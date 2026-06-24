@@ -26,3 +26,4 @@
 - **后端 Rust**：有学习/招聘成本；前端 ↔ Rust ↔ DuckDB 的异步/FFI 边界需谨慎设计。
 - 跨平台目标（Windows/macOS/Linux）由 Tauri webview 承载，须测各平台 webview 差异。
 - 前端框架（React/Svelte/Vue）是下一个子决策。
+- **被 ADR-0029 校准**：Tauri capability/allowlist 精确化为「禁用 webview 直访 keychain 与任意 HTTP，强制经 Rust command」（key 仅存 Rust 核心进程）；自动更新清单拉取为允许的运维外发（不携带用户数据）。
