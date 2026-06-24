@@ -4,7 +4,7 @@
 
 LLM 生成 SQL 的安全属性由 **DuckDB 引擎/配置层**保证，**不**做 SQL 文本过滤。四层：
 
-1. **只读源**：源 Dataset 以 READ-ONLY attach，引擎层物理不可写。
+1. **只读源**：源 Dataset 上传时 copy-in 进会话 DB 成只读表（见 ADR-0012），引擎层物理不可写。
 2. **受限函数面**：LLM SQL 禁用文件系统类函数（`read_*`、`COPY`、`ATTACH`、`INSTALL`、`LOAD`）；数据加载只在 attach 时由工具执行。
 3. **资源上限**：`memory_limit`、`threads`、结果行数上限、语句超时。
 4. **错误自愈**：Schema 错（表/列不存在）回喂 LLM 重试 1–2 次，仍失败则如实告知用户。

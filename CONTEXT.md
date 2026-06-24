@@ -5,7 +5,7 @@ AI 数据处理与分析工具。用户上传多格式数据集（Excel/CSV/JSON
 ## Language
 
 **数据集 (Dataset)**:
-会话内一个可被查询的逻辑表，是 LLM 生成 SQL 时的最小引用单元。一个 CSV/Parquet/JSON 文件映射为一个 Dataset；一个 Excel sheet 映射为一个 Dataset。
+会话内一个可被查询的逻辑表，是 LLM 生成 SQL 时的最小引用单元。一个 CSV/Parquet/JSON 文件映射为一个 Dataset；一个 Excel sheet 映射为一个 Dataset（杂乱结构需先规整，见 ADR-0015）。
 _Avoid_: 文件(file)、表(table)、数据源(source)——这些是实现概念，非领域概念
 
 **提问 (Question)**:
@@ -23,3 +23,7 @@ _Avoid_: 项目(project)、对话(conversation)
 **工作集 (Working Set)**:
 一次会话内当前可被 SQL 引用的全部 Dataset 集合——包括上传的源 Dataset，以及会话过程中产生的中间结果。
 _Avoid_: 数据库(database)、状态(state)
+
+**当前表 (Active Dataset)**:
+一个提问在用户未显式指明时所作用的 Dataset——默认是上一步的中间结果，会话开始时即源 Dataset；由 LLM 从对话上下文隐式解析，用户通常无需感知其存在。用户可显式点名覆盖（如"在原始数据上重新算"）。
+_Avoid_: 选中项(selection)、焦点(focus)、当前行(current row)
