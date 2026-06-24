@@ -2,7 +2,7 @@
 
 ## Decision
 
-每个**提问**（一轮）模型返回**一条 SQL + 可选 viz 规格**，产出**一个 `result_N`**。多步需求靠**跨轮物化链式**（引用前序 `result_N`）完成。**不做**单轮 pipeline，**不做** plan-then-execute。
+每个**提问**（一轮）模型返回**一条 SQL + 可选 viz 规格**（产出**一个 `result_N`**），**或一条文本响应（不产 SQL）**——用于越界拒绝（ADR-0017）与消歧澄清（ADR-0018）。多步需求靠**跨轮物化链式**（引用前序 `result_N`）完成。**不做**单轮 pipeline，**不做** plan-then-execute。
 
 ## Context
 
