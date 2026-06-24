@@ -21,9 +21,9 @@ _Avoid_: 临时表(temp table)、缓存(cache)、视图(view)——实现概念
 _Avoid_: 项目(project)、对话(conversation)
 
 **工作集 (Working Set)**:
-一次会话内当前可被 SQL 引用的全部 Dataset 集合——包括上传的源 Dataset，以及会话过程中产生的中间结果。
+一次会话内当前可被 SQL 引用的全部 Dataset 集合——包括上传的**一个或多个**源 Dataset，以及会话过程中产生的中间结果。
 _Avoid_: 数据库(database)、状态(state)
 
 **当前表 (Active Dataset)**:
-一个提问在用户未显式指明时所作用的 Dataset——默认是上一步的中间结果，会话开始时即源 Dataset；由 LLM 从对话上下文隐式解析，用户通常无需感知其存在。用户可显式点名覆盖（如"在原始数据上重新算"）。
+一个提问在用户未显式指明时所作用的 Dataset——默认是上一步的中间结果，会话开始时即**最近上传的源 Dataset**；由 LLM 从对话上下文隐式解析，用户通常无需感知其存在。用户可显式点名覆盖（如"在原始数据上重新算"、"在订单表上"）。
 _Avoid_: 选中项(selection)、焦点(focus)、当前行(current row)
