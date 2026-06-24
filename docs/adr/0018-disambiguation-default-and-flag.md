@@ -28,6 +28,6 @@
 
 ## Consequences
 
-- ADR-0009 契约扩展为 `{ sql, viz? }` | 文本态（澄清 / 拒绝）。
+- ADR-0009 契约扩展为 `{ sql, viz?, assumption? }` | 文本态（澄清 / 拒绝）；假设标注走 `assumption` 字段。
 - 结果展示须能挂"假设标注"（与 ADR-0010 历史视图的纠偏抓手一致）。
 - 澄清门槛由 system prompt + 谓词引导（软保证，同 0017）。
