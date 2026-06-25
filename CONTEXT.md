@@ -21,8 +21,12 @@ _Avoid_: 请求(request)、消息(message)、回合
 _Avoid_: 临时表(temp table)、缓存(cache)、视图(view)——实现概念
 
 **会话 (Session)**:
-一个有状态的临时分析工作区，承载当前工作集（源 Dataset 与对话中产生的中间结果），用户可在其中链式迭代查询。关闭即重置。
-_Avoid_: 项目(project)、对话(conversation)
+一个**持久化、可命名、可 resume** 的分析单元，拥有一条 recipe（见下）存在本地磁盘；重启后按 recipe 重建其工作集。打开时其工作集在内存中物化，多个打开的 Session 在内存中相互隔离（见 ADR-0027）。会话是持久化单位；临时的只是工作集，不再是“关闭即重置”。
+_Avoid_: 项目(project)、对话(conversation)、工作区(workspace)
+
+**配方 (Recipe)**:
+一个 Session **当前工作集**的持久化描述（非历史账本），分两部分——**可重建部分**：当前源集（路径 + 规整参数 + 内容指纹）+ 当前仍有效的 productive SQL 链（ADR-0009；被换源级联失效的轮不在此列，ADR-0025）；**展示部分**：全量对话历史（所有轮恒可见，ADR-0028，纯追加永不裁剪）。外加 `format_version`、session 名、active dataset 指针。resume 即载入当前源集 + 重放可重放链。本身不含物化数据（遵循 ADR-0004 derive-only）。
+_Avoid_: 日志(log)、账本(ledger)、脚本(script)、快照(snapshot)
 
 **工作集 (Working Set)**:
 一次会话内当前可被 SQL 引用的全部 Dataset 集合——包括上传的**一个或多个**源 Dataset，以及会话过程中产生的中间结果。
