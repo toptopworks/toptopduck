@@ -17,7 +17,7 @@ _Avoid_: 查询(query)——易与生成的 SQL 混淆；指令(command)、promp
 _Avoid_: 请求(request)、消息(message)、回合
 
 **中间结果 (Intermediate Result)**:
-一次查询产生、自动物化进工作集的带名 Dataset，默认按产生顺序自动命名（`result_1`、`result_2`…），可被后续 SQL 引用、可被用户重命名。它本身也是一种 Dataset。
+一次查询产生、自动物化进工作集的 Dataset。其**引用名**（`result_1`、`result_2`…按产生顺序单调递增、永不复用，ADR-0022）是 SQL、recipe 链、active 指针引用它的**稳定身份**；用户可改的是**显示名**（纯展示别名，仅显示层查重），改名不波及任何已存 SQL、不断 resume 重放链（ADR-0037）。它本身也是一种 Dataset。
 _Avoid_: 临时表(temp table)、缓存(cache)、视图(view)——实现概念
 
 **会话 (Session)**:
