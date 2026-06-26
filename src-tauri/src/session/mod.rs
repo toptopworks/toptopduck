@@ -36,17 +36,24 @@ impl Session {
     }
 
     /// Ingest a file. Transactional: on any failure the working set is unchanged
-    /// (bad files never pollute the session -- PRD AC7).
+    /// (bad files never pollute the session -- PRD AC7). CSV/Parquet/JSON share
+    /// one copy-in path -- only the DuckDB reader differs (ADR-0032 shared
+    /// contract, no format-specific branches).
     pub fn ingest(&mut self, path: &Path) -> LoadOutcome {
-        match ingest::dispatch(path) {
-            ingest::Dispatched::Csv => self.ingest_csv(path),
-            ingest::Dispatched::Unsupported(ext) => {
-                LoadOutcome::Error(LoadError::UnsupportedFormat { requested: ext })
-            }
-        }
+        let dispatched = ingest::dispatch(path);
+        let Some(reader) = ingest::reader_for(&dispatched) else {
+            let requested = match dispatched {
+                ingest::Dispatched::Unsupported(ext) => ext,
+                // Unreachable today (every supported variant maps to a reader),
+                // but kept total so a future variant can't silently fall through.
+                _ => String::new(),
+            };
+            return LoadOutcome::Error(LoadError::UnsupportedFormat { requested });
+        };
+        self.ingest_structured(path, reader)
     }
 
-    fn ingest_csv(&mut self, path: &Path) -> LoadOutcome {
+    fn ingest_structured(&mut self, path: &Path, reader: &str) -> LoadOutcome {
         let reference_name = match ingest::derive_reference_name(path) {
             Some(n) => self.working_set.deconflict(&n),
             None => {
@@ -57,7 +64,7 @@ impl Session {
         };
 
         // copy-in must succeed before the working set is touched.
-        let snap = match ingest::csv::load(path, &self.temp_path, &reference_name) {
+        let snap = match ingest::loader::copy_in(path, &self.temp_path, &reference_name, reader) {
             Ok(s) => s,
             Err(e) => return LoadOutcome::Error(e),
         };
@@ -65,7 +72,7 @@ impl Session {
         // Attach the snapshot read-only (ADR-0005 engine-level enforcement).
         // `attach_path` is tool-controlled (temp dir + sanitized alias), not user
         // input, so interpolation is safe; the user-supplied source path is bound
-        // as a parameter during copy-in (see ingest::csv).
+        // as a parameter during copy-in (see ingest::loader).
         let attach_path = snap.file_path.to_string_lossy();
         let attach_sql = format!(
             "ATTACH '{attach_path}' AS {} (READ_ONLY);",

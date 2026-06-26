@@ -49,7 +49,10 @@ impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Self::UnsupportedFormat { requested } => {
-                write!(f, "不支持的格式：{requested}（切片 1 仅支持 .csv）")
+                write!(
+                    f,
+                    "不支持的格式：{requested}（支持 .csv / .parquet / .json）"
+                )
             }
             Self::Parse { detail } => write!(f, "无法解析文件：{detail}"),
             Self::Io { detail } => write!(f, "读取文件失败：{detail}"),

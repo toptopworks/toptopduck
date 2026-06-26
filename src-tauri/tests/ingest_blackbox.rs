@@ -199,3 +199,134 @@ fn descriptor_carries_disclosure_payload() {
     assert!(!d.columns.is_empty());
     assert!(!d.sample.is_empty());
 }
+
+/// Generate a `people.parquet` from `people.csv` via DuckDB so no binary fixture
+/// is committed. Returns the path plus the temp dir that owns it -- keep both
+/// alive for the test's duration. The read path under test is independent of how
+/// the fixture was written.
+fn parquet_from_people() -> (PathBuf, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("people.parquet");
+    // Paths are tool-controlled (fixture + temp dir), not user input, so SQL
+    // interpolation is safe -- mirrors the fingerprint COPY in snapshot.rs.
+    let csv = fixture("people.csv");
+    let csv_path = csv.to_string_lossy().into_owned();
+    let parquet_path = out.to_string_lossy().into_owned();
+    let conn = duckdb::Connection::open_in_memory().expect("duckdb");
+    conn.execute_batch(&format!(
+        "COPY (SELECT * FROM read_csv_auto('{csv_path}')) TO '{parquet_path}' (FORMAT PARQUET)"
+    ))
+    .expect("write parquet fixture");
+    (out, dir)
+}
+
+/// (column name, canonical type) pairs for a descriptor, in declared order.
+fn column_types(d: &DatasetDescriptor) -> Vec<(&str, &str)> {
+    d.columns
+        .iter()
+        .map(|c| (c.name.as_str(), c.canonical_type.as_str()))
+        .collect()
+}
+
+#[test]
+fn loads_parquet_into_working_set_as_active() {
+    // AC1 (parquet): pick a Parquet -> one Dataset, becomes active, with the same
+    // type/row-count/sample contract as CSV.
+    let (parquet, _dir) = parquet_from_people();
+    let mut session = Session::new().expect("session");
+    let d = load_ok(&mut session, &parquet);
+    assert_eq!(d.reference_name, "people");
+    assert_eq!(session.active().unwrap().reference_name, "people");
+    assert_eq!(
+        column_types(&d),
+        vec![
+            ("id", "BIGINT"),
+            ("name", "VARCHAR"),
+            ("joined", "DATE"),
+            ("active", "BOOLEAN"),
+            ("score", "DOUBLE"),
+        ]
+    );
+    assert_eq!(d.row_count, 5);
+    assert_eq!(d.sample.len(), 3);
+}
+
+#[test]
+fn loads_flat_json_with_shared_contract() {
+    // AC (flat JSON): the same schema/sample contract as CSV/Parquet.
+    let mut session = Session::new().expect("session");
+    let d = load_ok(&mut session, &fixture("flat.json"));
+    assert_eq!(d.reference_name, "flat");
+    assert_eq!(
+        column_types(&d),
+        vec![
+            ("id", "BIGINT"),
+            ("name", "VARCHAR"),
+            ("active", "BOOLEAN"),
+            ("score", "DOUBLE"),
+        ]
+    );
+    assert_eq!(d.row_count, 3);
+    assert_eq!(d.sample[0], vec!["1", "Alice", "true", "3.5"]);
+}
+
+#[test]
+fn loads_nested_json_with_fully_expanded_types() {
+    // AC (nested JSON): STRUCT fields and LIST elements are fully expanded with
+    // canonical type names and preserved field case (ADR-0032). MAP does not arise
+    // from read_json_auto (objects infer as STRUCT); MAP canonicalization is
+    // covered by the schema projector unit tests.
+    let mut session = Session::new().expect("session");
+    let d = load_ok(&mut session, &fixture("nested.json"));
+    let by_name: std::collections::HashMap<&str, &str> = column_types(&d).into_iter().collect();
+    assert_eq!(by_name["address"], "STRUCT(city VARCHAR, zip VARCHAR)");
+    assert_eq!(by_name["tags"], "LIST(VARCHAR)");
+    assert_eq!(by_name["scores"], "LIST(BIGINT)");
+    assert_eq!(by_name["prefs"], "STRUCT(theme VARCHAR)");
+    assert_eq!(d.row_count, 3);
+    assert_eq!(d.sample.len(), 3);
+}
+
+#[test]
+fn corrupted_parquet_is_rejected_and_working_set_unchanged() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bad = dir.path().join("corrupted.parquet");
+    fs::write(&bad, b"not actually a parquet file").expect("write corrupted");
+    let mut session = Session::new().expect("session");
+    match session.ingest(&bad) {
+        LoadOutcome::Error(_) => {}
+        LoadOutcome::Loaded(d) => panic!("expected error for corrupted parquet, got: {d:?}"),
+    }
+    assert_eq!(session.list().len(), 0);
+}
+
+#[test]
+fn corrupted_json_is_rejected_and_working_set_unchanged() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bad = dir.path().join("corrupted.json");
+    fs::write(&bad, [0xffu8, 0xfe, 0x80, 0x81, 0xc0, 0xc1, 0x0a]).expect("write corrupted");
+    let mut session = Session::new().expect("session");
+    match session.ingest(&bad) {
+        LoadOutcome::Error(_) => {}
+        LoadOutcome::Loaded(d) => panic!("expected error for corrupted json, got: {d:?}"),
+    }
+    assert_eq!(session.list().len(), 0);
+}
+
+#[test]
+fn shared_contract_across_csv_parquet_and_json() {
+    // AC: CSV/Parquet/JSON share one schema/sample/fingerprint payload contract
+    // -- no format-specific branches in the descriptor.
+    let (parquet, _dir) = parquet_from_people();
+    let csv = fixture("people.csv");
+    let flat = fixture("flat.json");
+    let paths: [&Path; 3] = [&csv, &parquet, &flat];
+    let mut session = Session::new().expect("session");
+    for path in paths {
+        let d = load_ok(&mut session, path);
+        assert!(!d.columns.is_empty(), "empty columns for {path:?}");
+        assert!(!d.sample.is_empty(), "empty sample for {path:?}");
+        assert!(!d.fingerprint.is_empty(), "empty fingerprint for {path:?}");
+    }
+    assert_eq!(session.list().len(), 3);
+}

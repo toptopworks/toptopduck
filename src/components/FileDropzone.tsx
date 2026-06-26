@@ -12,7 +12,12 @@ export function FileDropzone({
   async function pick() {
     const selected = await open({
       multiple: false,
-      filters: [{ name: "CSV", extensions: ["csv"] }],
+      filters: [
+        {
+          name: "数据文件",
+          extensions: ["csv", "parquet", "json", "jsonl", "ndjson"],
+        },
+      ],
     });
     if (typeof selected === "string") {
       onIngest(selected);
@@ -35,9 +40,9 @@ export function FileDropzone({
   return (
     <div className="dropzone">
       <button onClick={pick} disabled={loading}>
-        {loading ? "加载中…" : "选择 CSV 文件"}
+        {loading ? "加载中…" : "选择数据文件"}
       </button>
-      <span className="muted">或把 .csv 文件拖到窗口</span>
+      <span className="muted">或把 .csv / .parquet / .json 文件拖到窗口</span>
     </div>
   );
 }

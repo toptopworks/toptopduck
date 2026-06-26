@@ -10,7 +10,7 @@ export function WorkingSetList({
   onSelect: (referenceName: string) => void;
 }) {
   if (datasets.length === 0) {
-    return <p className="muted">工作集为空 — 拖入或拾取一个 CSV 开始。</p>;
+    return <p className="muted">工作集为空 — 拖入或拾取一个数据文件开始。</p>;
   }
   return (
     <ul className="working-set">
