@@ -7,7 +7,7 @@ export function DatasetDetail({ dataset }: { dataset: DatasetDescriptor }) {
         {dataset.display_name} <small>(引用名：{dataset.reference_name})</small>
       </h2>
       <p className="meta">
-        行数：{dataset.row_count}　·　指纹：{dataset.fingerprint.slice(0, 12)}…
+        行数：{dataset.row_count} · 指纹：{dataset.fingerprint.slice(0, 12)}…
       </p>
 
       <h3>列与推断类型</h3>

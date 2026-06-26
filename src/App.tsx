@@ -32,6 +32,9 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // Mount-time sync from the Tauri backend (external system → state): a
+    // legitimate one-shot fetch, not the avoidable cascade this rule targets.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
   }, [refresh]);
 
