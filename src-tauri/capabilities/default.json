@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "默认能力：核心 + 文件拾取对话框（issue #5 切片 1）",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:default"]
+}
