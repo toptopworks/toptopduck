@@ -1,0 +1,41 @@
+:root {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color-scheme: light dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: #f7f7f8; color: #1a1a1a; }
+main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
+header h1 { margin: 0 0 0.5rem; }
+
+.disclosure {
+  background: #eef6ff; border: 1px solid #b6d4ff; border-radius: 6px;
+  padding: 0.6rem 0.8rem; font-size: 0.9rem; line-height: 1.5;
+}
+
+.dropzone { display: flex; align-items: center; gap: 0.75rem; margin: 1rem 0; }
+.dropzone button {
+  padding: 0.5rem 1rem; font-size: 1rem; cursor: pointer;
+  border: 1px solid #0d9488; background: #0d9488; color: #fff; border-radius: 6px;
+}
+.dropzone button:disabled { opacity: 0.6; cursor: progress; }
+
+.error { color: #b00020; background: #fde7e9; padding: 0.5rem 0.8rem; border-radius: 6px; }
+
+.layout { display: grid; grid-template-columns: 280px 1fr; gap: 1.25rem; margin-top: 1rem; }
+.panel { background: #fff; border: 1px solid #e3e3e8; border-radius: 8px; padding: 1rem; }
+
+.working-set { list-style: none; margin: 0; padding: 0; }
+.working-set li { margin: 0.2rem 0; }
+.working-set button { all: unset; cursor: pointer; padding: 0.4rem 0.5rem; border-radius: 6px; display: block; width: 100%; }
+.working-set li.active button { background: #e6f4f1; font-weight: 600; }
+.working-set small { color: #777; font-weight: 400; }
+
+.dataset-detail h2 { margin: 0 0 0.25rem; }
+.dataset-detail small { color: #777; font-weight: 400; }
+.meta { color: #555; margin: 0.25rem 0 0.75rem; }
+table { border-collapse: collapse; width: 100%; margin: 0.5rem 0 1rem; }
+th, td { border: 1px solid #e3e3e8; padding: 0.3rem 0.5rem; text-align: left; font-size: 0.9rem; }
+th { background: #f0f0f3; }
+code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
+.source { color: #777; font-size: 0.85rem; word-break: break-all; }
+.muted { color: #777; }

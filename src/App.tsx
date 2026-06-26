@@ -1,0 +1,90 @@
+import { useCallback, useEffect, useState } from "react";
+import { FileDropzone } from "./components/FileDropzone";
+import { WorkingSetList } from "./components/WorkingSetList";
+import { DatasetDetail } from "./components/DatasetDetail";
+import { DisclosureBanner } from "./components/DisclosureBanner";
+import { activeDataset, ingestFile, listWorkingSet } from "./api";
+import type { DatasetDescriptor, LoadError } from "./types";
+
+function loadErrorMessage(err: LoadError): string {
+  if ("UnsupportedFormat" in err) {
+    return err.UnsupportedFormat.requested
+      ? `不支持 ${err.UnsupportedFormat.requested}（切片 1 仅支持 .csv）`
+      : "无法识别的格式";
+  }
+  if ("Parse" in err) return err.Parse.detail;
+  if ("Io" in err) return err.Io.detail;
+  return err.Other.detail;
+}
+
+export default function App() {
+  const [datasets, setDatasets] = useState<DatasetDescriptor[]>([]);
+  const [activeName, setActiveName] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setDatasets(await listWorkingSet());
+    const act = await activeDataset();
+    setActiveName(act?.reference_name ?? null);
+    setSelected((cur) => cur ?? act?.reference_name ?? null);
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const handleIngest = useCallback(
+    async (path: string) => {
+      setLoading(true);
+      setError(null);
+      try {
+        const outcome = await ingestFile(path);
+        if ("Loaded" in outcome) {
+          await refresh();
+          setSelected(outcome.Loaded.reference_name);
+        } else {
+          setError(loadErrorMessage(outcome.Error));
+        }
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [refresh],
+  );
+
+  const shown = datasets.find((d) => d.reference_name === selected) ?? null;
+
+  return (
+    <main>
+      <header>
+        <h1>toptopduck</h1>
+        <DisclosureBanner />
+      </header>
+
+      <FileDropzone onIngest={handleIngest} loading={loading} />
+      {error && <p className="error">加载失败：{error}</p>}
+
+      <div className="layout">
+        <section className="panel">
+          <h2>工作集</h2>
+          <WorkingSetList
+            datasets={datasets}
+            activeName={activeName}
+            onSelect={setSelected}
+          />
+        </section>
+        <section className="panel">
+          {shown ? (
+            <DatasetDetail dataset={shown} />
+          ) : (
+            <p className="muted">选择一个数据集查看其结构。</p>
+          )}
+        </section>
+      </div>
+    </main>
+  );
+}
