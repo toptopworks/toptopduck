@@ -71,7 +71,10 @@ mod tests {
             reference_name: name.to_string(),
             display_name: name.to_string(),
             source_path: format!("/{name}.csv"),
-            columns: vec![ColumnSchema { name: "c".into(), canonical_type: "INTEGER".into() }],
+            columns: vec![ColumnSchema {
+                name: "c".into(),
+                canonical_type: "INTEGER".into(),
+            }],
             row_count: 1,
             sample: vec![vec!["1".into()]],
             fingerprint: name.into(),

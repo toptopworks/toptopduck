@@ -2,7 +2,6 @@
 //! type representation shared by the UI and the future LLM payload (DRY). Slice 1
 //! is flat CSV types; nested STRUCT/LIST/MAP expansion arrives with JSON (slice 2).
 
-
 /// Map a raw DuckDB DESCRIBE type string to its single canonical name.
 /// DuckDB's DESCRIBE already returns canonical names for most types; this defends
 /// against alias leakage and is the one place canonicalization happens.
@@ -82,7 +81,10 @@ mod tests {
     fn preserves_canonical_parameterized_types() {
         assert_eq!(canonical_type("DECIMAL(10,2)"), "DECIMAL(10,2)");
         assert_eq!(canonical_type("TIMESTAMP"), "TIMESTAMP");
-        assert_eq!(canonical_type("TIMESTAMP WITH TIME ZONE"), "TIMESTAMP WITH TIME ZONE");
+        assert_eq!(
+            canonical_type("TIMESTAMP WITH TIME ZONE"),
+            "TIMESTAMP WITH TIME ZONE"
+        );
         assert_eq!(canonical_type("DATE"), "DATE");
     }
 

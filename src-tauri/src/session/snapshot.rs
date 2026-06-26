@@ -131,8 +131,12 @@ fn fingerprint_via_copy(
 }
 
 fn parse_err(e: duckdb::Error) -> LoadError {
-    LoadError::Parse { detail: e.to_string() }
+    LoadError::Parse {
+        detail: e.to_string(),
+    }
 }
 fn io_err_std(e: std::io::Error) -> LoadError {
-    LoadError::Io { detail: e.to_string() }
+    LoadError::Io {
+        detail: e.to_string(),
+    }
 }

@@ -30,7 +30,7 @@ fn loads_csv_into_working_set_as_active() {
     let mut session = Session::new().expect("session");
     let d = load_ok(&mut session, &fixture("people.csv"));
     assert_eq!(d.reference_name, "people");
-    assert_eq!(d.display_name, "people");  // AC1: named after the filename stem (readable label, ADR-0037)
+    assert_eq!(d.display_name, "people"); // AC1: named after the filename stem (readable label, ADR-0037)
     assert_eq!(session.list().len(), 1);
     assert_eq!(session.active().expect("active").reference_name, "people");
 }

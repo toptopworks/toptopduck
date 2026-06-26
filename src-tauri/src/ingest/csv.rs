@@ -37,8 +37,12 @@ pub fn load(src: &Path, temp_dir: &Path, alias: &str) -> Result<Snapshot, LoadEr
 }
 
 fn io_err(e: duckdb::Error) -> LoadError {
-    LoadError::Io { detail: e.to_string() }
+    LoadError::Io {
+        detail: e.to_string(),
+    }
 }
 fn parse_err(e: duckdb::Error) -> LoadError {
-    LoadError::Parse { detail: e.to_string() }
+    LoadError::Parse {
+        detail: e.to_string(),
+    }
 }

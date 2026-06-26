@@ -62,16 +62,37 @@ mod tests {
 
     #[test]
     fn rejects_other_formats() {
-        assert!(matches!(dispatch(Path::new("a.xlsx")), Dispatched::Unsupported(_)));
-        assert!(matches!(dispatch(Path::new("a.parquet")), Dispatched::Unsupported(_)));
-        assert!(matches!(dispatch(Path::new("noext")), Dispatched::Unsupported(_)));
+        assert!(matches!(
+            dispatch(Path::new("a.xlsx")),
+            Dispatched::Unsupported(_)
+        ));
+        assert!(matches!(
+            dispatch(Path::new("a.parquet")),
+            Dispatched::Unsupported(_)
+        ));
+        assert!(matches!(
+            dispatch(Path::new("noext")),
+            Dispatched::Unsupported(_)
+        ));
     }
 
     #[test]
     fn sanitizes_reference_name() {
-        assert_eq!(derive_reference_name(Path::new("people.csv")).as_deref(), Some("people"));
-        assert_eq!(derive_reference_name(Path::new("my file (1).csv")).as_deref(), Some("my_file_1"));
-        assert_eq!(derive_reference_name(Path::new("2024_sales.csv")).as_deref(), Some("t2024_sales"));
-        assert_eq!(derive_reference_name(Path::new("__.csv")).as_deref(), Some("dataset"));
+        assert_eq!(
+            derive_reference_name(Path::new("people.csv")).as_deref(),
+            Some("people")
+        );
+        assert_eq!(
+            derive_reference_name(Path::new("my file (1).csv")).as_deref(),
+            Some("my_file_1")
+        );
+        assert_eq!(
+            derive_reference_name(Path::new("2024_sales.csv")).as_deref(),
+            Some("t2024_sales")
+        );
+        assert_eq!(
+            derive_reference_name(Path::new("__.csv")).as_deref(),
+            Some("dataset")
+        );
     }
 }
