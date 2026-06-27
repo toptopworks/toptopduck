@@ -20,7 +20,7 @@ const mockDataset: DatasetDescriptor = {
     ["1", "Alice"],
     ["2", "Bob"],
   ],
-  rectify: null,
+  rectify: "NotApplicable",
 };
 
 describe("DisclosureBanner", () => {

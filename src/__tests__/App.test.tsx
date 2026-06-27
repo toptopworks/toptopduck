@@ -35,7 +35,7 @@ const guidedDataset: DatasetDescriptor = {
     { name: "name", canonical_type: "VARCHAR" },
   ],
   sample: [["1", "Alice"]],
-  rectify: { header_row: 2, skip_rows: [] },
+  rectify: { User: { header_row: 2, skip_rows: [] } },
 };
 
 describe("App guided-load flow", () => {

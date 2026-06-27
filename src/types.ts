@@ -14,6 +14,17 @@ export interface SheetRectify {
   skip_rows: number[];
 }
 
+// Provenance of a dataset's rectify state (ADR-0042): mirrors the Rust enum
+// (serde externally-tagged). The type makes "only user choices are recorded,
+// never the auto algorithm" explicit.
+// - "NotApplicable": CSV/Parquet/JSON (no rectify step).
+// - "Auto": Excel auto-tidy chose confidently; no params ride the descriptor.
+// - { User: SheetRectify }: the user supplied explicit header/skip choices.
+export type RectifyProvenance =
+  | "NotApplicable"
+  | "Auto"
+  | { User: SheetRectify };
+
 export interface DatasetDescriptor {
   reference_name: string;
   display_name: string;
@@ -22,9 +33,9 @@ export interface DatasetDescriptor {
   row_count: number;
   sample: string[][];
   fingerprint: string;
-  // User's explicit rectify choices for an Excel sheet (ADR-0042); null for
-  // CSV/Parquet/JSON and Excel sheets that auto-tidied without a user override.
-  rectify: SheetRectify | null;
+  // Rectify provenance (ADR-0042): how the header/skip state was determined --
+  // format N/A, Excel auto-tidy (not recorded), or the user's explicit choices.
+  rectify: RectifyProvenance;
 }
 
 // Legacy `.xls` is rejected in v1 (ADR-0015); serde serializes the unit variant

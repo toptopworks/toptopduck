@@ -75,7 +75,7 @@ impl WorkingSet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::ColumnSchema;
+    use crate::model::{ColumnSchema, RectifyProvenance};
 
     fn descriptor(name: &str) -> DatasetDescriptor {
         DatasetDescriptor {
@@ -89,7 +89,7 @@ mod tests {
             row_count: 1,
             sample: vec![vec!["1".into()]],
             fingerprint: name.into(),
-            rectify: None,
+            rectify: RectifyProvenance::NotApplicable,
         }
     }
 
