@@ -4614,6 +4614,7 @@ dependencies = [
  "calamine",
  "csv",
  "duckdb",
+ "log",
  "rust_xlsxwriter",
  "serde",
  "serde_json",

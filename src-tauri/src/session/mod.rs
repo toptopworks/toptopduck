@@ -151,7 +151,12 @@ impl Session {
             })
             .collect();
 
-        // Copy-in + attach each sheet; roll back on any failure.
+        // Copy-in + attach each sheet; roll back on any failure. Panic-safety
+        // invariant: `attach_excel_sheet` must not panic between a successful
+        // ATTACH and the `attached.push`, otherwise the just-attached snapshot
+        // escapes rollback. It performs only infallible ops after ATTACH
+        // succeeds today (push + struct construction; no unwrap/expect), so the
+        // invariant holds -- keep it so when editing.
         let mut attached: Vec<String> = Vec::with_capacity(sheets.len());
         let mut descriptors: Vec<DatasetDescriptor> = Vec::with_capacity(sheets.len());
         for (sheet, reference_name) in sheets.iter().zip(names.iter()) {
@@ -234,12 +239,28 @@ impl Session {
     }
 
     /// Detach already-attached excel snapshots and delete their files (rollback).
+    /// Best-effort: a DETACH or remove_file failure is logged, not swallowed
+    /// silently. A failed DETACH can leave a ghost attachment on the connection
+    /// (breaking a later same-name re-ATTACH), and on Windows a held handle can
+    /// make remove_file fail too -- logging keeps either failure diagnosable.
     fn rollback_excel(&mut self, attached: &[String]) {
         for reference_name in attached.iter().rev() {
-            let _ = self
+            if let Err(e) = self
                 .conn
-                .execute_batch(&format!("DETACH {};", quote_alias(reference_name)));
-            let _ = fs::remove_file(self.temp_path.join(format!("{reference_name}.duckdb")));
+                .execute_batch(&format!("DETACH {};", quote_alias(reference_name)))
+            {
+                log::warn!(
+                    target: "toptopduck::session",
+                    "DETACH failed during excel rollback for {reference_name}: {e}"
+                );
+            }
+            if let Err(e) = fs::remove_file(self.temp_path.join(format!("{reference_name}.duckdb")))
+            {
+                log::warn!(
+                    target: "toptopduck::session",
+                    "snapshot file removal failed during excel rollback for {reference_name}: {e}"
+                );
+            }
         }
     }
 

@@ -445,6 +445,30 @@ fn loads_multi_sheet_xlsx_each_sheet_a_dataset() {
 }
 
 #[test]
+fn xlsx_hidden_sheets_are_skipped() {
+    // A hidden sheet (Excel state="hidden") is not loaded as a Dataset -- the
+    // user hid it in Excel, so it isn't part of the data they want to analyze.
+    // Only the visible sheet becomes a Dataset.
+    let mut wb = Workbook::new();
+    let visible = wb.add_worksheet();
+    visible.set_name("visible").expect("name");
+    visible.write_string(0, 0, "id").unwrap();
+    visible.write_number(1, 0, 1.0).unwrap();
+    let hidden = wb.add_worksheet();
+    hidden.set_name("hidden").expect("name");
+    hidden.set_hidden(true);
+    hidden.write_string(0, 0, "id").unwrap();
+    hidden.write_number(1, 0, 2.0).unwrap();
+    let (xlsx, _dir) = save_xlsx(wb, "hidden.xlsx");
+
+    let mut session = Session::new().expect("session");
+    let d = load_ok(&mut session, &xlsx);
+    assert_eq!(d.reference_name, "visible");
+    assert_eq!(session.list().len(), 1);
+    assert!(session.get("hidden").is_none());
+}
+
+#[test]
 fn xlsx_formula_cells_use_cached_values() {
     // AC4: formula cells resolve to their cached value (never recomputed). The
     // fixture stores an explicit cached result (exactly what Excel persists);

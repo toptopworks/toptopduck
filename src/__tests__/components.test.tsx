@@ -31,6 +31,7 @@ describe("DisclosureBanner", () => {
   it("discloses Excel formula cells use cached snapshot values (issue #7 AC4)", () => {
     const { container } = render(<DisclosureBanner />);
     expect(container).toHaveTextContent(/Excel 工作簿按 sheet 分别加载为独立/);
+    expect(container).toHaveTextContent(/隐藏的工作表会被跳过/);
     expect(container).toHaveTextContent(/公式单元格取加载时的缓存值（不重算）/);
   });
 });
