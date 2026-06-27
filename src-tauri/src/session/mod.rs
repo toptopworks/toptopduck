@@ -4,6 +4,8 @@
 
 pub mod snapshot;
 
+use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use duckdb::Connection;
@@ -38,19 +40,26 @@ impl Session {
     /// Ingest a file. Transactional: on any failure the working set is unchanged
     /// (bad files never pollute the session -- PRD AC7). CSV/Parquet/JSON share
     /// one copy-in path -- only the DuckDB reader differs (ADR-0032 shared
-    /// contract, no format-specific branches).
+    /// contract, no format-specific branches). Excel (.xlsx) goes through
+    /// [`Self::ingest_excel`]: each sheet becomes its own Dataset.
     pub fn ingest(&mut self, path: &Path) -> LoadOutcome {
         let dispatched = ingest::dispatch(path);
-        let Some(reader) = ingest::reader_for(&dispatched) else {
-            let requested = match dispatched {
-                ingest::Dispatched::Unsupported(ext) => ext,
-                // Unreachable today (every supported variant maps to a reader),
-                // but kept total so a future variant can't silently fall through.
-                _ => String::new(),
-            };
-            return LoadOutcome::Error(LoadError::UnsupportedFormat { requested });
-        };
-        self.ingest_structured(path, reader)
+        match dispatched {
+            ingest::Dispatched::Xlsx => self.ingest_excel(path),
+            _ => {
+                let Some(reader) = ingest::reader_for(&dispatched) else {
+                    let requested = match dispatched {
+                        ingest::Dispatched::Unsupported(ext) => ext,
+                        // Unreachable today (every supported variant maps to a
+                        // reader or to the excel path), but kept total so a
+                        // future variant can't silently fall through.
+                        _ => String::new(),
+                    };
+                    return LoadOutcome::Error(LoadError::UnsupportedFormat { requested });
+                };
+                self.ingest_structured(path, reader)
+            }
+        }
     }
 
     fn ingest_structured(&mut self, path: &Path, reader: &str) -> LoadOutcome {
@@ -105,6 +114,154 @@ impl Session {
         };
         self.working_set.register(descriptor.clone());
         LoadOutcome::Loaded(descriptor)
+    }
+
+    /// Ingest a .xlsx workbook (slice 3a, issue #7): each sheet maps to one
+    /// Dataset named after the sheet. Formula cells use their cached value,
+    /// never recomputed (ADR-0015). Transactional -- on any failure the working
+    /// set is unchanged and already-attached snapshots are rolled back (AC6/AC7).
+    /// Returns the active (last) sheet's descriptor; all sheets are queryable via
+    /// [`Self::list`] / [`Self::get`].
+    fn ingest_excel(&mut self, path: &Path) -> LoadOutcome {
+        let mut sheets = match ingest::excel::read_sheets(path) {
+            Ok(s) => s,
+            Err(e) => return LoadOutcome::Error(e),
+        };
+        // Blank sheets contribute no Dataset (slice 3a basic loading).
+        sheets.retain(|s| !s.rows.is_empty());
+        if sheets.is_empty() {
+            return LoadOutcome::Error(LoadError::Parse {
+                detail: "工作簿不含任何含数据的 sheet".into(),
+            });
+        }
+
+        // Pre-reserve de-conflicted reference names (after each sheet name)
+        // against the working set AND each other, so duplicate sanitized names
+        // never collide at ATTACH time. Registration is deferred until every
+        // sheet has attached (a bad sheet never pollutes the session).
+        let mut reserved: HashSet<String> = HashSet::new();
+        let names: Vec<String> = sheets
+            .iter()
+            .map(|s| {
+                let name = self
+                    .working_set
+                    .deconflict_with(&ingest::sanitize_sheet_name(&s.name), &reserved);
+                reserved.insert(name.clone());
+                name
+            })
+            .collect();
+
+        // Copy-in + attach each sheet; roll back on any failure. Panic-safety
+        // invariant: `attach_excel_sheet` must not panic between a successful
+        // ATTACH and the `attached.push`, otherwise the just-attached snapshot
+        // escapes rollback. It performs only infallible ops after ATTACH
+        // succeeds today (push + struct construction; no unwrap/expect), so the
+        // invariant holds -- keep it so when editing.
+        let mut attached: Vec<String> = Vec::with_capacity(sheets.len());
+        let mut descriptors: Vec<DatasetDescriptor> = Vec::with_capacity(sheets.len());
+        for (sheet, reference_name) in sheets.iter().zip(names.iter()) {
+            match self.attach_excel_sheet(path, sheet, reference_name, &mut attached) {
+                Ok(d) => descriptors.push(d),
+                Err(e) => {
+                    self.rollback_excel(&attached);
+                    return LoadOutcome::Error(e);
+                }
+            }
+        }
+
+        // All sheets attached: commit to the working set atomically. The empty
+        // guard at the top of ingest_excel ensures descriptors is non-empty here;
+        // prefer a returned error over a reachable panic regardless.
+        let Some(active) = descriptors.last().cloned() else {
+            return LoadOutcome::Error(LoadError::Parse {
+                detail: "工作簿不含任何含数据的 sheet".into(),
+            });
+        };
+        for d in descriptors {
+            self.working_set.register(d);
+        }
+        LoadOutcome::Loaded(active)
+    }
+
+    /// Copy-in one sheet's cached values to a read-only snapshot and attach it.
+    /// On failure the snapshot file is removed; the caller records successful
+    /// attaches (`attached`) for transactional rollback.
+    fn attach_excel_sheet(
+        &mut self,
+        path: &Path,
+        sheet: &ingest::excel::SheetRows,
+        reference_name: &str,
+        attached: &mut Vec<String>,
+    ) -> Result<DatasetDescriptor, LoadError> {
+        // calamine cached values -> temp CSV -> read_csv_auto copy-in. DuckDB
+        // infers types from the CSV, keeping the single-source-of-truth contract
+        // (ADR-0032) shared with CSV/Parquet/JSON.
+        let csv_path = ingest::excel::write_sheet_csv(sheet, &self.temp_path, reference_name)?;
+        // If copy-in fails the temp CSV must still be cleaned up -- the snapshot
+        // file is copy_in's own responsibility, but the CSV is ours to remove.
+        let snap = match ingest::loader::copy_in(
+            &csv_path,
+            &self.temp_path,
+            reference_name,
+            "read_csv_auto",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = fs::remove_file(&csv_path);
+                return Err(e);
+            }
+        };
+        // The temp CSV is only needed during copy-in; the snapshot holds the data.
+        let _ = fs::remove_file(&csv_path);
+
+        let attach_path = snap.file_path.to_string_lossy();
+        let attach_sql = format!(
+            "ATTACH '{attach_path}' AS {} (READ_ONLY);",
+            quote_alias(reference_name)
+        );
+        if let Err(e) = self.conn.execute_batch(&attach_sql) {
+            let _ = fs::remove_file(&snap.file_path);
+            return Err(LoadError::Other {
+                detail: format!("挂载快照失败：{e}"),
+            });
+        }
+        attached.push(reference_name.to_string());
+
+        Ok(DatasetDescriptor {
+            reference_name: reference_name.to_string(),
+            display_name: sheet.name.clone(),
+            source_path: path.to_string_lossy().to_string(),
+            columns: snap.columns,
+            row_count: snap.row_count,
+            sample: snap.sample,
+            fingerprint: snap.fingerprint,
+        })
+    }
+
+    /// Detach already-attached excel snapshots and delete their files (rollback).
+    /// Best-effort: a DETACH or remove_file failure is logged, not swallowed
+    /// silently. A failed DETACH can leave a ghost attachment on the connection
+    /// (breaking a later same-name re-ATTACH), and on Windows a held handle can
+    /// make remove_file fail too -- logging keeps either failure diagnosable.
+    fn rollback_excel(&mut self, attached: &[String]) {
+        for reference_name in attached.iter().rev() {
+            if let Err(e) = self
+                .conn
+                .execute_batch(&format!("DETACH {};", quote_alias(reference_name)))
+            {
+                log::warn!(
+                    target: "toptopduck::session",
+                    "DETACH failed during excel rollback for {reference_name}: {e}"
+                );
+            }
+            if let Err(e) = fs::remove_file(self.temp_path.join(format!("{reference_name}.duckdb")))
+            {
+                log::warn!(
+                    target: "toptopduck::session",
+                    "snapshot file removal failed during excel rollback for {reference_name}: {e}"
+                );
+            }
+        }
     }
 
     pub fn list(&self) -> Vec<DatasetDescriptor> {

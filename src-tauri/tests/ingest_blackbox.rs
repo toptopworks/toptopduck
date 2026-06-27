@@ -5,6 +5,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use rust_xlsxwriter::{Formula, Workbook};
 use toptopduck_lib::{DatasetDescriptor, LoadError, LoadOutcome, Session};
 
 fn fixtures_dir() -> PathBuf {
@@ -123,9 +124,13 @@ fn source_snapshot_is_read_only() {
 
 #[test]
 fn unsupported_format_is_rejected() {
-    // Slice 1 is CSV only; .xlsx is rejected with the working set unchanged.
+    // .xlsx is now supported (issue #7); .txt and other extensions are rejected
+    // with the working set unchanged. (.xls is handled in slice 3b.)
+    let dir = tempfile::tempdir().expect("tempdir");
+    let txt = dir.path().join("notes.txt");
+    fs::write(&txt, "just text").expect("write txt");
     let mut session = Session::new().expect("session");
-    match session.ingest(&fixture("unsupported.xlsx")) {
+    match session.ingest(&txt) {
         LoadOutcome::Error(LoadError::UnsupportedFormat { .. }) => {}
         other => panic!("expected UnsupportedFormat, got {other:?}"),
     }
@@ -329,4 +334,226 @@ fn shared_contract_across_csv_parquet_and_json() {
         assert!(!d.fingerprint.is_empty(), "empty fingerprint for {path:?}");
     }
     assert_eq!(session.list().len(), 3);
+}
+
+// --- Excel .xlsx (issue #7, slice 3a) --------------------------------------
+//
+// Fixtures are generated with rust_xlsxwriter so no binary .xlsx is committed
+// (mirrors the parquet helper). calamine reads cell cached values (formulas
+// resolve to their cached result, never recomputed -- ADR-0015); each sheet
+// becomes one Dataset named after the sheet. duckdb-rs's vendored DuckDB cannot
+// statically link the `excel` loadable extension, so xlsx bytes go
+// calamine -> per-sheet temp CSV -> read_csv_auto copy-in, keeping DuckDB as the
+// single type-inference source of truth (ADR-0032). See ADR-0014/0043.
+
+/// Save a workbook to a temp .xlsx; keep the temp dir alive for the test.
+fn save_xlsx(mut wb: Workbook, file_name: &str) -> (PathBuf, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join(file_name);
+    wb.save(&path).expect("save xlsx fixture");
+    (path, dir)
+}
+
+/// A single tidy sheet "people" mirroring people.csv so the shared contract
+/// (types/rows/sample) holds across CSV and xlsx.
+fn people_xlsx() -> (PathBuf, tempfile::TempDir) {
+    let mut wb = Workbook::new();
+    let ws = wb.add_worksheet();
+    ws.set_name("people").expect("name sheet");
+    ws.write_string(0, 0, "id").unwrap();
+    ws.write_string(0, 1, "name").unwrap();
+    ws.write_string(0, 2, "active").unwrap();
+    ws.write_string(0, 3, "score").unwrap();
+    let rows: &[(f64, &str, bool, f64)] = &[
+        (1.0, "Alice", true, 3.5),
+        (2.0, "Bob", false, 2.8),
+        (3.0, "Cara", true, 2.8),
+        (4.0, "Dave", false, 4.1),
+        (5.0, "Eve", true, 3.9),
+    ];
+    for (i, (id, name, active, score)) in rows.iter().enumerate() {
+        let r = (i + 1) as u32;
+        ws.write_number(r, 0, *id).unwrap();
+        ws.write_string(r, 1, *name).unwrap();
+        ws.write_boolean(r, 2, *active).unwrap();
+        ws.write_number(r, 3, *score).unwrap();
+    }
+    save_xlsx(wb, "people.xlsx")
+}
+
+#[test]
+fn loads_single_sheet_xlsx_named_after_sheet() {
+    // AC2: pick a single-sheet .xlsx -> one Dataset named after the sheet, active.
+    let (xlsx, _dir) = people_xlsx();
+    let mut session = Session::new().expect("session");
+    let d = load_ok(&mut session, &xlsx);
+    assert_eq!(d.reference_name, "people"); // named after the sheet, not the file
+    assert_eq!(d.display_name, "people");
+    assert_eq!(session.list().len(), 1);
+    assert_eq!(session.active().unwrap().reference_name, "people");
+}
+
+#[test]
+fn xlsx_shares_type_contract_with_csv() {
+    // AC5: same canonical DuckDB types as people.csv (single source of truth,
+    // ADR-0032) -- the calamine -> CSV -> read_csv_auto path re-infers in DuckDB.
+    let (xlsx, _dir) = people_xlsx();
+    let mut session = Session::new().expect("session");
+    let d = load_ok(&mut session, &xlsx);
+    assert_eq!(
+        column_types(&d),
+        vec![
+            ("id", "BIGINT"),
+            ("name", "VARCHAR"),
+            ("active", "BOOLEAN"),
+            ("score", "DOUBLE"),
+        ]
+    );
+    assert_eq!(d.row_count, 5);
+    assert_eq!(d.sample.len(), 3);
+    assert_eq!(d.sample[0], vec!["1", "Alice", "true", "3.5"]);
+}
+
+#[test]
+fn loads_multi_sheet_xlsx_each_sheet_a_dataset() {
+    // AC3: each sheet -> its own Dataset, each referenceable independently.
+    let mut wb = Workbook::new();
+    let people = wb.add_worksheet();
+    people.set_name("people").expect("name");
+    people.write_string(0, 0, "id").unwrap();
+    people.write_number(1, 0, 1.0).unwrap();
+    people.write_number(2, 0, 2.0).unwrap();
+    let orders = wb.add_worksheet();
+    orders.set_name("orders").expect("name");
+    orders.write_string(0, 0, "order_id").unwrap();
+    orders.write_string(0, 1, "amount").unwrap();
+    orders.write_number(1, 0, 100.0).unwrap();
+    orders.write_number(1, 1, 9.99).unwrap();
+    let (xlsx, _dir) = save_xlsx(wb, "multi.xlsx");
+
+    let mut session = Session::new().expect("session");
+    let d = load_ok(&mut session, &xlsx);
+    // active points at the last sheet (ADR-0022: active = most recent source).
+    assert_eq!(d.reference_name, "orders");
+    assert_eq!(session.list().len(), 2);
+    // each sheet is referenceable by its sheet-derived name
+    assert!(session.get("people").is_some());
+    assert!(session.get("orders").is_some());
+    // row counts are per-sheet, not summed
+    assert_eq!(session.get("people").unwrap().row_count, 2);
+    assert_eq!(session.get("orders").unwrap().row_count, 1);
+}
+
+#[test]
+fn xlsx_hidden_sheets_are_skipped() {
+    // A hidden sheet (Excel state="hidden") is not loaded as a Dataset -- the
+    // user hid it in Excel, so it isn't part of the data they want to analyze.
+    // Only the visible sheet becomes a Dataset.
+    let mut wb = Workbook::new();
+    let visible = wb.add_worksheet();
+    visible.set_name("visible").expect("name");
+    visible.write_string(0, 0, "id").unwrap();
+    visible.write_number(1, 0, 1.0).unwrap();
+    let hidden = wb.add_worksheet();
+    hidden.set_name("hidden").expect("name");
+    hidden.set_hidden(true);
+    hidden.write_string(0, 0, "id").unwrap();
+    hidden.write_number(1, 0, 2.0).unwrap();
+    let (xlsx, _dir) = save_xlsx(wb, "hidden.xlsx");
+
+    let mut session = Session::new().expect("session");
+    let d = load_ok(&mut session, &xlsx);
+    assert_eq!(d.reference_name, "visible");
+    assert_eq!(session.list().len(), 1);
+    assert!(session.get("hidden").is_none());
+}
+
+#[test]
+fn xlsx_formula_cells_use_cached_values() {
+    // AC4: formula cells resolve to their cached value (never recomputed). The
+    // fixture stores an explicit cached result (exactly what Excel persists);
+    // the sample must show that value, never the formula text.
+    let mut wb = Workbook::new();
+    let ws = wb.add_worksheet();
+    ws.set_name("calc").expect("name");
+    ws.write_string(0, 0, "a").unwrap();
+    ws.write_string(0, 1, "sum").unwrap();
+    ws.write_number(1, 0, 1.0).unwrap();
+    ws.write_formula(1, 1, Formula::new("1+1").set_result("2"))
+        .unwrap();
+    ws.write_number(2, 0, 2.0).unwrap();
+    ws.write_formula(2, 1, Formula::new("B2*5").set_result("10"))
+        .unwrap();
+    let (xlsx, _dir) = save_xlsx(wb, "calc.xlsx");
+
+    let mut session = Session::new().expect("session");
+    let d = load_ok(&mut session, &xlsx);
+    assert_eq!(d.reference_name, "calc");
+    assert_eq!(d.sample[0], vec!["1", "2"]); // cached "2", not "=1+1"
+    assert_eq!(d.sample[1], vec!["2", "10"]); // cached "10", not "B2*5"
+}
+
+#[test]
+fn xlsx_snapshot_is_read_only() {
+    // AC5: per-sheet snapshots are engine-level read-only (ADR-0005).
+    let (xlsx, _dir) = people_xlsx();
+    let mut session = Session::new().expect("session");
+    load_ok(&mut session, &xlsx);
+    let writes = [
+        r#"INSERT INTO "people".data VALUES (99,'X',true,1.0)"#,
+        r#"DROP TABLE "people".data"#,
+    ];
+    for sql in writes {
+        assert!(
+            session.execute_batch(sql).is_err(),
+            "write should be rejected: {sql}"
+        );
+    }
+}
+
+#[test]
+fn reloading_xlsx_is_deterministic() {
+    // AC5: reload the same xlsx -> structurally identical descriptor per sheet.
+    let (xlsx, _dir) = people_xlsx();
+    let mut session = Session::new().expect("session");
+    let d1 = load_ok(&mut session, &xlsx);
+    let d2 = load_ok(&mut session, &xlsx);
+    assert_eq!(d2.reference_name, "people_2"); // de-conflicted
+    assert_eq!(d1.columns, d2.columns);
+    assert_eq!(d1.row_count, d2.row_count);
+    assert_eq!(d1.sample, d2.sample);
+    assert_eq!(d1.fingerprint, d2.fingerprint);
+}
+
+#[test]
+fn xlsx_empty_sheets_are_skipped() {
+    // A fully blank sheet contributes no Dataset; only sheets with rows load.
+    let mut wb = Workbook::new();
+    let blank = wb.add_worksheet();
+    blank.set_name("blank").expect("name"); // no cells written
+    let data = wb.add_worksheet();
+    data.set_name("data").expect("name");
+    data.write_string(0, 0, "id").unwrap();
+    data.write_number(1, 0, 1.0).unwrap();
+    let (xlsx, _dir) = save_xlsx(wb, "mixed.xlsx");
+
+    let mut session = Session::new().expect("session");
+    let d = load_ok(&mut session, &xlsx);
+    assert_eq!(d.reference_name, "data");
+    assert_eq!(session.list().len(), 1);
+    assert!(session.get("blank").is_none());
+}
+
+#[test]
+fn corrupted_xlsx_is_rejected_and_working_set_unchanged() {
+    // AC6: a non-xlsx file passed as .xlsx -> clear error, working set unchanged.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bad = dir.path().join("corrupted.xlsx");
+    fs::write(&bad, b"not actually an xlsx file (no zip magic)").expect("write corrupted");
+    let mut session = Session::new().expect("session");
+    match session.ingest(&bad) {
+        LoadOutcome::Error(_) => {}
+        LoadOutcome::Loaded(d) => panic!("expected error for corrupted xlsx, got {d:?}"),
+    }
+    assert_eq!(session.list().len(), 0);
 }

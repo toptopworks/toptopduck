@@ -36,17 +36,30 @@ pub fn copy_in(
     // literal in bind values).
     let path_str = src.to_string_lossy().into_owned();
 
-    let snapshot = {
+    // Build inside an immediately-invoked closure so any failure (open / CREATE
+    // TABLE / descriptor derivation) flows to `result` instead of early-returning
+    // past the cleanup below. `Connection::open` has already created
+    // `<alias>.duckdb` on disk by then, so a failure must remove the partial
+    // file -- the excel path calls this once per sheet, and without this a
+    // mid-workbook failure could orphan several snapshots until the session temp
+    // dir is torn down.
+    let result = (|| -> Result<Snapshot, LoadError> {
         let conn = Connection::open(&file_path).map_err(io_err)?;
         conn.execute(
             &format!("CREATE TABLE data AS SELECT * FROM {reader_fn}(?)"),
             params![path_str],
         )
         .map_err(parse_err)?;
-        Snapshot::from_connection(&conn, file_path.clone(), temp_dir)?
-    }; // conn dropped -> file closed before the session re-attaches it
+        Snapshot::from_connection(&conn, file_path.clone(), temp_dir)
+    })(); // conn dropped -> file closed before the session re-attaches it
 
-    Ok(snapshot)
+    match result {
+        Ok(snapshot) => Ok(snapshot),
+        Err(e) => {
+            let _ = fs::remove_file(&file_path);
+            Err(e)
+        }
+    }
 }
 
 fn io_err(e: duckdb::Error) -> LoadError {

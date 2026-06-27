@@ -2,6 +2,8 @@
 //! de-conflicts reference names, and holds the active-dataset pointer (= the
 //! most recently uploaded source).
 
+use std::collections::HashSet;
+
 use crate::model::DatasetDescriptor;
 
 #[derive(Debug, Default)]
@@ -14,13 +16,22 @@ impl WorkingSet {
     /// De-conflict a candidate reference name: name, name_2, name_3, ...
     /// returns the first unused (ADR-0022 tool-side de-conflict).
     pub fn deconflict(&self, candidate: &str) -> String {
-        if !self.taken(candidate) {
+        self.deconflict_with(candidate, &HashSet::new())
+    }
+
+    /// De-conflict a candidate against both the working set and an extra reserved
+    /// set -- used when reserving several names in one batch (e.g. an Excel
+    /// workbook's sheets) before any are registered, so two sheets that sanitize
+    /// to the same name don't collide at ATTACH time.
+    pub fn deconflict_with(&self, candidate: &str, reserved: &HashSet<String>) -> String {
+        let taken = |n: &str| self.taken(n) || reserved.contains(n);
+        if !taken(candidate) {
             return candidate.to_string();
         }
         let mut n = 2;
         loop {
             let candidate = format!("{candidate}_{n}");
-            if !self.taken(&candidate) {
+            if !taken(&candidate) {
                 return candidate;
             }
             n += 1;
@@ -94,6 +105,19 @@ mod tests {
         assert_eq!(ws.deconflict("orders"), "orders_2");
         ws.register(descriptor("orders_2"));
         assert_eq!(ws.deconflict("orders"), "orders_3");
+    }
+
+    #[test]
+    fn deconflict_with_honours_reserved_set() {
+        // Batch reservation (e.g. an Excel workbook's sheets): two sheets that
+        // sanitize to the same name must not collide before any is registered.
+        let ws = WorkingSet::default();
+        let mut reserved = HashSet::new();
+        assert_eq!(ws.deconflict_with("orders", &reserved), "orders");
+        reserved.insert("orders".to_string());
+        assert_eq!(ws.deconflict_with("orders", &reserved), "orders_2");
+        reserved.insert("orders_2".to_string());
+        assert_eq!(ws.deconflict_with("orders", &reserved), "orders_3");
     }
 
     #[test]

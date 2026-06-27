@@ -5,7 +5,7 @@
 ## Language
 
 **数据集 (Dataset)**:
-会话内一个可被查询的逻辑表，是 LLM 生成 SQL 时的最小引用单元。一个 CSV/Parquet/JSON 文件映射为一个 Dataset；一个 Excel sheet 映射为一个 Dataset（杂乱结构需先规整，见 ADR-0015）。
+会话内一个可被查询的逻辑表，是 LLM 生成 SQL 时的最小引用单元。一个 CSV/Parquet/JSON 文件映射为一个 Dataset；一个 Excel sheet 映射为一个 Dataset（杂乱结构需先规整，见 ADR-0015）；**隐藏的 sheet 不映射**——用户在 Excel 中隐藏的表不属于待分析数据。
 _Avoid_: 文件(file)、表(table)、数据源(source)——这些是实现概念，非领域概念
 
 **提问 (Question)**:
