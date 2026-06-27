@@ -59,13 +59,21 @@ pub fn read_sheets(path: &Path) -> Result<Vec<SheetRows>, LoadError> {
         let range = book.worksheet_range(&name).map_err(parse_err)?;
         let rows: Vec<Vec<Data>> = range.rows().map(|r| r.to_vec()).collect();
         // worksheet_merge_cells re-reads the sheet XML for its <mergeCells>
-        // block; a sheet with no merges yields None, an unreadable block is
-        // tolerated (empty merges) rather than failing the whole load -- a
-        // sheet without merge info still tidies, just without forward-fill.
-        let merges = book
-            .worksheet_merge_cells(&name)
-            .and_then(Result::ok)
-            .unwrap_or_default();
+        // block. A sheet with no merges yields None; an unreadable block
+        // (Some(Err)) is tolerated -- the sheet still tidies, just without
+        // forward-fill -- but the degradation is logged so it stays observable,
+        // not silent (ADR-0032 spirit).
+        let merges = match book.worksheet_merge_cells(&name) {
+            None => Vec::new(),
+            Some(Ok(merges)) => merges,
+            Some(Err(e)) => {
+                log::warn!(
+                    target: "toptopduck::ingest::excel",
+                    "sheet \"{name}\": merged-cell ranges unreadable ({e}); forward-fill skipped (merged cells keep only their top-left value)"
+                );
+                Vec::new()
+            }
+        };
         out.push(SheetRows { name, rows, merges });
     }
     Ok(out)
@@ -92,7 +100,9 @@ pub fn write_sheet_csv(
 }
 
 /// Render the top `n` raw rows of a sheet as strings, for the guided-load
-/// preview (pre-rectify -- merged cells appear as Excel shows them). The user
+/// preview (pre-rectify). Merged cells appear as calamine yields them -- the
+/// top-left value with the rest of the merge blank -- which is the raw grid the
+/// rectify step forward-fills over, not Excel's visually filled merge. The user
 /// locates the header row and marks skips from this preview before re-ingesting
 /// via the guided path.
 pub fn render_preview(sheet: &SheetRows, n: usize) -> Vec<Vec<String>> {
@@ -154,9 +164,10 @@ fn track_degradation(cell: &Data, errors: &mut usize, serial_dates: &mut usize) 
 }
 
 /// Render a cached cell value to its CSV string form. SQL NULL (calamine Empty)
-/// renders as the empty string, matching the frozen-sample contract
-/// (`schema::render_cell`, ADR-0026). Int/Float both render via their numeric
-/// text so DuckDB re-infers the canonical type from the column (ADR-0032).
+/// renders as the empty string -- the same NULL->"" behavior as the frozen-sample
+/// renderer (`schema::render_cell`, ADR-0026), though this is an independent
+/// implementation, not a shared call site. Int/Float both render via their
+/// numeric text so DuckDB re-infers the canonical type from the column (ADR-0032).
 fn cell_to_string(cell: &Data) -> String {
     match cell {
         Data::Empty => String::new(),

@@ -189,7 +189,9 @@ impl Session {
         // Apply each sheet's user rectify. A sheet with no guidance entry
         // defaults to a plain single-header rectify (header_row 1, no skips) --
         // the dialog sends one entry per visible sheet, this just stays safe.
-        let entries: Vec<(String, Vec<Vec<Data>>, Option<SheetRectify>)> = sheets
+        // Any out-of-range header_row aborts before copy-in so no partial load
+        // escapes (transactional -- ADR-0042).
+        let entries: Vec<(String, Vec<Vec<Data>>, Option<SheetRectify>)> = match sheets
             .iter()
             .map(|sheet| {
                 let rectify = guidance
@@ -197,10 +199,14 @@ impl Session {
                     .find(|g| g.name == sheet.name)
                     .map(|g| g.rectify.clone())
                     .unwrap_or_default();
-                let rows = Self::apply_rectify(sheet, &rectify);
-                (sheet.name.clone(), rows, Some(rectify))
+                let rows = Self::apply_rectify(sheet, &rectify)?;
+                Ok::<_, LoadError>((sheet.name.clone(), rows, Some(rectify)))
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(e) => e,
+            Err(e) => return LoadOutcome::Error(e),
+        };
 
         match self.commit_excel(path, entries) {
             Ok(active) => LoadOutcome::Loaded(active),
@@ -350,14 +356,33 @@ impl Session {
     /// cells, then take the header from `header_row` (1-based) and the data rows
     /// below it minus `skip_rows` (1-based absolute). Deterministic for the same
     /// input + params (ADR-0042).
-    fn apply_rectify(sheet: &ingest::excel::SheetRows, rectify: &SheetRectify) -> Vec<Vec<Data>> {
+    ///
+    /// `header_row` is validated to be in `1..=rows.len()`: a guided ingest is a
+    /// `#[tauri::command]`, so the value crosses the IPC boundary, and an
+    /// out-of-range header_row would otherwise silently yield a header-less table
+    /// (range miss) or a header-duplicated table (`0` -- the first row serves as
+    /// both header and data). Rejecting it keeps the user's explicit decision
+    /// producing exactly the table they asked for (ADR-0042).
+    fn apply_rectify(
+        sheet: &ingest::excel::SheetRows,
+        rectify: &SheetRectify,
+    ) -> Result<Vec<Vec<Data>>, LoadError> {
         let mut rows = sheet.rows.clone();
         forward_fill_merges(&mut rows, &sheet.merges);
-        let header_idx = rectify.header_row.saturating_sub(1) as usize;
-        let mut out = Vec::with_capacity(rows.len());
-        if let Some(header) = rows.get(header_idx) {
-            out.push(header.clone());
+        if rectify.header_row == 0 || rectify.header_row as usize > rows.len() {
+            return Err(LoadError::Parse {
+                detail: format!(
+                    "表头行号 {} 越界（sheet \"{}\" 共 {} 行，需在 1..={} 内）",
+                    rectify.header_row,
+                    sheet.name,
+                    rows.len(),
+                    rows.len()
+                ),
+            });
         }
+        let header_idx = rectify.header_row as usize - 1;
+        let mut out = Vec::with_capacity(rows.len());
+        out.push(rows[header_idx].clone());
         let skip: HashSet<u32> = rectify.skip_rows.iter().copied().collect();
         for (i, row) in rows.iter().enumerate() {
             let abs = (i + 1) as u32; // 1-based absolute row
@@ -365,7 +390,7 @@ impl Session {
                 out.push(row.clone());
             }
         }
-        out
+        Ok(out)
     }
 
     /// Detach already-attached excel snapshots and delete their files (rollback).
