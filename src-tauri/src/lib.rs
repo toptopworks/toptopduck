@@ -10,7 +10,10 @@ pub mod model;
 pub mod session;
 pub mod workingset;
 
-pub use model::{ColumnSchema, DatasetDescriptor, LoadError, LoadOutcome};
+pub use model::{
+    ColumnSchema, DatasetDescriptor, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
+    SheetGuidance, SheetRectify,
+};
 pub use session::Session;
 
 use std::sync::{Arc, Mutex};
@@ -25,6 +28,7 @@ pub fn run() {
         .manage(Arc::new(Mutex::new(session)))
         .invoke_handler(tauri::generate_handler![
             commands::ingest_file,
+            commands::ingest_file_guided,
             commands::list_working_set,
             commands::active_dataset,
             commands::get_dataset,

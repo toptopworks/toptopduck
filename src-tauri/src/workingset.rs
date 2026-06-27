@@ -89,6 +89,7 @@ mod tests {
             row_count: 1,
             sample: vec![vec!["1".into()]],
             fingerprint: name.into(),
+            rectify: None,
         }
     }
 

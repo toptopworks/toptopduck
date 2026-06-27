@@ -6,6 +6,7 @@
 pub mod excel;
 pub mod loader;
 pub mod schema;
+pub mod tidy;
 
 use std::path::Path;
 
@@ -15,6 +16,11 @@ pub enum Dispatched {
     Parquet,
     Json,
     Xlsx,
+    /// Legacy .xls (BIFF8) workbook -- rejected distinctly (ADR-0015) so the UI
+    /// can show the actionable "另存为 .xlsx" hint; bundling a converter is out
+    /// of scope for v1. Routed separately from `Unsupported` rather than
+    /// special-cased inside a generic error message.
+    Xls,
     Unsupported(String),
 }
 
@@ -30,6 +36,7 @@ pub fn dispatch(path: &Path) -> Dispatched {
         Some("parquet") => Dispatched::Parquet,
         Some("json") | Some("jsonl") | Some("ndjson") => Dispatched::Json,
         Some("xlsx") => Dispatched::Xlsx,
+        Some("xls") => Dispatched::Xls,
         Some(ext) => Dispatched::Unsupported(format!(".{ext}")),
         None => Dispatched::Unsupported(String::new()),
     }
@@ -39,13 +46,15 @@ pub fn dispatch(path: &Path) -> Dispatched {
 /// format is unsupported or handled outside the shared copy-in path. The reader
 /// is interpolated into the copy-in SQL as a trusted static literal chosen here,
 /// never user input (see `loader::copy_in`). `Xlsx` returns `None` -- it goes
-/// through [`excel`] which materializes each sheet to a temp CSV first.
+/// through [`excel`] which materializes each sheet to a temp CSV first. `Xls`
+/// returns `None` -- it is rejected upstream and never reaches copy-in.
 pub fn reader_for(format: &Dispatched) -> Option<&'static str> {
     match format {
         Dispatched::Csv => Some("read_csv_auto"),
         Dispatched::Parquet => Some("read_parquet"),
         Dispatched::Json => Some("read_json_auto"),
         Dispatched::Xlsx => None,
+        Dispatched::Xls => None,
         Dispatched::Unsupported(_) => None,
     }
 }
@@ -107,16 +116,17 @@ mod tests {
         assert!(matches!(dispatch(Path::new("A.JSON")), Dispatched::Json));
         assert!(matches!(dispatch(Path::new("a.xlsx")), Dispatched::Xlsx));
         assert!(matches!(dispatch(Path::new("A.XLSX")), Dispatched::Xlsx));
+        // .xls routes to its own variant (rejected upstream with a "另存为
+        // .xlsx" hint -- ADR-0015), distinct from a generic unsupported format.
+        assert!(matches!(dispatch(Path::new("a.xls")), Dispatched::Xls));
+        assert!(matches!(dispatch(Path::new("A.XLS")), Dispatched::Xls));
     }
 
     #[test]
     fn rejects_other_formats() {
-        // .xls is rejected here (slice 3b special-cases its message); .txt etc.
-        // likewise. .xlsx is supported as of issue #7.
-        assert!(matches!(
-            dispatch(Path::new("a.xls")),
-            Dispatched::Unsupported(_)
-        ));
+        // .xls has its own variant (see dispatches_each_supported...); .txt and
+        // other unknown extensions fall through to Unsupported. .xlsx is
+        // supported as of issue #7.
         assert!(matches!(
             dispatch(Path::new("a.txt")),
             Dispatched::Unsupported(_)
@@ -134,6 +144,8 @@ mod tests {
         assert_eq!(reader_for(&Dispatched::Json), Some("read_json_auto"));
         // Xlsx has no single reader -- handled by the excel path (calamine).
         assert_eq!(reader_for(&Dispatched::Xlsx), None);
+        // Xls is rejected upstream -- it never reaches copy-in.
+        assert_eq!(reader_for(&Dispatched::Xls), None);
         assert_eq!(reader_for(&Dispatched::Unsupported(".x".into())), None);
     }
 

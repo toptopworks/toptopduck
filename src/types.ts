@@ -5,6 +5,15 @@ export interface ColumnSchema {
   canonical_type: string;
 }
 
+// One Excel sheet's user-chosen rectify decisions (ADR-0042): only the user's
+// explicit choices enter the recipe; the auto-tidy algorithm never does.
+export interface SheetRectify {
+  // 1-based row whose cells become the column header; rows above are skipped.
+  header_row: number;
+  // 1-based absolute rows below the header to drop (separators/sub-headers).
+  skip_rows: number[];
+}
+
 export interface DatasetDescriptor {
   reference_name: string;
   display_name: string;
@@ -13,14 +22,38 @@ export interface DatasetDescriptor {
   row_count: number;
   sample: string[][];
   fingerprint: string;
+  // User's explicit rectify choices for an Excel sheet (ADR-0042); null for
+  // CSV/Parquet/JSON and Excel sheets that auto-tidied without a user override.
+  rectify: SheetRectify | null;
 }
 
+// Legacy `.xls` is rejected in v1 (ADR-0015); serde serializes the unit variant
+// as the JSON string `"LegacyExcel"`, so it is a bare string in this union.
 export type LoadError =
+  | "LegacyExcel"
   | { UnsupportedFormat: { requested: string } }
   | { Parse: { detail: string } }
   | { Io: { detail: string } }
   | { Other: { detail: string } };
 
+export interface GuidanceSheet {
+  name: string;
+  // Raw top-of-sheet rows (rendered strings) for the user to locate the header.
+  preview: string[][];
+}
+
+export interface GuidanceRequest {
+  source_path: string;
+  workbook_name: string;
+  sheets: GuidanceSheet[];
+}
+
+export interface SheetGuidance {
+  name: string;
+  rectify: SheetRectify;
+}
+
 export type LoadOutcome =
   | { Loaded: DatasetDescriptor }
+  | { NeedsGuidance: GuidanceRequest }
   | { Error: LoadError };

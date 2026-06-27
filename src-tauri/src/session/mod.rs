@@ -8,12 +8,21 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use calamine::Data;
 use duckdb::Connection;
 use tempfile::TempDir;
 
 use crate::ingest;
-use crate::model::{DatasetDescriptor, LoadError, LoadOutcome};
+use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
+use crate::model::{
+    DatasetDescriptor, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome, SheetGuidance,
+    SheetRectify,
+};
 use crate::workingset::WorkingSet;
+
+/// Raw rows surfaced per sheet in the guided-load preview -- enough to spot the
+/// header row and any separator/sub-header/footer rows to skip (ADR-0015).
+const GUIDANCE_PREVIEW_ROWS: usize = 12;
 
 pub struct Session {
     conn: Connection,
@@ -45,14 +54,16 @@ impl Session {
     pub fn ingest(&mut self, path: &Path) -> LoadOutcome {
         let dispatched = ingest::dispatch(path);
         match dispatched {
+            // Legacy .xls is rejected up front with an actionable hint (ADR-0015)
+            // -- never reaches copy-in, leaves the working set untouched.
+            ingest::Dispatched::Xls => LoadOutcome::Error(LoadError::LegacyExcel),
             ingest::Dispatched::Xlsx => self.ingest_excel(path),
             _ => {
                 let Some(reader) = ingest::reader_for(&dispatched) else {
                     let requested = match dispatched {
                         ingest::Dispatched::Unsupported(ext) => ext,
-                        // Unreachable today (every supported variant maps to a
-                        // reader or to the excel path), but kept total so a
-                        // future variant can't silently fall through.
+                        // Unreachable today (Xls/Xlsx are handled above); kept
+                        // total so a future variant can't silently fall through.
                         _ => String::new(),
                     };
                     return LoadOutcome::Error(LoadError::UnsupportedFormat { requested });
@@ -111,23 +122,27 @@ impl Session {
             row_count: snap.row_count,
             sample: snap.sample,
             fingerprint: snap.fingerprint,
+            rectify: None,
         };
         self.working_set.register(descriptor.clone());
         LoadOutcome::Loaded(descriptor)
     }
 
-    /// Ingest a .xlsx workbook (slice 3a, issue #7): each sheet maps to one
-    /// Dataset named after the sheet. Formula cells use their cached value,
-    /// never recomputed (ADR-0015). Transactional -- on any failure the working
-    /// set is unchanged and already-attached snapshots are rolled back (AC6/AC7).
-    /// Returns the active (last) sheet's descriptor; all sheets are queryable via
-    /// [`Self::list`] / [`Self::get`].
+    /// Ingest a .xlsx workbook (slice 3b, issue #10): best-effort auto-tidy each
+    /// sheet (ADR-0015) -- forward-fill merged cells + single-header detection.
+    /// If every sheet tidies confidently, each becomes a Dataset (`rectify =
+    /// None`: the auto algorithm's choices aren't recorded, ADR-0042). If *any*
+    /// sheet can't be confidently tidied, NO sheet is loaded -- the working set
+    /// stays untouched and a [`LoadOutcome::NeedsGuidance`] carries each sheet's
+    /// raw preview so the UI can gather explicit header/skip choices. Formula
+    /// cells use their cached value (ADR-0015). Transactional: on any failure
+    /// already-attached snapshots roll back (AC6/AC7).
     fn ingest_excel(&mut self, path: &Path) -> LoadOutcome {
         let mut sheets = match ingest::excel::read_sheets(path) {
             Ok(s) => s,
             Err(e) => return LoadOutcome::Error(e),
         };
-        // Blank sheets contribute no Dataset (slice 3a basic loading).
+        // Blank sheets contribute no Dataset.
         sheets.retain(|s| !s.rows.is_empty());
         if sheets.is_empty() {
             return LoadOutcome::Error(LoadError::Parse {
@@ -135,68 +150,144 @@ impl Session {
             });
         }
 
-        // Pre-reserve de-conflicted reference names (after each sheet name)
-        // against the working set AND each other, so duplicate sanitized names
-        // never collide at ATTACH time. Registration is deferred until every
-        // sheet has attached (a bad sheet never pollutes the session).
-        let mut reserved: HashSet<String> = HashSet::new();
-        let names: Vec<String> = sheets
+        // Auto-tidy each sheet; the first that can't be confidently tidied sends
+        // the whole workbook to guided loading (no partial load -- transactional).
+        let mut entries: Vec<(String, Vec<Vec<Data>>, Option<SheetRectify>)> =
+            Vec::with_capacity(sheets.len());
+        for sheet in &sheets {
+            match auto_tidy(sheet) {
+                TidyOutcome::Tidied(t) => entries.push((sheet.name.clone(), t.rows, None)),
+                TidyOutcome::NeedsGuidance => {
+                    return LoadOutcome::NeedsGuidance(Self::build_guidance(path, &sheets));
+                }
+            }
+        }
+
+        match self.commit_excel(path, entries) {
+            Ok(active) => LoadOutcome::Loaded(active),
+            Err(e) => LoadOutcome::Error(e),
+        }
+    }
+
+    /// Re-ingest an Excel workbook with the user's explicit rectify choices
+    /// (ADR-0015 guided fallback / ADR-0042 user decisions). Each sheet is
+    /// rectified by its [`SheetRectify`] (header row + skipped rows) and
+    /// forward-filled over merged cells, then loaded with `rectify = Some(...)`
+    /// recorded on the descriptor. Transactional like [`Self::ingest`].
+    pub fn ingest_guided(&mut self, path: &Path, guidance: &[SheetGuidance]) -> LoadOutcome {
+        let mut sheets = match ingest::excel::read_sheets(path) {
+            Ok(s) => s,
+            Err(e) => return LoadOutcome::Error(e),
+        };
+        sheets.retain(|s| !s.rows.is_empty());
+        if sheets.is_empty() {
+            return LoadOutcome::Error(LoadError::Parse {
+                detail: "工作簿不含任何含数据的 sheet".into(),
+            });
+        }
+
+        // Apply each sheet's user rectify. A sheet with no guidance entry
+        // defaults to a plain single-header rectify (header_row 1, no skips) --
+        // the dialog sends one entry per visible sheet, this just stays safe.
+        // Any out-of-range header_row aborts before copy-in so no partial load
+        // escapes (transactional -- ADR-0042).
+        let entries: Vec<(String, Vec<Vec<Data>>, Option<SheetRectify>)> = match sheets
             .iter()
-            .map(|s| {
+            .map(|sheet| {
+                let rectify = guidance
+                    .iter()
+                    .find(|g| g.name == sheet.name)
+                    .map(|g| g.rectify.clone())
+                    .unwrap_or_default();
+                let rows = Self::apply_rectify(sheet, &rectify)?;
+                Ok::<_, LoadError>((sheet.name.clone(), rows, Some(rectify)))
+            })
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(e) => e,
+            Err(e) => return LoadOutcome::Error(e),
+        };
+
+        match self.commit_excel(path, entries) {
+            Ok(active) => LoadOutcome::Loaded(active),
+            Err(e) => LoadOutcome::Error(e),
+        }
+    }
+
+    /// Attach every `(display name, tidied rows, rectify)` entry as a read-only
+    /// snapshot and register them atomically. De-conflicts reference names up
+    /// front (against the working set + each other) so duplicate sanitized names
+    /// never collide at ATTACH time. Rolls back on any failure (AC6/AC7).
+    /// Returns the active (last) descriptor.
+    fn commit_excel(
+        &mut self,
+        path: &Path,
+        entries: Vec<(String, Vec<Vec<Data>>, Option<SheetRectify>)>,
+    ) -> Result<DatasetDescriptor, LoadError> {
+        let mut reserved: HashSet<String> = HashSet::new();
+        let names: Vec<String> = entries
+            .iter()
+            .map(|(display, _, _)| {
                 let name = self
                     .working_set
-                    .deconflict_with(&ingest::sanitize_sheet_name(&s.name), &reserved);
+                    .deconflict_with(&ingest::sanitize_sheet_name(display), &reserved);
                 reserved.insert(name.clone());
                 name
             })
             .collect();
 
-        // Copy-in + attach each sheet; roll back on any failure. Panic-safety
-        // invariant: `attach_excel_sheet` must not panic between a successful
-        // ATTACH and the `attached.push`, otherwise the just-attached snapshot
-        // escapes rollback. It performs only infallible ops after ATTACH
-        // succeeds today (push + struct construction; no unwrap/expect), so the
-        // invariant holds -- keep it so when editing.
-        let mut attached: Vec<String> = Vec::with_capacity(sheets.len());
-        let mut descriptors: Vec<DatasetDescriptor> = Vec::with_capacity(sheets.len());
-        for (sheet, reference_name) in sheets.iter().zip(names.iter()) {
-            match self.attach_excel_sheet(path, sheet, reference_name, &mut attached) {
+        // Copy-in + attach each entry; roll back on any failure. Panic-safety
+        // invariant (carried from slice 3a): `attach_sheet` does only infallible
+        // ops after ATTACH succeeds, so a just-attached snapshot never escapes
+        // rollback -- keep it so when editing.
+        let mut attached: Vec<String> = Vec::with_capacity(entries.len());
+        let mut descriptors: Vec<DatasetDescriptor> = Vec::with_capacity(entries.len());
+        for ((display, rows, rectify), reference_name) in entries.into_iter().zip(&names) {
+            match self.attach_sheet(
+                path,
+                &display,
+                reference_name,
+                &rows,
+                rectify,
+                &mut attached,
+            ) {
                 Ok(d) => descriptors.push(d),
                 Err(e) => {
                     self.rollback_excel(&attached);
-                    return LoadOutcome::Error(e);
+                    return Err(e);
                 }
             }
         }
 
-        // All sheets attached: commit to the working set atomically. The empty
-        // guard at the top of ingest_excel ensures descriptors is non-empty here;
-        // prefer a returned error over a reachable panic regardless.
+        // All attached: commit atomically. entries is non-empty (guarded above),
+        // but prefer a returned error over a reachable panic regardless.
         let Some(active) = descriptors.last().cloned() else {
-            return LoadOutcome::Error(LoadError::Parse {
+            return Err(LoadError::Parse {
                 detail: "工作簿不含任何含数据的 sheet".into(),
             });
         };
         for d in descriptors {
             self.working_set.register(d);
         }
-        LoadOutcome::Loaded(active)
+        Ok(active)
     }
 
-    /// Copy-in one sheet's cached values to a read-only snapshot and attach it.
+    /// Copy-in one tidied sheet's rows to a read-only snapshot and attach it.
     /// On failure the snapshot file is removed; the caller records successful
     /// attaches (`attached`) for transactional rollback.
-    fn attach_excel_sheet(
+    fn attach_sheet(
         &mut self,
         path: &Path,
-        sheet: &ingest::excel::SheetRows,
+        display_name: &str,
         reference_name: &str,
+        rows: &[Vec<Data>],
+        rectify: Option<SheetRectify>,
         attached: &mut Vec<String>,
     ) -> Result<DatasetDescriptor, LoadError> {
-        // calamine cached values -> temp CSV -> read_csv_auto copy-in. DuckDB
-        // infers types from the CSV, keeping the single-source-of-truth contract
-        // (ADR-0032) shared with CSV/Parquet/JSON.
-        let csv_path = ingest::excel::write_sheet_csv(sheet, &self.temp_path, reference_name)?;
+        // tidied rows -> temp CSV -> read_csv_auto copy-in. DuckDB infers types
+        // from the CSV, keeping the single-source-of-truth contract (ADR-0032).
+        let csv_path =
+            ingest::excel::write_sheet_csv(rows, display_name, &self.temp_path, reference_name)?;
         // If copy-in fails the temp CSV must still be cleaned up -- the snapshot
         // file is copy_in's own responsibility, but the CSV is ours to remove.
         let snap = match ingest::loader::copy_in(
@@ -229,13 +320,77 @@ impl Session {
 
         Ok(DatasetDescriptor {
             reference_name: reference_name.to_string(),
-            display_name: sheet.name.clone(),
+            display_name: display_name.to_string(),
             source_path: path.to_string_lossy().to_string(),
             columns: snap.columns,
             row_count: snap.row_count,
             sample: snap.sample,
             fingerprint: snap.fingerprint,
+            rectify,
         })
+    }
+
+    /// Build a [`GuidanceRequest`] from a workbook's sheets: each visible
+    /// non-blank sheet's raw top rows rendered as strings (pre-rectify preview).
+    fn build_guidance(path: &Path, sheets: &[ingest::excel::SheetRows]) -> GuidanceRequest {
+        let workbook_name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("workbook")
+            .to_string();
+        let sheets_preview = sheets
+            .iter()
+            .map(|s| GuidanceSheet {
+                name: s.name.clone(),
+                preview: ingest::excel::render_preview(s, GUIDANCE_PREVIEW_ROWS),
+            })
+            .collect();
+        GuidanceRequest {
+            source_path: path.to_string_lossy().to_string(),
+            workbook_name,
+            sheets: sheets_preview,
+        }
+    }
+
+    /// Apply a user's rectify choices to a sheet's raw grid: forward-fill merged
+    /// cells, then take the header from `header_row` (1-based) and the data rows
+    /// below it minus `skip_rows` (1-based absolute). Deterministic for the same
+    /// input + params (ADR-0042).
+    ///
+    /// `header_row` is validated to be in `1..=rows.len()`: a guided ingest is a
+    /// `#[tauri::command]`, so the value crosses the IPC boundary, and an
+    /// out-of-range header_row would otherwise silently yield a header-less table
+    /// (range miss) or a header-duplicated table (`0` -- the first row serves as
+    /// both header and data). Rejecting it keeps the user's explicit decision
+    /// producing exactly the table they asked for (ADR-0042).
+    fn apply_rectify(
+        sheet: &ingest::excel::SheetRows,
+        rectify: &SheetRectify,
+    ) -> Result<Vec<Vec<Data>>, LoadError> {
+        let mut rows = sheet.rows.clone();
+        forward_fill_merges(&mut rows, &sheet.merges);
+        if rectify.header_row == 0 || rectify.header_row as usize > rows.len() {
+            return Err(LoadError::Parse {
+                detail: format!(
+                    "表头行号 {} 越界（sheet \"{}\" 共 {} 行，需在 1..={} 内）",
+                    rectify.header_row,
+                    sheet.name,
+                    rows.len(),
+                    rows.len()
+                ),
+            });
+        }
+        let header_idx = rectify.header_row as usize - 1;
+        let mut out = Vec::with_capacity(rows.len());
+        out.push(rows[header_idx].clone());
+        let skip: HashSet<u32> = rectify.skip_rows.iter().copied().collect();
+        for (i, row) in rows.iter().enumerate() {
+            let abs = (i + 1) as u32; // 1-based absolute row
+            if abs > rectify.header_row && !skip.contains(&abs) {
+                out.push(row.clone());
+            }
+        }
+        Ok(out)
     }
 
     /// Detach already-attached excel snapshots and delete their files (rollback).
