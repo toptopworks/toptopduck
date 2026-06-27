@@ -1,0 +1,3 @@
+{"id": 1, "name": "Alice", "address": {"city": "NYC", "zip": "10001"}, "tags": ["a", "b"], "scores": [90, 85], "prefs": {"theme": "dark"}}
+{"id": 2, "name": "Bob", "address": {"city": "LA", "zip": "90001"}, "tags": ["c"], "scores": [70], "prefs": {"theme": "light"}}
+{"id": 3, "name": "Cara", "address": {"city": "SF", "zip": "94101"}, "tags": ["d", "e"], "scores": [88, 92], "prefs": {"theme": "dark"}}

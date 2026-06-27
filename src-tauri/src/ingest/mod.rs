@@ -1,18 +1,22 @@
-//! Ingest dispatcher (PRD #2 module boundary): routes a file by format to a
-//! format-specific loader. Slice 1 supports CSV only; other formats are rejected
-//! with a clear error (Parquet/JSON/Excel arrive in slices 2-3).
+//! Ingest dispatcher (PRD #2 module boundary): routes a file by format to the
+//! matching DuckDB native reader. CSV / Parquet / JSON are all read via copy-in
+//! into a frozen read-only snapshot; unsupported formats are rejected with a
+//! clear error (Excel arrives in a later slice).
 
-pub mod csv;
+pub mod loader;
 pub mod schema;
 
 use std::path::Path;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dispatched {
     Csv,
+    Parquet,
+    Json,
     Unsupported(String),
 }
 
-/// Route a file by extension. `.csv` only in slice 1.
+/// Route a file by extension.
 pub fn dispatch(path: &Path) -> Dispatched {
     match path
         .extension()
@@ -21,8 +25,22 @@ pub fn dispatch(path: &Path) -> Dispatched {
         .as_deref()
     {
         Some("csv") => Dispatched::Csv,
+        Some("parquet") => Dispatched::Parquet,
+        Some("json") | Some("jsonl") | Some("ndjson") => Dispatched::Json,
         Some(ext) => Dispatched::Unsupported(format!(".{ext}")),
         None => Dispatched::Unsupported(String::new()),
+    }
+}
+
+/// The DuckDB native reader function for a dispatched format, or `None` if the
+/// format is unsupported. The reader is interpolated into the copy-in SQL as a
+/// trusted static literal chosen here, never user input (see `loader::copy_in`).
+pub fn reader_for(format: &Dispatched) -> Option<&'static str> {
+    match format {
+        Dispatched::Csv => Some("read_csv_auto"),
+        Dispatched::Parquet => Some("read_parquet"),
+        Dispatched::Json => Some("read_json_auto"),
+        Dispatched::Unsupported(_) => None,
     }
 }
 
@@ -55,9 +73,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dispatches_csv_case_insensitively() {
+    fn dispatches_each_supported_format_case_insensitively() {
         assert!(matches!(dispatch(Path::new("a.csv")), Dispatched::Csv));
         assert!(matches!(dispatch(Path::new("A.CSV")), Dispatched::Csv));
+        assert!(matches!(
+            dispatch(Path::new("a.parquet")),
+            Dispatched::Parquet
+        ));
+        assert!(matches!(
+            dispatch(Path::new("a.PARQUET")),
+            Dispatched::Parquet
+        ));
+        assert!(matches!(dispatch(Path::new("a.json")), Dispatched::Json));
+        assert!(matches!(dispatch(Path::new("a.jsonl")), Dispatched::Json));
+        assert!(matches!(dispatch(Path::new("a.ndjson")), Dispatched::Json));
+        assert!(matches!(dispatch(Path::new("A.JSON")), Dispatched::Json));
     }
 
     #[test]
@@ -67,13 +97,17 @@ mod tests {
             Dispatched::Unsupported(_)
         ));
         assert!(matches!(
-            dispatch(Path::new("a.parquet")),
-            Dispatched::Unsupported(_)
-        ));
-        assert!(matches!(
             dispatch(Path::new("noext")),
             Dispatched::Unsupported(_)
         ));
+    }
+
+    #[test]
+    fn reader_for_maps_each_format_to_a_duckdb_reader() {
+        assert_eq!(reader_for(&Dispatched::Csv), Some("read_csv_auto"));
+        assert_eq!(reader_for(&Dispatched::Parquet), Some("read_parquet"));
+        assert_eq!(reader_for(&Dispatched::Json), Some("read_json_auto"));
+        assert_eq!(reader_for(&Dispatched::Unsupported(".x".into())), None);
     }
 
     #[test]

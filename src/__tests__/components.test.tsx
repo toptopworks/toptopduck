@@ -42,6 +42,21 @@ describe("DatasetDetail", () => {
     render(<DatasetDetail dataset={{ ...mockDataset, sample: [], row_count: 0 }} />);
     expect(screen.getByText(/无数据行/)).toBeInTheDocument();
   });
+
+  it("renders fully expanded nested DuckDB types (issue #6)", () => {
+    const nested: DatasetDescriptor = {
+      ...mockDataset,
+      columns: [
+        { name: "id", canonical_type: "BIGINT" },
+        { name: "address", canonical_type: "STRUCT(city VARCHAR, zip VARCHAR)" },
+        { name: "tags", canonical_type: "LIST(VARCHAR)" },
+      ],
+      sample: [["1", "{'city': NYC}", "[a, b]"]],
+    };
+    render(<DatasetDetail dataset={nested} />);
+    expect(screen.getByText("STRUCT(city VARCHAR, zip VARCHAR)")).toBeInTheDocument();
+    expect(screen.getByText("LIST(VARCHAR)")).toBeInTheDocument();
+  });
 });
 
 describe("WorkingSetList", () => {

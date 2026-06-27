@@ -106,7 +106,7 @@ fn fingerprint_via_copy(
     //
     // `dump_path` is tool-controlled (per-session temp dir + sanitized snapshot
     // stem), never user input, so string interpolation is safe; the user-supplied
-    // source path is bound as a parameter during copy-in (see ingest::csv).
+    // source path is bound as a parameter during copy-in (see ingest::loader).
     let dump = work_dir.join(format!("{stem}.fingerprint.csv"));
     let dump_path = dump.to_string_lossy();
     conn.execute_batch(&format!(

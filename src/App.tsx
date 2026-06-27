@@ -9,7 +9,7 @@ import type { DatasetDescriptor, LoadError } from "./types";
 function loadErrorMessage(err: LoadError): string {
   if ("UnsupportedFormat" in err) {
     return err.UnsupportedFormat.requested
-      ? `不支持 ${err.UnsupportedFormat.requested}（切片 1 仅支持 .csv）`
+      ? `不支持的格式：${err.UnsupportedFormat.requested}（支持 .csv / .parquet / .json）`
       : "无法识别的格式";
   }
   if ("Parse" in err) return err.Parse.detail;
