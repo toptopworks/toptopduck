@@ -752,6 +752,47 @@ fn different_rectify_yields_different_fingerprint() {
 }
 
 #[test]
+fn guided_load_rejects_out_of_range_header_row() {
+    // C1: header_row crosses the IPC boundary (guided ingest is a command); an
+    // out-of-range value must be rejected at the rectify seam rather than
+    // silently yielding a header-less or header-duplicated table that pollutes
+    // the working set. Both 0 (violates 1-based) and beyond the last row are
+    // rejected, and the working set stays empty (transactional -- AC6/AC7).
+    let mut wb = Workbook::new();
+    let ws = wb.add_worksheet();
+    ws.set_name("people").expect("name");
+    ws.write_string(0, 0, "id").unwrap();
+    ws.write_string(0, 1, "name").unwrap();
+    ws.write_number(1, 0, 1.0).unwrap();
+    ws.write_string(1, 1, "Alice").unwrap();
+    let (xlsx, _dir) = save_xlsx(wb, "oor_header.xlsx");
+
+    for bad_header_row in [0u32, 99] {
+        let mut session = Session::new().expect("session");
+        let outcome = session.ingest_guided(
+            &xlsx,
+            &[SheetGuidance {
+                name: "people".into(),
+                rectify: SheetRectify {
+                    header_row: bad_header_row,
+                    skip_rows: vec![],
+                },
+            }],
+        );
+        match outcome {
+            LoadOutcome::Error(LoadError::Parse { detail }) => {
+                assert!(
+                    detail.contains("越界"),
+                    "header_row {bad_header_row}: expected out-of-range error, got: {detail}"
+                );
+            }
+            other => panic!("header_row {bad_header_row}: expected Error, got {other:?}"),
+        }
+        assert_eq!(session.list().len(), 0); // nothing loaded -- transactional
+    }
+}
+
+#[test]
 fn auto_tidy_reload_is_deterministic() {
     // AC5: reloading the same messy workbook -> identical descriptor.
     let (xlsx, _dir) = messy_xlsx();
@@ -772,6 +813,28 @@ fn legacy_xls_is_rejected_with_hint() {
     let dir = tempfile::tempdir().expect("tempdir");
     let xls = dir.path().join("legacy.xls");
     fs::write(&xls, b"not a real xls").expect("write");
+    let mut session = Session::new().expect("session");
+    match session.ingest(&xls) {
+        LoadOutcome::Error(LoadError::LegacyExcel) => {}
+        other => panic!("expected LegacyExcel, got {other:?}"),
+    }
+    assert_eq!(session.list().len(), 0);
+}
+
+#[test]
+fn legacy_xls_with_ole2_signature_is_still_rejected() {
+    // AC6 invariant: .xls is rejected by extension before any copy-in, so even a
+    // file beginning with the real OLE2/BIFF8 compound-document signature
+    // (D0 CF 11 E0 A1 B1 1A E1) is rejected as LegacyExcel. This pins the
+    // contract: a future magic-byte sniffer inserted ahead of dispatch can't let
+    // a real .xls slip through to the unsupported copy-in path.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let xls = dir.path().join("real.xls");
+    // OLE2 magic + padding; not a parseable workbook, but the signature is
+    // exactly what a content sniffer would key on.
+    let mut bytes: Vec<u8> = vec![0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+    bytes.extend_from_slice(&[0u8; 64]);
+    fs::write(&xls, &bytes).expect("write");
     let mut session = Session::new().expect("session");
     match session.ingest(&xls) {
         LoadOutcome::Error(LoadError::LegacyExcel) => {}
