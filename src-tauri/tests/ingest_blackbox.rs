@@ -6,7 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use rust_xlsxwriter::{Formula, Workbook};
-use toptopduck_lib::{DatasetDescriptor, LoadError, LoadOutcome, Session};
+use toptopduck_lib::{
+    DatasetDescriptor, LoadError, LoadOutcome, Session, SheetGuidance, SheetRectify,
+};
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -21,6 +23,9 @@ fn fixture(name: &str) -> PathBuf {
 fn load_ok(session: &mut Session, path: &Path) -> DatasetDescriptor {
     match session.ingest(path) {
         LoadOutcome::Loaded(d) => d,
+        LoadOutcome::NeedsGuidance(g) => {
+            panic!("expected load to succeed, got NeedsGuidance: {g:?}")
+        }
         LoadOutcome::Error(e) => panic!("expected load to succeed, got: {e}"),
     }
 }
@@ -148,6 +153,7 @@ fn corrupted_csv_is_rejected_and_working_set_unchanged() {
     let mut session = Session::new().expect("session");
     match session.ingest(&bad) {
         LoadOutcome::Error(_) => {}
+        LoadOutcome::NeedsGuidance(g) => panic!("expected error, got NeedsGuidance: {g:?}"),
         LoadOutcome::Loaded(d) => panic!("expected error for corrupted file, got: {d:?}"),
     }
     assert_eq!(session.list().len(), 0);
@@ -300,6 +306,7 @@ fn corrupted_parquet_is_rejected_and_working_set_unchanged() {
     let mut session = Session::new().expect("session");
     match session.ingest(&bad) {
         LoadOutcome::Error(_) => {}
+        LoadOutcome::NeedsGuidance(g) => panic!("expected error, got NeedsGuidance: {g:?}"),
         LoadOutcome::Loaded(d) => panic!("expected error for corrupted parquet, got: {d:?}"),
     }
     assert_eq!(session.list().len(), 0);
@@ -313,6 +320,7 @@ fn corrupted_json_is_rejected_and_working_set_unchanged() {
     let mut session = Session::new().expect("session");
     match session.ingest(&bad) {
         LoadOutcome::Error(_) => {}
+        LoadOutcome::NeedsGuidance(g) => panic!("expected error, got NeedsGuidance: {g:?}"),
         LoadOutcome::Loaded(d) => panic!("expected error for corrupted json, got: {d:?}"),
     }
     assert_eq!(session.list().len(), 0);
@@ -553,7 +561,221 @@ fn corrupted_xlsx_is_rejected_and_working_set_unchanged() {
     let mut session = Session::new().expect("session");
     match session.ingest(&bad) {
         LoadOutcome::Error(_) => {}
+        LoadOutcome::NeedsGuidance(g) => panic!("expected error, got NeedsGuidance: {g:?}"),
         LoadOutcome::Loaded(d) => panic!("expected error for corrupted xlsx, got {d:?}"),
+    }
+    assert_eq!(session.list().len(), 0);
+}
+
+// --- Excel auto-tidy + guided fallback (issue #10, slice 3b) ----------------
+//
+// Best-effort auto-tidy (ADR-0015): forward-fill merged cells + single-header
+// detection. A sheet the auto algorithm can't confidently tidy -> NeedsGuidance
+// (no partial load); the user's explicit header/skip choices re-enter via
+// ingest_guided and are recorded as rectify params (ADR-0042). .xls is rejected
+// with an actionable hint. Fixtures use rust_xlsxwriter incl. merge_range.
+
+fn fmt() -> rust_xlsxwriter::Format {
+    rust_xlsxwriter::Format::default()
+}
+
+/// A sheet with a leading merged title row + a merged data cell in the region
+/// column -- auto-tidy must skip the title, keep the single header, and
+/// forward-fill the merged region (AC1).
+fn messy_xlsx() -> (PathBuf, tempfile::TempDir) {
+    let mut wb = Workbook::new();
+    let ws = wb.add_worksheet();
+    ws.set_name("report").expect("name");
+    // Row 0: merged banner title across A0:C0.
+    ws.merge_range(0, 0, 0, 2, "Sales Report", &fmt()).unwrap();
+    // Row 1: the real header.
+    ws.write_string(1, 0, "id").unwrap();
+    ws.write_string(1, 1, "region").unwrap();
+    ws.write_string(1, 2, "amount").unwrap();
+    // Row 2: data.
+    ws.write_number(2, 0, 1.0).unwrap();
+    ws.write_string(2, 1, "North").unwrap();
+    ws.write_number(2, 2, 100.0).unwrap();
+    // Rows 3-4: region merged "East" down col 1.
+    ws.write_number(3, 0, 2.0).unwrap();
+    ws.merge_range(3, 1, 4, 1, "East", &fmt()).unwrap();
+    ws.write_number(3, 2, 200.0).unwrap();
+    ws.write_number(4, 0, 3.0).unwrap();
+    ws.write_number(4, 2, 300.0).unwrap();
+    save_xlsx(wb, "messy.xlsx")
+}
+
+#[test]
+fn auto_tidy_skips_title_and_unmerges_data_cells() {
+    // AC1: a leading merged title + a merged data region -> a tidy single-header
+    // table (title dropped, region forward-filled).
+    let (xlsx, _dir) = messy_xlsx();
+    let mut session = Session::new().expect("session");
+    let d = load_ok(&mut session, &xlsx);
+    assert_eq!(d.reference_name, "report");
+    assert_eq!(
+        column_types(&d),
+        vec![
+            ("id", "BIGINT"),
+            ("region", "VARCHAR"),
+            ("amount", "BIGINT"),
+        ]
+    );
+    assert_eq!(d.row_count, 3);
+    // Title row gone; header is row 1; region col forward-filled ("East").
+    assert_eq!(d.sample[0], vec!["1", "North", "100"]);
+    assert_eq!(d.sample[1], vec!["2", "East", "200"]);
+    assert_eq!(d.sample[2], vec!["3", "East", "300"]);
+    assert_eq!(d.rectify, None); // auto-tidy records no user params (ADR-0042)
+}
+
+#[test]
+fn multi_row_header_requests_guidance() {
+    // AC2: two header-like rows above the data -> NeedsGuidance, working set
+    // untouched (no silent dirty table).
+    let mut wb = Workbook::new();
+    let ws = wb.add_worksheet();
+    ws.set_name("people").expect("name");
+    ws.write_string(0, 0, "meta").unwrap();
+    ws.write_string(0, 1, "info").unwrap();
+    ws.write_string(0, 2, "contact").unwrap();
+    ws.write_string(1, 0, "id").unwrap();
+    ws.write_string(1, 1, "name").unwrap();
+    ws.write_string(1, 2, "email").unwrap();
+    ws.write_number(2, 0, 1.0).unwrap();
+    ws.write_string(2, 1, "Alice").unwrap();
+    ws.write_string(2, 2, "a@x").unwrap();
+    let (xlsx, _dir) = save_xlsx(wb, "multi_header.xlsx");
+
+    let mut session = Session::new().expect("session");
+    let guidance = match session.ingest(&xlsx) {
+        LoadOutcome::NeedsGuidance(g) => g,
+        other => panic!("expected NeedsGuidance, got {other:?}"),
+    };
+    assert_eq!(session.list().len(), 0); // nothing loaded
+    assert_eq!(guidance.workbook_name, "multi_header");
+    assert_eq!(guidance.sheets.len(), 1);
+    assert_eq!(guidance.sheets[0].name, "people");
+    // Preview exposes the raw rows so the user can locate the header.
+    assert!(guidance.sheets[0].preview.len() >= 3);
+}
+
+#[test]
+fn guided_load_records_rectify_params() {
+    // AC3: the user's guided choices are recorded as rectify params on the
+    // descriptor (ADR-0042 explicit user decision).
+    let mut wb = Workbook::new();
+    let ws = wb.add_worksheet();
+    ws.set_name("people").expect("name");
+    ws.write_string(0, 0, "meta").unwrap();
+    ws.write_string(0, 1, "info").unwrap();
+    ws.write_string(1, 0, "id").unwrap();
+    ws.write_string(1, 1, "name").unwrap();
+    ws.write_number(2, 0, 1.0).unwrap();
+    ws.write_string(2, 1, "Alice").unwrap();
+    let (xlsx, _dir) = save_xlsx(wb, "guided.xlsx");
+
+    let mut session = Session::new().expect("session");
+    let guidance = vec![SheetGuidance {
+        name: "people".into(),
+        rectify: SheetRectify {
+            header_row: 2, // row 1 (0-based) is the real header
+            skip_rows: vec![],
+        },
+    }];
+    let d = match session.ingest_guided(&xlsx, &guidance) {
+        LoadOutcome::Loaded(d) => d,
+        other => panic!("expected guided load to succeed, got {other:?}"),
+    };
+    assert_eq!(
+        d.rectify,
+        Some(SheetRectify {
+            header_row: 2,
+            skip_rows: vec![]
+        })
+    );
+    assert_eq!(
+        column_types(&d),
+        vec![("id", "BIGINT"), ("name", "VARCHAR")]
+    );
+    assert_eq!(d.row_count, 1);
+}
+
+#[test]
+fn different_rectify_yields_different_fingerprint() {
+    // AC4: same sheet, different rectify -> different materialized snapshot ->
+    // different fingerprint (rectify participates via post-rectify content hash).
+    let mut wb = Workbook::new();
+    let ws = wb.add_worksheet();
+    ws.set_name("people").expect("name");
+    ws.write_string(0, 0, "meta").unwrap();
+    ws.write_string(0, 1, "info").unwrap();
+    ws.write_string(1, 0, "id").unwrap();
+    ws.write_string(1, 1, "name").unwrap();
+    ws.write_number(2, 0, 1.0).unwrap();
+    ws.write_string(2, 1, "Alice").unwrap();
+    let (xlsx, _dir) = save_xlsx(wb, "fingerprint.xlsx");
+
+    let fp_a = {
+        let mut s = Session::new().expect("session");
+        match s.ingest_guided(
+            &xlsx,
+            &[SheetGuidance {
+                name: "people".into(),
+                rectify: SheetRectify {
+                    header_row: 1,
+                    skip_rows: vec![],
+                },
+            }],
+        ) {
+            LoadOutcome::Loaded(d) => d.fingerprint,
+            other => panic!("expected load, got {other:?}"),
+        }
+    };
+    let fp_b = {
+        let mut s = Session::new().expect("session");
+        match s.ingest_guided(
+            &xlsx,
+            &[SheetGuidance {
+                name: "people".into(),
+                rectify: SheetRectify {
+                    header_row: 2,
+                    skip_rows: vec![],
+                },
+            }],
+        ) {
+            LoadOutcome::Loaded(d) => d.fingerprint,
+            other => panic!("expected load, got {other:?}"),
+        }
+    };
+    assert_ne!(fp_a, fp_b);
+}
+
+#[test]
+fn auto_tidy_reload_is_deterministic() {
+    // AC5: reloading the same messy workbook -> identical descriptor.
+    let (xlsx, _dir) = messy_xlsx();
+    let mut session = Session::new().expect("session");
+    let d1 = load_ok(&mut session, &xlsx);
+    let d2 = load_ok(&mut session, &xlsx);
+    assert_eq!(d2.reference_name, "report_2");
+    assert_eq!(d1.columns, d2.columns);
+    assert_eq!(d1.row_count, d2.row_count);
+    assert_eq!(d1.sample, d2.sample);
+    assert_eq!(d1.fingerprint, d2.fingerprint);
+}
+
+#[test]
+fn legacy_xls_is_rejected_with_hint() {
+    // AC6: .xls -> LegacyExcel (actionable "另存为 .xlsx" hint), working set
+    // unchanged. dispatch is by extension, so the file need not be a real BIFF8.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let xls = dir.path().join("legacy.xls");
+    fs::write(&xls, b"not a real xls").expect("write");
+    let mut session = Session::new().expect("session");
+    match session.ingest(&xls) {
+        LoadOutcome::Error(LoadError::LegacyExcel) => {}
+        other => panic!("expected LegacyExcel, got {other:?}"),
     }
     assert_eq!(session.list().len(), 0);
 }

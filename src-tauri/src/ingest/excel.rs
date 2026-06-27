@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use calamine::{open_workbook, Data, Reader, SheetVisible, Xlsx, XlsxError};
+use calamine::{open_workbook, Data, Dimensions, Reader, SheetVisible, Xlsx, XlsxError};
 
 use crate::model::LoadError;
 
@@ -24,6 +24,11 @@ use crate::model::LoadError;
 pub struct SheetRows {
     pub name: String,
     pub rows: Vec<Vec<Data>>,
+    /// Merged-cell ranges (calamine `Dimensions`, 0-based `(row, col)` start
+    /// ..= end). Auto-tidy forward-fills each range's top-left value across the
+    /// rest of the range, so merged cells unmerge without touching genuine
+    /// NULLs (ADR-0015). Empty when the sheet has no merged cells.
+    pub merges: Vec<Dimensions>,
 }
 
 /// Open a .xlsx and read every **visible** sheet's cells as cached values, in
@@ -53,7 +58,15 @@ pub fn read_sheets(path: &Path) -> Result<Vec<SheetRows>, LoadError> {
         // separate path that returns formula *text* -- not used here).
         let range = book.worksheet_range(&name).map_err(parse_err)?;
         let rows: Vec<Vec<Data>> = range.rows().map(|r| r.to_vec()).collect();
-        out.push(SheetRows { name, rows });
+        // worksheet_merge_cells re-reads the sheet XML for its <mergeCells>
+        // block; a sheet with no merges yields None, an unreadable block is
+        // tolerated (empty merges) rather than failing the whole load -- a
+        // sheet without merge info still tidies, just without forward-fill.
+        let merges = book
+            .worksheet_merge_cells(&name)
+            .and_then(Result::ok)
+            .unwrap_or_default();
+        out.push(SheetRows { name, rows, merges });
     }
     Ok(out)
 }
@@ -64,13 +77,31 @@ pub fn read_sheets(path: &Path) -> Result<Vec<SheetRows>, LoadError> {
 /// escaping (commas/quotes/newlines in cells) is delegated to the `csv` crate.
 /// On any write failure the partial file is removed so a bad sheet never leaves
 /// a transient CSV behind -- the caller's rollback only touches snapshots.
-pub fn write_sheet_csv(sheet: &SheetRows, dir: &Path, alias: &str) -> Result<PathBuf, LoadError> {
+pub fn write_sheet_csv(
+    rows: &[Vec<Data>],
+    sheet_name: &str,
+    dir: &Path,
+    alias: &str,
+) -> Result<PathBuf, LoadError> {
     let path = dir.join(format!("{alias}.xlsx.csv"));
-    if let Err(e) = write_rows(sheet, &path) {
+    if let Err(e) = write_rows(rows, sheet_name, &path) {
         let _ = fs::remove_file(&path);
         return Err(e);
     }
     Ok(path)
+}
+
+/// Render the top `n` raw rows of a sheet as strings, for the guided-load
+/// preview (pre-rectify -- merged cells appear as Excel shows them). The user
+/// locates the header row and marks skips from this preview before re-ingesting
+/// via the guided path.
+pub fn render_preview(sheet: &SheetRows, n: usize) -> Vec<Vec<String>> {
+    sheet
+        .rows
+        .iter()
+        .take(n)
+        .map(|r| r.iter().map(cell_to_string).collect())
+        .collect()
 }
 
 /// Write every row to `path`. While iterating we tally cells whose rendered
@@ -79,12 +110,12 @@ pub fn write_sheet_csv(sheet: &SheetRows, dir: &Path, alias: &str) -> Result<Pat
 /// dates fall back to the raw serial number -- either can flip a whole column's
 /// inferred type (e.g. numeric -> VARCHAR) with no signal to the user. We log
 /// each kind once per sheet so the degradation is observable, not silent.
-fn write_rows(sheet: &SheetRows, path: &Path) -> Result<(), LoadError> {
+fn write_rows(rows: &[Vec<Data>], sheet_name: &str, path: &Path) -> Result<(), LoadError> {
     let file = fs::File::create(path).map_err(io_err)?;
     let mut wtr = csv::Writer::from_writer(file);
     let mut error_cells = 0usize;
     let mut serial_dates = 0usize;
-    for row in &sheet.rows {
+    for row in rows {
         let record: Vec<String> = row
             .iter()
             .map(|c| {
@@ -98,17 +129,13 @@ fn write_rows(sheet: &SheetRows, path: &Path) -> Result<(), LoadError> {
     if error_cells > 0 {
         log::warn!(
             target: "toptopduck::ingest::excel",
-            "sheet \"{}\": {} Excel error cell(s) rendered as text; columns may infer VARCHAR not numeric",
-            sheet.name,
-            error_cells
+            "sheet \"{sheet_name}\": {error_cells} Excel error cell(s) rendered as text; columns may infer VARCHAR not numeric",
         );
     }
     if serial_dates > 0 {
         log::warn!(
             target: "toptopduck::ingest::excel",
-            "sheet \"{}\": {} undecodable date cell(s) fell back to serial number; date columns may infer numeric not TIMESTAMP",
-            sheet.name,
-            serial_dates
+            "sheet \"{sheet_name}\": {serial_dates} undecodable date cell(s) fell back to serial number; date columns may infer numeric not TIMESTAMP",
         );
     }
     Ok(())

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use tauri::State;
 
-use crate::model::{DatasetDescriptor, LoadOutcome};
+use crate::model::{DatasetDescriptor, LoadOutcome, SheetGuidance};
 use crate::session::Session;
 
 /// Ingest a file. Runs the DuckDB copy-in off the async/UI thread (AC8: does not
@@ -20,6 +20,25 @@ pub async fn ingest_file(
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = session.lock().map_err(|e| e.to_string())?;
         Ok::<LoadOutcome, String>(s.ingest(Path::new(&path)))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(outcome)
+}
+
+/// Re-ingest an Excel workbook with the user's guided rectify choices
+/// (ADR-0015/0042). Called after a `NeedsGuidance` outcome once the UI has
+/// gathered header/skip choices per sheet. Runs off the async/UI thread (AC8).
+#[tauri::command]
+pub async fn ingest_file_guided(
+    state: State<'_, Arc<Mutex<Session>>>,
+    path: String,
+    guidance: Vec<SheetGuidance>,
+) -> Result<LoadOutcome, String> {
+    let session = state.inner().clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        let mut s = session.lock().map_err(|e| e.to_string())?;
+        Ok::<LoadOutcome, String>(s.ingest_guided(Path::new(&path), &guidance))
     })
     .await
     .map_err(|e| e.to_string())??;
