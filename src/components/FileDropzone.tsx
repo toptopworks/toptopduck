@@ -15,7 +15,7 @@ export function FileDropzone({
       filters: [
         {
           name: "数据文件",
-          extensions: ["csv", "parquet", "json", "jsonl", "ndjson"],
+          extensions: ["csv", "parquet", "json", "jsonl", "ndjson", "xlsx"],
         },
       ],
     });
@@ -24,7 +24,7 @@ export function FileDropzone({
     }
   }
 
-  // Drag-and-drop: accept dropped .csv paths (Tauri webview event).
+  // Drag-and-drop: accept dropped data-file paths (Tauri webview event).
   useEffect(() => {
     const app = getCurrentWebviewWindow();
     const unlisten = app.onDragDropEvent((event) => {
@@ -42,7 +42,7 @@ export function FileDropzone({
       <button onClick={pick} disabled={loading}>
         {loading ? "加载中…" : "选择数据文件"}
       </button>
-      <span className="muted">或把 .csv / .parquet / .json 文件拖到窗口</span>
+      <span className="muted">或把 .csv / .parquet / .json / .xlsx 文件拖到窗口</span>
     </div>
   );
 }

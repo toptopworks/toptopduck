@@ -27,6 +27,12 @@ describe("DisclosureBanner", () => {
     expect(screen.getByText(/完整数据集永不离开本机/)).toBeInTheDocument();
     expect(screen.getByText(/首 3 行样本/)).toBeInTheDocument();
   });
+
+  it("discloses Excel formula cells use cached snapshot values (issue #7 AC4)", () => {
+    const { container } = render(<DisclosureBanner />);
+    expect(container).toHaveTextContent(/Excel 工作簿按 sheet 分别加载为独立/);
+    expect(container).toHaveTextContent(/公式单元格取加载时的缓存值（不重算）/);
+  });
 });
 
 describe("DatasetDetail", () => {

@@ -24,9 +24,22 @@ duckdb = { version = "1", features = ["bundled", "parquet"] }
 sha2 = "0.10"
 anyhow = "1"
 tempfile = "3"
+# `calamine` reads .xlsx cell cached values (formulas resolved to their cached
+# result, never recomputed -- ADR-0015) fully offline. duckdb-rs's vendored
+# DuckDB amalgamation cannot statically link the `excel` loadable extension
+# (manifest ships only core_functions/json/parquet), so xlsx bytes go
+# calamine -> per-sheet temp CSV -> read_csv_auto copy-in, keeping DuckDB as the
+# single type-inference source of truth (ADR-0032). See ADR-0014/0015/0043.
+calamine = { version = "0.30", features = ["dates"] }
+# Per-sheet temp CSV writer: correct escaping for commas/quotes/newlines in cells.
+csv = "1"
 
 [dev-dependencies]
 tempfile = "3"
+# Generates .xlsx fixtures (incl. formula cells with cached values) for the
+# black-box ingest seam -- no binary fixtures committed (mirrors the parquet
+# fixture helper).
+rust_xlsxwriter = "0.92"
 
 [profile.dev]
 incremental = true
