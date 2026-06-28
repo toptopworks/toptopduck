@@ -21,7 +21,7 @@ export function WorkingSetList({
   // backend rejects xlsx in this slice), so the picker excludes xlsx to match,
   // keeping the two entries (add vs replace) visually distinct (AC4). Optional
   // only so tests that don't exercise replace can skip it; App always supplies
-  // it, and the button is hidden from the no-op when absent.
+  // it, and the button is hidden when it is absent (no silent no-op).
   onReplace?: (referenceName: string, path: string) => void;
   // Disables the action buttons while an async op (rename / ingest / replace)
   // is in flight, preventing concurrent IPC from rapid double-clicks.
@@ -82,15 +82,17 @@ export function WorkingSetList({
           >
             ✎
           </button>
-          <button
-            className="replace"
-            aria-label={`换源 ${d.display_name}`}
-            title="重新上传替换此数据集（沿用引用名）"
-            disabled={loading}
-            onClick={() => void pickReplace(d)}
-          >
-            ↻
-          </button>
+          {onReplace && (
+            <button
+              className="replace"
+              aria-label={`换源 ${d.display_name}`}
+              title="重新上传替换此数据集（沿用引用名）"
+              disabled={loading}
+              onClick={() => void pickReplace(d)}
+            >
+              ↻
+            </button>
+          )}
         </li>
       ))}
     </ul>
