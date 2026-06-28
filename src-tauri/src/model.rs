@@ -56,6 +56,7 @@ impl Default for SheetRectify {
 ///   via the guided path; the params ride the descriptor so a future recipe can
 ///   persist them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data")]
 pub enum RectifyProvenance {
     NotApplicable,
     Auto,
@@ -132,6 +133,7 @@ pub struct SheetGuidance {
 /// Why an ingest failed. Surfaced to the UI; a failed load leaves the working
 /// set unchanged (a bad file never pollutes the session -- PRD AC7).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data")]
 pub enum LoadError {
     UnsupportedFormat {
         requested: String,
@@ -177,6 +179,7 @@ impl std::error::Error for LoadError {}
 
 /// Outcome of an ingest attempt at the command boundary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data")]
 pub enum LoadOutcome {
     Loaded(DatasetDescriptor),
     /// Auto-tidy couldn't confidently rectify an Excel sheet (ADR-0015): the

@@ -21,9 +21,9 @@ export interface SheetRectify {
 // - "Auto": Excel auto-tidy chose confidently; no params ride the descriptor.
 // - { User: SheetRectify }: the user supplied explicit header/skip choices.
 export type RectifyProvenance =
-  | "NotApplicable"
-  | "Auto"
-  | { User: SheetRectify };
+  | { kind: "NotApplicable" }
+  | { kind: "Auto" }
+  | { kind: "User"; data: SheetRectify };
 
 export interface DatasetDescriptor {
   reference_name: string;
@@ -38,14 +38,14 @@ export interface DatasetDescriptor {
   rectify: RectifyProvenance;
 }
 
-// Legacy `.xls` is rejected in v1 (ADR-0015); serde serializes the unit variant
-// as the JSON string `"LegacyExcel"`, so it is a bare string in this union.
+// Discriminated union (serde adjacently-tagged: `#[serde(tag="kind", content="data")]`).
+// Every variant carries `kind`; only the struct/newtype variants carry `data`.
 export type LoadError =
-  | "LegacyExcel"
-  | { UnsupportedFormat: { requested: string } }
-  | { Parse: { detail: string } }
-  | { Io: { detail: string } }
-  | { Other: { detail: string } };
+  | { kind: "LegacyExcel" }
+  | { kind: "UnsupportedFormat"; data: { requested: string } }
+  | { kind: "Parse"; data: { detail: string } }
+  | { kind: "Io"; data: { detail: string } }
+  | { kind: "Other"; data: { detail: string } };
 
 export interface GuidanceSheet {
   name: string;
@@ -65,6 +65,6 @@ export interface SheetGuidance {
 }
 
 export type LoadOutcome =
-  | { Loaded: DatasetDescriptor }
-  | { NeedsGuidance: GuidanceRequest }
-  | { Error: LoadError };
+  | { kind: "Loaded"; data: DatasetDescriptor }
+  | { kind: "NeedsGuidance"; data: GuidanceRequest }
+  | { kind: "Error"; data: LoadError };

@@ -8,17 +8,20 @@ import { activeDataset, ingestFile, ingestFileGuided, listWorkingSet } from "./a
 import type { DatasetDescriptor, GuidanceRequest, LoadError, SheetGuidance } from "./types";
 
 function loadErrorMessage(err: LoadError): string {
-  if (err === "LegacyExcel") {
-    return "不支持 .xls 格式（仅支持 .xlsx），请在 Excel 中另存为 .xlsx 后重试";
+  switch (err.kind) {
+    case "LegacyExcel":
+      return "不支持 .xls 格式（仅支持 .xlsx），请在 Excel 中另存为 .xlsx 后重试";
+    case "UnsupportedFormat":
+      return err.data.requested
+        ? `不支持的格式：${err.data.requested}（支持 .csv / .parquet / .json / .xlsx）`
+        : "无法识别的格式";
+    case "Parse":
+      return err.data.detail;
+    case "Io":
+      return err.data.detail;
+    case "Other":
+      return err.data.detail;
   }
-  if ("UnsupportedFormat" in err) {
-    return err.UnsupportedFormat.requested
-      ? `不支持的格式：${err.UnsupportedFormat.requested}（支持 .csv / .parquet / .json / .xlsx）`
-      : "无法识别的格式";
-  }
-  if ("Parse" in err) return err.Parse.detail;
-  if ("Io" in err) return err.Io.detail;
-  return err.Other.detail;
 }
 
 export default function App() {
@@ -53,13 +56,13 @@ export default function App() {
       setError(null);
       try {
         const outcome = await ingestFile(path);
-        if ("Loaded" in outcome) {
+        if (outcome.kind === "Loaded") {
           await refresh();
-          setSelected(outcome.Loaded.reference_name);
-        } else if ("NeedsGuidance" in outcome) {
-          setGuidance({ request: outcome.NeedsGuidance, path });
+          setSelected(outcome.data.reference_name);
+        } else if (outcome.kind === "NeedsGuidance") {
+          setGuidance({ request: outcome.data, path });
         } else {
-          setError(loadErrorMessage(outcome.Error));
+          setError(loadErrorMessage(outcome.data));
         }
       } catch (e) {
         setError(String(e));
@@ -78,12 +81,12 @@ export default function App() {
       setError(null);
       try {
         const outcome = await ingestFileGuided(path, sheetGuidance);
-        if ("Loaded" in outcome) {
+        if (outcome.kind === "Loaded") {
           setGuidance(null);
           await refresh();
-          setSelected(outcome.Loaded.reference_name);
-        } else if ("Error" in outcome) {
-          setError(loadErrorMessage(outcome.Error));
+          setSelected(outcome.data.reference_name);
+        } else if (outcome.kind === "Error") {
+          setError(loadErrorMessage(outcome.data));
         } else {
           // NeedsGuidance shouldn't recur after an explicit header pick.
           setError("仍无法规整此工作表，请调整表头选择后重试");

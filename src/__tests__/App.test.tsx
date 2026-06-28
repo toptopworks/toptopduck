@@ -35,7 +35,7 @@ const guidedDataset: DatasetDescriptor = {
     { name: "name", canonical_type: "VARCHAR" },
   ],
   sample: [["1", "Alice"]],
-  rectify: { User: { header_row: 2, skip_rows: [] } },
+  rectify: { kind: "User", data: { header_row: 2, skip_rows: [] } },
 };
 
 describe("App guided-load flow", () => {
@@ -45,7 +45,8 @@ describe("App guided-load flow", () => {
     vi.mocked(open).mockResolvedValue("/x/m.xlsx");
     vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
     vi.mocked(ingestFile).mockResolvedValue({
-      NeedsGuidance: {
+      kind: "NeedsGuidance",
+      data: {
         source_path: "/x/m.xlsx",
         workbook_name: "m",
         sheets: [
@@ -64,7 +65,7 @@ describe("App guided-load flow", () => {
     } as never);
     vi.mocked(ingestFileGuided).mockImplementation(async () => {
       state.workingSet = [guidedDataset];
-      return { Loaded: guidedDataset } as never;
+      return { kind: "Loaded", data: guidedDataset } as never;
     });
   });
 
