@@ -449,24 +449,19 @@ impl Session {
         self.working_set.get(reference_name).cloned()
     }
 
-    /// Rename a dataset's display label (ADR-0037, slice 4a issue #8): display-
-    /// only -- the reference name is untouched, so every existing reference (SQL
-    /// FROM, the recipe chain, the active pointer) stays valid and nothing is
-    /// rewritten or propagated. Returns the updated descriptor, or a
-    /// [`RenameError`] when the reference is unknown or the new label collides
-    /// with another dataset's display label (display-layer uniqueness).
+    /// Rename a dataset's display label (ADR-0037): display-only -- the reference
+    /// name is untouched, so every existing reference (SQL FROM, the recipe
+    /// chain, the active pointer) stays valid and nothing is rewritten or
+    /// propagated. Delegates to the working set, returning the updated
+    /// descriptor, or a [`RenameError`] when the reference is unknown or the new
+    /// label collides with another dataset's display label (display-layer
+    /// uniqueness).
     pub fn rename_display(
         &mut self,
         reference_name: &str,
         new_display: &str,
     ) -> Result<DatasetDescriptor, RenameError> {
-        self.working_set
-            .rename_display(reference_name, new_display)?;
-        // rename_display returned Ok, so the dataset exists; surface its updated
-        // descriptor. The ok_or is defensive (never triggers after a success) --
-        // prefer it over a reachable panic.
-        self.get(reference_name)
-            .ok_or_else(|| RenameError::NotFound(reference_name.to_string()))
+        self.working_set.rename_display(reference_name, new_display)
     }
 
     /// Run arbitrary SQL on the session connection. Exposed for the read-only

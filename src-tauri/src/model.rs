@@ -78,7 +78,9 @@ pub struct DatasetDescriptor {
     /// Reference name (ADR-0037): machine name, fixed at creation. Used by SQL,
     /// the recipe chain, and the active-dataset pointer.
     pub reference_name: String,
-    /// Display label (ADR-0037): user-renamable; defaults to the reference name.
+    /// Display label (ADR-0037): user-renamable; defaults to the original
+    /// filename/sheet stem, falling back to the reference name when no stem can
+    /// be extracted.
     pub display_name: String,
     /// Absolute source path (the original file -- never modified, ADR-0004).
     pub source_path: String,

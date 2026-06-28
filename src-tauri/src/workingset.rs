@@ -103,12 +103,12 @@ impl WorkingSet {
     /// layer; a collision with *another* dataset's label is rejected (a rename is
     /// an explicit user action, so silent de-conflict would surprise). Renaming
     /// to the dataset's own current label is a no-op and allowed. Returns the
-    /// resolved label on success.
+    /// updated descriptor on success.
     pub fn rename_display(
         &mut self,
         reference_name: &str,
         new_display: &str,
-    ) -> Result<String, RenameError> {
+    ) -> Result<DatasetDescriptor, RenameError> {
         let idx = self
             .datasets
             .iter()
@@ -125,7 +125,7 @@ impl WorkingSet {
             return Err(RenameError::DisplayTaken(new_display.to_string()));
         }
         self.datasets[idx].display_name = new_display.to_string();
-        Ok(new_display.to_string())
+        Ok(self.datasets[idx].clone())
     }
 
     pub fn len(&self) -> usize {
@@ -244,10 +244,12 @@ mod tests {
         let mut ws = WorkingSet::default();
         ws.register(descriptor_with("orders", "Orders"));
         let resolved = ws.rename_display("orders", "Q3 订单").unwrap();
-        assert_eq!(resolved, "Q3 订单");
+        // returned descriptor carries the unchanged reference + updated label
+        assert_eq!(resolved.reference_name, "orders");
+        assert_eq!(resolved.display_name, "Q3 订单");
         let d = ws.get("orders").unwrap();
-        assert_eq!(d.reference_name, "orders"); // unchanged
-        assert_eq!(d.display_name, "Q3 订单"); // updated
+        assert_eq!(d.reference_name, "orders"); // unchanged in working set
+        assert_eq!(d.display_name, "Q3 订单"); // updated in working set
     }
 
     #[test]
