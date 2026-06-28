@@ -4,7 +4,13 @@ import { WorkingSetList } from "./components/WorkingSetList";
 import { DatasetDetail } from "./components/DatasetDetail";
 import { DisclosureBanner } from "./components/DisclosureBanner";
 import { GuidedLoadDialog } from "./components/GuidedLoadDialog";
-import { activeDataset, ingestFile, ingestFileGuided, listWorkingSet } from "./api";
+import {
+  activeDataset,
+  ingestFile,
+  ingestFileGuided,
+  listWorkingSet,
+  renameDataset,
+} from "./api";
 import { loadErrorMessage } from "./loadErrorMessage";
 import type { DatasetDescriptor, GuidanceRequest, SheetGuidance } from "./types";
 
@@ -84,6 +90,24 @@ export default function App() {
     [guidance, refresh],
   );
 
+  const handleRename = useCallback(
+    async (referenceName: string, newDisplay: string) => {
+      setError(null);
+      setLoading(true);
+      try {
+        await renameDataset(referenceName, newDisplay);
+        await refresh();
+        // `selected` is keyed by the stable reference name, so it survives the
+        // display rename -- the UI-level proof of the ADR-0037 decoupling.
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [refresh],
+  );
+
   const shown = datasets.find((d) => d.reference_name === selected) ?? null;
 
   return (
@@ -103,6 +127,8 @@ export default function App() {
             datasets={datasets}
             activeName={activeName}
             onSelect={setSelected}
+            onRename={handleRename}
+            loading={loading}
           />
         </section>
         <section className="panel">

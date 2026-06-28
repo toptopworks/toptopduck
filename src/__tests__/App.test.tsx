@@ -18,6 +18,7 @@ vi.mock("../api", () => ({
   ingestFileGuided: vi.fn(),
   listWorkingSet: vi.fn(),
   activeDataset: vi.fn(async () => null),
+  renameDataset: vi.fn(),
 }));
 
 import { open } from "@tauri-apps/plugin-dialog";

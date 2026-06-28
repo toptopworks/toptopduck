@@ -16,7 +16,7 @@ use crate::ingest;
 use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
     DatasetDescriptor, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome, RectifyProvenance,
-    SheetGuidance, SheetRectify,
+    RenameError, SheetGuidance, SheetRectify,
 };
 use crate::workingset::WorkingSet;
 
@@ -106,13 +106,14 @@ impl Session {
         }
 
         // ADR-0037: the display label is the readable original filename stem (the
-        // SQL-safe reference name is sanitized above). Display-layer de-conflict
-        // (identical stems) arrives in slice 4a; slice 1 keeps it simple.
-        let display_name = path
+        // SQL-safe reference name is sanitized above), display-layer de-conflicted
+        // so two sources sharing a stem never show identical labels in the UI
+        // (slice 4a, issue #8).
+        let raw_display = path
             .file_stem()
             .and_then(|s| s.to_str())
-            .unwrap_or(reference_name.as_str())
-            .to_string();
+            .unwrap_or(reference_name.as_str());
+        let display_name = self.working_set.deconflict_display(raw_display);
 
         let descriptor = DatasetDescriptor {
             reference_name: reference_name.clone(),
@@ -219,24 +220,35 @@ impl Session {
     }
 
     /// Attach every `(display name, tidied rows, rectify)` entry as a read-only
-    /// snapshot and register them atomically. De-conflicts reference names up
-    /// front (against the working set + each other) so duplicate sanitized names
-    /// never collide at ATTACH time. Rolls back on any failure (AC6/AC7).
-    /// Returns the active (last) descriptor.
+    /// snapshot and register them atomically. De-conflicts both reference names
+    /// and display labels up front (against the working set + each other) so
+    /// duplicate sanitized names never collide at ATTACH time and no two sheets
+    /// show identical labels in the UI (ADR-0037). Rolls back on any failure
+    /// (AC6/AC7). Returns the active (last) descriptor.
     fn commit_excel(
         &mut self,
         path: &Path,
         entries: Vec<(String, Vec<Vec<Data>>, RectifyProvenance)>,
     ) -> Result<DatasetDescriptor, LoadError> {
-        let mut reserved: HashSet<String> = HashSet::new();
-        let names: Vec<String> = entries
+        let mut reserved_ref: HashSet<String> = HashSet::new();
+        let mut reserved_disp: HashSet<String> = HashSet::new();
+        // De-conflict both names up front against the working set AND each other:
+        // reference names (SQL-safe machine name) so two sheets that sanitize
+        // alike never collide at ATTACH time, display labels so two sheets
+        // sharing a name never show identical labels in the UI (ADR-0037, slice
+        // 4a issue #8).
+        let resolved: Vec<(String, String)> = entries
             .iter()
             .map(|(display, _, _)| {
-                let name = self
+                let reference = self
                     .working_set
-                    .deconflict_with(&ingest::sanitize_sheet_name(display), &reserved);
-                reserved.insert(name.clone());
-                name
+                    .deconflict_with(&ingest::sanitize_sheet_name(display), &reserved_ref);
+                reserved_ref.insert(reference.clone());
+                let display = self
+                    .working_set
+                    .deconflict_display_with(display, &reserved_disp);
+                reserved_disp.insert(display.clone());
+                (reference, display)
             })
             .collect();
 
@@ -246,10 +258,12 @@ impl Session {
         // rollback -- keep it so when editing.
         let mut attached: Vec<String> = Vec::with_capacity(entries.len());
         let mut descriptors: Vec<DatasetDescriptor> = Vec::with_capacity(entries.len());
-        for ((display, rows, rectify), reference_name) in entries.into_iter().zip(&names) {
+        for ((_, rows, rectify), (reference_name, display_name)) in
+            entries.into_iter().zip(&resolved)
+        {
             match self.attach_sheet(
                 path,
-                &display,
+                display_name,
                 reference_name,
                 &rows,
                 rectify,
@@ -433,6 +447,21 @@ impl Session {
 
     pub fn get(&self, reference_name: &str) -> Option<DatasetDescriptor> {
         self.working_set.get(reference_name).cloned()
+    }
+
+    /// Rename a dataset's display label (ADR-0037): display-only -- the reference
+    /// name is untouched, so every existing reference (SQL FROM, the recipe
+    /// chain, the active pointer) stays valid and nothing is rewritten or
+    /// propagated. Delegates to the working set, returning the updated
+    /// descriptor, or a [`RenameError`] when the reference is unknown or the new
+    /// label collides with another dataset's display label (display-layer
+    /// uniqueness).
+    pub fn rename_display(
+        &mut self,
+        reference_name: &str,
+        new_display: &str,
+    ) -> Result<DatasetDescriptor, RenameError> {
+        self.working_set.rename_display(reference_name, new_display)
     }
 
     /// Run arbitrary SQL on the session connection. Exposed for the read-only

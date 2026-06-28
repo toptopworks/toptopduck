@@ -69,3 +69,18 @@ pub fn get_dataset(
     let s = state.lock().map_err(|e| e.to_string())?;
     Ok(s.get(&reference_name))
 }
+
+/// Rename a dataset's display label (ADR-0037, slice 4a issue #8): display-only
+/// -- the reference name is untouched, so SQL / recipe / active references stay
+/// valid. Synchronous: no copy-in, just an in-memory label swap. Rejects an
+/// unknown reference or a label already shown by another dataset.
+#[tauri::command]
+pub fn rename_dataset(
+    state: State<'_, Arc<Mutex<Session>>>,
+    reference_name: String,
+    new_display: String,
+) -> Result<DatasetDescriptor, String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    s.rename_display(&reference_name, &new_display)
+        .map_err(|e| e.to_string())
+}

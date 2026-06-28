@@ -78,7 +78,9 @@ pub struct DatasetDescriptor {
     /// Reference name (ADR-0037): machine name, fixed at creation. Used by SQL,
     /// the recipe chain, and the active-dataset pointer.
     pub reference_name: String,
-    /// Display label (ADR-0037): user-renamable; defaults to the reference name.
+    /// Display label (ADR-0037): user-renamable; defaults to the original
+    /// filename/sheet stem, falling back to the reference name when no stem can
+    /// be extracted.
     pub display_name: String,
     /// Absolute source path (the original file -- never modified, ADR-0004).
     pub source_path: String,
@@ -189,3 +191,31 @@ pub enum LoadOutcome {
     NeedsGuidance(GuidanceRequest),
     Error(LoadError),
 }
+
+/// Why a display-label rename was rejected (ADR-0037). A rename only ever touches
+/// the display name -- never the reference name -- so a rejection leaves the
+/// working set and every existing reference (SQL FROM, recipe chain, active
+/// pointer) unchanged. Does NOT cross the IPC boundary as a typed value: the
+/// rename command surfaces it to the UI as a plain error string, so (unlike
+/// [`LoadError`]) it carries no serde wire contract and no `types.ts` mirror.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenameError {
+    /// No dataset carries the given reference name.
+    NotFound(String),
+    /// The requested display label is already shown by another dataset (display-
+    /// layer uniqueness, ADR-0037). The user must pick a different label; a
+    /// rename is an explicit user action, so silent de-conflict would surprise.
+    DisplayTaken(String),
+}
+
+impl std::fmt::Display for RenameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::NotFound(name) => write!(f, "找不到引用名为「{name}」的数据集"),
+            Self::DisplayTaken(label) => {
+                write!(f, "显示名「{label}」已被其他数据集使用，请换一个")
+            }
+        }
+    }
+}
+impl std::error::Error for RenameError {}
