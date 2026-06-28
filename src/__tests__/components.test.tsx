@@ -168,6 +168,22 @@ describe("WorkingSetList", () => {
     fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
     expect(onRename).not.toHaveBeenCalled();
   });
+
+  it("disables the rename button while loading (prevents concurrent IPC)", () => {
+    // A rename in flight locks the button: rapid double-clicks must not fire a
+    // second IPC before the first settles (the backend would run its label-
+    // collision check against stale state and reject a valid rename).
+    render(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        loading={true}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /重命名/ })).toBeDisabled();
+  });
 });
 
 describe("GuidedLoadDialog", () => {

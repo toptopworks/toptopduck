@@ -14,12 +14,18 @@ import {
 import { loadErrorMessage } from "./loadErrorMessage";
 import type { DatasetDescriptor, GuidanceRequest, SheetGuidance } from "./types";
 
+/** A surfaced error tagged by the operation that produced it, so the displayed
+ * prefix matches the action (a rename rejection is never mislabelled a load
+ * failure). The backend's RenameError crosses IPC as a plain string, so the
+ * kind is reconstructed at the call site that knows the operation. */
+type AppError = { message: string; kind: "load" | "rename" };
+
 export default function App() {
   const [datasets, setDatasets] = useState<DatasetDescriptor[]>([]);
   const [activeName, setActiveName] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<AppError | null>(null);
   // Pending guided load (ADR-0015): auto-tidy couldn't confidently rectify, so
   // the user's explicit header/skip choices must be gathered before loading.
   const [guidance, setGuidance] = useState<{ request: GuidanceRequest; path: string } | null>(
@@ -52,10 +58,10 @@ export default function App() {
         } else if (outcome.kind === "NeedsGuidance") {
           setGuidance({ request: outcome.data, path });
         } else {
-          setError(loadErrorMessage(outcome.data));
+          setError({ message: loadErrorMessage(outcome.data), kind: "load" });
         }
       } catch (e) {
-        setError(String(e));
+        setError({ message: String(e), kind: "load" });
       } finally {
         setLoading(false);
       }
@@ -76,13 +82,16 @@ export default function App() {
           await refresh();
           setSelected(outcome.data.reference_name);
         } else if (outcome.kind === "Error") {
-          setError(loadErrorMessage(outcome.data));
+          setError({ message: loadErrorMessage(outcome.data), kind: "load" });
         } else {
           // NeedsGuidance shouldn't recur after an explicit header pick.
-          setError("仍无法规整此工作表，请调整表头选择后重试");
+          setError({
+            message: "仍无法规整此工作表，请调整表头选择后重试",
+            kind: "load",
+          });
         }
       } catch (e) {
-        setError(String(e));
+        setError({ message: String(e), kind: "load" });
       } finally {
         setLoading(false);
       }
@@ -100,7 +109,7 @@ export default function App() {
         // `selected` is keyed by the stable reference name, so it survives the
         // display rename -- the UI-level proof of the ADR-0037 decoupling.
       } catch (e) {
-        setError(String(e));
+        setError({ message: String(e), kind: "rename" });
       } finally {
         setLoading(false);
       }
@@ -118,7 +127,12 @@ export default function App() {
       </header>
 
       <FileDropzone onIngest={handleIngest} loading={loading} />
-      {error && <p className="error">加载失败：{error}</p>}
+      {error && (
+        <p className="error">
+          {error.kind === "load" ? "加载失败：" : "重命名失败："}
+          {error.message}
+        </p>
+      )}
 
       <div className="layout">
         <section className="panel">
