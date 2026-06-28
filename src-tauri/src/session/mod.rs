@@ -553,7 +553,9 @@ impl Session {
             );
             let _ = fs::remove_file(&new_snap.file_path);
             return LoadOutcome::Error(LoadError::Other {
-                detail: format!("换源失败：无法挂载新快照（{e}）"),
+                // Prefix-free: App.tsx prepends "换源失败：" for kind "replace",
+                // matching the load path (loadErrorMessage surfaces detail verbatim).
+                detail: format!("无法挂载新快照（{e}）"),
             });
         }
         // Release the swap file's handle so the promote step can rename it. This
@@ -571,7 +573,7 @@ impl Session {
             );
             let _ = fs::remove_file(&new_snap.file_path);
             return LoadOutcome::Error(LoadError::Other {
-                detail: format!("换源失败：无法释放新快照（{e}）"),
+                detail: format!("无法释放新快照（{e}）"),
             });
         }
 
@@ -590,7 +592,7 @@ impl Session {
             );
             let _ = fs::remove_file(&new_snap.file_path);
             return LoadOutcome::Error(LoadError::Other {
-                detail: format!("换源失败：无法释放旧快照（{e}）"),
+                detail: format!("无法释放旧快照（{e}）"),
             });
         }
         // Old detached -- remove its file. Best-effort (mirrors rollback_excel):
@@ -616,12 +618,22 @@ impl Session {
                 swap_path
             }
         };
+        // Post-confirm window -- unrecoverable from here on. The old snapshot
+        // is already detached and its file best-effort removed, so a failure at
+        // this final ATTACH leaves the session half-attached: `reference_name`
+        // has no attachment, yet `working_set` still holds the stale descriptor
+        // (it is updated only after this succeeds). In practice this ATTACH
+        // cannot fail -- the same file attached successfully in the pre-attach
+        // step, and the session is single-threaded under its Mutex -- so the
+        // only realistic triggers are OS-level (e.g. an AV scan locking the
+        // renamed path). Recovery is a session restart; accepted as the cost of
+        // skipping a swap-then-cleanup round-trip (ADR-0042).
         if let Err(e) = self.conn.execute_batch(&format!(
             "ATTACH '{attach_path}' AS {} (READ_ONLY);",
             quote_alias(reference_name)
         )) {
             return LoadOutcome::Error(LoadError::Other {
-                detail: format!("换源失败：无法挂载新快照（{e}）"),
+                detail: format!("无法挂载新快照（{e}）"),
             });
         }
 
