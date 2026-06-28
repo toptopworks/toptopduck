@@ -102,8 +102,8 @@ impl WorkingSet {
     /// rewritten or propagated. The new label must be unique at the display
     /// layer; a collision with *another* dataset's label is rejected (a rename is
     /// an explicit user action, so silent de-conflict would surprise). Renaming
-    /// to the dataset's own current label is a no-op and allowed. Returns the
-    /// updated descriptor on success.
+    /// to the dataset's own current label is a no-op and allowed. The label is
+    /// trimmed; a blank result is rejected. Returns the updated descriptor.
     pub fn rename_display(
         &mut self,
         reference_name: &str,
@@ -114,17 +114,23 @@ impl WorkingSet {
             .iter()
             .position(|d| d.reference_name == reference_name)
             .ok_or_else(|| RenameError::NotFound(reference_name.to_string()))?;
+        // Trim before any check: surrounding whitespace must not perturb
+        // display-layer uniqueness, and a blank label is rejected (ADR-0037).
+        let label = new_display.trim();
+        if label.is_empty() {
+            return Err(RenameError::InvalidLabel);
+        }
         // Collision is against OTHER datasets only -- a no-op rename to this
         // dataset's own current label is allowed (it changes nothing).
         let taken_by_other = self
             .datasets
             .iter()
             .enumerate()
-            .any(|(i, d)| i != idx && d.display_name == new_display);
+            .any(|(i, d)| i != idx && d.display_name == label);
         if taken_by_other {
-            return Err(RenameError::DisplayTaken(new_display.to_string()));
+            return Err(RenameError::DisplayTaken(label.to_string()));
         }
-        self.datasets[idx].display_name = new_display.to_string();
+        self.datasets[idx].display_name = label.to_string();
         Ok(self.datasets[idx].clone())
     }
 
@@ -274,6 +280,31 @@ mod tests {
         ws.register(descriptor_with("orders", "Orders"));
         ws.rename_display("orders", "Orders").unwrap();
         assert_eq!(ws.get("orders").unwrap().display_name, "Orders");
+    }
+
+    #[test]
+    fn rename_display_rejects_blank_label() {
+        // A display label must be visible: empty / whitespace-only answers are
+        // rejected (the UI trims first, but the working set is the authority).
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor_with("orders", "Orders"));
+        for blank in ["", "   ", "\t"] {
+            let err = ws.rename_display("orders", blank).unwrap_err();
+            assert_eq!(err, RenameError::InvalidLabel);
+        }
+        // rejected rename left the label untouched
+        assert_eq!(ws.get("orders").unwrap().display_name, "Orders");
+    }
+
+    #[test]
+    fn rename_display_trims_surrounding_whitespace() {
+        // Surrounding whitespace is trimmed before storage so it never perturbs
+        // display-layer uniqueness: "  Q3  " becomes "Q3".
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor_with("orders", "Orders"));
+        let resolved = ws.rename_display("orders", "  Q3 订单  ").unwrap();
+        assert_eq!(resolved.display_name, "Q3 订单");
+        assert_eq!(ws.get("orders").unwrap().display_name, "Q3 订单");
     }
 
     #[test]

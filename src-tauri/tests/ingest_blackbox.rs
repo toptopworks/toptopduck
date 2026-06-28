@@ -915,6 +915,17 @@ fn renaming_unknown_dataset_is_rejected() {
 }
 
 #[test]
+fn renaming_to_a_blank_label_is_rejected() {
+    // A display label must be visible: a whitespace-only answer is rejected at
+    // the working set (the authority), leaving the label untouched.
+    let mut session = Session::new().expect("session");
+    load_ok(&mut session, &fixture("people.csv"));
+    let err = session.rename_display("people", "   ").unwrap_err();
+    assert_eq!(err, RenameError::InvalidLabel);
+    assert_eq!(session.get("people").unwrap().display_name, "people");
+}
+
+#[test]
 fn xlsx_sheets_deconflict_display_labels_on_reload() {
     // AC4 (Excel): reloading a workbook de-conflicts each sheet's display label
     // against the already-loaded ones, so two loads of the same sheet never show

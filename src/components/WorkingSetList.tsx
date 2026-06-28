@@ -21,12 +21,14 @@ export function WorkingSetList({
     return <p className="muted">工作集为空 — 拖入或拾取一个数据文件开始。</p>;
   }
 
-  // Prompt for a new display label. An empty answer or a no-change is ignored;
-  // a collision with another dataset's label is rejected by the backend.
+  // Prompt for a new display label. The answer is trimmed; a blank or
+  // no-change result is ignored. A collision is rejected by the backend.
   const promptRename = (d: DatasetDescriptor) => {
     const next = window.prompt("重命名显示名", d.display_name);
-    if (next && next !== d.display_name) {
-      onRename(d.reference_name, next);
+    if (!next) return; // cancelled
+    const trimmed = next.trim();
+    if (trimmed && trimmed !== d.display_name) {
+      onRename(d.reference_name, trimmed);
     }
   };
 
