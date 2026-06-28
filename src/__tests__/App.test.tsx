@@ -138,4 +138,27 @@ describe("App rename flow", () => {
     );
     expect(screen.getByText("BIGINT")).toBeInTheDocument();
   });
+
+  it("labels a rename failure distinctly from a load failure (M2)", async () => {
+    // A rejected rename surfaces the backend's message, but NOT under the
+    // load-failure prefix -- the error context follows the operation that
+    // produced it, so a rename rejection is never misread as a load failure.
+    state.workingSet = [guidedDataset];
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+    );
+
+    vi.spyOn(window, "prompt").mockReturnValue("员工表");
+    vi.mocked(renameDataset).mockRejectedValueOnce(
+      "显示名「员工表」已被其他数据集使用",
+    );
+    fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/显示名「员工表」已被其他数据集使用/)).toBeInTheDocument(),
+    );
+    // The rename rejection must not inherit the ingest flow's "加载失败" prefix.
+    expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
+  });
 });
