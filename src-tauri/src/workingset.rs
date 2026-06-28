@@ -25,17 +25,7 @@ impl WorkingSet {
     /// to the same name don't collide at ATTACH time.
     pub fn deconflict_with(&self, candidate: &str, reserved: &HashSet<String>) -> String {
         let taken = |n: &str| self.taken(n) || reserved.contains(n);
-        if !taken(candidate) {
-            return candidate.to_string();
-        }
-        let mut n = 2;
-        loop {
-            let candidate = format!("{candidate}_{n}");
-            if !taken(&candidate) {
-                return candidate;
-            }
-            n += 1;
-        }
+        self.deconflict_loop(candidate, taken, |c, n| format!("{c}_{n}"))
     }
 
     fn taken(&self, name: &str) -> bool {
@@ -58,21 +48,35 @@ impl WorkingSet {
     /// show the same label.
     pub fn deconflict_display_with(&self, candidate: &str, reserved: &HashSet<String>) -> String {
         let taken = |n: &str| self.display_taken(n) || reserved.contains(n);
-        if !taken(candidate) {
-            return candidate.to_string();
-        }
-        let mut n = 2;
-        loop {
-            let candidate = format!("{candidate} ({n})");
-            if !taken(&candidate) {
-                return candidate;
-            }
-            n += 1;
-        }
+        self.deconflict_loop(candidate, taken, |c, n| format!("{c} ({n})"))
     }
 
     fn display_taken(&self, display: &str) -> bool {
         self.datasets.iter().any(|d| d.display_name == display)
+    }
+
+    /// Shared de-conflict walk for both reference names (`_2` suffix) and display
+    /// labels (` (2)` suffix). The two layers differ only in the taken-test and
+    /// the suffix format, so the candidate walk is identical -- extracted here to
+    /// keep the twins from drifting (DRY). Tries the candidate as-is, then appends
+    /// successive suffixes from 2 until `is_taken` is satisfied.
+    fn deconflict_loop(
+        &self,
+        candidate: &str,
+        is_taken: impl Fn(&str) -> bool,
+        suffix: impl Fn(&str, usize) -> String,
+    ) -> String {
+        if !is_taken(candidate) {
+            return candidate.to_string();
+        }
+        let mut n = 2;
+        loop {
+            let candidate = suffix(candidate, n);
+            if !is_taken(&candidate) {
+                return candidate;
+            }
+            n += 1;
+        }
     }
 
     /// Register a dataset and point active at it (ADR-0022: active = most recent).
