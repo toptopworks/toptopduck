@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use rust_xlsxwriter::{Formula, Workbook};
 use toptopduck_lib::{
-    DatasetDescriptor, LoadError, LoadOutcome, RectifyProvenance, Session, SheetGuidance,
-    SheetRectify,
+    DatasetDescriptor, LoadError, LoadOutcome, RectifyProvenance, RenameError, Session,
+    SheetGuidance, SheetRectify,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -842,4 +842,89 @@ fn legacy_xls_with_ole2_signature_is_still_rejected() {
         other => panic!("expected LegacyExcel, got {other:?}"),
     }
     assert_eq!(session.list().len(), 0);
+}
+
+// --- Multi-source naming: display de-conflict + rename (issue #8, slice 4a) -
+//
+// ADR-0037: every Dataset has a stable reference name (creation-time, used by
+// SQL / recipe / active pointer) decoupled from a renamable display label. The
+// working set de-conflicts display labels so the UI never shows two identical
+// labels, and renaming touches only the label -- no reference is rewritten.
+
+#[test]
+fn two_sources_sharing_a_stem_deconflict_both_names() {
+    // AC1/AC4: a second source with the same stem coexists in the shared
+    // namespace. Reference names de-conflict (`_2`); display labels de-conflict
+    // with a human-readable "(2)" so the UI shows distinct labels (ADR-0037).
+    let mut session = Session::new().expect("session");
+    let d1 = load_ok(&mut session, &fixture("people.csv"));
+    let d2 = load_ok(&mut session, &fixture("people.csv"));
+    assert_eq!(d1.reference_name, "people");
+    assert_eq!(d2.reference_name, "people_2");
+    assert_eq!(d1.display_name, "people");
+    assert_eq!(d2.display_name, "people (2)");
+    // both are independently referenceable by their stable reference names
+    assert!(session.get("people").is_some());
+    assert!(session.get("people_2").is_some());
+}
+
+#[test]
+fn renaming_display_label_leaves_reference_name_stable() {
+    // AC2/AC3: renaming changes only the display label; the reference name is
+    // constant, so every existing reference (and the active pointer, keyed by
+    // reference name) stays valid -- nothing is rewritten or propagated.
+    let mut session = Session::new().expect("session");
+    let d = load_ok(&mut session, &fixture("people.csv"));
+    assert_eq!(d.reference_name, "people");
+
+    let renamed = session.rename_display("people", "员工表").expect("rename");
+    assert_eq!(renamed.reference_name, "people"); // unchanged
+    assert_eq!(renamed.display_name, "员工表");
+
+    // still fetched by the unchanged reference name; display updated
+    let fetched = session.get("people").expect("still present");
+    assert_eq!(fetched.reference_name, "people");
+    assert_eq!(fetched.display_name, "员工表");
+
+    // a later source becomes the new active; the renamed one is still reachable
+    // by its stable reference name (active pointer is by reference name).
+    let _d2 = load_ok(&mut session, &fixture("flat.json"));
+    assert_eq!(session.active().unwrap().reference_name, "flat");
+    assert!(session.get("people").is_some());
+}
+
+#[test]
+fn renaming_to_a_taken_display_label_is_rejected() {
+    // AC3: display-layer uniqueness holds -- renaming onto another dataset's
+    // label is rejected (an explicit rename is rejected, not silently
+    // de-conflicted; ADR-0037 allows reject), leaving the working set unchanged.
+    let mut session = Session::new().expect("session");
+    load_ok(&mut session, &fixture("people.csv")); // display "people"
+    load_ok(&mut session, &fixture("flat.json")); // display "flat"
+    let err = session.rename_display("people", "flat").unwrap_err();
+    assert_eq!(err, RenameError::DisplayTaken("flat".into()));
+    // rejected rename left the label untouched
+    assert_eq!(session.get("people").unwrap().display_name, "people");
+}
+
+#[test]
+fn renaming_unknown_dataset_is_rejected() {
+    let mut session = Session::new().expect("session");
+    let err = session.rename_display("nope", "X").unwrap_err();
+    assert_eq!(err, RenameError::NotFound("nope".into()));
+}
+
+#[test]
+fn xlsx_sheets_deconflict_display_labels_on_reload() {
+    // AC4 (Excel): reloading a workbook de-conflicts each sheet's display label
+    // against the already-loaded ones, so two loads of the same sheet never show
+    // the same label in the UI. Reference names de-conflict in parallel.
+    let (xlsx, _dir) = people_xlsx();
+    let mut session = Session::new().expect("session");
+    let d1 = load_ok(&mut session, &xlsx);
+    let d2 = load_ok(&mut session, &xlsx);
+    assert_eq!(d1.reference_name, "people");
+    assert_eq!(d2.reference_name, "people_2");
+    assert_eq!(d1.display_name, "people");
+    assert_eq!(d2.display_name, "people (2)");
 }

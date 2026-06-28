@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { DatasetDetail } from "../components/DatasetDetail";
 import { DisclosureBanner } from "../components/DisclosureBanner";
@@ -72,17 +72,70 @@ describe("DatasetDetail", () => {
 });
 
 describe("WorkingSetList", () => {
+  // window.prompt spies must not leak between tests (jsdom default returns null).
+  afterEach(() => vi.restoreAllMocks());
+
   it("lists datasets and marks the active one", () => {
     render(
-      <WorkingSetList datasets={[mockDataset]} activeName="people" onSelect={() => {}} />,
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName="people"
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
     );
-    expect(screen.getByRole("button", { name: /people/ })).toBeInTheDocument();
+    // The select button's accessible name starts with the display label; the
+    // rename sibling's starts with "重命名" -- anchor on the leading label so
+    // the two buttons never collide on a /people/ substring match.
+    expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument();
     expect(screen.getByText(/当前表/)).toBeInTheDocument();
   });
 
   it("shows an empty hint when there are no datasets", () => {
-    render(<WorkingSetList datasets={[]} activeName={null} onSelect={() => {}} />);
+    render(
+      <WorkingSetList datasets={[]} activeName={null} onSelect={() => {}} onRename={() => {}} />,
+    );
     expect(screen.getByText(/工作集为空/)).toBeInTheDocument();
+  });
+
+  it("renames a dataset's display label via prompt (ADR-0037, issue #8)", () => {
+    const onRename = vi.fn();
+    vi.spyOn(window, "prompt").mockReturnValue("员工表");
+    render(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={onRename}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
+    // Carries the stable reference name + the new display label; the reference
+    // name is what the parent keys selection off, so it survives the rename.
+    expect(onRename).toHaveBeenCalledWith("people", "员工表");
+  });
+
+  it("ignores an empty, cancelled, or no-change rename prompt", () => {
+    const onRename = vi.fn();
+    const promptSpy = vi.spyOn(window, "prompt");
+    render(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={onRename}
+      />,
+    );
+    const renameBtn = screen.getByRole("button", { name: /重命名/ });
+    // Cancel (null), empty string, and a no-change answer all count as "no
+    // rename" -- onRename must never fire. One render, repeated clicks, so the
+    // queries don't accumulate across renders.
+    for (const answer of [null, "", mockDataset.display_name]) {
+      onRename.mockClear();
+      promptSpy.mockReturnValue(answer);
+      fireEvent.click(renameBtn);
+      expect(onRename).not.toHaveBeenCalled();
+    }
   });
 });
 

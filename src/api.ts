@@ -21,3 +21,14 @@ export async function listWorkingSet(): Promise<DatasetDescriptor[]> {
 export async function activeDataset(): Promise<DatasetDescriptor | null> {
   return invoke<DatasetDescriptor | null>("active_dataset");
 }
+
+// Rename a dataset's display label (ADR-0037, issue #8): display-only -- the
+// reference name is untouched, so SQL / recipe / active references stay valid.
+// Rejects an unknown reference or a label already shown by another dataset; the
+// backend surfaces that as an error string (no typed RenameError crosses IPC).
+export async function renameDataset(
+  referenceName: string,
+  newDisplay: string,
+): Promise<DatasetDescriptor> {
+  return invoke<DatasetDescriptor>("rename_dataset", { referenceName, newDisplay });
+}

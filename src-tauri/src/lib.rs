@@ -12,7 +12,7 @@ pub mod workingset;
 
 pub use model::{
     ColumnSchema, DatasetDescriptor, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
-    RectifyProvenance, SheetGuidance, SheetRectify,
+    RectifyProvenance, RenameError, SheetGuidance, SheetRectify,
 };
 pub use session::Session;
 
@@ -32,6 +32,7 @@ pub fn run() {
             commands::list_working_set,
             commands::active_dataset,
             commands::get_dataset,
+            commands::rename_dataset,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
