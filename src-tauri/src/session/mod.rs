@@ -15,8 +15,8 @@ use tempfile::TempDir;
 use crate::ingest;
 use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
-    DatasetDescriptor, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome, SheetGuidance,
-    SheetRectify,
+    DatasetDescriptor, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome, RectifyProvenance,
+    SheetGuidance, SheetRectify,
 };
 use crate::workingset::WorkingSet;
 
@@ -122,41 +122,51 @@ impl Session {
             row_count: snap.row_count,
             sample: snap.sample,
             fingerprint: snap.fingerprint,
-            rectify: None,
+            rectify: RectifyProvenance::NotApplicable,
         };
         self.working_set.register(descriptor.clone());
         LoadOutcome::Loaded(descriptor)
     }
 
+    /// Read a workbook's visible sheets and drop blank ones -- the shared
+    /// preamble for both Excel ingest paths (auto-tidy and guided). Returns
+    /// `Err` with a single shared message when no sheet carries data, so the
+    /// "工作簿不含任何含数据的 sheet" wording lives in one place.
+    fn read_non_empty_sheets(path: &Path) -> Result<Vec<ingest::excel::SheetRows>, LoadError> {
+        let mut sheets = ingest::excel::read_sheets(path)?;
+        sheets.retain(|s| !s.rows.is_empty());
+        if sheets.is_empty() {
+            return Err(LoadError::Parse {
+                detail: "工作簿不含任何含数据的 sheet".into(),
+            });
+        }
+        Ok(sheets)
+    }
+
     /// Ingest a .xlsx workbook (slice 3b, issue #10): best-effort auto-tidy each
     /// sheet (ADR-0015) -- forward-fill merged cells + single-header detection.
     /// If every sheet tidies confidently, each becomes a Dataset (`rectify =
-    /// None`: the auto algorithm's choices aren't recorded, ADR-0042). If *any*
+    /// Auto`: the auto algorithm's choices aren't recorded, ADR-0042). If *any*
     /// sheet can't be confidently tidied, NO sheet is loaded -- the working set
     /// stays untouched and a [`LoadOutcome::NeedsGuidance`] carries each sheet's
     /// raw preview so the UI can gather explicit header/skip choices. Formula
     /// cells use their cached value (ADR-0015). Transactional: on any failure
     /// already-attached snapshots roll back (AC6/AC7).
     fn ingest_excel(&mut self, path: &Path) -> LoadOutcome {
-        let mut sheets = match ingest::excel::read_sheets(path) {
+        let sheets = match Self::read_non_empty_sheets(path) {
             Ok(s) => s,
             Err(e) => return LoadOutcome::Error(e),
         };
-        // Blank sheets contribute no Dataset.
-        sheets.retain(|s| !s.rows.is_empty());
-        if sheets.is_empty() {
-            return LoadOutcome::Error(LoadError::Parse {
-                detail: "工作簿不含任何含数据的 sheet".into(),
-            });
-        }
 
         // Auto-tidy each sheet; the first that can't be confidently tidied sends
         // the whole workbook to guided loading (no partial load -- transactional).
-        let mut entries: Vec<(String, Vec<Vec<Data>>, Option<SheetRectify>)> =
+        let mut entries: Vec<(String, Vec<Vec<Data>>, RectifyProvenance)> =
             Vec::with_capacity(sheets.len());
         for sheet in &sheets {
             match auto_tidy(sheet) {
-                TidyOutcome::Tidied(t) => entries.push((sheet.name.clone(), t.rows, None)),
+                TidyOutcome::Tidied(t) => {
+                    entries.push((sheet.name.clone(), t.rows, RectifyProvenance::Auto))
+                }
                 TidyOutcome::NeedsGuidance => {
                     return LoadOutcome::NeedsGuidance(Self::build_guidance(path, &sheets));
                 }
@@ -172,26 +182,20 @@ impl Session {
     /// Re-ingest an Excel workbook with the user's explicit rectify choices
     /// (ADR-0015 guided fallback / ADR-0042 user decisions). Each sheet is
     /// rectified by its [`SheetRectify`] (header row + skipped rows) and
-    /// forward-filled over merged cells, then loaded with `rectify = Some(...)`
+    /// forward-filled over merged cells, then loaded with `rectify = User(...)`
     /// recorded on the descriptor. Transactional like [`Self::ingest`].
     pub fn ingest_guided(&mut self, path: &Path, guidance: &[SheetGuidance]) -> LoadOutcome {
-        let mut sheets = match ingest::excel::read_sheets(path) {
+        let sheets = match Self::read_non_empty_sheets(path) {
             Ok(s) => s,
             Err(e) => return LoadOutcome::Error(e),
         };
-        sheets.retain(|s| !s.rows.is_empty());
-        if sheets.is_empty() {
-            return LoadOutcome::Error(LoadError::Parse {
-                detail: "工作簿不含任何含数据的 sheet".into(),
-            });
-        }
 
         // Apply each sheet's user rectify. A sheet with no guidance entry
         // defaults to a plain single-header rectify (header_row 1, no skips) --
         // the dialog sends one entry per visible sheet, this just stays safe.
         // Any out-of-range header_row aborts before copy-in so no partial load
         // escapes (transactional -- ADR-0042).
-        let entries: Vec<(String, Vec<Vec<Data>>, Option<SheetRectify>)> = match sheets
+        let entries: Vec<(String, Vec<Vec<Data>>, RectifyProvenance)> = match sheets
             .iter()
             .map(|sheet| {
                 let rectify = guidance
@@ -200,7 +204,7 @@ impl Session {
                     .map(|g| g.rectify.clone())
                     .unwrap_or_default();
                 let rows = Self::apply_rectify(sheet, &rectify)?;
-                Ok::<_, LoadError>((sheet.name.clone(), rows, Some(rectify)))
+                Ok::<_, LoadError>((sheet.name.clone(), rows, RectifyProvenance::User(rectify)))
             })
             .collect::<Result<Vec<_>, _>>()
         {
@@ -222,7 +226,7 @@ impl Session {
     fn commit_excel(
         &mut self,
         path: &Path,
-        entries: Vec<(String, Vec<Vec<Data>>, Option<SheetRectify>)>,
+        entries: Vec<(String, Vec<Vec<Data>>, RectifyProvenance)>,
     ) -> Result<DatasetDescriptor, LoadError> {
         let mut reserved: HashSet<String> = HashSet::new();
         let names: Vec<String> = entries
@@ -281,7 +285,7 @@ impl Session {
         display_name: &str,
         reference_name: &str,
         rows: &[Vec<Data>],
-        rectify: Option<SheetRectify>,
+        rectify: RectifyProvenance,
         attached: &mut Vec<String>,
     ) -> Result<DatasetDescriptor, LoadError> {
         // tidied rows -> temp CSV -> read_csv_auto copy-in. DuckDB infers types

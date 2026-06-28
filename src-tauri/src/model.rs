@@ -43,6 +43,34 @@ impl Default for SheetRectify {
     }
 }
 
+/// Provenance of a dataset's rectify state (ADR-0042): turns the rule "only the
+/// user's explicit choices are recorded; the deterministic auto-tidy algorithm
+/// is never persisted" into a type-level invariant instead of a convention. A
+/// future recipe re-derives the materialized table from this provenance.
+///
+/// - [`RectifyProvenance::NotApplicable`]: the format has no rectify step
+///   (CSV / Parquet / JSON).
+/// - [`RectifyProvenance::Auto`]: an Excel sheet auto-tidied confidently; the
+///   algorithm's choices aren't carried, so resume re-runs the current version.
+/// - [`RectifyProvenance::User`]: the user supplied explicit header/skip choices
+///   via the guided path; the params ride the descriptor so a future recipe can
+///   persist them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data")]
+pub enum RectifyProvenance {
+    NotApplicable,
+    Auto,
+    User(SheetRectify),
+}
+
+impl Default for RectifyProvenance {
+    /// `NotApplicable` -- the common case for the non-Excel formats, and the
+    /// safe fallback when a deserialized descriptor omits the field.
+    fn default() -> Self {
+        Self::NotApplicable
+    }
+}
+
 /// The descriptor of a loaded source Dataset: the artifact registered in the
 /// working set and surfaced to the UI (and, later, the LLM payload).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,11 +92,11 @@ pub struct DatasetDescriptor {
     /// the *post-rectify* table, so different rectify choices yield different
     /// fingerprints when they change the materialized rows.
     pub fingerprint: String,
-    /// User's explicit rectify choices (ADR-0042) for an Excel sheet, carried so
-    /// a future recipe can persist them. `None` for CSV/Parquet/JSON and Excel
-    /// sheets that auto-tidied without a user override.
+    /// Rectify provenance (ADR-0042): how the dataset's header/skip state was
+    /// determined -- format N/A, Excel auto-tidy (not recorded), or the user's
+    /// explicit guided choices (carried so a future recipe can persist them).
     #[serde(default)]
-    pub rectify: Option<SheetRectify>,
+    pub rectify: RectifyProvenance,
 }
 
 /// One visible Excel sheet's raw preview for the guided-load dialog: enough rows
@@ -105,6 +133,7 @@ pub struct SheetGuidance {
 /// Why an ingest failed. Surfaced to the UI; a failed load leaves the working
 /// set unchanged (a bad file never pollutes the session -- PRD AC7).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data")]
 pub enum LoadError {
     UnsupportedFormat {
         requested: String,
@@ -150,6 +179,7 @@ impl std::error::Error for LoadError {}
 
 /// Outcome of an ingest attempt at the command boundary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data")]
 pub enum LoadOutcome {
     Loaded(DatasetDescriptor),
     /// Auto-tidy couldn't confidently rectify an Excel sheet (ADR-0015): the

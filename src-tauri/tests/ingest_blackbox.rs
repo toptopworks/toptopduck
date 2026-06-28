@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 
 use rust_xlsxwriter::{Formula, Workbook};
 use toptopduck_lib::{
-    DatasetDescriptor, LoadError, LoadOutcome, Session, SheetGuidance, SheetRectify,
+    DatasetDescriptor, LoadError, LoadOutcome, RectifyProvenance, Session, SheetGuidance,
+    SheetRectify,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -626,7 +627,7 @@ fn auto_tidy_skips_title_and_unmerges_data_cells() {
     assert_eq!(d.sample[0], vec!["1", "North", "100"]);
     assert_eq!(d.sample[1], vec!["2", "East", "200"]);
     assert_eq!(d.sample[2], vec!["3", "East", "300"]);
-    assert_eq!(d.rectify, None); // auto-tidy records no user params (ADR-0042)
+    assert_eq!(d.rectify, RectifyProvenance::Auto); // auto-tidy: Auto provenance, no user params (ADR-0042)
 }
 
 #[test]
@@ -689,7 +690,7 @@ fn guided_load_records_rectify_params() {
     };
     assert_eq!(
         d.rectify,
-        Some(SheetRectify {
+        RectifyProvenance::User(SheetRectify {
             header_row: 2,
             skip_rows: vec![]
         })

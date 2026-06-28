@@ -14,6 +14,17 @@ export interface SheetRectify {
   skip_rows: number[];
 }
 
+// Provenance of a dataset's rectify state (ADR-0042): mirrors the Rust enum
+// (serde adjacently-tagged). The type makes "only user choices are recorded,
+// never the auto algorithm" explicit.
+// - "NotApplicable": CSV/Parquet/JSON (no rectify step).
+// - "Auto": Excel auto-tidy chose confidently; no params ride the descriptor.
+// - { User: SheetRectify }: the user supplied explicit header/skip choices.
+export type RectifyProvenance =
+  | { kind: "NotApplicable" }
+  | { kind: "Auto" }
+  | { kind: "User"; data: SheetRectify };
+
 export interface DatasetDescriptor {
   reference_name: string;
   display_name: string;
@@ -22,19 +33,19 @@ export interface DatasetDescriptor {
   row_count: number;
   sample: string[][];
   fingerprint: string;
-  // User's explicit rectify choices for an Excel sheet (ADR-0042); null for
-  // CSV/Parquet/JSON and Excel sheets that auto-tidied without a user override.
-  rectify: SheetRectify | null;
+  // Rectify provenance (ADR-0042): how the header/skip state was determined --
+  // format N/A, Excel auto-tidy (not recorded), or the user's explicit choices.
+  rectify: RectifyProvenance;
 }
 
-// Legacy `.xls` is rejected in v1 (ADR-0015); serde serializes the unit variant
-// as the JSON string `"LegacyExcel"`, so it is a bare string in this union.
+// Discriminated union (serde adjacently-tagged: `#[serde(tag="kind", content="data")]`).
+// Every variant carries `kind`; only the struct/newtype variants carry `data`.
 export type LoadError =
-  | "LegacyExcel"
-  | { UnsupportedFormat: { requested: string } }
-  | { Parse: { detail: string } }
-  | { Io: { detail: string } }
-  | { Other: { detail: string } };
+  | { kind: "LegacyExcel" }
+  | { kind: "UnsupportedFormat"; data: { requested: string } }
+  | { kind: "Parse"; data: { detail: string } }
+  | { kind: "Io"; data: { detail: string } }
+  | { kind: "Other"; data: { detail: string } };
 
 export interface GuidanceSheet {
   name: string;
@@ -54,6 +65,6 @@ export interface SheetGuidance {
 }
 
 export type LoadOutcome =
-  | { Loaded: DatasetDescriptor }
-  | { NeedsGuidance: GuidanceRequest }
-  | { Error: LoadError };
+  | { kind: "Loaded"; data: DatasetDescriptor }
+  | { kind: "NeedsGuidance"; data: GuidanceRequest }
+  | { kind: "Error"; data: LoadError };

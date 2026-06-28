@@ -12,7 +12,7 @@ pub mod workingset;
 
 pub use model::{
     ColumnSchema, DatasetDescriptor, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
-    SheetGuidance, SheetRectify,
+    RectifyProvenance, SheetGuidance, SheetRectify,
 };
 pub use session::Session;
 

@@ -129,8 +129,10 @@ fn write_rows(rows: &[Vec<Data>], sheet_name: &str, path: &Path) -> Result<(), L
         let record: Vec<String> = row
             .iter()
             .map(|c| {
-                track_degradation(c, &mut error_cells, &mut serial_dates);
-                cell_to_string(c)
+                let (rendered, err_inc, serial_inc) = render_cell(c);
+                error_cells += err_inc;
+                serial_dates += serial_inc;
+                rendered
             })
             .collect();
         wtr.write_record(&record).map_err(io_err)?;
@@ -151,39 +153,43 @@ fn write_rows(rows: &[Vec<Data>], sheet_name: &str, path: &Path) -> Result<(), L
     Ok(())
 }
 
-/// Tally cells whose rendered CSV form diverges from their logical kind, so
-/// [`write_rows`] can warn once per sheet rather than once per cell. Only
-/// `Data::Error` and `Data::DateTime` whose `as_datetime()` returns `None`
-/// degrade; every other kind renders faithfully.
-fn track_degradation(cell: &Data, errors: &mut usize, serial_dates: &mut usize) {
+/// Render a cached cell value to its CSV string form, and tally whether the
+/// rendered form would degrade DuckDB's type inference (ADR-0032 single source
+/// of truth): an Excel error cell renders as `#REF!`-style text and an
+/// undecodable date falls back to the raw serial number -- either can flip a
+/// whole column's inferred type (e.g. numeric -> VARCHAR). Returning the string
+/// and the two degradation counters from one match keeps a single source of
+/// truth for how each `Data` kind renders, so adding a variant can't drift
+/// between the renderer and the tally. SQL NULL (calamine Empty) renders as the
+/// empty string -- the same NULL->"" behavior as the frozen-sample renderer
+/// (`schema::render_cell`, ADR-0026), though this is an independent
+/// implementation, not a shared call site.
+///
+/// Returns `(rendered string, error-cell tally, serial-date tally)`.
+fn render_cell(cell: &Data) -> (String, usize, usize) {
     match cell {
-        Data::Error(_) => *errors += 1,
-        Data::DateTime(d) if d.as_datetime().is_none() => *serial_dates += 1,
-        _ => {}
+        Data::Empty => (String::new(), 0, 0),
+        Data::String(s) => (s.clone(), 0, 0),
+        Data::Int(i) => (i.to_string(), 0, 0),
+        Data::Float(f) => (f.to_string(), 0, 0),
+        Data::Bool(b) => (b.to_string(), 0, 0),
+        // Excel dates are serial numbers; render via the ISO datetime calamine
+        // decodes (dates feature). Falls back to the raw serial if undecodable.
+        Data::DateTime(d) => match d.as_datetime() {
+            Some(dt) => (dt.to_string(), 0, 0),
+            None => (d.as_f64().to_string(), 0, 1),
+        },
+        Data::DateTimeIso(s) | Data::DurationIso(s) => (s.clone(), 0, 0),
+        Data::Error(e) => (e.to_string(), 1, 0),
     }
 }
 
-/// Render a cached cell value to its CSV string form. SQL NULL (calamine Empty)
-/// renders as the empty string -- the same NULL->"" behavior as the frozen-sample
-/// renderer (`schema::render_cell`, ADR-0026), though this is an independent
-/// implementation, not a shared call site. Int/Float both render via their
-/// numeric text so DuckDB re-infers the canonical type from the column (ADR-0032).
+/// Render a cached cell value to its CSV string form -- the string half of
+/// [`render_cell`], for callers (e.g. preview) that don't need the degradation
+/// tally. Int/Float both render via their numeric text so DuckDB re-infers the
+/// canonical type from the column (ADR-0032).
 fn cell_to_string(cell: &Data) -> String {
-    match cell {
-        Data::Empty => String::new(),
-        Data::String(s) => s.clone(),
-        Data::Int(i) => i.to_string(),
-        Data::Float(f) => f.to_string(),
-        Data::Bool(b) => b.to_string(),
-        // Excel dates are serial numbers; render via the ISO datetime calamine
-        // decodes (dates feature). Falls back to the raw serial if undecodable.
-        Data::DateTime(d) => d
-            .as_datetime()
-            .map(|dt| dt.to_string())
-            .unwrap_or_else(|| d.as_f64().to_string()),
-        Data::DateTimeIso(s) | Data::DurationIso(s) => s.clone(),
-        Data::Error(e) => e.to_string(),
-    }
+    render_cell(cell).0
 }
 
 fn parse_err(e: XlsxError) -> LoadError {
@@ -250,39 +256,32 @@ mod tests {
     }
 
     #[test]
-    fn track_degradation_counts_only_degrading_kinds() {
-        let mut errors = 0;
-        let mut serial_dates = 0;
-        // Normal kinds never tally.
-        track_degradation(&Data::Empty, &mut errors, &mut serial_dates);
-        track_degradation(&Data::Int(1), &mut errors, &mut serial_dates);
-        track_degradation(&Data::Float(2.0), &mut errors, &mut serial_dates);
-        track_degradation(&Data::String("x".into()), &mut errors, &mut serial_dates);
-        track_degradation(&Data::Bool(true), &mut errors, &mut serial_dates);
-        // A decodable DateTime is NOT a serial-date fallback.
-        track_degradation(
-            &Data::DateTime(ExcelDateTime::new(
-                44197.0,
-                ExcelDateTimeType::DateTime,
-                false,
-            )),
-            &mut errors,
-            &mut serial_dates,
-        );
+    fn render_cell_counts_only_degrading_kinds() {
+        // Normal kinds render without tallying degradation.
+        let (_, errors, serial_dates) = render_cell(&Data::Empty);
         assert_eq!((errors, serial_dates), (0, 0));
-        // Only error cells tally here (as_datetime rarely returns None, so the
-        // serial-date branch is defensive -- its undecodable case can't be
+        let (_, errors, serial_dates) = render_cell(&Data::Int(1));
+        assert_eq!((errors, serial_dates), (0, 0));
+        let (_, errors, serial_dates) = render_cell(&Data::Float(2.0));
+        assert_eq!((errors, serial_dates), (0, 0));
+        let (_, errors, serial_dates) = render_cell(&Data::String("x".into()));
+        assert_eq!((errors, serial_dates), (0, 0));
+        let (_, errors, serial_dates) = render_cell(&Data::Bool(true));
+        assert_eq!((errors, serial_dates), (0, 0));
+        // A decodable DateTime is NOT a serial-date fallback.
+        let decodable = Data::DateTime(ExcelDateTime::new(
+            44197.0,
+            ExcelDateTimeType::DateTime,
+            false,
+        ));
+        let (_, errors, serial_dates) = render_cell(&decodable);
+        assert_eq!((errors, serial_dates), (0, 0));
+        // Only error cells tally errors here (as_datetime rarely returns None, so
+        // the serial-date branch is defensive -- its undecodable case can't be
         // constructed without calamine internals).
-        track_degradation(
-            &Data::Error(CellErrorType::Div0),
-            &mut errors,
-            &mut serial_dates,
-        );
-        track_degradation(
-            &Data::Error(CellErrorType::Ref),
-            &mut errors,
-            &mut serial_dates,
-        );
-        assert_eq!((errors, serial_dates), (2, 0));
+        let (_, errors, serial_dates) = render_cell(&Data::Error(CellErrorType::Div0));
+        assert_eq!((errors, serial_dates), (1, 0));
+        let (_, errors, serial_dates) = render_cell(&Data::Error(CellErrorType::Ref));
+        assert_eq!((errors, serial_dates), (1, 0));
     }
 }
