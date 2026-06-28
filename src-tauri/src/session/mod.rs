@@ -464,11 +464,154 @@ impl Session {
         self.working_set.rename_display(reference_name, new_display)
     }
 
+    /// Re-upload a file onto an existing dataset's reference name (ADR-0042,
+    /// issue #11 slice 4b): a fresh snapshot takes over the name and the old
+    /// snapshot is discarded. Distinct from [`Self::ingest`] (add): the reference
+    /// name to take over is explicit, and the new snapshot does **not** receive a
+    /// de-conflicted new name. Transactional: on any failure the working set is
+    /// unchanged and the old snapshot stays queryable under its name.
+    ///
+    /// Only structured files (CSV/Parquet/JSON) are supported here -- they map
+    /// 1:1 to a single snapshot taking over the name. Excel workbooks (multi-
+    /// sheet semantics, guided rectify) need their own replace path and are out
+    /// of scope for this slice; passing one returns an error and leaves the
+    /// working set untouched. `.xls` is rejected with the same actionable hint as
+    /// ingest. This is also the sole way to fix a mis-inferred type or a bad
+    /// rectify: source snapshots are read-only, so the data can only be swapped
+    /// by re-uploading (ADR-0020).
+    pub fn replace_source(&mut self, reference_name: &str, path: &Path) -> LoadOutcome {
+        // The reference name must already be loaded -- a replace targets an
+        // existing source, it never creates one.
+        let existing = match self.working_set.get(reference_name) {
+            Some(d) => d.clone(),
+            None => {
+                return LoadOutcome::Error(LoadError::Other {
+                    detail: format!("找不到引用名为「{reference_name}」的数据集，无法换源"),
+                })
+            }
+        };
+
+        // Dispatch the new file. Same front door as ingest: .xls rejected up
+        // front; structured formats go to copy-in; .xlsx is refused here (its
+        // multi-sheet / guided replace semantics are a separate slice).
+        let dispatched = ingest::dispatch(path);
+        let reader = match dispatched {
+            ingest::Dispatched::Xls => return LoadOutcome::Error(LoadError::LegacyExcel),
+            ingest::Dispatched::Xlsx => {
+                return LoadOutcome::Error(LoadError::Other {
+                    detail: "换源暂不支持 Excel 工作簿（多 sheet 语义待定），请改用结构化文件"
+                        .into(),
+                });
+            }
+            _ => match ingest::reader_for(&dispatched) {
+                Some(r) => r,
+                None => {
+                    let requested = match dispatched {
+                        ingest::Dispatched::Unsupported(ext) => ext,
+                        _ => String::new(),
+                    };
+                    return LoadOutcome::Error(LoadError::UnsupportedFormat { requested });
+                }
+            },
+        };
+
+        // Copy-in the new file under a swap stem: the old snapshot's file
+        // (`<ref>.duckdb`) is still attached and held, so the new one must land
+        // elsewhere first. copy_in clears any stale swap file from a prior failed
+        // attempt before writing.
+        let swap_alias = format!("{reference_name}__swap");
+        let new_snap = match ingest::loader::copy_in(path, &self.temp_path, &swap_alias, reader) {
+            Ok(s) => s,
+            Err(e) => return LoadOutcome::Error(e),
+        };
+
+        // Swap the snapshots. The new one is already known-good (copy_in opened
+        // it, created `data`, derived the descriptor), so the old one is only
+        // touched once the new one is ready. DETACH first to release the old
+        // file's handle (Windows won't remove a held file); if DETACH fails the
+        // old snapshot is still attached and usable, so the swap file is orphaned
+        // and removed, and the error is reported with the working set untouched.
+        if let Err(e) = self
+            .conn
+            .execute_batch(&format!("DETACH {};", quote_alias(reference_name)))
+        {
+            log::warn!(
+                target: "toptopduck::session",
+                "DETACH old failed during replace for {reference_name}: {e}"
+            );
+            let _ = fs::remove_file(&new_snap.file_path);
+            return LoadOutcome::Error(LoadError::Other {
+                detail: format!("换源失败：无法释放旧快照（{e}）"),
+            });
+        }
+        // Old detached -- remove its file. Best-effort (mirrors rollback_excel):
+        // a remove failure (e.g. a lingering handle on Windows) is logged, then
+        // the promote step falls back to attaching the swap file in place.
+        let formal = self.temp_path.join(format!("{reference_name}.duckdb"));
+        if let Err(e) = fs::remove_file(&formal) {
+            log::warn!(
+                target: "toptopduck::session",
+                "old snapshot file removal during replace for {reference_name}: {e}"
+            );
+        }
+        // Promote the swap file to the formal name when possible; if rename
+        // fails (the old file couldn't be cleared), attach the swap file where
+        // it is -- the session temp dir is wiped on drop either way.
+        let attach_path = match fs::rename(&new_snap.file_path, &formal) {
+            Ok(()) => formal.to_string_lossy().into_owned(),
+            Err(e) => {
+                log::warn!(
+                    target: "toptopduck::session",
+                    "rename swap->formal during replace for {reference_name}: {e}"
+                );
+                new_snap.file_path.to_string_lossy().into_owned()
+            }
+        };
+        if let Err(e) = self.conn.execute_batch(&format!(
+            "ATTACH '{attach_path}' AS {} (READ_ONLY);",
+            quote_alias(reference_name)
+        )) {
+            return LoadOutcome::Error(LoadError::Other {
+                detail: format!("换源失败：无法挂载新快照（{e}）"),
+            });
+        }
+
+        // Commit: update the descriptor in place. The reference name is stable
+        // (every existing reference now resolves to the new data); the display
+        // label carries over (a user rename survives the replace, ADR-0037); the
+        // body reflects the new snapshot.
+        let updated = DatasetDescriptor {
+            reference_name: reference_name.to_string(),
+            display_name: existing.display_name,
+            source_path: path.to_string_lossy().to_string(),
+            columns: new_snap.columns,
+            row_count: new_snap.row_count,
+            sample: new_snap.sample,
+            fingerprint: new_snap.fingerprint,
+            rectify: RectifyProvenance::NotApplicable,
+        };
+        self.working_set.replace(updated.clone());
+        LoadOutcome::Loaded(updated)
+    }
+
     /// Run arbitrary SQL on the session connection. Exposed for the read-only
     /// enforcement tests (AC5): writes against a source snapshot are rejected by
     /// the engine. Not part of the public ingest contract.
     pub fn execute_batch(&self, sql: &str) -> Result<(), duckdb::Error> {
         self.conn.execute_batch(sql)
+    }
+
+    /// Count rows in a snapshot's `data` table through its reference name
+    /// (issue #11 AC1: a replace must make a later query see the *new* data).
+    /// Exposed for the black-box tests alongside [`Self::execute_batch`] -- not
+    /// part of the public ingest contract (the real query path arrives with the
+    /// query loop, PRD #1).
+    pub fn snapshot_row_count(&self, reference_name: &str) -> Result<i64, duckdb::Error> {
+        self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM {}.data", quote_alias(reference_name)),
+            [],
+            |r| r.get(0),
+        )
     }
 }
 

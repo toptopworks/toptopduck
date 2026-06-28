@@ -10,6 +10,7 @@ import {
   ingestFileGuided,
   listWorkingSet,
   renameDataset,
+  replaceSource,
 } from "./api";
 import { loadErrorMessage } from "./loadErrorMessage";
 import type { DatasetDescriptor, GuidanceRequest, SheetGuidance } from "./types";
@@ -18,7 +19,7 @@ import type { DatasetDescriptor, GuidanceRequest, SheetGuidance } from "./types"
  * prefix matches the action (a rename rejection is never mislabelled a load
  * failure). The backend's RenameError crosses IPC as a plain string, so the
  * kind is reconstructed at the call site that knows the operation. */
-type AppError = { message: string; kind: "load" | "rename" };
+type AppError = { message: string; kind: "load" | "rename" | "replace" };
 
 export default function App() {
   const [datasets, setDatasets] = useState<DatasetDescriptor[]>([]);
@@ -117,6 +118,39 @@ export default function App() {
     [refresh],
   );
 
+  // Re-upload a file onto an existing dataset's reference name (ADR-0042, issue
+  // #11): a fresh snapshot takes over the name. Distinct from handleIngest
+  // (add) -- the reference name to take over is explicit. The reference name is
+  // unchanged, so `selected` stays valid; refresh picks up the swapped
+  // descriptor. Errors are tagged "replace" so the prefix matches the action
+  // (never mislabelled a load failure).
+  const handleReplace = useCallback(
+    async (referenceName: string, path: string) => {
+      setLoading(true);
+      setError(null);
+      try {
+        const outcome = await replaceSource(referenceName, path);
+        if (outcome.kind === "Loaded") {
+          await refresh();
+          setSelected(outcome.data.reference_name);
+        } else if (outcome.kind === "NeedsGuidance") {
+          // Structured replace never yields NeedsGuidance; defensive guard.
+          setError({
+            message: "换源暂不支持需规整引导的文件，请改用结构化文件",
+            kind: "replace",
+          });
+        } else {
+          setError({ message: loadErrorMessage(outcome.data), kind: "replace" });
+        }
+      } catch (e) {
+        setError({ message: String(e), kind: "replace" });
+      } finally {
+        setLoading(false);
+      }
+    },
+    [refresh],
+  );
+
   const shown = datasets.find((d) => d.reference_name === selected) ?? null;
 
   return (
@@ -129,7 +163,11 @@ export default function App() {
       <FileDropzone onIngest={handleIngest} loading={loading} />
       {error && (
         <p className="error">
-          {error.kind === "load" ? "加载失败：" : "重命名失败："}
+          {error.kind === "load"
+            ? "加载失败："
+            : error.kind === "rename"
+              ? "重命名失败："
+              : "换源失败："}
           {error.message}
         </p>
       )}
@@ -142,6 +180,7 @@ export default function App() {
             activeName={activeName}
             onSelect={setSelected}
             onRename={handleRename}
+            onReplace={handleReplace}
             loading={loading}
           />
         </section>

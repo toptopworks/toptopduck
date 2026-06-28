@@ -84,3 +84,23 @@ pub fn rename_dataset(
     s.rename_display(&reference_name, &new_display)
         .map_err(|e| e.to_string())
 }
+
+/// Re-upload a file onto an existing dataset's reference name (ADR-0042, issue
+/// #11 slice 4b): a fresh snapshot takes over the name and the old one is
+/// discarded. Distinct entry from `ingest_file` (add) -- the reference name to
+/// take over is explicit. Runs the copy-in off the async/UI thread (AC8).
+#[tauri::command]
+pub async fn replace_source(
+    state: State<'_, Arc<Mutex<Session>>>,
+    reference_name: String,
+    path: String,
+) -> Result<LoadOutcome, String> {
+    let session = state.inner().clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        let mut s = session.lock().map_err(|e| e.to_string())?;
+        Ok::<LoadOutcome, String>(s.replace_source(&reference_name, Path::new(&path)))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(outcome)
+}

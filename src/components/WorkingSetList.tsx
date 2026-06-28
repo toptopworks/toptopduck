@@ -1,3 +1,4 @@
+import { open } from "@tauri-apps/plugin-dialog";
 import type { DatasetDescriptor } from "../types";
 
 export function WorkingSetList({
@@ -5,6 +6,7 @@ export function WorkingSetList({
   activeName,
   onSelect,
   onRename,
+  onReplace,
   loading = false,
 }: {
   datasets: DatasetDescriptor[];
@@ -13,8 +15,16 @@ export function WorkingSetList({
   // Display-only rename (ADR-0037, issue #8): the reference name is never
   // touched, so selection / SQL / active references all stay valid.
   onRename: (referenceName: string, newDisplay: string) => void;
-  // Disables the rename button while an async op (rename / ingest) is in
-  // flight, preventing concurrent IPC from rapid double-clicks.
+  // Re-upload a file onto this dataset's reference name (ADR-0042, issue #11):
+  // a fresh snapshot takes over the name. Distinct from the dropzone's add --
+  // the reference name to take over is explicit. Structured files only (the
+  // backend rejects xlsx in this slice), so the picker excludes xlsx to match,
+  // keeping the two entries (add vs replace) visually distinct (AC4). Optional
+  // only so tests that don't exercise replace can skip it; App always supplies
+  // it, and the button is hidden from the no-op when absent.
+  onReplace?: (referenceName: string, path: string) => void;
+  // Disables the action buttons while an async op (rename / ingest / replace)
+  // is in flight, preventing concurrent IPC from rapid double-clicks.
   loading?: boolean;
 }) {
   if (datasets.length === 0) {
@@ -29,6 +39,25 @@ export function WorkingSetList({
     const trimmed = next.trim();
     if (trimmed && trimmed !== d.display_name) {
       onRename(d.reference_name, trimmed);
+    }
+  };
+
+  // Pick a structured file to swap in under this dataset's reference name. The
+  // picker excludes .xlsx on purpose: the backend's replace path is structured-
+  // only, so this keeps the two entries (add vs replace) visually distinct and
+  // avoids offering a choice the backend would then reject.
+  const pickReplace = async (d: DatasetDescriptor) => {
+    const selected = await open({
+      multiple: false,
+      filters: [
+        {
+          name: "数据文件",
+          extensions: ["csv", "parquet", "json", "jsonl", "ndjson"],
+        },
+      ],
+    });
+    if (typeof selected === "string") {
+      onReplace?.(d.reference_name, selected);
     }
   };
 
@@ -52,6 +81,15 @@ export function WorkingSetList({
             onClick={() => promptRename(d)}
           >
             ✎
+          </button>
+          <button
+            className="replace"
+            aria-label={`换源 ${d.display_name}`}
+            title="重新上传替换此数据集（沿用引用名）"
+            disabled={loading}
+            onClick={() => void pickReplace(d)}
+          >
+            ↻
           </button>
         </li>
       ))}

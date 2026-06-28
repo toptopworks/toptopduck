@@ -939,3 +939,176 @@ fn xlsx_sheets_deconflict_display_labels_on_reload() {
     assert_eq!(d1.display_name, "people");
     assert_eq!(d2.display_name, "people (2)");
 }
+
+// --- Source replace: re-upload takes over the reference name (issue #11, slice 4b) -
+//
+// ADR-0042: re-uploading onto a source = swapping its snapshot under the same
+// reference name. The new file copy-in's to a fresh snapshot that takes over the
+// name; the old snapshot is discarded. Distinct entry from ingest (add): the
+// reference name to take over is explicit, and no de-conflicted second entry
+// appears. Only structured files (CSV/Parquet/JSON) are supported -- they map
+// 1:1 to a single snapshot. This is also the sole fix for a mis-inferred type
+// (source snapshots are read-only, ADR-0020). Cascade stale of derived result_N
+// is out of scope (#3); these tests assert the takeover + fingerprint only.
+
+fn replace_ok(session: &mut Session, reference_name: &str, path: &Path) -> DatasetDescriptor {
+    match session.replace_source(reference_name, path) {
+        LoadOutcome::Loaded(d) => d,
+        LoadOutcome::NeedsGuidance(g) => {
+            panic!("expected replace to succeed, got NeedsGuidance: {g:?}")
+        }
+        LoadOutcome::Error(e) => panic!("expected replace to succeed, got: {e}"),
+    }
+}
+
+#[test]
+fn replace_takes_over_reference_name_with_new_data() {
+    // AC1: re-upload onto a reference name -> the new snapshot takes over; the
+    // old one is gone; a query through the name sees the new data. people.csv
+    // (5 rows, has a `joined` col) replaced by flat.json (3 rows, no `joined`).
+    let mut session = Session::new().expect("session");
+    let d1 = load_ok(&mut session, &fixture("people.csv"));
+    assert_eq!(d1.reference_name, "people");
+    assert_eq!(d1.row_count, 5);
+    let old_fp = d1.fingerprint;
+
+    let d2 = replace_ok(&mut session, "people", &fixture("flat.json"));
+    assert_eq!(d2.reference_name, "people"); // taken over, not renamed
+    assert_eq!(session.list().len(), 1); // not added as a second entry
+    assert_eq!(d2.row_count, 3); // new content
+    assert_ne!(d2.fingerprint, old_fp); // content changed
+                                        // schema changed too: flat.json has no `joined` column
+    assert!(d2.columns.iter().all(|c| c.name != "joined"));
+
+    // AC1 (query seam): the reference name now resolves to the new snapshot's
+    // rows -- 3, not the original 5.
+    assert_eq!(session.snapshot_row_count("people").unwrap(), 3);
+}
+
+#[test]
+fn replaced_fingerprint_equals_a_fresh_load() {
+    // AC2/AC3: the replaced snapshot's fingerprint is the content hash of the
+    // post-copy-in snapshot -- identical to a fresh standalone load of the same
+    // file, independent of whether it arrived via ingest or replace.
+    let fp_fresh = {
+        let mut s = Session::new().expect("session");
+        load_ok(&mut s, &fixture("flat.json")).fingerprint
+    };
+    let mut session = Session::new().expect("session");
+    load_ok(&mut session, &fixture("people.csv"));
+    let d = replace_ok(&mut session, "people", &fixture("flat.json"));
+    assert_eq!(d.fingerprint, fp_fresh);
+}
+
+#[test]
+fn replace_with_same_file_reproduces_fingerprint() {
+    // AC3: replacing with the same file -> same fingerprint (deterministic,
+    // reproducible). The data doesn't change, so neither does the hash.
+    let mut session = Session::new().expect("session");
+    let d1 = load_ok(&mut session, &fixture("people.csv"));
+    let d2 = replace_ok(&mut session, "people", &fixture("people.csv"));
+    assert_eq!(d2.fingerprint, d1.fingerprint);
+    assert_eq!(session.snapshot_row_count("people").unwrap(), 5);
+}
+
+#[test]
+fn replace_fixes_a_mis_loaded_dataset() {
+    // AC5: a replace is the sole way to fix a bad load (sources are read-only).
+    // Loading flat.json then replacing with people.csv swaps in the richer
+    // schema -- the column set of the new file takes effect under the same name.
+    let mut session = Session::new().expect("session");
+    load_ok(&mut session, &fixture("flat.json"));
+    assert!(session
+        .get("flat")
+        .unwrap()
+        .columns
+        .iter()
+        .all(|c| c.name != "joined"));
+    let d = replace_ok(&mut session, "flat", &fixture("people.csv"));
+    assert!(d.columns.iter().any(|c| c.name == "joined"));
+    assert_eq!(d.row_count, 5);
+    assert_eq!(d.reference_name, "flat"); // name stable across the swap
+}
+
+#[test]
+fn replace_carries_display_label_over() {
+    // PRD: the display name carries over a replace (a user rename survives).
+    let mut session = Session::new().expect("session");
+    load_ok(&mut session, &fixture("people.csv"));
+    session.rename_display("people", "员工表").expect("rename");
+    let d = replace_ok(&mut session, "people", &fixture("flat.json"));
+    assert_eq!(d.reference_name, "people");
+    assert_eq!(d.display_name, "员工表"); // carried over, not reset
+}
+
+#[test]
+fn replace_makes_dataset_active() {
+    // ADR-0022: a replace is a fresh upload -> active moves to it even when
+    // another source was active before.
+    let mut session = Session::new().expect("session");
+    load_ok(&mut session, &fixture("people.csv"));
+    load_ok(&mut session, &fixture("flat.json"));
+    assert_eq!(session.active().unwrap().reference_name, "flat");
+    replace_ok(&mut session, "people", &fixture("flat.json"));
+    assert_eq!(session.active().unwrap().reference_name, "people");
+}
+
+#[test]
+fn replace_unknown_reference_is_rejected() {
+    let mut session = Session::new().expect("session");
+    load_ok(&mut session, &fixture("people.csv"));
+    match session.replace_source("nope", &fixture("flat.json")) {
+        LoadOutcome::Error(_) => {}
+        other => panic!("expected Error, got {other:?}"),
+    }
+    assert_eq!(session.list().len(), 1); // unchanged
+    assert_eq!(session.snapshot_row_count("people").unwrap(), 5); // old still queryable
+}
+
+#[test]
+fn replace_excel_workbook_is_unsupported() {
+    // Excel multi-sheet / guided replace semantics are a separate slice; a .xlsx
+    // is refused here and the working set is left untouched.
+    let (xlsx, _dir) = people_xlsx();
+    let mut session = Session::new().expect("session");
+    load_ok(&mut session, &fixture("people.csv"));
+    match session.replace_source("people", &xlsx) {
+        LoadOutcome::Error(_) => {}
+        other => panic!("expected Error for xlsx replace, got {other:?}"),
+    }
+    assert_eq!(session.list().len(), 1);
+    assert_eq!(session.snapshot_row_count("people").unwrap(), 5); // old intact
+}
+
+#[test]
+fn replace_legacy_xls_is_rejected_with_hint() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let xls = dir.path().join("legacy.xls");
+    fs::write(&xls, b"not a real xls").expect("write");
+    let mut session = Session::new().expect("session");
+    load_ok(&mut session, &fixture("people.csv"));
+    match session.replace_source("people", &xls) {
+        LoadOutcome::Error(LoadError::LegacyExcel) => {}
+        other => panic!("expected LegacyExcel, got {other:?}"),
+    }
+    assert_eq!(session.list().len(), 1);
+}
+
+#[test]
+fn replace_failed_load_leaves_old_snapshot_usable() {
+    // Transactional: a failed replace (corrupted new file) leaves the old
+    // snapshot intact and queryable under its name; the working set is unchanged.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bad = dir.path().join("corrupted.csv");
+    fs::write(&bad, [0xffu8, 0xfe, 0x80, 0x81, 0xc0, 0xc1, 0x0a]).expect("write corrupted");
+    let mut session = Session::new().expect("session");
+    let before = load_ok(&mut session, &fixture("people.csv"));
+    match session.replace_source("people", &bad) {
+        LoadOutcome::Error(_) => {}
+        other => panic!("expected Error for corrupted replace, got {other:?}"),
+    }
+    assert_eq!(session.list().len(), 1);
+    let after = session.get("people").unwrap();
+    assert_eq!(after.fingerprint, before.fingerprint); // descriptor unchanged
+    assert_eq!(session.snapshot_row_count("people").unwrap(), 5); // old data still there
+}
