@@ -137,6 +137,37 @@ describe("WorkingSetList", () => {
       expect(onRename).not.toHaveBeenCalled();
     }
   });
+
+  it("trims surrounding whitespace before renaming", () => {
+    const onRename = vi.fn();
+    vi.spyOn(window, "prompt").mockReturnValue("  员工表  ");
+    render(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={onRename}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
+    // trimmed before reaching the parent -> backend gets a clean label
+    expect(onRename).toHaveBeenCalledWith("people", "员工表");
+  });
+
+  it("ignores a whitespace-only rename prompt", () => {
+    const onRename = vi.fn();
+    vi.spyOn(window, "prompt").mockReturnValue("   ");
+    render(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={onRename}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
+    expect(onRename).not.toHaveBeenCalled();
+  });
 });
 
 describe("GuidedLoadDialog", () => {

@@ -206,6 +206,10 @@ pub enum RenameError {
     /// layer uniqueness, ADR-0037). The user must pick a different label; a
     /// rename is an explicit user action, so silent de-conflict would surprise.
     DisplayTaken(String),
+    /// The requested display label is empty or whitespace-only (ADR-0037). A
+    /// display label must be visible, so blanks are rejected; the user must
+    /// supply a non-blank label.
+    InvalidLabel,
 }
 
 impl std::fmt::Display for RenameError {
@@ -215,6 +219,7 @@ impl std::fmt::Display for RenameError {
             Self::DisplayTaken(label) => {
                 write!(f, "显示名「{label}」已被其他数据集使用，请换一个")
             }
+            Self::InvalidLabel => write!(f, "显示名不能为空或仅含空白"),
         }
     }
 }

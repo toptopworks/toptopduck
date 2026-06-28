@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { DatasetDescriptor } from "../types";
 
@@ -23,7 +23,7 @@ vi.mock("../api", () => ({
 
 import { open } from "@tauri-apps/plugin-dialog";
 import App from "../App";
-import { ingestFile, ingestFileGuided, listWorkingSet } from "../api";
+import { ingestFile, ingestFileGuided, listWorkingSet, renameDataset } from "../api";
 
 const guidedDataset: DatasetDescriptor = {
   reference_name: "people",
@@ -92,5 +92,50 @@ describe("App guided-load flow", () => {
       ]),
     );
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+});
+
+describe("App rename flow", () => {
+  // prompt spies must not leak between tests (jsdom default returns null).
+  afterEach(() => vi.restoreAllMocks());
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
+  });
+
+  it("keeps selection on the renamed dataset (ADR-0037 display/reference decoupling)", async () => {
+    // One dataset loaded; selection keys off the stable reference name, so a
+    // display rename must not drop the current selection.
+    state.workingSet = [guidedDataset];
+    render(<App />);
+
+    // Mount refresh settles, then select the dataset to show its detail.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^people/ }));
+    expect(screen.getByText("BIGINT")).toBeInTheDocument(); // its column is shown
+
+    // Rename via prompt; on refresh the working set carries the new label.
+    vi.spyOn(window, "prompt").mockReturnValue("员工表");
+    vi.mocked(renameDataset).mockImplementation(async (ref, display) => {
+      state.workingSet = state.workingSet.map((d) =>
+        d.reference_name === ref ? { ...d, display_name: display } : d,
+      );
+      return { ...guidedDataset, display_name: display };
+    });
+    fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
+
+    // The rename carries the stable reference name + the new display label.
+    await waitFor(() => expect(renameDataset).toHaveBeenCalledWith("people", "员工表"));
+
+    // Selection survived (keyed by reference_name): the list now shows the new
+    // label, yet the same dataset's columns are still in the detail pane.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^员工表/ })).toBeInTheDocument(),
+    );
+    expect(screen.getByText("BIGINT")).toBeInTheDocument();
   });
 });
