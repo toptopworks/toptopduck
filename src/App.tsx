@@ -5,24 +5,8 @@ import { DatasetDetail } from "./components/DatasetDetail";
 import { DisclosureBanner } from "./components/DisclosureBanner";
 import { GuidedLoadDialog } from "./components/GuidedLoadDialog";
 import { activeDataset, ingestFile, ingestFileGuided, listWorkingSet } from "./api";
-import type { DatasetDescriptor, GuidanceRequest, LoadError, SheetGuidance } from "./types";
-
-function loadErrorMessage(err: LoadError): string {
-  switch (err.kind) {
-    case "LegacyExcel":
-      return "不支持 .xls 格式（仅支持 .xlsx），请在 Excel 中另存为 .xlsx 后重试";
-    case "UnsupportedFormat":
-      return err.data.requested
-        ? `不支持的格式：${err.data.requested}（支持 .csv / .parquet / .json / .xlsx）`
-        : "无法识别的格式";
-    case "Parse":
-      return err.data.detail;
-    case "Io":
-      return err.data.detail;
-    case "Other":
-      return err.data.detail;
-  }
-}
+import { loadErrorMessage } from "./loadErrorMessage";
+import type { DatasetDescriptor, GuidanceRequest, SheetGuidance } from "./types";
 
 export default function App() {
   const [datasets, setDatasets] = useState<DatasetDescriptor[]>([]);
