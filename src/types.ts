@@ -15,7 +15,7 @@ export interface SheetRectify {
 }
 
 // Provenance of a dataset's rectify state (ADR-0042): mirrors the Rust enum
-// (serde externally-tagged). The type makes "only user choices are recorded,
+// (serde adjacently-tagged). The type makes "only user choices are recorded,
 // never the auto algorithm" explicit.
 // - "NotApplicable": CSV/Parquet/JSON (no rectify step).
 // - "Auto": Excel auto-tidy chose confidently; no params ride the descriptor.
