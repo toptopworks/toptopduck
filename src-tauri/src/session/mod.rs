@@ -468,8 +468,18 @@ impl Session {
     /// issue #11 slice 4b): a fresh snapshot takes over the name and the old
     /// snapshot is discarded. Distinct from [`Self::ingest`] (add): the reference
     /// name to take over is explicit, and the new snapshot does **not** receive a
-    /// de-conflicted new name. Transactional: on any failure the working set is
-    /// unchanged and the old snapshot stays queryable under its name.
+    /// de-conflicted new name.
+    ///
+    /// Transactional up to the file swap. The new snapshot is pre-attached under
+    /// a `__swap` alias and confirmed readable **before** the old one is touched,
+    /// so any failure up to and including that confirmation (copy-in parse, new-
+    /// snapshot mount, swap/release, old-DETACH) leaves the working set and the
+    /// old snapshot untouched and still queryable. Only after the new snapshot is
+    /// confirmed is the old one detached and its file removed; the swap file is
+    /// then promoted to the formal name (or attached in place when the rename is
+    /// blocked by a lingering old handle). That promote operates on an already-
+    /// verified file, so the post-confirm steps are deterministic file moves plus
+    /// a re-ATTACH of the same file under the reference name.
     ///
     /// Only structured files (CSV/Parquet/JSON) are supported here -- they map
     /// 1:1 to a single snapshot taking over the name. Excel workbooks (multi-
@@ -525,12 +535,51 @@ impl Session {
             Err(e) => return LoadOutcome::Error(e),
         };
 
-        // Swap the snapshots. The new one is already known-good (copy_in opened
-        // it, created `data`, derived the descriptor), so the old one is only
-        // touched once the new one is ready. DETACH first to release the old
-        // file's handle (Windows won't remove a held file); if DETACH fails the
-        // old snapshot is still attached and usable, so the swap file is orphaned
-        // and removed, and the error is reported with the working set untouched.
+        // Confirm the new snapshot mounts BEFORE retiring the old one: pre-attach
+        // it under the swap alias (distinct from `<ref>`, so both co-exist). A
+        // mount failure here means the new file is unusable -- the swap file is
+        // removed and the old snapshot stays attached and queryable, working set
+        // untouched. This front-loads the only non-deterministic failure (can the
+        // engine open this snapshot?) ahead of any destructive step, so a bad new
+        // file never costs the user the old one.
+        let swap_path = new_snap.file_path.to_string_lossy().into_owned();
+        if let Err(e) = self.conn.execute_batch(&format!(
+            "ATTACH '{swap_path}' AS {} (READ_ONLY);",
+            quote_alias(&swap_alias),
+        )) {
+            log::warn!(
+                target: "toptopduck::session",
+                "pre-attach of new snapshot failed during replace for {reference_name}: {e}"
+            );
+            let _ = fs::remove_file(&new_snap.file_path);
+            return LoadOutcome::Error(LoadError::Other {
+                detail: format!("换源失败：无法挂载新快照（{e}）"),
+            });
+        }
+        // Release the swap file's handle so the promote step can rename it. This
+        // DETACHes the very attachment just confirmed, so it cannot fail for a
+        // file-content reason; on failure the old snapshot is still attached and
+        // queryable, so we abort before any damage (the swap file is best-effort
+        // removed, though the held handle may keep it until session drop).
+        if let Err(e) = self
+            .conn
+            .execute_batch(&format!("DETACH {};", quote_alias(&swap_alias)))
+        {
+            log::warn!(
+                target: "toptopduck::session",
+                "DETACH swap failed during replace for {reference_name}: {e}"
+            );
+            let _ = fs::remove_file(&new_snap.file_path);
+            return LoadOutcome::Error(LoadError::Other {
+                detail: format!("换源失败：无法释放新快照（{e}）"),
+            });
+        }
+
+        // New snapshot confirmed -- retire the old one. DETACH first to release
+        // the old file's handle (Windows won't remove a held file); if DETACH
+        // fails the old snapshot is still attached and usable, so the swap file is
+        // orphaned and removed, and the error is reported with the working set
+        // untouched.
         if let Err(e) = self
             .conn
             .execute_batch(&format!("DETACH {};", quote_alias(reference_name)))
@@ -564,7 +613,7 @@ impl Session {
                     target: "toptopduck::session",
                     "rename swap->formal during replace for {reference_name}: {e}"
                 );
-                new_snap.file_path.to_string_lossy().into_owned()
+                swap_path
             }
         };
         if let Err(e) = self.conn.execute_batch(&format!(
