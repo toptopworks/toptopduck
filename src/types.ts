@@ -86,3 +86,28 @@ export type LoadOutcome =
   | { kind: "Loaded"; data: DatasetDescriptor }
   | { kind: "NeedsGuidance"; data: GuidanceRequest }
   | { kind: "Error"; data: LoadError };
+
+// One turn outcome (issue #22 query loop). Mirrors the Rust TurnOutcome (serde
+// adjacently-tagged: kind + data). Slice #22 ships one variant; later slices
+// add refuse / clarify / fail / cancel without widening this for the existing
+// variant.
+export type TurnOutcome = {
+  kind: "Materialized";
+  data: {
+    dataset: DatasetDescriptor;
+    // The provider optional assumption note (ADR-0009), surfaced as a side
+    // note the user can correct; null when the provider offered none.
+    assumption: string | null;
+  };
+};
+
+// One page of a dataset rows (ADR-0024 windowed display). Cells are CAST to
+// VARCHAR (NULL renders as "") server-side. `total` is the full row count so a
+// truncated page never masquerades as complete (ADR-0030).
+export interface RowPage {
+  columns: ColumnSchema[];
+  rows: string[][];
+  total: number;
+  offset: number;
+  limit: number;
+}

@@ -1,12 +1,15 @@
 //! Tauri command boundary (frontend <-> Rust). Thin wrappers over [`Session`];
-//! the ingest pipeline itself is the black box tested in tests/ingest_blackbox.rs.
+//! the ingest pipeline is the black box tested in tests/ingest_blackbox.rs, and
+//! the ask -> result loop in tests/query_blackbox.rs (issue #22).
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use tauri::State;
 
-use crate::model::{DatasetDescriptor, DatasetPrivacy, LoadOutcome, SheetGuidance};
+use crate::model::{
+    DatasetDescriptor, DatasetPrivacy, LoadOutcome, RowPage, SheetGuidance, TurnOutcome,
+};
 use crate::session::Session;
 
 /// Ingest a file. Runs the DuckDB copy-in off the async/UI thread (AC8: does not
@@ -117,4 +120,45 @@ pub fn set_dataset_privacy(
     let mut s = state.lock().map_err(|e| e.to_string())?;
     s.set_privacy(&reference_name, privacy)
         .ok_or_else(|| format!("找不到引用名为「{reference_name}」的数据集"))
+}
+
+/// Ask one question (PRD #1, issue #22): the orchestrator gets one SQL from the
+/// provider, runs it on the session DuckDB, and materializes result_N. Runs off
+/// the async/UI thread (AC8) so a slow provider never freezes the app. Failures
+/// cross IPC as a plain error string (the typed outcome classification + retry
+/// budget arrive in #23).
+#[tauri::command]
+pub async fn ask(
+    state: State<'_, Arc<Mutex<Session>>>,
+    question: String,
+) -> Result<TurnOutcome, String> {
+    let session = state.inner().clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        let mut s = session.lock().map_err(|e| e.to_string())?;
+        s.ask(&question).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(outcome)
+}
+
+/// Read one page of a dataset's rows (ADR-0024 windowed display). Runs off the
+/// async/UI thread (AC8) like `ask`: a large OFFSET is an O(offset) scan, so
+/// holding the session lock on the IPC path would block every other command.
+/// Rejects an unknown reference name or an engine error with an error string.
+#[tauri::command]
+pub async fn read_rows(
+    state: State<'_, Arc<Mutex<Session>>>,
+    reference_name: String,
+    offset: u64,
+    limit: u64,
+) -> Result<RowPage, String> {
+    let session = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let s = session.lock().map_err(|e| e.to_string())?;
+        s.read_rows(&reference_name, offset, limit)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

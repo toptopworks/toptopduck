@@ -1,15 +1,21 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { DatasetDetail } from "../components/DatasetDetail";
 import { DisclosureBanner } from "../components/DisclosureBanner";
 import { GuidedLoadDialog } from "../components/GuidedLoadDialog";
 import { PrivacyControls } from "../components/PrivacyControls";
+import { ResultView } from "../components/ResultView";
 import { WorkingSetList } from "../components/WorkingSetList";
+import { readRows } from "../api";
 import type { DatasetDescriptor, DatasetPrivacy, GuidanceRequest } from "../types";
 
 // WorkingSetList's replace action opens the Tauri file dialog; stub it so the
 // tests can drive the picker without the native bridge.
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+vi.mock("../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api")>();
+  return { ...actual, readRows: vi.fn() };
+});
 
 import { open } from "@tauri-apps/plugin-dialog";
 
@@ -421,5 +427,93 @@ describe("GuidedLoadDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: /取消/ }));
     expect(onCancel).toHaveBeenCalledOnce();
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+});
+
+describe("ResultView", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("renders rows, total, and the assumption note from readRows", async () => {
+    // AC: the materialized result is shown as a table + row count; the
+    // assumption note (ADR-0009) renders as a correctable side note.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "n", canonical_type: "BIGINT" }],
+      rows: [["5"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    render(<ResultView referenceName="result_1" assumption="把 id 当作主键" />);
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 0, 100));
+    expect(screen.getByText(/行数：1/)).toBeInTheDocument();
+    expect(screen.getByText("n")).toBeInTheDocument(); // column header
+    expect(screen.getByText("5")).toBeInTheDocument(); // cell value
+    expect(screen.getByText(/假设：把 id 当作主键/)).toBeInTheDocument();
+  });
+
+  it("paginates forward and discloses a total larger than the page", async () => {
+    // ADR-0024/0030: a bounded page is shown with the honest total, so a
+    // truncated view never looks complete; the next-page button fetches onward.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "id", canonical_type: "BIGINT" }],
+      rows: [["1"], ["2"]],
+      total: 5,
+      offset: 0,
+      limit: 2,
+    });
+    render(<ResultView referenceName="result_1" assumption={null} pageSize={2} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 0, 2));
+    expect(screen.getByText(/共 5 行/)).toBeInTheDocument(); // total disclosed
+    fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 2, 2));
+  });
+
+  it("renders the empty-state row and a zero total for a 0-row result", async () => {
+    // ADR-0030: a 0-row result is a valid materialized result, shown with the
+    // honest total (0) and the empty-state row -- never special-cased away.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "id", canonical_type: "BIGINT" }],
+      rows: [],
+      total: 0,
+      offset: 0,
+      limit: 100,
+    });
+    render(<ResultView referenceName="result_1" assumption={null} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 0, 100));
+    expect(screen.getByText(/行数：0/)).toBeInTheDocument();
+    expect(screen.getByText(/（无数据行）/)).toBeInTheDocument();
+  });
+
+  it("paginates backward via the previous button", async () => {
+    vi.mocked(readRows)
+      .mockResolvedValueOnce({
+        columns: [{ name: "id", canonical_type: "BIGINT" }],
+        rows: [["1"], ["2"]],
+        total: 5,
+        offset: 0,
+        limit: 2,
+      })
+      .mockResolvedValueOnce({
+        columns: [{ name: "id", canonical_type: "BIGINT" }],
+        rows: [["3"], ["4"]],
+        total: 5,
+        offset: 2,
+        limit: 2,
+      })
+      .mockResolvedValueOnce({
+        columns: [{ name: "id", canonical_type: "BIGINT" }],
+        rows: [["1"], ["2"]],
+        total: 5,
+        offset: 0,
+        limit: 2,
+      });
+    render(<ResultView referenceName="result_1" assumption={null} pageSize={2} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 0, 2));
+    fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 2, 2));
+    fireEvent.click(screen.getByRole("button", { name: /上一页/ }));
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 0, 2));
   });
 });

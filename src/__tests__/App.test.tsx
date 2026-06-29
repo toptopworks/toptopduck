@@ -13,19 +13,36 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 // Mutable working set the api mock reflects after a guided load (the dialog
 // flow's end state). vi.hoisted keeps it alive across the hoisted vi.mock.
 const state = vi.hoisted(() => ({ workingSet: [] as DatasetDescriptor[] }));
-vi.mock("../api", () => ({
-  ingestFile: vi.fn(),
-  ingestFileGuided: vi.fn(),
-  listWorkingSet: vi.fn(),
-  activeDataset: vi.fn(async () => null),
-  renameDataset: vi.fn(),
-  replaceSource: vi.fn(),
-  setDatasetPrivacy: vi.fn(),
-}));
+// importOriginal keeps the real fmtError (a pure helper) while the Tauri invoke
+// wrappers are stubbed.
+vi.mock("../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api")>();
+  return {
+    ...actual,
+    ingestFile: vi.fn(),
+    ingestFileGuided: vi.fn(),
+    listWorkingSet: vi.fn(),
+    activeDataset: vi.fn(async () => null),
+    renameDataset: vi.fn(),
+    replaceSource: vi.fn(),
+    setDatasetPrivacy: vi.fn(),
+    askQuestion: vi.fn(),
+    readRows: vi.fn(),
+  };
+});
 
 import { open } from "@tauri-apps/plugin-dialog";
 import App from "../App";
-import { ingestFile, ingestFileGuided, listWorkingSet, renameDataset, setDatasetPrivacy } from "../api";
+import {
+  activeDataset,
+  askQuestion,
+  ingestFile,
+  ingestFileGuided,
+  listWorkingSet,
+  readRows,
+  renameDataset,
+  setDatasetPrivacy,
+} from "../api";
 
 const guidedDataset: DatasetDescriptor = {
   reference_name: "people",
@@ -197,5 +214,55 @@ describe("App privacy flow", () => {
     expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
     expect(screen.queryByText(/重命名失败/)).not.toBeInTheDocument();
     expect(screen.queryByText(/换源失败/)).not.toBeInTheDocument();
+  });
+});
+
+describe("App ask flow", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [guidedDataset]; // a source is loaded
+    vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
+    vi.mocked(activeDataset).mockImplementation(async () => guidedDataset);
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [],
+      rows: [],
+      total: 0,
+      offset: 0,
+      limit: 100,
+    });
+  });
+
+  it("submits a question and shows the materialized result (issue #22)", async () => {
+    vi.mocked(askQuestion).mockResolvedValue({
+      kind: "Materialized",
+      data: {
+        dataset: { ...guidedDataset, reference_name: "result_1", row_count: 1 },
+        assumption: null,
+      },
+    });
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+    );
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "总共几行" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("总共几行"));
+    // the materialized result pane appears (ResultView heading)
+    await waitFor(() => expect(screen.getByText(/结果：result_1/)).toBeInTheDocument());
+  });
+
+  it("labels an ask failure distinctly from a load failure", async () => {
+    vi.mocked(askQuestion).mockRejectedValueOnce("尚未接入 LLM 提供方");
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+    );
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "x" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(screen.getByText(/尚未接入 LLM 提供方/)).toBeInTheDocument(),
+    );
+    // an ask failure must not inherit the load-flow prefix.
+    expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
   });
 });

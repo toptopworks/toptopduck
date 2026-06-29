@@ -10,6 +10,13 @@ use crate::model::{DatasetDescriptor, DatasetPrivacy, RenameError};
 pub struct WorkingSet {
     datasets: Vec<DatasetDescriptor>,
     active: Option<String>, // reference name (stable)
+    /// Reference names that are materialized turn results (main-DB physical
+    /// tables, ADR-0024) vs uploaded sources (attached read-only catalogs,
+    /// ADR-0012). Drives the FROM form in SQL and row reads, and lets
+    /// [`Self::next_result_number`] scan only results. Tracked explicitly (not
+    /// by name pattern) so a source whose sanitized name happens to look like
+    /// `result_N` can never be mistaken for a derived result.
+    results: HashSet<String>,
 }
 
 impl WorkingSet {
@@ -189,6 +196,58 @@ impl WorkingSet {
         Some(slot.clone())
     }
 
+    /// Register a materialized turn result (ADR-0003/0024): a Dataset that
+    /// lives as a main-DB physical table (not an attached snapshot). Unlike
+    /// [`Self::register`] (a source upload), registering a result does NOT move
+    /// the active pointer -- active tracks the most-recently-uploaded *source*
+    /// (ADR-0022); resolving active across results is #27. The result is
+    /// referenceable like any source (shared FROM namespace), and its name is
+    /// recorded in `results` so [`Self::sql_from`] picks the main-table form
+    /// (`"<ref>"`) over the source-attached form (`"<ref>".data`).
+    pub fn register_result(&mut self, dataset: DatasetDescriptor) {
+        let reference_name = dataset.reference_name.clone();
+        self.datasets.push(dataset);
+        self.results.insert(reference_name);
+    }
+
+    /// The next result number: one past the max existing `result_N`, starting
+    /// at 1 (ADR-0022 monotonic, never reused -- deleted results leave gaps, the
+    /// next takes max+1, never back-filling). Scans only names recorded in
+    /// `results`, so a source named `result_1.csv` (sanitized to `result_1` but
+    /// NOT a derived result) never inflates the counter.
+    pub fn next_result_number(&self) -> u64 {
+        self.datasets
+            .iter()
+            .filter(|d| self.results.contains(&d.reference_name))
+            .filter_map(|d| d.reference_name.strip_prefix("result_"))
+            .filter_map(|suffix| suffix.parse::<u64>().ok())
+            .max()
+            .map_or(1, |n| n + 1)
+    }
+
+    /// Whether `reference_name` is a materialized turn result (main-DB table)
+    /// vs an uploaded source (attached read-only catalog).
+    pub fn is_result(&self, reference_name: &str) -> bool {
+        self.results.contains(reference_name)
+    }
+
+    /// The verbatim SQL FROM fragment for a dataset, or `None` if it isn't
+    /// registered. A source is an attached read-only catalog, referenced as
+    /// `"<ref>".data` (ADR-0012); a derived result is a main-DB physical table,
+    /// referenced as `"<ref>"` (ADR-0024). The identifier is tool-generated
+    /// (sanitized reference name / `result_N`), so quoting it is safe.
+    pub fn sql_from(&self, reference_name: &str) -> Option<String> {
+        if !self.taken(reference_name) {
+            return None;
+        }
+        let quoted = quote_reference(reference_name);
+        if self.is_result(reference_name) {
+            Some(quoted)
+        } else {
+            Some(format!("{quoted}.data"))
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.datasets.len()
     }
@@ -196,6 +255,15 @@ impl WorkingSet {
     pub fn is_empty(&self) -> bool {
         self.datasets.is_empty()
     }
+}
+
+/// Quote a reference name as a SQL identifier (double quotes; embedded quotes
+/// doubled). Mirrors `ingest::schema::quote_ident` / `session::quote_alias`;
+/// kept local so the working set stays independent of the ingest module. The
+/// input is always a tool-generated reference name, never user SQL.
+fn quote_reference(name: &str) -> String {
+    let escaped = name.replace('"', "\"\"");
+    format!("\"{escaped}\"")
 }
 
 #[cfg(test)]
@@ -444,5 +512,89 @@ mod tests {
         ws.register(descriptor("orders"));
         assert!(ws.set_privacy("nope", DatasetPrivacy::default()).is_none());
         assert_eq!(ws.len(), 1); // unchanged
+    }
+
+    // --- Materialized turn results (issue #22) --------------------------------
+    //
+    // ADR-0022/0024: a turn result is a Dataset like any source, sharing the
+    // FROM namespace, but stored as a main-DB physical table (not an attached
+    // snapshot). Its number is session-monotonic and never reused; the active
+    // pointer tracks the most-recent source, not results.
+
+    fn result_descriptor(name: &str) -> DatasetDescriptor {
+        DatasetDescriptor {
+            reference_name: name.to_string(),
+            display_name: name.to_string(),
+            source_path: String::new(),
+            columns: vec![ColumnSchema {
+                name: "c".into(),
+                canonical_type: "INTEGER".into(),
+            }],
+            row_count: 1,
+            sample: vec![vec!["1".into()]],
+            fingerprint: name.into(),
+            rectify: RectifyProvenance::NotApplicable,
+            privacy: DatasetPrivacy::default(),
+        }
+    }
+
+    #[test]
+    fn next_result_number_starts_at_one_with_only_sources() {
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("people"));
+        assert_eq!(ws.next_result_number(), 1); // no results yet
+    }
+
+    #[test]
+    fn result_number_is_monotonic_and_one_past_max() {
+        // ADR-0022: result_N = max(existing)+1, monotonic, never reused.
+        let mut ws = WorkingSet::default();
+        ws.register_result(result_descriptor("result_1"));
+        assert_eq!(ws.next_result_number(), 2);
+        ws.register_result(result_descriptor("result_2"));
+        assert_eq!(ws.next_result_number(), 3);
+        // a gap leaves 6 as the next -- numbers are never back-filled.
+        ws.register_result(result_descriptor("result_5"));
+        assert_eq!(ws.next_result_number(), 6);
+    }
+
+    #[test]
+    fn a_source_named_like_a_result_does_not_inflate_the_counter() {
+        // A source whose sanitized name collides with the result_N pattern
+        // (e.g. result_9.csv -> result_9) is NOT a derived result and must not
+        // be scanned by next_result_number.
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("result_9"));
+        assert_eq!(ws.next_result_number(), 1);
+        assert!(!ws.is_result("result_9"));
+    }
+
+    #[test]
+    fn register_result_does_not_steal_active_from_source() {
+        // Active tracks the most-recently-uploaded source (ADR-0022); a derived
+        // result must not move active (resolution across results is #27).
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("people"));
+        assert_eq!(ws.active().unwrap().reference_name, "people");
+        ws.register_result(result_descriptor("result_1"));
+        assert_eq!(ws.active().unwrap().reference_name, "people");
+    }
+
+    #[test]
+    fn sql_from_picks_catalog_form_for_source_and_table_form_for_result() {
+        // A source FROM is "<ref>".data (attached read-only catalog); a result
+        // FROM is "<ref>" (main-DB physical table). Same namespace, distinct
+        // storage forms.
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor_with("people", "People"));
+        assert_eq!(ws.sql_from("people").as_deref(), Some(r#""people".data"#));
+        ws.register_result(result_descriptor("result_1"));
+        assert_eq!(ws.sql_from("result_1").as_deref(), Some(r#""result_1""#));
+    }
+
+    #[test]
+    fn sql_from_returns_none_for_unknown_reference() {
+        let ws = WorkingSet::default();
+        assert!(ws.sql_from("nope").is_none());
     }
 }

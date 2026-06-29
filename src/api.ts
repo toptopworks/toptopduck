@@ -1,12 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { DatasetDescriptor, DatasetPrivacy, LoadOutcome, SheetGuidance } from "./types";
+import type {
+  DatasetDescriptor,
+  DatasetPrivacy,
+  LoadOutcome,
+  RowPage,
+  SheetGuidance,
+  TurnOutcome,
+} from "./types";
 
 export async function ingestFile(path: string): Promise<LoadOutcome> {
   return invoke<LoadOutcome>("ingest_file", { path });
 }
 
 // Re-ingest an Excel workbook with the user's guided rectify choices
-// (ADR-0015/0042), after a `NeedsGuidance` outcome.
+// (ADR-0015/0042), after a NeedsGuidance outcome.
 export async function ingestFileGuided(
   path: string,
   guidance: SheetGuidance[],
@@ -46,13 +53,40 @@ export async function replaceSource(
 
 // Set a dataset's privacy controls (ADR-0011, issue #9 slice 5): per-dataset
 // sample switch + per-column type-only marking. In-memory config swap on the
-// descriptor (no copy-in -- fast, non-blocking on the Rust side). The config
-// persists with the dataset; the (future, PRD #1) window assembler reads it to
-// prune the LLM payload. Rejects an unknown reference name with an error string
-// (no typed error crosses IPC).
+// descriptor (no copy-in). Rejects an unknown reference name with an error
+// string (no typed error crosses IPC).
 export async function setDatasetPrivacy(
   referenceName: string,
   privacy: DatasetPrivacy,
 ): Promise<DatasetDescriptor> {
   return invoke<DatasetDescriptor>("set_dataset_privacy", { referenceName, privacy });
+}
+
+// Ask one question (PRD #1, issue #22): the orchestrator gets one SQL from the
+// provider, runs it on the session DuckDB, and materializes result_N. Runs off
+// the UI thread (AC8). Failures cross IPC as a plain error string; the typed
+// outcome classification + retry budget arrive in #23.
+export async function askQuestion(question: string): Promise<TurnOutcome> {
+  return invoke<TurnOutcome>("ask", { question });
+}
+
+// Read one page of a dataset's rows (ADR-0024 windowed display). Bounded
+// LIMIT/OFFSET, run off the UI thread like ask (AC8). Works for sources and
+// materialized results alike. Rejects an unknown reference with an error string.
+export async function readRows(
+  referenceName: string,
+  offset: number,
+  limit: number,
+): Promise<RowPage> {
+  return invoke<RowPage>("read_rows", { referenceName, offset, limit });
+}
+
+// Format an unknown error (a Tauri IPC reject, a JS Error, or a structured
+// object) into a readable string. The Rust side rejects with a plain string
+// today; this also narrows a future structured error or a JS Error instead of
+// rendering "[object Object]".
+export function fmtError(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  return JSON.stringify(e);
 }

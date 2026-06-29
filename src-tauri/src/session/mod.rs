@@ -13,22 +13,35 @@ use duckdb::Connection;
 use tempfile::TempDir;
 
 use crate::ingest;
+use crate::ingest::schema::quote_ident;
 use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
-    RectifyProvenance, RenameError, SheetGuidance, SheetRectify,
+    RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, TurnError, TurnOutcome,
 };
+use crate::provider::{DatasetRef, Provider, ProviderRequest, UnwiredProvider};
+use crate::session::snapshot::derive_table;
 use crate::workingset::WorkingSet;
 
 /// Raw rows surfaced per sheet in the guided-load preview -- enough to spot the
 /// header row and any separator/sub-header/footer rows to skip (ADR-0015).
 const GUIDANCE_PREVIEW_ROWS: usize = 12;
 
+/// Upper bound on a single read_rows page (ADR-0005/0024 display cap). A larger
+/// requested limit is clamped so a malformed/hostile caller can't pull the whole
+/// table into memory; the physical table still holds the full result.
+const MAX_READ_ROWS: u64 = 10_000;
+
 pub struct Session {
     conn: Connection,
     working_set: WorkingSet,
     _temp_dir: TempDir, // held to keep its dir alive; cleared on drop (ADR-0029)
     temp_path: PathBuf,
+    /// The LLM provider behind the turn orchestrator (ADR-0007). Defaults to
+    /// [`UnwiredProvider`] (real Claude wires in #29); tests inject a scripted
+    /// fake via [`Self::with_provider`]. `Send` so the session is shareable
+    /// behind an `Arc<Mutex>` and turns can run on a blocking thread.
+    provider: Box<dyn Provider>,
 }
 
 impl Session {
@@ -43,7 +56,17 @@ impl Session {
             working_set: WorkingSet::default(),
             _temp_dir: temp_dir,
             temp_path,
+            provider: Box::new(UnwiredProvider),
         })
+    }
+
+    /// Build a session with an explicit provider (tests inject a scripted fake;
+    /// the real LLM client wires in #29). The default [`Self::new`] uses
+    /// [`UnwiredProvider`] -- every turn is refused until a provider is set.
+    pub fn with_provider(provider: Box<dyn Provider>) -> anyhow::Result<Self> {
+        let mut session = Self::new()?;
+        session.provider = provider;
+        Ok(session)
     }
 
     /// Ingest a file. Transactional: on any failure the working set is unchanged
@@ -96,7 +119,7 @@ impl Session {
         let attach_path = snap.file_path.to_string_lossy();
         let attach_sql = format!(
             "ATTACH '{attach_path}' AS {} (READ_ONLY);",
-            quote_alias(&reference_name),
+            quote_ident(&reference_name),
         );
         if let Err(e) = self.conn.execute_batch(&attach_sql) {
             let _ = std::fs::remove_file(&snap.file_path);
@@ -327,7 +350,7 @@ impl Session {
         let attach_path = snap.file_path.to_string_lossy();
         let attach_sql = format!(
             "ATTACH '{attach_path}' AS {} (READ_ONLY);",
-            quote_alias(reference_name)
+            quote_ident(reference_name)
         );
         if let Err(e) = self.conn.execute_batch(&attach_sql) {
             let _ = fs::remove_file(&snap.file_path);
@@ -422,7 +445,7 @@ impl Session {
         for reference_name in attached.iter().rev() {
             if let Err(e) = self
                 .conn
-                .execute_batch(&format!("DETACH {};", quote_alias(reference_name)))
+                .execute_batch(&format!("DETACH {};", quote_ident(reference_name)))
             {
                 log::warn!(
                     target: "toptopduck::session",
@@ -563,7 +586,7 @@ impl Session {
         let swap_path = new_snap.file_path.to_string_lossy().into_owned();
         if let Err(e) = self.conn.execute_batch(&format!(
             "ATTACH '{swap_path}' AS {} (READ_ONLY);",
-            quote_alias(&swap_alias),
+            quote_ident(&swap_alias),
         )) {
             log::warn!(
                 target: "toptopduck::session",
@@ -583,7 +606,7 @@ impl Session {
         // removed, though the held handle may keep it until session drop).
         if let Err(e) = self
             .conn
-            .execute_batch(&format!("DETACH {};", quote_alias(&swap_alias)))
+            .execute_batch(&format!("DETACH {};", quote_ident(&swap_alias)))
         {
             log::warn!(
                 target: "toptopduck::session",
@@ -602,7 +625,7 @@ impl Session {
         // untouched.
         if let Err(e) = self
             .conn
-            .execute_batch(&format!("DETACH {};", quote_alias(reference_name)))
+            .execute_batch(&format!("DETACH {};", quote_ident(reference_name)))
         {
             log::warn!(
                 target: "toptopduck::session",
@@ -648,7 +671,7 @@ impl Session {
         // skipping a swap-then-cleanup round-trip (ADR-0042).
         if let Err(e) = self.conn.execute_batch(&format!(
             "ATTACH '{attach_path}' AS {} (READ_ONLY);",
-            quote_alias(reference_name)
+            quote_ident(reference_name)
         )) {
             return LoadOutcome::Error(LoadError::Other {
                 detail: format!("无法挂载新快照（{e}）"),
@@ -676,6 +699,163 @@ impl Session {
         LoadOutcome::Loaded(updated)
     }
 
+    /// Run one turn (PRD #1, slice #22): assemble a schema-aware request from
+    /// the working set, ask the provider for one SQL (ADR-0009), execute it on
+    /// the session DuckDB, and materialize the rows as `result_N` (ADR-0003/
+    /// 0024). The result is registered in the working set (a Dataset like any
+    /// source) and returned. Failures (provider not wired / SQL error) surface
+    /// as [`TurnError`] -- the failed-turn retry budget is #23.
+    pub fn ask(&mut self, question: &str) -> Result<TurnOutcome, TurnError> {
+        let request = self.build_provider_request(question);
+        let reply = self
+            .provider
+            .generate(&request)
+            .map_err(|e| TurnError::Provider(e.to_string()))?;
+
+        // Materialize the SQL as result_N (max+1, never reused -- ADR-0022).
+        // The result name is tool-generated. The SQL is provider-supplied but
+        // NOT yet validated -- engine guardrails (read-only, resource caps) are
+        // #25 and must land before the real LLM wires in #29; until then the only
+        // live provider is UnwiredProvider, which never returns SQL.
+        let n = self.working_set.next_result_number();
+        let result_name = format!("result_{n}");
+        let create_sql = format!(
+            "CREATE TABLE {} AS {}",
+            quote_ident(&result_name),
+            reply.sql
+        );
+        if let Err(e) = self.conn.execute_batch(&create_sql) {
+            return Err(TurnError::Execute(e.to_string()));
+        }
+
+        // Derive the result's shape from the just-created table -- the same
+        // derivation a source snapshot uses (DRY). On a shape-derivation failure
+        // the just-created result_N is dropped first: an orphan table left
+        // unregistered would make the next turn's next_result_number reuse N and
+        // clash on CREATE, wedging every later turn (ADR-0022 never-reused). The
+        // DROP is best-effort but its failure is folded into the returned error
+        // -- a silent drop failure would leave exactly the orphan the DROP exists
+        // to remove, wedging the session with no signal (M1 regression).
+        let shape = match derive_table(&self.conn, &result_name, &self.temp_path, &result_name) {
+            Ok(shape) => shape,
+            Err(e) => {
+                let drop_sql = format!("DROP TABLE {}", quote_ident(&result_name));
+                let detail = match self.conn.execute_batch(&drop_sql) {
+                    Ok(()) => e.to_string(),
+                    // The cleanup DROP itself failed: the orphan result_N likely
+                    // lingers and will clash on a later CREATE -- surface it so a
+                    // wedged session is observable, not silently masked.
+                    Err(drop_err) => format!(
+                        "{e}; cleanup DROP of {result_name} also failed: {drop_err} (orphan table may wedge later turns)"
+                    ),
+                };
+                return Err(TurnError::Execute(detail));
+            }
+        };
+        let descriptor = DatasetDescriptor {
+            reference_name: result_name.clone(),
+            display_name: result_name,
+            source_path: String::new(), // derived -- no source file (ADR-0004)
+            columns: shape.columns,
+            row_count: shape.row_count,
+            sample: shape.sample,
+            fingerprint: shape.fingerprint,
+            rectify: RectifyProvenance::NotApplicable,
+            privacy: DatasetPrivacy::default(),
+        };
+        self.working_set.register_result(descriptor.clone());
+        Ok(TurnOutcome::Materialized {
+            dataset: descriptor,
+            assumption: reply.assumption,
+        })
+    }
+
+    /// Assemble the provider request: the question, the working set as dataset
+    /// refs (each with its verbatim FROM fragment), and the active source. The
+    /// bare schema today; window assembly (privacy pruning, history) is #24.
+    fn build_provider_request(&self, question: &str) -> ProviderRequest {
+        let datasets = self
+            .working_set
+            .list()
+            .iter()
+            .map(|d| DatasetRef {
+                reference_name: d.reference_name.clone(),
+                sql_ref: self
+                    .working_set
+                    .sql_from(&d.reference_name)
+                    .expect("working set list() entries are always registered"),
+                columns: d.columns.clone(),
+                row_count: d.row_count,
+            })
+            .collect();
+        ProviderRequest {
+            question: question.to_string(),
+            datasets,
+            active: self.working_set.active().map(|d| d.reference_name.clone()),
+        }
+    }
+
+    /// Read one page of a dataset's rows (ADR-0024 windowed display). Cells are
+    /// CAST to VARCHAR (NULL -> "") for uniform frontend rendering. `total` is
+    /// the full row count, returned alongside the page so a truncated view never
+    /// masquerades as complete (ADR-0030). Sources read `"<ref>".data`; results
+    /// read `"<ref>"`. The FROM fragment, identifiers, and numeric LIMIT/OFFSET
+    /// are all tool-generated, so the interpolation is safe.
+    pub fn read_rows(
+        &self,
+        reference_name: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<RowPage, TurnError> {
+        // Clamp the page size to the display cap (ADR-0005/0024) so a malformed
+        // or hostile caller can't pull the whole table into memory.
+        let limit = limit.min(MAX_READ_ROWS);
+        let descriptor = self
+            .working_set
+            .get(reference_name)
+            .ok_or_else(|| TurnError::UnknownDataset(reference_name.to_string()))?;
+        let from = self
+            .working_set
+            .sql_from(reference_name)
+            .ok_or_else(|| TurnError::UnknownDataset(reference_name.to_string()))?;
+        let columns = descriptor.columns.clone();
+        let selects: Vec<String> = columns
+            .iter()
+            .map(|c| format!("CAST({} AS VARCHAR)", quote_ident(&c.name)))
+            .collect();
+        let sql = format!(
+            "SELECT {} FROM {} LIMIT {} OFFSET {}",
+            selects.join(", "),
+            from,
+            limit,
+            offset
+        );
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| TurnError::Execute(e.to_string()))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| TurnError::Execute(e.to_string()))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| TurnError::Execute(e.to_string()))? {
+            let mut cells = Vec::with_capacity(columns.len());
+            for i in 0..columns.len() {
+                let v: Option<String> =
+                    row.get(i).map_err(|e| TurnError::Execute(e.to_string()))?;
+                cells.push(v.unwrap_or_default());
+            }
+            out.push(cells);
+        }
+        Ok(RowPage {
+            columns,
+            rows: out,
+            total: descriptor.row_count,
+            offset,
+            limit,
+        })
+    }
+
     /// Run arbitrary SQL on the session connection. Exposed for the read-only
     /// enforcement tests (AC5): writes against a source snapshot are rejected by
     /// the engine. Not part of the public ingest contract.
@@ -690,14 +870,62 @@ impl Session {
     /// query loop, PRD #1).
     pub fn snapshot_row_count(&self, reference_name: &str) -> Result<i64, duckdb::Error> {
         self.conn.query_row(
-            &format!("SELECT COUNT(*) FROM {}.data", quote_alias(reference_name)),
+            &format!("SELECT COUNT(*) FROM {}.data", quote_ident(reference_name)),
             [],
             |r| r.get(0),
         )
     }
 }
 
-fn quote_alias(name: &str) -> String {
-    let escaped = name.replace('"', "\"\"");
-    format!("\"{escaped}\"")
+#[cfg(test)]
+mod tests {
+    use super::Session;
+    use crate::model::TurnError;
+    use crate::provider::fake::FakeProvider;
+    use crate::provider::ProviderReply;
+    use tempfile::NamedTempFile;
+
+    // M1 regression: a turn whose shape derivation fails must roll back the
+    // already-created result_N. Here the derivation's fingerprint dump cannot be
+    // written -- temp_path points at a file, so its "child" dump path has a file
+    // as parent and the COPY ... TO fails, but only AFTER CREATE TABLE result_1
+    // has succeeded. Without the DROP rollback the orphan table lingers
+    // unregistered, next_result_number reuses N, and every later turn clashes
+    // on CREATE -- wedging the whole session (ADR-0022 never-reused).
+    #[test]
+    fn ask_drops_the_result_table_when_shape_derivation_fails() {
+        let provider = FakeProvider::new().scripted(
+            "建表",
+            ProviderReply {
+                sql: "SELECT 1 AS n".into(),
+                viz: None,
+                assumption: None,
+            },
+        );
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        // Derivation work dir whose parent is a file -> the fingerprint
+        // COPY ... TO '<path>/result_1.fingerprint.csv' fails after CREATE.
+        let file = NamedTempFile::new().expect("temp file");
+        session.temp_path = file.path().to_path_buf();
+
+        let err = session.ask("建表").unwrap_err();
+        assert!(
+            matches!(err, TurnError::Execute(_)),
+            "a shape-derivation failure surfaces as Execute, got {err:?}"
+        );
+
+        // result_1 was rolled back: it is no longer a table in the session DB.
+        let remaining: i64 = session
+            .conn
+            .query_row(
+                "SELECT count(*) FROM information_schema.tables WHERE table_name = 'result_1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("information_schema probe");
+        assert_eq!(
+            remaining, 0,
+            "result_1 must be dropped after the derive failure (M1)"
+        );
+    }
 }
