@@ -273,3 +273,68 @@ impl std::fmt::Display for RenameError {
     }
 }
 impl std::error::Error for RenameError {}
+
+// --- Turn / result materialization (issue #22, query loop slice 1) -----------
+//
+// The narrowest ask -> result loop (PRD #1): a question goes in, the
+// orchestrator runs provider-supplied SQL on the session DuckDB, and the rows
+// land as a materialized result_N physical table (ADR-0003/0024). Slice #22
+// ships exactly one outcome variant and surfaces failures as an error string;
+// the full outcome classification + single retry budget arrives in #23.
+
+/// One turn outcome. Slice #22 ships exactly one variant -- a materialized
+/// result; the full classification (refuse / clarify / fail / cancel) arrives
+/// in #23. The enum exists from the start so later slices add variants without
+/// breaking the IPC contract or the frontend match.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data")]
+pub enum TurnOutcome {
+    /// The turn produced one SQL, executed it, and materialized result_N.
+    /// Carries the result descriptor (a Dataset like any source, ADR-0003) plus
+    /// the provider optional assumption note (ADR-0009), surfaced as a side
+    /// note the user can correct.
+    Materialized {
+        dataset: DatasetDescriptor,
+        #[serde(default)]
+        assumption: Option<String>,
+    },
+}
+
+/// Why a turn did not produce a Materialized outcome. Slice #22 surfaces these
+/// as an error string across IPC; #23 absorbs them into the TurnOutcome enum
+/// (a failed turn with a single retry budget) per ADR-0028.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TurnError {
+    /// The provider refused or could not answer (not wired, network, quota, or
+    /// a malformed output contract). Carries the provider error message.
+    Provider(String),
+    /// The generated SQL failed to execute (syntax / reference / type error).
+    /// ADR-0009 single-query fail -> refeed retry arrives in #23.
+    Execute(String),
+    /// A row read targeted a reference name that is not in the working set.
+    UnknownDataset(String),
+}
+
+impl std::fmt::Display for TurnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::Provider(detail) => write!(f, "{detail}"),
+            Self::Execute(detail) => write!(f, "执行查询失败：{detail}"),
+            Self::UnknownDataset(name) => write!(f, "找不到引用名为「{name}」的数据集"),
+        }
+    }
+}
+impl std::error::Error for TurnError {}
+
+/// One page of a dataset rows (ADR-0024 windowed display). Cells are CAST to
+/// VARCHAR (NULL renders as the empty string) so the frontend renders uniform
+/// strings. `total` is the full row count -- the frontend shows it alongside
+/// the page so a truncated view never masquerades as complete (ADR-0030).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RowPage {
+    pub columns: Vec<ColumnSchema>,
+    pub rows: Vec<Vec<String>>,
+    pub total: u64,
+    pub offset: u64,
+    pub limit: u64,
+}

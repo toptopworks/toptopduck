@@ -16,8 +16,10 @@ use crate::ingest;
 use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
-    RectifyProvenance, RenameError, SheetGuidance, SheetRectify,
+    RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, TurnError, TurnOutcome,
 };
+use crate::provider::{DatasetRef, Provider, ProviderRequest, UnwiredProvider};
+use crate::session::snapshot::derive_table;
 use crate::workingset::WorkingSet;
 
 /// Raw rows surfaced per sheet in the guided-load preview -- enough to spot the
@@ -29,6 +31,11 @@ pub struct Session {
     working_set: WorkingSet,
     _temp_dir: TempDir, // held to keep its dir alive; cleared on drop (ADR-0029)
     temp_path: PathBuf,
+    /// The LLM provider behind the turn orchestrator (ADR-0007). Defaults to
+    /// [`UnwiredProvider`] (real Claude wires in #29); tests inject a scripted
+    /// fake via [`Self::with_provider`]. `Send` so the session is shareable
+    /// behind an `Arc<Mutex>` and turns can run on a blocking thread.
+    provider: Box<dyn Provider>,
 }
 
 impl Session {
@@ -43,7 +50,17 @@ impl Session {
             working_set: WorkingSet::default(),
             _temp_dir: temp_dir,
             temp_path,
+            provider: Box::new(UnwiredProvider),
         })
+    }
+
+    /// Build a session with an explicit provider (tests inject a scripted fake;
+    /// the real LLM client wires in #29). The default [`Self::new`] uses
+    /// [`UnwiredProvider`] -- every turn is refused until a provider is set.
+    pub fn with_provider(provider: Box<dyn Provider>) -> anyhow::Result<Self> {
+        let mut session = Self::new()?;
+        session.provider = provider;
+        Ok(session)
     }
 
     /// Ingest a file. Transactional: on any failure the working set is unchanged
@@ -674,6 +691,140 @@ impl Session {
         };
         self.working_set.replace(updated.clone());
         LoadOutcome::Loaded(updated)
+    }
+
+    /// Run one turn (PRD #1, slice #22): assemble a schema-aware request from
+    /// the working set, ask the provider for one SQL (ADR-0009), execute it on
+    /// the session DuckDB, and materialize the rows as `result_N` (ADR-0003/
+    /// 0024). The result is registered in the working set (a Dataset like any
+    /// source) and returned. Failures (provider not wired / SQL error) surface
+    /// as [`TurnError`] -- the failed-turn retry budget is #23.
+    pub fn ask(&mut self, question: &str) -> Result<TurnOutcome, TurnError> {
+        let request = self.build_provider_request(question);
+        let reply = self
+            .provider
+            .generate(&request)
+            .map_err(|e| TurnError::Provider(e.to_string()))?;
+
+        // Materialize the SQL as result_N (max+1, never reused -- ADR-0022).
+        // The result name is tool-generated, and the SQL is provider-supplied
+        // (trusted contract, ADR-0009); engine guardrails on the SQL itself
+        // (read-only, resource caps) arrive in #25.
+        let n = self.working_set.next_result_number();
+        let result_name = format!("result_{n}");
+        let create_sql = format!(
+            "CREATE TABLE {} AS {}",
+            quote_alias(&result_name),
+            reply.sql
+        );
+        if let Err(e) = self.conn.execute_batch(&create_sql) {
+            return Err(TurnError::Execute(e.to_string()));
+        }
+
+        // Derive the result's shape from the just-created table -- the same
+        // derivation a source snapshot uses (DRY). A shape-derivation failure
+        // here is an engine error surfaced as Execute (the table was created).
+        let shape = derive_table(&self.conn, &result_name, &self.temp_path, &result_name)
+            .map_err(|e| TurnError::Execute(e.to_string()))?;
+        let descriptor = DatasetDescriptor {
+            reference_name: result_name.clone(),
+            display_name: result_name,
+            source_path: String::new(), // derived -- no source file (ADR-0004)
+            columns: shape.columns,
+            row_count: shape.row_count,
+            sample: shape.sample,
+            fingerprint: shape.fingerprint,
+            rectify: RectifyProvenance::NotApplicable,
+            privacy: DatasetPrivacy::default(),
+        };
+        self.working_set.register_result(descriptor.clone());
+        Ok(TurnOutcome::Materialized {
+            dataset: descriptor,
+            assumption: reply.assumption,
+        })
+    }
+
+    /// Assemble the provider request: the question, the working set as dataset
+    /// refs (each with its verbatim FROM fragment), and the active source. The
+    /// bare schema today; window assembly (privacy pruning, history) is #24.
+    fn build_provider_request(&self, question: &str) -> ProviderRequest {
+        let datasets = self
+            .working_set
+            .list()
+            .iter()
+            .map(|d| DatasetRef {
+                reference_name: d.reference_name.clone(),
+                sql_ref: self
+                    .working_set
+                    .sql_from(&d.reference_name)
+                    .unwrap_or_else(|| quote_alias(&d.reference_name)),
+                columns: d.columns.clone(),
+                row_count: d.row_count,
+            })
+            .collect();
+        ProviderRequest {
+            question: question.to_string(),
+            datasets,
+            active: self.working_set.active().map(|d| d.reference_name.clone()),
+        }
+    }
+
+    /// Read one page of a dataset's rows (ADR-0024 windowed display). Cells are
+    /// CAST to VARCHAR (NULL -> "") for uniform frontend rendering. `total` is
+    /// the full row count, returned alongside the page so a truncated view never
+    /// masquerades as complete (ADR-0030). Sources read `"<ref>".data`; results
+    /// read `"<ref>"`. The FROM fragment, identifiers, and numeric LIMIT/OFFSET
+    /// are all tool-generated, so the interpolation is safe.
+    pub fn read_rows(
+        &self,
+        reference_name: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<RowPage, TurnError> {
+        let descriptor = self
+            .working_set
+            .get(reference_name)
+            .ok_or_else(|| TurnError::UnknownDataset(reference_name.to_string()))?;
+        let from = self
+            .working_set
+            .sql_from(reference_name)
+            .ok_or_else(|| TurnError::UnknownDataset(reference_name.to_string()))?;
+        let columns = descriptor.columns.clone();
+        let selects: Vec<String> = columns
+            .iter()
+            .map(|c| format!("CAST({} AS VARCHAR)", quote_alias(&c.name)))
+            .collect();
+        let sql = format!(
+            "SELECT {} FROM {} LIMIT {} OFFSET {}",
+            selects.join(", "),
+            from,
+            limit,
+            offset
+        );
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| TurnError::Execute(e.to_string()))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| TurnError::Execute(e.to_string()))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| TurnError::Execute(e.to_string()))? {
+            let mut cells = Vec::with_capacity(columns.len());
+            for i in 0..columns.len() {
+                let v: Option<String> =
+                    row.get(i).map_err(|e| TurnError::Execute(e.to_string()))?;
+                cells.push(v.unwrap_or_default());
+            }
+            out.push(cells);
+        }
+        Ok(RowPage {
+            columns,
+            rows: out,
+            total: descriptor.row_count,
+            offset,
+            limit,
+        })
     }
 
     /// Run arbitrary SQL on the session connection. Exposed for the read-only
