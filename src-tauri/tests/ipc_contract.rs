@@ -203,9 +203,10 @@ fn turn_outcome_materialized_carries_descriptor_and_assumption() {
 fn turn_error_display_strings_are_the_ipc_contract() {
     // TurnError crosses IPC only as its Display string (commands.rs maps it with
     // to_string); the frontend string-matches these. Pin the exact wording so a
-    // change is caught here, not as a silent UI regression.
+    // change is caught here, not as a silent UI regression. Turn failures are no
+    // longer TurnError (they are TurnOutcome::Failed, ADR-0028); this type now
+    // carries only the read_rows errors (UnknownDataset, Execute).
     use toptopduck_lib::TurnError;
-    assert_eq!(TurnError::Provider("detail".into()).to_string(), "detail");
     assert_eq!(
         TurnError::Execute("detail".into()).to_string(),
         "执行查询失败：detail",
@@ -213,5 +214,64 @@ fn turn_error_display_strings_are_the_ipc_contract() {
     assert_eq!(
         TurnError::UnknownDataset("result_1".into()).to_string(),
         "找不到引用名为「result_1」的数据集",
+    );
+}
+
+#[test]
+fn text_kind_serializes_as_a_bare_variant_string() {
+    // TextKind is a plain (untagged) enum, so each variant crosses IPC as its
+    // bare name string -- the shape src/types.ts mirrors for the textual
+    // outcome's text_kind field.
+    use toptopduck_lib::TextKind;
+    assert_wire(&TextKind::Clarify, r#""Clarify""#);
+    assert_wire(&TextKind::Refuse, r#""Refuse""#);
+}
+
+#[test]
+fn turn_outcome_textual_carries_kind_body_and_assumption() {
+    // Outcome B (ADR-0017/0018): the textual variant nests text_kind (a bare
+    // string), body, and assumption under data. assumption defaults to null.
+    use toptopduck_lib::{TextKind, TurnOutcome};
+    assert_wire(
+        &TurnOutcome::Textual {
+            text_kind: TextKind::Refuse,
+            body: "out of scope".into(),
+            assumption: None,
+        },
+        r#"{"kind":"Textual","data":{"text_kind":"Refuse","body":"out of scope","assumption":null}}"#,
+    );
+}
+
+#[test]
+fn turn_outcome_failed_carries_reason_under_data() {
+    // Outcome C (ADR-0028): a failed turn nests its honest reason under data.
+    use toptopduck_lib::TurnOutcome;
+    assert_wire(
+        &TurnOutcome::Failed {
+            reason: "bad column".into(),
+        },
+        r#"{"kind":"Failed","data":{"reason":"bad column"}}"#,
+    );
+}
+
+#[test]
+fn turn_outcome_cancelled_is_a_unit_variant_with_no_data() {
+    // Outcome D (ADR-0028, placeholder until #28): a unit variant -- `kind`
+    // only, no `data` key -- like the other unit variants in the contract.
+    use toptopduck_lib::TurnOutcome;
+    assert_wire(&TurnOutcome::Cancelled, r#"{"kind":"Cancelled"}"#);
+}
+
+#[test]
+fn turn_record_pairs_question_and_outcome() {
+    // A thread entry (ADR-0028/0039): a flat { question, outcome } object where
+    // outcome keeps its own adjacent tag. This is the conversation() wire shape.
+    use toptopduck_lib::{TurnOutcome, TurnRecord};
+    assert_wire(
+        &TurnRecord {
+            question: "总行数？".into(),
+            outcome: TurnOutcome::Failed { reason: "x".into() },
+        },
+        r#"{"question":"总行数？","outcome":{"kind":"Failed","data":{"reason":"x"}}}"#,
     );
 }

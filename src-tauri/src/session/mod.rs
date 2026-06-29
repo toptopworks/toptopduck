@@ -18,8 +18,11 @@ use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
     RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, TurnError, TurnOutcome,
+    TurnRecord,
 };
-use crate::provider::{DatasetRef, Provider, ProviderRequest, UnwiredProvider};
+use crate::provider::{
+    DatasetRef, Provider, ProviderError, ProviderReply, ProviderRequest, UnwiredProvider,
+};
 use crate::session::snapshot::derive_table;
 use crate::workingset::WorkingSet;
 
@@ -32,6 +35,15 @@ const GUIDANCE_PREVIEW_ROWS: usize = 12;
 /// table into memory; the physical table still holds the full result.
 const MAX_READ_ROWS: u64 = 10_000;
 
+/// Single retry budget per turn (ADR-0028): malformed contract violations and
+/// schema/runtime execution errors share one budget. The initial attempt plus
+/// this many retries (default 2 -> 3 total attempts); exhaustion yields a
+/// failed outcome with an honest reason. Resource caps / timeouts do NOT enter
+/// the loop (the same SQL would hit the same wall) -- those become the cancel
+/// outcome in #28. The retry is invisible to the user: one question = one
+/// thread entry = one outcome.
+const TURN_RETRY_BUDGET: u32 = 2;
+
 pub struct Session {
     conn: Connection,
     working_set: WorkingSet,
@@ -42,6 +54,10 @@ pub struct Session {
     /// fake via [`Self::with_provider`]. `Send` so the session is shareable
     /// behind an `Arc<Mutex>` and turns can run on a blocking thread.
     provider: Box<dyn Provider>,
+    /// The conversation thread (ADR-0028/0039): every turn, in order, each
+    /// labeled by its verbatim question. The source of truth the frontend
+    /// renders and the (future, #24) window assembler reads.
+    history: Vec<TurnRecord>,
 }
 
 impl Session {
@@ -57,6 +73,7 @@ impl Session {
             _temp_dir: temp_dir,
             temp_path,
             provider: Box::new(UnwiredProvider),
+            history: Vec::new(),
         })
     }
 
@@ -699,43 +716,109 @@ impl Session {
         LoadOutcome::Loaded(updated)
     }
 
-    /// Run one turn (PRD #1, slice #22): assemble a schema-aware request from
-    /// the working set, ask the provider for one SQL (ADR-0009), execute it on
-    /// the session DuckDB, and materialize the rows as `result_N` (ADR-0003/
-    /// 0024). The result is registered in the working set (a Dataset like any
-    /// source) and returned. Failures (provider not wired / SQL error) surface
-    /// as [`TurnError`] -- the failed-turn retry budget is #23.
-    pub fn ask(&mut self, question: &str) -> Result<TurnOutcome, TurnError> {
+    /// Run one turn (PRD #1): assemble a schema-aware request, ask the provider
+    /// (ADR-0009 contract: SQL or textual), and produce exactly one ADR-0028
+    /// outcome -- result / textual / failed (cancelled arrives in #28). The
+    /// single retry budget (malformed output + schema/runtime error) is consumed
+    /// invisibly; on exhaustion the turn fails honestly. Every turn is recorded
+    /// in the conversation thread (always visible, ADR-0028/0039); only a result
+    /// advances result_N. Infallible -- a question always yields one outcome.
+    pub fn ask(&mut self, question: &str) -> TurnOutcome {
         let request = self.build_provider_request(question);
-        let reply = self
-            .provider
-            .generate(&request)
-            .map_err(|e| TurnError::Provider(e.to_string()))?;
+        let mut last_failure: Option<String> = None;
+        for _attempt in 0..=TURN_RETRY_BUDGET {
+            match self.provider.generate(&request) {
+                // Textual branch (ADR-0017/0018): a valid non-result turn -- no
+                // retry, no result_N. The provider's text + assumption ride the
+                // outcome verbatim.
+                Ok(ProviderReply::Text {
+                    kind,
+                    body,
+                    assumption,
+                }) => {
+                    let outcome = TurnOutcome::Textual {
+                        text_kind: kind,
+                        body,
+                        assumption,
+                    };
+                    return self.record_turn(question, outcome);
+                }
+                // SQL branch: execute + materialize. A CREATE/derive failure
+                // consumes the budget and retries; success materializes result_N.
+                Ok(ProviderReply::Sql {
+                    sql, assumption, ..
+                }) => match self.try_materialize(&sql) {
+                    Ok(dataset) => {
+                        let outcome = TurnOutcome::Materialized {
+                            dataset,
+                            assumption,
+                        };
+                        return self.record_turn(question, outcome);
+                    }
+                    Err(detail) => last_failure = Some(format!("执行查询失败：{detail}")),
+                },
+                // NotWired is permanent (no provider configured) -- retrying
+                // cannot help, so the turn fails immediately without consuming
+                // the budget.
+                Err(ProviderError::NotWired) => {
+                    let outcome = TurnOutcome::Failed {
+                        reason: ProviderError::NotWired.to_string(),
+                    };
+                    return self.record_turn(question, outcome);
+                }
+                // A contract violation / transient call failure -- consume the
+                // budget and retry. Re-feed is implicit: the real client gets the
+                // error in #29; the scripted fake advances its queue.
+                Err(ProviderError::Unavailable(detail)) => {
+                    last_failure = Some(ProviderError::Unavailable(detail).to_string());
+                }
+            }
+        }
+        // Budget exhausted: surface the last failure honestly as a failed turn.
+        let outcome = TurnOutcome::Failed {
+            reason: last_failure.unwrap_or_else(|| "未知错误".to_string()),
+        };
+        self.record_turn(question, outcome)
+    }
 
-        // Materialize the SQL as result_N (max+1, never reused -- ADR-0022).
-        // The result name is tool-generated. The SQL is provider-supplied but
-        // NOT yet validated -- engine guardrails (read-only, resource caps) are
-        // #25 and must land before the real LLM wires in #29; until then the only
-        // live provider is UnwiredProvider, which never returns SQL.
+    /// Append a turn to the conversation thread and return its outcome. Every
+    /// outcome kind is recorded (ADR-0028 always-visible); the caller has
+    /// already decided the outcome, so this just persists + returns it.
+    fn record_turn(&mut self, question: &str, outcome: TurnOutcome) -> TurnOutcome {
+        self.history.push(TurnRecord {
+            question: question.to_string(),
+            outcome: outcome.clone(),
+        });
+        outcome
+    }
+
+    /// Execute one provider SQL and materialize it as result_N (ADR-0003/0024),
+    /// deriving + registering the result. Returns `Err` with an honest detail on
+    /// any failure (CREATE rejected, or shape derivation failed) -- the caller's
+    /// retry loop decides whether to re-attempt.
+    ///
+    /// On a shape-derivation failure the just-created result_N is rolled back
+    /// first: an orphan table left unregistered would make the next attempt's
+    /// `next_result_number` reuse N and clash on CREATE, wedging every later
+    /// turn (ADR-0022 never-reused). The DROP is best-effort but its own failure
+    /// is folded into the detail so a wedged session is observable, not
+    /// silently masked (M1 regression). The result name is tool-generated; the
+    /// SQL is provider-supplied but NOT yet validated -- engine guardrails
+    /// (read-only, resource caps) are #25 and must land before the real LLM
+    /// wires in #29; until then the only live provider returning SQL is the
+    /// scripted test fake.
+    fn try_materialize(&mut self, sql: &str) -> Result<DatasetDescriptor, String> {
+        // result_N is max+1, never reused (ADR-0022). Re-derived each attempt:
+        // a failed attempt registers nothing, so N is stable across retries.
         let n = self.working_set.next_result_number();
         let result_name = format!("result_{n}");
-        let create_sql = format!(
-            "CREATE TABLE {} AS {}",
-            quote_ident(&result_name),
-            reply.sql
-        );
+        let create_sql = format!("CREATE TABLE {} AS {}", quote_ident(&result_name), sql);
         if let Err(e) = self.conn.execute_batch(&create_sql) {
-            return Err(TurnError::Execute(e.to_string()));
+            return Err(e.to_string());
         }
 
         // Derive the result's shape from the just-created table -- the same
-        // derivation a source snapshot uses (DRY). On a shape-derivation failure
-        // the just-created result_N is dropped first: an orphan table left
-        // unregistered would make the next turn's next_result_number reuse N and
-        // clash on CREATE, wedging every later turn (ADR-0022 never-reused). The
-        // DROP is best-effort but its failure is folded into the returned error
-        // -- a silent drop failure would leave exactly the orphan the DROP exists
-        // to remove, wedging the session with no signal (M1 regression).
+        // derivation a source snapshot uses (DRY).
         let shape = match derive_table(&self.conn, &result_name, &self.temp_path, &result_name) {
             Ok(shape) => shape,
             Err(e) => {
@@ -749,7 +832,7 @@ impl Session {
                         "{e}; cleanup DROP of {result_name} also failed: {drop_err} (orphan table may wedge later turns)"
                     ),
                 };
-                return Err(TurnError::Execute(detail));
+                return Err(detail);
             }
         };
         let descriptor = DatasetDescriptor {
@@ -764,10 +847,14 @@ impl Session {
             privacy: DatasetPrivacy::default(),
         };
         self.working_set.register_result(descriptor.clone());
-        Ok(TurnOutcome::Materialized {
-            dataset: descriptor,
-            assumption: reply.assumption,
-        })
+        Ok(descriptor)
+    }
+
+    /// The conversation thread (ADR-0028/0039): every turn, in order, each
+    /// labeled by its verbatim question. The thread is the source of truth the
+    /// frontend renders and the (future, #24) window assembler reads.
+    pub fn conversation(&self) -> &[TurnRecord] {
+        &self.history
     }
 
     /// Assemble the provider request: the question, the working set as dataset
@@ -880,7 +967,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::Session;
-    use crate::model::TurnError;
+    use crate::model::TurnOutcome;
     use crate::provider::fake::FakeProvider;
     use crate::provider::ProviderReply;
     use tempfile::NamedTempFile;
@@ -890,13 +977,16 @@ mod tests {
     // written -- temp_path points at a file, so its "child" dump path has a file
     // as parent and the COPY ... TO fails, but only AFTER CREATE TABLE result_1
     // has succeeded. Without the DROP rollback the orphan table lingers
-    // unregistered, next_result_number reuses N, and every later turn clashes
-    // on CREATE -- wedging the whole session (ADR-0022 never-reused).
+    // unregistered; within this turn's retry loop the next attempt's
+    // next_result_number reuses N and clashes on CREATE, and across later turns
+    // every ask wedges on the same clash (ADR-0022 never-reused). The derive
+    // failure is retried up to the budget (ADR-0028 single loop), then the turn
+    // fails honestly -- but every failed attempt must still roll back result_1.
     #[test]
     fn ask_drops_the_result_table_when_shape_derivation_fails() {
         let provider = FakeProvider::new().scripted(
             "建表",
-            ProviderReply {
+            ProviderReply::Sql {
                 sql: "SELECT 1 AS n".into(),
                 viz: None,
                 assumption: None,
@@ -908,13 +998,20 @@ mod tests {
         let file = NamedTempFile::new().expect("temp file");
         session.temp_path = file.path().to_path_buf();
 
-        let err = session.ask("建表").unwrap_err();
+        // The derive failure exhausts the retry budget and surfaces as a failed
+        // turn whose reason carries the execution-step failure.
+        let reason = match session.ask("建表") {
+            TurnOutcome::Failed { reason } => reason,
+            other => panic!("expected Failed after derive failure, got {other:?}"),
+        };
         assert!(
-            matches!(err, TurnError::Execute(_)),
-            "a shape-derivation failure surfaces as Execute, got {err:?}"
+            reason.contains("执行查询失败"),
+            "derive failure reason should carry the execution prefix, got {reason:?}"
         );
 
-        // result_1 was rolled back: it is no longer a table in the session DB.
+        // result_1 was rolled back on every attempt: it is no longer a table in
+        // the session DB. (A broken rollback would leave it lingering -> the
+        // retry's next CREATE clashes and the probe below is non-zero.)
         let remaining: i64 = session
             .conn
             .query_row(

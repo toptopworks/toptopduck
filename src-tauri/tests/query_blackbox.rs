@@ -1,13 +1,15 @@
-//! Black-box query seam (PRD #1 main seam, issue #22): feed a question to a
-//! Session wired with a scripted FakeProvider and assert the materialized
-//! result_N -- its rows, schema, monotonic numbering, and that the source is
-//! untouched. Fully local, deterministic, no network, no real LLM. The fake
-//! stands in for the provider (ADR-0007); the orchestrator under test never
-//! knows it is not the real Claude client.
+//! Black-box query seam (PRD #1 main seam, issues #22/#23): feed a question to
+//! a Session wired with a scripted FakeProvider and assert the ADR-0028 outcome
+//! -- result / textual / failed (cancelled is #28), the always-visible thread,
+//! and that result_N advances only for results. Fully local, deterministic, no
+//! network, no real LLM. The fake stands in for the provider (ADR-0007); the
+//! orchestrator under test never knows it is not the real Claude client.
 
 use std::path::{Path, PathBuf};
 
-use toptopduck_lib::{FakeProvider, LoadOutcome, ProviderReply, Session, TurnOutcome};
+use toptopduck_lib::{
+    FakeProvider, LoadOutcome, ProviderError, ProviderReply, Session, TextKind, TurnOutcome,
+};
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -26,20 +28,29 @@ fn load_source(session: &mut Session, path: &Path) {
     }
 }
 
-fn reply(sql: &str) -> ProviderReply {
-    ProviderReply {
+fn reply_sql(sql: &str) -> ProviderReply {
+    ProviderReply::Sql {
         sql: sql.to_string(),
         viz: None,
         assumption: None,
     }
 }
 
+fn reply_text(kind: TextKind, body: &str) -> ProviderReply {
+    ProviderReply::Text {
+        kind,
+        body: body.to_string(),
+        assumption: None,
+    }
+}
+
 /// Build a session whose provider is scripted with the given (question, sql)
-/// pairs. One session per test keeps the script map scoped and deterministic.
+/// pairs (one stable SQL reply each). One session per test keeps the script map
+/// scoped and deterministic.
 fn session_with(scripts: &[(&str, &str)]) -> Session {
     let mut provider = FakeProvider::new();
     for (question, sql) in scripts {
-        provider = provider.scripted(question, reply(sql));
+        provider = provider.scripted(question, reply_sql(sql));
     }
     Session::with_provider(Box::new(provider)).expect("session")
 }
@@ -55,6 +66,15 @@ fn materialized(outcome: TurnOutcome) -> (String, u64, Vec<(String, String)>) {
                 .collect();
             (dataset.reference_name, dataset.row_count, cols)
         }
+        other => panic!("expected Materialized, got {other:?}"),
+    }
+}
+
+/// Unpack a Failed outcome's reason, panicking on any other outcome.
+fn failed_reason(outcome: TurnOutcome) -> String {
+    match outcome {
+        TurnOutcome::Failed { reason } => reason,
+        other => panic!("expected Failed, got {other:?}"),
     }
 }
 
@@ -66,7 +86,7 @@ fn ask_materializes_one_result_with_rows_and_schema() {
     let mut session = session_with(&[("总共几行", r#"SELECT COUNT(*) AS n FROM "people".data"#)]);
     load_source(&mut session, &fixture("people.csv"));
 
-    let (name, rows, cols) = materialized(session.ask("总共几行").expect("ask"));
+    let (name, rows, cols) = materialized(session.ask("总共几行"));
     assert_eq!(name, "result_1");
     assert_eq!(rows, 1);
     assert_eq!(cols, vec![("n".to_string(), "BIGINT".to_string())]);
@@ -83,9 +103,9 @@ fn result_number_is_monotonic_across_turns() {
     ]);
     load_source(&mut session, &fixture("people.csv"));
 
-    let (first, _, _) = materialized(session.ask("数行").expect("ask1"));
+    let (first, _, _) = materialized(session.ask("数行"));
     assert_eq!(first, "result_1");
-    let (second, _, _) = materialized(session.ask("取名").expect("ask2"));
+    let (second, _, _) = materialized(session.ask("取名"));
     assert_eq!(second, "result_2");
 }
 
@@ -99,7 +119,7 @@ fn asking_never_mutates_the_source() {
         .read_rows("people", 0, 100)
         .expect("read source before");
 
-    session.ask("数行").expect("ask");
+    session.ask("数行");
 
     let after = session
         .read_rows("people", 0, 100)
@@ -118,8 +138,8 @@ fn result_is_referenceable_in_a_later_turn() {
     ]);
     load_source(&mut session, &fixture("people.csv"));
 
-    session.ask("源计数").expect("ask1"); // result_1: 1 row
-    let (name, rows, cols) = materialized(session.ask("数结果").expect("ask2"));
+    session.ask("源计数"); // result_1: 1 row
+    let (name, rows, cols) = materialized(session.ask("数结果"));
     assert_eq!(name, "result_2");
     assert_eq!(rows, 1); // result_1 had exactly 1 row
     assert_eq!(cols, vec![("m".to_string(), "BIGINT".to_string())]);
@@ -132,7 +152,7 @@ fn read_rows_pages_a_materialized_result() {
     // disclosure).
     let mut session = session_with(&[("全部id", r#"SELECT id FROM "people".data ORDER BY id"#)]);
     load_source(&mut session, &fixture("people.csv"));
-    session.ask("全部id").expect("ask"); // result_1: 5 rows (id 1..5)
+    session.ask("全部id"); // result_1: 5 rows (id 1..5)
 
     let page1 = session.read_rows("result_1", 0, 3).expect("page1");
     assert_eq!(page1.total, 5);
@@ -151,7 +171,7 @@ fn ask_surfaces_the_provider_assumption_note() {
     // render it as a correctable side note.
     let provider = FakeProvider::new().scripted(
         "数行",
-        ProviderReply {
+        ProviderReply::Sql {
             sql: r#"SELECT COUNT(*) AS n FROM "people".data"#.into(),
             viz: None,
             assumption: Some("把 id 当作主键".into()),
@@ -160,33 +180,35 @@ fn ask_surfaces_the_provider_assumption_note() {
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
 
-    match session.ask("数行").expect("ask") {
+    match session.ask("数行") {
         TurnOutcome::Materialized { assumption, .. } => {
             assert_eq!(assumption.as_deref(), Some("把 id 当作主键"));
         }
+        other => panic!("expected Materialized, got {other:?}"),
     }
 }
 
 #[test]
 fn ask_without_a_wired_provider_fails_honestly() {
     // The default Session (UnwiredProvider) refuses every turn with NotWired --
-    // no silent no-op, no invented SQL. The real client wires in #29.
+    // no silent no-op, no invented SQL. NotWired is permanent, so it is NOT
+    // retried: the turn fails immediately. The real client wires in #29.
     let mut session = Session::new().expect("session");
     load_source(&mut session, &fixture("people.csv"));
-    let err = session.ask("任何问题").unwrap_err();
-    assert!(err.to_string().contains("尚未接入"));
+    let reason = failed_reason(session.ask("任何问题"));
+    assert!(reason.contains("尚未接入"), "got {reason:?}");
     // nothing materialized
     assert!(session.get("result_1").is_none());
 }
 
 #[test]
-fn a_bad_sql_surfaces_as_an_execute_error() {
-    // A provider SQL the engine rejects (unknown column) -> Execute error, no
-    // result materialized. The single-query retry budget arrives in #23.
+fn a_persistently_bad_sql_exhausts_the_budget_and_fails() {
+    // ADR-0028: a provider SQL the engine rejects is retried up to the single
+    // budget; persistent failure yields a failed turn (no result materialized).
     let mut session = session_with(&[("坏查询", r#"SELECT no_such_col FROM "people".data"#)]);
     load_source(&mut session, &fixture("people.csv"));
-    let err = session.ask("坏查询").unwrap_err();
-    assert!(err.to_string().contains("执行查询失败"));
+    let reason = failed_reason(session.ask("坏查询"));
+    assert!(reason.contains("执行查询失败"), "got {reason:?}");
     assert!(session.get("result_1").is_none());
 }
 
@@ -204,7 +226,7 @@ fn ask_materializes_a_zero_row_result_normally() {
     let mut session = session_with(&[("没有匹配", r#"SELECT id FROM "people".data WHERE id < 0"#)]);
     load_source(&mut session, &fixture("people.csv"));
 
-    let (name, rows, cols) = materialized(session.ask("没有匹配").expect("ask"));
+    let (name, rows, cols) = materialized(session.ask("没有匹配"));
     assert_eq!(name, "result_1");
     assert_eq!(rows, 0); // a 0-row result materializes normally
     assert_eq!(cols.len(), 1);
@@ -215,4 +237,229 @@ fn ask_materializes_a_zero_row_result_normally() {
     let page = session.read_rows("result_1", 0, 100).expect("read");
     assert_eq!(page.rows.len(), 0);
     assert_eq!(page.total, 0);
+}
+
+// --- Outcome B: textual (clarify / refuse) -- ADR-0017/0018 ----------------
+
+#[test]
+fn a_clarify_question_yields_a_textual_outcome_without_a_result() {
+    // ADR-0018: when the provider cannot confidently infer intent it asks back
+    // rather than guess. That is a textual outcome -- no SQL runs, no result_N
+    // is consumed, but the turn is still recorded (always visible).
+    let provider = FakeProvider::new().scripted(
+        "哪个名字",
+        reply_text(TextKind::Clarify, "按产品名还是客户名汇总？"),
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    match session.ask("哪个名字") {
+        TurnOutcome::Textual {
+            text_kind,
+            body,
+            assumption,
+        } => {
+            assert_eq!(text_kind, TextKind::Clarify);
+            assert_eq!(body, "按产品名还是客户名汇总？");
+            assert!(assumption.is_none());
+        }
+        other => panic!("expected Textual, got {other:?}"),
+    }
+    assert!(session.get("result_1").is_none()); // no result consumed
+}
+
+#[test]
+fn a_refuse_question_yields_a_textual_outcome() {
+    // ADR-0017: an out-of-scope request is refused honestly (no faked SQL). The
+    // refusal is a textual outcome distinct from a clarify.
+    let provider = FakeProvider::new().scripted(
+        "预测下个月销量",
+        reply_text(TextKind::Refuse, "预测/时序建模不在 v1 能力范围内"),
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    match session.ask("预测下个月销量") {
+        TurnOutcome::Textual {
+            text_kind, body, ..
+        } => {
+            assert_eq!(text_kind, TextKind::Refuse);
+            assert!(body.contains("不在 v1 能力范围"));
+        }
+        other => panic!("expected Textual, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_textual_outcome_carries_the_assumption_note() {
+    // ADR-0009/0018: the assumption side note rides the textual outcome too
+    // (e.g. which interpretation a clarify is resolving).
+    let provider = FakeProvider::new().scripted(
+        "汇总",
+        ProviderReply::Text {
+            kind: TextKind::Clarify,
+            body: "哪个维度？".into(),
+            assumption: Some("当前表有多个可汇总列".into()),
+        },
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    match session.ask("汇总") {
+        TurnOutcome::Textual { assumption, .. } => {
+            assert_eq!(assumption.as_deref(), Some("当前表有多个可汇总列"));
+        }
+        other => panic!("expected Textual, got {other:?}"),
+    }
+}
+
+// --- Outcome C: failed -- single retry budget (ADR-0028) -------------------
+
+#[test]
+fn retry_recovers_within_the_budget_for_a_contract_violation() {
+    // ADR-0028: a malformed contract violation consumes the shared budget and
+    // retries. [Err, Err, Ok] -> attempts Err, Err, Ok -> Materialized within
+    // the default budget of 2 (3 total attempts). Pinning recovery at the 3rd
+    // attempt proves the budget is at least 2 retries.
+    let provider = FakeProvider::new().scripted_seq(
+        "抖一下",
+        vec![
+            Err(ProviderError::Unavailable("malformed".into())),
+            Err(ProviderError::Unavailable("malformed".into())),
+            Ok(reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#)),
+        ],
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    let (name, rows, _) = materialized(session.ask("抖一下"));
+    assert_eq!(name, "result_1"); // recovered -> result materialized
+    assert_eq!(rows, 1);
+}
+
+#[test]
+fn retry_exhausts_when_recovery_would_need_a_fourth_attempt() {
+    // ADR-0028: the budget is exactly 2 retries (3 attempts). [Err, Err, Err, Ok]
+    // -> the three attempts all hit Err; the Ok at index 3 is never reached, so
+    // the turn fails. Pinning failure here (against the recovery test above)
+    // proves the budget is at most 2 retries.
+    let provider = FakeProvider::new().scripted_seq(
+        "一直坏",
+        vec![
+            Err(ProviderError::Unavailable("malformed".into())),
+            Err(ProviderError::Unavailable("malformed".into())),
+            Err(ProviderError::Unavailable("malformed".into())),
+            Ok(reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#)),
+        ],
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    let reason = failed_reason(session.ask("一直坏"));
+    assert!(reason.contains("LLM 提供方调用失败"), "got {reason:?}");
+    assert!(session.get("result_1").is_none()); // never materialized
+}
+
+#[test]
+fn retry_recovers_when_bad_sql_is_then_fixed() {
+    // ADR-0028: a schema/runtime execution error shares the SAME budget as a
+    // contract violation. [bad SQL, good SQL] -> attempt 1 fails to execute,
+    // attempt 2 materializes. Confirms execution errors enter the single loop.
+    let provider = FakeProvider::new().scripted_seq(
+        "先错后对",
+        vec![
+            Ok(reply_sql(r#"SELECT no_such_col FROM "people".data"#)),
+            Ok(reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#)),
+        ],
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    let (name, _, _) = materialized(session.ask("先错后对"));
+    assert_eq!(name, "result_1"); // second attempt materialized
+}
+
+#[test]
+fn not_wired_is_not_retried() {
+    // NotWired is permanent (no provider configured) -- unlike a contract
+    // violation, retrying cannot help. A sequence whose later entries would
+    // succeed still fails immediately on the first NotWired.
+    let provider = FakeProvider::new().scripted_seq(
+        "没接",
+        vec![
+            Err(ProviderError::NotWired),
+            Ok(reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#)),
+        ],
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    let reason = failed_reason(session.ask("没接"));
+    assert!(reason.contains("尚未接入"), "got {reason:?}");
+    assert!(session.get("result_1").is_none()); // the Ok was never reached
+}
+
+// --- Always-visible thread + result_N numbering (ADR-0028/0039) ------------
+
+#[test]
+fn non_result_outcomes_do_not_advance_result_numbering() {
+    // ADR-0028: only a result advances result_N. A clarify turn occupies a
+    // thread slot but consumes no number -- the next result is result_1, not
+    // result_2.
+    let provider = FakeProvider::new()
+        .scripted("先澄清", reply_text(TextKind::Clarify, "哪个维度？"))
+        .scripted(
+            "再查询",
+            reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    match session.ask("先澄清") {
+        TurnOutcome::Textual { .. } => {}
+        other => panic!("expected Textual, got {other:?}"),
+    }
+    let (name, _, _) = materialized(session.ask("再查询"));
+    assert_eq!(name, "result_1"); // textual did not advance the counter
+}
+
+#[test]
+fn every_turn_is_recorded_in_the_conversation_thread_in_order() {
+    // ADR-0028/0039: every turn -- result, textual, failed alike -- is always
+    // visible in the thread, in order, labeled by the verbatim question.
+    let provider = FakeProvider::new()
+        .scripted(
+            "查行数",
+            reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        )
+        .scripted("哪个名字", reply_text(TextKind::Clarify, "哪个维度？"))
+        .scripted_seq(
+            "坏查询",
+            vec![Ok(reply_sql(r#"SELECT no_such_col FROM "people".data"#))],
+        );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    session.ask("查行数");
+    session.ask("哪个名字");
+    session.ask("坏查询");
+
+    let thread = session.conversation();
+    assert_eq!(thread.len(), 3, "every turn occupies a thread slot");
+    // Each entry is labeled by its verbatim question (ADR-0039).
+    assert_eq!(thread[0].question, "查行数");
+    assert!(matches!(
+        thread[0].outcome,
+        TurnOutcome::Materialized { .. }
+    ));
+    assert_eq!(thread[1].question, "哪个名字");
+    assert!(matches!(
+        thread[1].outcome,
+        TurnOutcome::Textual {
+            text_kind: TextKind::Clarify,
+            ..
+        }
+    ));
+    assert_eq!(thread[2].question, "坏查询");
+    assert!(matches!(thread[2].outcome, TurnOutcome::Failed { .. }));
 }

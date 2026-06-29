@@ -6,6 +6,7 @@ import type {
   RowPage,
   SheetGuidance,
   TurnOutcome,
+  TurnRecord,
 } from "./types";
 
 export async function ingestFile(path: string): Promise<LoadOutcome> {
@@ -62,12 +63,19 @@ export async function setDatasetPrivacy(
   return invoke<DatasetDescriptor>("set_dataset_privacy", { referenceName, privacy });
 }
 
-// Ask one question (PRD #1, issue #22): the orchestrator gets one SQL from the
-// provider, runs it on the session DuckDB, and materializes result_N. Runs off
-// the UI thread (AC8). Failures cross IPC as a plain error string; the typed
-// outcome classification + retry budget arrive in #23.
+// Ask one question (PRD #1): run one turn and return its ADR-0028 outcome
+// (result / textual / failed / cancelled). The single retry budget is consumed
+// invisibly inside the turn. Runs off the UI thread (AC8). A turn always
+// produces an outcome; the only rejection here is a session-lock failure.
 export async function askQuestion(question: string): Promise<TurnOutcome> {
   return invoke<TurnOutcome>("ask", { question });
+}
+
+// Read the conversation thread (ADR-0028/0039): every turn in order, each
+// labeled by its verbatim question and its outcome. The always-visible history
+// the UI renders; a snapshot read with no copy-in.
+export async function conversation(): Promise<TurnRecord[]> {
+  return invoke<TurnRecord[]>("conversation");
 }
 
 // Read one page of a dataset's rows (ADR-0024 windowed display). Bounded

@@ -37,29 +37,46 @@ pub struct ProviderRequest {
     pub active: Option<String>,
 }
 
-/// One turn LLM output contract (ADR-0009): exactly one SQL, an optional viz
-/// spec, and an optional natural-language assumption note. Slice #22 consumes
-/// only sql; viz and assumption are carried so later slices test offline
-/// against the full contract shape instead of widening it underfoot. viz is an
-/// opaque string here -- #26 replaces it with a structured vega-lite spec.
+/// One turn LLM output contract (ADR-0009, calibrated by ADR-0028): either one
+/// SQL to execute (+ optional viz spec + optional assumption note), or a
+/// textual response with no SQL -- a disambiguation question (ADR-0018) or an
+/// out-of-scope refusal (ADR-0017). Slice #23 widens #22's SQL-only reply to
+/// the full contract; viz is an opaque string here (#26 replaces it with a
+/// structured vega-lite spec), and `assumption` carries the natural-language
+/// side note for both branches (the method name behind a refusal, the
+/// interpretation behind a clarify, or the assumption behind a SQL).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderReply {
-    pub sql: String,
-    pub viz: Option<String>,
-    pub assumption: Option<String>,
+pub enum ProviderReply {
+    /// One SQL to execute, with an optional viz spec and assumption note.
+    Sql {
+        sql: String,
+        viz: Option<String>,
+        assumption: Option<String>,
+    },
+    /// A textual response (no SQL): a clarify question or an out-of-scope
+    /// refusal. `body` is the text shown to the user; `assumption` is the
+    /// optional side note (e.g. which method the refusal is steering away
+    /// from).
+    Text {
+        kind: crate::model::TextKind,
+        body: String,
+        assumption: Option<String>,
+    },
 }
 
-/// Why a provider call did not yield a reply. Slice #22 surfaces either as a
-/// failed turn (via crate::model::TurnError); the full failed-turn retry budget
-/// is #23.
+/// Why a provider call did not yield a reply. The orchestrator's single retry
+/// budget (ADR-0028) consumes `Unavailable` (a contract violation / transient
+/// call failure) and re-attempts; `NotWired` is permanent (no provider
+/// configured) and is not retried -- it yields a failed turn immediately.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderError {
     /// No provider is wired -- the real LLM arrives in #29. The default
     /// UnwiredProvider returns this for every turn, so the orchestrator never
-    /// silently runs without an explicit provider.
+    /// silently runs without an explicit provider. Permanent: not retried.
     NotWired,
-    /// The provider call itself failed (network / auth / quota / malformed
-    /// output). Carries the detail for diagnostics; the fake never hits it.
+    /// The provider call failed or its output violated the contract (network /
+    /// auth / quota / malformed output). Transient/recoverable: the retry loop
+    /// re-feeds it up to the budget, then yields a failed turn (ADR-0028).
     Unavailable(String),
 }
 

@@ -274,53 +274,109 @@ impl std::fmt::Display for RenameError {
 }
 impl std::error::Error for RenameError {}
 
-// --- Turn / result materialization (issue #22, query loop slice 1) -----------
+// --- Turn / result materialization (issue #22/#23, query loop) --------------
 //
-// The narrowest ask -> result loop (PRD #1): a question goes in, the
-// orchestrator runs provider-supplied SQL on the session DuckDB, and the rows
-// land as a materialized result_N physical table (ADR-0003/0024). Slice #22
-// ships exactly one outcome variant and surfaces failures as an error string;
-// the full outcome classification + single retry budget arrives in #23.
+// The ask -> outcome loop (PRD #1): a question goes in, the orchestrator runs
+// provider-supplied SQL on the session DuckDB, and the rows land as a
+// materialized result_N physical table (ADR-0003/0024). Slice #22 shipped the
+// narrowest result-only loop; #23 widens it to the full ADR-0028 four-way
+// outcome classification (result / textual / failed / cancelled), the always-
+// visible thread, and the single retry budget.
 
-/// One turn outcome. Slice #22 ships exactly one variant -- a materialized
-/// result; the full classification (refuse / clarify / fail / cancel) arrives
-/// in #23. The enum exists from the start so later slices add variants without
-/// breaking the IPC contract or the frontend match.
+/// Which kind of non-SQL textual response the provider returned (ADR-0009
+/// textual branch): a disambiguation question (ADR-0018) or an out-of-scope
+/// refusal (ADR-0017). The frontend renders the two distinctly so a user can
+/// tell "answer me this" from "I won't do that".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextKind {
+    /// A disambiguation / clarification question (ADR-0018): the provider could
+    /// not confidently infer the intent and asks back rather than guess.
+    Clarify,
+    /// An out-of-scope refusal (ADR-0017): the request is outside v1's SQL-only
+    /// capability boundary; the provider refuses honestly instead of faking.
+    Refuse,
+}
+
+/// One turn outcome (ADR-0028): one exhaustive four-way classification. A turn
+/// always produces exactly one, regardless of whether it materialized a result
+/// -- "no result" is itself a typed outcome, never a silent gap. The four kinds
+/// share three invariants (always visible, always occupy a thread slot, never
+/// advance result_N except Materialized); they differ only in recoverability.
+///
+/// Slice #23 widens #22's single Materialized variant to the full set. The
+/// adjacently-tagged wire shape (`kind`/`data`) is pinned by tests/ipc_contract
+/// and mirrored by src/types.ts -- adding a variant here requires the frontend
+/// match to follow.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum TurnOutcome {
-    /// The turn produced one SQL, executed it, and materialized result_N.
-    /// Carries the result descriptor (a Dataset like any source, ADR-0003) plus
-    /// the provider optional assumption note (ADR-0009), surfaced as a side
-    /// note the user can correct.
+    /// Outcome A -- a result turn: produced one SQL, executed it, and
+    /// materialized result_N. Carries the result descriptor (a Dataset like any
+    /// source, ADR-0003) plus the provider's optional assumption note
+    /// (ADR-0009), surfaced as a correctable side note. This is the only
+    /// outcome that advances result_N numbering.
     Materialized {
         dataset: DatasetDescriptor,
         #[serde(default)]
         assumption: Option<String>,
     },
+    /// Outcome B -- a textual turn: the provider answered with text, not SQL --
+    /// a disambiguation question (ADR-0018) or an out-of-scope refusal
+    /// (ADR-0017). Carries which kind, the body text, and an optional
+    /// assumption note (e.g. the method name behind a refusal). Occupies a
+    /// thread slot but does NOT advance result_N.
+    Textual {
+        text_kind: TextKind,
+        body: String,
+        #[serde(default)]
+        assumption: Option<String>,
+    },
+    /// Outcome C -- a failed turn: the single retry budget (malformed contract
+    /// violation + schema/runtime error, ADR-0028) is exhausted. Carries an
+    /// honest, user-facing reason. Occupies a thread slot but does NOT advance
+    /// result_N.
+    Failed { reason: String },
+    /// Outcome D -- a cancelled turn (placeholder): abort via user cancel /
+    /// resource cap / statement timeout (ADR-0021). The cancel mechanism lands
+    /// in #28; this variant exists now so the four-way classification is
+    /// complete and the frontend can render it, but no code path produces it
+    /// yet.
+    Cancelled,
 }
 
-/// Why a turn did not produce a Materialized outcome. Slice #22 surfaces these
-/// as an error string across IPC; #23 absorbs them into the TurnOutcome enum
-/// (a failed turn with a single retry budget) per ADR-0028.
+/// One entry in the conversation thread (ADR-0028/0039): the verbatim user
+/// question paired with its outcome. Every turn appends exactly one -- always
+/// visible, occupying a timeline slot -- regardless of whether the outcome
+/// produced a result_N. Only [`TurnOutcome::Materialized`] advances result_N
+/// numbering; the others occupy a slot but consume no number. The question is
+/// the entry's label in the user's own words (ADR-0039: the step label is the
+/// verbatim question, never an LLM-generated title).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TurnRecord {
+    pub question: String,
+    pub outcome: TurnOutcome,
+}
+
+/// Why a row read failed. A turn no longer fails across this type -- turn
+/// failures are [`TurnOutcome::Failed`] (ADR-0028), so a turn always produces an
+/// outcome. This type remains only for [`crate::session::Session::read_rows`]: a
+/// row read is not a turn, and its failures cross IPC as the Display strings
+/// below.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TurnError {
-    /// The provider refused or could not answer (not wired, network, quota, or
-    /// a malformed output contract). Carries the provider error message.
-    Provider(String),
-    /// The generated SQL failed to execute (syntax / reference / type error).
-    /// ADR-0009 single-query fail -> refeed retry arrives in #23.
-    Execute(String),
     /// A row read targeted a reference name that is not in the working set.
     UnknownDataset(String),
+    /// The row-page query failed in the engine (a read-side DuckDB error while
+    /// counting or paging rows). Distinct from a turn's SQL failing, which is
+    /// now a [`TurnOutcome::Failed`].
+    Execute(String),
 }
 
 impl std::fmt::Display for TurnError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::Provider(detail) => write!(f, "{detail}"),
-            Self::Execute(detail) => write!(f, "执行查询失败：{detail}"),
             Self::UnknownDataset(name) => write!(f, "找不到引用名为「{name}」的数据集"),
+            Self::Execute(detail) => write!(f, "执行查询失败：{detail}"),
         }
     }
 }

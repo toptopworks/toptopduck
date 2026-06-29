@@ -4,11 +4,14 @@
 //! (ingest / session / workingset) is driven as a black box by
 //! tests/ingest_blackbox.rs -- the PRD's main seam.
 //!
-//! Query loop slice 1 (issue #22): the narrowest ask -> result loop. A turn
-//! orchestrator (session::Session::ask) calls the provider abstraction
-//! (provider::Provider, ADR-0007) for one SQL, runs it on the session DuckDB,
-//! and materializes result_N. tests/query_blackbox.rs drives it through a
-//! scripted FakeProvider at the ask -> outcome seam -- offline and deterministic.
+//! Query loop (issue #22/#23): ask -> outcome. A turn orchestrator
+//! (session::Session::ask) calls the provider abstraction (provider::Provider,
+//! ADR-0007) for one SQL or a textual response (ADR-0009), runs any SQL on the
+//! session DuckDB, and produces one ADR-0028 outcome (result / textual / failed
+//! / cancelled). Slice #23 adds the full four-way classification, the always-
+//! visible conversation thread, and the single retry budget.
+//! tests/query_blackbox.rs drives it through a scripted FakeProvider at the ask
+//! -> outcome seam -- offline and deterministic.
 
 pub mod commands;
 pub mod ingest;
@@ -19,8 +22,8 @@ pub mod workingset;
 
 pub use model::{
     ColumnSchema, DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError,
-    LoadOutcome, RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, TurnError,
-    TurnOutcome,
+    LoadOutcome, RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, TextKind,
+    TurnError, TurnOutcome, TurnRecord,
 };
 pub use provider::fake::FakeProvider;
 pub use provider::{
@@ -49,6 +52,7 @@ pub fn run() {
             commands::replace_source,
             commands::set_dataset_privacy,
             commands::ask,
+            commands::conversation,
             commands::read_rows,
         ])
         .run(tauri::generate_context!())

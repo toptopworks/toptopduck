@@ -6,9 +6,11 @@ import { DisclosureBanner } from "./components/DisclosureBanner";
 import { GuidedLoadDialog } from "./components/GuidedLoadDialog";
 import { QuestionBar } from "./components/QuestionBar";
 import { ResultView } from "./components/ResultView";
+import { Thread } from "./components/Thread";
 import {
   activeDataset,
   askQuestion,
+  conversation,
   fmtError,
   ingestFile,
   ingestFileGuided,
@@ -18,7 +20,7 @@ import {
   setDatasetPrivacy,
 } from "./api";
 import { loadErrorMessage } from "./loadErrorMessage";
-import type { DatasetDescriptor, GuidanceRequest, SheetGuidance } from "./types";
+import type { DatasetDescriptor, GuidanceRequest, SheetGuidance, TurnRecord } from "./types";
 
 /** A surfaced error tagged by the operation that produced it, so the displayed
  * prefix matches the action (a rename rejection is never mislabelled a load
@@ -54,12 +56,17 @@ export default function App() {
     null,
   );
   const [latestResult, setLatestResult] = useState<LatestResult | null>(null);
+  // The always-visible conversation thread (ADR-0028/0039): every turn, in
+  // order, labeled by its verbatim question. The session is the source of
+  // truth; this is refetched after each turn so all outcome kinds render.
+  const [thread, setThread] = useState<TurnRecord[]>([]);
 
   const refresh = useCallback(async () => {
     setDatasets(await listWorkingSet());
     const act = await activeDataset();
     setActiveName(act?.reference_name ?? null);
     setSelected((cur) => cur ?? act?.reference_name ?? null);
+    setThread(await conversation());
   }, []);
 
   useEffect(() => {
@@ -197,43 +204,58 @@ export default function App() {
   // so the error prefix matches the action (never mislabelled a load failure).
   const handlePrivacyChange = useSimpleMutation("privacy", setDatasetPrivacy);
 
-  // Ask one question (issue #22): the orchestrator materializes result_N, which
-  // enters the working set and is shown in the result pane. Tagged "ask" so a
-  // failure prefix matches the action (never mislabelled a load failure).
+  // Ask one question (PRD #1, issue #23): run one turn -> one ADR-0028 outcome.
+  // The retry loop is invisible (one question = one thread entry = one outcome).
+  // A result enters the working set + result pane; textual / failed / cancelled
+  // turns still appear in the thread (always visible) but touch no working set.
+  // Tagged "ask" so a failure prefix matches the action (never mislabelled a
+  // load failure).
   const handleAsk = useCallback(
     async (question: string) => {
       setLoading(true);
       setError(null);
+      let outcome;
       try {
-        const outcome = await askQuestion(question);
-        if (outcome.kind === "Materialized") {
-          const referenceName = outcome.data.dataset.reference_name;
-          // The turn already materialized result_N into the working set, so
-          // select it before refresh -- the user sees the result even when the
-          // working-set sync fails. A refresh failure is reported distinctly
-          // (never mislabel a successful turn as a failed ask), matching the
-          // operation-vs-refresh separation useSimpleMutation enforces elsewhere.
-          setLatestResult({
-            referenceName,
-            assumption: outcome.data.assumption,
-          });
-          setSelected(referenceName);
-          try {
-            await refresh();
-          } catch (e) {
-            setError({
-              message: `结果已生成，但工作集刷新失败：${fmtError(e)}`,
-              kind: "ask",
-            });
-          }
-        }
+        outcome = await askQuestion(question);
       } catch (e) {
         setError({ message: fmtError(e), kind: "ask" });
-      } finally {
         setLoading(false);
+        return;
       }
+      if (outcome.kind === "Materialized") {
+        const referenceName = outcome.data.dataset.reference_name;
+        // Select before refresh -- the user sees the result even when the
+        // working-set sync fails. A refresh failure is reported distinctly
+        // (never mislabel a successful turn as a failed ask).
+        setLatestResult({ referenceName, assumption: outcome.data.assumption });
+        setSelected(referenceName);
+        try {
+          await refresh(); // working set + thread
+        } catch (e) {
+          setError({ message: `结果已生成，但工作集刷新失败：${fmtError(e)}`, kind: "ask" });
+        }
+      } else {
+        // Textual / failed / cancelled: no working-set change, only the thread.
+        try {
+          setThread(await conversation());
+        } catch (e) {
+          setError({ message: `对话刷新失败：${fmtError(e)}`, kind: "ask" });
+        }
+      }
+      setLoading(false);
     },
     [refresh],
+  );
+
+  // Re-show a past result turn's rows in the result pane (ADR-0028 always-
+  // visible history: any result in the thread is re-openable). Preserves the
+  // turn's assumption side note across re-selections.
+  const handleSelectResult = useCallback(
+    (referenceName: string, assumption: string | null) => {
+      setLatestResult({ referenceName, assumption });
+      setSelected(referenceName);
+    },
+    [],
   );
 
   const shown = datasets.find((d) => d.reference_name === selected) ?? null;
@@ -253,6 +275,11 @@ export default function App() {
       )}
 
       <QuestionBar onSubmit={handleAsk} loading={loading} />
+      <Thread
+        records={thread}
+        selectedResult={latestResult?.referenceName ?? null}
+        onSelectResult={handleSelectResult}
+      />
       {latestResult && (
         <section className="panel">
           <ResultView
