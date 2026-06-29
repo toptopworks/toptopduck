@@ -468,3 +468,32 @@ fn every_turn_is_recorded_in_the_conversation_thread_in_order() {
     assert_eq!(thread[2].question, "坏查询");
     assert!(matches!(thread[2].outcome, TurnOutcome::Failed { .. }));
 }
+
+#[test]
+fn budget_exhaustion_keeps_each_distinct_failure() {
+    // ADR-0028 (honest failure): when the retry budget exhausts through a mix
+    // of distinct failures, the failed turn surfaces every distinct one, not
+    // just the last. Without this, a SQL execution error (the actionable kind)
+    // would be silently overwritten by a later transient Unavailable. The
+    // consecutive duplicate Unavailable is deduped so it isn't repeated.
+    let provider = FakeProvider::new().scripted_seq(
+        "又错又抖",
+        vec![
+            // attempt 1: a SQL the engine rejects
+            Ok(reply_sql(r#"SELECT no_such_col FROM "people".data"#)),
+            // attempts 2-3: a transient contract violation (consecutive dup)
+            Err(ProviderError::Unavailable("malformed".into())),
+            Err(ProviderError::Unavailable("malformed".into())),
+        ],
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    let reason = failed_reason(session.ask("又错又抖"));
+    // The SQL error survives -- not overwritten by the later Unavailable.
+    assert!(reason.contains("执行查询失败"), "got {reason:?}");
+    // The transient failure is also present, distinct from the SQL error.
+    assert!(reason.contains("LLM 提供方调用失败"), "got {reason:?}");
+    assert!(reason.contains("重试预算耗尽"), "got {reason:?}");
+    assert!(session.get("result_1").is_none());
+}

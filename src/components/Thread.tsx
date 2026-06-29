@@ -11,10 +11,11 @@ interface ThreadProps {
 }
 
 // The always-visible conversation thread (ADR-0028/0039). Every turn is listed
-// in order, labeled by the verbatim question; the four outcome kinds render
-// distinctly (result / clarify / refuse / failed / cancelled), and the optional
-// assumption note (ADR-0009/0018) shows as a correctable side note. A result
-// turn is clickable to (re)show its rows in the result pane.
+// in order, labeled by the verbatim question; the four TurnOutcome variants
+// render distinctly (Materialized / Textual[Clarify,Refuse] / Failed /
+// Cancelled), and the optional assumption note (ADR-0009/0018) shows as a
+// correctable side note. A result turn is clickable to (re)show its rows in
+// the result pane.
 export function Thread({ records, selectedResult, onSelectResult }: ThreadProps) {
   if (records.length === 0) return null;
   return (
@@ -46,6 +47,14 @@ interface TurnBodyProps {
   onSelectResult: (referenceName: string, assumption: string | null) => void;
 }
 
+// The provider's optional assumption note (ADR-0009/0018), rendered as a
+// correctable side note on both Materialized and Textual turns. Extracted so
+// the rendering isn't duplicated across the two outcomes that carry it.
+function AssumptionNote({ assumption }: { assumption: string | null }) {
+  if (!assumption) return null;
+  return <span className="assumption">假设：{assumption}</span>;
+}
+
 function TurnBody({ record, selectedResult, onSelectResult }: TurnBodyProps) {
   switch (record.outcome.kind) {
     case "Materialized": {
@@ -61,7 +70,7 @@ function TurnBody({ record, selectedResult, onSelectResult }: TurnBodyProps) {
           >
             结果：{dataset.reference_name}
           </button>
-          {assumption && <span className="assumption">假设：{assumption}</span>}
+          <AssumptionNote assumption={assumption} />
         </p>
       );
     }
@@ -72,7 +81,7 @@ function TurnBody({ record, selectedResult, onSelectResult }: TurnBodyProps) {
         <p className={`turn-outcome textual ${text_kind.toLowerCase()}`}>
           <span className="textual-kind">{isClarify ? "需要澄清" : "无法处理"}</span>
           <span className="textual-body">{body}</span>
-          {assumption && <span className="assumption">假设：{assumption}</span>}
+          <AssumptionNote assumption={assumption} />
         </p>
       );
     }
@@ -84,5 +93,13 @@ function TurnBody({ record, selectedResult, onSelectResult }: TurnBodyProps) {
       );
     case "Cancelled":
       return <p className="turn-outcome cancelled">已取消</p>;
+    default: {
+      // Exhaustiveness guard: a future TurnOutcome variant must add a case here,
+      // mirroring Rust's compile-time match exhaustiveness. types.ts is the
+      // hand-maintained mirror, so the TS compiler won't catch a missing branch
+      // without this `never` check.
+      const unhandled: never = record.outcome;
+      throw new Error(`unhandled turn outcome: ${JSON.stringify(unhandled)}`);
+    }
   }
 }

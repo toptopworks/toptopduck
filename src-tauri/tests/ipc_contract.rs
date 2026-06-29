@@ -188,7 +188,7 @@ fn load_outcome_error_nests_load_error_tag() {
 fn turn_outcome_materialized_carries_descriptor_and_assumption() {
     // Pin the wire shape the frontend mirrors (src/types.ts): adjacently-tagged,
     // the Materialized variant nests the descriptor + assumption under data.
-    // assumption is null when the provider offered none (serde default).
+    // assumption is always present -- null when the provider offered none.
     use toptopduck_lib::TurnOutcome;
     assert_wire(
         &TurnOutcome::Materialized {
@@ -230,7 +230,8 @@ fn text_kind_serializes_as_a_bare_variant_string() {
 #[test]
 fn turn_outcome_textual_carries_kind_body_and_assumption() {
     // Outcome B (ADR-0017/0018): the textual variant nests text_kind (a bare
-    // string), body, and assumption under data. assumption defaults to null.
+    // string), body, and assumption under data. assumption is always present --
+    // null when the provider offered none.
     use toptopduck_lib::{TextKind, TurnOutcome};
     assert_wire(
         &TurnOutcome::Textual {

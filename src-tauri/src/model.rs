@@ -317,7 +317,6 @@ pub enum TurnOutcome {
     /// outcome that advances result_N numbering.
     Materialized {
         dataset: DatasetDescriptor,
-        #[serde(default)]
         assumption: Option<String>,
     },
     /// Outcome B -- a textual turn: the provider answered with text, not SQL --
@@ -328,7 +327,6 @@ pub enum TurnOutcome {
     Textual {
         text_kind: TextKind,
         body: String,
-        #[serde(default)]
         assumption: Option<String>,
     },
     /// Outcome C -- a failed turn: the single retry budget (malformed contract
@@ -357,6 +355,12 @@ pub struct TurnRecord {
     pub outcome: TurnOutcome,
 }
 
+/// Prefix for every DuckDB execution-failure message that crosses IPC as a
+/// Display string -- a turn's materialize failure (`session::ask`) and a row
+/// read's [`TurnError::Execute`] surface the same engine error, so the literal
+/// lives once here. String-matched by the frontend; pinned by tests/ipc_contract.
+pub(crate) const EXECUTE_FAIL_PREFIX: &str = "执行查询失败：";
+
 /// Why a row read failed. A turn no longer fails across this type -- turn
 /// failures are [`TurnOutcome::Failed`] (ADR-0028), so a turn always produces an
 /// outcome. This type remains only for [`crate::session::Session::read_rows`]: a
@@ -376,7 +380,7 @@ impl std::fmt::Display for TurnError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Self::UnknownDataset(name) => write!(f, "找不到引用名为「{name}」的数据集"),
-            Self::Execute(detail) => write!(f, "执行查询失败：{detail}"),
+            Self::Execute(detail) => write!(f, "{EXECUTE_FAIL_PREFIX}{detail}"),
         }
     }
 }

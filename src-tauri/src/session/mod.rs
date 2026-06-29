@@ -1,6 +1,6 @@
 //! Per-session state: an in-memory DuckDB parent (working-set metadata + future
 //! result_N) plus READ_ONLY-attached source snapshots (ADR-0004/0005/0012). The
-//! per-session temp dir holds the snapshot files and is cleared on drop (ADR-0029).
+//! per-session temp dir holds the snapshot files and is cleared on drop (ADR-0012).
 
 pub mod snapshot;
 
@@ -16,9 +16,9 @@ use crate::ingest;
 use crate::ingest::schema::quote_ident;
 use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
-    RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, TurnError, TurnOutcome,
-    TurnRecord,
+    DatasetDescriptor, DatasetPrivacy, EXECUTE_FAIL_PREFIX, GuidanceRequest, GuidanceSheet,
+    LoadError, LoadOutcome, RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify,
+    TurnError, TurnOutcome, TurnRecord,
 };
 use crate::provider::{
     DatasetRef, Provider, ProviderError, ProviderReply, ProviderRequest, UnwiredProvider,
@@ -47,7 +47,7 @@ const TURN_RETRY_BUDGET: u32 = 2;
 pub struct Session {
     conn: Connection,
     working_set: WorkingSet,
-    _temp_dir: TempDir, // held to keep its dir alive; cleared on drop (ADR-0029)
+    _temp_dir: TempDir, // held to keep its dir alive; cleared on drop (ADR-0012)
     temp_path: PathBuf,
     /// The LLM provider behind the turn orchestrator (ADR-0007). Defaults to
     /// [`UnwiredProvider`] (real Claude wires in #29); tests inject a scripted
@@ -318,7 +318,8 @@ impl Session {
             }
         }
 
-        // All attached: commit atomically. entries is non-empty (guarded above),
+        // All attached: commit atomically. Callers guard entries non-empty
+        // (read_non_empty_sheets rejects an empty workbook before reaching here),
         // but prefer a returned error over a reachable panic regardless.
         let Some(active) = descriptors.last().cloned() else {
             return Err(LoadError::Parse {
@@ -725,7 +726,12 @@ impl Session {
     /// advances result_N. Infallible -- a question always yields one outcome.
     pub fn ask(&mut self, question: &str) -> TurnOutcome {
         let request = self.build_provider_request(question);
-        let mut last_failure: Option<String> = None;
+        // Collect each attempt's failure so exhaustion surfaces them all, not
+        // just the last -- a SQL execution error (the actionable kind) would
+        // otherwise be overwritten by a later transient Unavailable. Consecutive
+        // identical failures dedupe so a persistently-bad SQL isn't repeated
+        // across attempts.
+        let mut failures: Vec<String> = Vec::new();
         for _attempt in 0..=TURN_RETRY_BUDGET {
             match self.provider.generate(&request) {
                 // Textual branch (ADR-0017/0018): a valid non-result turn -- no
@@ -755,7 +761,9 @@ impl Session {
                         };
                         return self.record_turn(question, outcome);
                     }
-                    Err(detail) => last_failure = Some(format!("执行查询失败：{detail}")),
+                    Err(detail) => {
+                        Self::push_failure(&mut failures, format!("{EXECUTE_FAIL_PREFIX}{detail}"))
+                    }
                 },
                 // NotWired is permanent (no provider configured) -- retrying
                 // cannot help, so the turn fails immediately without consuming
@@ -767,22 +775,39 @@ impl Session {
                     return self.record_turn(question, outcome);
                 }
                 // A contract violation / transient call failure -- consume the
-                // budget and retry. Re-feed is implicit: the real client gets the
-                // error in #29; the scripted fake advances its queue.
+                // budget and retry with the SAME request (blind retry). The real
+                // client's error re-feed lands in #29; the scripted fake's queue
+                // advances per call.
                 Err(ProviderError::Unavailable(detail)) => {
-                    last_failure = Some(ProviderError::Unavailable(detail).to_string());
+                    Self::push_failure(&mut failures, ProviderError::Unavailable(detail).to_string());
                 }
             }
         }
-        // Budget exhausted: surface the last failure honestly as a failed turn.
-        // The "重试预算耗尽" prefix distinguishes this from a permanent NotWired
-        // failure (which never consumes the budget, ADR-0028), so the two failure
-        // paths read distinctly to the user.
-        let detail = last_failure.unwrap_or_else(|| "未知错误".to_string());
+        // Budget exhausted: surface the accumulated failures honestly as a failed
+        // turn. The "重试预算耗尽" prefix distinguishes this from a permanent
+        // NotWired failure (which never consumes the budget, ADR-0028), so the
+        // two failure paths read distinctly to the user.
+        let detail = if failures.is_empty() {
+            "未知错误".to_string()
+        } else {
+            failures.join("；")
+        };
         let outcome = TurnOutcome::Failed {
             reason: format!("重试预算耗尽：{detail}"),
         };
         self.record_turn(question, outcome)
+    }
+
+    /// Record one retry attempt's failure, deduping consecutive identical
+    /// failures: a persistent error isn't repeated across attempts, while
+    /// distinct failures (e.g. a SQL error then a transient Unavailable) are
+    /// all kept so budget exhaustion surfaces the full picture, not just the
+    /// last attempt.
+    fn push_failure(failures: &mut Vec<String>, detail: String) {
+        match failures.last() {
+            Some(last) if last == &detail => {} // consecutive duplicate -- skip
+            _ => failures.push(detail),
+        }
     }
 
     /// Append a turn to the conversation thread and return its outcome. Every
