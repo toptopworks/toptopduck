@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use tauri::State;
 
-use crate::model::{DatasetDescriptor, LoadOutcome, SheetGuidance};
+use crate::model::{DatasetDescriptor, DatasetPrivacy, LoadOutcome, SheetGuidance};
 use crate::session::Session;
 
 /// Ingest a file. Runs the DuckDB copy-in off the async/UI thread (AC8: does not
@@ -103,4 +103,20 @@ pub async fn replace_source(
     .await
     .map_err(|e| e.to_string())??;
     Ok(outcome)
+}
+
+/// Set a dataset's privacy controls (ADR-0011, issue #9 slice 5): per-dataset
+/// sample switch + per-column type-only marking. Synchronous: an in-memory
+/// config swap on the descriptor (no copy-in). The config persists with the
+/// dataset in the working-set metadata; the query-loop window assembler (PRD #1)
+/// reads it to prune the LLM payload. Rejects an unknown reference name.
+#[tauri::command]
+pub fn set_dataset_privacy(
+    state: State<'_, Arc<Mutex<Session>>>,
+    reference_name: String,
+    privacy: DatasetPrivacy,
+) -> Result<DatasetDescriptor, String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    s.set_privacy(&reference_name, privacy)
+        .ok_or_else(|| format!("找不到引用名为「{reference_name}」的数据集"))
 }

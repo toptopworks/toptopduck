@@ -11,15 +11,16 @@ import {
   listWorkingSet,
   renameDataset,
   replaceSource,
+  setDatasetPrivacy,
 } from "./api";
 import { loadErrorMessage } from "./loadErrorMessage";
-import type { DatasetDescriptor, GuidanceRequest, SheetGuidance } from "./types";
+import type { DatasetDescriptor, DatasetPrivacy, GuidanceRequest, SheetGuidance } from "./types";
 
 /** A surfaced error tagged by the operation that produced it, so the displayed
  * prefix matches the action (a rename rejection is never mislabelled a load
  * failure). The backend's RenameError crosses IPC as a plain string, so the
  * kind is reconstructed at the call site that knows the operation. */
-type AppError = { message: string; kind: "load" | "rename" | "replace" };
+type AppError = { message: string; kind: "load" | "rename" | "replace" | "privacy" };
 
 export default function App() {
   const [datasets, setDatasets] = useState<DatasetDescriptor[]>([]);
@@ -151,6 +152,26 @@ export default function App() {
     [refresh],
   );
 
+  // Apply a privacy config to a dataset (ADR-0011, issue #9 slice 5): the whole
+  // new config crosses IPC, the backend swaps it on the descriptor, and refresh
+  // picks up the updated working set (single source of truth). Tagged "privacy"
+  // so the error prefix matches the action (never mislabelled a load failure).
+  const handlePrivacyChange = useCallback(
+    async (referenceName: string, privacy: DatasetPrivacy) => {
+      setLoading(true);
+      setError(null);
+      try {
+        await setDatasetPrivacy(referenceName, privacy);
+        await refresh();
+      } catch (e) {
+        setError({ message: String(e), kind: "privacy" });
+      } finally {
+        setLoading(false);
+      }
+    },
+    [refresh],
+  );
+
   const shown = datasets.find((d) => d.reference_name === selected) ?? null;
 
   return (
@@ -167,7 +188,9 @@ export default function App() {
             ? "加载失败："
             : error.kind === "rename"
               ? "重命名失败："
-              : "换源失败："}
+              : error.kind === "replace"
+                ? "换源失败："
+                : "隐私设置失败："}
           {error.message}
         </p>
       )}
@@ -186,7 +209,11 @@ export default function App() {
         </section>
         <section className="panel">
           {shown ? (
-            <DatasetDetail dataset={shown} />
+            <DatasetDetail
+              dataset={shown}
+              loading={loading}
+              onPrivacyChange={handlePrivacyChange}
+            />
           ) : (
             <p className="muted">选择一个数据集查看其结构。</p>
           )}

@@ -15,8 +15,8 @@ use tempfile::TempDir;
 use crate::ingest;
 use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
-    DatasetDescriptor, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome, RectifyProvenance,
-    RenameError, SheetGuidance, SheetRectify,
+    DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
+    RectifyProvenance, RenameError, SheetGuidance, SheetRectify,
 };
 use crate::workingset::WorkingSet;
 
@@ -124,6 +124,7 @@ impl Session {
             sample: snap.sample,
             fingerprint: snap.fingerprint,
             rectify: RectifyProvenance::NotApplicable,
+            privacy: DatasetPrivacy::default(),
         };
         self.working_set.register(descriptor.clone());
         LoadOutcome::Loaded(descriptor)
@@ -345,6 +346,7 @@ impl Session {
             sample: snap.sample,
             fingerprint: snap.fingerprint,
             rectify,
+            privacy: DatasetPrivacy::default(),
         })
     }
 
@@ -462,6 +464,22 @@ impl Session {
         new_display: &str,
     ) -> Result<DatasetDescriptor, RenameError> {
         self.working_set.rename_display(reference_name, new_display)
+    }
+
+    /// Set a dataset's privacy controls (ADR-0011, issue #9 slice 5): per-
+    /// dataset sample switch + per-column type-only marking. The config rides
+    /// the descriptor in the working set, so it persists across UI resize /
+    /// active-dataset switch / source replace, and the query-loop window
+    /// assembler (PRD #1) reads it off the same descriptor to prune the LLM
+    /// payload (cross-PRD contract). Returns the updated descriptor, or `None`
+    /// when the reference name isn't loaded -- the command boundary maps that to
+    /// an error string.
+    pub fn set_privacy(
+        &mut self,
+        reference_name: &str,
+        privacy: DatasetPrivacy,
+    ) -> Option<DatasetDescriptor> {
+        self.working_set.set_privacy(reference_name, privacy)
     }
 
     /// Re-upload a file onto an existing dataset's reference name (ADR-0042,
@@ -640,7 +658,9 @@ impl Session {
         // Commit: update the descriptor in place. The reference name is stable
         // (every existing reference now resolves to the new data); the display
         // label carries over (a user rename survives the replace, ADR-0037); the
-        // body reflects the new snapshot.
+        // privacy config carries over too (issue #9 AC4: a source's privacy
+        // intent survives a re-upload -- entries for columns that no longer exist
+        // are ignored at read time, ADR-0011); the body reflects the new snapshot.
         let updated = DatasetDescriptor {
             reference_name: reference_name.to_string(),
             display_name: existing.display_name,
@@ -650,6 +670,7 @@ impl Session {
             sample: new_snap.sample,
             fingerprint: new_snap.fingerprint,
             rectify: RectifyProvenance::NotApplicable,
+            privacy: existing.privacy,
         };
         self.working_set.replace(updated.clone());
         LoadOutcome::Loaded(updated)

@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use crate::model::{DatasetDescriptor, RenameError};
+use crate::model::{DatasetDescriptor, DatasetPrivacy, RenameError};
 
 #[derive(Debug, Default)]
 pub struct WorkingSet {
@@ -163,6 +163,27 @@ impl WorkingSet {
         Ok(self.datasets[idx].clone())
     }
 
+    /// Set a dataset's privacy controls (ADR-0011, issue #9 slice 5): per-
+    /// dataset sample switch + per-column type-only marking. The config rides
+    /// the descriptor in the working set, so it persists across UI resize /
+    /// active-dataset switch / source replace. The query-loop window assembler
+    /// (PRD #1) reads it to prune the LLM payload; this slice only stores it
+    /// (clear cross-PRD contract). Returns the updated descriptor, or `None`
+    /// when the reference name isn't registered (the command maps that to an
+    /// error string -- no typed error crosses IPC for a single-failure op).
+    pub fn set_privacy(
+        &mut self,
+        reference_name: &str,
+        privacy: DatasetPrivacy,
+    ) -> Option<DatasetDescriptor> {
+        let slot = self
+            .datasets
+            .iter_mut()
+            .find(|d| d.reference_name == reference_name)?;
+        slot.privacy = privacy;
+        Some(slot.clone())
+    }
+
     pub fn len(&self) -> usize {
         self.datasets.len()
     }
@@ -197,6 +218,7 @@ mod tests {
             sample: vec![vec!["1".into()]],
             fingerprint: reference_name.into(),
             rectify: RectifyProvenance::NotApplicable,
+            privacy: DatasetPrivacy::default(),
         }
     }
 
@@ -386,6 +408,36 @@ mod tests {
         let mut ws = WorkingSet::default();
         ws.register(descriptor("orders"));
         assert!(!ws.replace(descriptor("nope")));
+        assert_eq!(ws.len(), 1); // unchanged
+    }
+
+    #[test]
+    fn set_privacy_updates_the_descriptor_in_place() {
+        // ADR-0011, issue #9: the per-dataset privacy config lands on the stored
+        // descriptor and is returned, so the command boundary reflects it
+        // immediately and the (future) #1 window assembler reads it back.
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("orders"));
+        // sanity: ships the ADR-0011 default
+        assert!(ws.get("orders").unwrap().privacy.send_samples);
+
+        let cfg = DatasetPrivacy {
+            send_samples: false,
+            type_only_columns: vec!["secret".into()],
+        };
+        let resolved = ws.set_privacy("orders", cfg.clone()).unwrap();
+        assert_eq!(resolved.reference_name, "orders");
+        assert_eq!(resolved.privacy, cfg); // returned
+        assert_eq!(ws.get("orders").unwrap().privacy, cfg); // and stored
+    }
+
+    #[test]
+    fn set_privacy_returns_none_for_unknown_reference() {
+        // A single-failure op (unknown name) -> None, not a typed error; the
+        // command maps None to an error string. No phantom dataset is created.
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("orders"));
+        assert!(ws.set_privacy("nope", DatasetPrivacy::default()).is_none());
         assert_eq!(ws.len(), 1); // unchanged
     }
 }

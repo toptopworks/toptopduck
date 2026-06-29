@@ -71,6 +71,50 @@ impl Default for RectifyProvenance {
     }
 }
 
+/// Per-dataset privacy controls (ADR-0011, issue #9 slice 5): govern what of a
+/// source Dataset may leave the local trust boundary in the LLM payload. The
+/// config rides the descriptor (the single source of truth shared with the UI),
+/// so it persists in the working-set metadata across UI resize, active-dataset
+/// switch, and source replace. The actual payload **pruning** happens in the
+/// query-loop window assembler (PRD #1) -- this slice only stores + reads the
+/// config, keeping a clear cross-PRD contract: #1 reads `privacy` off the same
+/// descriptor it already reads schema/sample from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatasetPrivacy {
+    /// Whether any sample rows of this dataset may be sent off-machine
+    /// (ADR-0011). Defaults to true: real samples measurably improve SQL
+    /// quality on dirty data, which is the product's lifeblood. When false, no
+    /// cell values of this dataset enter the LLM payload -- the column schema
+    /// (minus type-only columns) is still sent.
+    #[serde(default = "default_send_samples")]
+    pub send_samples: bool,
+    /// Column names marked "type only" (ADR-0011): their values AND their names
+    /// never enter the LLM payload -- not even the column name leaks. Only the
+    /// DuckDB type of such a column is sent. Stored by column name (a column has
+    /// no separate display name in v1). Treated as a set at read time, so stale
+    /// entries after a schema-changing replace are simply ignored.
+    #[serde(default)]
+    pub type_only_columns: Vec<String>,
+}
+
+/// Serde default for [`DatasetPrivacy::send_samples`]: true (ADR-0011 default --
+/// real samples sent, user-controlled, honestly disclosed).
+fn default_send_samples() -> bool {
+    true
+}
+
+impl Default for DatasetPrivacy {
+    /// Samples on, no type-only columns -- the ADR-0011 default. Used when a
+    /// deserialized descriptor omits `privacy` (backward compat with older
+    /// recipes), and as the initial state of every freshly loaded Dataset.
+    fn default() -> Self {
+        Self {
+            send_samples: true,
+            type_only_columns: Vec::new(),
+        }
+    }
+}
+
 /// The descriptor of a loaded source Dataset: the artifact registered in the
 /// working set and surfaced to the UI (and, later, the LLM payload).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +143,12 @@ pub struct DatasetDescriptor {
     /// explicit guided choices (carried so a future recipe can persist them).
     #[serde(default)]
     pub rectify: RectifyProvenance,
+    /// Privacy controls (ADR-0011, issue #9 slice 5): what of this dataset may
+    /// leave the local trust boundary in the LLM payload. Defaults to "samples
+    /// on, no type-only columns"; `#[serde(default)]` keeps older descriptors
+    /// (and recipes) deserializing to that default.
+    #[serde(default)]
+    pub privacy: DatasetPrivacy,
 }
 
 /// One visible Excel sheet's raw preview for the guided-load dialog: enough rows

@@ -19,6 +19,8 @@ vi.mock("../api", () => ({
   listWorkingSet: vi.fn(),
   activeDataset: vi.fn(async () => null),
   renameDataset: vi.fn(),
+  replaceSource: vi.fn(),
+  setDatasetPrivacy: vi.fn(),
 }));
 
 import { open } from "@tauri-apps/plugin-dialog";
@@ -37,6 +39,7 @@ const guidedDataset: DatasetDescriptor = {
   ],
   sample: [["1", "Alice"]],
   rectify: { kind: "User", data: { header_row: 2, skip_rows: [] } },
+  privacy: { send_samples: true, type_only_columns: [] },
 };
 
 describe("App guided-load flow", () => {
@@ -116,7 +119,9 @@ describe("App rename flow", () => {
       expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: /^people/ }));
-    expect(screen.getByText("BIGINT")).toBeInTheDocument(); // its column is shown
+    // The dataset's column type is shown (now in both the schema table and the
+    // privacy-cols table, so BIGINT appears twice -- assert presence, not uniqueness).
+    expect(screen.getAllByText("BIGINT").length).toBeGreaterThan(0);
 
     // Rename via prompt; on refresh the working set carries the new label.
     vi.spyOn(window, "prompt").mockReturnValue("员工表");
@@ -136,7 +141,7 @@ describe("App rename flow", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^员工表/ })).toBeInTheDocument(),
     );
-    expect(screen.getByText("BIGINT")).toBeInTheDocument();
+    expect(screen.getAllByText("BIGINT").length).toBeGreaterThan(0);
   });
 
   it("labels a rename failure distinctly from a load failure (M2)", async () => {

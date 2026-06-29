@@ -1,6 +1,15 @@
-import type { DatasetDescriptor } from "../types";
+import type { DatasetDescriptor, DatasetPrivacy } from "../types";
+import { PrivacyControls } from "./PrivacyControls";
 
-export function DatasetDetail({ dataset }: { dataset: DatasetDescriptor }) {
+interface DatasetDetailProps {
+  dataset: DatasetDescriptor;
+  // Forwarded to PrivacyControls: disables the toggles while an async op is in
+  // flight, and applies a new privacy config to this dataset (ADR-0011, #9).
+  loading?: boolean;
+  onPrivacyChange?: (referenceName: string, privacy: DatasetPrivacy) => void;
+}
+
+export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: DatasetDetailProps) {
   return (
     <section className="dataset-detail">
       <h2>
@@ -50,6 +59,14 @@ export function DatasetDetail({ dataset }: { dataset: DatasetDescriptor }) {
             ))}
           </tbody>
         </table>
+      )}
+
+      {onPrivacyChange && (
+        <PrivacyControls
+          dataset={dataset}
+          loading={loading}
+          onPrivacyChange={onPrivacyChange}
+        />
       )}
 
       <p className="source">来源文件：{dataset.source_path}</p>
