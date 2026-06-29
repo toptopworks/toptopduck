@@ -13,6 +13,7 @@ use duckdb::Connection;
 use tempfile::TempDir;
 
 use crate::ingest;
+use crate::ingest::schema::quote_ident;
 use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
@@ -25,6 +26,11 @@ use crate::workingset::WorkingSet;
 /// Raw rows surfaced per sheet in the guided-load preview -- enough to spot the
 /// header row and any separator/sub-header/footer rows to skip (ADR-0015).
 const GUIDANCE_PREVIEW_ROWS: usize = 12;
+
+/// Upper bound on a single read_rows page (ADR-0005/0024 display cap). A larger
+/// requested limit is clamped so a malformed/hostile caller can't pull the whole
+/// table into memory; the physical table still holds the full result.
+const MAX_READ_ROWS: u64 = 10_000;
 
 pub struct Session {
     conn: Connection,
@@ -113,7 +119,7 @@ impl Session {
         let attach_path = snap.file_path.to_string_lossy();
         let attach_sql = format!(
             "ATTACH '{attach_path}' AS {} (READ_ONLY);",
-            quote_alias(&reference_name),
+            quote_ident(&reference_name),
         );
         if let Err(e) = self.conn.execute_batch(&attach_sql) {
             let _ = std::fs::remove_file(&snap.file_path);
@@ -344,7 +350,7 @@ impl Session {
         let attach_path = snap.file_path.to_string_lossy();
         let attach_sql = format!(
             "ATTACH '{attach_path}' AS {} (READ_ONLY);",
-            quote_alias(reference_name)
+            quote_ident(reference_name)
         );
         if let Err(e) = self.conn.execute_batch(&attach_sql) {
             let _ = fs::remove_file(&snap.file_path);
@@ -439,7 +445,7 @@ impl Session {
         for reference_name in attached.iter().rev() {
             if let Err(e) = self
                 .conn
-                .execute_batch(&format!("DETACH {};", quote_alias(reference_name)))
+                .execute_batch(&format!("DETACH {};", quote_ident(reference_name)))
             {
                 log::warn!(
                     target: "toptopduck::session",
@@ -580,7 +586,7 @@ impl Session {
         let swap_path = new_snap.file_path.to_string_lossy().into_owned();
         if let Err(e) = self.conn.execute_batch(&format!(
             "ATTACH '{swap_path}' AS {} (READ_ONLY);",
-            quote_alias(&swap_alias),
+            quote_ident(&swap_alias),
         )) {
             log::warn!(
                 target: "toptopduck::session",
@@ -600,7 +606,7 @@ impl Session {
         // removed, though the held handle may keep it until session drop).
         if let Err(e) = self
             .conn
-            .execute_batch(&format!("DETACH {};", quote_alias(&swap_alias)))
+            .execute_batch(&format!("DETACH {};", quote_ident(&swap_alias)))
         {
             log::warn!(
                 target: "toptopduck::session",
@@ -619,7 +625,7 @@ impl Session {
         // untouched.
         if let Err(e) = self
             .conn
-            .execute_batch(&format!("DETACH {};", quote_alias(reference_name)))
+            .execute_batch(&format!("DETACH {};", quote_ident(reference_name)))
         {
             log::warn!(
                 target: "toptopduck::session",
@@ -665,7 +671,7 @@ impl Session {
         // skipping a swap-then-cleanup round-trip (ADR-0042).
         if let Err(e) = self.conn.execute_batch(&format!(
             "ATTACH '{attach_path}' AS {} (READ_ONLY);",
-            quote_alias(reference_name)
+            quote_ident(reference_name)
         )) {
             return LoadOutcome::Error(LoadError::Other {
                 detail: format!("无法挂载新快照（{e}）"),
@@ -715,7 +721,7 @@ impl Session {
         let result_name = format!("result_{n}");
         let create_sql = format!(
             "CREATE TABLE {} AS {}",
-            quote_alias(&result_name),
+            quote_ident(&result_name),
             reply.sql
         );
         if let Err(e) = self.conn.execute_batch(&create_sql) {
@@ -733,7 +739,7 @@ impl Session {
         let shape = match derive_table(&self.conn, &result_name, &self.temp_path, &result_name) {
             Ok(shape) => shape,
             Err(e) => {
-                let drop_sql = format!("DROP TABLE {}", quote_alias(&result_name));
+                let drop_sql = format!("DROP TABLE {}", quote_ident(&result_name));
                 let detail = match self.conn.execute_batch(&drop_sql) {
                     Ok(()) => e.to_string(),
                     // The cleanup DROP itself failed: the orphan result_N likely
@@ -777,7 +783,7 @@ impl Session {
                 sql_ref: self
                     .working_set
                     .sql_from(&d.reference_name)
-                    .unwrap_or_else(|| quote_alias(&d.reference_name)),
+                    .expect("working set list() entries are always registered"),
                 columns: d.columns.clone(),
                 row_count: d.row_count,
             })
@@ -801,6 +807,9 @@ impl Session {
         offset: u64,
         limit: u64,
     ) -> Result<RowPage, TurnError> {
+        // Clamp the page size to the display cap (ADR-0005/0024) so a malformed
+        // or hostile caller can't pull the whole table into memory.
+        let limit = limit.min(MAX_READ_ROWS);
         let descriptor = self
             .working_set
             .get(reference_name)
@@ -812,7 +821,7 @@ impl Session {
         let columns = descriptor.columns.clone();
         let selects: Vec<String> = columns
             .iter()
-            .map(|c| format!("CAST({} AS VARCHAR)", quote_alias(&c.name)))
+            .map(|c| format!("CAST({} AS VARCHAR)", quote_ident(&c.name)))
             .collect();
         let sql = format!(
             "SELECT {} FROM {} LIMIT {} OFFSET {}",
@@ -861,16 +870,11 @@ impl Session {
     /// query loop, PRD #1).
     pub fn snapshot_row_count(&self, reference_name: &str) -> Result<i64, duckdb::Error> {
         self.conn.query_row(
-            &format!("SELECT COUNT(*) FROM {}.data", quote_alias(reference_name)),
+            &format!("SELECT COUNT(*) FROM {}.data", quote_ident(reference_name)),
             [],
             |r| r.get(0),
         )
     }
-}
-
-fn quote_alias(name: &str) -> String {
-    let escaped = name.replace('"', "\"\"");
-    format!("\"{escaped}\"")
 }
 
 #[cfg(test)]

@@ -195,3 +195,24 @@ fn read_rows_on_unknown_reference_is_rejected() {
     let session = session_with(&[]);
     assert!(session.read_rows("nope", 0, 10).is_err());
 }
+
+#[test]
+fn ask_materializes_a_zero_row_result_normally() {
+    // ADR-0030: a SQL that returns 0 rows still materializes a normal result_N
+    // (0 rows + projected schema), consumes a number, and is referenceable -- it
+    // is never special-cased as "no result".
+    let mut session = session_with(&[("没有匹配", r#"SELECT id FROM "people".data WHERE id < 0"#)]);
+    load_source(&mut session, &fixture("people.csv"));
+
+    let (name, rows, cols) = materialized(session.ask("没有匹配").expect("ask"));
+    assert_eq!(name, "result_1");
+    assert_eq!(rows, 0); // a 0-row result materializes normally
+    assert_eq!(cols.len(), 1);
+    assert_eq!(cols[0].0, "id");
+    assert!(session.get("result_1").is_some()); // registered + referenceable
+
+    // The 0-row result reads back as an empty page with the honest total (0).
+    let page = session.read_rows("result_1", 0, 100).expect("read");
+    assert_eq!(page.rows.len(), 0);
+    assert_eq!(page.total, 0);
+}

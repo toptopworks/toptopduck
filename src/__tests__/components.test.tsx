@@ -12,7 +12,10 @@ import type { DatasetDescriptor, DatasetPrivacy, GuidanceRequest } from "../type
 // WorkingSetList's replace action opens the Tauri file dialog; stub it so the
 // tests can drive the picker without the native bridge.
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
-vi.mock("../api", () => ({ readRows: vi.fn() }));
+vi.mock("../api", async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, readRows: vi.fn() };
+});
 
 import { open } from "@tauri-apps/plugin-dialog";
 
@@ -465,5 +468,52 @@ describe("ResultView", () => {
     expect(screen.getByText(/共 5 行/)).toBeInTheDocument(); // total disclosed
     fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
     await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 2, 2));
+  });
+
+  it("renders the empty-state row and a zero total for a 0-row result", async () => {
+    // ADR-0030: a 0-row result is a valid materialized result, shown with the
+    // honest total (0) and the empty-state row -- never special-cased away.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "id", canonical_type: "BIGINT" }],
+      rows: [],
+      total: 0,
+      offset: 0,
+      limit: 100,
+    });
+    render(<ResultView referenceName="result_1" assumption={null} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 0, 100));
+    expect(screen.getByText(/行数：0/)).toBeInTheDocument();
+    expect(screen.getByText(/（无数据行）/)).toBeInTheDocument();
+  });
+
+  it("paginates backward via the previous button", async () => {
+    vi.mocked(readRows)
+      .mockResolvedValueOnce({
+        columns: [{ name: "id", canonical_type: "BIGINT" }],
+        rows: [["1"], ["2"]],
+        total: 5,
+        offset: 0,
+        limit: 2,
+      })
+      .mockResolvedValueOnce({
+        columns: [{ name: "id", canonical_type: "BIGINT" }],
+        rows: [["3"], ["4"]],
+        total: 5,
+        offset: 2,
+        limit: 2,
+      })
+      .mockResolvedValueOnce({
+        columns: [{ name: "id", canonical_type: "BIGINT" }],
+        rows: [["1"], ["2"]],
+        total: 5,
+        offset: 0,
+        limit: 2,
+      });
+    render(<ResultView referenceName="result_1" assumption={null} pageSize={2} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 0, 2));
+    fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 2, 2));
+    fireEvent.click(screen.getByRole("button", { name: /上一页/ }));
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 0, 2));
   });
 });

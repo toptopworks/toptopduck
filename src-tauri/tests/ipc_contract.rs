@@ -198,3 +198,20 @@ fn turn_outcome_materialized_carries_descriptor_and_assumption() {
         r#"{"kind":"Materialized","data":{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"assumption":null}}"#,
     );
 }
+
+#[test]
+fn turn_error_display_strings_are_the_ipc_contract() {
+    // TurnError crosses IPC only as its Display string (commands.rs maps it with
+    // to_string); the frontend string-matches these. Pin the exact wording so a
+    // change is caught here, not as a silent UI regression.
+    use toptopduck_lib::TurnError;
+    assert_eq!(TurnError::Provider("detail".into()).to_string(), "detail");
+    assert_eq!(
+        TurnError::Execute("detail".into()).to_string(),
+        "执行查询失败：detail",
+    );
+    assert_eq!(
+        TurnError::UnknownDataset("result_1".into()).to_string(),
+        "找不到引用名为「result_1」的数据集",
+    );
+}

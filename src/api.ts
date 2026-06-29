@@ -71,7 +71,7 @@ export async function askQuestion(question: string): Promise<TurnOutcome> {
 }
 
 // Read one page of a dataset's rows (ADR-0024 windowed display). Bounded
-// LIMIT/OFFSET; synchronous on the Rust side (fast). Works for sources and
+// LIMIT/OFFSET, run off the UI thread like ask (AC8). Works for sources and
 // materialized results alike. Rejects an unknown reference with an error string.
 export async function readRows(
   referenceName: string,
@@ -79,4 +79,14 @@ export async function readRows(
   limit: number,
 ): Promise<RowPage> {
   return invoke<RowPage>("read_rows", { referenceName, offset, limit });
+}
+
+// Format an unknown error (a Tauri IPC reject, a JS Error, or a structured
+// object) into a readable string. The Rust side rejects with a plain string
+// today; this also narrows a future structured error or a JS Error instead of
+// rendering "[object Object]".
+export function fmtError(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  return JSON.stringify(e);
 }

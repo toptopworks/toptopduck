@@ -9,6 +9,7 @@ import { ResultView } from "./components/ResultView";
 import {
   activeDataset,
   askQuestion,
+  fmtError,
   ingestFile,
   ingestFileGuided,
   listWorkingSet,
@@ -84,7 +85,7 @@ export default function App() {
         try {
           await fn(...args);
         } catch (e) {
-          setError({ message: String(e), kind });
+          setError({ message: fmtError(e), kind });
           setLoading(false);
           return;
         }
@@ -92,7 +93,7 @@ export default function App() {
           await refresh();
         } catch (refreshErr) {
           setError({
-            message: `${ERROR_PREFIX[kind].replace("失败：", "")}已保存，但刷新工作集失败：${String(refreshErr)}`,
+            message: `${ERROR_PREFIX[kind].replace("失败：", "")}已保存，但刷新工作集失败：${fmtError(refreshErr)}`,
             kind,
           });
         }
@@ -117,7 +118,7 @@ export default function App() {
           setError({ message: loadErrorMessage(outcome.data), kind: "load" });
         }
       } catch (e) {
-        setError({ message: String(e), kind: "load" });
+        setError({ message: fmtError(e), kind: "load" });
       } finally {
         setLoading(false);
       }
@@ -147,7 +148,7 @@ export default function App() {
           });
         }
       } catch (e) {
-        setError({ message: String(e), kind: "load" });
+        setError({ message: fmtError(e), kind: "load" });
       } finally {
         setLoading(false);
       }
@@ -182,7 +183,7 @@ export default function App() {
           setError({ message: loadErrorMessage(outcome.data), kind: "replace" });
         }
       } catch (e) {
-        setError({ message: String(e), kind: "replace" });
+        setError({ message: fmtError(e), kind: "replace" });
       } finally {
         setLoading(false);
       }
@@ -221,13 +222,13 @@ export default function App() {
             await refresh();
           } catch (e) {
             setError({
-              message: `结果已生成，但工作集刷新失败：${String(e)}`,
+              message: `结果已生成，但工作集刷新失败：${fmtError(e)}`,
               kind: "ask",
             });
           }
         }
       } catch (e) {
-        setError({ message: String(e), kind: "ask" });
+        setError({ message: fmtError(e), kind: "ask" });
       } finally {
         setLoading(false);
       }

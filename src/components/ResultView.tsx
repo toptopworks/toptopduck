@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { readRows } from "../api";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { fmtError, readRows } from "../api";
 import type { ColumnSchema } from "../types";
 
 const DEFAULT_PAGE_SIZE = 100;
@@ -26,6 +26,9 @@ export function ResultView({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Stable id linking the table to its heading so the heading text is the
+  // table's accessible name.
+  const headingId = useId();
   // Monotonic request id: each loadPage bumps it and ignores any response whose
   // id is no longer current, so a late-arriving page (or its error) can never
   // overwrite the page the user navigated to next.
@@ -44,7 +47,7 @@ export function ResultView({
         setOffset(off);
       } catch (e) {
         if (seq !== seqRef.current) return;
-        setError(String(e));
+        setError(fmtError(e));
       } finally {
         if (seq === seqRef.current) setLoading(false);
       }
@@ -64,12 +67,12 @@ export function ResultView({
 
   return (
     <section className="result-view">
-      <h2>结果：{referenceName}</h2>
+      <h2 id={headingId}>结果：{referenceName}</h2>
       <p className="meta">行数：{total}</p>
       {assumption && <p className="assumption">假设：{assumption}</p>}
       {error && <p className="error">{error}</p>}
       <div className="table-scroll">
-        <table className="result">
+        <table className="result" aria-labelledby={headingId}>
           <thead>
             <tr>
               {columns.map((c) => (
@@ -97,7 +100,9 @@ export function ResultView({
         </table>
       </div>
       <p className="page-info">
-        第 {total === 0 ? 0 : offset + 1}–{offset + shown} 行（共 {total} 行）
+        <span aria-live="polite">
+          第 {total === 0 ? 0 : offset + 1}–{offset + shown} 行（共 {total} 行）
+        </span>
         <button
           type="button"
           disabled={!hasPrev || loading}

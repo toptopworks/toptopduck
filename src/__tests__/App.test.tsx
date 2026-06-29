@@ -13,17 +13,23 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 // Mutable working set the api mock reflects after a guided load (the dialog
 // flow's end state). vi.hoisted keeps it alive across the hoisted vi.mock.
 const state = vi.hoisted(() => ({ workingSet: [] as DatasetDescriptor[] }));
-vi.mock("../api", () => ({
-  ingestFile: vi.fn(),
-  ingestFileGuided: vi.fn(),
-  listWorkingSet: vi.fn(),
-  activeDataset: vi.fn(async () => null),
-  renameDataset: vi.fn(),
-  replaceSource: vi.fn(),
-  setDatasetPrivacy: vi.fn(),
-  askQuestion: vi.fn(),
-  readRows: vi.fn(),
-}));
+// importOriginal keeps the real fmtError (a pure helper) while the Tauri invoke
+// wrappers are stubbed.
+vi.mock("../api", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    ingestFile: vi.fn(),
+    ingestFileGuided: vi.fn(),
+    listWorkingSet: vi.fn(),
+    activeDataset: vi.fn(async () => null),
+    renameDataset: vi.fn(),
+    replaceSource: vi.fn(),
+    setDatasetPrivacy: vi.fn(),
+    askQuestion: vi.fn(),
+    readRows: vi.fn(),
+  };
+});
 
 import { open } from "@tauri-apps/plugin-dialog";
 import App from "../App";
