@@ -16,9 +16,9 @@ use crate::ingest;
 use crate::ingest::schema::quote_ident;
 use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, EXECUTE_FAIL_PREFIX, GuidanceRequest, GuidanceSheet,
-    LoadError, LoadOutcome, RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify,
-    TurnError, TurnOutcome, TurnRecord,
+    DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
+    RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, TurnError, TurnOutcome,
+    TurnRecord, EXECUTE_FAIL_PREFIX,
 };
 use crate::provider::{
     DatasetRef, Provider, ProviderError, ProviderReply, ProviderRequest, UnwiredProvider,
@@ -779,7 +779,10 @@ impl Session {
                 // client's error re-feed lands in #29; the scripted fake's queue
                 // advances per call.
                 Err(ProviderError::Unavailable(detail)) => {
-                    Self::push_failure(&mut failures, ProviderError::Unavailable(detail).to_string());
+                    Self::push_failure(
+                        &mut failures,
+                        ProviderError::Unavailable(detail).to_string(),
+                    );
                 }
             }
         }
