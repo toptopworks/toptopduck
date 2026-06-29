@@ -6,18 +6,17 @@ export interface ColumnSchema {
 }
 
 // Per-dataset privacy controls (ADR-0011, issue #9 slice 5): mirror of the Rust
-// `DatasetPrivacy`. Governs what of a source Dataset may leave the local trust
-// boundary in the LLM payload. The config rides the descriptor (single source of
-// truth), persists in the working set, and is read by the (future, PRD #1)
-// window assembler to prune the payload -- this slice only stores + reads it.
+// `DatasetPrivacy`. The config rides the descriptor (single source of truth),
+// persists in the working set, and is readable by the (future, PRD #1) window
+// assembler -- this slice only stores + reads the config; PRD #1 will apply the
+// actual pruning based on these fields.
 export interface DatasetPrivacy {
-  // Whether any sample rows may be sent off-machine. Default true (real samples
-  // improve SQL quality on dirty data). When false, no cell values of this
-  // dataset enter the payload.
+  // Whether any sample rows may be sent off-machine. Default true. When false,
+  // PRD #1 will ensure no cell values enter the LLM payload.
   send_samples: boolean;
-  // Column names marked "type only": their values AND names never enter the
-  // payload (only the DuckDB type is sent). Stored by column name; treated as a
-  // set, so stale entries after a schema-changing replace are ignored at read.
+  // Column names marked "type only": stored by column name; treated as a set
+  // at read time, so stale entries after a schema-changing replace are ignored.
+  // PRD #1 will use this to send only the DuckDB type for these columns.
   type_only_columns: string[];
 }
 

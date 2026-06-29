@@ -163,14 +163,10 @@ impl WorkingSet {
         Ok(self.datasets[idx].clone())
     }
 
-    /// Set a dataset's privacy controls (ADR-0011, issue #9 slice 5): per-
-    /// dataset sample switch + per-column type-only marking. The config rides
-    /// the descriptor in the working set, so it persists across UI resize /
-    /// active-dataset switch / source replace. The query-loop window assembler
-    /// (PRD #1) reads it to prune the LLM payload; this slice only stores it
-    /// (clear cross-PRD contract). Returns the updated descriptor, or `None`
-    /// when the reference name isn't registered (the command maps that to an
-    /// error string -- no typed error crosses IPC for a single-failure op).
+    /// Set a dataset's privacy controls. See [`crate::session::Session::set_privacy`]
+    /// -- this is the storage-layer implementation. Returns the updated
+    /// descriptor, or `None` when the reference name isn't registered (the
+    /// command maps that to an error string).
     pub fn set_privacy(
         &mut self,
         reference_name: &str,
@@ -180,7 +176,16 @@ impl WorkingSet {
             .datasets
             .iter_mut()
             .find(|d| d.reference_name == reference_name)?;
-        slot.privacy = privacy;
+        // Normalize: dedup + sort for deterministic storage (set semantics at the
+        // type-usage level; Vec is kept for serde compatibility).
+        let mut cols = privacy.type_only_columns;
+        cols.retain(|c| !c.trim().is_empty());
+        cols.sort();
+        cols.dedup();
+        slot.privacy = DatasetPrivacy {
+            type_only_columns: cols,
+            ..privacy
+        };
         Some(slot.clone())
     }
 

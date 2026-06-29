@@ -105,11 +105,9 @@ pub async fn replace_source(
     Ok(outcome)
 }
 
-/// Set a dataset's privacy controls (ADR-0011, issue #9 slice 5): per-dataset
-/// sample switch + per-column type-only marking. Synchronous: an in-memory
-/// config swap on the descriptor (no copy-in). The config persists with the
-/// dataset in the working-set metadata; the query-loop window assembler (PRD #1)
-/// reads it to prune the LLM payload. Rejects an unknown reference name.
+/// Set a dataset's privacy controls. See [`Session::set_privacy`]
+/// -- this is the Tauri/IPC command boundary wrapper. Rejects an unknown
+/// reference name with an error string.
 #[tauri::command]
 pub fn set_dataset_privacy(
     state: State<'_, Arc<Mutex<Session>>>,

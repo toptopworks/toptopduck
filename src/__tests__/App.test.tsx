@@ -25,7 +25,7 @@ vi.mock("../api", () => ({
 
 import { open } from "@tauri-apps/plugin-dialog";
 import App from "../App";
-import { ingestFile, ingestFileGuided, listWorkingSet, renameDataset } from "../api";
+import { ingestFile, ingestFileGuided, listWorkingSet, renameDataset, setDatasetPrivacy } from "../api";
 
 const guidedDataset: DatasetDescriptor = {
   reference_name: "people",
@@ -165,5 +165,37 @@ describe("App rename flow", () => {
     );
     // The rename rejection must not inherit the ingest flow's "加载失败" prefix.
     expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
+  });
+});
+
+describe("App privacy flow", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
+  });
+
+  it("labels a privacy failure distinctly from load/rename/replace failures (issue #9)", async () => {
+    // A rejected privacy change surfaces the backend's message with the
+    // "隐私设置失败：" prefix -- distinct from "加载失败：" / "重命名失败：" /
+    // "换源失败：", so a privacy rejection is never misattributed.
+    state.workingSet = [guidedDataset];
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+    );
+    // Select the dataset to reveal PrivacyControls in the detail pane.
+    fireEvent.click(screen.getByRole("button", { name: /^people/ }));
+
+    vi.mocked(setDatasetPrivacy).mockRejectedValueOnce("权限不足，无法修改隐私设置");
+    fireEvent.click(screen.getByLabelText(/向云端 LLM 发送样本值/));
+
+    await waitFor(() =>
+      expect(screen.getByText(/权限不足，无法修改隐私设置/)).toBeInTheDocument(),
+    );
+    // The privacy rejection must not carry any other operation's prefix.
+    expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/重命名失败/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/换源失败/)).not.toBeInTheDocument();
   });
 });

@@ -83,16 +83,15 @@ impl Default for RectifyProvenance {
 pub struct DatasetPrivacy {
     /// Whether any sample rows of this dataset may be sent off-machine
     /// (ADR-0011). Defaults to true: real samples measurably improve SQL
-    /// quality on dirty data, which is the product's lifeblood. When false, no
-    /// cell values of this dataset enter the LLM payload -- the column schema
-    /// (minus type-only columns) is still sent.
+    /// quality on dirty data, which is the product's lifeblood. When false,
+    /// PRD #1 will ensure no cell values of this dataset enter the LLM payload.
     #[serde(default = "default_send_samples")]
     pub send_samples: bool,
-    /// Column names marked "type only" (ADR-0011): their values AND their names
-    /// never enter the LLM payload -- not even the column name leaks. Only the
-    /// DuckDB type of such a column is sent. Stored by column name (a column has
-    /// no separate display name in v1). Treated as a set at read time, so stale
-    /// entries after a schema-changing replace are simply ignored.
+    /// Column names marked "type only" (ADR-0011). Stored by column name (a
+    /// column has no separate display name in v1). Treated as a set at read
+    /// time, so stale entries after a schema-changing replace are simply
+    /// ignored. PRD #1 will use this to exclude the column's values and name
+    /// from the LLM payload, sending only the DuckDB type.
     #[serde(default)]
     pub type_only_columns: Vec<String>,
 }

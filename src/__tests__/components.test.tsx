@@ -65,6 +65,8 @@ describe("DatasetDetail", () => {
     expect(screen.getByText("VARCHAR")).toBeInTheDocument();
     expect(screen.getByText("Alice")).toBeInTheDocument();
     expect(screen.getByText(/行数：5/)).toBeInTheDocument();
+    // Privacy controls are absent when onPrivacyChange is not supplied.
+    expect(screen.queryByText(/隐私控制/)).toBeNull();
   });
 
   it("shows a no-rows hint when the sample is empty", () => {
@@ -180,6 +182,20 @@ describe("PrivacyControls", () => {
     // the summary ends with the sent list and a period, never the "列仅类型" clause.
     expect(screen.queryByText(/列仅类型/)).toBeNull();
     expect(screen.getByText(/id、name）。/)).toBeInTheDocument();
+  });
+
+  it("shows empty sent columns when all columns are type-only", () => {
+    // When every column is marked type-only, sentColumnNames is empty and the
+    // disclosure renders "0 列发送" without a parenthesised column list.
+    const dataset: DatasetDescriptor = {
+      ...mockDataset,
+      privacy: { send_samples: false, type_only_columns: ["id", "name"] },
+    };
+    render(
+      <PrivacyControls dataset={dataset} loading={false} onPrivacyChange={() => {}} />,
+    );
+    expect(screen.getByText(/0 列发送/)).toBeInTheDocument();
+    expect(screen.getByText(/2 列仅类型/)).toBeInTheDocument();
   });
 
   it("disables the toggles while loading (prevents concurrent IPC)", () => {

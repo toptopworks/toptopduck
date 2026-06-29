@@ -40,8 +40,9 @@ export function PrivacyControls({ dataset, loading, onPrivacyChange }: PrivacyCo
   // Honest disclosure of the *current* effective payload (ADR-0011): which column
   // names + types leave the machine, and whether sample values do. A type-only
   // column contributes only its DuckDB type -- neither its name nor its values.
-  const hiddenNames = columns.map((c) => c.name).filter((n) => typeOnly.has(n));
-  const sentColumnNames = columns.map((c) => c.name).filter((n) => !typeOnly.has(n));
+  const colNames = columns.map((c) => c.name);
+  const hiddenNames = colNames.filter((n) => typeOnly.has(n));
+  const sentColumnNames = colNames.filter((n) => !typeOnly.has(n));
 
   return (
     <div className="privacy">

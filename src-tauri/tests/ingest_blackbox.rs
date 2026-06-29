@@ -1224,3 +1224,28 @@ fn set_privacy_on_unknown_reference_is_a_noop() {
         .is_none());
     assert_eq!(session.list().len(), 1); // unchanged
 }
+
+#[test]
+fn setting_privacy_on_one_dataset_does_not_affect_another() {
+    // Cross-dataset isolation: privacy config lives on the per-dataset
+    // descriptor in a Vec, so setting privacy on A must not leak to B.
+    let mut session = Session::new().expect("session");
+    let a = load_ok(&mut session, &fixture("people.csv"));
+    let b = load_ok(&mut session, &fixture("flat.json"));
+    assert_ne!(a.reference_name, b.reference_name);
+
+    let cfg = DatasetPrivacy {
+        send_samples: false,
+        type_only_columns: vec!["name".into()],
+    };
+    session.set_privacy(&a.reference_name, cfg).expect("set");
+
+    // A's privacy changed.
+    let a_after = session.get(&a.reference_name).unwrap();
+    assert!(!a_after.privacy.send_samples);
+    assert_eq!(a_after.privacy.type_only_columns, vec!["name"]);
+
+    // B still has the default.
+    let b_after = session.get(&b.reference_name).unwrap();
+    assert_eq!(b_after.privacy, DatasetPrivacy::default());
+}

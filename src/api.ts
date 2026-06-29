@@ -45,10 +45,11 @@ export async function replaceSource(
 }
 
 // Set a dataset's privacy controls (ADR-0011, issue #9 slice 5): per-dataset
-// sample switch + per-column type-only marking. Synchronous in-memory config
-// swap on the descriptor. The config persists with the dataset; the (future,
-// PRD #1) window assembler reads it to prune the LLM payload. Rejects an unknown
-// reference name with an error string (no typed error crosses IPC).
+// sample switch + per-column type-only marking. In-memory config swap on the
+// descriptor (no copy-in -- fast, non-blocking on the Rust side). The config
+// persists with the dataset; the (future, PRD #1) window assembler reads it to
+// prune the LLM payload. Rejects an unknown reference name with an error string
+// (no typed error crosses IPC).
 export async function setDatasetPrivacy(
   referenceName: string,
   privacy: DatasetPrivacy,
