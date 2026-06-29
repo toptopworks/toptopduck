@@ -775,8 +775,12 @@ impl Session {
             }
         }
         // Budget exhausted: surface the last failure honestly as a failed turn.
+        // The "重试预算耗尽" prefix distinguishes this from a permanent NotWired
+        // failure (which never consumes the budget, ADR-0028), so the two failure
+        // paths read distinctly to the user.
+        let detail = last_failure.unwrap_or_else(|| "未知错误".to_string());
         let outcome = TurnOutcome::Failed {
-            reason: last_failure.unwrap_or_else(|| "未知错误".to_string()),
+            reason: format!("重试预算耗尽：{detail}"),
         };
         self.record_turn(question, outcome)
     }

@@ -209,6 +209,9 @@ fn a_persistently_bad_sql_exhausts_the_budget_and_fails() {
     load_source(&mut session, &fixture("people.csv"));
     let reason = failed_reason(session.ask("坏查询"));
     assert!(reason.contains("执行查询失败"), "got {reason:?}");
+    // The budget path prefixes "重试预算耗尽" so it reads distinctly from a
+    // permanent NotWired failure (ADR-0028).
+    assert!(reason.contains("重试预算耗尽"), "got {reason:?}");
     assert!(session.get("result_1").is_none());
 }
 
@@ -357,6 +360,8 @@ fn retry_exhausts_when_recovery_would_need_a_fourth_attempt() {
 
     let reason = failed_reason(session.ask("一直坏"));
     assert!(reason.contains("LLM 提供方调用失败"), "got {reason:?}");
+    // Budget exhaustion, not a permanent NotWired failure (ADR-0028).
+    assert!(reason.contains("重试预算耗尽"), "got {reason:?}");
     assert!(session.get("result_1").is_none()); // never materialized
 }
 

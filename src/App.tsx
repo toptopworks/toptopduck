@@ -214,35 +214,33 @@ export default function App() {
     async (question: string) => {
       setLoading(true);
       setError(null);
-      let outcome;
       try {
-        outcome = await askQuestion(question);
+        const outcome = await askQuestion(question);
+        if (outcome.kind === "Materialized") {
+          const referenceName = outcome.data.dataset.reference_name;
+          // Select before refresh -- the user sees the result even when the
+          // working-set sync fails. A refresh failure is reported distinctly
+          // (never mislabel a successful turn as a failed ask).
+          setLatestResult({ referenceName, assumption: outcome.data.assumption });
+          setSelected(referenceName);
+          try {
+            await refresh(); // working set + thread
+          } catch (e) {
+            setError({ message: `结果已生成，但工作集刷新失败：${fmtError(e)}`, kind: "ask" });
+          }
+        } else {
+          // Textual / failed / cancelled: no working-set change, only the thread.
+          try {
+            setThread(await conversation());
+          } catch (e) {
+            setError({ message: `对话刷新失败：${fmtError(e)}`, kind: "ask" });
+          }
+        }
       } catch (e) {
         setError({ message: fmtError(e), kind: "ask" });
+      } finally {
         setLoading(false);
-        return;
       }
-      if (outcome.kind === "Materialized") {
-        const referenceName = outcome.data.dataset.reference_name;
-        // Select before refresh -- the user sees the result even when the
-        // working-set sync fails. A refresh failure is reported distinctly
-        // (never mislabel a successful turn as a failed ask).
-        setLatestResult({ referenceName, assumption: outcome.data.assumption });
-        setSelected(referenceName);
-        try {
-          await refresh(); // working set + thread
-        } catch (e) {
-          setError({ message: `结果已生成，但工作集刷新失败：${fmtError(e)}`, kind: "ask" });
-        }
-      } else {
-        // Textual / failed / cancelled: no working-set change, only the thread.
-        try {
-          setThread(await conversation());
-        } catch (e) {
-          setError({ message: `对话刷新失败：${fmtError(e)}`, kind: "ask" });
-        }
-      }
-      setLoading(false);
     },
     [refresh],
   );

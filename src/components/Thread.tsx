@@ -22,6 +22,10 @@ export function Thread({ records, selectedResult, onSelectResult }: ThreadProps)
       <h2>对话</h2>
       <ol>
         {records.map((record, i) => (
+          // The thread is append-only and never reordered (ADR-0028/0039), so the
+          // array index is a stable, unique key for each turn -- no separate id is
+          // needed (YAGNI: an id would ripple through the Rust/TS model + wire
+          // contract for no present benefit).
           <li key={i} className="turn">
             <p className="turn-question">{record.question}</p>
             <TurnBody
