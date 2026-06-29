@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use tauri::State;
 
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, LoadOutcome, RowPage, SheetGuidance, TurnOutcome,
+    DatasetDescriptor, DatasetPrivacy, LoadOutcome, RowPage, SheetGuidance, TurnOutcome, TurnRecord,
 };
 use crate::session::Session;
 
@@ -122,11 +122,12 @@ pub fn set_dataset_privacy(
         .ok_or_else(|| format!("找不到引用名为「{reference_name}」的数据集"))
 }
 
-/// Ask one question (PRD #1, issue #22): the orchestrator gets one SQL from the
-/// provider, runs it on the session DuckDB, and materializes result_N. Runs off
-/// the async/UI thread (AC8) so a slow provider never freezes the app. Failures
-/// cross IPC as a plain error string (the typed outcome classification + retry
-/// budget arrive in #23).
+/// Ask one question (PRD #1): run one turn and return its ADR-0028 outcome
+/// (result / textual / failed / cancelled). The single retry budget is consumed
+/// invisibly inside the turn. Runs off the async/UI thread (AC8) so a slow
+/// provider never freezes the app. A turn always produces an outcome; the only
+/// `Err` here is a session-lock failure (not a turn failure -- that is a
+/// `Failed` outcome).
 #[tauri::command]
 pub async fn ask(
     state: State<'_, Arc<Mutex<Session>>>,
@@ -135,11 +136,22 @@ pub async fn ask(
     let session = state.inner().clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = session.lock().map_err(|e| e.to_string())?;
-        s.ask(&question).map_err(|e| e.to_string())
+        Ok::<TurnOutcome, String>(s.ask(&question))
     })
     .await
     .map_err(|e| e.to_string())??;
     Ok(outcome)
+}
+
+/// Read the conversation thread (ADR-0028/0039): every turn in order, each
+/// labeled by its verbatim question and its outcome. Synchronous -- a snapshot
+/// read of the session history with no copy-in. The frontend renders this as
+/// the always-visible thread; the (future, #24) window assembler reads it to
+/// build the provider prompt.
+#[tauri::command]
+pub fn conversation(state: State<'_, Arc<Mutex<Session>>>) -> Result<Vec<TurnRecord>, String> {
+    let s = state.lock().map_err(|e| e.to_string())?;
+    Ok(s.conversation().to_vec())
 }
 
 /// Read one page of a dataset's rows (ADR-0024 windowed display). Runs off the

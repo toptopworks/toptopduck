@@ -87,19 +87,43 @@ export type LoadOutcome =
   | { kind: "NeedsGuidance"; data: GuidanceRequest }
   | { kind: "Error"; data: LoadError };
 
-// One turn outcome (issue #22 query loop). Mirrors the Rust TurnOutcome (serde
-// adjacently-tagged: kind + data). Slice #22 ships one variant; later slices
-// add refuse / clarify / fail / cancel without widening this for the existing
-// variant.
-export type TurnOutcome = {
-  kind: "Materialized";
-  data: {
-    dataset: DatasetDescriptor;
-    // The provider optional assumption note (ADR-0009), surfaced as a side
-    // note the user can correct; null when the provider offered none.
-    assumption: string | null;
-  };
-};
+// Which kind of non-SQL textual response the provider returned (ADR-0009
+// textual branch): a disambiguation question (ADR-0018) or an out-of-scope
+// refusal (ADR-0017). Mirrors the Rust TextKind (a bare variant string).
+export type TextKind = "Clarify" | "Refuse";
+
+// One turn outcome (ADR-0028). Mirrors the Rust TurnOutcome (serde adjacently-
+// tagged: kind + data). The four kinds are exhaustive: a turn always produces
+// exactly one, regardless of whether it materialized a result. Only Materialized
+// advances result_N; the others occupy a thread slot but consume no number.
+export type TurnOutcome =
+  | {
+    kind: "Materialized";
+    data: {
+      dataset: DatasetDescriptor;
+      // The provider optional assumption note (ADR-0009), surfaced as a side
+      // note the user can correct; null when the provider offered none.
+      assumption: string | null;
+    };
+  }
+  | {
+    kind: "Textual";
+    data: {
+      text_kind: TextKind;
+      body: string;
+      assumption: string | null;
+    };
+  }
+  | { kind: "Failed"; data: { reason: string } }
+  | { kind: "Cancelled" };
+
+// One conversation-thread entry (ADR-0028/0039): the verbatim user question
+// paired with its outcome. Every turn appends exactly one -- always visible.
+// Mirrors the Rust TurnRecord; the conversation() command returns TurnRecord[].
+export interface TurnRecord {
+  question: string;
+  outcome: TurnOutcome;
+}
 
 // One page of a dataset rows (ADR-0024 windowed display). Cells are CAST to
 // VARCHAR (NULL renders as "") server-side. `total` is the full row count so a

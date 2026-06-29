@@ -5,9 +5,15 @@ import { DisclosureBanner } from "../components/DisclosureBanner";
 import { GuidedLoadDialog } from "../components/GuidedLoadDialog";
 import { PrivacyControls } from "../components/PrivacyControls";
 import { ResultView } from "../components/ResultView";
+import { Thread } from "../components/Thread";
 import { WorkingSetList } from "../components/WorkingSetList";
 import { readRows } from "../api";
-import type { DatasetDescriptor, DatasetPrivacy, GuidanceRequest } from "../types";
+import type {
+  DatasetDescriptor,
+  DatasetPrivacy,
+  GuidanceRequest,
+  TurnRecord,
+} from "../types";
 
 // WorkingSetList's replace action opens the Tauri file dialog; stub it so the
 // tests can drive the picker without the native bridge.
@@ -515,5 +521,103 @@ describe("ResultView", () => {
     await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 2, 2));
     fireEvent.click(screen.getByRole("button", { name: /上一页/ }));
     await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 0, 2));
+  });
+});
+
+describe("Thread", () => {
+  // A materialized record built from the shared mock descriptor (reference_name
+  // overridden) -- the only outcome that needs a full dataset payload.
+  function materializedRecord(referenceName: string, assumption: string | null): TurnRecord {
+    return {
+      question: `问 ${referenceName}`,
+      outcome: {
+        kind: "Materialized",
+        data: { dataset: { ...mockDataset, reference_name: referenceName }, assumption },
+      },
+    };
+  }
+
+  it("renders every turn labeled by its verbatim question with its outcome kind", () => {
+    // ADR-0028: all four outcomes are always visible, in order, each labeled by
+    // the user's own question (ADR-0039). The assumption side note renders for
+    // the outcomes that carry one (ADR-0009/0018).
+    const records: TurnRecord[] = [
+      materializedRecord("result_1", "把 id 当主键"),
+      {
+        question: "哪个名字",
+        outcome: {
+          kind: "Textual",
+          data: { text_kind: "Clarify", body: "按产品名还是客户名？", assumption: null },
+        },
+      },
+      {
+        question: "预测销量",
+        outcome: {
+          kind: "Textual",
+          data: { text_kind: "Refuse", body: "预测不在 v1 能力范围内", assumption: null },
+        },
+      },
+      {
+        question: "坏查询",
+        outcome: { kind: "Failed", data: { reason: "执行查询失败：bad column" } },
+      },
+      { question: "中途取消", outcome: { kind: "Cancelled" } },
+    ];
+    render(
+      <Thread records={records} selectedResult="result_1" onSelectResult={() => {}} />,
+    );
+
+    // Every verbatim question is a visible label.
+    expect(screen.getByText("问 result_1")).toBeInTheDocument();
+    expect(screen.getByText("哪个名字")).toBeInTheDocument();
+    expect(screen.getByText("预测销量")).toBeInTheDocument();
+    expect(screen.getByText("坏查询")).toBeInTheDocument();
+    expect(screen.getByText("中途取消")).toBeInTheDocument();
+
+    // Result turn: a result link + the assumption side note.
+    expect(screen.getByRole("button", { name: /结果：result_1/ })).toBeInTheDocument();
+    expect(screen.getByText(/假设：把 id 当主键/)).toBeInTheDocument();
+    // Clarify and refuse render distinctly with their kind + body.
+    expect(screen.getByText("需要澄清")).toBeInTheDocument();
+    expect(screen.getByText("按产品名还是客户名？")).toBeInTheDocument();
+    expect(screen.getByText("无法处理")).toBeInTheDocument();
+    expect(screen.getByText("预测不在 v1 能力范围内")).toBeInTheDocument();
+    // Failed renders the honest reason; cancelled renders the marker.
+    expect(screen.getByText(/失败：执行查询失败：bad column/)).toBeInTheDocument();
+    expect(screen.getByText("已取消")).toBeInTheDocument();
+  });
+
+  it("clicking a result turn selects it with its assumption preserved", () => {
+    const onSelectResult = vi.fn();
+    render(
+      <Thread
+        records={[materializedRecord("result_2", "用了简单计数")]}
+        selectedResult={null}
+        onSelectResult={onSelectResult}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /结果：result_2/ }));
+    expect(onSelectResult).toHaveBeenCalledWith("result_2", "用了简单计数");
+  });
+
+  it("marks the selected result turn active", () => {
+    render(
+      <Thread
+        records={[materializedRecord("result_1", null)]}
+        selectedResult="result_1"
+        onSelectResult={() => {}}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /结果：result_1/ })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+  });
+
+  it("renders nothing when the thread is empty", () => {
+    const { container } = render(
+      <Thread records={[]} selectedResult={null} onSelectResult={() => {}} />,
+    );
+    expect(container).toBeEmptyDOMElement();
   });
 });

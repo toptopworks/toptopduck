@@ -27,6 +27,7 @@ vi.mock("../api", async (importOriginal) => {
     replaceSource: vi.fn(),
     setDatasetPrivacy: vi.fn(),
     askQuestion: vi.fn(),
+    conversation: vi.fn(async () => []),
     readRows: vi.fn(),
   };
 });
@@ -36,6 +37,7 @@ import App from "../App";
 import {
   activeDataset,
   askQuestion,
+  conversation,
   ingestFile,
   ingestFileGuided,
   listWorkingSet,
@@ -264,5 +266,38 @@ describe("App ask flow", () => {
     );
     // an ask failure must not inherit the load-flow prefix.
     expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
+  });
+
+  it("shows a textual outcome in the thread and opens no result pane (issue #23)", async () => {
+    // ADR-0028: a non-result outcome is still always visible (in the thread),
+    // occupies a slot, but produces no result_N -- so no result pane opens.
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+    );
+    // Mount refresh has settled; queue what the turn produces (asked after mount
+    // so the mount's own conversation() call doesn't consume the once-mock).
+    vi.mocked(askQuestion).mockResolvedValueOnce({
+      kind: "Textual",
+      data: { text_kind: "Clarify", body: "按产品名还是客户名汇总？", assumption: null },
+    });
+    vi.mocked(conversation).mockResolvedValueOnce([
+      {
+        question: "哪个名字",
+        outcome: {
+          kind: "Textual",
+          data: { text_kind: "Clarify", body: "按产品名还是客户名汇总？", assumption: null },
+        },
+      },
+    ]);
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "哪个名字" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+
+    // The clarify body is visible in the thread...
+    await waitFor(() =>
+      expect(screen.getByText("按产品名还是客户名汇总？")).toBeInTheDocument(),
+    );
+    // ...and no result pane opens for a non-result outcome.
+    expect(screen.queryByText(/结果：result/)).not.toBeInTheDocument();
   });
 });
