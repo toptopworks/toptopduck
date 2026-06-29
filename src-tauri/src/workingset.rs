@@ -86,6 +86,31 @@ impl WorkingSet {
         self.active = Some(reference_name);
     }
 
+    /// Replace a dataset's snapshot in place under the same reference name
+    /// (ADR-0042, issue #11 slice 4b). The reference name is stable, so every
+    /// existing reference (SQL FROM, the recipe chain, the active pointer) now
+    /// resolves to the new snapshot's data -- only the dataset body changes
+    /// (columns / row count / sample / fingerprint / source path / rectify); the
+    /// display label comes from the incoming descriptor (a user rename is meant
+    /// to survive a replace). A replace is a fresh upload onto this name, so it
+    /// also becomes the active dataset ("most recent upload = active",
+    /// ADR-0022) -- the active pointer is keyed by reference name, so it still
+    /// resolves correctly. Returns `false` (a logic bug, not a user error) when
+    /// the name isn't registered; callers check first.
+    pub fn replace(&mut self, descriptor: DatasetDescriptor) -> bool {
+        let reference_name = descriptor.reference_name.clone();
+        let Some(slot) = self
+            .datasets
+            .iter_mut()
+            .find(|d| d.reference_name == reference_name)
+        else {
+            return false;
+        };
+        *slot = descriptor;
+        self.active = Some(reference_name);
+        true
+    }
+
     pub fn list(&self) -> &[DatasetDescriptor] {
         &self.datasets
     }
@@ -317,5 +342,50 @@ mod tests {
         ws.register(descriptor("orders"));
         let err = ws.rename_display("nope", "X").unwrap_err();
         assert_eq!(err, RenameError::NotFound("nope".into()));
+    }
+
+    #[test]
+    fn replace_takes_over_reference_name_and_becomes_active() {
+        // AC1 (issue #11): a replace swaps the dataset body under the same
+        // reference name -- columns/sample/fingerprint change, the name doesn't,
+        // and no second entry appears. It also becomes the active dataset.
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor_with("orders", "Orders"));
+        let original = ws.get("orders").unwrap().clone();
+
+        let mut replacement = descriptor_with("orders", "Orders v2");
+        replacement.row_count = 99;
+        replacement.fingerprint = "newfp".into();
+        assert!(ws.replace(replacement));
+
+        assert_eq!(ws.len(), 1); // taken over, not added
+        let d = ws.get("orders").unwrap();
+        assert_eq!(d.reference_name, "orders"); // name stable
+        assert_eq!(d.row_count, 99); // body replaced
+        assert_eq!(d.fingerprint, "newfp");
+        assert_ne!(d.fingerprint, original.fingerprint);
+        assert_eq!(ws.active().unwrap().reference_name, "orders"); // now active
+    }
+
+    #[test]
+    fn replace_makes_replaced_dataset_active_over_others() {
+        // ADR-0022: a replace is a fresh upload -> active moves to it even when
+        // another source was active before.
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("orders"));
+        ws.register(descriptor("people"));
+        assert_eq!(ws.active().unwrap().reference_name, "people");
+        let mut replacement = descriptor("orders");
+        replacement.row_count = 7;
+        assert!(ws.replace(replacement));
+        assert_eq!(ws.active().unwrap().reference_name, "orders");
+    }
+
+    #[test]
+    fn replace_returns_false_for_unknown_reference() {
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("orders"));
+        assert!(!ws.replace(descriptor("nope")));
+        assert_eq!(ws.len(), 1); // unchanged
     }
 }

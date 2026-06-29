@@ -33,6 +33,7 @@ pub fn run() {
             commands::active_dataset,
             commands::get_dataset,
             commands::rename_dataset,
+            commands::replace_source,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -32,3 +32,14 @@ export async function renameDataset(
 ): Promise<DatasetDescriptor> {
   return invoke<DatasetDescriptor>("rename_dataset", { referenceName, newDisplay });
 }
+
+// Re-upload onto an existing dataset's reference name (ADR-0042, issue #11): a
+// fresh snapshot takes over the name; the old one is discarded. Distinct from
+// ingestFile (add) -- the reference name to take over is explicit. Structured
+// files only (the backend rejects xlsx in this slice).
+export async function replaceSource(
+  referenceName: string,
+  path: string,
+): Promise<LoadOutcome> {
+  return invoke<LoadOutcome>("replace_source", { referenceName, path });
+}

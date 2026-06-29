@@ -1,10 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { DatasetDetail } from "../components/DatasetDetail";
 import { DisclosureBanner } from "../components/DisclosureBanner";
 import { GuidedLoadDialog } from "../components/GuidedLoadDialog";
 import { WorkingSetList } from "../components/WorkingSetList";
 import type { DatasetDescriptor, GuidanceRequest } from "../types";
+
+// WorkingSetList's replace action opens the Tauri file dialog; stub it so the
+// tests can drive the picker without the native bridge.
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+
+import { open } from "@tauri-apps/plugin-dialog";
 
 const mockDataset: DatasetDescriptor = {
   reference_name: "people",
@@ -183,6 +189,56 @@ describe("WorkingSetList", () => {
       />,
     );
     expect(screen.getByRole("button", { name: /重命名/ })).toBeDisabled();
+  });
+
+  it("picks a file and replaces the dataset via onReplace (issue #11)", async () => {
+    // AC4: replace is a distinct entry from add. The per-row button opens a
+    // structured-file picker (no xlsx) and forwards the choice with the stable
+    // reference name -- the name the backend takes over.
+    const onReplace = vi.fn();
+    vi.mocked(open).mockResolvedValue("/x/new.csv");
+    render(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onReplace={onReplace}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /换源/ }));
+    await waitFor(() => expect(onReplace).toHaveBeenCalledWith("people", "/x/new.csv"));
+  });
+
+  it("ignores a cancelled replace picker (issue #11)", async () => {
+    const onReplace = vi.fn();
+    vi.mocked(open).mockResolvedValue(null); // cancelled
+    render(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onReplace={onReplace}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /换源/ }));
+    await waitFor(() => expect(vi.mocked(open)).toHaveBeenCalled());
+    expect(onReplace).not.toHaveBeenCalled();
+  });
+
+  it("disables the replace button while loading (issue #11)", () => {
+    render(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onReplace={() => {}}
+        loading={true}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /换源/ })).toBeDisabled();
   });
 });
 
