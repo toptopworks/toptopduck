@@ -722,10 +722,20 @@ impl Session {
         }
 
         // Derive the result's shape from the just-created table -- the same
-        // derivation a source snapshot uses (DRY). A shape-derivation failure
-        // here is an engine error surfaced as Execute (the table was created).
-        let shape = derive_table(&self.conn, &result_name, &self.temp_path, &result_name)
-            .map_err(|e| TurnError::Execute(e.to_string()))?;
+        // derivation a source snapshot uses (DRY). On a shape-derivation failure
+        // the just-created result_N is dropped first: an orphan table left
+        // unregistered would make the next turn's next_result_number reuse N and
+        // clash on CREATE, wedging every later turn (ADR-0022 never-reused). The
+        // DROP is best-effort -- a drop failure is no worse than the derive
+        // failure already being reported.
+        let shape = match derive_table(&self.conn, &result_name, &self.temp_path, &result_name) {
+            Ok(shape) => shape,
+            Err(e) => {
+                let drop_sql = format!("DROP TABLE {}", quote_alias(&result_name));
+                let _ = self.conn.execute_batch(&drop_sql);
+                return Err(TurnError::Execute(e.to_string()));
+            }
+        };
         let descriptor = DatasetDescriptor {
             reference_name: result_name.clone(),
             display_name: result_name,
@@ -851,4 +861,57 @@ impl Session {
 fn quote_alias(name: &str) -> String {
     let escaped = name.replace('"', "\"\"");
     format!("\"{escaped}\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Session;
+    use crate::model::TurnError;
+    use crate::provider::fake::FakeProvider;
+    use crate::provider::ProviderReply;
+    use tempfile::NamedTempFile;
+
+    // M1 regression: a turn whose shape derivation fails must roll back the
+    // already-created result_N. Here the derivation's fingerprint dump cannot be
+    // written -- temp_path points at a file, so its "child" dump path has a file
+    // as parent and the COPY ... TO fails, but only AFTER CREATE TABLE result_1
+    // has succeeded. Without the DROP rollback the orphan table lingers
+    // unregistered, next_result_number reuses N, and every later turn clashes
+    // on CREATE -- wedging the whole session (ADR-0022 never-reused).
+    #[test]
+    fn ask_drops_the_result_table_when_shape_derivation_fails() {
+        let provider = FakeProvider::new().scripted(
+            "建表",
+            ProviderReply {
+                sql: "SELECT 1 AS n".into(),
+                viz: None,
+                assumption: None,
+            },
+        );
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        // Derivation work dir whose parent is a file -> the fingerprint
+        // COPY ... TO '<path>/result_1.fingerprint.csv' fails after CREATE.
+        let file = NamedTempFile::new().expect("temp file");
+        session.temp_path = file.path().to_path_buf();
+
+        let err = session.ask("建表").unwrap_err();
+        assert!(
+            matches!(err, TurnError::Execute(_)),
+            "a shape-derivation failure surfaces as Execute, got {err:?}"
+        );
+
+        // result_1 was rolled back: it is no longer a table in the session DB.
+        let remaining: i64 = session
+            .conn
+            .query_row(
+                "SELECT count(*) FROM information_schema.tables WHERE table_name = 'result_1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("information_schema probe");
+        assert_eq!(
+            remaining, 0,
+            "result_1 must be dropped after the derive failure (M1)"
+        );
+    }
 }
