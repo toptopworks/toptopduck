@@ -19,11 +19,13 @@ vi.mock("../api", () => ({
   listWorkingSet: vi.fn(),
   activeDataset: vi.fn(async () => null),
   renameDataset: vi.fn(),
+  replaceSource: vi.fn(),
+  setDatasetPrivacy: vi.fn(),
 }));
 
 import { open } from "@tauri-apps/plugin-dialog";
 import App from "../App";
-import { ingestFile, ingestFileGuided, listWorkingSet, renameDataset } from "../api";
+import { ingestFile, ingestFileGuided, listWorkingSet, renameDataset, setDatasetPrivacy } from "../api";
 
 const guidedDataset: DatasetDescriptor = {
   reference_name: "people",
@@ -37,6 +39,7 @@ const guidedDataset: DatasetDescriptor = {
   ],
   sample: [["1", "Alice"]],
   rectify: { kind: "User", data: { header_row: 2, skip_rows: [] } },
+  privacy: { send_samples: true, type_only_columns: [] },
 };
 
 describe("App guided-load flow", () => {
@@ -116,7 +119,9 @@ describe("App rename flow", () => {
       expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: /^people/ }));
-    expect(screen.getByText("BIGINT")).toBeInTheDocument(); // its column is shown
+    // The dataset's column type is shown (now in both the schema table and the
+    // privacy-cols table, so BIGINT appears twice -- assert presence, not uniqueness).
+    expect(screen.getAllByText("BIGINT").length).toBeGreaterThan(0);
 
     // Rename via prompt; on refresh the working set carries the new label.
     vi.spyOn(window, "prompt").mockReturnValue("员工表");
@@ -136,7 +141,7 @@ describe("App rename flow", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^员工表/ })).toBeInTheDocument(),
     );
-    expect(screen.getByText("BIGINT")).toBeInTheDocument();
+    expect(screen.getAllByText("BIGINT").length).toBeGreaterThan(0);
   });
 
   it("labels a rename failure distinctly from a load failure (M2)", async () => {
@@ -160,5 +165,37 @@ describe("App rename flow", () => {
     );
     // The rename rejection must not inherit the ingest flow's "加载失败" prefix.
     expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
+  });
+});
+
+describe("App privacy flow", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
+  });
+
+  it("labels a privacy failure distinctly from load/rename/replace failures (issue #9)", async () => {
+    // A rejected privacy change surfaces the backend's message with the
+    // "隐私设置失败：" prefix -- distinct from "加载失败：" / "重命名失败：" /
+    // "换源失败：", so a privacy rejection is never misattributed.
+    state.workingSet = [guidedDataset];
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+    );
+    // Select the dataset to reveal PrivacyControls in the detail pane.
+    fireEvent.click(screen.getByRole("button", { name: /^people/ }));
+
+    vi.mocked(setDatasetPrivacy).mockRejectedValueOnce("权限不足，无法修改隐私设置");
+    fireEvent.click(screen.getByLabelText(/向云端 LLM 发送样本值/));
+
+    await waitFor(() =>
+      expect(screen.getByText(/权限不足，无法修改隐私设置/)).toBeInTheDocument(),
+    );
+    // The privacy rejection must not carry any other operation's prefix.
+    expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/重命名失败/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/换源失败/)).not.toBeInTheDocument();
   });
 });

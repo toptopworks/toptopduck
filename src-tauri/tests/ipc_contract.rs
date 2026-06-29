@@ -9,7 +9,8 @@
 //! side changes, the other must follow, and these tests make that coupling loud.
 
 use toptopduck_lib::{
-    DatasetDescriptor, GuidanceRequest, LoadError, LoadOutcome, RectifyProvenance, SheetRectify,
+    DatasetDescriptor, DatasetPrivacy, GuidanceRequest, LoadError, LoadOutcome, RectifyProvenance,
+    SheetRectify,
 };
 
 /// Serialize `value`, assert the JSON equals `expected` (the pinned wire
@@ -102,6 +103,7 @@ fn sample_descriptor() -> DatasetDescriptor {
         sample: vec![],
         fingerprint: "abcd".into(),
         rectify: RectifyProvenance::NotApplicable,
+        privacy: DatasetPrivacy::default(),
     }
 }
 
@@ -109,10 +111,48 @@ fn sample_descriptor() -> DatasetDescriptor {
 fn load_outcome_loaded_carries_descriptor_in_data() {
     // Loaded nests the full descriptor; the descriptor's own `rectify` field
     // serializes with the same adjacent tag, proving nested tagging is uniform.
+    // `privacy` rides the descriptor as the default (samples on, no type-only),
+    // so the cross-PRD contract (issue #9) is pinned here for the frontend mirror.
     assert_wire(
         &LoadOutcome::Loaded(sample_descriptor()),
-        r#"{"kind":"Loaded","data":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"}}}"#,
+        r#"{"kind":"Loaded","data":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}}}"#,
     );
+}
+
+#[test]
+fn dataset_privacy_default_serializes_to_samples_on_empty_type_only() {
+    // The privacy wire shape the frontend mirrors: two flat fields, no tagging.
+    // Default = ADR-0011 (samples on, no type-only columns).
+    assert_wire(
+        &DatasetPrivacy::default(),
+        r#"{"send_samples":true,"type_only_columns":[]}"#,
+    );
+}
+
+#[test]
+fn dataset_privacy_carries_type_only_columns() {
+    // A user-marked type-only config round-trips with the column names in order.
+    let privacy = DatasetPrivacy {
+        send_samples: false,
+        type_only_columns: vec!["ssn".into(), "phone".into()],
+    };
+    assert_wire(
+        &privacy,
+        r#"{"send_samples":false,"type_only_columns":["ssn","phone"]}"#,
+    );
+}
+
+#[test]
+fn descriptor_without_privacy_field_deserializes_to_default() {
+    // Backward compat: an older descriptor (or recipe) that omits `privacy` must
+    // deserialize to the ADR-0011 default rather than failing -- `#[serde(default)]`
+    // on the field. A newer consumer (PRD #1 window assembler) then reads a sane
+    // config instead of a missing-field error.
+    let json = r#"{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"}}"#;
+    let d: DatasetDescriptor = serde_json::from_str(json).expect("deserialize");
+    assert_eq!(d.privacy, DatasetPrivacy::default());
+    assert!(d.privacy.send_samples);
+    assert!(d.privacy.type_only_columns.is_empty());
 }
 
 #[test]

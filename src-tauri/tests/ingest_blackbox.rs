@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use rust_xlsxwriter::{Formula, Workbook};
 use toptopduck_lib::{
-    DatasetDescriptor, LoadError, LoadOutcome, RectifyProvenance, RenameError, Session,
-    SheetGuidance, SheetRectify,
+    DatasetDescriptor, DatasetPrivacy, LoadError, LoadOutcome, RectifyProvenance, RenameError,
+    Session, SheetGuidance, SheetRectify,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -1111,4 +1111,141 @@ fn replace_failed_load_leaves_old_snapshot_usable() {
     let after = session.get("people").unwrap();
     assert_eq!(after.fingerprint, before.fingerprint); // descriptor unchanged
     assert_eq!(session.snapshot_row_count("people").unwrap(), 5); // old data still there
+}
+
+// --- Privacy controls: sample switch + type-only columns (issue #9, slice 5) --
+//
+// ADR-0011: the user controls what of a source Dataset may leave the local
+// trust boundary in the LLM payload -- per-dataset sample switch + per-column
+// "type only" (no value, no name). The config rides the descriptor (single
+// source of truth) so it persists in the working-set metadata across UI resize
+// / active switch / source replace. The actual payload PRUNING happens in the
+// query-loop window assembler (PRD #1, cross-PRD contract); these tests assert
+// the config is stored, read back, and persisted -- the contract #1 relies on.
+// The end-to-end "pruned payload actually left the machine" assertion lives at
+// the #1 seam (loading is LLM-free), not here.
+
+#[test]
+fn freshly_loaded_dataset_has_default_privacy() {
+    // AC1/AC2 default: a just-loaded Dataset ships the ADR-0011 default -- real
+    // samples sent, no type-only columns -- so the disclosure UI's starting
+    // state matches "samples on, nothing hidden".
+    let mut session = Session::new().expect("session");
+    let d = load_ok(&mut session, &fixture("people.csv"));
+    assert_eq!(d.privacy, DatasetPrivacy::default());
+    assert!(d.privacy.send_samples);
+    assert!(d.privacy.type_only_columns.is_empty());
+}
+
+#[test]
+fn turning_off_samples_persists_on_the_dataset() {
+    // AC1/AC4: a per-dataset sample switch lands on the descriptor and survives
+    // a re-fetch (the config lives in the working set, not transient UI state).
+    let mut session = Session::new().expect("session");
+    load_ok(&mut session, &fixture("people.csv"));
+    let off = DatasetPrivacy {
+        send_samples: false,
+        type_only_columns: vec![],
+    };
+    let updated = session.set_privacy("people", off.clone()).expect("set");
+    assert!(!updated.privacy.send_samples); // reflected immediately
+    assert_eq!(updated.privacy, off);
+    // Persists on re-fetch -- the contract #1 reads off the stored descriptor.
+    assert_eq!(session.get("people").unwrap().privacy, off);
+}
+
+#[test]
+fn marking_a_column_type_only_persists_on_the_dataset() {
+    // AC2/AC4: a per-column "type only" mark lands on the descriptor and
+    // survives a re-fetch. The column NAME rides the config (columns have no
+    // separate display name in v1); #1 prunes both the values and the name.
+    let mut session = Session::new().expect("session");
+    load_ok(&mut session, &fixture("people.csv"));
+    let cfg = DatasetPrivacy {
+        send_samples: true,
+        type_only_columns: vec!["name".into()],
+    };
+    let updated = session.set_privacy("people", cfg.clone()).expect("set");
+    assert_eq!(updated.privacy.type_only_columns, vec!["name"]);
+    assert_eq!(session.get("people").unwrap().privacy, cfg);
+}
+
+#[test]
+fn privacy_config_survives_source_replace() {
+    // AC4 (replace): a re-upload onto the same reference name carries the
+    // privacy intent over -- the user's sample/type-only decisions are not lost
+    // when the underlying snapshot is swapped (the reference name is stable).
+    let mut session = Session::new().expect("session");
+    load_ok(&mut session, &fixture("people.csv"));
+    let cfg = DatasetPrivacy {
+        send_samples: false,
+        type_only_columns: vec!["name".into()], // people.csv has a `name` column
+    };
+    session.set_privacy("people", cfg.clone()).expect("set");
+
+    // Replace with flat.json (also has a `name` column) under the same name.
+    let d = replace_ok(&mut session, "people", &fixture("flat.json"));
+    assert_eq!(d.privacy, cfg); // carried over, not reset to default
+    assert!(!d.privacy.send_samples);
+    assert_eq!(d.privacy.type_only_columns, vec!["name"]);
+}
+
+#[test]
+fn type_only_entry_for_a_dropped_column_is_ignored_not_fatal() {
+    // ADR-0011 robustness: after a schema-changing replace, a type-only entry
+    // for a column that no longer exists is simply ignored at read time -- it
+    // must not break the descriptor or the (future) payload assembly. The config
+    // is carried verbatim; pruning consults the current column set.
+    let mut session = Session::new().expect("session");
+    load_ok(&mut session, &fixture("people.csv"));
+    // people.csv has `joined`; flat.json does not -- mark `joined` type-only,
+    // then replace with flat.json so the column disappears.
+    let cfg = DatasetPrivacy {
+        send_samples: true,
+        type_only_columns: vec!["joined".into()],
+    };
+    session.set_privacy("people", cfg.clone()).expect("set");
+    let d = replace_ok(&mut session, "people", &fixture("flat.json"));
+    // The config is carried verbatim (intent preserved); `joined` just no longer
+    // matches a column, so the future assembler skips it harmlessly.
+    assert_eq!(d.privacy, cfg);
+    assert!(d.columns.iter().all(|c| c.name != "joined"));
+}
+
+#[test]
+fn set_privacy_on_unknown_reference_is_a_noop() {
+    // Robustness: setting privacy on a reference name that isn't loaded returns
+    // None (the command maps that to an error string) and leaves the working set
+    // untouched -- no phantom dataset is created.
+    let mut session = Session::new().expect("session");
+    load_ok(&mut session, &fixture("people.csv"));
+    assert!(session
+        .set_privacy("nope", DatasetPrivacy::default())
+        .is_none());
+    assert_eq!(session.list().len(), 1); // unchanged
+}
+
+#[test]
+fn setting_privacy_on_one_dataset_does_not_affect_another() {
+    // Cross-dataset isolation: privacy config lives on the per-dataset
+    // descriptor in a Vec, so setting privacy on A must not leak to B.
+    let mut session = Session::new().expect("session");
+    let a = load_ok(&mut session, &fixture("people.csv"));
+    let b = load_ok(&mut session, &fixture("flat.json"));
+    assert_ne!(a.reference_name, b.reference_name);
+
+    let cfg = DatasetPrivacy {
+        send_samples: false,
+        type_only_columns: vec!["name".into()],
+    };
+    session.set_privacy(&a.reference_name, cfg).expect("set");
+
+    // A's privacy changed.
+    let a_after = session.get(&a.reference_name).unwrap();
+    assert!(!a_after.privacy.send_samples);
+    assert_eq!(a_after.privacy.type_only_columns, vec!["name"]);
+
+    // B still has the default.
+    let b_after = session.get(&b.reference_name).unwrap();
+    assert_eq!(b_after.privacy, DatasetPrivacy::default());
 }

@@ -11,8 +11,8 @@ pub mod session;
 pub mod workingset;
 
 pub use model::{
-    ColumnSchema, DatasetDescriptor, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
-    RectifyProvenance, RenameError, SheetGuidance, SheetRectify,
+    ColumnSchema, DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError,
+    LoadOutcome, RectifyProvenance, RenameError, SheetGuidance, SheetRectify,
 };
 pub use session::Session;
 
@@ -34,6 +34,7 @@ pub fn run() {
             commands::get_dataset,
             commands::rename_dataset,
             commands::replace_source,
+            commands::set_dataset_privacy,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

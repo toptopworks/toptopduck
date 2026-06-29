@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use tauri::State;
 
-use crate::model::{DatasetDescriptor, LoadOutcome, SheetGuidance};
+use crate::model::{DatasetDescriptor, DatasetPrivacy, LoadOutcome, SheetGuidance};
 use crate::session::Session;
 
 /// Ingest a file. Runs the DuckDB copy-in off the async/UI thread (AC8: does not
@@ -103,4 +103,18 @@ pub async fn replace_source(
     .await
     .map_err(|e| e.to_string())??;
     Ok(outcome)
+}
+
+/// Set a dataset's privacy controls. See [`Session::set_privacy`]
+/// -- this is the Tauri/IPC command boundary wrapper. Rejects an unknown
+/// reference name with an error string.
+#[tauri::command]
+pub fn set_dataset_privacy(
+    state: State<'_, Arc<Mutex<Session>>>,
+    reference_name: String,
+    privacy: DatasetPrivacy,
+) -> Result<DatasetDescriptor, String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    s.set_privacy(&reference_name, privacy)
+        .ok_or_else(|| format!("找不到引用名为「{reference_name}」的数据集"))
 }

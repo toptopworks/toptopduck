@@ -11,6 +11,7 @@ import {
   listWorkingSet,
   renameDataset,
   replaceSource,
+  setDatasetPrivacy,
 } from "./api";
 import { loadErrorMessage } from "./loadErrorMessage";
 import type { DatasetDescriptor, GuidanceRequest, SheetGuidance } from "./types";
@@ -19,7 +20,16 @@ import type { DatasetDescriptor, GuidanceRequest, SheetGuidance } from "./types"
  * prefix matches the action (a rename rejection is never mislabelled a load
  * failure). The backend's RenameError crosses IPC as a plain string, so the
  * kind is reconstructed at the call site that knows the operation. */
-type AppError = { message: string; kind: "load" | "rename" | "replace" };
+type AppError = { message: string; kind: "load" | "rename" | "replace" | "privacy" };
+
+/** Error prefix per operation kind — exhaustive over AppError["kind"], so
+ * TypeScript catches a missing entry when a new kind is added. */
+const ERROR_PREFIX: Record<AppError["kind"], string> = {
+  load: "加载失败：",
+  rename: "重命名失败：",
+  replace: "换源失败：",
+  privacy: "隐私设置失败：",
+};
 
 export default function App() {
   const [datasets, setDatasets] = useState<DatasetDescriptor[]>([]);
@@ -46,6 +56,44 @@ export default function App() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
   }, [refresh]);
+
+  /** Generic mutation hook for simple backend-then-refresh patterns (rename,
+   * privacy -- ADR-0037 / ADR-0011). Separates the operation error from a
+   * refresh error: a successful backend commit followed by a failed refresh
+   * surfaces a distinct message (config saved, display failed to sync), never
+   * mislabelling a succeeded operation as a failure.
+   *
+   * Handlers with LoadOutcome matching (ingest, replace) use the inline
+   * pattern -- their error semantics differ (a failed copy-in is a real
+   * failure, and the refresh is always paired with a successful copy-in). */
+  function useSimpleMutation<Args extends unknown[]>(
+    kind: AppError["kind"],
+    fn: (...args: Args) => Promise<unknown>,
+  ) {
+    return useCallback(
+      async (...args: Args) => {
+        setLoading(true);
+        setError(null);
+        try {
+          await fn(...args);
+        } catch (e) {
+          setError({ message: String(e), kind });
+          setLoading(false);
+          return;
+        }
+        try {
+          await refresh();
+        } catch (refreshErr) {
+          setError({
+            message: `${ERROR_PREFIX[kind].replace("失败：", "")}已保存，但刷新工作集失败：${String(refreshErr)}`,
+            kind,
+          });
+        }
+        setLoading(false);
+      },
+      [kind, fn],
+    );
+  }
 
   const handleIngest = useCallback(
     async (path: string) => {
@@ -100,23 +148,7 @@ export default function App() {
     [guidance, refresh],
   );
 
-  const handleRename = useCallback(
-    async (referenceName: string, newDisplay: string) => {
-      setError(null);
-      setLoading(true);
-      try {
-        await renameDataset(referenceName, newDisplay);
-        await refresh();
-        // `selected` is keyed by the stable reference name, so it survives the
-        // display rename -- the UI-level proof of the ADR-0037 decoupling.
-      } catch (e) {
-        setError({ message: String(e), kind: "rename" });
-      } finally {
-        setLoading(false);
-      }
-    },
-    [refresh],
-  );
+  const handleRename = useSimpleMutation("rename", renameDataset);
 
   // Re-upload a file onto an existing dataset's reference name (ADR-0042, issue
   // #11): a fresh snapshot takes over the name. Distinct from handleIngest
@@ -151,6 +183,12 @@ export default function App() {
     [refresh],
   );
 
+  // Apply a privacy config to a dataset (ADR-0011, issue #9 slice 5): the whole
+  // new config crosses IPC, the backend swaps it on the descriptor, and refresh
+  // picks up the updated working set (single source of truth). Tagged "privacy"
+  // so the error prefix matches the action (never mislabelled a load failure).
+  const handlePrivacyChange = useSimpleMutation("privacy", setDatasetPrivacy);
+
   const shown = datasets.find((d) => d.reference_name === selected) ?? null;
 
   return (
@@ -163,12 +201,7 @@ export default function App() {
       <FileDropzone onIngest={handleIngest} loading={loading} />
       {error && (
         <p className="error">
-          {error.kind === "load"
-            ? "加载失败："
-            : error.kind === "rename"
-              ? "重命名失败："
-              : "换源失败："}
-          {error.message}
+          {ERROR_PREFIX[error.kind]}{error.message}
         </p>
       )}
 
@@ -186,7 +219,11 @@ export default function App() {
         </section>
         <section className="panel">
           {shown ? (
-            <DatasetDetail dataset={shown} />
+            <DatasetDetail
+              dataset={shown}
+              loading={loading}
+              onPrivacyChange={handlePrivacyChange}
+            />
           ) : (
             <p className="muted">选择一个数据集查看其结构。</p>
           )}

@@ -5,6 +5,21 @@ export interface ColumnSchema {
   canonical_type: string;
 }
 
+// Per-dataset privacy controls (ADR-0011, issue #9 slice 5): mirror of the Rust
+// `DatasetPrivacy`. The config rides the descriptor (single source of truth),
+// persists in the working set, and is readable by the (future, PRD #1) window
+// assembler -- this slice only stores + reads the config; PRD #1 will apply the
+// actual pruning based on these fields.
+export interface DatasetPrivacy {
+  // Whether any sample rows may be sent off-machine. Default true. When false,
+  // PRD #1 will ensure no cell values enter the LLM payload.
+  send_samples: boolean;
+  // Column names marked "type only": stored by column name; treated as a set
+  // at read time, so stale entries after a schema-changing replace are ignored.
+  // PRD #1 will use this to send only the DuckDB type for these columns.
+  type_only_columns: string[];
+}
+
 // One Excel sheet's user-chosen rectify decisions (ADR-0042): only the user's
 // explicit choices enter the recipe; the auto-tidy algorithm never does.
 export interface SheetRectify {
@@ -36,6 +51,9 @@ export interface DatasetDescriptor {
   // Rectify provenance (ADR-0042): how the header/skip state was determined --
   // format N/A, Excel auto-tidy (not recorded), or the user's explicit choices.
   rectify: RectifyProvenance;
+  // Privacy controls (ADR-0011, issue #9 slice 5): what of this dataset may
+  // leave the local trust boundary. Defaults to samples on, no type-only cols.
+  privacy: DatasetPrivacy;
 }
 
 // Discriminated union (serde adjacently-tagged: `#[serde(tag="kind", content="data")]`).
