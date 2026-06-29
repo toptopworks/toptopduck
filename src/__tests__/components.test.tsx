@@ -13,7 +13,7 @@ import type { DatasetDescriptor, DatasetPrivacy, GuidanceRequest } from "../type
 // tests can drive the picker without the native bridge.
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("../api", async (importOriginal) => {
-  const actual = await importOriginal();
+  const actual = await importOriginal<typeof import("../api")>();
   return { ...actual, readRows: vi.fn() };
 });
 

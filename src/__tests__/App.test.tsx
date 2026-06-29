@@ -16,7 +16,7 @@ const state = vi.hoisted(() => ({ workingSet: [] as DatasetDescriptor[] }));
 // importOriginal keeps the real fmtError (a pure helper) while the Tauri invoke
 // wrappers are stubbed.
 vi.mock("../api", async (importOriginal) => {
-  const actual = await importOriginal();
+  const actual = await importOriginal<typeof import("../api")>();
   return {
     ...actual,
     ingestFile: vi.fn(),
