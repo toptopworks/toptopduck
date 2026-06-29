@@ -707,9 +707,10 @@ impl Session {
             .map_err(|e| TurnError::Provider(e.to_string()))?;
 
         // Materialize the SQL as result_N (max+1, never reused -- ADR-0022).
-        // The result name is tool-generated, and the SQL is provider-supplied
-        // (trusted contract, ADR-0009); engine guardrails on the SQL itself
-        // (read-only, resource caps) arrive in #25.
+        // The result name is tool-generated. The SQL is provider-supplied but
+        // NOT yet validated -- engine guardrails (read-only, resource caps) are
+        // #25 and must land before the real LLM wires in #29; until then the only
+        // live provider is UnwiredProvider, which never returns SQL.
         let n = self.working_set.next_result_number();
         let result_name = format!("result_{n}");
         let create_sql = format!(
@@ -726,14 +727,23 @@ impl Session {
         // the just-created result_N is dropped first: an orphan table left
         // unregistered would make the next turn's next_result_number reuse N and
         // clash on CREATE, wedging every later turn (ADR-0022 never-reused). The
-        // DROP is best-effort -- a drop failure is no worse than the derive
-        // failure already being reported.
+        // DROP is best-effort but its failure is folded into the returned error
+        // -- a silent drop failure would leave exactly the orphan the DROP exists
+        // to remove, wedging the session with no signal (M1 regression).
         let shape = match derive_table(&self.conn, &result_name, &self.temp_path, &result_name) {
             Ok(shape) => shape,
             Err(e) => {
                 let drop_sql = format!("DROP TABLE {}", quote_alias(&result_name));
-                let _ = self.conn.execute_batch(&drop_sql);
-                return Err(TurnError::Execute(e.to_string()));
+                let detail = match self.conn.execute_batch(&drop_sql) {
+                    Ok(()) => e.to_string(),
+                    // The cleanup DROP itself failed: the orphan result_N likely
+                    // lingers and will clash on a later CREATE -- surface it so a
+                    // wedged session is observable, not silently masked.
+                    Err(drop_err) => format!(
+                        "{e}; cleanup DROP of {result_name} also failed: {drop_err} (orphan table may wedge later turns)"
+                    ),
+                };
+                return Err(TurnError::Execute(detail));
             }
         };
         let descriptor = DatasetDescriptor {

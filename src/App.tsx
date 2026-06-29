@@ -206,12 +206,25 @@ export default function App() {
       try {
         const outcome = await askQuestion(question);
         if (outcome.kind === "Materialized") {
+          const referenceName = outcome.data.dataset.reference_name;
+          // The turn already materialized result_N into the working set, so
+          // select it before refresh -- the user sees the result even when the
+          // working-set sync fails. A refresh failure is reported distinctly
+          // (never mislabel a successful turn as a failed ask), matching the
+          // operation-vs-refresh separation useSimpleMutation enforces elsewhere.
           setLatestResult({
-            referenceName: outcome.data.dataset.reference_name,
+            referenceName,
             assumption: outcome.data.assumption,
           });
-          await refresh();
-          setSelected(outcome.data.dataset.reference_name);
+          setSelected(referenceName);
+          try {
+            await refresh();
+          } catch (e) {
+            setError({
+              message: `结果已生成，但工作集刷新失败：${String(e)}`,
+              kind: "ask",
+            });
+          }
         }
       } catch (e) {
         setError({ message: String(e), kind: "ask" });
@@ -242,6 +255,7 @@ export default function App() {
       {latestResult && (
         <section className="panel">
           <ResultView
+            key={latestResult.referenceName}
             referenceName={latestResult.referenceName}
             assumption={latestResult.assumption}
           />

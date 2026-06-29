@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { readRows } from "../api";
 import type { ColumnSchema } from "../types";
 
@@ -26,20 +26,27 @@ export function ResultView({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Monotonic request id: each loadPage bumps it and ignores any response whose
+  // id is no longer current, so a late-arriving page (or its error) can never
+  // overwrite the page the user navigated to next.
+  const seqRef = useRef(0);
   const loadPage = useCallback(
     async (off: number) => {
+      const seq = (seqRef.current += 1);
       setLoading(true);
       setError(null);
       try {
         const page = await readRows(referenceName, off, pageSize);
+        if (seq !== seqRef.current) return; // superseded -- discard the stale page
         setColumns(page.columns);
         setRows(page.rows);
         setTotal(page.total);
         setOffset(off);
       } catch (e) {
+        if (seq !== seqRef.current) return;
         setError(String(e));
       } finally {
-        setLoading(false);
+        if (seq === seqRef.current) setLoading(false);
       }
     },
     [referenceName, pageSize],
@@ -76,8 +83,11 @@ export function ResultView({
                 <td className="muted">（无数据行）</td>
               </tr>
             )}
+            {/* key is the in-window index, not offset+i: rows are window-scoped,
+                so a position-derived key would mis-reuse DOM when one page's last
+                rows overlap the next page's first rows. */}
             {rows.map((row, i) => (
-              <tr key={offset + i}>
+              <tr key={i}>
                 {row.map((cell, j) => (
                   <td key={j}>{cell}</td>
                 ))}

@@ -142,17 +142,23 @@ pub async fn ask(
     Ok(outcome)
 }
 
-/// Read one page of a dataset's rows (ADR-0024 windowed display). Synchronous: a
-/// bounded LIMIT/OFFSET read is fast, so it needs no blocking thread. Rejects an
-/// unknown reference name or an engine error with an error string.
+/// Read one page of a dataset's rows (ADR-0024 windowed display). Runs off the
+/// async/UI thread (AC8) like `ask`: a large OFFSET is an O(offset) scan, so
+/// holding the session lock on the IPC path would block every other command.
+/// Rejects an unknown reference name or an engine error with an error string.
 #[tauri::command]
-pub fn read_rows(
+pub async fn read_rows(
     state: State<'_, Arc<Mutex<Session>>>,
     reference_name: String,
     offset: u64,
     limit: u64,
 ) -> Result<RowPage, String> {
-    let s = state.lock().map_err(|e| e.to_string())?;
-    s.read_rows(&reference_name, offset, limit)
-        .map_err(|e| e.to_string())
+    let session = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let s = session.lock().map_err(|e| e.to_string())?;
+        s.read_rows(&reference_name, offset, limit)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
