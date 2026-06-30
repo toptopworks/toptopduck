@@ -2,9 +2,10 @@
 //! result_N) plus READ_ONLY-attached source snapshots (ADR-0004/0005/0012). The
 //! per-session temp dir holds the snapshot files and is cleared on drop (ADR-0012).
 
+pub mod sandbox;
 pub mod snapshot;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -12,13 +13,16 @@ use calamine::Data;
 use duckdb::Connection;
 use tempfile::TempDir;
 
+use crate::guardrail::{
+    apply_resource_caps, classify_duckdb_error, ExecError, ExecErrorKind, DEFAULT_MAX_RESULT_ROWS,
+};
 use crate::ingest;
 use crate::ingest::schema::quote_ident;
 use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
     RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, TurnError, TurnOutcome,
-    TurnRecord, EXECUTE_FAIL_PREFIX,
+    TurnRecord, EXECUTE_FAIL_PREFIX, RESOURCE_FAIL_PREFIX,
 };
 use crate::provider::{Provider, ProviderError, ProviderReply, UnwiredProvider};
 use crate::session::snapshot::derive_table;
@@ -57,6 +61,19 @@ pub struct Session {
     /// labeled by its verbatim question. The source of truth the frontend
     /// renders and the window assembler (`crate::window`, #24) reads each turn.
     history: Vec<TurnRecord>,
+    /// Ceiling on a materialized result's row count (ADR-0005 L3). A query whose
+    /// result would exceed it is aborted with a resource error rather than
+    /// allowed to balloon memory. Defaults to [`DEFAULT_MAX_RESULT_ROWS`];
+    /// tunable via [`Self::set_result_row_cap`] (e.g. tests lower it for a fast,
+    /// deterministic cap-hit).
+    result_row_cap: u64,
+    /// Each loaded source's reference name -> the `.duckdb` snapshot file admin
+    /// currently holds attached, so the sandbox can re-attach it READ_ONLY
+    /// (ADR-0005 read_* closure). Tracked here rather than reconstructed from
+    /// `temp_path/<ref>.duckdb` because a replace may leave the file at a swap
+    /// path. Insert-only; stale entries are harmless (the working set is the
+    /// source of truth for which sources exist).
+    source_files: HashMap<String, PathBuf>,
 }
 
 impl Session {
@@ -66,6 +83,10 @@ impl Session {
             .tempdir()?;
         let temp_path = temp_dir.path().to_path_buf();
         let conn = Connection::open_in_memory()?;
+        // Engine-level resource caps (ADR-0005 L3): bind memory + threads before
+        // any query runs so a runaway LLM SQL cannot OOM or monopolize the
+        // machine. Best-effort; apply_resource_caps logs+swallows a rejection.
+        apply_resource_caps(&conn);
         Ok(Self {
             conn,
             working_set: WorkingSet::default(),
@@ -73,7 +94,17 @@ impl Session {
             temp_path,
             provider: Box::new(UnwiredProvider),
             history: Vec::new(),
+            result_row_cap: DEFAULT_MAX_RESULT_ROWS,
+            source_files: HashMap::new(),
         })
+    }
+
+    /// Tune the materialized-result row ceiling (ADR-0005 L3, "可调"). A query
+    /// whose result would exceed `cap` rows aborts with a resource error. The
+    /// default is [`DEFAULT_MAX_RESULT_ROWS`]; tests lower it for a fast,
+    /// deterministic cap-hit, and a future preferences surface may expose it.
+    pub fn set_result_row_cap(&mut self, cap: u64) {
+        self.result_row_cap = cap;
     }
 
     /// Build a session with an explicit provider (tests inject a scripted fake;
@@ -143,6 +174,12 @@ impl Session {
                 detail: format!("挂载快照失败：{e}"),
             });
         }
+
+        // Record the attached snapshot's file so the sandbox can re-attach it
+        // READ_ONLY (ADR-0005 read_* closure). file_path is moved here; the
+        // descriptor below takes snap's remaining fields.
+        self.source_files
+            .insert(reference_name.clone(), snap.file_path);
 
         // ADR-0037: the display label is the readable original filename stem (the
         // SQL-safe reference name is sanitized above), display-layer de-conflicted
@@ -376,6 +413,11 @@ impl Session {
             });
         }
         attached.push(reference_name.to_string());
+        // Record the attached snapshot's file for the sandbox re-attach path
+        // (ADR-0005 read_* closure). file_path is moved here; the descriptor
+        // below takes the remaining fields.
+        self.source_files
+            .insert(reference_name.to_string(), snap.file_path);
 
         Ok(DatasetDescriptor {
             reference_name: reference_name.to_string(),
@@ -695,6 +737,11 @@ impl Session {
             });
         }
 
+        // Record the post-replace attached file (formal name, or the swap path
+        // when the rename fallback fired) for the sandbox re-attach path.
+        self.source_files
+            .insert(reference_name.to_string(), PathBuf::from(&attach_path));
+
         // Commit: update the descriptor in place. The reference name is stable
         // (every existing reference now resolves to the new data); the display
         // label carries over (a user rename survives the replace, ADR-0037); the
@@ -748,8 +795,11 @@ impl Session {
                     };
                     return self.record_turn(question, outcome);
                 }
-                // SQL branch: execute + materialize. A CREATE/derive failure
-                // consumes the budget and retries; success materializes result_N.
+                // SQL branch: execute + materialize. A schema/runtime failure
+                // (bad reference, type error) consumes the budget and retries;
+                // a resource-cap hit does NOT retry (the same SQL would hit the
+                // same wall, ADR-0005/0028) and fails immediately. Success
+                // materializes result_N.
                 Ok(ProviderReply::Sql {
                     sql, assumption, ..
                 }) => match self.try_materialize(&sql) {
@@ -761,9 +811,20 @@ impl Session {
                         };
                         return self.record_turn(question, outcome);
                     }
-                    Err(detail) => {
-                        Self::push_failure(&mut failures, format!("{EXECUTE_FAIL_PREFIX}{detail}"))
-                    }
+                    Err(exec_err) => match exec_err.kind {
+                        // Resource cap: abort now -- retrying cannot help.
+                        ExecErrorKind::Resource => {
+                            let outcome = TurnOutcome::Failed {
+                                reason: format!("{}{}", RESOURCE_FAIL_PREFIX, exec_err.detail),
+                            };
+                            return self.record_turn(question, outcome);
+                        }
+                        // Schema/runtime: feed the budget and retry.
+                        _ => Self::push_failure(
+                            &mut failures,
+                            format!("{}{}", EXECUTE_FAIL_PREFIX, exec_err.detail),
+                        ),
+                    },
                 },
                 // NotWired is permanent (no provider configured) -- retrying
                 // cannot help, so the turn fails immediately without consuming
@@ -825,46 +886,107 @@ impl Session {
     }
 
     /// Execute one provider SQL and materialize it as result_N (ADR-0003/0024),
-    /// deriving + registering the result. Returns `Err` with an honest detail on
-    /// any failure (CREATE rejected, or shape derivation failed) -- the caller's
-    /// retry loop decides whether to re-attempt.
+    /// deriving + registering the result. Returns `Err` carrying a classified
+    /// [`ExecError`] on any failure: a rejected CREATE (engine error -- the
+    /// wrapping rejects mutating statements and COPY/ATTACH/INSTALL/LOAD as
+    /// parser errors; ADR-0005), a hit resource cap, or a shape-derivation
+    /// failure. The caller's retry loop routes on the kind: Resource aborts,
+    /// Schema/Runtime retry (ADR-0028).
     ///
     /// On a shape-derivation failure the just-created result_N is rolled back
     /// first: an orphan table left unregistered would make the next attempt's
     /// `next_result_number` reuse N and clash on CREATE, wedging every later
     /// turn (ADR-0022 never-reused). The DROP is best-effort but its own failure
     /// is folded into the detail so a wedged session is observable, not
-    /// silently masked (M1 regression). The result name is tool-generated; the
-    /// SQL is provider-supplied but NOT yet validated -- engine guardrails
-    /// (read-only, resource caps) are #25 and must land before the real LLM
-    /// wires in #29; until then the only live provider returning SQL is the
-    /// scripted test fake.
-    fn try_materialize(&mut self, sql: &str) -> Result<DatasetDescriptor, String> {
+    /// silently masked (M1 regression).
+    ///
+    /// Engine guardrails (ADR-0005): the SQL runs on a locked-down sandbox
+    /// ([`crate::session::sandbox`]) with LocalFileSystem disabled, then is
+    /// embedded as `CREATE TABLE result_N AS SELECT * FROM (<sql>) LIMIT cap+1`.
+    /// The disabled filesystem refuses read_* table functions; the subquery
+    /// wrapping means a non-SELECT statement (DROP/ALTER/INSERT/UPDATE/DELETE,
+    /// COPY/ATTACH/INSTALL/LOAD) is a parser error before it can touch a source
+    /// or the filesystem; the LIMIT pushes down into the scan so at most cap+1
+    /// rows materialize, capping memory on a runaway join. The result name is
+    /// tool-generated; the SQL is provider-supplied -- the only live provider
+    /// returning SQL today is the scripted test fake (the real LLM wires in #29).
+    fn try_materialize(&mut self, sql: &str) -> Result<DatasetDescriptor, ExecError> {
         // result_N is max+1, never reused (ADR-0022). Re-derived each attempt:
         // a failed attempt registers nothing, so N is stable across retries.
         let n = self.working_set.next_result_number();
         let result_name = format!("result_{n}");
-        let create_sql = format!("CREATE TABLE {} AS {}", quote_ident(&result_name), sql);
-        if let Err(e) = self.conn.execute_batch(&create_sql) {
-            return Err(e.to_string());
+        // Provider SQL runs on a locked-down sandbox (ADR-0005 read_* closure):
+        // a separate instance with LocalFileSystem disabled, so a read_* table
+        // function is refused by the engine ("... disabled by configuration").
+        // Sources are re-attached READ_ONLY (zero-copy; concurrent read-only
+        // attach is allowed) and prior results are mirrored in, so the SQL
+        // resolves identically to admin. Only the sandbox runs provider SQL;
+        // admin runs tool-controlled DML. The sandbox is dropped at end of scope
+        // (lockdown is irreversible, so it is single-use).
+        let sandbox_conn = sandbox::open()?;
+        sandbox::attach_sources(&sandbox_conn, &self.working_set, &self.source_files)?;
+        sandbox::mirror_results(&sandbox_conn, &self.conn, &self.working_set)?;
+        sandbox::lockdown(&sandbox_conn)?;
+
+        // Resource cap (ADR-0005 L3): bracket the query and LIMIT to cap+1 so a
+        // runaway cross-join cannot balloon memory (DuckDB pushes LIMIT into the
+        // scan, so only cap+1 rows ever materialize). The brackets make LIMIT
+        // bind to the whole query output; a trailing ';' is stripped so the
+        // subquery parses. Below, a count of cap+1 means the true result
+        // exceeded the cap -> abort (silent truncation is forbidden, ADR-0030).
+        let inner = sql.trim().trim_end_matches(';').trim_end();
+        let cap_plus_one = self.result_row_cap.saturating_add(1);
+        let create_sql = format!(
+            "CREATE TABLE {} AS SELECT * FROM ({inner}) AS _src LIMIT {cap_plus_one}",
+            quote_ident(&result_name),
+        );
+        if let Err(e) = sandbox_conn.execute_batch(&create_sql) {
+            // The engine rejected the CREATE on the sandbox -- a parser error
+            // from a mutating statement / COPY / ATTACH the wrapping bars, a
+            // read_* refusal ("disabled by configuration"), a schema error, or
+            // a runtime error. Classify so the caller can route retry vs abort;
+            // a blocked read_* is Resource (no retry).
+            return Err(ExecError::new(
+                classify_duckdb_error(&e.to_string()),
+                e.to_string(),
+            ));
+        }
+        // Row-count governor on the sandbox: count == cap+1 -> the true result
+        // exceeded the cap. Aborts as Resource; the sandbox is dropped (admin
+        // untouched), so -- unlike the install/derive steps below -- no rollback
+        // of result_N is needed here.
+        let rows: i64 = match sandbox_conn.query_row(
+            &format!("SELECT COUNT(*) FROM {}", quote_ident(&result_name)),
+            [],
+            |r| r.get(0),
+        ) {
+            Ok(rows) => rows,
+            Err(e) => return Err(ExecError::new(ExecErrorKind::Runtime, e.to_string())),
+        };
+        if rows as u64 > self.result_row_cap {
+            return Err(ExecError::new(
+                ExecErrorKind::Resource,
+                format!("结果行数（{rows}）超过上限 {}", self.result_row_cap),
+            ));
         }
 
-        // Derive the result's shape from the just-created table -- the same
-        // derivation a source snapshot uses (DRY).
+        // Install the new result onto admin (Value mirror). A failure can leave
+        // a partial result_N on admin, so roll it back (ADR-0022 never-reused).
+        if let Err(e) =
+            sandbox::install_result(&self.conn, &sandbox_conn, &result_name, &result_name)
+        {
+            let detail = Self::rollback_result(&self.conn, &result_name, e.detail);
+            return Err(ExecError::new(ExecErrorKind::Runtime, detail));
+        }
+
+        // Derive the result's shape from admin's installed table -- the same
+        // derivation a source snapshot uses (DRY). A derive failure also rolls
+        // back result_N (orphan table would wedge later turns, ADR-0022).
         let shape = match derive_table(&self.conn, &result_name, &self.temp_path, &result_name) {
             Ok(shape) => shape,
             Err(e) => {
-                let drop_sql = format!("DROP TABLE {}", quote_ident(&result_name));
-                let detail = match self.conn.execute_batch(&drop_sql) {
-                    Ok(()) => e.to_string(),
-                    // The cleanup DROP itself failed: the orphan result_N likely
-                    // lingers and will clash on a later CREATE -- surface it so a
-                    // wedged session is observable, not silently masked.
-                    Err(drop_err) => format!(
-                        "{e}; cleanup DROP of {result_name} also failed: {drop_err} (orphan table may wedge later turns)"
-                    ),
-                };
-                return Err(detail);
+                let detail = Self::rollback_result(&self.conn, &result_name, e.to_string());
+                return Err(ExecError::new(ExecErrorKind::Runtime, detail));
             }
         };
         let descriptor = DatasetDescriptor {
@@ -880,6 +1002,21 @@ impl Session {
         };
         self.working_set.register_result(descriptor.clone());
         Ok(descriptor)
+    }
+
+    /// Drop a just-created result_N table and fold any cleanup failure into the
+    /// reported detail. An orphan result_N would make the next attempt's
+    /// `next_result_number` reuse N and clash on CREATE, wedging every later
+    /// turn (ADR-0022 never-reused) -- the M1 regression. Surfacing the DROP
+    /// failure keeps a wedged session observable instead of silently masked.
+    fn rollback_result(conn: &Connection, result_name: &str, detail: String) -> String {
+        let drop_sql = format!("DROP TABLE {}", quote_ident(result_name));
+        match conn.execute_batch(&drop_sql) {
+            Ok(()) => detail,
+            Err(drop_err) => format!(
+                "{detail}; cleanup DROP of {result_name} also failed: {drop_err} (orphan table may wedge later turns)"
+            ),
+        }
     }
 
     /// The conversation thread (ADR-0028/0039): every turn, in order, each
@@ -1031,6 +1168,35 @@ mod tests {
         assert_eq!(
             remaining, 0,
             "result_1 must be dropped after the derive failure (M1)"
+        );
+    }
+
+    #[test]
+    fn resource_caps_are_applied_to_the_session_connection() {
+        // AC3 (issue #25): the engine-level resource caps are set on the session
+        // connection at construction (ADR-0005 L3). Read back via duckdb_settings
+        // (PRAGMA-as-query is unsupported in this DuckDB for these keys).
+        let session = Session::new().expect("session");
+        let threads: String = session
+            .conn
+            .query_row(
+                "SELECT value FROM duckdb_settings() WHERE name='threads'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("threads setting");
+        assert_eq!(threads, crate::guardrail::MAX_THREADS.to_string());
+        let mem: String = session
+            .conn
+            .query_row(
+                "SELECT value FROM duckdb_settings() WHERE name='memory_limit'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("memory_limit setting");
+        assert!(
+            mem.contains('2') || mem.contains("512"),
+            "memory_limit={mem}"
         );
     }
 }

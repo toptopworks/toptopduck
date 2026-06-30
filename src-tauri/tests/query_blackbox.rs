@@ -647,3 +647,148 @@ fn privacy_type_only_column_hides_name_and_values() {
     assert_eq!(row[0], Some("1".to_string())); // id
     assert_eq!(row[1], None); // name -- type-only, value withheld
 }
+
+// --- Engine guardrails (issue #25) -- ADR-0005 ----------------------------
+//
+// Black-box through the ask -> outcome seam: a fake provider returns SQL that
+// touches a guardrail, and we observe the engine refuse it (a Failed outcome)
+// with the source intact. The guarantees are engine-level -- READ_ONLY attach,
+// the `CREATE TABLE result_N AS <query>` wrapping (a non-SELECT statement is a
+// parser error before it can touch a source or the filesystem), and resource
+// PRAGMAs -- never SQL text filtering (ADR-0005).
+
+#[test]
+fn all_mutating_statements_against_the_source_are_rejected() {
+    // AC1: a turn that tries to mutate a source Dataset (DROP/ALTER/INSERT/
+    // UPDATE/DELETE) is rejected by the engine, and the source is unchanged.
+    // The DML is embedded inside `CREATE TABLE result_N AS <query>`, where it is
+    // a parser error; the READ_ONLY attach is the second layer. Each variant
+    // fails and leaves people at its original 5 rows.
+    let mutating = [
+        r#"DROP TABLE "people".data"#,
+        r#"DELETE FROM "people".data"#,
+        r#"UPDATE "people".data SET id = 0"#,
+        r#"INSERT INTO "people".data VALUES (99)"#,
+        r#"ALTER TABLE "people".data DROP COLUMN name"#,
+    ];
+    for sql in mutating {
+        let mut session = session_with(&[("改源", sql)]);
+        load_source(&mut session, &fixture("people.csv"));
+        let reason = failed_reason(session.ask("改源"));
+        assert!(
+            reason.contains("执行查询失败"),
+            "sql={sql} reason={reason:?}"
+        );
+        // Source content survives every attempt -- nothing was mutated.
+        assert_eq!(
+            session.snapshot_row_count("people").unwrap(),
+            5,
+            "source mutated by {sql}"
+        );
+        assert!(session.get("result_1").is_none()); // nothing materialized
+    }
+}
+
+#[test]
+fn filesystem_statements_are_rejected_by_the_wrapping() {
+    // AC2: COPY / ATTACH / INSTALL / LOAD are statements, not query expressions,
+    // so embedding them inside `CREATE TABLE ... AS <query>` is a parser error
+    // (ADR-0005 engine-level, not text filtering). The turn fails; nothing is
+    // written to disk, attached, or loaded. (The remaining read_* table functions
+    // in a SELECT need a sandboxed connection -- tracked separately.)
+    let stmts = [
+        "COPY result_1 TO 'leak.csv'",
+        "ATTACH ':memory:' AS leak",
+        "INSTALL httpfs",
+        "LOAD httpfs",
+    ];
+    for sql in stmts {
+        let mut session = session_with(&[("fs", sql)]);
+        load_source(&mut session, &fixture("people.csv"));
+        let reason = failed_reason(session.ask("fs"));
+        assert!(
+            reason.contains("执行查询失败"),
+            "sql={sql} reason={reason:?}"
+        );
+    }
+}
+
+#[test]
+fn a_query_over_the_row_cap_aborts_with_a_resource_error_without_retrying() {
+    // AC3/AC4: a result exceeding the row-count ceiling is aborted with a
+    // resource error (ADR-0005 L3). Unlike a schema/runtime error it does NOT
+    // enter the retry loop -- a scripted second attempt that would succeed is
+    // never reached, proving the resource path fails immediately (ADR-0028:
+    // resource caps stay out of the loop). Contrast with
+    // `a_persistently_bad_sql_exhausts_the_budget_and_fails` (schema -> retried).
+    let provider = FakeProvider::new().scripted_seq(
+        "大查询",
+        vec![
+            Ok(reply_sql("SELECT * FROM range(10)")), // 10 rows > cap of 3
+            Ok(reply_sql("SELECT 1 AS n")),           // would succeed -- never reached
+        ],
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    session.set_result_row_cap(3); // small cap for a deterministic hit
+    load_source(&mut session, &fixture("people.csv"));
+
+    let reason = failed_reason(session.ask("大查询"));
+    assert!(reason.contains("资源上限"), "got {reason:?}");
+    // The resource path did NOT burn the budget (distinct from a schema retry).
+    assert!(!reason.contains("重试预算耗尽"), "got {reason:?}");
+    assert!(session.get("result_1").is_none()); // over-cap result rolled back
+}
+
+#[test]
+fn a_query_under_the_row_cap_materializes_normally() {
+    // AC3 sanity: results at or under the cap materialize in full (no false
+    // abort, ADR-0030 full-result preservation). With cap=3, a 3-row result is
+    // exact -- count <= cap, so it is kept, not truncated, not aborted.
+    let mut session = session_with(&[("ok", "SELECT * FROM range(3)")]);
+    session.set_result_row_cap(3);
+    let (name, rows, _) = materialized(session.ask("ok"));
+    assert_eq!(name, "result_1");
+    assert_eq!(rows, 3);
+}
+
+#[test]
+fn a_read_function_into_arbitrary_disk_aborts_with_a_resource_error_without_retrying() {
+    // AC2 (issue #25, read_* closure): a SELECT calling a read_* table function
+    // (read_csv_auto / read_parquet / read_json_auto) would let the LLM read
+    // arbitrary disk. The sandbox runs provider SQL with LocalFileSystem
+    // disabled, so the engine refuses with "disabled by configuration" --
+    // classified Resource (ADR-0005/0028), which aborts WITHOUT retrying. A
+    // scripted second reply that would succeed is never reached, proving the
+    // resource path fails immediately. Contrast with the COPY/ATTACH statement
+    // test (a parser error -> Runtime -> retried) and the row-cap test.
+    //
+    // The leak target is a real temp file carrying a sentinel secret so the
+    // assertion is concrete: had the sandbox not blocked read_csv_auto, the
+    // secret would have materialized into result_1.
+    let leak_dir = tempfile::tempdir().expect("temp dir");
+    let leak = leak_dir.path().join("secret.csv");
+    std::fs::write(&leak, "secret\nPASSWORD-LEAKED\n").expect("write leak");
+    let leak_sql = format!(
+        "SELECT secret FROM read_csv_auto('{}')",
+        leak.to_string_lossy()
+    );
+    let provider = FakeProvider::new().scripted_seq(
+        "leak",
+        vec![
+            Ok(reply_sql(&leak_sql)),       // blocked -> Resource, no retry
+            Ok(reply_sql("SELECT 1 AS n")), // would succeed -- never reached
+        ],
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    let reason = failed_reason(session.ask("leak"));
+    assert!(
+        reason.contains("资源上限"),
+        "read_* should be blocked as a resource error, got {reason:?}"
+    );
+    // The resource path did NOT burn the budget (distinct from a schema retry).
+    assert!(!reason.contains("重试预算耗尽"), "got {reason:?}");
+    // Nothing materialized: the over-disk read never produced a result.
+    assert!(session.get("result_1").is_none());
+}

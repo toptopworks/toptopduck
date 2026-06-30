@@ -14,6 +14,7 @@
 //! -> outcome seam -- offline and deterministic.
 
 pub mod commands;
+pub mod guardrail;
 pub mod ingest;
 pub mod model;
 pub mod provider;
