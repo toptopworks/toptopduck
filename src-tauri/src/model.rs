@@ -317,6 +317,14 @@ pub enum TurnOutcome {
     /// outcome that advances result_N numbering.
     Materialized {
         dataset: DatasetDescriptor,
+        /// The verbatim SQL the provider returned this turn (ADR-0009/0023):
+        /// the recent-turn window ships it so the provider sees its own prior
+        /// SQL (ADR-0023 point 1: "LLM 响应（SQL + assumption 文本）"). `None`
+        /// only on legacy data that predates the field -- a fresh result turn
+        /// always produced a SQL, so the live path sets `Some`. The serde
+        /// default lets older recipes / IPC peers deserialize without it.
+        #[serde(default)]
+        sql: Option<String>,
         assumption: Option<String>,
     },
     /// Outcome B -- a textual turn: the provider answered with text, not SQL --

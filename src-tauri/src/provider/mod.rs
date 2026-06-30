@@ -78,12 +78,16 @@ pub enum TurnPayload {
 
 /// The provider's prior response, mirrored in a recent turn's payload. A trimmed
 /// view of [`crate::model::TurnOutcome`] -- the result's full schema + sample
-/// ride the dataset list, so this carries only what is per-turn: the result
-/// name, the textual body, the assumption note, the failure tag.
+/// ride the dataset list, so this carries only what is per-turn: the SQL, the
+/// result name, the textual body, the assumption note, the failure tag.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResponsePayload {
     Materialized {
         result: String,
+        /// The verbatim SQL the provider returned (ADR-0023 point 1) -- present
+        /// on a recent materialized turn so the provider sees its own prior SQL.
+        /// `None` only when the source turn predates the field.
+        sql: Option<String>,
         assumption: Option<String>,
     },
     Textual {
@@ -103,9 +107,11 @@ impl From<&crate::model::TurnOutcome> for ResponsePayload {
         match outcome {
             TurnOutcome::Materialized {
                 dataset,
+                sql,
                 assumption,
             } => ResponsePayload::Materialized {
                 result: dataset.reference_name.clone(),
+                sql: sql.clone(),
                 assumption: assumption.clone(),
             },
             TurnOutcome::Textual {

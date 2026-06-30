@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use toptopduck_lib::{
     DatasetPrivacy, DatasetRef, FakeProvider, LoadOutcome, ProviderError, ProviderReply,
-    ProviderRequest, Session, TextKind, TurnOutcome, TurnPayload,
+    ProviderRequest, ResponsePayload, Session, TextKind, TurnOutcome, TurnPayload,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -576,6 +576,19 @@ fn window_assembler_windows_history_and_samples_via_fake_provider() {
     assert_eq!(dataset_in(payload, "result_1").sample, None); // turn 1 is far
     assert!(dataset_in(payload, "result_2").sample.is_some()); // in-window
     assert!(dataset_in(payload, "result_21").sample.is_some()); // most recent
+
+    // ADR-0023 point 1: a recent materialized turn ships its verbatim SQL so the
+    // provider sees its own prior SQL. The most recent turn (turn 21) is Full;
+    // its response carries the exact SQL the fake replied with.
+    match &payload.history[20] {
+        TurnPayload::Full { response, .. } => match response {
+            ResponsePayload::Materialized { sql, .. } => {
+                assert_eq!(sql.as_deref(), Some("SELECT 1 AS n"));
+            }
+            other => panic!("expected Materialized response, got {other:?}"),
+        },
+        other => panic!("recent turn should be Full, got {other:?}"),
+    }
 }
 
 #[test]

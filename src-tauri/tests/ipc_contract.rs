@@ -193,9 +193,10 @@ fn turn_outcome_materialized_carries_descriptor_and_assumption() {
     assert_wire(
         &TurnOutcome::Materialized {
             dataset: sample_descriptor(),
+            sql: None,
             assumption: None,
         },
-        r#"{"kind":"Materialized","data":{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"assumption":null}}"#,
+        r#"{"kind":"Materialized","data":{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"sql":null,"assumption":null}}"#,
     );
 }
 

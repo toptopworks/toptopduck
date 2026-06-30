@@ -97,8 +97,9 @@ impl Provider for FakeProvider {
     fn generate(&self, request: &ProviderRequest) -> Result<ProviderReply, ProviderError> {
         // Record the assembled payload before dispatching -- the capture is what
         // lets a black-box test assert the window assembler's output (issue #24).
-        // A poisoned lock means a panic left it half-updated; keep appending so a
-        // flaky peer test does not block this one.
+        // A poisoned lock means a panic left it half-updated; drop the capture
+        // silently rather than propagating the poison, so a flaky peer test does
+        // not block this one.
         if let Ok(mut buf) = self.captured.lock() {
             buf.push(request.clone());
         }

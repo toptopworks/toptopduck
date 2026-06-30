@@ -259,6 +259,7 @@ mod tests {
             question: question.to_string(),
             outcome: TurnOutcome::Materialized {
                 dataset: result_desc(result),
+                sql: Some(format!("SELECT * FROM {}", result)),
                 assumption: None,
             },
         }

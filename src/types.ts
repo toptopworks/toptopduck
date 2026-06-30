@@ -101,6 +101,11 @@ export type TurnOutcome =
     kind: "Materialized";
     data: {
       dataset: DatasetDescriptor;
+      // The verbatim SQL the provider returned (ADR-0009/0023): the recent-turn
+      // window ships it so the provider sees its own prior SQL. Optional to
+      // mirror the Rust serde default (absent on older data); a fresh result
+      // turn always carries one. The frontend does not yet surface it.
+      sql?: string | null;
       // The provider optional assumption note (ADR-0009), surfaced as a side
       // note the user can correct; null when the provider offered none.
       assumption: string | null;

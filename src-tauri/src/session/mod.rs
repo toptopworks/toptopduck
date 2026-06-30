@@ -756,6 +756,7 @@ impl Session {
                     Ok(dataset) => {
                         let outcome = TurnOutcome::Materialized {
                             dataset,
+                            sql: Some(sql),
                             assumption,
                         };
                         return self.record_turn(question, outcome);
