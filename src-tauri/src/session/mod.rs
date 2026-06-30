@@ -12,13 +12,16 @@ use calamine::Data;
 use duckdb::Connection;
 use tempfile::TempDir;
 
+use crate::guardrail::{
+    apply_resource_caps, classify_duckdb_error, ExecError, ExecErrorKind, DEFAULT_MAX_RESULT_ROWS,
+};
 use crate::ingest;
 use crate::ingest::schema::quote_ident;
 use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
     RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, TurnError, TurnOutcome,
-    TurnRecord, EXECUTE_FAIL_PREFIX,
+    TurnRecord, EXECUTE_FAIL_PREFIX, RESOURCE_FAIL_PREFIX,
 };
 use crate::provider::{Provider, ProviderError, ProviderReply, UnwiredProvider};
 use crate::session::snapshot::derive_table;
@@ -57,6 +60,12 @@ pub struct Session {
     /// labeled by its verbatim question. The source of truth the frontend
     /// renders and the window assembler (`crate::window`, #24) reads each turn.
     history: Vec<TurnRecord>,
+    /// Ceiling on a materialized result's row count (ADR-0005 L3). A query whose
+    /// result would exceed it is aborted with a resource error rather than
+    /// allowed to balloon memory. Defaults to [`DEFAULT_MAX_RESULT_ROWS`];
+    /// tunable via [`Self::set_result_row_cap`] (e.g. tests lower it for a fast,
+    /// deterministic cap-hit).
+    result_row_cap: u64,
 }
 
 impl Session {
@@ -66,6 +75,10 @@ impl Session {
             .tempdir()?;
         let temp_path = temp_dir.path().to_path_buf();
         let conn = Connection::open_in_memory()?;
+        // Engine-level resource caps (ADR-0005 L3): bind memory + threads before
+        // any query runs so a runaway LLM SQL cannot OOM or monopolize the
+        // machine. Best-effort; apply_resource_caps logs+swallows a rejection.
+        apply_resource_caps(&conn);
         Ok(Self {
             conn,
             working_set: WorkingSet::default(),
@@ -73,7 +86,16 @@ impl Session {
             temp_path,
             provider: Box::new(UnwiredProvider),
             history: Vec::new(),
+            result_row_cap: DEFAULT_MAX_RESULT_ROWS,
         })
+    }
+
+    /// Tune the materialized-result row ceiling (ADR-0005 L3, "可调"). A query
+    /// whose result would exceed `cap` rows aborts with a resource error. The
+    /// default is [`DEFAULT_MAX_RESULT_ROWS`]; tests lower it for a fast,
+    /// deterministic cap-hit, and a future preferences surface may expose it.
+    pub fn set_result_row_cap(&mut self, cap: u64) {
+        self.result_row_cap = cap;
     }
 
     /// Build a session with an explicit provider (tests inject a scripted fake;
@@ -748,8 +770,11 @@ impl Session {
                     };
                     return self.record_turn(question, outcome);
                 }
-                // SQL branch: execute + materialize. A CREATE/derive failure
-                // consumes the budget and retries; success materializes result_N.
+                // SQL branch: execute + materialize. A schema/runtime failure
+                // (bad reference, type error) consumes the budget and retries;
+                // a resource-cap hit does NOT retry (the same SQL would hit the
+                // same wall, ADR-0005/0028) and fails immediately. Success
+                // materializes result_N.
                 Ok(ProviderReply::Sql {
                     sql, assumption, ..
                 }) => match self.try_materialize(&sql) {
@@ -761,9 +786,20 @@ impl Session {
                         };
                         return self.record_turn(question, outcome);
                     }
-                    Err(detail) => {
-                        Self::push_failure(&mut failures, format!("{EXECUTE_FAIL_PREFIX}{detail}"))
-                    }
+                    Err(exec_err) => match exec_err.kind {
+                        // Resource cap: abort now -- retrying cannot help.
+                        ExecErrorKind::Resource => {
+                            let outcome = TurnOutcome::Failed {
+                                reason: format!("{}{}", RESOURCE_FAIL_PREFIX, exec_err.detail),
+                            };
+                            return self.record_turn(question, outcome);
+                        }
+                        // Schema/runtime: feed the budget and retry.
+                        _ => Self::push_failure(
+                            &mut failures,
+                            format!("{}{}", EXECUTE_FAIL_PREFIX, exec_err.detail),
+                        ),
+                    },
                 },
                 // NotWired is permanent (no provider configured) -- retrying
                 // cannot help, so the turn fails immediately without consuming
@@ -825,28 +861,82 @@ impl Session {
     }
 
     /// Execute one provider SQL and materialize it as result_N (ADR-0003/0024),
-    /// deriving + registering the result. Returns `Err` with an honest detail on
-    /// any failure (CREATE rejected, or shape derivation failed) -- the caller's
-    /// retry loop decides whether to re-attempt.
+    /// deriving + registering the result. Returns `Err` carrying a classified
+    /// [`ExecError`] on any failure: a rejected CREATE (engine error -- the
+    /// wrapping rejects mutating statements and COPY/ATTACH/INSTALL/LOAD as
+    /// parser errors; ADR-0005), a hit resource cap, or a shape-derivation
+    /// failure. The caller's retry loop routes on the kind: Resource aborts,
+    /// Schema/Runtime retry (ADR-0028).
     ///
     /// On a shape-derivation failure the just-created result_N is rolled back
     /// first: an orphan table left unregistered would make the next attempt's
     /// `next_result_number` reuse N and clash on CREATE, wedging every later
     /// turn (ADR-0022 never-reused). The DROP is best-effort but its own failure
     /// is folded into the detail so a wedged session is observable, not
-    /// silently masked (M1 regression). The result name is tool-generated; the
-    /// SQL is provider-supplied but NOT yet validated -- engine guardrails
-    /// (read-only, resource caps) are #25 and must land before the real LLM
-    /// wires in #29; until then the only live provider returning SQL is the
-    /// scripted test fake.
-    fn try_materialize(&mut self, sql: &str) -> Result<DatasetDescriptor, String> {
+    /// silently masked (M1 regression).
+    ///
+    /// Engine guardrails (ADR-0005): the SQL is embedded as
+    /// `CREATE TABLE result_N AS SELECT * FROM (<sql>) LIMIT cap+1`. The
+    /// subquery wrapping means a non-SELECT statement (DROP/ALTER/INSERT/
+    /// UPDATE/DELETE, COPY/ATTACH/INSTALL/LOAD) is a parser error before it can
+    /// touch a source or the filesystem; the LIMIT pushes down into the scan so
+    /// at most cap+1 rows materialize, capping memory on a runaway join. The
+    /// result name is tool-generated; the SQL is provider-supplied -- the only
+    /// live provider returning SQL today is the scripted test fake (the real
+    /// LLM wires in #29).
+    fn try_materialize(&mut self, sql: &str) -> Result<DatasetDescriptor, ExecError> {
         // result_N is max+1, never reused (ADR-0022). Re-derived each attempt:
         // a failed attempt registers nothing, so N is stable across retries.
         let n = self.working_set.next_result_number();
         let result_name = format!("result_{n}");
-        let create_sql = format!("CREATE TABLE {} AS {}", quote_ident(&result_name), sql);
+        // Resource cap (ADR-0005 L3): bracket the query and LIMIT to cap+1 so a
+        // runaway cross-join cannot balloon memory (DuckDB pushes LIMIT into the
+        // scan, so only cap+1 rows ever materialize). The brackets make LIMIT
+        // bind to the whole query output; a trailing ';' is stripped so the
+        // subquery parses. Below, a count of cap+1 means the true result
+        // exceeded the cap -> abort (silent truncation is forbidden, ADR-0030).
+        let inner = sql.trim().trim_end_matches(';').trim_end();
+        let cap_plus_one = self.result_row_cap.saturating_add(1);
+        let create_sql = format!(
+            "CREATE TABLE {} AS SELECT * FROM ({inner}) AS _src LIMIT {cap_plus_one}",
+            quote_ident(&result_name),
+        );
         if let Err(e) = self.conn.execute_batch(&create_sql) {
-            return Err(e.to_string());
+            // The engine rejected the CREATE -- a parser error from a mutating
+            // statement / COPY / ATTACH / etc. the wrapping bars (ADR-0005), a
+            // schema error (bad reference), or a runtime error (type). Classify
+            // so the caller can route retry vs abort.
+            return Err(ExecError::new(
+                classify_duckdb_error(&e.to_string()),
+                e.to_string(),
+            ));
+        }
+        // Row-count governor: count == cap+1 -> the true result exceeded the cap.
+        let rows: i64 = match self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM {}", quote_ident(&result_name)),
+            [],
+            |r| r.get(0),
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                // The count itself failed (engine error on the just-created
+                // table) -- roll back and surface as a runtime error.
+                let _ = self
+                    .conn
+                    .execute_batch(&format!("DROP TABLE {}", quote_ident(&result_name)));
+                return Err(ExecError::new(ExecErrorKind::Runtime, e.to_string()));
+            }
+        };
+        if rows as u64 > self.result_row_cap {
+            // Over the cap: abort with a resource error and roll back result_N
+            // so the next attempt's N is stable (ADR-0022).
+            let _ = self
+                .conn
+                .execute_batch(&format!("DROP TABLE {}", quote_ident(&result_name)));
+            return Err(ExecError::new(
+                ExecErrorKind::Resource,
+                format!("结果行数（{rows}）超过上限 {}", self.result_row_cap),
+            ));
         }
 
         // Derive the result's shape from the just-created table -- the same
@@ -864,7 +954,7 @@ impl Session {
                         "{e}; cleanup DROP of {result_name} also failed: {drop_err} (orphan table may wedge later turns)"
                     ),
                 };
-                return Err(detail);
+                return Err(ExecError::new(ExecErrorKind::Runtime, detail));
             }
         };
         let descriptor = DatasetDescriptor {
@@ -1031,6 +1121,35 @@ mod tests {
         assert_eq!(
             remaining, 0,
             "result_1 must be dropped after the derive failure (M1)"
+        );
+    }
+
+    #[test]
+    fn resource_caps_are_applied_to_the_session_connection() {
+        // AC3 (issue #25): the engine-level resource caps are set on the session
+        // connection at construction (ADR-0005 L3). Read back via duckdb_settings
+        // (PRAGMA-as-query is unsupported in this DuckDB for these keys).
+        let session = Session::new().expect("session");
+        let threads: String = session
+            .conn
+            .query_row(
+                "SELECT value FROM duckdb_settings() WHERE name='threads'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("threads setting");
+        assert_eq!(threads, crate::guardrail::MAX_THREADS.to_string());
+        let mem: String = session
+            .conn
+            .query_row(
+                "SELECT value FROM duckdb_settings() WHERE name='memory_limit'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("memory_limit setting");
+        assert!(
+            mem.contains('2') || mem.contains("512"),
+            "memory_limit={mem}"
         );
     }
 }

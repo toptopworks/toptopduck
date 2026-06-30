@@ -369,6 +369,13 @@ pub struct TurnRecord {
 /// lives once here. String-matched by the frontend; pinned by tests/ipc_contract.
 pub(crate) const EXECUTE_FAIL_PREFIX: &str = "执行查询失败：";
 
+/// Prefix for a turn aborted by an engine-level resource cap (ADR-0005 L3):
+/// memory ceiling, result-row ceiling, or a blocked filesystem function.
+/// Distinct from [`EXECUTE_FAIL_PREFIX`] (a retried schema/runtime error that
+/// exhausted the budget) so a cap-hit reads clearly as a limit, not a bug, and
+/// so the frontend can render it separately. String-matched by the frontend.
+pub(crate) const RESOURCE_FAIL_PREFIX: &str = "资源上限：";
+
 /// Why a row read failed. A turn no longer fails across this type -- turn
 /// failures are [`TurnOutcome::Failed`] (ADR-0028), so a turn always produces an
 /// outcome. This type remains only for [`crate::session::Session::read_rows`]: a
