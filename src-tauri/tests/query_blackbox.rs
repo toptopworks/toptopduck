@@ -8,7 +8,8 @@
 use std::path::{Path, PathBuf};
 
 use toptopduck_lib::{
-    FakeProvider, LoadOutcome, ProviderError, ProviderReply, Session, TextKind, TurnOutcome,
+    DatasetPrivacy, DatasetRef, FakeProvider, LoadOutcome, ProviderError, ProviderReply,
+    ProviderRequest, ResponsePayload, Session, TextKind, TurnOutcome, TurnPayload,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -496,4 +497,153 @@ fn budget_exhaustion_keeps_each_distinct_failure() {
     assert!(reason.contains("LLM 提供方调用失败"), "got {reason:?}");
     assert!(reason.contains("重试预算耗尽"), "got {reason:?}");
     assert!(session.get("result_1").is_none());
+}
+
+// --- Window assembly + privacy payload wiring (issue #24) -------------------
+//
+// The window assembler is observed purely through the assembled payload the fake
+// provider receives -- the highest seam (PRD testing philosophy: assert the
+// payload shape, never prompt-string assembly details). The fake captures every
+// request; the last entry is the turn under inspection.
+
+/// Borrow a dataset's payload entry by reference name, panicking if absent.
+fn dataset_in<'a>(payload: &'a ProviderRequest, name: &str) -> &'a DatasetRef {
+    payload
+        .datasets
+        .iter()
+        .find(|d| d.reference_name == name)
+        .unwrap_or_else(|| panic!("payload missing dataset {name}"))
+}
+
+#[test]
+fn window_assembler_windows_history_and_samples_via_fake_provider() {
+    // AC #24: drive N>20 turns through the real loop, then capture the assembled
+    // payload at the fake provider and assert the window/summary/sample shape.
+    let mut provider = FakeProvider::new();
+    for k in 1..=21u8 {
+        provider = provider.scripted(&format!("turn {k}"), reply_sql("SELECT 1 AS n"));
+    }
+    provider = provider.scripted("probe", reply_sql("SELECT 1 AS n"));
+    let captured = provider.captured();
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    for k in 1..=21u8 {
+        let name = materialized(session.ask(&format!("turn {k}"))).0;
+        assert_eq!(name, format!("result_{k}"));
+    }
+    session.ask("probe");
+
+    let buf = captured.lock().expect("capture lock");
+    let payload = buf.last().expect("probe request captured");
+    assert_eq!(payload.question, "probe");
+
+    // 21 prior turns: the oldest (turn 1 -> result_1) falls out of the N=20
+    // window and becomes a verbatim summary; the recent 20 stay full.
+    assert_eq!(payload.history.len(), 21);
+    assert_eq!(
+        payload
+            .history
+            .iter()
+            .filter(|t| matches!(t, TurnPayload::Summary { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        payload
+            .history
+            .iter()
+            .filter(|t| matches!(t, TurnPayload::Full { .. }))
+            .count(),
+        20
+    );
+    match &payload.history[0] {
+        TurnPayload::Summary {
+            question_excerpt,
+            result,
+        } => {
+            assert_eq!(question_excerpt, "turn 1"); // short -> verbatim, no truncation
+            assert_eq!(result.as_deref(), Some("result_1")); // retargetable by name
+        }
+        other => panic!("oldest turn should be Summary, got {other:?}"),
+    }
+
+    // Source always ships full schema + samples (ADR-0023); out-of-window
+    // result_1 ships no sample, in-window results do (ADR-0026).
+    let people = dataset_in(payload, "people");
+    assert_eq!(people.columns.len(), 5); // id,name,joined,active,score
+    assert!(people.sample.is_some());
+    assert_eq!(dataset_in(payload, "result_1").sample, None); // turn 1 is far
+    assert!(dataset_in(payload, "result_2").sample.is_some()); // in-window
+    assert!(dataset_in(payload, "result_21").sample.is_some()); // most recent
+
+    // ADR-0023 point 1: a recent materialized turn ships its verbatim SQL so the
+    // provider sees its own prior SQL. The most recent turn (turn 21) is Full;
+    // its response carries the exact SQL the fake replied with.
+    match &payload.history[20] {
+        TurnPayload::Full { response, .. } => match response {
+            ResponsePayload::Materialized { sql, .. } => {
+                assert_eq!(sql.as_deref(), Some("SELECT 1 AS n"));
+            }
+            other => panic!("expected Materialized response, got {other:?}"),
+        },
+        other => panic!("recent turn should be Full, got {other:?}"),
+    }
+}
+
+#[test]
+fn privacy_samples_off_withholds_a_sources_cells() {
+    // AC #24: DatasetPrivacy.send_samples=false prunes every sample cell of that
+    // dataset from the payload (ADR-0011) -- the controls now "take effect" on
+    // what is actually sent, not just stored.
+    let provider = FakeProvider::new().scripted("q", reply_sql("SELECT 1 AS n"));
+    let captured = provider.captured();
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    session.set_privacy(
+        "people",
+        DatasetPrivacy {
+            send_samples: false,
+            type_only_columns: vec![],
+        },
+    );
+
+    session.ask("q");
+    let buf = captured.lock().expect("lock");
+    let payload = buf.last().expect("captured");
+    let people = dataset_in(payload, "people");
+    assert_eq!(people.sample, None); // no cells ship
+                                     // schema still full -- only values are withheld.
+    assert_eq!(people.columns.len(), 5);
+    assert!(people.columns.iter().all(|c| c.name.is_some()));
+}
+
+#[test]
+fn privacy_type_only_column_hides_name_and_values() {
+    // AC #24: a type-only column ships its type but neither its name nor any
+    // sample value (ADR-0011). The "name" column of people.csv is VARCHAR.
+    let provider = FakeProvider::new().scripted("q", reply_sql("SELECT 1 AS n"));
+    let captured = provider.captured();
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    session.set_privacy(
+        "people",
+        DatasetPrivacy {
+            send_samples: true,
+            type_only_columns: vec!["name".into()],
+        },
+    );
+
+    session.ask("q");
+    let buf = captured.lock().expect("lock");
+    let payload = buf.last().expect("captured");
+    let people = dataset_in(payload, "people");
+    // Exactly one column is name-redacted, and it is the VARCHAR "name" column.
+    let redacted: Vec<_> = people.columns.iter().filter(|c| c.name.is_none()).collect();
+    assert_eq!(redacted.len(), 1);
+    assert_eq!(redacted[0].canonical_type, "VARCHAR");
+    // Sample cells: id ships, name (index 1) withheld at its position.
+    let row = people.sample.as_ref().unwrap().first().unwrap();
+    assert_eq!(row[0], Some("1".to_string())); // id
+    assert_eq!(row[1], None); // name -- type-only, value withheld
 }

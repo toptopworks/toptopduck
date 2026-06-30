@@ -20,10 +20,9 @@ use crate::model::{
     RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, TurnError, TurnOutcome,
     TurnRecord, EXECUTE_FAIL_PREFIX,
 };
-use crate::provider::{
-    DatasetRef, Provider, ProviderError, ProviderReply, ProviderRequest, UnwiredProvider,
-};
+use crate::provider::{Provider, ProviderError, ProviderReply, UnwiredProvider};
 use crate::session::snapshot::derive_table;
+use crate::window;
 use crate::workingset::WorkingSet;
 
 /// Raw rows surfaced per sheet in the guided-load preview -- enough to spot the
@@ -56,7 +55,7 @@ pub struct Session {
     provider: Box<dyn Provider>,
     /// The conversation thread (ADR-0028/0039): every turn, in order, each
     /// labeled by its verbatim question. The source of truth the frontend
-    /// renders and the (future, #24) window assembler reads.
+    /// renders and the window assembler (`crate::window`, #24) reads each turn.
     history: Vec<TurnRecord>,
 }
 
@@ -725,7 +724,7 @@ impl Session {
     /// in the conversation thread (always visible, ADR-0028/0039); only a result
     /// advances result_N. Infallible -- a question always yields one outcome.
     pub fn ask(&mut self, question: &str) -> TurnOutcome {
-        let request = self.build_provider_request(question);
+        let request = window::assemble(question, &self.working_set, &self.history);
         // Collect each attempt's failure so exhaustion surfaces them all, not
         // just the last -- a SQL execution error (the actionable kind) would
         // otherwise be overwritten by a later transient Unavailable. Consecutive
@@ -756,7 +755,8 @@ impl Session {
                 }) => match self.try_materialize(&sql) {
                     Ok(dataset) => {
                         let outcome = TurnOutcome::Materialized {
-                            dataset,
+                            dataset: Box::new(dataset),
+                            sql: Some(sql),
                             assumption,
                         };
                         return self.record_turn(question, outcome);
@@ -884,34 +884,10 @@ impl Session {
 
     /// The conversation thread (ADR-0028/0039): every turn, in order, each
     /// labeled by its verbatim question. The thread is the source of truth the
-    /// frontend renders and the (future, #24) window assembler reads.
+    /// frontend renders and the window assembler (`crate::window`) reads each
+    /// turn to build the provider payload (ADR-0023 window + ADR-0039 summary).
     pub fn conversation(&self) -> &[TurnRecord] {
         &self.history
-    }
-
-    /// Assemble the provider request: the question, the working set as dataset
-    /// refs (each with its verbatim FROM fragment), and the active source. The
-    /// bare schema today; window assembly (privacy pruning, history) is #24.
-    fn build_provider_request(&self, question: &str) -> ProviderRequest {
-        let datasets = self
-            .working_set
-            .list()
-            .iter()
-            .map(|d| DatasetRef {
-                reference_name: d.reference_name.clone(),
-                sql_ref: self
-                    .working_set
-                    .sql_from(&d.reference_name)
-                    .expect("working set list() entries are always registered"),
-                columns: d.columns.clone(),
-                row_count: d.row_count,
-            })
-            .collect();
-        ProviderRequest {
-            question: question.to_string(),
-            datasets,
-            active: self.working_set.active().map(|d| d.reference_name.clone()),
-        }
     }
 
     /// Read one page of a dataset's rows (ADR-0024 windowed display). Cells are

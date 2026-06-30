@@ -13,6 +13,7 @@
 
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use super::{Provider, ProviderError, ProviderReply, ProviderRequest};
 
@@ -32,6 +33,12 @@ struct Script {
 /// test (no hidden default that could mask a wiring bug).
 pub struct FakeProvider {
     scripts: HashMap<String, Script>,
+    /// Every request handed to `generate`, newest last (one entry per call, so
+    /// a retried turn appends repeats of the same request). Shared by `Arc` so
+    /// a test can inspect what the window assembler produced after driving the
+    /// session -- the fake is consumed into the session, but the capture handle
+    /// stays in the test's hand.
+    captured: Arc<Mutex<Vec<ProviderRequest>>>,
 }
 
 impl Default for FakeProvider {
@@ -40,6 +47,7 @@ impl Default for FakeProvider {
     fn default() -> Self {
         Self {
             scripts: HashMap::new(),
+            captured: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -47,6 +55,14 @@ impl Default for FakeProvider {
 impl FakeProvider {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A shared handle to every request this fake has been handed, newest last.
+    /// Clone the `Arc` before passing the fake into a session, drive turns, then
+    /// read the last entry to assert the assembled payload (issue #24 window +
+    /// privacy tests).
+    pub fn captured(&self) -> Arc<Mutex<Vec<ProviderRequest>>> {
+        Arc::clone(&self.captured)
     }
 
     /// Register one stable reply for a question -- returned on every call. The
@@ -79,6 +95,14 @@ impl FakeProvider {
 
 impl Provider for FakeProvider {
     fn generate(&self, request: &ProviderRequest) -> Result<ProviderReply, ProviderError> {
+        // Record the assembled payload before dispatching -- the capture is what
+        // lets a black-box test assert the window assembler's output (issue #24).
+        // A poisoned lock means a panic left it half-updated; drop the capture
+        // silently rather than propagating the poison, so a flaky peer test does
+        // not block this one.
+        if let Ok(mut buf) = self.captured.lock() {
+            buf.push(request.clone());
+        }
         let script = self
             .scripts
             .get(request.question.as_str())
@@ -101,20 +125,22 @@ impl Provider for FakeProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ColumnSchema, TextKind};
-    use crate::provider::DatasetRef;
+    use crate::model::TextKind;
+    use crate::provider::{ColumnRef, DatasetRef};
 
     fn request(question: &str) -> ProviderRequest {
         ProviderRequest {
             question: question.to_string(),
+            history: Vec::new(),
             datasets: vec![DatasetRef {
                 reference_name: "people".into(),
                 sql_ref: r#""people".data"#.into(),
-                columns: vec![ColumnSchema {
-                    name: "id".into(),
+                columns: vec![ColumnRef {
+                    name: Some("id".into()),
                     canonical_type: "BIGINT".into(),
                 }],
                 row_count: 5,
+                sample: Some(vec![vec![Some("1".into())]]),
             }],
             active: Some("people".into()),
         }
