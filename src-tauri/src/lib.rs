@@ -18,6 +18,7 @@ pub mod ingest;
 pub mod model;
 pub mod provider;
 pub mod session;
+pub mod window;
 pub mod workingset;
 
 pub use model::{
@@ -27,7 +28,8 @@ pub use model::{
 };
 pub use provider::fake::FakeProvider;
 pub use provider::{
-    DatasetRef, Provider, ProviderError, ProviderReply, ProviderRequest, UnwiredProvider,
+    ColumnRef, DatasetRef, Provider, ProviderError, ProviderReply, ProviderRequest,
+    ResponsePayload, TurnPayload, UnwiredProvider,
 };
 pub use session::Session;
 

@@ -3,36 +3,140 @@
 //! never on a concrete client, so every turn is testable offline against a
 //! scripted fake (the v1 shared test base). v1 ships one real implementation
 //! behind the trait; multi-provider is a future config point, not pre-built.
+//!
+//! The [`ProviderRequest`] handed to a provider each turn is the *assembled LLM
+//! payload* -- the windowed conversation history plus every working-set dataset
+//! pruned by the privacy controls (issue #24, ADR-0023/0026/0039/0011). The
+//! window assembler (`crate::window`) is the single place that builds it; the
+//! types below are just its shape.
 
 pub mod fake;
 
-use crate::model::ColumnSchema;
+use crate::model::TextKind;
 
-/// One Dataset the provider may reference in its SQL, with the verbatim FROM
-/// fragment it must use. Sources are read-only attached catalogs referenced as
-/// "<ref>".data (ADR-0012); materialized turn results are main-DB physical
-/// tables referenced as "<ref>" (ADR-0024). Carried as a ready fragment so the
-/// provider emits the correct form without knowing the storage layer -- the
-/// window assembler (#24) is the one place that knows storage vs. reference.
-#[derive(Debug, Clone)]
-pub struct DatasetRef {
-    pub reference_name: String,
-    /// Verbatim SQL fragment for this dataset FROM clause, e.g.
-    /// "people".data (source) or "result_1" (derived result).
-    pub sql_ref: String,
-    pub columns: Vec<ColumnSchema>,
-    pub row_count: u64,
+/// One column of a dataset as it appears in the LLM payload. The name is hidden
+/// when the user marked the column "type only" (ADR-0011): the provider learns
+/// the canonical DuckDB type but neither the column name nor any of its sample
+/// values, so a sensitive column's shape stays visible for SQL correctness
+/// without leaking its identity or contents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnRef {
+    /// The column name, or `None` when privacy hides it (ADR-0011 type-only).
+    pub name: Option<String>,
+    pub canonical_type: String,
 }
 
-/// The request the orchestrator hands a provider each turn: the user question
-/// plus the current working set (every Dataset the SQL may reference) and the
-/// active dataset (ADR-0022 -- the implicit target when the question names
-/// none). Window assembly (privacy pruning, history, truncation) arrives in
-/// #24; slice #22 sends the bare schema -- enough for a scripted fake to pick
-/// SQL.
-#[derive(Debug, Clone)]
+/// One Dataset the provider may reference in its SQL, as it appears in the
+/// assembled payload (ADR-0023/0026/0011). Sources are read-only attached
+/// catalogs referenced as `"<ref>".data` (ADR-0012); materialized turn results
+/// are main-DB physical tables referenced as `"<ref>"` (ADR-0024). Carried as a
+/// ready `sql_ref` fragment so the provider emits the correct form without
+/// knowing the storage layer -- the window assembler is the one place that
+/// knows storage vs. reference.
+///
+/// `sample` is `None` when sample rows are withheld: the dataset sits outside
+/// the recent-turn window (a `result_N` whose producing turn is older than
+/// N=20, ADR-0026), or the user turned samples off for this dataset
+/// (ADR-0011). Sources always carry samples (always in-window, ADR-0023). When
+/// present, each row aligns positionally to `columns`; a cell is `None` where
+/// its column is type-only (ADR-0011 -- the value is withheld along with the
+/// name).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DatasetRef {
+    pub reference_name: String,
+    /// Verbatim SQL fragment for this dataset's FROM clause, e.g.
+    /// `"people".data` (source) or `"result_1"` (derived result).
+    pub sql_ref: String,
+    pub columns: Vec<ColumnRef>,
+    pub row_count: u64,
+    pub sample: Option<Vec<Vec<Option<String>>>>,
+}
+
+/// One prior turn's contribution to the assembled prompt (ADR-0023 window).
+/// Recent turns (within N=20) carry full detail; older turns carry only a
+/// verbatim-question summary (ADR-0039) so the provider can still map "that
+/// earlier table" to a reference (ADR-0010) without paying the full token cost.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TurnPayload {
+    /// A recent turn (within the N=20 window): the verbatim question and the
+    /// provider's own prior response. A result turn names its `result_N` (the
+    /// full schema + sample ride the dataset list, ADR-0023); a textual turn
+    /// carries its body; failed/cancelled carry their outcome tag.
+    Full {
+        question: String,
+        response: ResponsePayload,
+    },
+    /// A turn beyond the N=20 window: only the verbatim question, bounded-
+    /// truncated (ADR-0039 -- never an LLM-generated summary), plus the
+    /// `result_N` name if it produced one (so the provider can still retarget
+    /// it, ADR-0010/0023). No SQL, no schema, no sample.
+    Summary {
+        question_excerpt: String,
+        result: Option<String>,
+    },
+}
+
+/// The provider's prior response, mirrored in a recent turn's payload. A trimmed
+/// view of [`crate::model::TurnOutcome`] -- the result's full schema + sample
+/// ride the dataset list, so this carries only what is per-turn: the result
+/// name, the textual body, the assumption note, the failure tag.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResponsePayload {
+    Materialized {
+        result: String,
+        assumption: Option<String>,
+    },
+    Textual {
+        kind: TextKind,
+        body: String,
+        assumption: Option<String>,
+    },
+    Failed {
+        reason: String,
+    },
+    Cancelled,
+}
+
+impl From<&crate::model::TurnOutcome> for ResponsePayload {
+    fn from(outcome: &crate::model::TurnOutcome) -> Self {
+        use crate::model::TurnOutcome;
+        match outcome {
+            TurnOutcome::Materialized {
+                dataset,
+                assumption,
+            } => ResponsePayload::Materialized {
+                result: dataset.reference_name.clone(),
+                assumption: assumption.clone(),
+            },
+            TurnOutcome::Textual {
+                text_kind,
+                body,
+                assumption,
+            } => ResponsePayload::Textual {
+                kind: *text_kind,
+                body: body.clone(),
+                assumption: assumption.clone(),
+            },
+            TurnOutcome::Failed { reason } => ResponsePayload::Failed {
+                reason: reason.clone(),
+            },
+            TurnOutcome::Cancelled => ResponsePayload::Cancelled,
+        }
+    }
+}
+
+/// The request the orchestrator hands a provider each turn (issue #24): the
+/// asking question, the windowed conversation history, and every working-set
+/// dataset pruned by the privacy controls. Built once per turn by the window
+/// assembler (`crate::window`); the retry loop re-feeds the same request, so a
+/// provider sees an identical payload across attempts.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProviderRequest {
     pub question: String,
+    /// Prior turns, oldest first (ADR-0023). Excludes the current turn -- the
+    /// asking `question` stands alone above. The last N=20 are full; anything
+    /// older is a verbatim-question summary (ADR-0039).
+    pub history: Vec<TurnPayload>,
     pub datasets: Vec<DatasetRef>,
     pub active: Option<String>,
 }
