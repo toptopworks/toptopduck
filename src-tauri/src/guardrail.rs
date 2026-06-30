@@ -15,12 +15,14 @@
 //!    Schema/Runtime (retried -- the provider may self-correct) vs Resource
 //!    (not retried -- the same SQL hits the same wall, ADR-0028).
 //!
-//! The filesystem-function guard (read_*/COPY/ATTACH/INSTALL/LOAD) is largely
-//! enforced by the `CREATE TABLE ... AS <query>` wrapping itself: those are
-//! statements, not query expressions, so the engine rejects them as syntax
-//! errors when the LLM embeds them. The remaining surface (read_* table
-//! functions in a SELECT) needs a sandboxed connection and is tracked
-//! separately; see the issue #25 notes.
+//! The filesystem-function guard (read_*/COPY/ATTACH/INSTALL/LOAD) is enforced
+//! two ways. COPY/ATTACH/INSTALL/LOAD are statements, not query expressions, so
+//! the `CREATE TABLE ... AS <query>` wrapping rejects them as syntax errors.
+//! The remaining surface -- read_* table functions (read_csv_auto / read_parquet
+//! / read_json_auto) in a SELECT -- is blocked by running provider SQL on a
+//! sandboxed connection whose LocalFileSystem is disabled (see
+//! `session::sandbox`); the engine's "... disabled by configuration" refusal is
+//! classified [`ExecErrorKind::Resource`] (no retry).
 
 use duckdb::Connection;
 

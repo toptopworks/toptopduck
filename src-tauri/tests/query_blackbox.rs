@@ -750,3 +750,45 @@ fn a_query_under_the_row_cap_materializes_normally() {
     assert_eq!(name, "result_1");
     assert_eq!(rows, 3);
 }
+
+#[test]
+fn a_read_function_into_arbitrary_disk_aborts_with_a_resource_error_without_retrying() {
+    // AC2 (issue #25, read_* closure): a SELECT calling a read_* table function
+    // (read_csv_auto / read_parquet / read_json_auto) would let the LLM read
+    // arbitrary disk. The sandbox runs provider SQL with LocalFileSystem
+    // disabled, so the engine refuses with "disabled by configuration" --
+    // classified Resource (ADR-0005/0028), which aborts WITHOUT retrying. A
+    // scripted second reply that would succeed is never reached, proving the
+    // resource path fails immediately. Contrast with the COPY/ATTACH statement
+    // test (a parser error -> Runtime -> retried) and the row-cap test.
+    //
+    // The leak target is a real temp file carrying a sentinel secret so the
+    // assertion is concrete: had the sandbox not blocked read_csv_auto, the
+    // secret would have materialized into result_1.
+    let leak_dir = tempfile::tempdir().expect("temp dir");
+    let leak = leak_dir.path().join("secret.csv");
+    std::fs::write(&leak, "secret\nPASSWORD-LEAKED\n").expect("write leak");
+    let leak_sql = format!(
+        "SELECT secret FROM read_csv_auto('{}')",
+        leak.to_string_lossy()
+    );
+    let provider = FakeProvider::new().scripted_seq(
+        "leak",
+        vec![
+            Ok(reply_sql(&leak_sql)),       // blocked -> Resource, no retry
+            Ok(reply_sql("SELECT 1 AS n")), // would succeed -- never reached
+        ],
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    let reason = failed_reason(session.ask("leak"));
+    assert!(
+        reason.contains("资源上限"),
+        "read_* should be blocked as a resource error, got {reason:?}"
+    );
+    // The resource path did NOT burn the budget (distinct from a schema retry).
+    assert!(!reason.contains("重试预算耗尽"), "got {reason:?}");
+    // Nothing materialized: the over-disk read never produced a result.
+    assert!(session.get("result_1").is_none());
+}
