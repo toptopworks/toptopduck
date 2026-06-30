@@ -316,7 +316,7 @@ pub enum TurnOutcome {
     /// (ADR-0009), surfaced as a correctable side note. This is the only
     /// outcome that advances result_N numbering.
     Materialized {
-        dataset: DatasetDescriptor,
+        dataset: Box<DatasetDescriptor>,
         /// The verbatim SQL the provider returned this turn (ADR-0009/0023):
         /// the recent-turn window ships it so the provider sees its own prior
         /// SQL (ADR-0023 point 1: "LLM 响应（SQL + assumption 文本）"). `None`

@@ -192,7 +192,7 @@ fn turn_outcome_materialized_carries_descriptor_and_assumption() {
     use toptopduck_lib::TurnOutcome;
     assert_wire(
         &TurnOutcome::Materialized {
-            dataset: sample_descriptor(),
+            dataset: Box::new(sample_descriptor()),
             sql: None,
             assumption: None,
         },

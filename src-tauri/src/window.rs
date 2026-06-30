@@ -258,7 +258,7 @@ mod tests {
         TurnRecord {
             question: question.to_string(),
             outcome: TurnOutcome::Materialized {
-                dataset: result_desc(result),
+                dataset: Box::new(result_desc(result)),
                 sql: Some(format!("SELECT * FROM {}", result)),
                 assumption: None,
             },

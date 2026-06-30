@@ -755,7 +755,7 @@ impl Session {
                 }) => match self.try_materialize(&sql) {
                     Ok(dataset) => {
                         let outcome = TurnOutcome::Materialized {
-                            dataset,
+                            dataset: Box::new(dataset),
                             sql: Some(sql),
                             assumption,
                         };
