@@ -921,22 +921,19 @@ impl Session {
             Err(e) => {
                 // The count itself failed (engine error on the just-created
                 // table) -- roll back and surface as a runtime error.
-                let _ = self
-                    .conn
-                    .execute_batch(&format!("DROP TABLE {}", quote_ident(&result_name)));
-                return Err(ExecError::new(ExecErrorKind::Runtime, e.to_string()));
+                let detail = Self::rollback_result(&self.conn, &result_name, e.to_string());
+                return Err(ExecError::new(ExecErrorKind::Runtime, detail));
             }
         };
         if rows as u64 > self.result_row_cap {
             // Over the cap: abort with a resource error and roll back result_N
             // so the next attempt's N is stable (ADR-0022).
-            let _ = self
-                .conn
-                .execute_batch(&format!("DROP TABLE {}", quote_ident(&result_name)));
-            return Err(ExecError::new(
-                ExecErrorKind::Resource,
+            let detail = Self::rollback_result(
+                &self.conn,
+                &result_name,
                 format!("结果行数（{rows}）超过上限 {}", self.result_row_cap),
-            ));
+            );
+            return Err(ExecError::new(ExecErrorKind::Resource, detail));
         }
 
         // Derive the result's shape from the just-created table -- the same
@@ -944,16 +941,7 @@ impl Session {
         let shape = match derive_table(&self.conn, &result_name, &self.temp_path, &result_name) {
             Ok(shape) => shape,
             Err(e) => {
-                let drop_sql = format!("DROP TABLE {}", quote_ident(&result_name));
-                let detail = match self.conn.execute_batch(&drop_sql) {
-                    Ok(()) => e.to_string(),
-                    // The cleanup DROP itself failed: the orphan result_N likely
-                    // lingers and will clash on a later CREATE -- surface it so a
-                    // wedged session is observable, not silently masked.
-                    Err(drop_err) => format!(
-                        "{e}; cleanup DROP of {result_name} also failed: {drop_err} (orphan table may wedge later turns)"
-                    ),
-                };
+                let detail = Self::rollback_result(&self.conn, &result_name, e.to_string());
                 return Err(ExecError::new(ExecErrorKind::Runtime, detail));
             }
         };
@@ -970,6 +958,21 @@ impl Session {
         };
         self.working_set.register_result(descriptor.clone());
         Ok(descriptor)
+    }
+
+    /// Drop a just-created result_N table and fold any cleanup failure into the
+    /// reported detail. An orphan result_N would make the next attempt's
+    /// `next_result_number` reuse N and clash on CREATE, wedging every later
+    /// turn (ADR-0022 never-reused) -- the M1 regression. Surfacing the DROP
+    /// failure keeps a wedged session observable instead of silently masked.
+    fn rollback_result(conn: &Connection, result_name: &str, detail: String) -> String {
+        let drop_sql = format!("DROP TABLE {}", quote_ident(result_name));
+        match conn.execute_batch(&drop_sql) {
+            Ok(()) => detail,
+            Err(drop_err) => format!(
+                "{detail}; cleanup DROP of {result_name} also failed: {drop_err} (orphan table may wedge later turns)"
+            ),
+        }
     }
 
     /// The conversation thread (ADR-0028/0039): every turn, in order, each
