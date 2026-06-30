@@ -260,6 +260,7 @@ mod tests {
             outcome: TurnOutcome::Materialized {
                 dataset: Box::new(result_desc(result)),
                 sql: Some(format!("SELECT * FROM {}", result)),
+                viz: None,
                 assumption: None,
             },
         }

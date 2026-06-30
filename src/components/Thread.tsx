@@ -1,4 +1,4 @@
-import type { TurnRecord } from "../types";
+import type { TurnRecord, VizSpec } from "../types";
 
 interface ThreadProps {
   records: TurnRecord[];
@@ -7,7 +7,7 @@ interface ThreadProps {
   selectedResult: string | null;
   /** Click a result turn to show its rows in the result pane. Carries the
    * turn's assumption so the side note is preserved across re-selections. */
-  onSelectResult: (referenceName: string, assumption: string | null) => void;
+  onSelectResult: (referenceName: string, assumption: string | null, viz: VizSpec | null) => void;
 }
 
 // The always-visible conversation thread (ADR-0028/0039). Every turn is listed
@@ -44,7 +44,7 @@ export function Thread({ records, selectedResult, onSelectResult }: ThreadProps)
 interface TurnBodyProps {
   record: TurnRecord;
   selectedResult: string | null;
-  onSelectResult: (referenceName: string, assumption: string | null) => void;
+  onSelectResult: (referenceName: string, assumption: string | null, viz: VizSpec | null) => void;
 }
 
 // The provider's optional assumption note (ADR-0009/0018), rendered as a
@@ -58,7 +58,7 @@ function AssumptionNote({ assumption }: { assumption: string | null }) {
 function TurnBody({ record, selectedResult, onSelectResult }: TurnBodyProps) {
   switch (record.outcome.kind) {
     case "Materialized": {
-      const { dataset, assumption } = record.outcome.data;
+      const { dataset, assumption, viz } = record.outcome.data;
       const active = dataset.reference_name === selectedResult;
       return (
         <p className="turn-outcome">
@@ -66,7 +66,7 @@ function TurnBody({ record, selectedResult, onSelectResult }: TurnBodyProps) {
             type="button"
             className={active ? "result-link active" : "result-link"}
             aria-current={active ? "true" : undefined}
-            onClick={() => onSelectResult(dataset.reference_name, assumption)}
+            onClick={() => onSelectResult(dataset.reference_name, assumption, viz)}
           >
             结果：{dataset.reference_name}
           </button>

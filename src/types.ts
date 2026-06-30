@@ -92,6 +92,24 @@ export type LoadOutcome =
 // refusal (ADR-0017). Mirrors the Rust TextKind (a bare variant string).
 export type TextKind = "Clarify" | "Refuse";
 
+// v1 chart whitelist (ADR-0016). Mirrors the Rust ChartKind (serde
+// rename_all="lowercase" -> a bare lowercase variant string). The closed set a
+// provider viz may target; anything outside is not a ChartKind -- the Rust enum
+// rejects it at the contract boundary, and a spec that draws a non-whitelisted
+// chart degrades to a table in the frontend (ADR-0033).
+export type ChartKind = "table" | "bar" | "line" | "scatter" | "area" | "pie";
+
+// A provider-emitted viz spec (ADR-0016/0033, issue #26): chart kind from the
+// v1 whitelist plus the Vega-Lite JSON that renders it. Mirrors the Rust
+// VizSpec. The frontend renders `spec` via Vega-Embed, or degrades to the
+// table with a disclosure when the spec is malformed or fails to render.
+export interface VizSpec {
+  kind: ChartKind;
+  // Vega-Lite JSON spec string (carried verbatim across IPC; parsed + rendered
+  // in the frontend).
+  spec: string;
+}
+
 // One turn outcome (ADR-0028). Mirrors the Rust TurnOutcome (serde adjacently-
 // tagged: kind + data). The four kinds are exhaustive: a turn always produces
 // exactly one, regardless of whether it materialized a result. Only Materialized
@@ -106,6 +124,11 @@ export type TurnOutcome =
       // mirror the Rust serde default (absent on older data); a fresh result
       // turn always carries one. The frontend does not yet surface it.
       sql?: string | null;
+      // The provider's optional viz spec (ADR-0016/0033, issue #26): null when
+      // the provider offered no chart (the default table turn). The frontend
+      // renders it via Vega-Embed or degrades to the table with a disclosure
+      // when the spec is malformed or fails to render.
+      viz: VizSpec | null;
       // The provider optional assumption note (ADR-0009), surfaced as a side
       // note the user can correct; null when the provider offered none.
       assumption: string | null;

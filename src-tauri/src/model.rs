@@ -297,6 +297,36 @@ pub enum TextKind {
     Refuse,
 }
 
+/// One chart kind in the v1 whitelist (ADR-0016): the closed set a provider viz
+/// may target -- table / bar / line / scatter / area / pie. A kind the LLM
+/// returns outside this set fails to deserialize at the contract boundary and
+/// is retried like any malformed reply (ADR-0028); a Vega-Lite `mark` outside
+/// this set (a whitelisted kind whose spec nonetheless draws a non-whitelisted
+/// chart) degrades to a table in the frontend (ADR-0033).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChartKind {
+    Table,
+    Bar,
+    Line,
+    Scatter,
+    Area,
+    Pie,
+}
+
+/// A provider-emitted viz spec (ADR-0016/0033): one chart kind from the v1
+/// whitelist plus the Vega-Lite JSON that renders it. The frontend renders
+/// `spec` via Vega-Embed; a malformed spec, a non-whitelisted mark, or a
+/// rendering failure degrades to the underlying table with a disclosure
+/// (ADR-0033 -- silent degradation is a silent lie). `kind` is the provider's
+/// structured intent; `spec` is the opaque Vega-Lite JSON carried verbatim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VizSpec {
+    pub kind: ChartKind,
+    /// Vega-Lite JSON spec, rendered by Vega-Embed in the frontend (ADR-0016).
+    pub spec: String,
+}
+
 /// One turn outcome (ADR-0028): one exhaustive four-way classification. A turn
 /// always produces exactly one, regardless of whether it materialized a result
 /// -- "no result" is itself a typed outcome, never a silent gap. The four kinds
@@ -325,6 +355,14 @@ pub enum TurnOutcome {
         /// default lets older recipes / IPC peers deserialize without it.
         #[serde(default)]
         sql: Option<String>,
+        /// The provider's optional viz spec (ADR-0016/0033): the LLM-decided
+        /// chart to render over this result, or `None` for a plain table turn
+        /// (the default -- a visual intent is required to emit one, ADR-0033).
+        /// Carried verbatim to the frontend, which renders it or degrades to the
+        /// table with a disclosure. `#[serde(default)]` keeps older data
+        /// (recipes / IPC peers from before #26) deserializing to `None`.
+        #[serde(default)]
+        viz: Option<VizSpec>,
         assumption: Option<String>,
     },
     /// Outcome B -- a textual turn: the provider answered with text, not SQL --

@@ -188,16 +188,55 @@ fn load_outcome_error_nests_load_error_tag() {
 fn turn_outcome_materialized_carries_descriptor_and_assumption() {
     // Pin the wire shape the frontend mirrors (src/types.ts): adjacently-tagged,
     // the Materialized variant nests the descriptor + assumption under data.
-    // assumption is always present -- null when the provider offered none.
+    // assumption is always present -- null when the provider offered none; viz
+    // is null when the provider offered no chart (ADR-0016/0033, default table).
     use toptopduck_lib::TurnOutcome;
     assert_wire(
         &TurnOutcome::Materialized {
             dataset: Box::new(sample_descriptor()),
             sql: None,
+            viz: None,
             assumption: None,
         },
-        r#"{"kind":"Materialized","data":{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"sql":null,"assumption":null}}"#,
+        r#"{"kind":"Materialized","data":{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"sql":null,"viz":null,"assumption":null}}"#,
     );
+}
+
+#[test]
+fn turn_outcome_materialized_carries_a_viz_spec() {
+    // #26 (ADR-0016/0033): a Materialized outcome may carry a viz spec -- a
+    // chart kind (whitelist bare variant, serde rename_all="lowercase") plus the
+    // Vega-Lite JSON spec string. Pin the wire shape src/types.ts mirrors so a
+    // frontend regression is caught here, not silently. The spec string is
+    // carried verbatim (escaped as a JSON string); the frontend parses + renders
+    // it, degrading to the table on a malformed spec or render failure.
+    use toptopduck_lib::{ChartKind, TurnOutcome, VizSpec};
+    assert_wire(
+        &TurnOutcome::Materialized {
+            dataset: Box::new(sample_descriptor()),
+            sql: None,
+            viz: Some(VizSpec {
+                kind: ChartKind::Bar,
+                spec: "{\"mark\":\"bar\"}".into(),
+            }),
+            assumption: None,
+        },
+        r#"{"kind":"Materialized","data":{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"sql":null,"viz":{"kind":"bar","spec":"{\"mark\":\"bar\"}"},"assumption":null}}"#,
+    );
+}
+
+#[test]
+fn chart_kind_serializes_as_a_lowercase_variant_string() {
+    // ChartKind crosses IPC as its bare lowercase variant name (serde
+    // rename_all="lowercase") -- the whitelist the frontend mirrors as a string
+    // union in src/types.ts. Anything outside this set is not a ChartKind.
+    use toptopduck_lib::ChartKind;
+    assert_wire(&ChartKind::Table, r#""table""#);
+    assert_wire(&ChartKind::Bar, r#""bar""#);
+    assert_wire(&ChartKind::Line, r#""line""#);
+    assert_wire(&ChartKind::Scatter, r#""scatter""#);
+    assert_wire(&ChartKind::Area, r#""area""#);
+    assert_wire(&ChartKind::Pie, r#""pie""#);
 }
 
 #[test]

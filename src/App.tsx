@@ -20,7 +20,13 @@ import {
   setDatasetPrivacy,
 } from "./api";
 import { loadErrorMessage } from "./loadErrorMessage";
-import type { DatasetDescriptor, GuidanceRequest, SheetGuidance, TurnRecord } from "./types";
+import type {
+  DatasetDescriptor,
+  GuidanceRequest,
+  SheetGuidance,
+  TurnRecord,
+  VizSpec,
+} from "./types";
 
 /** A surfaced error tagged by the operation that produced it, so the displayed
  * prefix matches the action (a rename rejection is never mislabelled a load
@@ -42,6 +48,10 @@ const ERROR_PREFIX: Record<AppError["kind"], string> = {
 interface LatestResult {
   referenceName: string;
   assumption: string | null;
+  /** The turn's viz spec (ADR-0016/0033): null = plain table; a spec the
+   * ResultView renders or degrades to the table with a disclosure. Carried so a
+   * re-selected past result re-renders its chart too. */
+  viz: VizSpec | null;
 }
 
 export default function App() {
@@ -221,7 +231,11 @@ export default function App() {
           // Select before refresh -- the user sees the result even when the
           // working-set sync fails. A refresh failure is reported distinctly
           // (never mislabel a successful turn as a failed ask).
-          setLatestResult({ referenceName, assumption: outcome.data.assumption });
+          setLatestResult({
+            referenceName,
+            assumption: outcome.data.assumption,
+            viz: outcome.data.viz,
+          });
           setSelected(referenceName);
           try {
             await refresh(); // working set + thread
@@ -247,10 +261,10 @@ export default function App() {
 
   // Re-show a past result turn's rows in the result pane (ADR-0028 always-
   // visible history: any result in the thread is re-openable). Preserves the
-  // turn's assumption side note across re-selections.
+  // turn's assumption side note and viz spec across re-selections.
   const handleSelectResult = useCallback(
-    (referenceName: string, assumption: string | null) => {
-      setLatestResult({ referenceName, assumption });
+    (referenceName: string, assumption: string | null, viz: VizSpec | null) => {
+      setLatestResult({ referenceName, assumption, viz });
       setSelected(referenceName);
     },
     [],
@@ -284,6 +298,7 @@ export default function App() {
             key={latestResult.referenceName}
             referenceName={latestResult.referenceName}
             assumption={latestResult.assumption}
+            viz={latestResult.viz}
           />
         </section>
       )}

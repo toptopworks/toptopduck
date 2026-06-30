@@ -8,8 +8,8 @@
 use std::path::{Path, PathBuf};
 
 use toptopduck_lib::{
-    DatasetPrivacy, DatasetRef, FakeProvider, LoadOutcome, ProviderError, ProviderReply,
-    ProviderRequest, ResponsePayload, Session, TextKind, TurnOutcome, TurnPayload,
+    ChartKind, DatasetPrivacy, DatasetRef, FakeProvider, LoadOutcome, ProviderError, ProviderReply,
+    ProviderRequest, ResponsePayload, Session, TextKind, TurnOutcome, TurnPayload, VizSpec,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -241,6 +241,87 @@ fn ask_materializes_a_zero_row_result_normally() {
     let page = session.read_rows("result_1", 0, 100).expect("read");
     assert_eq!(page.rows.len(), 0);
     assert_eq!(page.total, 0);
+}
+
+// --- Viz pass-through (issue #26) -- ADR-0016/0033 -------------------------
+//
+// The viz spec is presentation layer (ADR-0033): the orchestrator carries the
+// provider's viz verbatim to the Materialized outcome -- it neither interprets
+// nor validates the Vega-Lite JSON. Rendering + degradation disclosure are the
+// frontend's job (ADR-0016/0033); this seam only asserts the spec survives the
+// loop intact, including a malformed one (the backend never silently drops or
+// "fixes" a spec -- degradation is the frontend's honest call).
+
+#[test]
+fn ask_carries_the_provider_viz_spec_through_to_the_outcome() {
+    // AC #26: a provider viz (whitelisted kind + Vega-Lite JSON) rides the
+    // Materialized outcome verbatim -- the loop does not touch it. The frontend
+    // later renders it (ADR-0016) or degrades with a disclosure (ADR-0033).
+    let provider = FakeProvider::new().scripted(
+        "画柱状图",
+        ProviderReply::Sql {
+            sql: r#"SELECT name, COUNT(*) AS n FROM "people".data GROUP BY name"#.into(),
+            viz: Some(VizSpec {
+                kind: ChartKind::Bar,
+                spec: "{\"mark\":{\"type\":\"bar\"},\"encoding\":{}}".into(),
+            }),
+            assumption: None,
+        },
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    match session.ask("画柱状图") {
+        TurnOutcome::Materialized { viz, .. } => {
+            let v = viz.expect("viz carried through");
+            assert_eq!(v.kind, ChartKind::Bar);
+            assert_eq!(v.spec, "{\"mark\":{\"type\":\"bar\"},\"encoding\":{}}");
+        }
+        other => panic!("expected Materialized, got {other:?}"),
+    }
+}
+
+#[test]
+fn ask_with_no_viz_yields_a_none_viz_outcome() {
+    // AC #26: the default is a plain table turn -- a provider that offers no viz
+    // yields a Materialized outcome with viz=None (ADR-0033 default table).
+    let mut session = session_with(&[("总数", r#"SELECT COUNT(*) AS n FROM "people".data"#)]);
+    load_source(&mut session, &fixture("people.csv"));
+    match session.ask("总数") {
+        TurnOutcome::Materialized { viz, .. } => assert!(viz.is_none()),
+        other => panic!("expected Materialized, got {other:?}"),
+    }
+}
+
+#[test]
+fn ask_carries_a_malformed_viz_spec_verbatim_for_the_frontend_to_degrade() {
+    // ADR-0033: viz is presentation layer -- the orchestrator does NOT validate
+    // the Vega-Lite JSON. A malformed spec rides the outcome verbatim; the
+    // frontend parses + renders it and degrades to the table with a disclosure.
+    // Asserting the garbage survives intact proves the loop never silently drops
+    // or "fixes" a spec -- degradation is the frontend's honest call, not a
+    // hidden backend scrub.
+    let provider = FakeProvider::new().scripted(
+        "坏图",
+        ProviderReply::Sql {
+            sql: "SELECT 1 AS n".into(),
+            viz: Some(VizSpec {
+                kind: ChartKind::Line,
+                spec: "not-valid-json".into(),
+            }),
+            assumption: None,
+        },
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    match session.ask("坏图") {
+        TurnOutcome::Materialized { viz, .. } => {
+            let v = viz.expect("viz carried through");
+            assert_eq!(v.kind, ChartKind::Line);
+            assert_eq!(v.spec, "not-valid-json"); // garbage survives verbatim
+        }
+        other => panic!("expected Materialized, got {other:?}"),
+    }
 }
 
 // --- Outcome B: textual (clarify / refuse) -- ADR-0017/0018 ----------------
