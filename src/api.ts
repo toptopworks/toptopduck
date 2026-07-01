@@ -3,6 +3,8 @@ import type {
   DatasetDescriptor,
   DatasetPrivacy,
   LoadOutcome,
+  ProviderConfig,
+  ProviderConfigView,
   RowPage,
   SheetGuidance,
   TurnOutcome,
@@ -106,4 +108,46 @@ export function fmtError(e: unknown): string {
   if (e instanceof Error) return e.message;
   if (typeof e === "string") return e;
   return JSON.stringify(e);
+}
+
+// --- LLM provider key + config (issue #29, ADR-0007/0019/0029) -------------
+//
+// The API key crosses IPC exactly once (here, into Rust), is stored in the OS
+// keychain, and thereafter the frontend learns only a boolean. The non-secret
+// config (base URL + model) crosses both ways. The webview holds no key and
+// makes no HTTP egress -- all LLM calls are placed by the Rust core (ADR-0029).
+
+// Whether an API key is stored in the OS keychain. A boolean only -- the key
+// itself never crosses back to the frontend (ADR-0029 invariant 3). The UI uses
+// this to decide whether to prompt for configuration before the first turn.
+export async function hasApiKey(): Promise<boolean> {
+  return invoke<boolean>("has_api_key");
+}
+
+// Store the API key (ADR-0029: a one-shot frontend-to-Rust transfer; the key is
+// stored in the OS keychain and never returned back across IPC). An empty key
+// is rejected by the UI before this call.
+export async function setApiKey(key: string): Promise<void> {
+  await invoke<void>("set_api_key", { key });
+}
+
+// Remove the stored API key. After this, hasApiKey is false and the next turn
+// refuses honestly as not-wired (the user must reconfigure before asking again).
+export async function clearApiKey(): Promise<void> {
+  await invoke<void>("clear_api_key");
+}
+
+// Read the effective provider config + whether a key is set (ADR-0019/0029).
+// The base URL + model cross IPC; the key does not (only the boolean).
+export async function getProviderConfig(): Promise<ProviderConfigView> {
+  return invoke<ProviderConfigView>("get_provider_config");
+}
+
+// Save the non-secret provider config (Anthropic-protocol base URL + model,
+// ADR-0019). Returns the effective view. The API key never enters this path
+// (ADR-0029: key confined to its own keychain entry).
+export async function setProviderConfig(
+  config: ProviderConfig,
+): Promise<ProviderConfigView> {
+  return invoke<ProviderConfigView>("set_provider_config", { config });
 }

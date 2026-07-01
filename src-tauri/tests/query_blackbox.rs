@@ -197,11 +197,12 @@ fn ask_surfaces_the_provider_assumption_note() {
 fn ask_without_a_wired_provider_fails_honestly() {
     // The default Session (UnwiredProvider) refuses every turn with NotWired --
     // no silent no-op, no invented SQL. NotWired is permanent, so it is NOT
-    // retried: the turn fails immediately. The real client wires in #29.
+    // retried: the turn fails immediately. (The real AnthropicProvider, wired
+    // in lib::run, returns NotWired the same way when no key is stored.)
     let mut session = Session::new().expect("session");
     load_source(&mut session, &fixture("people.csv"));
     let reason = failed_reason(session.ask("任何问题"));
-    assert!(reason.contains("尚未接入"), "got {reason:?}");
+    assert!(reason.contains("未配置"), "got {reason:?}");
     // nothing materialized
     assert!(session.get("result_1").is_none());
 }
@@ -486,7 +487,7 @@ fn not_wired_is_not_retried() {
     load_source(&mut session, &fixture("people.csv"));
 
     let reason = failed_reason(session.ask("没接"));
-    assert!(reason.contains("尚未接入"), "got {reason:?}");
+    assert!(reason.contains("未配置"), "got {reason:?}");
     assert!(session.get("result_1").is_none()); // the Ok was never reached
 }
 

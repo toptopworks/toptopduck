@@ -29,6 +29,11 @@ vi.mock("../api", async (importOriginal) => {
     askQuestion: vi.fn(),
     conversation: vi.fn(async () => []),
     readRows: vi.fn(),
+    getProviderConfig: vi.fn(async () => ({
+      base_url: "https://api.anthropic.com",
+      model: "claude-sonnet-4-6",
+      has_key: false,
+    })),
   };
 });
 
@@ -255,7 +260,7 @@ describe("App ask flow", () => {
   });
 
   it("labels an ask failure distinctly from a load failure", async () => {
-    vi.mocked(askQuestion).mockRejectedValueOnce("尚未接入 LLM 提供方");
+    vi.mocked(askQuestion).mockRejectedValueOnce("未配置有效的 LLM 提供方");
     render(<App />);
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
@@ -263,7 +268,7 @@ describe("App ask flow", () => {
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "x" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
     await waitFor(() =>
-      expect(screen.getByText(/尚未接入 LLM 提供方/)).toBeInTheDocument(),
+      expect(screen.getByText(/未配置有效的 LLM 提供方/)).toBeInTheDocument(),
     );
     // an ask failure must not inherit the load-flow prefix.
     expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();

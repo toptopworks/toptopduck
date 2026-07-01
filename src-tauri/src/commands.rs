@@ -9,8 +9,10 @@ use tauri::State;
 
 use crate::cancel::CancelToken;
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, LoadOutcome, RowPage, SheetGuidance, TurnOutcome, TurnRecord,
+    DatasetDescriptor, DatasetPrivacy, LoadOutcome, ProviderConfig, ProviderConfigView, RowPage,
+    SheetGuidance, TurnOutcome, TurnRecord, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
 };
+use crate::provider::keychain::KeychainStore;
 use crate::session::Session;
 
 /// Ingest a file. Runs the DuckDB copy-in off the async/UI thread (AC8: does not
@@ -187,4 +189,71 @@ pub async fn read_rows(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+// --- LLM provider key + config (issue #29, ADR-0007/0019/0029) -------------
+//
+// The API key crosses IPC exactly once (frontend -> Rust, stored), and
+// thereafter the frontend learns only a boolean. The non-secret config (base
+// URL + model) crosses both ways. Every read/write hits the OS keychain via the
+// managed [`KeychainStore`] (ADR-0029 invariant 3: the decrypted key lives only
+// in the Rust core; the webview has no keychain access and no HTTP egress).
+
+/// Whether an API key is stored. Returns a boolean only -- never the key
+/// itself (ADR-0029 invariant 3). The frontend uses this to decide whether to
+/// prompt for configuration before the first turn.
+#[tauri::command]
+pub fn has_api_key(store: State<'_, KeychainStore>) -> Result<bool, String> {
+    Ok(store.has_key())
+}
+
+/// Store the API key the frontend collected (ADR-0029: a one-shot
+/// frontend-to-Rust transfer; the key is never returned back across IPC).
+#[tauri::command]
+pub fn set_api_key(store: State<'_, KeychainStore>, key: String) -> Result<(), String> {
+    store.set_key(&key)
+}
+
+/// Remove the stored API key. Idempotent: a missing entry is success; a real
+/// keychain error propagates so the frontend can tell the user the key did not
+/// come out. After a successful clear, `has_api_key` is false and the next turn
+/// refuses as not-wired.
+#[tauri::command]
+pub fn clear_api_key(store: State<'_, KeychainStore>) -> Result<(), String> {
+    store.clear_key()
+}
+
+/// Read the effective provider config + whether a key is set (ADR-0019/0029).
+/// The base URL + model cross IPC; the key does not (only the boolean).
+#[tauri::command]
+pub fn get_provider_config(store: State<'_, KeychainStore>) -> Result<ProviderConfigView, String> {
+    let cfg = store.get_config();
+    Ok(ProviderConfigView {
+        base_url: cfg.base_url,
+        model: cfg.model,
+        has_key: store.has_key(),
+    })
+}
+
+/// Save the non-secret provider config (Anthropic-protocol base URL + model,
+/// ADR-0019). Empty fields normalize to the v1 defaults so the stored blob is
+/// always valid (and `get_provider_config` then reads consistent values). The
+/// API key never enters this path (ADR-0029: key confined to its own entry).
+#[tauri::command]
+pub fn set_provider_config(
+    store: State<'_, KeychainStore>,
+    mut config: ProviderConfig,
+) -> Result<ProviderConfigView, String> {
+    if config.base_url.trim().is_empty() {
+        config.base_url = DEFAULT_PROVIDER_BASE_URL.to_string();
+    }
+    if config.model.trim().is_empty() {
+        config.model = DEFAULT_PROVIDER_MODEL.to_string();
+    }
+    store.set_config(&config)?;
+    Ok(ProviderConfigView {
+        base_url: config.base_url,
+        model: config.model,
+        has_key: store.has_key(),
+    })
 }

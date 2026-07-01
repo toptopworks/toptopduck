@@ -6,6 +6,7 @@ import { DisclosureBanner } from "./components/DisclosureBanner";
 import { GuidedLoadDialog } from "./components/GuidedLoadDialog";
 import { QuestionBar } from "./components/QuestionBar";
 import { ResultView } from "./components/ResultView";
+import { SettingsDialog } from "./components/SettingsDialog";
 import { Thread } from "./components/Thread";
 import {
   activeDataset,
@@ -13,6 +14,7 @@ import {
   cancelQuery,
   conversation,
   fmtError,
+  getProviderConfig,
   ingestFile,
   ingestFileGuided,
   listWorkingSet,
@@ -71,6 +73,12 @@ export default function App() {
   // order, labeled by its verbatim question. The session is the source of
   // truth; this is refetched after each turn so all outcome kinds render.
   const [thread, setThread] = useState<TurnRecord[]>([]);
+  // LLM provider key status (issue #29, ADR-0029): whether an API key is
+  // stored. A boolean only -- the key itself never crosses to the frontend.
+  // When false, ask turns fail as not-wired until the user configures a key in
+  // the settings dialog; this indicator guides them there.
+  const [hasKey, setHasKey] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     setDatasets(await listWorkingSet());
@@ -80,12 +88,27 @@ export default function App() {
     setThread(await conversation());
   }, []);
 
+  // Refresh the LLM key-configured indicator (issue #29). Called on mount and
+  // after the settings dialog closes (a save/clear changes the stored key). A
+  // failure is non-fatal -- the indicator just stays stale and an ask surfaces
+  // the real error, so it is swallowed rather than surfacing as a top-level
+  // app error.
+  const refreshKeyStatus = useCallback(async () => {
+    try {
+      setHasKey((await getProviderConfig()).has_key);
+    } catch {
+      // Keep the previous indicator; the ask path surfaces real failures.
+    }
+  }, []);
+
   useEffect(() => {
     // Mount-time sync from the Tauri backend (external system -> state): a
     // legitimate one-shot fetch, not the avoidable cascade this rule targets.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
-  }, [refresh]);
+    // refreshKeyStatus swallows its own errors, so no disable is needed here.
+    void refreshKeyStatus();
+  }, [refresh, refreshKeyStatus]);
 
   /** Generic mutation hook for simple backend-then-refresh patterns (rename,
    * privacy -- ADR-0037 / ADR-0011). Separates the operation error from a
@@ -292,6 +315,12 @@ export default function App() {
       <header>
         <h1>toptopduck</h1>
         <DisclosureBanner />
+        <div className="header-actions">
+          <span className={hasKey ? "key-ok" : "key-missing"}>
+            {hasKey ? "LLM key 已配置" : "未配置 LLM key——提问将失败"}
+          </span>
+          <button onClick={() => setSettingsOpen(true)}>设置</button>
+        </div>
       </header>
 
       <FileDropzone onIngest={handleIngest} loading={loading} />
@@ -349,6 +378,17 @@ export default function App() {
           loading={loading}
           onSubmit={handleGuidedSubmit}
           onCancel={() => setGuidance(null)}
+        />
+      )}
+
+      {settingsOpen && (
+        <SettingsDialog
+          // Closing the dialog also refreshes the key indicator, so a save or
+          // clear is reflected in the header status immediately.
+          onClose={() => {
+            setSettingsOpen(false);
+            void refreshKeyStatus();
+          }}
         />
       )}
     </main>
