@@ -109,6 +109,9 @@ impl From<&crate::model::TurnOutcome> for ResponsePayload {
                 dataset,
                 sql,
                 assumption,
+                // viz intentionally dropped: a prior turn's chart intent is
+                // irrelevant to SQL generation (the ADR-0023 window carries the
+                // prior SQL, not the presentation spec).
                 ..
             } => ResponsePayload::Materialized {
                 result: dataset.reference_name.clone(),

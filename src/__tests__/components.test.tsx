@@ -626,6 +626,29 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     expect(screen.queryByText(/图表无法渲染/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /下一页/ })).toBeInTheDocument();
   });
+
+  it("finalizes the Vega view on unmount to free the chart resource", async () => {
+    // The render effect's cleanup calls finalize so an unmounted chart frees its
+    // Vega view (no canvas/view leak across result switches). ResultView is keyed
+    // by reference name in App.tsx, so every result switch remounts and runs
+    // this cleanup path -- leaving it unguarded would leak views silently.
+    const finalize = vi.fn();
+    vi.mocked(embed).mockResolvedValue(
+      { finalize } as unknown as Awaited<ReturnType<typeof embed>>,
+    );
+    const { unmount } = render(
+      <ResultView
+        referenceName="result_1"
+        assumption={null}
+        viz={{ kind: "bar", spec: JSON.stringify({ mark: "bar" }) }}
+      />,
+    );
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    unmount();
+    // finalize fires either synchronously in cleanup (if embed already resolved)
+    // or on the resolved promise (if unmount raced it); waitFor covers both.
+    await waitFor(() => expect(finalize).toHaveBeenCalledTimes(1));
+  });
 });
 
 describe("Thread", () => {

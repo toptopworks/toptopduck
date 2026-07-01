@@ -25,18 +25,18 @@ const WHITELISTED_MARKS: ReadonlySet<string> = new Set([
   "arc", // pie
 ]);
 
-/// The outcome of decoding one provider viz spec. `ok` carries the parsed
-/// Vega-Lite object ready to render; `degraded` carries the user-facing reason
-/// the chart could not be shown (so the ResultView can disclose it honestly,
-/// ADR-0033 -- silent degradation is a silent lie).
+/** The outcome of decoding one provider viz spec. The `ok` variant carries the
+ * parsed Vega-Lite object ready to render; the failure variant carries the
+ * user-facing reason the chart could not be shown (so the ResultView can
+ * disclose it honestly, ADR-0033 -- silent degradation is a silent lie). */
 export type DecodeResult =
   | { ok: true; spec: object }
   | { ok: false; reason: string };
 
-/// Parse + whitelist-check a provider viz spec (ADR-0016/0033). A null/missing
-/// viz is the default table turn (NOT a degradation) and is handled by the
-/// caller -- this function takes an emitted spec and decides whether it is
-/// renderable.
+/** Parse + whitelist-check a provider viz spec (ADR-0016/0033). A null/missing
+ * viz is the default table turn (NOT a degradation) and is handled by the
+ * caller -- this function takes an emitted spec and decides whether it is
+ * renderable. */
 export function decodeViz(viz: VizSpec): DecodeResult {
   let parsed: unknown;
   try {
@@ -57,11 +57,11 @@ export function decodeViz(viz: VizSpec): DecodeResult {
   return { ok: true, spec: parsed };
 }
 
-/// Read a Vega-Lite spec's top-level mark type, whether `mark` is a string
-/// ("bar") or a mark object ({"type":"bar"}). `null` when there is no top-level
-/// mark (a layered spec, or one relying on a default) -- decodeViz lets such a
-/// spec through so Vega-Embed can judge it, with a render failure degrading via
-/// the ResultView error path.
+/** Read a Vega-Lite spec's top-level mark type, whether `mark` is a string
+ * ("bar") or a mark object ({"type":"bar"}). `null` when there is no top-level
+ * mark (a layered spec, or one relying on a default) -- decodeViz lets such a
+ * spec through so Vega-Embed can judge it, with a render failure degrading via
+ * the ResultView error path. */
 function readMark(spec: object): string | null {
   const mark = (spec as Record<string, unknown>).mark;
   if (typeof mark === "string") return mark;
