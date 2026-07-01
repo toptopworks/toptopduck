@@ -355,14 +355,21 @@ fn extract_json_object(text: &str) -> Option<&str> {
 }
 
 /// Truncate a string for an error message (avoid flooding the user / log with a
-/// long malformed model reply).
+/// long malformed model reply). Floors to a UTF-8 char boundary: a naive
+/// `&s[..LIMIT]` panics when the cut lands mid-character, and model replies (and
+/// the errors built from them) are routinely CJK -- so this path, of all paths,
+/// must not panic on multi-byte text. (`rust-version = 1.77` predates the
+/// stable `floor_char_boundary`, so the floor is manual.)
 fn truncate(s: &str) -> String {
     const LIMIT: usize = 200;
     if s.len() <= LIMIT {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..LIMIT])
+        return s.to_string();
     }
+    let mut end = LIMIT;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }
 
 #[cfg(test)]
@@ -650,5 +657,22 @@ mod tests {
             Some(r#"{"a":1}"#)
         );
         assert_eq!(extract_json_object("no braces here"), None);
+    }
+
+    #[test]
+    fn truncate_floors_to_char_boundary_for_cjk_replies() {
+        // 120 CJK chars = 360 bytes; byte 200 (the LIMIT) lands mid-character.
+        // A naive `&s[..200]` would panic on the char boundary; truncate floors.
+        let reply = "中".repeat(120);
+        let out = truncate(&reply);
+        assert!(out.ends_with('…'), "truncated output should end with ellipsis");
+        // The head must hold only whole '中' chars -- the floor dropped no halves.
+        let head: String = out.chars().filter(|&c| c != '…').collect();
+        assert!(head.chars().all(|c| c == '中'));
+        assert!(head.chars().count() < 120);
+
+        // Short input passes through verbatim (no ellipsis added).
+        assert_eq!(truncate("短回复"), "短回复");
+        assert_eq!(truncate(""), "");
     }
 }

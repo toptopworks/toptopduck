@@ -214,12 +214,13 @@ pub fn set_api_key(store: State<'_, KeychainStore>, key: String) -> Result<(), S
     store.set_key(&key)
 }
 
-/// Remove the stored API key. Best-effort: a missing entry is success. After
-/// this, `has_api_key` is false and the next turn refuses as not-wired.
+/// Remove the stored API key. Idempotent: a missing entry is success; a real
+/// keychain error propagates so the frontend can tell the user the key did not
+/// come out. After a successful clear, `has_api_key` is false and the next turn
+/// refuses as not-wired.
 #[tauri::command]
 pub fn clear_api_key(store: State<'_, KeychainStore>) -> Result<(), String> {
-    store.clear_key();
-    Ok(())
+    store.clear_key()
 }
 
 /// Read the effective provider config + whether a key is set (ADR-0019/0029).

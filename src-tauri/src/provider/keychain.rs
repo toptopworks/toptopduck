@@ -63,10 +63,17 @@ impl KeychainStore {
         Ok(())
     }
 
-    /// Remove the stored key. Best-effort: a missing entry is success.
-    pub fn clear_key(&self) {
-        if let Ok(entry) = Entry::new(SERVICE, KEY_ACCOUNT) {
-            let _ = entry.delete_credential();
+    /// Remove the stored key. Idempotent: a missing entry is success. Any other
+    /// keychain error is surfaced rather than swallowed -- the OS keychain is the
+    /// trust root for the key (ADR-0029), so a failed delete must not silently
+    /// read as "key removed" while the key still sits in the keyring.
+    pub fn clear_key(&self) -> Result<(), String> {
+        let entry = Entry::new(SERVICE, KEY_ACCOUNT).map_err(keychain_err)?;
+        match entry.delete_credential() {
+            Ok(()) => Ok(()),
+            // Idempotent: clearing when nothing is stored is a no-op success.
+            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(keychain_err(e)),
         }
     }
 
