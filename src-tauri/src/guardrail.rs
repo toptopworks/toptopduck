@@ -41,6 +41,12 @@ pub(crate) enum ExecErrorKind {
     /// same SQL would hit the same wall, so it becomes an immediate failed
     /// outcome (ADR-0005/0028).
     Resource,
+    /// The turn was cancelled mid-execution (ADR-0021). NOT an execution failure
+    /// at all -- the orchestrator routes this to the Cancelled outcome (ADR-0028
+    /// D) via its cancel-flag check, which fires before any retry routing. The
+    /// variant exists so the cancel signal is type-honest instead of borrowing
+    /// `Resource` (a cap hit), which would conflate outcome C with outcome D.
+    Cancelled,
 }
 
 /// One classified execution failure. `detail` is the honest, user-facing

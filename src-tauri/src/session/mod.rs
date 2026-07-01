@@ -1132,10 +1132,11 @@ impl Session {
         // result_N exists on the sandbox only (admin untouched), so no rollback
         // is needed -- drop the sandbox and let the caller record Cancelled. The
         // check goes after the resource governor so a genuine over-cap result is
-        // not misread as a cancel.
+        // not misread as a cancel. The kind is Cancelled (not Resource) so the
+        // signal stays type-honest -- outcome D, not a cap hit (ADR-0028).
         if cancel.is_requested() {
             return Err(ExecError::new(
-                ExecErrorKind::Resource,
+                ExecErrorKind::Cancelled,
                 "查询已取消".to_string(),
             ));
         }
