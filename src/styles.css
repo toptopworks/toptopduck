@@ -21,6 +21,16 @@ header h1 { margin: 0 0 0.5rem; }
 
 .error { color: #b00020; background: #fde7e9; padding: 0.5rem 0.8rem; border-radius: 6px; }
 
+/* Viz (ADR-0016/0033): the chart container bounds a Vega-Embed render so a wide
+   spec scrolls instead of bursting the panel; the degraded-viz disclosure is an
+   amber note -- the chart failed but the table still shows, so it reads as a
+   warning, distinct from the red fatal .error and the blue info .disclosure. */
+.viz-chart { margin: 0.5rem 0; max-width: 100%; overflow: auto; }
+.viz-disclosure {
+  background: #fff4e5; border: 1px solid #ffd9a0; border-radius: 6px;
+  padding: 0.5rem 0.8rem; font-size: 0.9rem; margin: 0.5rem 0;
+}
+
 .layout { display: grid; grid-template-columns: 280px 1fr; gap: 1.25rem; margin-top: 1rem; }
 .panel { background: #fff; border: 1px solid #e3e3e8; border-radius: 8px; padding: 1rem; }
 

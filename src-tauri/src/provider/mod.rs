@@ -109,6 +109,10 @@ impl From<&crate::model::TurnOutcome> for ResponsePayload {
                 dataset,
                 sql,
                 assumption,
+                // viz intentionally dropped: a prior turn's chart intent is
+                // irrelevant to SQL generation (the ADR-0023 window carries the
+                // prior SQL, not the presentation spec).
+                ..
             } => ResponsePayload::Materialized {
                 result: dataset.reference_name.clone(),
                 sql: sql.clone(),
@@ -147,20 +151,24 @@ pub struct ProviderRequest {
     pub active: Option<String>,
 }
 
-/// One turn LLM output contract (ADR-0009, calibrated by ADR-0028): either one
-/// SQL to execute (+ optional viz spec + optional assumption note), or a
+/// One turn LLM output contract (ADR-0009, calibrated by ADR-0028/0033): either
+/// one SQL to execute (+ optional viz spec + optional assumption note), or a
 /// textual response with no SQL -- a disambiguation question (ADR-0018) or an
 /// out-of-scope refusal (ADR-0017). Slice #23 widens #22's SQL-only reply to
-/// the full contract; viz is an opaque string here (#26 replaces it with a
-/// structured vega-lite spec), and `assumption` carries the natural-language
-/// side note for both branches (the method name behind a refusal, the
-/// interpretation behind a clarify, or the assumption behind a SQL).
+/// the full contract; #26 structures the viz as a typed [`VizSpec`] (chart kind
+/// from the v1 whitelist + Vega-Lite JSON, ADR-0016/0033). `assumption` carries
+/// the natural-language side note for both branches (the method name behind a
+/// refusal, the interpretation behind a clarify, or the assumption behind a SQL).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderReply {
     /// One SQL to execute, with an optional viz spec and assumption note.
     Sql {
         sql: String,
-        viz: Option<String>,
+        /// Optional viz spec (ADR-0016/0033): the LLM-decided chart for this
+        /// result, or `None` for a plain table turn (the default). Carried
+        /// verbatim to the frontend, which renders it or degrades to a table
+        /// with a disclosure when the spec is malformed or fails to render.
+        viz: Option<crate::model::VizSpec>,
         assumption: Option<String>,
     },
     /// A textual response (no SQL): a clarify question or an out-of-scope

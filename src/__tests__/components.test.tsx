@@ -8,6 +8,7 @@ import { ResultView } from "../components/ResultView";
 import { Thread } from "../components/Thread";
 import { WorkingSetList } from "../components/WorkingSetList";
 import { readRows } from "../api";
+import embed from "vega-embed";
 import type {
   DatasetDescriptor,
   DatasetPrivacy,
@@ -22,6 +23,11 @@ vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
   return { ...actual, readRows: vi.fn() };
 });
+// Vega-Embed needs a real canvas; jsdom has none, so the render itself is
+// mocked. ResultView still drives the real decodeViz + the embed call/catch
+// branches -- the mock lets each test script a successful embed or a rejected
+// one to exercise the degradation path (ADR-0033).
+vi.mock("vega-embed", () => ({ default: vi.fn() }));
 
 import { open } from "@tauri-apps/plugin-dialog";
 
@@ -451,7 +457,7 @@ describe("ResultView", () => {
       offset: 0,
       limit: 100,
     });
-    render(<ResultView referenceName="result_1" assumption="把 id 当作主键" />);
+    render(<ResultView referenceName="result_1" assumption="把 id 当作主键" viz={null} />);
     await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 0, 100));
     expect(screen.getByText(/行数：1/)).toBeInTheDocument();
     expect(screen.getByText("n")).toBeInTheDocument(); // column header
@@ -469,7 +475,7 @@ describe("ResultView", () => {
       offset: 0,
       limit: 2,
     });
-    render(<ResultView referenceName="result_1" assumption={null} pageSize={2} />);
+    render(<ResultView referenceName="result_1" assumption={null} viz={null} pageSize={2} />);
     await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 0, 2));
     expect(screen.getByText(/共 5 行/)).toBeInTheDocument(); // total disclosed
     fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
@@ -486,7 +492,7 @@ describe("ResultView", () => {
       offset: 0,
       limit: 100,
     });
-    render(<ResultView referenceName="result_1" assumption={null} />);
+    render(<ResultView referenceName="result_1" assumption={null} viz={null} />);
     await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 0, 100));
     expect(screen.getByText(/行数：0/)).toBeInTheDocument();
     expect(screen.getByText(/（无数据行）/)).toBeInTheDocument();
@@ -515,12 +521,133 @@ describe("ResultView", () => {
         offset: 0,
         limit: 2,
       });
-    render(<ResultView referenceName="result_1" assumption={null} pageSize={2} />);
+    render(<ResultView referenceName="result_1" assumption={null} viz={null} pageSize={2} />);
     await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 0, 2));
     fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
     await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 2, 2));
     fireEvent.click(screen.getByRole("button", { name: /上一页/ }));
     await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 0, 2));
+  });
+});
+
+describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
+  // A minimal successful Vega-Embed Result -- ResultView only touches finalize.
+  const embedOk = () =>
+    ({ finalize: vi.fn() }) as unknown as Awaited<ReturnType<typeof embed>>;
+  const page = {
+    columns: [{ name: "n", canonical_type: "BIGINT" }],
+    rows: [["5"]],
+    total: 1,
+    offset: 0,
+    limit: 100,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(readRows).mockResolvedValue(page);
+  });
+
+  it("renders the chart via Vega-Embed and hides the table on success", async () => {
+    // AC1: a provider viz (whitelisted kind + Vega-Lite JSON) renders; the chart
+    // takes precedence over the table, and no degradation disclosure shows.
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    const { container } = render(
+      <ResultView
+        referenceName="result_1"
+        assumption={null}
+        viz={{ kind: "bar", spec: JSON.stringify({ mark: "bar" }) }}
+      />,
+    );
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    expect(container.querySelector(".viz-chart")).toBeInTheDocument();
+    // The table pagination is hidden while the chart shows.
+    expect(screen.queryByRole("button", { name: /下一页/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/图表无法渲染/)).not.toBeInTheDocument();
+  });
+
+  it("degrades to the table with a disclosure when the spec is malformed JSON", async () => {
+    // AC2/AC6: a malformed viz degrades to the table + an honest disclosure
+    // (ADR-0033 -- silent degradation is a silent lie). Vega-Embed is never
+    // called: decodeViz rejects before rendering.
+    const { container } = render(
+      <ResultView
+        referenceName="result_1"
+        assumption={null}
+        viz={{ kind: "bar", spec: "not-valid-json" }}
+      />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    expect(embed).not.toHaveBeenCalled();
+    expect(screen.getByText(/图表无法渲染，已显示表格/)).toBeInTheDocument();
+    expect(container.querySelector(".viz-chart")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /下一页/ })).toBeInTheDocument();
+  });
+
+  it("degrades to the table with a disclosure for a non-whitelisted mark", async () => {
+    // AC2/AC6: a spec that draws a chart v1 does not ship (a heatmap "rect")
+    // degrades. Whitelist = bar/line/area/scatter/pie only.
+    render(
+      <ResultView
+        referenceName="result_1"
+        assumption={null}
+        viz={{ kind: "bar", spec: JSON.stringify({ mark: "rect" }) }}
+      />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    expect(embed).not.toHaveBeenCalled();
+    expect(screen.getByText(/图表无法渲染，已显示表格/)).toBeInTheDocument();
+    expect(screen.getByText(/rect/)).toBeInTheDocument();
+  });
+
+  it("degrades to the underlying table when Vega-Embed render fails", async () => {
+    // AC5: a spec that decodes but fails to render degrades to the table with a
+    // disclosure -- the underlying data is always shown, never lost.
+    vi.mocked(embed).mockRejectedValue(new Error("vega render boom"));
+    render(
+      <ResultView
+        referenceName="result_1"
+        assumption={null}
+        viz={{ kind: "bar", spec: JSON.stringify({ mark: "bar" }) }}
+      />,
+    );
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(screen.getByText(/图表无法渲染，已显示表格/)).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: /下一页/ })).toBeInTheDocument();
+  });
+
+  it("renders a plain table with no disclosure when viz is null", async () => {
+    // ADR-0033: a null viz is the default table turn -- NOT a degradation, so no
+    // disclosure shows and Vega-Embed is never called.
+    render(<ResultView referenceName="result_1" assumption={null} viz={null} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    expect(embed).not.toHaveBeenCalled();
+    expect(screen.queryByText(/图表无法渲染/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /下一页/ })).toBeInTheDocument();
+  });
+
+  it("finalizes the Vega view on unmount to free the chart resource", async () => {
+    // The render effect's cleanup calls finalize so an unmounted chart frees its
+    // Vega view (no canvas/view leak across result switches). ResultView is keyed
+    // by reference name in App.tsx, so every result switch remounts and runs
+    // this cleanup path -- leaving it unguarded would leak views silently.
+    const finalize = vi.fn();
+    vi.mocked(embed).mockResolvedValue(
+      { finalize } as unknown as Awaited<ReturnType<typeof embed>>,
+    );
+    const { unmount } = render(
+      <ResultView
+        referenceName="result_1"
+        assumption={null}
+        viz={{ kind: "bar", spec: JSON.stringify({ mark: "bar" }) }}
+      />,
+    );
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    unmount();
+    // finalize fires either synchronously in cleanup (if embed already resolved)
+    // or on the resolved promise (if unmount raced it); waitFor covers both.
+    await waitFor(() => expect(finalize).toHaveBeenCalledTimes(1));
   });
 });
 
@@ -532,7 +659,11 @@ describe("Thread", () => {
       question: `问 ${referenceName}`,
       outcome: {
         kind: "Materialized",
-        data: { dataset: { ...mockDataset, reference_name: referenceName }, assumption },
+        data: {
+          dataset: { ...mockDataset, reference_name: referenceName },
+          viz: null,
+          assumption,
+        },
       },
     };
   }
@@ -597,7 +728,7 @@ describe("Thread", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: /结果：result_2/ }));
-    expect(onSelectResult).toHaveBeenCalledWith("result_2", "用了简单计数");
+    expect(onSelectResult).toHaveBeenCalledWith("result_2", "用了简单计数", null);
   });
 
   it("marks the selected result turn active", () => {

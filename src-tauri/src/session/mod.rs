@@ -801,12 +801,15 @@ impl Session {
                 // same wall, ADR-0005/0028) and fails immediately. Success
                 // materializes result_N.
                 Ok(ProviderReply::Sql {
-                    sql, assumption, ..
+                    sql,
+                    viz,
+                    assumption,
                 }) => match self.try_materialize(&sql) {
                     Ok(dataset) => {
                         let outcome = TurnOutcome::Materialized {
                             dataset: Box::new(dataset),
                             sql: Some(sql),
+                            viz,
                             assumption,
                         };
                         return self.record_turn(question, outcome);

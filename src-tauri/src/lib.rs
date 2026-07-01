@@ -23,9 +23,9 @@ pub mod window;
 pub mod workingset;
 
 pub use model::{
-    ColumnSchema, DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError,
-    LoadOutcome, RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, TextKind,
-    TurnError, TurnOutcome, TurnRecord,
+    ChartKind, ColumnSchema, DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet,
+    LoadError, LoadOutcome, RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify,
+    TextKind, TurnError, TurnOutcome, TurnRecord, VizSpec,
 };
 pub use provider::fake::FakeProvider;
 pub use provider::{

@@ -239,6 +239,7 @@ describe("App ask flow", () => {
       kind: "Materialized",
       data: {
         dataset: { ...guidedDataset, reference_name: "result_1", row_count: 1 },
+        viz: null,
         assumption: null,
       },
     });

@@ -125,7 +125,7 @@ impl Provider for FakeProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::TextKind;
+    use crate::model::{ChartKind, TextKind, VizSpec};
     use crate::provider::{ColumnRef, DatasetRef};
 
     fn request(question: &str) -> ProviderRequest {
@@ -172,7 +172,10 @@ mod tests {
             "plot it",
             ProviderReply::Sql {
                 sql: "SELECT 1".into(),
-                viz: Some("vega-lite-spec".into()),
+                viz: Some(VizSpec {
+                    kind: ChartKind::Bar,
+                    spec: "{\"mark\":\"bar\"}".into(),
+                }),
                 assumption: Some("treated id as a key".into()),
             },
         );
@@ -183,7 +186,9 @@ mod tests {
                 assumption,
             } => {
                 assert_eq!(sql, "SELECT 1");
-                assert_eq!(viz.as_deref(), Some("vega-lite-spec"));
+                let v = viz.expect("viz present");
+                assert_eq!(v.kind, ChartKind::Bar);
+                assert_eq!(v.spec, "{\"mark\":\"bar\"}");
                 assert_eq!(assumption.as_deref(), Some("treated id as a key"));
             }
             ProviderReply::Text { .. } => panic!("expected Sql reply"),
