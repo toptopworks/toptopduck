@@ -7,12 +7,18 @@ pub mod snapshot;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use calamine::Data;
 use duckdb::Connection;
 use tempfile::TempDir;
 
+use crate::cancel::CancelToken;
 use crate::guardrail::{
     apply_resource_caps, classify_duckdb_error, ExecError, ExecErrorKind, DEFAULT_MAX_RESULT_ROWS,
 };
@@ -74,29 +80,24 @@ pub struct Session {
     /// path. Insert-only; stale entries are harmless (the working set is the
     /// source of truth for which sources exist).
     source_files: HashMap<String, PathBuf>,
+    /// Cancellation + single-in-flight signal for the query loop (ADR-0021,
+    /// issue #28). `Arc`-shared with the cancel command (and the timeout
+    /// watchdog) so a cancel fires WITHOUT the session lock -- `ask` holds it
+    /// for the whole turn. Clone it out via [`Self::cancel_token`] before the
+    /// lock is taken (e.g. the command layer registers it as managed state).
+    cancel: Arc<CancelToken>,
+    /// Optional wall-clock ceiling on one turn (ADR-0005/0021 statement-timeout
+    /// path). When set, `ask` arms a watchdog that fires `cancel.request()` on
+    /// expiry; the running query is interrupted and the turn lands as Cancelled
+    /// (ADR-0028 outcome D -- timeout shares the cancel abort path). `None`
+    /// (default) means no turn-level timeout; engine resource caps
+    /// (ADR-0005 L3) still bound runaway queries. Tunable for tests.
+    turn_timeout: Option<Duration>,
 }
 
 impl Session {
     pub fn new() -> anyhow::Result<Self> {
-        let temp_dir = tempfile::Builder::new()
-            .prefix("toptopduck-session-")
-            .tempdir()?;
-        let temp_path = temp_dir.path().to_path_buf();
-        let conn = Connection::open_in_memory()?;
-        // Engine-level resource caps (ADR-0005 L3): bind memory + threads before
-        // any query runs so a runaway LLM SQL cannot OOM or monopolize the
-        // machine. Best-effort; apply_resource_caps logs+swallows a rejection.
-        apply_resource_caps(&conn);
-        Ok(Self {
-            conn,
-            working_set: WorkingSet::default(),
-            _temp_dir: temp_dir,
-            temp_path,
-            provider: Box::new(UnwiredProvider),
-            history: Vec::new(),
-            result_row_cap: DEFAULT_MAX_RESULT_ROWS,
-            source_files: HashMap::new(),
-        })
+        Self::with_provider_and_cancel(Box::new(UnwiredProvider), Arc::new(CancelToken::new()))
     }
 
     /// Tune the materialized-result row ceiling (ADR-0005 L3, "可调"). A query
@@ -111,9 +112,73 @@ impl Session {
     /// the real LLM client wires in #29). The default [`Self::new`] uses
     /// [`UnwiredProvider`] -- every turn is refused until a provider is set.
     pub fn with_provider(provider: Box<dyn Provider>) -> anyhow::Result<Self> {
-        let mut session = Self::new()?;
-        session.provider = provider;
-        Ok(session)
+        Self::with_provider_and_cancel(provider, Arc::new(CancelToken::new()))
+    }
+
+    /// Build a session with an explicit provider AND a shared cancel token
+    /// (ADR-0021, issue #28). The token is `Arc`-cloned to the cancel command
+    /// and the timeout watchdog so a cancel fires without the session lock;
+    /// `with_provider` / `new` allocate a private token for callers that don't
+    /// need cross-thread cancel. Tests that drive cancel/timeout inject a token
+    /// they also hold, so they can observe `is_in_flight` / fire `request`.
+    pub fn with_provider_and_cancel(
+        provider: Box<dyn Provider>,
+        cancel: Arc<CancelToken>,
+    ) -> anyhow::Result<Self> {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("toptopduck-session-")
+            .tempdir()?;
+        let temp_path = temp_dir.path().to_path_buf();
+        let conn = Connection::open_in_memory()?;
+        // Engine-level resource caps (ADR-0005 L3): bind memory + threads before
+        // any query runs so a runaway LLM SQL cannot OOM or monopolize the
+        // machine. Best-effort; apply_resource_caps logs+swallows a rejection.
+        apply_resource_caps(&conn);
+        Ok(Self {
+            conn,
+            working_set: WorkingSet::default(),
+            _temp_dir: temp_dir,
+            temp_path,
+            provider,
+            history: Vec::new(),
+            result_row_cap: DEFAULT_MAX_RESULT_ROWS,
+            source_files: HashMap::new(),
+            cancel,
+            turn_timeout: None,
+        })
+    }
+
+    /// A clone of the shared cancel token (ADR-0021, issue #28). The command
+    /// layer takes this BEFORE the session lock so the cancel command can fire
+    /// without contending for the lock `ask` holds for the whole turn; tests
+    /// clone it to observe `is_in_flight` / drive `request` from another thread.
+    pub fn cancel_token(&self) -> Arc<CancelToken> {
+        Arc::clone(&self.cancel)
+    }
+
+    /// Request cancellation of the in-flight turn (ADR-0021). Sets the
+    /// cooperative flag and interrupts the running DuckDB query (if any); the
+    /// orchestrator lands the turn as [`TurnOutcome::Cancelled`] at its next
+    /// check. Safe to call when no turn is in flight (no-op besides the flag,
+    /// which the next `ask` resets before it starts).
+    pub fn cancel(&self) {
+        self.cancel.request();
+    }
+
+    /// Whether a turn is currently executing (the single-in-flight invariant,
+    /// ADR-0021). Observable without the session lock via the shared token, so a
+    /// test can assert exactly one query runs at a time.
+    pub fn is_query_in_flight(&self) -> bool {
+        self.cancel.is_in_flight()
+    }
+
+    /// Set a wall-clock ceiling on each turn (ADR-0005/0021 statement-timeout
+    /// path). When set, `ask` arms a watchdog that fires cancel on expiry; the
+    /// running query is interrupted and the turn lands as Cancelled (ADR-0028
+    /// outcome D). `None` disables the turn-level timeout (the default; engine
+    /// resource caps still apply). Tunable for deterministic timeout tests.
+    pub fn set_turn_timeout(&mut self, timeout: Option<Duration>) {
+        self.turn_timeout = timeout;
     }
 
     /// Ingest a file. Transactional: on any failure the working set is unchanged
@@ -780,12 +845,51 @@ impl Session {
 
     /// Run one turn (PRD #1): assemble a schema-aware request, ask the provider
     /// (ADR-0009 contract: SQL or textual), and produce exactly one ADR-0028
-    /// outcome -- result / textual / failed (cancelled arrives in #28). The
-    /// single retry budget (malformed output + schema/runtime error) is consumed
-    /// invisibly; on exhaustion the turn fails honestly. Every turn is recorded
+    /// outcome -- result / textual / failed / cancelled. The single retry budget
+    /// (malformed output + schema/runtime error) is consumed invisibly; on
+    /// exhaustion the turn fails honestly. A cancel or timeout (ADR-0021) aborts
+    /// to Cancelled and leaves the working set untouched. Every turn is recorded
     /// in the conversation thread (always visible, ADR-0028/0039); only a result
     /// advances result_N. Infallible -- a question always yields one outcome.
     pub fn ask(&mut self, question: &str) -> TurnOutcome {
+        // Single in-flight + cancellation (ADR-0021, issue #28): begin the turn
+        // on the shared token (marks in-flight, clears any stale request from a
+        // prior turn) and arm the optional timeout watchdog. The guard is held
+        // to end of scope -- its Drop clears in-flight + the interrupt slot on
+        // every exit (including the early Cancelled returns below) and
+        // invalidates the watchdog so a late timeout cannot fire into the next
+        // turn. Clone the Arc into a local so `&cancel` borrows that local, not
+        // `&mut self` (try_materialize takes &mut self).
+        let cancel = Arc::clone(&self.cancel);
+        let guard = cancel.begin_turn();
+        if let Some(timeout) = self.turn_timeout {
+            let alive = guard.watchdog_alive();
+            let token = Arc::clone(&cancel);
+            // Detached: the alive flag is its only tie to this turn. A turn that
+            // finishes before the deadline drops the guard -> alive=false -> the
+            // watchdog wakes, sees false, and does not fire. KNOWN RACE (follow-up
+            // to #28): if the watchdog reads alive=true and then the turn ends and
+            // a new turn begins before request() runs, the cancel lands on the new
+            // turn. The window is a handful of instructions between the load and
+            // request(), only reachable when timeout ~= the prior turn's runtime;
+            // default turn_timeout=None spawns nothing, so production exposure is
+            // near zero. A generation/turn-id guard closes it fully (deferred).
+            // catch_unwind keeps this detached thread self-sufficient: request()
+            // degrades on lock poison (see CancelToken::request), but any residual
+            // panic is logged instead of killing the thread silently.
+            thread::spawn(move || {
+                thread::sleep(timeout);
+                if alive.load(Ordering::SeqCst)
+                    && catch_unwind(AssertUnwindSafe(|| token.request())).is_err()
+                {
+                    log::error!(
+                        target: "toptopduck::session",
+                        "turn watchdog panicked firing cancel; timeout path may be impaired"
+                    );
+                }
+            });
+        }
+
         let request = window::assemble(question, &self.working_set, &self.history);
         // Collect each attempt's failure so exhaustion surfaces them all, not
         // just the last -- a SQL execution error (the actionable kind) would
@@ -794,15 +898,27 @@ impl Session {
         // across attempts.
         let mut failures: Vec<String> = Vec::new();
         for _attempt in 0..=TURN_RETRY_BUDGET {
+            // Cancel check at the loop top: a cancel that arrived before the
+            // first attempt or during the prior attempt aborts immediately as
+            // Cancelled (ADR-0021/0028 outcome D). No retry -- the user asked to
+            // stop, and a timed-out SQL would re-hit the same wall.
+            if cancel.is_requested() {
+                return self.record_turn(question, TurnOutcome::Cancelled);
+            }
             match self.provider.generate(&request) {
                 // Textual branch (ADR-0017/0018): a valid non-result turn -- no
                 // retry, no result_N. The provider's text + assumption ride the
-                // outcome verbatim.
+                // outcome verbatim. A cancel that arrived during the (possibly
+                // slow) provider call wins over a textual reply: the user asked
+                // to stop, so this is Cancelled, not a clarification.
                 Ok(ProviderReply::Text {
                     kind,
                     body,
                     assumption,
                 }) => {
+                    if cancel.is_requested() {
+                        return self.record_turn(question, TurnOutcome::Cancelled);
+                    }
                     let outcome = TurnOutcome::Textual {
                         text_kind: kind,
                         body,
@@ -813,37 +929,70 @@ impl Session {
                 // SQL branch: execute + materialize. A schema/runtime failure
                 // (bad reference, type error) consumes the budget and retries;
                 // a resource-cap hit does NOT retry (the same SQL would hit the
-                // same wall, ADR-0005/0028) and fails immediately. Success
-                // materializes result_N.
+                // same wall, ADR-0005/0028) and fails immediately. A cancel
+                // during the query interrupts DuckDB; the resulting error is a
+                // Cancelled turn, not a retryable failure. Success materializes
+                // result_N.
                 Ok(ProviderReply::Sql {
                     sql,
                     viz,
                     assumption,
-                }) => match self.try_materialize(&sql) {
-                    Ok(dataset) => {
-                        let outcome = TurnOutcome::Materialized {
-                            dataset: Box::new(dataset),
-                            sql: Some(sql),
-                            viz,
-                            assumption,
-                        };
-                        return self.record_turn(question, outcome);
+                }) => {
+                    // Re-check after the (possibly slow) provider call: if the
+                    // provider blocked past a cancel/timeout, stop now without
+                    // touching DuckDB.
+                    if cancel.is_requested() {
+                        return self.record_turn(question, TurnOutcome::Cancelled);
                     }
-                    Err(exec_err) => match exec_err.kind {
-                        // Resource cap: abort now -- retrying cannot help.
-                        ExecErrorKind::Resource => {
-                            let outcome = TurnOutcome::Failed {
-                                reason: format!("{}{}", RESOURCE_FAIL_PREFIX, exec_err.detail),
+                    match self.try_materialize(&sql, &cancel) {
+                        Ok(dataset) => {
+                            let outcome = TurnOutcome::Materialized {
+                                dataset: Box::new(dataset),
+                                sql: Some(sql),
+                                viz,
+                                assumption,
                             };
                             return self.record_turn(question, outcome);
                         }
-                        // Schema/runtime: feed the budget and retry.
-                        _ => Self::push_failure(
-                            &mut failures,
-                            format!("{}{}", EXECUTE_FAIL_PREFIX, exec_err.detail),
-                        ),
-                    },
-                },
+                        Err(exec_err) => {
+                            // A cancel during the query (engine interrupt or a
+                            // mid-query flag) is Cancelled, not a retryable
+                            // failure -- check the flag before routing on kind.
+                            if cancel.is_requested() {
+                                return self.record_turn(question, TurnOutcome::Cancelled);
+                            }
+                            match exec_err.kind {
+                                // Resource cap: abort now -- retrying cannot help.
+                                ExecErrorKind::Resource => {
+                                    let outcome = TurnOutcome::Failed {
+                                        reason: format!(
+                                            "{}{}",
+                                            RESOURCE_FAIL_PREFIX, exec_err.detail
+                                        ),
+                                    };
+                                    return self.record_turn(question, outcome);
+                                }
+                                // Guard-checked above: try_materialize only emits
+                                // Cancelled when is_requested() is true, which the
+                                // pre-check already routed to TurnOutcome::Cancelled.
+                                // The arm turns the invariant into a runtime contract
+                                // -- a future second caller of try_materialize that
+                                // forgets the pre-check fails loudly here instead of
+                                // silently retrying a cancel.
+                                ExecErrorKind::Cancelled => unreachable!(
+                                    "Cancelled kind is guard-checked above; \
+                                     try_materialize only emits it when is_requested() \
+                                     is true"
+                                ),
+                                // Schema/runtime: feed the budget and retry.
+                                _ => Self::push_failure(
+                                    &mut failures,
+                                    format!("{}{}", EXECUTE_FAIL_PREFIX, exec_err.detail),
+                                ),
+                            }
+                        }
+                    }
+                }
                 // NotWired is permanent (no provider configured) -- retrying
                 // cannot help, so the turn fails immediately without consuming
                 // the budget.
@@ -928,7 +1077,11 @@ impl Session {
     /// rows materialize, capping memory on a runaway join. The result name is
     /// tool-generated; the SQL is provider-supplied -- the only live provider
     /// returning SQL today is the scripted test fake (the real LLM wires in #29).
-    fn try_materialize(&mut self, sql: &str) -> Result<DatasetDescriptor, ExecError> {
+    fn try_materialize(
+        &mut self,
+        sql: &str,
+        cancel: &crate::cancel::CancelToken,
+    ) -> Result<DatasetDescriptor, ExecError> {
         // result_N is max+1, never reused (ADR-0022). Re-derived each attempt:
         // a failed attempt registers nothing, so N is stable across retries.
         let n = self.working_set.next_result_number();
@@ -946,6 +1099,14 @@ impl Session {
         sandbox::mirror_results(&sandbox_conn, &self.conn, &self.working_set)?;
         sandbox::lockdown(&sandbox_conn)?;
 
+        // Register the sandbox interrupt handle so a cancel can abort THIS query
+        // at source (ADR-0021 DuckDB interrupt). Scoped to the provider SQL only:
+        // cleared right after the CREATE+count, so the tool-controlled
+        // install/derive steps below (fast, on admin) are never disrupted by a
+        // cancel -- the orchestrator's post-call flag check lands those as
+        // Cancelled without touching the working set.
+        cancel.set_interrupt(sandbox_conn.interrupt_handle());
+
         // Resource cap (ADR-0005 L3): bracket the query and LIMIT to cap+1 so a
         // runaway cross-join cannot balloon memory (DuckDB pushes LIMIT into the
         // scan, so only cap+1 rows ever materialize). The brackets make LIMIT
@@ -958,12 +1119,18 @@ impl Session {
             "CREATE TABLE {} AS SELECT * FROM ({inner}) AS _src LIMIT {cap_plus_one}",
             quote_ident(&result_name),
         );
-        if let Err(e) = sandbox_conn.execute_batch(&create_sql) {
+        let create_outcome = sandbox_conn.execute_batch(&create_sql);
+        // The provider SQL is done (success or failure) -- stop associating the
+        // interrupt handle so a later cancel cannot reach this connection.
+        cancel.clear_interrupt();
+        if let Err(e) = create_outcome {
             // The engine rejected the CREATE on the sandbox -- a parser error
             // from a mutating statement / COPY / ATTACH the wrapping bars, a
-            // read_* refusal ("disabled by configuration"), a schema error, or
-            // a runtime error. Classify so the caller can route retry vs abort;
-            // a blocked read_* is Resource (no retry).
+            // read_* refusal ("disabled by configuration"), a schema error, a
+            // runtime error, OR the interrupt from a cancel (surfaces as a
+            // generic DuckDB failure -> Runtime here). The caller re-checks the
+            // cancel flag and routes a cancel to Cancelled before any retry, so
+            // the kind only chooses the non-cancel routing.
             return Err(ExecError::new(
                 classify_duckdb_error(&e.to_string()),
                 e.to_string(),
@@ -985,6 +1152,18 @@ impl Session {
             return Err(ExecError::new(
                 ExecErrorKind::Resource,
                 format!("结果行数（{rows}）超过上限 {}", self.result_row_cap),
+            ));
+        }
+        // Cancel landed between the query's success and the install: the partial
+        // result_N exists on the sandbox only (admin untouched), so no rollback
+        // is needed -- drop the sandbox and let the caller record Cancelled. The
+        // check goes after the resource governor so a genuine over-cap result is
+        // not misread as a cancel. The kind is Cancelled (not Resource) so the
+        // signal stays type-honest -- outcome D, not a cap hit (ADR-0028).
+        if cancel.is_requested() {
+            return Err(ExecError::new(
+                ExecErrorKind::Cancelled,
+                "查询已取消".to_string(),
             ));
         }
 
@@ -1031,9 +1210,19 @@ impl Session {
         let drop_sql = format!("DROP TABLE {}", quote_ident(result_name));
         match conn.execute_batch(&drop_sql) {
             Ok(()) => detail,
-            Err(drop_err) => format!(
-                "{detail}; cleanup DROP of {result_name} also failed: {drop_err} (orphan table may wedge later turns)"
-            ),
+            Err(drop_err) => {
+                // Session-wedge-grade failure: an orphan result_N makes the next
+                // attempt reuse N and clash on CREATE, wedging every later turn
+                // (ADR-0022). Log at error so it is observable server-side, not
+                // just folded into the user-facing reason string.
+                log::error!(
+                    target: "toptopduck::session",
+                    "rollback DROP of {result_name} failed: {drop_err}; session may wedge on next result_N reuse (ADR-0022)"
+                );
+                format!(
+                    "{detail}; cleanup DROP of {result_name} also failed: {drop_err} (orphan table may wedge later turns)"
+                )
+            }
         }
     }
 

@@ -6,10 +6,14 @@
 //! orchestrator under test never knows it is not the real Claude client.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use toptopduck_lib::{
-    ChartKind, DatasetPrivacy, DatasetRef, FakeProvider, LoadOutcome, ProviderError, ProviderReply,
-    ProviderRequest, ResponsePayload, Session, TextKind, TurnOutcome, TurnPayload, VizSpec,
+    CancelToken, ChartKind, DatasetPrivacy, DatasetRef, FakeProvider, LoadOutcome, ProviderError,
+    ProviderReply, ProviderRequest, ResponsePayload, Session, TextKind, TurnOutcome, TurnPayload,
+    VizSpec,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -1068,4 +1072,220 @@ fn the_active_dataset_command_reflects_the_resolved_active() {
     session.ask("源计数"); // result_1
                            // After a turn: active = the most recent result, matching the payload.
     assert_eq!(session.active().expect("active").reference_name, "result_1");
+}
+
+// --- Single in-flight + cancellation (issue #28) -- ADR-0021/0028 -----------
+//
+// ADR-0021: at most one query executes per session; while it runs the input is
+// disabled (the frontend's loading lock), and the user may cancel the in-flight
+// query. Cancel fires the shared cancel token, which sets the cooperative flag
+// AND interrupts the running DuckDB query; the turn lands as the Cancelled
+// outcome (ADR-0028 D) with the working set untouched (no result_N, sources and
+// prior results intact). A turn-level timeout shares the same abort path. The
+// fake simulates a long, cancellable query by blocking in `generate` until the
+// token fires (the real LLM's latency + a real long DuckDB query are exercised
+// by the interrupt test further down).
+
+/// Poll the shared cancel token's in-flight flag until it goes true (the ask
+/// thread has begun its turn). Bounded so a misconfigured test (one that never
+/// starts a turn) fails fast instead of hanging.
+fn await_in_flight(cancel: &CancelToken, timeout: Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    while !cancel.is_in_flight() {
+        if std::time::Instant::now() > deadline {
+            panic!("turn never entered in-flight within {timeout:?}");
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn cancelling_an_in_flight_query_lands_as_cancelled_with_working_set_unchanged() {
+    // AC1/AC2/AC4: a blocking query is cancelled mid-flight -> Cancelled outcome,
+    // no result_N materialized, source intact (ADR-0021). The "prior result
+    // survives" angle is covered by `a_turn_after_a_cancelled_turn_still_works`.
+    let cancel = Arc::new(CancelToken::new());
+    let provider = FakeProvider::new()
+        .with_cancel(cancel.clone())
+        .scripted_blocking("慢查询", reply_sql("SELECT 1 AS n"));
+    let session =
+        Session::with_provider_and_cancel(Box::new(provider), cancel.clone()).expect("session");
+    let session = Arc::new(Mutex::new(session));
+    {
+        let mut s = session.lock().unwrap();
+        load_source(&mut s, &fixture("people.csv"));
+    }
+
+    let session_ask = Arc::clone(&session);
+    let handle = thread::spawn(move || {
+        let mut s = session_ask.lock().unwrap();
+        s.ask("慢查询")
+    });
+
+    await_in_flight(&cancel, Duration::from_secs(2));
+    // While in-flight: the single-in-flight flag is the observable backend truth
+    // (AC1) -- exactly one query is executing.
+    assert!(cancel.is_in_flight());
+    cancel.request();
+
+    let outcome = handle.join().expect("ask thread");
+    assert!(matches!(outcome, TurnOutcome::Cancelled), "got {outcome:?}");
+    // Working set unchanged: no result materialized, source intact.
+    let s = session.lock().unwrap();
+    assert!(s.get("result_1").is_none());
+    assert_eq!(s.snapshot_row_count("people").unwrap(), 5);
+}
+
+#[test]
+fn a_turn_level_timeout_lands_as_cancelled() {
+    // AC3: a turn that exceeds the wall-clock ceiling is aborted by the watchdog
+    // -> Cancelled (ADR-0028 D -- timeout shares the cancel abort path). No
+    // manual cancel call; the watchdog fires the token after the deadline.
+    let cancel = Arc::new(CancelToken::new());
+    let provider = FakeProvider::new()
+        .with_cancel(cancel.clone())
+        .scripted_blocking("慢查询", reply_sql("SELECT 1 AS n"));
+    let mut session =
+        Session::with_provider_and_cancel(Box::new(provider), cancel.clone()).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    session.set_turn_timeout(Some(Duration::from_millis(60)));
+
+    let start = std::time::Instant::now();
+    let outcome = session.ask("慢查询");
+    let elapsed = start.elapsed();
+
+    assert!(matches!(outcome, TurnOutcome::Cancelled), "got {outcome:?}");
+    // The watchdog fired well before a naive 60s safety ceiling -- proves the
+    // timeout (not a full hang) drove the abort.
+    assert!(elapsed < Duration::from_secs(10), "took {elapsed:?}");
+    assert!(session.get("result_1").is_none()); // working set unchanged
+}
+
+#[test]
+fn a_cancelled_turn_is_recorded_in_the_thread_but_advances_no_result_number() {
+    // ADR-0028/0039: a cancelled turn is always visible (occupies a thread slot)
+    // but does NOT advance result_N. The next result is result_1, not result_2.
+    let cancel = Arc::new(CancelToken::new());
+    let provider = FakeProvider::new()
+        .with_cancel(cancel.clone())
+        .scripted_blocking("慢查询", reply_sql("SELECT 1 AS n"))
+        .scripted(
+            "再查",
+            reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        );
+    let mut session =
+        Session::with_provider_and_cancel(Box::new(provider), cancel.clone()).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    session.set_turn_timeout(Some(Duration::from_millis(100)));
+
+    let cancelled = session.ask("慢查询");
+    assert!(matches!(cancelled, TurnOutcome::Cancelled));
+
+    // The cancelled turn is in the thread, labeled by its verbatim question.
+    let thread = session.conversation();
+    assert_eq!(thread.len(), 1);
+    assert_eq!(thread[0].question, "慢查询");
+    assert!(matches!(thread[0].outcome, TurnOutcome::Cancelled));
+
+    // The follow-up turn is a normal turn -- drop the timeout so the watchdog
+    // cannot race the (fast) sandbox setup + COUNT. The point under test is
+    // result_N numbering, not the timeout.
+    session.set_turn_timeout(None);
+    // A subsequent result is result_1 -- the cancelled turn consumed no number.
+    let (name, _, _) = materialized(session.ask("再查"));
+    assert_eq!(name, "result_1");
+}
+
+#[test]
+fn a_turn_after_a_cancelled_turn_starts_clean_with_no_stale_request() {
+    // begin_turn resets the token: a cancel that landed on the cancelled turn
+    // must not leak into the next turn (which would then also cancel). The next
+    // turn runs to completion.
+    let cancel = Arc::new(CancelToken::new());
+    let provider = FakeProvider::new()
+        .with_cancel(cancel.clone())
+        .scripted_blocking("慢查询", reply_sql("SELECT 1 AS n"))
+        .scripted(
+            "正常",
+            reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        );
+    let mut session =
+        Session::with_provider_and_cancel(Box::new(provider), cancel.clone()).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    session.set_turn_timeout(Some(Duration::from_millis(100)));
+
+    assert!(matches!(session.ask("慢查询"), TurnOutcome::Cancelled));
+    // The follow-up is a normal turn: drop the timeout so its watchdog cannot
+    // race the fast sandbox setup.
+    session.set_turn_timeout(None);
+    // The flag is still set from the cancelled turn; the next ask must clear it.
+    assert!(cancel.is_requested());
+    let (name, rows, _) = materialized(session.ask("正常"));
+    assert_eq!(name, "result_1"); // materialized, not cancelled
+    assert_eq!(rows, 1);
+}
+
+#[test]
+fn cancelling_when_no_query_is_in_flight_is_a_harmless_noop() {
+    // The cancel command may be called when nothing is running (the user hits
+    // 停止 a moment after the turn finished). The flag is set, but the next ask
+    // resets it before starting -- so a stray cancel cannot wedge the session.
+    let cancel = Arc::new(CancelToken::new());
+    let provider = FakeProvider::new().scripted(
+        "正常",
+        reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+    );
+    let mut session =
+        Session::with_provider_and_cancel(Box::new(provider), cancel.clone()).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    cancel.request(); // no query running
+    assert!(cancel.is_requested());
+    let (name, _, _) = materialized(session.ask("正常")); // resets + runs to completion
+    assert_eq!(name, "result_1");
+}
+
+#[test]
+#[ignore] // exercises the real DuckDB interrupt path; slower, run explicitly
+fn a_real_long_duckdb_query_is_interruptible_via_cancel() {
+    // ADR-0021 "DuckDB query interrupt": a genuinely long engine query (a
+    // cross-join count over billions of rows) is aborted at source when cancel
+    // fires the registered interrupt handle -> the turn lands as Cancelled. This
+    // proves the interrupt-handle wiring in try_materialize, not just the
+    // cooperative flag the blocking-fake tests exercise. The query is sized to
+    // run for many seconds uninterrupted, so a cancel at ~100ms reliably catches
+    // it mid-flight on any machine.
+    let cancel = Arc::new(CancelToken::new());
+    // No `with_cancel`/`scripted_blocking`: the provider returns instantly; the
+    // LATENCY is the DuckDB query itself.
+    let provider = FakeProvider::new().scripted(
+        "慢查询",
+        reply_sql("SELECT count(*) AS n FROM range(200000000) t1 CROSS JOIN range(10) t2"),
+    );
+    let session =
+        Session::with_provider_and_cancel(Box::new(provider), cancel.clone()).expect("session");
+    let session = Arc::new(Mutex::new(session));
+    {
+        let mut s = session.lock().unwrap();
+        load_source(&mut s, &fixture("people.csv"));
+    }
+
+    let session_ask = Arc::clone(&session);
+    let handle = thread::spawn(move || {
+        let mut s = session_ask.lock().unwrap();
+        s.ask("慢查询")
+    });
+
+    await_in_flight(&cancel, Duration::from_secs(2));
+    // Give the query a moment to start running on the engine before interrupting.
+    thread::sleep(Duration::from_millis(100));
+    cancel.request();
+
+    let outcome = handle.join().expect("ask thread");
+    assert!(
+        matches!(outcome, TurnOutcome::Cancelled),
+        "DuckDB interrupt should land Cancelled, got {outcome:?}"
+    );
+    let s = session.lock().unwrap();
+    assert!(s.get("result_1").is_none()); // rolled back / never installed
 }

@@ -12,8 +12,12 @@
 //! retry budget (ADR-0028) needs to exercise offline.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+use crate::cancel::CancelToken;
 
 use super::{Provider, ProviderError, ProviderReply, ProviderRequest};
 
@@ -39,6 +43,16 @@ pub struct FakeProvider {
     /// session -- the fake is consumed into the session, but the capture handle
     /// stays in the test's hand.
     captured: Arc<Mutex<Vec<ProviderRequest>>>,
+    /// Optional cancel token: when set, a question in [`Self::blocking`] simulates
+    /// a long-running query by polling this token in a tight sleep loop and only
+    /// returning once cancel is requested (issue #28). The orchestrator then
+    /// sees the flag and lands the turn as Cancelled. `None` for fakes that do
+    /// not simulate latency (the #22-#27 behavior -- instant replies).
+    cancel: Option<Arc<CancelToken>>,
+    /// Questions whose `generate` call blocks until the cancel token is
+    /// requested. Models a long, user-cancellable query for the cancel/timeout
+    /// black-box tests (ADR-0021). Empty by default.
+    blocking: HashSet<String>,
 }
 
 impl Default for FakeProvider {
@@ -48,6 +62,8 @@ impl Default for FakeProvider {
         Self {
             scripts: HashMap::new(),
             captured: Arc::new(Mutex::new(Vec::new())),
+            cancel: None,
+            blocking: HashSet::new(),
         }
     }
 }
@@ -91,6 +107,28 @@ impl FakeProvider {
         );
         self
     }
+
+    /// Share the session's cancel token so a blocking question can poll it
+    /// (issue #28). The token the Session holds is the same one the test (or the
+    /// cancel command) fires -- wiring the fake to it is what lets a black-box
+    /// test drive cancel/timeout without a real long DuckDB query. Builder-style.
+    pub fn with_cancel(mut self, cancel: Arc<CancelToken>) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+
+    /// Register a stable reply for a question AND mark it blocking: `generate`
+    /// polls the cancel token (sleep loop) and only returns once cancel is
+    /// requested, simulating a long-running query (ADR-0021). Requires
+    /// [`Self::with_cancel`] -- without a token the block is a defensive no-op
+    /// (the reply returns immediately) so a misconfigured test never hangs. The
+    /// reply ultimately returned is discarded by the orchestrator when it sees
+    /// the cancel flag -> the turn lands as Cancelled, so the exact reply
+    /// matters only in that it must be a valid `ProviderReply`.
+    pub fn scripted_blocking(mut self, question: &str, reply: ProviderReply) -> Self {
+        self.blocking.insert(question.to_string());
+        self.scripted(question, reply)
+    }
 }
 
 impl Provider for FakeProvider {
@@ -102,6 +140,19 @@ impl Provider for FakeProvider {
         // not block this one.
         if let Ok(mut buf) = self.captured.lock() {
             buf.push(request.clone());
+        }
+        // A blocking question simulates a long query: poll the cancel token in a
+        // tight sleep loop and only proceed once cancel is requested (issue #28,
+        // ADR-0021). The orchestrator checks the flag after this call returns
+        // and lands the turn as Cancelled, so the reply we ultimately hand back
+        // is discarded. Defensive: if no token was wired the block is skipped so
+        // a misconfigured test never hangs.
+        if self.blocking.contains(request.question.as_str()) {
+            if let Some(cancel) = &self.cancel {
+                while !cancel.is_requested() {
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
         }
         let script = self
             .scripts

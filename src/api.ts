@@ -71,6 +71,15 @@ export async function askQuestion(question: string): Promise<TurnOutcome> {
   return invoke<TurnOutcome>("ask", { question });
 }
 
+// Cancel the in-flight turn (ADR-0021, issue #28). Fires the shared cancel
+// token, which interrupts the running DuckDB query; the in-flight ask lands as
+// a Cancelled outcome. Best-effort and always resolves: cancel is a signal, not
+// a transaction -- a cancel when nothing is in flight is a harmless no-op (the
+// next ask resets the flag before it starts).
+export async function cancelQuery(): Promise<void> {
+  await invoke<void>("cancel");
+}
+
 // Read the conversation thread (ADR-0028/0039): every turn in order, each
 // labeled by its verbatim question and its outcome. The always-visible history
 // the UI renders; a snapshot read with no copy-in.

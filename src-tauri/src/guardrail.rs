@@ -36,11 +36,20 @@ pub(crate) enum ExecErrorKind {
     /// A runtime/logic error (type conversion, divide-by-zero, etc.). Retried --
     /// the provider may rephrase the SQL.
     Runtime,
-    /// A resource cap was hit (memory ceiling, result-row ceiling, or -- once
-    /// the sandbox lands -- a blocked filesystem function). NOT retried: the
-    /// same SQL would hit the same wall, so it becomes an immediate failed
-    /// outcome (ADR-0005/0028).
+    /// A resource cap was hit (memory ceiling, result-row ceiling, or a
+    /// filesystem function blocked on the sandbox's disabled LocalFileSystem --
+    /// ADR-0005, issue #25). NOT retried: the same SQL would hit the same wall,
+    /// so it becomes an immediate failed outcome (ADR-0005/0028).
     Resource,
+    /// The turn was cancelled mid-execution (ADR-0021). NOT an execution failure
+    /// at all -- routing is done by the orchestrator's cancel-flag check (which
+    /// fires before the retry-routing match on this kind), so this variant never
+    /// reaches the `match exec_err.kind` arm in `ask`. It exists for type-honest
+    /// logging/diagnostics instead of borrowing `Resource` (a cap hit), which
+    /// would conflate outcome C with outcome D. `ask` asserts the invariant with
+    /// an `unreachable!` arm, so a future second caller of `try_materialize` that
+    /// forgets the pre-check fails loudly instead of silently retrying a cancel.
+    Cancelled,
 }
 
 /// One classified execution failure. `detail` is the honest, user-facing

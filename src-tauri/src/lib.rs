@@ -13,6 +13,7 @@
 //! tests/query_blackbox.rs drives it through a scripted FakeProvider at the ask
 //! -> outcome seam -- offline and deterministic.
 
+pub mod cancel;
 pub mod commands;
 pub mod guardrail;
 pub mod ingest;
@@ -22,6 +23,7 @@ pub mod session;
 pub mod window;
 pub mod workingset;
 
+pub use cancel::CancelToken;
 pub use model::{
     ChartKind, ColumnSchema, DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet,
     LoadError, LoadOutcome, RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify,
@@ -38,13 +40,21 @@ use std::sync::{Arc, Mutex};
 
 /// Boots the Tauri shell. The shared Session is created once and managed behind
 /// an Arc<Mutex>; ingest and turns run on a blocking thread so the UI never
-/// freezes (AC8).
+/// freezes (AC8). The cancel token is shared (Arc) between the Session and the
+/// cancel command so a cancel fires without the session lock `ask` holds for the
+/// whole turn (ADR-0021, issue #28).
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let session = Session::new().expect("failed to create session");
+    let cancel = Arc::new(CancelToken::new());
+    let session = Session::with_provider_and_cancel(
+        Box::new(crate::provider::UnwiredProvider),
+        cancel.clone(),
+    )
+    .expect("failed to create session");
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Arc::new(Mutex::new(session)))
+        .manage(cancel)
         .invoke_handler(tauri::generate_handler![
             commands::ingest_file,
             commands::ingest_file_guided,
@@ -55,6 +65,7 @@ pub fn run() {
             commands::replace_source,
             commands::set_dataset_privacy,
             commands::ask,
+            commands::cancel,
             commands::conversation,
             commands::read_rows,
         ])
