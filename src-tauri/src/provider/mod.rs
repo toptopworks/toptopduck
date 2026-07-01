@@ -200,8 +200,10 @@ pub enum ProviderError {
     /// all ([`UnwiredProvider`]). Permanent for the turn: not retried.
     NotWired,
     /// The provider call failed or its output violated the contract (network /
-    /// auth / quota / malformed output). Transient/recoverable: the retry loop
+    /// quota / malformed output). Transient/recoverable: the retry loop
     /// re-feeds it up to the budget, then yields a failed turn (ADR-0028).
+    /// Auth failures (HTTP 401/403) are permanent, not transient -- they map
+    /// to [`NotWired`] and skip the retry loop (ADR-0044).
     Unavailable(String),
 }
 
