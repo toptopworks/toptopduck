@@ -33,6 +33,20 @@ tempfile = "3"
 calamine = { version = "0.30", features = ["dates"] }
 # Per-sheet temp CSV writer: correct escaping for commas/quotes/newlines in cells.
 csv = "1"
+# Real LLM transport (issue #29, ADR-0007/0019/0029): blocking HTTP client for
+# the Anthropic Messages API, called from the sync `Provider::generate` path on
+# a blocking thread. Chosen over reqwest (async) because the provider trait is
+# synchronous and runs under `spawn_blocking` -- no async runtime needed, and
+# ureq is far lighter. The `json` feature adds serde integration; TLS (rustls,
+# default) is pure-Rust and cross-platform with no native deps. This is the ONLY
+# network egress surface in the app -- the webview has no HTTP plugin and the
+# CSP blocks its external connect (ADR-0029 invariant 1).
+ureq = { version = "2", features = ["json"] }
+# OS keychain access (ADR-0029 invariant 3): the decrypted API key lives only
+# in the Rust core process. The frontend never holds it ("is it set?" returns a
+# bool); Rust fetches it per turn and attaches it to the LLM call. Cross-
+# platform (Windows Credential Manager / macOS Keychain / Linux Secret Service).
+keyring = "3"
 # `log` facade for diagnostic warnings (silent type-inference degradation on
 # Excel error/undecodable-date cells, rollback failures). calamine already
 # pulls `log` in transitively; declaring it explicitly makes the call sites
@@ -47,6 +61,11 @@ tempfile = "3"
 # black-box ingest seam -- no binary fixtures committed (mirrors the parquet
 # fixture helper).
 rust_xlsxwriter = "0.92"
+# HTTP mock for the real-provider unit tests (issue #29): AnthropicProvider is
+# exercised against a local mockito server instead of the network -- the turn
+# orchestrator's offline test base stays on FakeProvider; this tests the HTTP +
+# auth + parse path deterministically, no real key, no real Anthropic.
+mockito = "1"
 
 [profile.dev]
 incremental = true

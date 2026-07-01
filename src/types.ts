@@ -163,3 +163,28 @@ export interface RowPage {
   offset: number;
   limit: number;
 }
+
+// Non-secret LLM provider config (issue #29, ADR-0007/0019/0029): the
+// Anthropic-protocol endpoint base URL + model id. Mirrors the Rust
+// ProviderConfig. The API key is NOT here -- it lives in the OS keychain and
+// never crosses to the frontend; this is the set_provider_config input shape.
+export interface ProviderConfig {
+  // Anthropic Messages API base URL (ADR-0019: configurable baseURL; default
+  // Anthropic direct, overridable to a user's own Anthropic-compatible gateway).
+  base_url: string;
+  // Model id to request (ADR-0007: default Sonnet-class, pinned; the user may
+  // switch to a stronger or cheaper model).
+  model: string;
+}
+
+// The get_provider_config view (ADR-0029): effective base URL + model plus
+// has_key -- a boolean, never the key itself. Mirrors the Rust
+// ProviderConfigView. The frontend learns whether to prompt for a key without
+// ever receiving it.
+export interface ProviderConfigView {
+  base_url: string;
+  model: string;
+  // Whether an API key is stored in the OS keychain. A boolean only (ADR-0029
+  // invariant 3: the decrypted key lives only in the Rust core).
+  has_key: boolean;
+}

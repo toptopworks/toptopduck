@@ -451,3 +451,74 @@ pub struct RowPage {
     pub offset: u64,
     pub limit: u64,
 }
+
+// --- LLM provider config (issue #29, ADR-0007/0019/0029) -------------------
+//
+// Non-secret provider config: the Anthropic-protocol endpoint base URL and the
+// model id. The API key is NOT here -- it lives in the OS keychain (ADR-0029
+// invariant 3) and never crosses to the frontend. This type is the
+// set_provider_config input and the storage shape (Rust-side keychain entry);
+// get_provider_config returns the view below (config + a has_key bool).
+
+/// v1 default endpoint (ADR-0019: Anthropic native protocol + configurable
+/// `baseURL`; default is Anthropic direct).
+pub const DEFAULT_PROVIDER_BASE_URL: &str = "https://api.anthropic.com";
+
+/// v1 default model (ADR-0007: Sonnet-class, version-pinned). SQL + structured
+/// JSON output at top tier with controllable cost; the user can switch to a
+/// stronger (Fable/Opus) or cheaper (Haiku) model via the config.
+pub const DEFAULT_PROVIDER_MODEL: &str = "claude-sonnet-4-6";
+
+/// Non-secret provider config (ADR-0019/0029): the Anthropic-protocol endpoint
+/// base URL + the model id. Stored Rust-side (keychain entry as JSON); never
+/// carries the API key. Crosses IPC as the set_provider_config input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    /// Anthropic Messages API base URL (ADR-0019: configurable `baseURL`,
+    /// default Anthropic direct). A user's own Anthropic-compatible gateway goes
+    /// here. `#[serde(default)]` keeps older stored blobs deserializing.
+    #[serde(default = "default_provider_base_url")]
+    pub base_url: String,
+    /// Model id to request (ADR-0007: default Sonnet-class, pinned).
+    #[serde(default = "default_provider_model")]
+    pub model: String,
+}
+
+/// Serde default for [`ProviderConfig::base_url`] (used both at deserialize time
+/// for older blobs and by [`ProviderConfig::defaults`]).
+fn default_provider_base_url() -> String {
+    DEFAULT_PROVIDER_BASE_URL.to_string()
+}
+
+/// Serde default for [`ProviderConfig::model`].
+fn default_provider_model() -> String {
+    DEFAULT_PROVIDER_MODEL.to_string()
+}
+
+impl ProviderConfig {
+    /// The v1 defaults (Anthropic direct endpoint, Sonnet-class model).
+    pub fn defaults() -> Self {
+        Self {
+            base_url: DEFAULT_PROVIDER_BASE_URL.to_string(),
+            model: DEFAULT_PROVIDER_MODEL.to_string(),
+        }
+    }
+}
+
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        Self::defaults()
+    }
+}
+
+/// The get_provider_config view (ADR-0029): the effective base URL + model the
+/// provider uses, plus `has_key` -- a boolean, never the key itself. The
+/// frontend learns whether to prompt for a key without ever receiving it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderConfigView {
+    pub base_url: String,
+    pub model: String,
+    /// Whether an API key is stored in the OS keychain. A boolean only (ADR-0029
+    /// invariant 3: the key never crosses to the frontend).
+    pub has_key: bool,
+}

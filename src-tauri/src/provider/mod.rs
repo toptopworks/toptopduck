@@ -1,8 +1,9 @@
 //! LLM provider abstraction (ADR-0007): a thin trait behind which the real
-//! Claude client arrives in #29. The turn orchestrator depends on this trait,
-//! never on a concrete client, so every turn is testable offline against a
-//! scripted fake (the v1 shared test base). v1 ships one real implementation
-//! behind the trait; multi-provider is a future config point, not pre-built.
+//! Claude client ships (issue #29: `anthropic::AnthropicProvider`). The turn
+//! orchestrator depends on this trait, never on a concrete client, so every
+//! turn is testable offline against a scripted fake (the v1 shared test base).
+//! v1 ships one real implementation behind the trait; multi-provider is a
+//! future config point, not pre-built.
 //!
 //! The [`ProviderRequest`] handed to a provider each turn is the *assembled LLM
 //! payload* -- the windowed conversation history plus every working-set dataset
@@ -10,7 +11,10 @@
 //! window assembler (`crate::window`) is the single place that builds it; the
 //! types below are just its shape.
 
+pub mod anthropic;
 pub mod fake;
+pub mod keychain;
+pub mod prompt;
 
 use crate::model::TextKind;
 
@@ -184,13 +188,16 @@ pub enum ProviderReply {
 
 /// Why a provider call did not yield a reply. The orchestrator's single retry
 /// budget (ADR-0028) consumes `Unavailable` (a contract violation / transient
-/// call failure) and re-attempts; `NotWired` is permanent (no provider
-/// configured) and is not retried -- it yields a failed turn immediately.
+/// call failure) and re-attempts; `NotWired` is permanent for the turn (no key
+/// configured, the stored key was rejected by the endpoint, or no provider is
+/// wired at all) and is not retried -- it yields a failed turn immediately
+/// prompting the user to configure a valid key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderError {
-    /// No provider is wired -- the real LLM arrives in #29. The default
-    /// UnwiredProvider returns this for every turn, so the orchestrator never
-    /// silently runs without an explicit provider. Permanent: not retried.
+    /// The provider cannot serve this turn for a non-transient reason: no API
+    /// key is stored (ADR-0029 invariant 3), the stored key was rejected by the
+    /// endpoint (HTTP 401/403), or -- in test/dev -- no provider is wired at
+    /// all ([`UnwiredProvider`]). Permanent for the turn: not retried.
     NotWired,
     /// The provider call failed or its output violated the contract (network /
     /// auth / quota / malformed output). Transient/recoverable: the retry loop
@@ -201,7 +208,10 @@ pub enum ProviderError {
 impl std::fmt::Display for ProviderError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::NotWired => write!(f, "尚未接入 LLM 提供方（真实接线在后续切片），无法处理提问"),
+            Self::NotWired => write!(
+                f,
+                "未配置有效的 LLM 提供方（请在设置中配置 Anthropic API key 后重试）"
+            ),
             Self::Unavailable(detail) => write!(f, "LLM 提供方调用失败：{detail}"),
         }
     }
@@ -210,9 +220,9 @@ impl std::error::Error for ProviderError {}
 
 /// The provider abstraction (ADR-0007). One method: turn a schema-aware request
 /// into the one-SQL reply contract (ADR-0009). Concrete implementations: the
-/// scripted test fake (fake::FakeProvider) and the default UnwiredProvider (the
-/// real Claude client arrives in #29). Send so the session can hold it behind
-/// an Arc<Mutex> and run turns on a blocking thread.
+/// real Anthropic client (anthropic::AnthropicProvider, #29), the scripted test
+/// fake (fake::FakeProvider), and the default UnwiredProvider. Send so the
+/// session can hold it behind an Arc<Mutex> and run turns on a blocking thread.
 pub trait Provider: Send {
     fn generate(&self, request: &ProviderRequest) -> Result<ProviderReply, ProviderError>;
 }

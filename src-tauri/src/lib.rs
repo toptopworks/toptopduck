@@ -26,10 +26,14 @@ pub mod workingset;
 pub use cancel::CancelToken;
 pub use model::{
     ChartKind, ColumnSchema, DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet,
-    LoadError, LoadOutcome, RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify,
-    TextKind, TurnError, TurnOutcome, TurnRecord, VizSpec,
+    LoadError, LoadOutcome, ProviderConfig, ProviderConfigView, RectifyProvenance, RenameError,
+    RowPage, SheetGuidance, SheetRectify, TextKind, TurnError, TurnOutcome, TurnRecord, VizSpec,
+    DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
 };
+pub use provider::anthropic::AnthropicProvider;
 pub use provider::fake::FakeProvider;
+pub use provider::keychain::{KeychainStore, ProviderConfigSource, StaticConfig};
+pub use provider::prompt::{render_schema_context, CAPABILITY_BOUNDARY_PROMPT};
 pub use provider::{
     ColumnRef, DatasetRef, Provider, ProviderError, ProviderReply, ProviderRequest,
     ResponsePayload, TurnPayload, UnwiredProvider,
@@ -42,12 +46,17 @@ use std::sync::{Arc, Mutex};
 /// an Arc<Mutex>; ingest and turns run on a blocking thread so the UI never
 /// freezes (AC8). The cancel token is shared (Arc) between the Session and the
 /// cancel command so a cancel fires without the session lock `ask` holds for the
-/// whole turn (ADR-0021, issue #28).
+/// whole turn (ADR-0021, issue #28). The real LLM provider (AnthropicProvider,
+/// #29) is wired behind the Provider trait -- it fetches the API key from the
+/// OS keychain per turn, so the app starts usable once a key is stored; before
+/// that every turn refuses honestly as not-wired. The KeychainStore is managed
+/// as Tauri state so the IPC commands read/write the same OS keychain.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let cancel = Arc::new(CancelToken::new());
+    let keychain = KeychainStore::new();
     let session = Session::with_provider_and_cancel(
-        Box::new(crate::provider::UnwiredProvider),
+        Box::new(AnthropicProvider::new(Box::new(keychain.clone()))),
         cancel.clone(),
     )
     .expect("failed to create session");
@@ -55,6 +64,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Arc::new(Mutex::new(session)))
         .manage(cancel)
+        .manage(keychain)
         .invoke_handler(tauri::generate_handler![
             commands::ingest_file,
             commands::ingest_file_guided,
@@ -68,6 +78,11 @@ pub fn run() {
             commands::cancel,
             commands::conversation,
             commands::read_rows,
+            commands::has_api_key,
+            commands::set_api_key,
+            commands::clear_api_key,
+            commands::get_provider_config,
+            commands::set_provider_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
