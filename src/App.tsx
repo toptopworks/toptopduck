@@ -10,6 +10,7 @@ import { Thread } from "./components/Thread";
 import {
   activeDataset,
   askQuestion,
+  cancelQuery,
   conversation,
   fmtError,
   ingestFile,
@@ -270,6 +271,20 @@ export default function App() {
     [],
   );
 
+  // Cancel the in-flight turn (ADR-0021, issue #28). Fires the backend cancel
+  // token, which interrupts the running DuckDB query; the in-flight ask then
+  // resolves as a Cancelled outcome and handleAsk's finally clears loading.
+  // Best-effort: a cancel that fails to dispatch is surfaced but does not wedge
+  // the input -- the ask itself still resolves (Cancelled or otherwise) and
+  // clears loading on its own.
+  const handleCancel = useCallback(async () => {
+    try {
+      await cancelQuery();
+    } catch (e) {
+      setError({ message: fmtError(e), kind: "ask" });
+    }
+  }, []);
+
   const shown = datasets.find((d) => d.reference_name === selected) ?? null;
 
   return (
@@ -286,7 +301,7 @@ export default function App() {
         </p>
       )}
 
-      <QuestionBar onSubmit={handleAsk} loading={loading} />
+      <QuestionBar onSubmit={handleAsk} onCancel={handleCancel} loading={loading} />
       <Thread
         records={thread}
         selectedResult={latestResult?.referenceName ?? null}

@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use tauri::State;
 
+use crate::cancel::CancelToken;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, LoadOutcome, RowPage, SheetGuidance, TurnOutcome, TurnRecord,
 };
@@ -141,6 +142,19 @@ pub async fn ask(
     .await
     .map_err(|e| e.to_string())??;
     Ok(outcome)
+}
+
+/// Cancel the in-flight turn (ADR-0021, issue #28). Fires the shared cancel
+/// token, which sets the cooperative flag AND interrupts the running DuckDB
+/// query; the in-flight `ask` lands as a Cancelled outcome at its next check.
+/// Crucially this does NOT take the session lock -- `ask` holds it for the whole
+/// turn, so cancel reaches the token through a separate managed `Arc`. Safe when
+/// no turn is in flight (sets a flag the next `ask` resets before it starts).
+/// Always succeeds: cancel is a best-effort signal, not a transaction.
+#[tauri::command]
+pub fn cancel(cancel: State<'_, Arc<CancelToken>>) -> Result<(), String> {
+    cancel.request();
+    Ok(())
 }
 
 /// Read the conversation thread (ADR-0028/0039): every turn in order, each
