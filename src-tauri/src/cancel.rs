@@ -87,13 +87,25 @@ impl CancelToken {
     /// Called from the cancel command (user hit 停止) and the timeout watchdog.
     pub fn request(&self) {
         self.requested.store(true, Ordering::SeqCst);
-        if let Some(handle) = self
-            .interrupt
-            .lock()
-            .expect("interrupt lock poisoned")
-            .as_ref()
-        {
-            handle.interrupt();
+        // The interrupt is a best-effort engine-abort enhancement on top of the
+        // cooperative flag (already set above). On lock poison -- the ask thread
+        // panicked mid set/clear -- degrade to flag-only instead of panicking:
+        // cancel is a best-effort signal, and a poisoned cancel path must not
+        // turn the 停止 button into a hard failure that wedges the session. The
+        // cooperative flag alone still lands the in-flight turn as Cancelled at
+        // its next check, so cancel stays effective sans the engine interrupt.
+        // (set_interrupt/clear_interrupt keep their `.expect`: they run on the
+        // ask thread, where poison means the session is already unrecoverable.)
+        match self.interrupt.lock() {
+            Ok(slot) => {
+                if let Some(handle) = slot.as_ref() {
+                    handle.interrupt();
+                }
+            }
+            Err(_) => log::error!(
+                target: "toptopduck::cancel",
+                "interrupt lock poisoned; cancel degrades to cooperative flag only"
+            ),
         }
     }
 
@@ -116,8 +128,14 @@ impl CancelToken {
     /// liveness flag for the optional timeout watchdog: dropping the guard
     /// invalidates it so a slow timer cannot fire into the next turn.
     pub fn begin_turn(self: &Arc<Self>) -> InFlightGuard {
-        // Reset first, then mark in-flight, so a cancel racing the begin cannot
-        // carry a stale `true` into the new turn (SeqCst orders the two stores).
+        // Reset unconditionally at the start of each turn so a stale
+        // `requested=true` from a prior turn cannot leak into the new one. A
+        // cancel arriving *during* begin is intentionally honored: it writes
+        // `requested=true` after this reset, so the new turn observes it at its
+        // first loop-top check and lands as Cancelled. SeqCst matches the rest of
+        // the token for cross-thread visibility; the reset+set are NOT coordinated
+        // with a racing cancel, but need not be -- the two stores touch different
+        // fields, and `request()` only writes `requested`.
         self.requested.store(false, Ordering::SeqCst);
         self.in_flight.store(true, Ordering::SeqCst);
         InFlightGuard {

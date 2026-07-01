@@ -7,6 +7,7 @@ pub mod snapshot;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -866,12 +867,25 @@ impl Session {
             let token = Arc::clone(&cancel);
             // Detached: the alive flag is its only tie to this turn. A turn that
             // finishes before the deadline drops the guard -> alive=false -> the
-            // watchdog wakes, sees false, and does not fire (no spurious cancel
-            // of a later turn). The default (no timeout) spawns nothing.
+            // watchdog wakes, sees false, and does not fire. KNOWN RACE (follow-up
+            // to #28): if the watchdog reads alive=true and then the turn ends and
+            // a new turn begins before request() runs, the cancel lands on the new
+            // turn. The window is a handful of instructions between the load and
+            // request(), only reachable when timeout ~= the prior turn's runtime;
+            // default turn_timeout=None spawns nothing, so production exposure is
+            // near zero. A generation/turn-id guard closes it fully (deferred).
+            // catch_unwind keeps this detached thread self-sufficient: request()
+            // degrades on lock poison (see CancelToken::request), but any residual
+            // panic is logged instead of killing the thread silently.
             thread::spawn(move || {
                 thread::sleep(timeout);
-                if alive.load(Ordering::SeqCst) {
-                    token.request();
+                if alive.load(Ordering::SeqCst)
+                    && catch_unwind(AssertUnwindSafe(|| token.request())).is_err()
+                {
+                    log::error!(
+                        target: "toptopduck::session",
+                        "turn watchdog panicked firing cancel; timeout path may be impaired"
+                    );
                 }
             });
         }
@@ -958,6 +972,18 @@ impl Session {
                                     };
                                     return self.record_turn(question, outcome);
                                 }
+                                // Guard-checked above: try_materialize only emits
+                                // Cancelled when is_requested() is true, which the
+                                // pre-check already routed to TurnOutcome::Cancelled.
+                                // The arm turns the invariant into a runtime contract
+                                // -- a future second caller of try_materialize that
+                                // forgets the pre-check fails loudly here instead of
+                                // silently retrying a cancel.
+                                ExecErrorKind::Cancelled => unreachable!(
+                                    "Cancelled kind is guard-checked above; \
+                                     try_materialize only emits it when is_requested() \
+                                     is true"
+                                ),
                                 // Schema/runtime: feed the budget and retry.
                                 _ => Self::push_failure(
                                     &mut failures,
@@ -1184,9 +1210,19 @@ impl Session {
         let drop_sql = format!("DROP TABLE {}", quote_ident(result_name));
         match conn.execute_batch(&drop_sql) {
             Ok(()) => detail,
-            Err(drop_err) => format!(
-                "{detail}; cleanup DROP of {result_name} also failed: {drop_err} (orphan table may wedge later turns)"
-            ),
+            Err(drop_err) => {
+                // Session-wedge-grade failure: an orphan result_N makes the next
+                // attempt reuse N and clash on CREATE, wedging every later turn
+                // (ADR-0022). Log at error so it is observable server-side, not
+                // just folded into the user-facing reason string.
+                log::error!(
+                    target: "toptopduck::session",
+                    "rollback DROP of {result_name} failed: {drop_err}; session may wedge on next result_N reuse (ADR-0022)"
+                );
+                format!(
+                    "{detail}; cleanup DROP of {result_name} also failed: {drop_err} (orphan table may wedge later turns)"
+                )
+            }
         }
     }
 
