@@ -56,6 +56,13 @@ pub fn assemble(
 /// Resolution is deterministic here; the LLM's implicit reading of the question
 /// is the #8 wiring slice. [`Session::active`](crate::session::Session::active)
 /// calls this too, so the UI's "当前表" indicator agrees with the payload.
+///
+/// This reads the **full** thread, not the [`WINDOW_TURNS`]-windowed slice
+/// [`assemble_history`] ships: the default must track the truly most-recent
+/// result even after its producing turn has collapsed to a far-window summary
+/// (ADR-0023), so a long thread's default never silently drifts back to the
+/// source. `active` is a top-level payload pointer, independent of which turns
+/// the window happened to keep -- do not "fix" this to read the windowed slice.
 pub fn resolve_active(working_set: &WorkingSet, history: &[TurnRecord]) -> Option<String> {
     let last_result = history.iter().rev().find_map(|t| match &t.outcome {
         TurnOutcome::Materialized { dataset, .. } => Some(dataset.reference_name.clone()),
@@ -510,6 +517,18 @@ mod tests {
         }
     }
 
+    /// A failed turn (ADR-0028: retry budget exhausted) that produces no result
+    /// -- the failed half of "skip non-materialized turns", paired with
+    /// [`textual_turn`] above.
+    fn failed_turn(question: &str) -> TurnRecord {
+        TurnRecord {
+            question: question.to_string(),
+            outcome: TurnOutcome::Failed {
+                reason: "重试预算耗尽".into(),
+            },
+        }
+    }
+
     #[test]
     fn resolve_active_is_the_most_recent_source_when_no_result_exists() {
         // AC1 (issue #27): before any turn, the resolved active is the most-
@@ -583,5 +602,52 @@ mod tests {
         ));
         let payload = assemble("probe", &ws, &[]);
         assert_eq!(payload.active.as_deref(), Some("orders"));
+    }
+
+    #[test]
+    fn resolve_active_skips_failed_turns_too() {
+        // A failed turn (ADR-0028) produces no result, so the resolved active
+        // stays at the most recent RESULT -- the failed half of AC2's "skip
+        // non-materialized turns", paired with
+        // `resolve_active_skips_non_materialized_turns` (the textual half).
+        let (ws, history) = source_plus_turns(2);
+        let mut history = history;
+        history.push(failed_turn("坏查询"));
+        assert_eq!(resolve_active(&ws, &history).as_deref(), Some("result_2"));
+    }
+
+    #[test]
+    fn resolve_active_reads_full_history_not_the_window() {
+        // ADR-0023 / issue #27: resolve_active reads the FULL thread, not the
+        // WINDOW_TURNS window `assemble_history` ships. When the most recent
+        // result's producing turn has collapsed to a far-window summary (and
+        // its sample is withheld), the resolved default is STILL that result --
+        // a long thread's default never silently drifts back to the source.
+        //
+        // Layout: 1 materialized turn (result_1) + 20 textual turns = 21 turns.
+        // The oldest (result_1's turn) falls out of the N=20 window: it becomes
+        // a summary and result_1's sample is withheld. Yet active stays result_1.
+        let (ws, history) = source_plus_turns(1);
+        let mut history = history;
+        for i in 0..WINDOW_TURNS {
+            history.push(textual_turn(&format!("追问 {i}")));
+        }
+        assert_eq!(history.len(), WINDOW_TURNS + 1);
+
+        let payload = assemble("probe", &ws, &history);
+        // Guards: the window really did fold result_1's turn and withhold its
+        // sample -- without these, this test stops proving the out-of-window case.
+        assert!(matches!(payload.history[0], TurnPayload::Summary { .. }));
+        let result_1 = payload
+            .datasets
+            .iter()
+            .find(|d| d.reference_name == "result_1")
+            .expect("result_1 registered");
+        assert!(
+            result_1.sample.is_none(),
+            "out-of-window result drops its sample"
+        );
+        // The contract under test: active still names the out-of-window result.
+        assert_eq!(payload.active.as_deref(), Some("result_1"));
     }
 }
