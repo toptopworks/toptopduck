@@ -873,3 +873,199 @@ fn a_read_function_into_arbitrary_disk_aborts_with_a_resource_error_without_retr
     // Nothing materialized: the over-disk read never produced a result.
     assert!(session.get("result_1").is_none());
 }
+
+// --- Active dataset resolution + natural-language redirect (issue #27) -----
+//
+// ADR-0010/0022: the dataset a question targets is resolved implicitly. The
+// default is the previous step's intermediate result (or the most-recent source
+// at session start); the user can redirect by natural language ("在原始数据上").
+// No UI "selection" control exists -- the WorkingSetList click only picks which
+// detail pane to show, never the query target. The contract established here:
+// the payload carries `active` (the default hint), and the provider may target
+// any dataset by name. The real LLM's implicit resolution lands in #8; this
+// slice pins the contract via the scripted fake and observes it at the ask ->
+// outcome seam (captured payload.active + the materialized outcome's target).
+
+#[test]
+fn active_defaults_to_the_most_recent_source_at_session_start() {
+    // AC1/AC6: with no turns yet, the payload's `active` is the most-recently-
+    // uploaded source (ADR-0022 active default). Two sources loaded -> the
+    // second is active; both sit in the shared namespace.
+    let provider = FakeProvider::new().scripted("探针", reply_sql("SELECT 1 AS n"));
+    let captured = provider.captured();
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv")); // most recent upload
+
+    session.ask("探针");
+    let payload = captured
+        .lock()
+        .expect("lock")
+        .last()
+        .expect("captured")
+        .clone();
+    assert_eq!(payload.active.as_deref(), Some("orders"));
+    // Multi-dataset working set: both sources coexist + referenceable.
+    assert!(payload
+        .datasets
+        .iter()
+        .any(|d| d.reference_name == "people"));
+    assert!(payload
+        .datasets
+        .iter()
+        .any(|d| d.reference_name == "orders"));
+    assert!(session.get("people").is_some());
+    assert!(session.get("orders").is_some());
+}
+
+#[test]
+fn active_defaults_to_the_previous_result_after_a_turn() {
+    // AC2: once a result exists, the next question's payload defaults `active`
+    // to the most recent prior result ("上一步的中间结果"), not the source.
+    let provider = FakeProvider::new()
+        .scripted(
+            "第一步",
+            reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        )
+        .scripted("第二步", reply_sql("SELECT COUNT(*) AS m FROM result_1"));
+    let captured = provider.captured();
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    session.ask("第一步"); // -> result_1
+    session.ask("第二步"); // payload for this turn
+
+    let payloads = captured.lock().expect("lock");
+    assert_eq!(payloads[0].active.as_deref(), Some("people")); // before any result
+    assert_eq!(payloads[1].active.as_deref(), Some("result_1")); // after result_1
+}
+
+#[test]
+fn active_stays_on_the_last_result_across_a_textual_turn() {
+    // AC2 edge: a textual turn produces no intermediate result, so the resolved
+    // active stays at the most recent RESULT (result_1), not the most recent
+    // turn. The next question still defaults to result_1.
+    let provider = FakeProvider::new()
+        .scripted(
+            "第一步",
+            reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        )
+        .scripted("澄清", reply_text(TextKind::Clarify, "哪个维度？"))
+        .scripted("跟进", reply_sql("SELECT COUNT(*) AS m FROM result_1"));
+    let captured = provider.captured();
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    session.ask("第一步"); // result_1
+    session.ask("澄清"); // textual -- no result
+    session.ask("跟进"); // defaults active to result_1 (still the last result)
+
+    let payloads = captured.lock().expect("lock");
+    assert_eq!(payloads[2].active.as_deref(), Some("result_1"));
+}
+
+#[test]
+fn a_default_follow_up_targets_the_resolved_active_result() {
+    // AC6 (default path): the provider's SQL targets the resolved active
+    // (result_1) and materializes a new result from it. result_1 holds one row
+    // (a COUNT), so counting it yields 1 -- proving the turn acted on result_1,
+    // not the 5-row source.
+    let provider = FakeProvider::new()
+        .scripted(
+            "源计数",
+            reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        )
+        .scripted("结果计数", reply_sql("SELECT COUNT(*) AS m FROM result_1"));
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    session.ask("源计数"); // result_1: 1 row
+    let (name, rows, _) = materialized(session.ask("结果计数")); // FROM result_1
+    assert_eq!(name, "result_2");
+    assert_eq!(rows, 1);
+    let page = session.read_rows("result_2", 0, 10).expect("read");
+    assert_eq!(page.rows, vec![vec!["1".to_string()]]); // counted result_1's 1 row
+}
+
+#[test]
+fn a_natural_language_redirect_targets_the_named_source_not_the_default() {
+    // AC3/AC6 (redirect path): the user says "在原始数据上重算" -- the provider's
+    // SQL targets the source, not the default active (result_1). The contract:
+    // `active` is a default hint; the provider may target any dataset by name.
+    // Real LLM implicit resolution lands in #8; the fake simulates it by
+    // scripting source-targeting SQL for the redirect question.
+    //
+    // Observable two ways: (1) the payload's `active` is STILL result_1 -- the
+    // redirect happens in the provider's SQL, not by moving the pointer; (2) the
+    // outcome read the 5-row source (count = 5), not result_1 (which would be 1).
+    let provider = FakeProvider::new()
+        .scripted(
+            "源计数",
+            reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        )
+        .scripted(
+            "在原始数据上重算",
+            reply_sql(r#"SELECT COUNT(*) AS k FROM "people".data"#),
+        );
+    let captured = provider.captured();
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    session.ask("源计数"); // result_1 (1 row); resolved active is now result_1
+    let (name, rows, _) = materialized(session.ask("在原始数据上重算"));
+
+    // (1) The default `active` is unchanged by the redirect -- still result_1.
+    let payloads = captured.lock().expect("lock");
+    assert_eq!(payloads[1].active.as_deref(), Some("result_1"));
+    drop(payloads);
+
+    // (2) The outcome targeted the 5-row source, not result_1 (1 row).
+    assert_eq!(name, "result_2");
+    assert_eq!(rows, 1);
+    let page = session.read_rows("result_2", 0, 10).expect("read");
+    assert_eq!(page.rows, vec![vec!["5".to_string()]]); // people has 5 rows
+}
+
+#[test]
+fn a_redirect_to_a_named_cosource_targets_it_not_the_default() {
+    // AC3/AC6 (multi-dataset redirect): with two sources + a result, the user
+    // redirects "在订单表上" to the non-active co-source (orders). The fake's SQL
+    // targets orders; the outcome reflects orders' 3 rows, not result_1 (1) or
+    // people (5). Proves redirection works across a multi-dataset working set.
+    let provider = FakeProvider::new()
+        .scripted(
+            "源计数",
+            reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        )
+        .scripted(
+            "在订单表上计数",
+            reply_sql(r#"SELECT COUNT(*) AS k FROM "orders".data"#),
+        );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv"));
+
+    session.ask("源计数"); // result_1 from people; resolved active is now result_1
+    let (name, _, _) = materialized(session.ask("在订单表上计数"));
+    assert_eq!(name, "result_2");
+    let page = session.read_rows("result_2", 0, 10).expect("read");
+    assert_eq!(page.rows, vec![vec!["3".to_string()]]); // orders has 3 rows
+}
+
+#[test]
+fn the_active_dataset_command_reflects_the_resolved_active() {
+    // AC5 wiring: the `active_dataset` surface (UI label) agrees with the
+    // payload -- after a turn, both resolve to the most recent result, so the
+    // "当前表" indicator the user sees matches what the next question targets.
+    let provider = FakeProvider::new().scripted(
+        "源计数",
+        reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    // Before any turn: active = the source.
+    assert_eq!(session.active().expect("active").reference_name, "people");
+    session.ask("源计数"); // result_1
+                           // After a turn: active = the most recent result, matching the payload.
+    assert_eq!(session.active().expect("active").reference_name, "result_1");
+}

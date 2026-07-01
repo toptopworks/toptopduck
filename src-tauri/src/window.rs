@@ -39,8 +39,36 @@ pub fn assemble(
         question: question.to_string(),
         history: assemble_history(history),
         datasets: assemble_datasets(working_set, history),
-        active: working_set.active().map(|d| d.reference_name.clone()),
+        active: resolve_active(working_set, history),
     }
+}
+
+/// Resolve the dataset a question targets by default when the user names none
+/// (ADR-0010/0022, issue #27): the most recent **prior** materialized result
+/// ("上一步的中间结果"), or -- when no result exists yet -- the most-recently-
+/// uploaded source ("会话开始 = 最近上传源"). `history` is the thread *before*
+/// the asking turn, so this is the previous step's result. Textual/failed turns
+/// produce no result, so a trailing clarify block does not move the default off
+/// the last result.
+///
+/// The resolved name rides the payload's `active` as a **default hint**, not a
+/// lock: the provider may still redirect by natural language ("在原始数据上").
+/// Resolution is deterministic here; the LLM's implicit reading of the question
+/// is the #8 wiring slice. [`Session::active`](crate::session::Session::active)
+/// calls this too, so the UI's "当前表" indicator agrees with the payload.
+///
+/// This reads the **full** thread, not the [`WINDOW_TURNS`]-windowed slice
+/// [`assemble_history`] ships: the default must track the truly most-recent
+/// result even after its producing turn has collapsed to a far-window summary
+/// (ADR-0023), so a long thread's default never silently drifts back to the
+/// source. `active` is a top-level payload pointer, independent of which turns
+/// the window happened to keep -- do not "fix" this to read the windowed slice.
+pub fn resolve_active(working_set: &WorkingSet, history: &[TurnRecord]) -> Option<String> {
+    let last_result = history.iter().rev().find_map(|t| match &t.outcome {
+        TurnOutcome::Materialized { dataset, .. } => Some(dataset.reference_name.clone()),
+        _ => None,
+    });
+    last_result.or_else(|| working_set.active().map(|d| d.reference_name.clone()))
 }
 
 /// Build the windowed conversation payload (ADR-0023/0039). The last
@@ -210,7 +238,7 @@ fn type_only_set(cols: &[String]) -> HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DatasetPrivacy, RectifyProvenance, TurnOutcome};
+    use crate::model::{DatasetPrivacy, RectifyProvenance, TextKind, TurnOutcome};
 
     /// Build column schemas from (name, type) pairs.
     fn cols(specs: &[(&str, &str)]) -> Vec<ColumnSchema> {
@@ -466,5 +494,160 @@ mod tests {
             }
             other => panic!("expected Summary, got {other:?}"),
         }
+    }
+
+    // --- Active dataset resolution (issue #27) -- ADR-0010/0022 -------------
+    //
+    // The resolved active is the dataset a question targets by default -- the
+    // most recent prior result ("上一步的中间结果"), falling back to the most-
+    // recently-uploaded source at session start. The real LLM may still redirect
+    // by natural language (ADR-0010); `active` is the default hint carried in the
+    // payload, not a lock.
+
+    /// A textual turn that produces no result -- used to prove the resolved
+    /// active skips non-materialized turns.
+    fn textual_turn(question: &str) -> TurnRecord {
+        TurnRecord {
+            question: question.to_string(),
+            outcome: TurnOutcome::Textual {
+                text_kind: TextKind::Clarify,
+                body: "哪个维度？".into(),
+                assumption: None,
+            },
+        }
+    }
+
+    /// A failed turn (ADR-0028: retry budget exhausted) that produces no result
+    /// -- the failed half of "skip non-materialized turns", paired with
+    /// [`textual_turn`] above.
+    fn failed_turn(question: &str) -> TurnRecord {
+        TurnRecord {
+            question: question.to_string(),
+            outcome: TurnOutcome::Failed {
+                reason: "重试预算耗尽".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn resolve_active_is_the_most_recent_source_when_no_result_exists() {
+        // AC1 (issue #27): before any turn, the resolved active is the most-
+        // recently-uploaded source (ADR-0022 active default). A second upload
+        // moves the source-level active pointer to it.
+        let (mut ws, _) = source_plus_turns(0);
+        ws.register(source(
+            "orders",
+            &[("order_id", "BIGINT")],
+            vec![vec!["1".to_string()]],
+        ));
+        assert_eq!(resolve_active(&ws, &[]).as_deref(), Some("orders"));
+    }
+
+    #[test]
+    fn resolve_active_is_the_most_recent_prior_result_after_turns() {
+        // AC2 (issue #27): once results exist, the resolved active is the most
+        // recent prior result ("上一步的中间结果"), not the source.
+        let (ws, history) = source_plus_turns(3);
+        assert_eq!(resolve_active(&ws, &history).as_deref(), Some("result_3"));
+    }
+
+    #[test]
+    fn resolve_active_skips_non_materialized_turns() {
+        // A textual / failed turn produces no intermediate result, so the
+        // resolved active stays at the most recent RESULT, not the most recent
+        // turn. The default "上一步的中间结果" is the last result that actually
+        // materialized.
+        let (ws, history) = source_plus_turns(2);
+        let mut history = history;
+        history.push(textual_turn("哪个名字"));
+        assert_eq!(resolve_active(&ws, &history).as_deref(), Some("result_2"));
+    }
+
+    #[test]
+    fn resolve_active_falls_back_to_source_when_no_turn_materialized() {
+        // Every prior turn is textual/failed (no result) -> fall back to the
+        // source-level active (most recent upload). people is the only source.
+        let (ws, _) = source_plus_turns(0);
+        let history = vec![textual_turn("哪个名字")];
+        assert_eq!(resolve_active(&ws, &history).as_deref(), Some("people"));
+    }
+
+    #[test]
+    fn resolve_active_is_none_for_an_empty_working_set() {
+        // Nothing loaded, nothing asked -> no active. The provider is told there
+        // is no default (the ask path guards against this earlier, but the
+        // resolver stays total: empty in, None out).
+        let ws = WorkingSet::default();
+        assert_eq!(resolve_active(&ws, &[]), None);
+    }
+
+    #[test]
+    fn assemble_carries_the_resolved_active_into_the_payload() {
+        // The resolved active rides the payload's `active` field -- the contract
+        // the provider sees. After result_3, active = result_3, not the source.
+        let (ws, history) = source_plus_turns(3);
+        let payload = assemble("probe", &ws, &history);
+        assert_eq!(payload.active.as_deref(), Some("result_3"));
+    }
+
+    #[test]
+    fn assemble_active_is_the_source_before_any_result() {
+        // AC1 wiring: with no results, the payload's `active` is the source-level
+        // active (most recent upload), so the provider's default points at it.
+        let (mut ws, _) = source_plus_turns(0);
+        ws.register(source(
+            "orders",
+            &[("order_id", "BIGINT")],
+            vec![vec!["1".to_string()]],
+        ));
+        let payload = assemble("probe", &ws, &[]);
+        assert_eq!(payload.active.as_deref(), Some("orders"));
+    }
+
+    #[test]
+    fn resolve_active_skips_failed_turns_too() {
+        // A failed turn (ADR-0028) produces no result, so the resolved active
+        // stays at the most recent RESULT -- the failed half of AC2's "skip
+        // non-materialized turns", paired with
+        // `resolve_active_skips_non_materialized_turns` (the textual half).
+        let (ws, history) = source_plus_turns(2);
+        let mut history = history;
+        history.push(failed_turn("坏查询"));
+        assert_eq!(resolve_active(&ws, &history).as_deref(), Some("result_2"));
+    }
+
+    #[test]
+    fn resolve_active_reads_full_history_not_the_window() {
+        // ADR-0023 / issue #27: resolve_active reads the FULL thread, not the
+        // WINDOW_TURNS window `assemble_history` ships. When the most recent
+        // result's producing turn has collapsed to a far-window summary (and
+        // its sample is withheld), the resolved default is STILL that result --
+        // a long thread's default never silently drifts back to the source.
+        //
+        // Layout: 1 materialized turn (result_1) + 20 textual turns = 21 turns.
+        // The oldest (result_1's turn) falls out of the N=20 window: it becomes
+        // a summary and result_1's sample is withheld. Yet active stays result_1.
+        let (ws, history) = source_plus_turns(1);
+        let mut history = history;
+        for i in 0..WINDOW_TURNS {
+            history.push(textual_turn(&format!("追问 {i}")));
+        }
+        assert_eq!(history.len(), WINDOW_TURNS + 1);
+
+        let payload = assemble("probe", &ws, &history);
+        // Guards: the window really did fold result_1's turn and withhold its
+        // sample -- without these, this test stops proving the out-of-window case.
+        assert!(matches!(payload.history[0], TurnPayload::Summary { .. }));
+        let result_1 = payload
+            .datasets
+            .iter()
+            .find(|d| d.reference_name == "result_1")
+            .expect("result_1 registered");
+        assert!(
+            result_1.sample.is_none(),
+            "out-of-window result drops its sample"
+        );
+        // The contract under test: active still names the out-of-window result.
+        assert_eq!(payload.active.as_deref(), Some("result_1"));
     }
 }

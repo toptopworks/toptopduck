@@ -526,7 +526,22 @@ impl Session {
     }
 
     pub fn active(&self) -> Option<DatasetDescriptor> {
-        self.working_set.active().cloned()
+        // Resolved current table (ADR-0010/0022, issue #27): the most recent
+        // result if any, else the most-recently-uploaded source. Mirrors what the
+        // window assembler puts in the payload, so the UI's "当前表" indicator
+        // matches what the next question targets by default.
+        //
+        // INVARIANT: every name `resolve_active` yields is present in the working
+        // set today -- it derives from a registered result descriptor or the
+        // active source, and WorkingSet has no remove path yet -- so `get`
+        // cannot return None here. When ADR-0013's result soft-invalidate/GC
+        // lands, a Materialized turn's name could outlive its descriptor; the
+        // right fix then is to filter stale names INSIDE `resolve_active` (it
+        // already holds the working set), NOT an `or_else` fallback here -- a
+        // fallback here would split the payload (`active` still names the stale
+        // result) from the UI label, papering over the divergence silently.
+        window::resolve_active(&self.working_set, &self.history)
+            .and_then(|name| self.working_set.get(&name).cloned())
     }
 
     pub fn get(&self, reference_name: &str) -> Option<DatasetDescriptor> {
