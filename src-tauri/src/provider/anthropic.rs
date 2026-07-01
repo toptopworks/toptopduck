@@ -665,7 +665,10 @@ mod tests {
         // A naive `&s[..200]` would panic on the char boundary; truncate floors.
         let reply = "中".repeat(120);
         let out = truncate(&reply);
-        assert!(out.ends_with('…'), "truncated output should end with ellipsis");
+        assert!(
+            out.ends_with('…'),
+            "truncated output should end with ellipsis"
+        );
         // The head must hold only whole '中' chars -- the floor dropped no halves.
         let head: String = out.chars().filter(|&c| c != '…').collect();
         assert!(head.chars().all(|c| c == '中'));

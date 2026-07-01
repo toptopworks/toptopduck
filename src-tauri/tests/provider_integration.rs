@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use toptopduck_lib::{AnthropicProvider, CancelToken, LoadOutcome, Session, StaticConfig, TurnOutcome};
+use toptopduck_lib::{
+    AnthropicProvider, CancelToken, LoadOutcome, Session, StaticConfig, TurnOutcome,
+};
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -128,9 +130,8 @@ fn real_provider_cancel_during_http_block_lands_cancelled() {
         base_url: server.url(),
         model: "claude-sonnet-4-6".into(),
     }));
-    let mut session =
-        Session::with_provider_and_cancel(Box::new(provider), Arc::clone(&cancel))
-            .expect("session");
+    let mut session = Session::with_provider_and_cancel(Box::new(provider), Arc::clone(&cancel))
+        .expect("session");
 
     let people = fixtures_dir().join("people.csv");
     match session.ingest(&people) {
