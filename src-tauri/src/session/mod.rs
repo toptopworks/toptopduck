@@ -526,7 +526,12 @@ impl Session {
     }
 
     pub fn active(&self) -> Option<DatasetDescriptor> {
-        self.working_set.active().cloned()
+        // Resolved current table (ADR-0010/0022, issue #27): the most recent
+        // result if any, else the most-recently-uploaded source. Mirrors what the
+        // window assembler puts in the payload, so the UI's "当前表" indicator
+        // matches what the next question targets by default.
+        window::resolve_active(&self.working_set, &self.history)
+            .and_then(|name| self.working_set.get(&name).cloned())
     }
 
     pub fn get(&self, reference_name: &str) -> Option<DatasetDescriptor> {

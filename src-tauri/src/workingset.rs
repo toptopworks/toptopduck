@@ -200,10 +200,12 @@ impl WorkingSet {
     /// lives as a main-DB physical table (not an attached snapshot). Unlike
     /// [`Self::register`] (a source upload), registering a result does NOT move
     /// the active pointer -- active tracks the most-recently-uploaded *source*
-    /// (ADR-0022); resolving active across results is #27. The result is
-    /// referenceable like any source (shared FROM namespace), and its name is
-    /// recorded in `results` so [`Self::sql_from`] picks the main-table form
-    /// (`"<ref>"`) over the source-attached form (`"<ref>".data`).
+    /// (ADR-0022). The resolved "current table" (most recent result, else the
+    /// source) is computed from the thread by [`crate::window::resolve_active`]
+    /// (issue #27), not stored here. The result is referenceable like any source
+    /// (shared FROM namespace), and its name is recorded in `results` so
+    /// [`Self::sql_from`] picks the main-table form (`"<ref>"`) over the
+    /// source-attached form (`"<ref>".data`).
     pub fn register_result(&mut self, dataset: DatasetDescriptor) {
         let reference_name = dataset.reference_name.clone();
         self.datasets.push(dataset);
