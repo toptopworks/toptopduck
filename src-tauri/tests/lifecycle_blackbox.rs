@@ -163,6 +163,15 @@ fn remove_source_drops_a_non_active_no_result_source() {
     load_source(&mut session, &fixture("orders.csv")); // active = orders now
     assert_eq!(session.list().len(), 2);
 
+    // Capture people's display label BEFORE removal so the Deleted event can be
+    // checked for naming the EXACT removed source (ADR-0040: "always visible +
+    // still names what was removed"), not just a non-empty string -- a regression
+    // that blanked or mislabeled the label would slip past a non-empty check.
+    let people_display_name = session
+        .get("people")
+        .expect("people present before removal")
+        .display_name;
+
     // people is non-active (orders is); no results exist -> safe to remove.
     session
         .remove_source("people")
@@ -192,7 +201,10 @@ fn remove_source_drops_a_non_active_no_result_source() {
         .collect();
     assert_eq!(deleted.len(), 1, "exactly one Deleted event");
     assert_eq!(deleted[0].reference_name, "people");
-    assert!(!deleted[0].display_name.is_empty());
+    assert_eq!(
+        deleted[0].display_name, people_display_name,
+        "Deleted event names the exact removed source's display label"
+    );
 }
 
 #[test]
@@ -321,6 +333,20 @@ fn source_events_do_not_enter_the_llm_turn_window() {
         1,
         "only prior turns enter the window, not source events"
     );
+
+    // Stronger ADR-0040 invariant: source events must not leak into the payload
+    // in ANY form -- not just that the turn count is right. A future refactor
+    // that folded source events into the window while keeping the turn count
+    // unchanged would pass the length checks above; this text guard catches it.
+    // "Added"/"Deleted" are SourceLifecycleKind variants -- a TurnPayload's Debug
+    // never emits them, so any hit is a leak.
+    for (i, req) in captured.iter().enumerate() {
+        let dump = format!("{req:?}");
+        assert!(
+            !dump.contains("Added") && !dump.contains("Deleted"),
+            "request {i}: source-event kind leaked into provider payload: {dump}"
+        );
+    }
 }
 
 #[test]

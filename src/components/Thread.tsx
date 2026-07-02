@@ -32,6 +32,9 @@ export function Thread({ entries, selectedResult, onSelectResult }: ThreadProps)
           // so the array index is a stable, unique key for each entry -- no
           // separate id is needed (YAGNI: an id would ripple through the
           // Rust/TS model + wire contract for no present benefit).
+          // TODO: if thread truncation/pagination or entry-local UI state
+          // (fold/copy/select) ever lands, switch to a stable monotonic id --
+          // index keys would mispatch DOM state across re-renders then.
           <li key={i} className={entry.entry === "Turn" ? "turn" : "source-event"}>
             {entry.entry === "Turn" ? (
               <TurnEntry
@@ -54,15 +57,31 @@ export function Thread({ entries, selectedResult, onSelectResult }: ThreadProps)
 // source entered the working set; Deleted = "−", a source left it. The display
 // label is carried on the event so a deletion still names what was removed.
 function SourceEvent({ kind, displayName }: { kind: SourceLifecycleKind; displayName: string }) {
-  const isAdded = kind === "Added";
-  const marker = isAdded ? "＋" : "－";
-  const verb = isAdded ? "加载了" : "删除了";
+  const { marker, verb } = sourceLifecycleText(kind);
   return (
     <p className={`source-lifecycle ${kind.toLowerCase()}`}>
       <span className="source-marker" aria-hidden="true">{marker}</span>
       <span className="source-text">{verb}「{displayName}」</span>
     </p>
   );
+}
+
+// Exhaustiveness guard mirroring Rust's compile-time match on
+// `SourceLifecycleKind`: a future variant (e.g. Replaced, #41) must add a
+// branch here. `types.ts` is the hand-maintained mirror of the Rust enum, so
+// the TS compiler won't catch a missing branch without this `never` check
+// (consistent with the `TurnBody` guard below).
+function sourceLifecycleText(kind: SourceLifecycleKind): { marker: string; verb: string } {
+  switch (kind) {
+    case "Added":
+      return { marker: "＋", verb: "加载了" };
+    case "Deleted":
+      return { marker: "－", verb: "删除了" };
+    default: {
+      const unhandled: never = kind;
+      throw new Error(`unhandled source lifecycle kind: ${JSON.stringify(unhandled)}`);
+    }
+  }
 }
 
 interface TurnEntryProps {

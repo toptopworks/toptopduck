@@ -130,8 +130,10 @@ pub fn set_dataset_privacy(
 /// reference name from the shared namespace, and appends a `Deleted` source
 /// lifecycle event to the thread. Refuses the active source (→ #39) and any
 /// removal while materialized results exist (→ #40 cascade). Synchronous: the
-/// session Mutex already serializes this against an in-flight turn (ADR-0040
-/// execution window), and the only I/O is a best-effort DETACH + remove_file.
+/// session Mutex serializes this against an in-flight turn (correctness), and
+/// the frontend additionally disables source management via its shared
+/// `loading` flag during the ADR-0040 execution window (UX) -- the two layers
+/// are independent. The only I/O is a best-effort DETACH + remove_file.
 #[tauri::command]
 pub fn remove_source(
     state: State<'_, Arc<Mutex<Session>>>,

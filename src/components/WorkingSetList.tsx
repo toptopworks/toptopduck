@@ -89,12 +89,13 @@ export function WorkingSetList({
           key={d.reference_name}
           className={d.reference_name === activeName ? "active" : ""}
         >
-          <button onClick={() => onSelect(d.reference_name)}>
+          <button type="button" onClick={() => onSelect(d.reference_name)}>
             {d.display_name}
             {d.reference_name === activeName ? " · 当前表" : ""}
             <small> {d.row_count} 行</small>
           </button>
           <button
+            type="button"
             className="rename"
             aria-label={`重命名 ${d.display_name}`}
             title="重命名显示名"
@@ -105,6 +106,7 @@ export function WorkingSetList({
           </button>
           {onReplace && (
             <button
+              type="button"
               className="replace"
               aria-label={`换源 ${d.display_name}`}
               title="重新上传替换此数据集（沿用引用名）"
@@ -116,6 +118,7 @@ export function WorkingSetList({
           )}
           {onDelete && (
             <button
+              type="button"
               className="delete"
               aria-label={`删除 ${d.display_name}`}
               title="从工作集删除此数据集"

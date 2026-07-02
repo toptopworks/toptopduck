@@ -453,10 +453,11 @@ pub enum ThreadEntry {
     Source(SourceLifecycleEvent),
 }
 
-/// Why a source removal was rejected (issue #38). This slice handles only
-/// non-active sources with no derived dependencies; active-focus re-selection
-/// (#39) and cascade stale of dependent results (#40) are deferred to later
-/// slices and surface here as honest rejections rather than partial handling.
+/// Why a source removal was rejected (issue #38). Three honest refusals:
+/// `NotFound` (no such reference name), `IsActive` (silent-jump ban, ADR-0035;
+/// explicit re-selection lands in #39), and `HasDerivatives` (no stale-cascade
+/// engine yet, #40). The latter two are deferred to later slices and surface
+/// here as honest rejections rather than partial handling.
 /// Does NOT cross IPC as a typed value: the remove command surfaces it as a
 /// plain error string (the same shape rename / replace use), so (unlike
 /// [`LoadError`]) it carries no serde wire contract and no types.ts mirror.

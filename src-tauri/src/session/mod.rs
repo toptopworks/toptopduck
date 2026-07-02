@@ -682,9 +682,10 @@ impl Session {
     /// DETACH and snapshot-file removal are best-effort + logged (never silently
     /// swallowed): a failure leaves a ghost attachment or a stray temp file, but
     /// the working set (the source of truth) still reflects the removal and the
-    /// session temp dir is wiped on drop. The session Mutex already serializes
-    /// this against an in-flight turn (ADR-0040 execution window), so no extra
-    /// guard is needed here.
+    /// session temp dir is wiped on drop. The session Mutex serializes this
+    /// against an in-flight turn (correctness); the frontend's shared `loading`
+    /// flag additionally disables source-management UI during the ADR-0040
+    /// execution window (UX), so no in-flight guard is needed here.
     pub fn remove_source(&mut self, reference_name: &str) -> Result<(), RemoveSourceError> {
         // Snapshot the descriptor before any mutation: its display label rides
         // the Deleted event (the thread must still name what was removed after
@@ -697,6 +698,11 @@ impl Session {
 
         // Refuse the active source: removing it would silently move the user's
         // focus (ADR-0035). Explicit re-selection lands in #39.
+        // NOTE: `working_set.active()` (last-registered source) is used rather
+        // than `Session::active`/resolve_active (user focus = latest result,
+        // else active source) because the `has_results()` guard below ensures
+        // no result exists, where the two coincide. When #40 lifts that guard,
+        // re-check this against the resolve_active semantics.
         let is_active = self
             .working_set
             .active()
