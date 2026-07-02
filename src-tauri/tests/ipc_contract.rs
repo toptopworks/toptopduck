@@ -306,7 +306,8 @@ fn turn_outcome_cancelled_is_a_unit_variant_with_no_data() {
 #[test]
 fn turn_record_pairs_question_and_outcome() {
     // A thread entry (ADR-0028/0039): a flat { question, outcome } object where
-    // outcome keeps its own adjacent tag. This is the conversation() wire shape.
+    // outcome keeps its own adjacent tag. This is the Turn shape a ThreadEntry
+    // wraps (see thread_entry_* below for the conversation() wire shape).
     use toptopduck_lib::{TurnOutcome, TurnRecord};
     assert_wire(
         &TurnRecord {
@@ -314,5 +315,63 @@ fn turn_record_pairs_question_and_outcome() {
             outcome: TurnOutcome::Failed { reason: "x".into() },
         },
         r#"{"question":"总行数？","outcome":{"kind":"Failed","data":{"reason":"x"}}}"#,
+    );
+}
+
+#[test]
+fn source_lifecycle_kind_serializes_as_a_bare_variant_string() {
+    // ADR-0040: SourceLifecycleKind is a plain (untagged) enum, so each variant
+    // crosses IPC as its bare name string -- the shape src/types.ts mirrors.
+    // Replaced is reserved for #41 and intentionally absent (YAGNI) here.
+    use toptopduck_lib::SourceLifecycleKind;
+    assert_wire(&SourceLifecycleKind::Added, r#""Added""#);
+    assert_wire(&SourceLifecycleKind::Deleted, r#""Deleted""#);
+}
+
+#[test]
+fn source_lifecycle_event_carries_kind_name_and_display() {
+    // ADR-0040: a source lifecycle event is a flat { kind, reference_name,
+    // display_name } object. kind serializes as its bare variant string. The
+    // display_name is captured at event time so the thread can render it after
+    // the descriptor is gone (a Deleted event still names what was removed).
+    use toptopduck_lib::{SourceLifecycleEvent, SourceLifecycleKind};
+    assert_wire(
+        &SourceLifecycleEvent {
+            kind: SourceLifecycleKind::Deleted,
+            reference_name: "orders".into(),
+            display_name: "Q3 订单".into(),
+        },
+        r#"{"kind":"Deleted","reference_name":"orders","display_name":"Q3 订单"}"#,
+    );
+}
+
+#[test]
+fn thread_entry_turn_wraps_a_turn_record_under_data() {
+    // ADR-0040: the unified timeline entry. Adjacently-tagged on `entry`:
+    // a Turn wraps the full TurnRecord (which keeps its own {question,outcome}
+    // shape) under `data`. This is what conversation() returns for turns.
+    use toptopduck_lib::{ThreadEntry, TurnOutcome, TurnRecord};
+    assert_wire(
+        &ThreadEntry::Turn(TurnRecord {
+            question: "总行数？".into(),
+            outcome: TurnOutcome::Failed { reason: "x".into() },
+        }),
+        r#"{"entry":"Turn","data":{"question":"总行数？","outcome":{"kind":"Failed","data":{"reason":"x"}}}}"#,
+    );
+}
+
+#[test]
+fn thread_entry_source_wraps_a_source_event_under_data() {
+    // ADR-0040: the non-turn entry. A Source wraps the lifecycle event under
+    // `data`; the frontend narrows on `entry` to render it distinctly from a
+    // turn (no question, no outcome -- never enters the LLM window).
+    use toptopduck_lib::{SourceLifecycleEvent, SourceLifecycleKind, ThreadEntry};
+    assert_wire(
+        &ThreadEntry::Source(SourceLifecycleEvent {
+            kind: SourceLifecycleKind::Added,
+            reference_name: "people".into(),
+            display_name: "people".into(),
+        }),
+        r#"{"entry":"Source","data":{"kind":"Added","reference_name":"people","display_name":"people"}}"#,
     );
 }

@@ -19,6 +19,7 @@ import {
   ingestFileGuided,
   listWorkingSet,
   renameDataset,
+  removeSource,
   replaceSource,
   setDatasetPrivacy,
 } from "./api";
@@ -27,7 +28,7 @@ import type {
   DatasetDescriptor,
   GuidanceRequest,
   SheetGuidance,
-  TurnRecord,
+  ThreadEntry,
   VizSpec,
 } from "./types";
 
@@ -35,7 +36,10 @@ import type {
  * prefix matches the action (a rename rejection is never mislabelled a load
  * failure). The backend error crosses IPC as a plain string, so the kind is
  * reconstructed at the call site that knows the operation. */
-type AppError = { message: string; kind: "load" | "rename" | "replace" | "privacy" | "ask" };
+type AppError = {
+  message: string;
+  kind: "load" | "rename" | "replace" | "delete" | "privacy" | "ask";
+};
 
 /** Error prefix per operation kind -- exhaustive over AppError["kind"], so
  * TypeScript catches a missing entry when a new kind is added. */
@@ -43,6 +47,7 @@ const ERROR_PREFIX: Record<AppError["kind"], string> = {
   load: "加载失败：",
   rename: "重命名失败：",
   replace: "换源失败：",
+  delete: "删源失败：",
   privacy: "隐私设置失败：",
   ask: "提问失败：",
 };
@@ -69,10 +74,11 @@ export default function App() {
     null,
   );
   const [latestResult, setLatestResult] = useState<LatestResult | null>(null);
-  // The always-visible conversation thread (ADR-0028/0039): every turn, in
-  // order, labeled by its verbatim question. The session is the source of
-  // truth; this is refetched after each turn so all outcome kinds render.
-  const [thread, setThread] = useState<TurnRecord[]>([]);
+  // The always-visible conversation thread (ADR-0028/0039/0040): the unified
+  // timeline of turns AND source lifecycle events, in order. The session is the
+  // source of truth; this is refetched after each turn / source mutation so all
+  // entry kinds render.
+  const [thread, setThread] = useState<ThreadEntry[]>([]);
   // LLM provider key status (issue #29, ADR-0029): whether an API key is
   // stored. A boolean only -- the key itself never crosses to the frontend.
   // When false, ask turns fail as not-wired until the user configures a key in
@@ -238,6 +244,16 @@ export default function App() {
   // so the error prefix matches the action (never mislabelled a load failure).
   const handlePrivacyChange = useSimpleMutation("privacy", setDatasetPrivacy);
 
+  // Remove a source from the working set (issue #38, ADR-0040): the backend
+  // detaches the snapshot, deletes its file, drops the reference name, and
+  // appends a Deleted source lifecycle event. Tagged "delete" so the error
+  // prefix matches the action (a HasDerivatives / IsActive refusal is never
+  // mislabelled a load failure). The shared `loading` flag disables source
+  // management while the (synchronous, lock-held) removal runs and -- via the
+  // same flag set by handleAsk -- while a turn is in flight (ADR-0040 execution
+  // window).
+  const handleDelete = useSimpleMutation("delete", removeSource);
+
   // Ask one question (PRD #1, issue #23): run one turn -> one ADR-0028 outcome.
   // The retry loop is invisible (one question = one thread entry = one outcome).
   // A result enters the working set + result pane; textual / failed / cancelled
@@ -332,7 +348,7 @@ export default function App() {
 
       <QuestionBar onSubmit={handleAsk} onCancel={handleCancel} loading={loading} />
       <Thread
-        records={thread}
+        entries={thread}
         selectedResult={latestResult?.referenceName ?? null}
         onSelectResult={handleSelectResult}
       />
@@ -356,6 +372,7 @@ export default function App() {
             onSelect={setSelected}
             onRename={handleRename}
             onReplace={handleReplace}
+            onDelete={handleDelete}
             loading={loading}
           />
         </section>

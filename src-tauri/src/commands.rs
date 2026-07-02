@@ -10,7 +10,7 @@ use tauri::State;
 use crate::cancel::CancelToken;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, LoadOutcome, ProviderConfig, ProviderConfigView, RowPage,
-    SheetGuidance, TurnOutcome, TurnRecord, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
+    SheetGuidance, ThreadEntry, TurnOutcome, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
 };
 use crate::provider::keychain::KeychainStore;
 use crate::session::Session;
@@ -125,6 +125,24 @@ pub fn set_dataset_privacy(
         .ok_or_else(|| format!("找不到引用名为「{reference_name}」的数据集"))
 }
 
+/// Remove a source Dataset from the working set (issue #38, ADR-0040). The first
+/// source-removal path: detaches the snapshot, deletes its file, drops the
+/// reference name from the shared namespace, and appends a `Deleted` source
+/// lifecycle event to the thread. Refuses the active source (→ #39) and any
+/// removal while materialized results exist (→ #40 cascade). Synchronous: the
+/// session Mutex serializes this against an in-flight turn (correctness), and
+/// the frontend additionally disables source management via its shared
+/// `loading` flag during the ADR-0040 execution window (UX) -- the two layers
+/// are independent. The only I/O is a best-effort DETACH + remove_file.
+#[tauri::command]
+pub fn remove_source(
+    state: State<'_, Arc<Mutex<Session>>>,
+    reference_name: String,
+) -> Result<(), String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    s.remove_source(&reference_name).map_err(|e| e.to_string())
+}
+
 /// Ask one question (PRD #1): run one turn and return its ADR-0028 outcome
 /// (result / textual / failed / cancelled). The single retry budget is consumed
 /// invisibly inside the turn. Runs off the async/UI thread (AC8) so a slow
@@ -159,13 +177,14 @@ pub fn cancel(cancel: State<'_, Arc<CancelToken>>) -> Result<(), String> {
     Ok(())
 }
 
-/// Read the conversation thread (ADR-0028/0039): every turn in order, each
-/// labeled by its verbatim question and its outcome. Synchronous -- a snapshot
-/// read of the session history with no copy-in. The frontend renders this as
-/// the always-visible thread; the (future, #24) window assembler reads it to
-/// build the provider prompt.
+/// Read the conversation thread (ADR-0028/0039/0040): the unified timeline of
+/// turns AND source lifecycle events, in order. Synchronous -- a snapshot read
+/// of the session history with no copy-in. The frontend renders this as the
+/// always-visible thread (turns + source events); the window assembler reads
+/// only the turns (the session filters source events out before assembly), so
+/// source events never enter the LLM payload.
 #[tauri::command]
-pub fn conversation(state: State<'_, Arc<Mutex<Session>>>) -> Result<Vec<TurnRecord>, String> {
+pub fn conversation(state: State<'_, Arc<Mutex<Session>>>) -> Result<Vec<ThreadEntry>, String> {
     let s = state.lock().map_err(|e| e.to_string())?;
     Ok(s.conversation().to_vec())
 }

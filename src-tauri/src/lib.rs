@@ -26,8 +26,9 @@ pub mod workingset;
 pub use cancel::CancelToken;
 pub use model::{
     ChartKind, ColumnSchema, DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet,
-    LoadError, LoadOutcome, ProviderConfig, ProviderConfigView, RectifyProvenance, RenameError,
-    RowPage, SheetGuidance, SheetRectify, TextKind, TurnError, TurnOutcome, TurnRecord, VizSpec,
+    LoadError, LoadOutcome, ProviderConfig, ProviderConfigView, RectifyProvenance,
+    RemoveSourceError, RenameError, RowPage, SheetGuidance, SheetRectify, SourceLifecycleEvent,
+    SourceLifecycleKind, TextKind, ThreadEntry, TurnError, TurnOutcome, TurnRecord, VizSpec,
     DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
 };
 pub use provider::anthropic::AnthropicProvider;
@@ -73,6 +74,7 @@ pub fn run() {
             commands::get_dataset,
             commands::rename_dataset,
             commands::replace_source,
+            commands::remove_source,
             commands::set_dataset_privacy,
             commands::ask,
             commands::cancel,

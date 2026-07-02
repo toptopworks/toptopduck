@@ -7,8 +7,8 @@ import type {
   ProviderConfigView,
   RowPage,
   SheetGuidance,
+  ThreadEntry,
   TurnOutcome,
-  TurnRecord,
 } from "./types";
 
 export async function ingestFile(path: string): Promise<LoadOutcome> {
@@ -54,6 +54,15 @@ export async function replaceSource(
   return invoke<LoadOutcome>("replace_source", { referenceName, path });
 }
 
+// Remove a source dataset from the working set (issue #38, ADR-0040). Detaches
+// the snapshot, deletes its file, drops the reference name, and appends a
+// Deleted source lifecycle event to the thread. Refuses the active source
+// (→ #39) and any removal while materialized results exist (→ #40). Resolves on
+// success; rejects with a plain error string on a refusal or a lock failure.
+export async function removeSource(referenceName: string): Promise<void> {
+  await invoke<void>("remove_source", { referenceName });
+}
+
 // Set a dataset's privacy controls (ADR-0011, issue #9 slice 5): per-dataset
 // sample switch + per-column type-only marking. In-memory config swap on the
 // descriptor (no copy-in). Rejects an unknown reference name with an error
@@ -82,11 +91,13 @@ export async function cancelQuery(): Promise<void> {
   await invoke<void>("cancel");
 }
 
-// Read the conversation thread (ADR-0028/0039): every turn in order, each
-// labeled by its verbatim question and its outcome. The always-visible history
-// the UI renders; a snapshot read with no copy-in.
-export async function conversation(): Promise<TurnRecord[]> {
-  return invoke<TurnRecord[]>("conversation");
+// Read the conversation thread (ADR-0028/0039/0040): the unified timeline of
+// turns AND source lifecycle events, in order. The always-visible history the UI
+// renders (turns + source events); a snapshot read with no copy-in. Source
+// events are first-class here but never enter the LLM window -- the backend
+// filters them out before assembling the provider payload.
+export async function conversation(): Promise<ThreadEntry[]> {
+  return invoke<ThreadEntry[]>("conversation");
 }
 
 // Read one page of a dataset's rows (ADR-0024 windowed display). Bounded

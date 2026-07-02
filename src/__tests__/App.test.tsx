@@ -25,6 +25,7 @@ vi.mock("../api", async (importOriginal) => {
     activeDataset: vi.fn(async () => null),
     renameDataset: vi.fn(),
     replaceSource: vi.fn(),
+    removeSource: vi.fn(),
     setDatasetPrivacy: vi.fn(),
     askQuestion: vi.fn(),
     conversation: vi.fn(async () => []),
@@ -47,6 +48,7 @@ import {
   ingestFileGuided,
   listWorkingSet,
   readRows,
+  removeSource,
   renameDataset,
   setDatasetPrivacy,
 } from "../api";
@@ -289,10 +291,13 @@ describe("App ask flow", () => {
     });
     vi.mocked(conversation).mockResolvedValueOnce([
       {
-        question: "哪个名字",
-        outcome: {
-          kind: "Textual",
-          data: { text_kind: "Clarify", body: "按产品名还是客户名汇总？", assumption: null },
+        entry: "Turn",
+        data: {
+          question: "哪个名字",
+          outcome: {
+            kind: "Textual",
+            data: { text_kind: "Clarify", body: "按产品名还是客户名汇总？", assumption: null },
+          },
         },
       },
     ]);
@@ -305,5 +310,53 @@ describe("App ask flow", () => {
     );
     // ...and no result pane opens for a non-result outcome.
     expect(screen.queryByText(/结果：result/)).not.toBeInTheDocument();
+  });
+});
+
+describe("App delete-source flow (issue #38)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [guidedDataset];
+    vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
+  });
+
+  it("removes a source via removeSource then refreshes the working set", async () => {
+    // AC: the per-row delete (after a confirm) calls removeSource with the
+    // stable reference name, then refreshes so the list no longer shows it.
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.mocked(removeSource).mockImplementation(async (ref) => {
+      state.workingSet = state.workingSet.filter((d) => d.reference_name !== ref);
+    });
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /删除/ }));
+
+    await waitFor(() => expect(removeSource).toHaveBeenCalledWith("people"));
+    // The refresh after the delete drops the removed source from the list.
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /^people/ })).not.toBeInTheDocument(),
+    );
+  });
+
+  it("labels a delete failure distinctly from load/rename/replace/ask failures", async () => {
+    // A HasDerivatives / IsActive refusal surfaces under the "删源失败：" prefix
+    // -- never mislabelled as another operation's failure.
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.mocked(removeSource).mockRejectedValueOnce("工作集中存在中间结果，暂不支持删源");
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /删除/ }));
+    await waitFor(() =>
+      expect(screen.getByText(/删源失败：工作集中存在中间结果/)).toBeInTheDocument(),
+    );
+    // No other operation's prefix is used.
+    expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/重命名失败/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/换源失败/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/提问失败/)).not.toBeInTheDocument();
   });
 });
