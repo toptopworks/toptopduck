@@ -9,9 +9,10 @@
 
 use std::path::{Path, PathBuf};
 
+use rust_xlsxwriter::Workbook;
 use toptopduck_lib::{
-    FakeProvider, LoadOutcome, ProviderReply, RemoveSourceError, Session, SourceLifecycleKind,
-    ThreadEntry, TurnOutcome,
+    FakeProvider, LoadOutcome, ProviderReply, RemoveSourceError, Session, SheetGuidance,
+    SheetRectify, SourceLifecycleKind, ThreadEntry, TurnOutcome,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -60,6 +61,17 @@ fn count_events(entries: &[ThreadEntry], kind: SourceLifecycleKind) -> usize {
         .count()
 }
 
+/// Save a workbook to a temp xlsx. Mirrors `ingest_blackbox`'s helper: each
+/// integration-test binary is a separate crate, so the helper is duplicated
+/// rather than shared. The returned `TempDir` must outlive the session that
+/// reads the file (drop -> the file is removed).
+fn save_xlsx(mut wb: Workbook, file_name: &str) -> (PathBuf, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join(file_name);
+    wb.save(&path).expect("save xlsx fixture");
+    (path, dir)
+}
+
 #[test]
 fn ingest_appends_an_added_event_per_source() {
     // ADR-0040 / issue #38: every ingest path appends an `Added` source
@@ -85,6 +97,60 @@ fn ingest_appends_an_added_event_per_source() {
         count_events(session.conversation(), SourceLifecycleKind::Added),
         2
     );
+}
+
+#[test]
+fn guided_multi_sheet_ingest_appends_an_added_event_per_sheet() {
+    // AC3 (issue #38): the guided multi-sheet path (`ingest_guided` ->
+    // `commit_excel`) also appends one Added event per sheet, closing the gap
+    // left by `ingest_appends_an_added_event_per_source`, which exercises only
+    // the plain single-file `ingest`. Two sheets -> two Added events, each
+    // carrying its sheet's reference name + display label; both stay registered.
+    let mut wb = Workbook::new();
+    for name in ["people", "orders"] {
+        let ws = wb.add_worksheet();
+        ws.set_name(name).expect("name sheet");
+        ws.write_string(0, 0, "id").unwrap();
+        ws.write_number(1, 0, 1.0).unwrap();
+    }
+    let (xlsx, _dir) = save_xlsx(wb, "guided_multi.xlsx");
+
+    let mut session = session_with_scripts(&[]);
+    let guidance: Vec<SheetGuidance> = ["people", "orders"]
+        .iter()
+        .map(|name| SheetGuidance {
+            name: (*name).into(),
+            rectify: SheetRectify {
+                header_row: 1,
+                skip_rows: vec![],
+            },
+        })
+        .collect();
+    match session.ingest_guided(&xlsx, &guidance) {
+        LoadOutcome::Loaded(_) => {}
+        other => panic!("expected guided load to succeed, got {other:?}"),
+    }
+
+    // Two sheets -> two Added events, one per sheet, in ingest order.
+    let added: Vec<_> = session
+        .conversation()
+        .iter()
+        .filter_map(|e| match e {
+            ThreadEntry::Source(ev) if ev.kind == SourceLifecycleKind::Added => Some(ev),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(added.len(), 2, "one Added event per sheet");
+    assert_eq!(added[0].reference_name, "people");
+    assert_eq!(added[1].reference_name, "orders");
+    assert!(
+        added.iter().all(|e| !e.display_name.is_empty()),
+        "display label carried per sheet"
+    );
+    // Both sheets are registered and referenceable.
+    assert_eq!(session.list().len(), 2);
+    assert!(session.get("people").is_some());
+    assert!(session.get("orders").is_some());
 }
 
 #[test]
