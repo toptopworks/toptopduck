@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use toptopduck_lib::{
     CancelToken, ChartKind, DatasetPrivacy, DatasetRef, FakeProvider, LoadOutcome, ProviderError,
-    ProviderReply, ProviderRequest, ResponsePayload, Session, TextKind, TurnOutcome, TurnPayload,
-    VizSpec,
+    ProviderReply, ProviderRequest, ResponsePayload, Session, TextKind, ThreadEntry, TurnOutcome,
+    TurnPayload, TurnRecord, VizSpec,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -81,6 +81,21 @@ fn failed_reason(outcome: TurnOutcome) -> String {
         TurnOutcome::Failed { reason } => reason,
         other => panic!("expected Failed, got {other:?}"),
     }
+}
+
+/// The turn-only view of the conversation timeline (ADR-0040): source lifecycle
+/// events share the timeline (an ingest appends an `Added` event), so tests
+/// asserting on turns filter them out here. Clones so `thread[i].question` /
+/// `.outcome` access keeps the same shape it had when conversation() returned
+/// `&[TurnRecord]` -- the assertions stay readable.
+fn turns(entries: &[ThreadEntry]) -> Vec<TurnRecord> {
+    entries
+        .iter()
+        .filter_map(|e| match e {
+            ThreadEntry::Turn(t) => Some(t.clone()),
+            ThreadEntry::Source(_) => None,
+        })
+        .collect()
 }
 
 #[test]
@@ -536,7 +551,7 @@ fn every_turn_is_recorded_in_the_conversation_thread_in_order() {
     session.ask("哪个名字");
     session.ask("坏查询");
 
-    let thread = session.conversation();
+    let thread = turns(session.conversation());
     assert_eq!(thread.len(), 3, "every turn occupies a thread slot");
     // Each entry is labeled by its verbatim question (ADR-0039).
     assert_eq!(thread[0].question, "查行数");
@@ -1183,7 +1198,10 @@ fn a_cancelled_turn_is_recorded_in_the_thread_but_advances_no_result_number() {
     assert!(matches!(cancelled, TurnOutcome::Cancelled));
 
     // The cancelled turn is in the thread, labeled by its verbatim question.
-    let thread = session.conversation();
+    // (Source lifecycle events share the timeline but are filtered out by the
+    // turns() helper, so the leading `Added` event from load_source is not
+    // counted here -- the assertion stays about the turn slot.)
+    let thread = turns(session.conversation());
     assert_eq!(thread.len(), 1);
     assert_eq!(thread[0].question, "慢查询");
     assert!(matches!(thread[0].outcome, TurnOutcome::Cancelled));

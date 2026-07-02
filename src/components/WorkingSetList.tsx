@@ -7,6 +7,7 @@ export function WorkingSetList({
   onSelect,
   onRename,
   onReplace,
+  onDelete,
   loading = false,
 }: {
   datasets: DatasetDescriptor[];
@@ -23,8 +24,16 @@ export function WorkingSetList({
   // only so tests that don't exercise replace can skip it; App always supplies
   // it, and the button is hidden when it is absent (no silent no-op).
   onReplace?: (referenceName: string, path: string) => void;
-  // Disables the action buttons while an async op (rename / ingest / replace)
-  // is in flight, preventing concurrent IPC from rapid double-clicks.
+  // Remove a source from the working set (issue #38, ADR-0040). The backend
+  // detaches the snapshot, deletes its file, drops the reference name, and
+  // appends a Deleted source lifecycle event. Optional only so tests that don't
+  // exercise delete can skip it; App always supplies it, and the button is
+  // hidden when it is absent (no silent no-op).
+  onDelete?: (referenceName: string) => void;
+  // Disables the action buttons while an async op (rename / ingest / replace /
+  // delete) is in flight OR while a turn is in flight (ADR-0040 execution
+  // window: ask in flight -> source management disabled), preventing concurrent
+  // IPC and source-vs-turn interleaving.
   loading?: boolean;
 }) {
   if (datasets.length === 0) {
@@ -61,6 +70,18 @@ export function WorkingSetList({
     }
   };
 
+  // Confirm before removing a source: deletion drops the reference name from
+  // the shared namespace (any SQL FROM it will fail) and is irreversible in v1
+  // (the file must be re-uploaded). A no answer is ignored. The backend refuses
+  // the active source and any removal while results exist, surfacing those as a
+  // "删源失败" error in App -- the confirm here is only the user's intent gate.
+  const confirmDelete = (d: DatasetDescriptor) => {
+    const ok = window.confirm(`确定从工作集删除「${d.display_name}」？`);
+    if (ok) {
+      onDelete?.(d.reference_name);
+    }
+  };
+
   return (
     <ul className="working-set">
       {datasets.map((d) => (
@@ -91,6 +112,17 @@ export function WorkingSetList({
               onClick={() => void pickReplace(d)}
             >
               ↻
+            </button>
+          )}
+          {onDelete && (
+            <button
+              className="delete"
+              aria-label={`删除 ${d.display_name}`}
+              title="从工作集删除此数据集"
+              disabled={loading}
+              onClick={() => confirmDelete(d)}
+            >
+              ✕
             </button>
           )}
         </li>

@@ -27,8 +27,9 @@ use crate::ingest::schema::quote_ident;
 use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
-    RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, TurnError, TurnOutcome,
-    TurnRecord, EXECUTE_FAIL_PREFIX, RESOURCE_FAIL_PREFIX,
+    RectifyProvenance, RemoveSourceError, RenameError, RowPage, SheetGuidance, SheetRectify,
+    SourceLifecycleEvent, SourceLifecycleKind, ThreadEntry, TurnError, TurnOutcome, TurnRecord,
+    EXECUTE_FAIL_PREFIX, RESOURCE_FAIL_PREFIX,
 };
 use crate::provider::{Provider, ProviderError, ProviderReply, UnwiredProvider};
 use crate::session::snapshot::derive_table;
@@ -63,10 +64,12 @@ pub struct Session {
     /// fake via [`Self::with_provider`]. `Send` so the session is shareable
     /// behind an `Arc<Mutex>` and turns can run on a blocking thread.
     provider: Box<dyn Provider>,
-    /// The conversation thread (ADR-0028/0039): every turn, in order, each
-    /// labeled by its verbatim question. The source of truth the frontend
-    /// renders and the window assembler (`crate::window`, #24) reads each turn.
-    history: Vec<TurnRecord>,
+    /// The conversation thread (ADR-0028/0039/0040): a unified timeline of turns
+    /// AND source lifecycle events, in order. The source of truth the frontend
+    /// renders; the window assembler reads only the turns (via [`Self::turns`]),
+    /// so source events occupy a timeline slot and stay always-visible yet never
+    /// enter the LLM turn window or advance result_N (ADR-0040).
+    history: Vec<ThreadEntry>,
     /// Ceiling on a materialized result's row count (ADR-0005 L3). A query whose
     /// result would exceed it is aborted with a resource error rather than
     /// allowed to balloon memory. Defaults to [`DEFAULT_MAX_RESULT_ROWS`];
@@ -268,6 +271,14 @@ impl Session {
             privacy: DatasetPrivacy::default(),
         };
         self.working_set.register(descriptor.clone());
+        // ADR-0040: a successful add appends a source lifecycle event -- a
+        // first-class thread entry that is NOT a turn (no question, no outcome),
+        // so it never enters the LLM window or advances result_N.
+        self.append_source_event(
+            SourceLifecycleKind::Added,
+            &descriptor.reference_name,
+            &descriptor.display_name,
+        );
         LoadOutcome::Loaded(descriptor)
     }
 
@@ -428,7 +439,12 @@ impl Session {
             });
         };
         for d in descriptors {
+            // ADR-0040: each added sheet appends its own Add event, so a
+            // multi-sheet workbook shows one event per sheet in the thread.
+            let reference_name = d.reference_name.clone();
+            let display_name = d.display_name.clone();
             self.working_set.register(d);
+            self.append_source_event(SourceLifecycleKind::Added, &reference_name, &display_name);
         }
         Ok(active)
     }
@@ -598,14 +614,17 @@ impl Session {
         //
         // INVARIANT: every name `resolve_active` yields is present in the working
         // set today -- it derives from a registered result descriptor or the
-        // active source, and WorkingSet has no remove path yet -- so `get`
-        // cannot return None here. When ADR-0013's result soft-invalidate/GC
-        // lands, a Materialized turn's name could outlive its descriptor; the
-        // right fix then is to filter stale names INSIDE `resolve_active` (it
-        // already holds the working set), NOT an `or_else` fallback here -- a
-        // fallback here would split the payload (`active` still names the stale
-        // result) from the UI label, papering over the divergence silently.
-        window::resolve_active(&self.working_set, &self.history)
+        // active source. The remove path (#38) refuses removal of the active
+        // source and of any source while results exist, so the active source
+        // and any materialized result stay registered while they're resolvable.
+        // When ADR-0013's result soft-invalidate/GC lands, a Materialized turn's
+        // name could outlive its descriptor; the right fix then is to filter
+        // stale names INSIDE `resolve_active` (it already holds the working
+        // set), NOT an `or_else` fallback here -- a fallback here would split
+        // the payload (`active` still names the stale result) from the UI label,
+        // papering over the divergence silently.
+        let turns = self.turns();
+        window::resolve_active(&self.working_set, &turns)
             .and_then(|name| self.working_set.get(&name).cloned())
     }
 
@@ -642,6 +661,102 @@ impl Session {
         privacy: DatasetPrivacy,
     ) -> Option<DatasetDescriptor> {
         self.working_set.set_privacy(reference_name, privacy)
+    }
+
+    /// Remove a source Dataset from the working set (issue #38, ADR-0040). The
+    /// first source-removal path: detaches the read-only snapshot, deletes its
+    /// file, drops the dataset from the shared namespace, and appends a
+    /// `Deleted` source lifecycle event to the thread. The event is first-class
+    /// (always visible, occupies a timeline slot) but NOT a turn -- it never
+    /// enters the LLM window or advances result_N.
+    ///
+    /// This slice handles only **non-active sources with no derived results**:
+    /// - Removing the active source would silently change the user's analysis
+    ///   focus; ADR-0035 forbids a silent jump, so explicit re-selection lands
+    ///   in #39 and removal of the active source is refused here.
+    /// - Removing a source while any `result_N` exists needs the stale-cascade
+    ///   engine (#40) to mark dependent derivations stale honestly; without it,
+    ///   removal is refused. The conservative "any result exists" guard is the
+    ///   only provenance-free way to guarantee "no derived dependency" today.
+    ///
+    /// DETACH and snapshot-file removal are best-effort + logged (never silently
+    /// swallowed): a failure leaves a ghost attachment or a stray temp file, but
+    /// the working set (the source of truth) still reflects the removal and the
+    /// session temp dir is wiped on drop. The session Mutex already serializes
+    /// this against an in-flight turn (ADR-0040 execution window), so no extra
+    /// guard is needed here.
+    pub fn remove_source(&mut self, reference_name: &str) -> Result<(), RemoveSourceError> {
+        // Snapshot the descriptor before any mutation: its display label rides
+        // the Deleted event (the thread must still name what was removed after
+        // the dataset is gone), and the active/unknown checks need it up front.
+        let descriptor = self
+            .working_set
+            .get(reference_name)
+            .ok_or_else(|| RemoveSourceError::NotFound(reference_name.to_string()))?
+            .clone();
+
+        // Refuse the active source: removing it would silently move the user's
+        // focus (ADR-0035). Explicit re-selection lands in #39.
+        let is_active = self
+            .working_set
+            .active()
+            .map(|a| a.reference_name == reference_name)
+            .unwrap_or(false);
+        if is_active {
+            return Err(RemoveSourceError::IsActive {
+                reference_name: reference_name.to_string(),
+                display_name: descriptor.display_name,
+            });
+        }
+
+        // Refuse while any materialized result exists: the stale-cascade engine
+        // (#40) is what honestly marks dependent derivations stale, and without
+        // provenance the only honest "no derived dependency" claim is "no result
+        // exists at all".
+        if self.working_set.has_results() {
+            return Err(RemoveSourceError::HasDerivatives);
+        }
+
+        // Detach the read-only snapshot catalog. Best-effort + logged (mirrors
+        // rollback_excel): a DETACH failure leaves a ghost attachment that
+        // cannot affect correctness (the working set no longer names it; a
+        // later same-name ingest de-conflicts), but is kept diagnosable.
+        if let Err(e) = self
+            .conn
+            .execute_batch(&format!("DETACH {};", quote_ident(reference_name)))
+        {
+            log::warn!(
+                target: "toptopduck::session",
+                "DETACH failed during remove_source for {reference_name}: {e}"
+            );
+        }
+
+        // Delete the snapshot file. source_files holds the real attached path
+        // (a replace may have left it at a swap path); fall back to the formal
+        // <ref>.duckdb name only when no entry was tracked. Best-effort +
+        // logged: on Windows a held handle can make remove_file fail, but the
+        // session temp dir is wiped on drop either way.
+        let snapshot_path = self
+            .source_files
+            .remove(reference_name)
+            .unwrap_or_else(|| self.temp_path.join(format!("{reference_name}.duckdb")));
+        if let Err(e) = fs::remove_file(&snapshot_path) {
+            log::warn!(
+                target: "toptopduck::session",
+                "snapshot file removal failed during remove_source for {reference_name}: {e}"
+            );
+        }
+
+        // Commit: drop the dataset (also clears active-if-match + results
+        // membership) and append the Deleted event. The display label was
+        // captured above, so the event still names what was removed.
+        self.working_set.remove(reference_name);
+        self.append_source_event(
+            SourceLifecycleKind::Deleted,
+            reference_name,
+            &descriptor.display_name,
+        );
+        Ok(())
     }
 
     /// Re-upload a file onto an existing dataset's reference name (ADR-0042,
@@ -890,7 +1005,11 @@ impl Session {
             });
         }
 
-        let request = window::assemble(question, &self.working_set, &self.history);
+        // The window assembler consumes turns only (ADR-0040): source lifecycle
+        // events live in the same timeline but are filtered out here, so they
+        // never enter the LLM turn window or occupy an N=20 slot.
+        let turns = self.turns();
+        let request = window::assemble(question, &self.working_set, &turns);
         // Collect each attempt's failure so exhaustion surfaces them all, not
         // just the last -- a SQL execution error (the actionable kind) would
         // otherwise be overwritten by a later transient Unavailable. Consecutive
@@ -1043,13 +1162,48 @@ impl Session {
 
     /// Append a turn to the conversation thread and return its outcome. Every
     /// outcome kind is recorded (ADR-0028 always-visible); the caller has
-    /// already decided the outcome, so this just persists + returns it.
+    /// already decided the outcome, so this just persists + returns it. The turn
+    /// is wrapped in a [`ThreadEntry::Turn`] -- source lifecycle events share
+    /// the same timeline (ADR-0040) but never enter the LLM window.
     fn record_turn(&mut self, question: &str, outcome: TurnOutcome) -> TurnOutcome {
-        self.history.push(TurnRecord {
+        self.history.push(ThreadEntry::Turn(TurnRecord {
             question: question.to_string(),
             outcome: outcome.clone(),
-        });
+        }));
         outcome
+    }
+
+    /// Append a source lifecycle event (ADR-0040) to the timeline. The event is
+    /// first-class (always visible, occupies a slot) but NOT a turn, so it never
+    /// enters the LLM window or advances result_N. The display label is carried
+    /// verbatim so the thread can still name a dataset after it's removed.
+    fn append_source_event(
+        &mut self,
+        kind: SourceLifecycleKind,
+        reference_name: &str,
+        display_name: &str,
+    ) {
+        self.history.push(ThreadEntry::Source(SourceLifecycleEvent {
+            kind,
+            reference_name: reference_name.to_string(),
+            display_name: display_name.to_string(),
+        }));
+    }
+
+    /// The turn-only view of the timeline, cloned out for the window assembler
+    /// (ADR-0040): source lifecycle events share the timeline but the LLM
+    /// payload is built from turns alone. A clone (not a borrow) so the slice
+    /// the assembler reads is `&[TurnRecord]` unchanged -- the assembler and its
+    /// tests stay source-event-agnostic. The clone is negligible (a small
+    /// thread, once per turn / active read) next to the LLM call it feeds.
+    fn turns(&self) -> Vec<TurnRecord> {
+        self.history
+            .iter()
+            .filter_map(|entry| match entry {
+                ThreadEntry::Turn(record) => Some(record.clone()),
+                ThreadEntry::Source(_) => None,
+            })
+            .collect()
     }
 
     /// Execute one provider SQL and materialize it as result_N (ADR-0003/0024),
@@ -1226,11 +1380,13 @@ impl Session {
         }
     }
 
-    /// The conversation thread (ADR-0028/0039): every turn, in order, each
-    /// labeled by its verbatim question. The thread is the source of truth the
-    /// frontend renders and the window assembler (`crate::window`) reads each
-    /// turn to build the provider payload (ADR-0023 window + ADR-0039 summary).
-    pub fn conversation(&self) -> &[TurnRecord] {
+    /// The conversation thread (ADR-0028/0039/0040): the unified timeline of
+    /// turns AND source lifecycle events, in order. The thread is the source of
+    /// truth the frontend renders; the window assembler reads only the turns
+    /// (via [`Self::turns`]) to build the provider payload (ADR-0023 window +
+    /// ADR-0039 summary). Source events are first-class here but never reach
+    /// the window.
+    pub fn conversation(&self) -> &[ThreadEntry] {
         &self.history
     }
 

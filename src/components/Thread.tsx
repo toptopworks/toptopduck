@@ -1,7 +1,10 @@
-import type { TurnRecord, VizSpec } from "../types";
+import type { SourceLifecycleKind, ThreadEntry, TurnRecord, VizSpec } from "../types";
 
 interface ThreadProps {
-  records: TurnRecord[];
+  /** The unified timeline (ADR-0040): turns interleaved with source lifecycle
+   * events, in order. Source events render as non-interactive markers distinct
+   * from turns. */
+  entries: ThreadEntry[];
   /** The result reference currently shown in the result pane, so its thread
    * entry can be marked active. */
   selectedResult: string | null;
@@ -10,30 +13,35 @@ interface ThreadProps {
   onSelectResult: (referenceName: string, assumption: string | null, viz: VizSpec | null) => void;
 }
 
-// The always-visible conversation thread (ADR-0028/0039). Every turn is listed
+// The always-visible conversation thread (ADR-0028/0039/0040). Turns are listed
 // in order, labeled by the verbatim question; the four TurnOutcome variants
 // render distinctly (Materialized / Textual[Clarify,Refuse] / Failed /
 // Cancelled), and the optional assumption note (ADR-0009/0018) shows as a
-// correctable side note. A result turn is clickable to (re)show its rows in
-// the result pane.
-export function Thread({ records, selectedResult, onSelectResult }: ThreadProps) {
-  if (records.length === 0) return null;
+// correctable side note. A result turn is clickable to (re)show its rows.
+// Source lifecycle events (Added/Deleted) render as non-interactive markers --
+// they occupy a timeline slot and are always visible but are NOT turns, so they
+// never show a question/outcome and never enter the LLM window.
+export function Thread({ entries, selectedResult, onSelectResult }: ThreadProps) {
+  if (entries.length === 0) return null;
   return (
     <section className="panel thread" aria-label="对话历史">
       <h2>对话</h2>
       <ol>
-        {records.map((record, i) => (
-          // The thread is append-only and never reordered (ADR-0028/0039), so the
-          // array index is a stable, unique key for each turn -- no separate id is
-          // needed (YAGNI: an id would ripple through the Rust/TS model + wire
-          // contract for no present benefit).
-          <li key={i} className="turn">
-            <p className="turn-question">{record.question}</p>
-            <TurnBody
-              record={record}
-              selectedResult={selectedResult}
-              onSelectResult={onSelectResult}
-            />
+        {entries.map((entry, i) => (
+          // The thread is append-only and never reordered (ADR-0028/0039/0040),
+          // so the array index is a stable, unique key for each entry -- no
+          // separate id is needed (YAGNI: an id would ripple through the
+          // Rust/TS model + wire contract for no present benefit).
+          <li key={i} className={entry.entry === "Turn" ? "turn" : "source-event"}>
+            {entry.entry === "Turn" ? (
+              <TurnEntry
+                record={entry.data}
+                selectedResult={selectedResult}
+                onSelectResult={onSelectResult}
+              />
+            ) : (
+              <SourceEvent kind={entry.data.kind} displayName={entry.data.display_name} />
+            )}
           </li>
         ))}
       </ol>
@@ -41,7 +49,23 @@ export function Thread({ records, selectedResult, onSelectResult }: ThreadProps)
   );
 }
 
-interface TurnBodyProps {
+// A source lifecycle event rendered as a non-interactive timeline marker
+// (ADR-0040): distinct from a turn (no question, no outcome). Added = "+", a
+// source entered the working set; Deleted = "−", a source left it. The display
+// label is carried on the event so a deletion still names what was removed.
+function SourceEvent({ kind, displayName }: { kind: SourceLifecycleKind; displayName: string }) {
+  const isAdded = kind === "Added";
+  const marker = isAdded ? "＋" : "－";
+  const verb = isAdded ? "加载了" : "删除了";
+  return (
+    <p className={`source-lifecycle ${kind.toLowerCase()}`}>
+      <span className="source-marker" aria-hidden="true">{marker}</span>
+      <span className="source-text">{verb}「{displayName}」</span>
+    </p>
+  );
+}
+
+interface TurnEntryProps {
   record: TurnRecord;
   selectedResult: string | null;
   onSelectResult: (referenceName: string, assumption: string | null, viz: VizSpec | null) => void;
@@ -53,6 +77,21 @@ interface TurnBodyProps {
 function AssumptionNote({ assumption }: { assumption: string | null }) {
   if (!assumption) return null;
   return <span className="assumption">假设：{assumption}</span>;
+}
+
+function TurnEntry({ record, selectedResult, onSelectResult }: TurnEntryProps) {
+  return (
+    <>
+      <p className="turn-question">{record.question}</p>
+      <TurnBody record={record} selectedResult={selectedResult} onSelectResult={onSelectResult} />
+    </>
+  );
+}
+
+interface TurnBodyProps {
+  record: TurnRecord;
+  selectedResult: string | null;
+  onSelectResult: (referenceName: string, assumption: string | null, viz: VizSpec | null) => void;
 }
 
 function TurnBody({ record, selectedResult, onSelectResult }: TurnBodyProps) {

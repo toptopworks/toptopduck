@@ -250,6 +250,38 @@ impl WorkingSet {
         }
     }
 
+    /// Remove a dataset from the working set by reference name, returning the
+    /// removed descriptor (or `None` when the name isn't registered). Used by the
+    /// delete-source path (issue #38): the descriptor's display label rides the
+    /// `Deleted` source lifecycle event so the thread can still name what was
+    /// removed after the dataset is gone. Clears the active pointer when it
+    /// pointed at the removed name and drops any `result_N` membership entry --
+    /// both are defensive: the session's remove guard only ever calls this on a
+    /// non-active source with no materialized results, so neither branch fires
+    /// on the live path, but the working set stays correct if that ever changes.
+    pub fn remove(&mut self, reference_name: &str) -> Option<DatasetDescriptor> {
+        let idx = self
+            .datasets
+            .iter()
+            .position(|d| d.reference_name == reference_name)?;
+        let removed = self.datasets.remove(idx);
+        self.results.remove(reference_name);
+        if self.active.as_deref() == Some(reference_name) {
+            self.active = None;
+        }
+        Some(removed)
+    }
+
+    /// Whether any materialized `result_N` is currently registered -- the
+    /// session's delete-source guard uses this to refuse removal while derived
+    /// results exist (issue #38 conservative rule; cascade-stale lands in #40).
+    /// Provenance-free: it does not check which source a result derived from,
+    /// only whether any result exists at all, which is the only honest
+    /// "no-derived-dependency" claim possible before the stale-cascade engine.
+    pub fn has_results(&self) -> bool {
+        !self.results.is_empty()
+    }
+
     pub fn len(&self) -> usize {
         self.datasets.len()
     }
@@ -598,5 +630,66 @@ mod tests {
     fn sql_from_returns_none_for_unknown_reference() {
         let ws = WorkingSet::default();
         assert!(ws.sql_from("nope").is_none());
+    }
+
+    // --- Source removal (issue #38) -------------------------------------------
+
+    #[test]
+    fn remove_drops_a_non_active_source_and_keeps_the_rest() {
+        // The delete-source happy path: a non-active source is removed, the
+        // others stay, and the removed descriptor comes back so the caller can
+        // stamp a Deleted event with its display label.
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("orders")); // active after this
+        ws.register(descriptor("people")); // active = people now
+        assert_eq!(ws.active().unwrap().reference_name, "people");
+
+        let removed = ws.remove("orders").expect("orders registered");
+        assert_eq!(removed.reference_name, "orders");
+        assert_eq!(removed.display_name, "orders"); // label preserved for the event
+        assert_eq!(ws.len(), 1);
+        assert!(ws.get("orders").is_none()); // gone from the namespace
+        assert!(ws.get("people").is_some()); // untouched
+        assert_eq!(ws.active().unwrap().reference_name, "people"); // active unchanged
+    }
+
+    #[test]
+    fn remove_clears_active_when_it_pointed_at_the_removed_name() {
+        // Defensive: the session guard never removes the active source, but the
+        // working set stays correct if that ever changes -- active must not
+        // dangle at a name that's no longer registered.
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("orders"));
+        assert_eq!(ws.active().unwrap().reference_name, "orders");
+        ws.remove("orders");
+        assert!(ws.active().is_none());
+        assert!(ws.is_empty());
+    }
+
+    #[test]
+    fn remove_returns_none_for_unknown_reference() {
+        // Removing a name that was never registered (or already removed) is a
+        // no-op returning None; the working set is unchanged.
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("orders"));
+        assert!(ws.remove("nope").is_none());
+        assert_eq!(ws.len(), 1);
+        // idempotent on the live name too: a second remove after the first is None
+        ws.remove("orders");
+        assert!(ws.remove("orders").is_none());
+    }
+
+    #[test]
+    fn has_results_tracks_whether_any_result_is_registered() {
+        // The delete-source guard refuses removal while results exist (issue
+        // #38). Sources alone -> false; registering a result -> true; removing
+        // it -> false again.
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("orders"));
+        assert!(!ws.has_results());
+        ws.register_result(result_descriptor("result_1"));
+        assert!(ws.has_results());
+        ws.remove("result_1");
+        assert!(!ws.has_results());
     }
 }

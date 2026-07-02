@@ -147,11 +147,39 @@ export type TurnOutcome =
 
 // One conversation-thread entry (ADR-0028/0039): the verbatim user question
 // paired with its outcome. Every turn appends exactly one -- always visible.
-// Mirrors the Rust TurnRecord; the conversation() command returns TurnRecord[].
+// Mirrors the Rust TurnRecord; nested under ThreadEntry.Turn.data (see below).
 export interface TurnRecord {
   question: string;
   outcome: TurnOutcome;
 }
+
+// Which kind of source lifecycle mutation produced an event (ADR-0040). Mirrors
+// the Rust SourceLifecycleKind as a bare variant string (like TextKind). This
+// slice (#38) lands Added + Deleted; Replaced is reserved for #41 and is not
+// emitted yet.
+export type SourceLifecycleKind = "Added" | "Deleted";
+
+// A source lifecycle event (ADR-0040): a user-driven mutation of the working
+// set's source membership. First-class in the thread (always visible, occupies a
+// timeline slot) but NOT a turn -- never enters the LLM window or advances
+// result_N. Mirrors the Rust SourceLifecycleEvent.
+export interface SourceLifecycleEvent {
+  kind: SourceLifecycleKind;
+  // Stable reference name (the identity SQL / recipe / active pointer use).
+  reference_name: string;
+  // Readable label captured at event time, so the thread still names a dataset
+  // after it's removed (a Deleted event shows what was deleted).
+  display_name: string;
+}
+
+// One entry of the unified conversation timeline (ADR-0040): a Turn (question +
+// outcome) OR a source lifecycle event. Adjacently-tagged (`{entry, data}`) so
+// the frontend narrows on `entry`. Mirrors the Rust ThreadEntry; the
+// conversation() command returns ThreadEntry[]. Only the Turn variant enters the
+// LLM window -- the backend filters source events out before assembly.
+export type ThreadEntry =
+  | { entry: "Turn"; data: TurnRecord }
+  | { entry: "Source"; data: SourceLifecycleEvent };
 
 // One page of a dataset rows (ADR-0024 windowed display). Cells are CAST to
 // VARCHAR (NULL renders as "") server-side. `total` is the full row count so a

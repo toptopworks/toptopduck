@@ -401,6 +401,102 @@ pub struct TurnRecord {
     pub outcome: TurnOutcome,
 }
 
+// --- Source lifecycle events (issue #38, ADR-0040) -------------------------
+//
+// A source lifecycle event is a user-driven mutation of the working set's
+// source membership (add / delete -- replace lands in #41). It is a first-class
+// thread entry that occupies a timeline slot and is always visible, but it is
+// NOT a turn (no question, no outcome): it never enters the LLM turn window,
+// never occupies an N=20 slot, and never advances result_N (ADR-0040). The
+// window assembler (crate::window) consumes turns only, so source events are
+// naturally excluded from the provider payload.
+
+/// Which kind of source lifecycle mutation produced an event (ADR-0040). Mirrors
+/// the Rust enum as a bare variant string across IPC (like [`TextKind`]). This
+/// slice (#38) lands `Added` (every ingest) and `Deleted` (remove path);
+/// `Replaced` is reserved for the replace-cascade slice (#41) and is not emitted
+/// yet -- it is omitted from the enum entirely (YAGNI) until that slice adds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceLifecycleKind {
+    /// A source Dataset entered the working set (ADR-0022). Appended by every
+    /// ingest path after the snapshot is attached and registered.
+    Added,
+    /// A source Dataset left the working set (issue #38 remove path). The
+    /// reference name is gone from the shared namespace; its snapshot is
+    /// detached + file deleted.
+    Deleted,
+}
+
+/// A source lifecycle event (ADR-0040): first-class in the thread, never a turn.
+/// Carries the reference name (stable identity, the same key SQL / the recipe
+/// chain uses) and the display label (readable, captured at event time so the
+/// thread can still render "删除了「Orders」" after the descriptor is gone).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceLifecycleEvent {
+    pub kind: SourceLifecycleKind,
+    pub reference_name: String,
+    pub display_name: String,
+}
+
+/// One entry of the unified conversation timeline (ADR-0040): either a Turn
+/// (question + outcome, ADR-0028/0039) or a source lifecycle event. Both occupy
+/// a timeline slot and are always visible; only the Turn variant enters the LLM
+/// turn window. Adjacently-tagged (`#[serde(tag = "entry", content = "data")]`)
+/// so the frontend narrows on `entry` uniformly. The conversation() command
+/// returns `Vec<ThreadEntry>`; the window assembler receives only the turns
+/// (filtered by the session before assembly), so source events never reach the
+/// provider payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "entry", content = "data")]
+pub enum ThreadEntry {
+    Turn(TurnRecord),
+    Source(SourceLifecycleEvent),
+}
+
+/// Why a source removal was rejected (issue #38). This slice handles only
+/// non-active sources with no derived dependencies; active-focus re-selection
+/// (#39) and cascade stale of dependent results (#40) are deferred to later
+/// slices and surface here as honest rejections rather than partial handling.
+/// Does NOT cross IPC as a typed value: the remove command surfaces it as a
+/// plain error string (the same shape rename / replace use), so (unlike
+/// [`LoadError`]) it carries no serde wire contract and no types.ts mirror.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoveSourceError {
+    /// No dataset carries the given reference name.
+    NotFound(String),
+    /// The dataset is the current focus (active source). Removing the active
+    /// source would silently change the user's analysis focus -- ADR-0035
+    /// forbids a silent jump. Explicit re-selection lands in #39.
+    IsActive {
+        reference_name: String,
+        display_name: String,
+    },
+    /// The working set holds one or more materialized `result_N`. Without the
+    /// stale-cascade engine (#40) the session cannot honestly mark those
+    /// derivations stale, so removal is refused until that slice lands. The
+    /// conservative guard ("any result exists") is the only provenance-free way
+    /// to guarantee "no derived dependency" today.
+    HasDerivatives,
+}
+
+impl std::fmt::Display for RemoveSourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::NotFound(name) => write!(f, "找不到引用名为「{name}」的数据集"),
+            Self::IsActive { display_name, .. } => write!(
+                f,
+                "「{display_name}」是当前焦点表，删除当前焦点源前请先切换到其他表\
+                 （显式选源能力见后续切片）"
+            ),
+            Self::HasDerivatives => write!(
+                f,
+                "工作集中存在中间结果，暂不支持删源（级联失效能力见后续切片）"
+            ),
+        }
+    }
+}
+impl std::error::Error for RemoveSourceError {}
+
 /// Prefix for every DuckDB execution-failure message that crosses IPC as a
 /// Display string -- a turn's materialize failure (`session::ask`) and a row
 /// read's [`TurnError::Execute`] surface the same engine error, so the literal

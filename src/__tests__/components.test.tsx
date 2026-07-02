@@ -14,6 +14,7 @@ import type {
   DatasetDescriptor,
   DatasetPrivacy,
   GuidanceRequest,
+  ThreadEntry,
   TurnRecord,
 } from "../types";
 
@@ -423,6 +424,59 @@ describe("WorkingSetList", () => {
     );
     expect(screen.getByRole("button", { name: /换源/ })).toBeDisabled();
   });
+
+  it("deletes a dataset after a confirm, forwarding the stable reference name (issue #38)", () => {
+    // The per-row delete button confirms, then forwards the reference name --
+    // the identity the backend removes (not the display label).
+    const onDelete = vi.fn();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onDelete={onDelete}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /删除/ }));
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("people"));
+    expect(onDelete).toHaveBeenCalledWith("people");
+  });
+
+  it("ignores a cancelled delete confirm (issue #38)", () => {
+    // A no at the confirm gate never reaches the backend -- no IPC, no removal.
+    const onDelete = vi.fn();
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onDelete={onDelete}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /删除/ }));
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("disables the delete button while loading (execution window, ADR-0040)", () => {
+    // loading is true while any async op (incl. an in-flight turn) runs -- the
+    // execution window disables source management so a mid-turn delete cannot
+    // interleave with the query.
+    render(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onDelete={() => {}}
+        loading={true}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /删除/ })).toBeDisabled();
+  });
 });
 
 describe("GuidedLoadDialog", () => {
@@ -703,6 +757,12 @@ describe("Thread", () => {
     };
   }
 
+  // Wrap a TurnRecord as a ThreadEntry::Turn -- the shape conversation() now
+  // returns (ADR-0040). Keeps the turn-focused tests readable.
+  function turnEntry(record: TurnRecord): ThreadEntry {
+    return { entry: "Turn", data: record };
+  }
+
   it("renders every turn labeled by its verbatim question with its outcome kind", () => {
     // ADR-0028: all four outcomes are always visible, in order, each labeled by
     // the user's own question (ADR-0039). The assumption side note renders for
@@ -730,7 +790,11 @@ describe("Thread", () => {
       { question: "中途取消", outcome: { kind: "Cancelled" } },
     ];
     render(
-      <Thread records={records} selectedResult="result_1" onSelectResult={() => {}} />,
+      <Thread
+        entries={records.map(turnEntry)}
+        selectedResult="result_1"
+        onSelectResult={() => {}}
+      />,
     );
 
     // Every verbatim question is a visible label.
@@ -757,7 +821,7 @@ describe("Thread", () => {
     const onSelectResult = vi.fn();
     render(
       <Thread
-        records={[materializedRecord("result_2", "用了简单计数")]}
+        entries={[turnEntry(materializedRecord("result_2", "用了简单计数"))]}
         selectedResult={null}
         onSelectResult={onSelectResult}
       />,
@@ -769,7 +833,7 @@ describe("Thread", () => {
   it("marks the selected result turn active", () => {
     render(
       <Thread
-        records={[materializedRecord("result_1", null)]}
+        entries={[turnEntry(materializedRecord("result_1", null))]}
         selectedResult="result_1"
         onSelectResult={() => {}}
       />,
@@ -782,8 +846,32 @@ describe("Thread", () => {
 
   it("renders nothing when the thread is empty", () => {
     const { container } = render(
-      <Thread records={[]} selectedResult={null} onSelectResult={() => {}} />,
+      <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} />,
     );
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it("renders source lifecycle events as non-interactive markers interleaved with turns (ADR-0040)", () => {
+    // A source event is first-class in the thread (always visible, occupies a
+    // slot) but NOT a turn -- it shows no question/outcome, renders distinctly,
+    // and is not clickable. Interleaving order is preserved.
+    const entries: ThreadEntry[] = [
+      { entry: "Source", data: { kind: "Added", reference_name: "people", display_name: "people" } },
+      turnEntry(materializedRecord("result_1", null)),
+      {
+        entry: "Source",
+        data: { kind: "Deleted", reference_name: "people", display_name: "people" },
+      },
+    ];
+    render(
+      <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
+    );
+    // Added + Deleted markers render with their verbs, distinct from turns.
+    expect(screen.getByText(/加载了「people」/)).toBeInTheDocument();
+    expect(screen.getByText(/删除了「people」/)).toBeInTheDocument();
+    // The turn's question still renders between them (ordering preserved).
+    expect(screen.getByText("问 result_1")).toBeInTheDocument();
+    // Source markers carry no clickable result link (only the turn does).
+    expect(screen.getAllByRole("button").length).toBe(1);
   });
 });
