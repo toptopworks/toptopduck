@@ -1603,10 +1603,16 @@ impl Session {
         for name in &candidates {
             let drop_sql = format!("DROP TABLE {}", quote_ident(name));
             if let Err(e) = self.conn.execute_batch(&drop_sql) {
-                // Best-effort: a DROP failure leaves an orphan table that's no
-                // longer referenced (the working-set removal below is the
-                // authority). Logged so a recurring engine failure -- not the
-                // norm -- stays observable server-side.
+                // Best-effort, and deliberately warn (not error). The asymmetry
+                // vs `rollback_result`'s error-grade DROP is grounded in
+                // ADR-0022: rollback drops an UN-registered result_N, so an
+                // orphan makes the next `next_result_number` (max over
+                // registered names) reuse N and clash on CREATE -> wedge. GC
+                // drops an already-registered older result_K, and the
+                // `remove` below drops it from the registry, so the next
+                // number is max(remaining)+1 > K -- the orphan never collides
+                // with a future CREATE. warn keeps a recurring engine failure
+                // observable without overstating a non-wedging cleanup miss.
                 log::warn!(
                     target: "toptopduck::session",
                     "GC DROP of stale {name} failed: {e}"

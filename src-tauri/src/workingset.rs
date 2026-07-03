@@ -1011,4 +1011,31 @@ mod tests {
             "source named result_1 is not a reclaim target"
         );
     }
+
+    #[test]
+    fn remove_clears_provenance_edge() {
+        // AC2 (issue #42): GC reclaims via `remove`, whose contract includes
+        // clearing the provenance edge. Without it, a later source delete's
+        // cascade would still treat the GC'd result as a dependent. The
+        // `is_live_result` guard in `cascade_stale` skips an unregistered name
+        // today, so a stale edge is latent cruft rather than an active bug --
+        // this test pins the contract so a future `remove` rewrite can't
+        // silently drop it. The session-layer GC path (DROP + `remove`) rides
+        // on this guarantee for AC2's "lineage entry reclaimed" limb.
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("people"));
+        ws.register_result(result_descriptor("result_1"));
+        let mut deps = HashSet::new();
+        deps.insert("people".to_string());
+        ws.record_provenance("result_1", deps);
+        assert!(
+            !ws.dependents_of("people").is_empty(),
+            "result_1 depends on people before the remove"
+        );
+        ws.remove("result_1");
+        assert!(
+            ws.dependents_of("people").is_empty(),
+            "provenance edge cleared -- a GC'd result is no longer a dependent"
+        );
+    }
 }
