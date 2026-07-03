@@ -283,13 +283,17 @@ impl WorkingSet {
 
     /// Remove a dataset from the working set by reference name, returning the
     /// removed descriptor (or `None` when the name isn't registered). Used by the
-    /// delete-source path (issue #38): the descriptor's display label rides the
-    /// `Deleted` source lifecycle event so the thread can still name what was
+    /// delete-source path (issues #38/#40): the descriptor's display label rides
+    /// the `Deleted` source lifecycle event so the thread can still name what was
     /// removed after the dataset is gone. Clears the active pointer when it
-    /// pointed at the removed name and drops any `result_N` membership entry --
-    /// both are defensive: the session's remove guard only ever calls this on a
-    /// non-active source with no materialized results, so neither branch fires
-    /// on the live path, but the working set stays correct if that ever changes.
+    /// pointed at the removed name, drops any `result_N` membership entry, and
+    /// drops the provenance graph edge -- all defensive bookkeeping: the
+    /// session's `commit_removal` runs the stale-cascade first, so a delete may
+    /// well leave dependent (now-stale) results registered, but the removed
+    /// name's own entries are cleared here so nothing dangles. The active-clear
+    /// branch does not fire on the live path (`remove_source` refuses the active
+    /// source; `remove_active_source` repoints active first), but the working
+    /// set stays correct if that ever changes.
     pub fn remove(&mut self, reference_name: &str) -> Option<DatasetDescriptor> {
         let idx = self
             .datasets
@@ -297,20 +301,11 @@ impl WorkingSet {
             .position(|d| d.reference_name == reference_name)?;
         let removed = self.datasets.remove(idx);
         self.results.remove(reference_name);
+        self.provenance.remove(reference_name);
         if self.active.as_deref() == Some(reference_name) {
             self.active = None;
         }
         Some(removed)
-    }
-
-    /// Whether any materialized `result_N` is currently registered -- the
-    /// session's delete-source guard uses this to refuse removal while derived
-    /// results exist (issue #38 conservative rule; cascade-stale lands in #40).
-    /// Provenance-free: it does not check which source a result derived from,
-    /// only whether any result exists at all, which is the only honest
-    /// "no-derived-dependency" claim possible before the stale-cascade engine.
-    pub fn has_results(&self) -> bool {
-        !self.results.is_empty()
     }
 
     pub fn len(&self) -> usize {
@@ -860,19 +855,5 @@ mod tests {
         // idempotent on the live name too: a second remove after the first is None
         ws.remove("orders");
         assert!(ws.remove("orders").is_none());
-    }
-
-    #[test]
-    fn has_results_tracks_whether_any_result_is_registered() {
-        // The delete-source guard refuses removal while results exist (issue
-        // #38). Sources alone -> false; registering a result -> true; removing
-        // it -> false again.
-        let mut ws = WorkingSet::default();
-        ws.register(descriptor("orders"));
-        assert!(!ws.has_results());
-        ws.register_result(result_descriptor("result_1"));
-        assert!(ws.has_results());
-        ws.remove("result_1");
-        assert!(!ws.has_results());
     }
 }

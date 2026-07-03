@@ -130,12 +130,21 @@ fn collect_table_with_joins(twj: &TableWithJoins, out: &mut HashSet<String>) {
 fn collect_table_factor(factor: &TableFactor, out: &mut HashSet<String>) {
     match factor {
         TableFactor::Table { name, .. } => {
-            // The name renders as `ref` or `schema.ref` / `"ref".data`; the
-            // first '.'-separated segment, quotes stripped, is the working-set
-            // reference name. Using Display sidesteps the ObjectName /
-            // TableObject shape differences across sqlparser versions.
+            // The name renders as `"ref"` (ADR-0024 result form) or
+            // `"ref".data` (ADR-0012 source form); the first '.'-separated
+            // segment, quotes stripped, is the working-set reference name.
+            // Assumes the FROM shape is at most two segments -- a catalog-
+            // qualified `schema."ref".data` (3+ segments) would mis-resolve to
+            // `schema`, but ADR-0012/0024 never produce that shape, so this is
+            // safe today. Using Display sidesteps the ObjectName / TableObject
+            // shape differences across sqlparser versions.
             let displayed = name.to_string();
-            let first = displayed.split('.').next().unwrap_or(&displayed);
+            // `split` always yields >= 1 segment (even on ""), so `next()` is
+            // always `Some` -- `expect` over `unwrap` to name the invariant.
+            let first = displayed
+                .split('.')
+                .next()
+                .expect("split always yields at least one segment");
             out.insert(first.trim_matches('"').to_string());
         }
         TableFactor::Derived { subquery, .. } => collect_query(subquery.as_ref(), out),

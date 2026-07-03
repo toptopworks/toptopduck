@@ -395,9 +395,9 @@ fn remove_active_source_refuses_non_active() {
 fn remove_active_source_refuses_invalid_continue() {
     // The continuation must be a remaining source -- not the removed name, not
     // missing. (A registered `result_N` name is unreachable on the live path:
-    // its presence means `has_results`, which the next test covers. The
-    // result-name rejection itself is pinned in `workingset::tests`.) Both
-    // invalid forms refuse with `InvalidContinueWith` and leave things put.
+    // the dialog's candidate list filters results out, and the result-name
+    // rejection itself is pinned in `workingset::tests`.) Both invalid forms
+    // refuse with `InvalidContinueWith` and leave things put.
     let mut session = session_with_scripts(&[]);
     load_source(&mut session, &fixture("people.csv"));
     load_source(&mut session, &fixture("orders.csv")); // active = orders
@@ -767,4 +767,55 @@ fn result_number_takes_max_plus_one_after_stale() {
         }
         other => panic!("expected Materialized result_2, got {other:?}"),
     }
+}
+
+#[test]
+fn already_stale_result_keeps_first_anchor_on_second_cascade() {
+    // ADR-0041 (issue #40): a result already stale keeps its FIRST anchor when
+    // a later, independent source delete ripples through it again -- the
+    // earliest invalidating event is the truth, and a dead turn is never
+    // revived. result_1 depends on BOTH orders and people (a UNION of each
+    // source's row count). Deleting orders first marks it stale anchored to
+    // orders; a subsequent delete of people reaches it again (it also depends
+    // on people), but must NOT overwrite the first anchor.
+    //
+    // leading_zero is loaded last so it becomes the active source -- both
+    // orders and people are then non-active, so each delete goes through the
+    // plain `remove_source` path (no active-continuation dance needed).
+    let mut session = session_with_scripts(&[(
+        "both",
+        r#"SELECT COUNT(*) AS n FROM "orders".data UNION ALL SELECT COUNT(*) AS n FROM "people".data"#,
+    )]);
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv"));
+    load_source(&mut session, &fixture("leading_zero.csv")); // active = leading_zero
+    session.ask("both"); // result_1 depends on {orders, people}
+    assert!(session.get("result_1").is_some());
+
+    // First delete: orders -> result_1 stale, anchored to orders.
+    session.remove_source("orders").expect("remove orders");
+    let r1 = session.get("result_1").expect("result_1 registered");
+    assert_eq!(
+        r1.stale
+            .as_ref()
+            .expect("result_1 stale after orders delete")
+            .reference_name,
+        "orders",
+        "first anchor is the first-deleted source"
+    );
+
+    // Second delete: people -> the cascade reaches result_1 again (it also
+    // depends on people), but result_1 is already stale, so its anchor stays
+    // "orders" (ADR-0041 -- a later invalidating event never revises the
+    // first).
+    session.remove_source("people").expect("remove people");
+    let r1 = session.get("result_1").expect("result_1 still registered");
+    assert_eq!(
+        r1.stale
+            .as_ref()
+            .expect("result_1 still stale")
+            .reference_name,
+        "orders",
+        "second cascade did not overwrite the first anchor"
+    );
 }
