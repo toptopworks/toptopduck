@@ -75,6 +75,7 @@ pub fn run() {
             commands::rename_dataset,
             commands::replace_source,
             commands::remove_source,
+            commands::remove_active_source,
             commands::set_dataset_privacy,
             commands::ask,
             commands::cancel,

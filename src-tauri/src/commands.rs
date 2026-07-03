@@ -125,15 +125,18 @@ pub fn set_dataset_privacy(
         .ok_or_else(|| format!("找不到引用名为「{reference_name}」的数据集"))
 }
 
-/// Remove a source Dataset from the working set (issue #38, ADR-0040). The first
-/// source-removal path: detaches the snapshot, deletes its file, drops the
-/// reference name from the shared namespace, and appends a `Deleted` source
-/// lifecycle event to the thread. Refuses the active source (→ #39) and any
-/// removal while materialized results exist (→ #40 cascade). Synchronous: the
-/// session Mutex serializes this against an in-flight turn (correctness), and
-/// the frontend additionally disables source management via its shared
-/// `loading` flag during the ADR-0040 execution window (UX) -- the two layers
-/// are independent. The only I/O is a best-effort DETACH + remove_file.
+/// Remove a source Dataset from the working set (issue #38/#39, ADR-0040).
+/// Detaches the snapshot, deletes its file, drops the reference name from the
+/// shared namespace, and appends a `Deleted` source lifecycle event to the
+/// thread. Refuses removal while materialized results exist (→ #40 cascade),
+/// and refuses the ACTIVE source when OTHER sources remain (ADR-0035 → issue
+/// #39: no silent focus jump -- the caller must use `remove_active_source` to
+/// name an explicit continuation). The LAST active source is allowed through
+/// here to an empty working set (AC4, issue #39). Synchronous: the session
+/// Mutex serializes this against an in-flight turn (correctness), and the
+/// frontend additionally disables source management via its shared `loading`
+/// flag during the ADR-0040 execution window (UX) -- the two layers are
+/// independent. The only I/O is a best-effort DETACH + remove_file.
 #[tauri::command]
 pub fn remove_source(
     state: State<'_, Arc<Mutex<Session>>>,
@@ -141,6 +144,27 @@ pub fn remove_source(
 ) -> Result<(), String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
     s.remove_source(&reference_name).map_err(|e| e.to_string())
+}
+
+/// Remove the ACTIVE source and repoint focus at an explicit continuation
+/// source (issue #39, ADR-0035): the user-facing answer to `remove_source`'s
+/// `IsActive` refusal. The frontend's confirm dialog picks `continue_with` from
+/// the remaining sources; this command atomically switches the active pointer
+/// to it, drops the removed source, and appends a `Deleted` event. Same
+/// `HasDerivatives` guard as `remove_source` (→ #40). Refuses with
+/// `NotActive`/`InvalidContinueWith` when the view raced a concurrent mutation
+/// (the working set is left untouched in those cases). Surfaces all refusals as
+/// a plain error string -- no typed `RemoveSourceError` crosses IPC (same shape
+/// as rename / replace / remove_source).
+#[tauri::command]
+pub fn remove_active_source(
+    state: State<'_, Arc<Mutex<Session>>>,
+    reference_name: String,
+    continue_with: String,
+) -> Result<(), String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    s.remove_active_source(&reference_name, &continue_with)
+        .map_err(|e| e.to_string())
 }
 
 /// Ask one question (PRD #1): run one turn and return its ADR-0028 outcome

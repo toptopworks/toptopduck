@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { ActiveSourceDeleteDialog } from "./components/ActiveSourceDeleteDialog";
 import { FileDropzone } from "./components/FileDropzone";
 import { WorkingSetList } from "./components/WorkingSetList";
 import { DatasetDetail } from "./components/DatasetDetail";
@@ -20,6 +21,7 @@ import {
   listWorkingSet,
   renameDataset,
   removeSource,
+  removeActiveSource,
   replaceSource,
   setDatasetPrivacy,
 } from "./api";
@@ -85,6 +87,13 @@ export default function App() {
   // the settings dialog; this indicator guides them there.
   const [hasKey, setHasKey] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Pending active-source delete (issue #39, ADR-0035): when the user removes
+  // the current focus source while other sources remain, this holds the target
+  // while the confirm dialog collects an explicit continuation. null = no
+  // dialog open. Nothing crosses IPC while this is set -- cancel is a true
+  // no-op (AC3).
+  const [pendingActiveDelete, setPendingActiveDelete] =
+    useState<DatasetDescriptor | null>(null);
 
   const refresh = useCallback(async () => {
     setDatasets(await listWorkingSet());
@@ -244,15 +253,76 @@ export default function App() {
   // so the error prefix matches the action (never mislabelled a load failure).
   const handlePrivacyChange = useSimpleMutation("privacy", setDatasetPrivacy);
 
-  // Remove a source from the working set (issue #38, ADR-0040): the backend
-  // detaches the snapshot, deletes its file, drops the reference name, and
-  // appends a Deleted source lifecycle event. Tagged "delete" so the error
-  // prefix matches the action (a HasDerivatives / IsActive refusal is never
-  // mislabelled a load failure). The shared `loading` flag disables source
-  // management while the (synchronous, lock-held) removal runs and -- via the
-  // same flag set by handleAsk -- while a turn is in flight (ADR-0040 execution
-  // window).
-  const handleDelete = useSimpleMutation("delete", removeSource);
+  // Plain remove path (issue #38/#39, ADR-0040): the backend detaches the
+  // snapshot, deletes its file, drops the reference name, and appends a Deleted
+  // source lifecycle event. Used for non-active sources and for the LAST active
+  // source (AC4 -> empty working set). Tagged "delete" so the error prefix
+  // matches the action (a HasDerivatives / IsActive refusal is never mislabelled
+  // a load failure). The shared `loading` flag disables source management while
+  // the (synchronous, lock-held) removal runs and -- via the same flag set by
+  // handleAsk -- while a turn is in flight (ADR-0040 execution window).
+  const handleRemoveSource = useSimpleMutation("delete", removeSource);
+
+  // Issue #39 / ADR-0035: deleting the ACTIVE source while others remain would
+  // silently move the user's focus. Route those deletes through the confirm
+  // dialog (the user picks an explicit continuation in `pendingActiveDelete`);
+  // any non-active source, or the last active source, goes straight through the
+  // plain remove path. The frontend already knows active + remaining from
+  // list/active, so it branches without waiting for the backend's IsActive
+  // refusal -- but `removeSource` still refuses on the IPC boundary, so a
+  // direct call or a stale view cannot silently slip past.
+  const handleDelete = useCallback(
+    (referenceName: string) => {
+      if (referenceName === activeName && datasets.length > 1) {
+        const target = datasets.find((d) => d.reference_name === referenceName);
+        if (target) {
+          setPendingActiveDelete(target);
+          return;
+        }
+      }
+      void handleRemoveSource(referenceName);
+    },
+    [activeName, datasets, handleRemoveSource],
+  );
+
+  // AC2 (issue #39): the user picked a continuation -- delete the active source
+  // and repoint focus at it in one atomic IPC. Success closes the dialog; a
+  // refusal (stale view / HasDerivatives) keeps it open so the error stays
+  // attached to the same action. Mirrors useSimpleMutation's two-error split
+  // (commit ok vs refresh failed) but is hand-written so it can clear the
+  // pending dialog state on a committed success.
+  const handleConfirmActiveDelete = useCallback(
+    async (continueWith: string) => {
+      const target = pendingActiveDelete;
+      if (!target) return;
+      setLoading(true);
+      setError(null);
+      try {
+        await removeActiveSource(target.reference_name, continueWith);
+      } catch (e) {
+        setError({ message: fmtError(e), kind: "delete" });
+        setLoading(false);
+        return;
+      }
+      setPendingActiveDelete(null);
+      try {
+        await refresh();
+      } catch (refreshErr) {
+        setError({
+          message: `删源已保存，但刷新工作集失败：${fmtError(refreshErr)}`,
+          kind: "delete",
+        });
+      }
+      setLoading(false);
+    },
+    [pendingActiveDelete, refresh],
+  );
+
+  // AC3 (issue #39): cancel leaves the working set untouched -- nothing crossed
+  // IPC while the dialog was open, so just drop the pending state.
+  const handleCancelActiveDelete = useCallback(() => {
+    setPendingActiveDelete(null);
+  }, []);
 
   // Ask one question (PRD #1, issue #23): run one turn -> one ADR-0028 outcome.
   // The retry loop is invisible (one question = one thread entry = one outcome).
@@ -395,6 +465,24 @@ export default function App() {
           loading={loading}
           onSubmit={handleGuidedSubmit}
           onCancel={() => setGuidance(null)}
+        />
+      )}
+
+      {pendingActiveDelete && (
+        <ActiveSourceDeleteDialog
+          target={pendingActiveDelete}
+          // AC5: every remaining dataset but the removed one. On the live path
+          // this dialog only opens in the no-result case (activeName resolves to
+          // a source), so these ARE the remaining sources. A stale view that
+          // opens it while a result exists is refused by the backend's
+          // HasDerivatives guard -- result removal is #40's scope, not this
+          // slice, and the DatasetDescriptor carries no source/result flag for
+          // the frontend to pre-filter without a round-trip.
+          candidates={datasets.filter(
+            (d) => d.reference_name !== pendingActiveDelete.reference_name,
+          )}
+          onConfirm={(cw) => void handleConfirmActiveDelete(cw)}
+          onCancel={handleCancelActiveDelete}
         />
       )}
 
