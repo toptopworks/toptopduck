@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { ActiveSourceDeleteDialog } from "../components/ActiveSourceDeleteDialog";
 import { DatasetDetail } from "../components/DatasetDetail";
 import { DisclosureBanner } from "../components/DisclosureBanner";
 import { GuidedLoadDialog } from "../components/GuidedLoadDialog";
@@ -873,5 +874,87 @@ describe("Thread", () => {
     expect(screen.getByText("问 result_1")).toBeInTheDocument();
     // Source markers carry no clickable result link (only the turn does).
     expect(screen.getAllByRole("button").length).toBe(1);
+  });
+});
+
+describe("ActiveSourceDeleteDialog (issue #39)", () => {
+  const target: DatasetDescriptor = {
+    ...mockDataset,
+    reference_name: "orders",
+    display_name: "orders",
+  };
+  // AC5: candidates are the FULL remaining set -- everyone but the removed one.
+  const candidates: DatasetDescriptor[] = [
+    { ...mockDataset, reference_name: "people", display_name: "people" },
+    { ...mockDataset, reference_name: "items", display_name: "items" },
+  ];
+
+  it("pre-selects the first candidate and confirms with it (AC2/AC5)", () => {
+    // AC5: every remaining source is a candidate. AC2: the first is pre-selected
+    // so a single Confirm carries (ref, continueWith) to the backend.
+    const onConfirm = vi.fn();
+    render(
+      <ActiveSourceDeleteDialog
+        target={target}
+        candidates={candidates}
+        onConfirm={onConfirm}
+        onCancel={() => {}}
+      />,
+    );
+    // The target is named in the dialog title.
+    expect(screen.getByText(/删除焦点源「orders」/)).toBeInTheDocument();
+    // AC5: full remaining set renders; the first is checked by default.
+    expect(screen.getByRole("radio", { name: "people" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "items" })).not.toBeChecked();
+
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    expect(onConfirm).toHaveBeenCalledWith("people");
+  });
+
+  it("lets the user re-pick before confirming (AC2)", () => {
+    // The focus moves to whichever source the user chooses, not always the
+    // first -- picking items then confirming carries items as the continuation.
+    const onConfirm = vi.fn();
+    render(
+      <ActiveSourceDeleteDialog
+        target={target}
+        candidates={candidates}
+        onConfirm={onConfirm}
+        onCancel={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("radio", { name: "items" }));
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    expect(onConfirm).toHaveBeenCalledWith("items");
+  });
+
+  it("cancel does not fire onConfirm (AC3)", () => {
+    const onConfirm = vi.fn();
+    const onCancel = vi.fn();
+    render(
+      <ActiveSourceDeleteDialog
+        target={target}
+        candidates={candidates}
+        onConfirm={onConfirm}
+        onCancel={onCancel}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "中止" }));
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it("Escape closes the dialog via cancel (a11y, mirrors GuidedLoadDialog)", () => {
+    const onCancel = vi.fn();
+    render(
+      <ActiveSourceDeleteDialog
+        target={target}
+        candidates={candidates}
+        onConfirm={() => {}}
+        onCancel={onCancel}
+      />,
+    );
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onCancel).toHaveBeenCalledOnce();
   });
 });

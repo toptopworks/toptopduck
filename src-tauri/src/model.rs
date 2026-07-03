@@ -465,9 +465,12 @@ pub enum ThreadEntry {
 pub enum RemoveSourceError {
     /// No dataset carries the given reference name.
     NotFound(String),
-    /// The dataset is the current focus (active source). Removing the active
-    /// source would silently change the user's analysis focus -- ADR-0035
-    /// forbids a silent jump. Explicit re-selection lands in #39.
+    /// The dataset is the current focus (active source) AND other sources
+    /// remain. Removing the active source would silently change the user's
+    /// analysis focus -- ADR-0035 forbids a silent jump, so the caller must go
+    /// through `remove_active_source` (issue #39) to name an explicit
+    /// continuation. When this is the LAST source the remove path falls through
+    /// to an empty working set instead (AC4, issue #39).
     IsActive {
         reference_name: String,
         display_name: String,
@@ -476,8 +479,21 @@ pub enum RemoveSourceError {
     /// stale-cascade engine (#40) the session cannot honestly mark those
     /// derivations stale, so removal is refused until that slice lands. The
     /// conservative guard ("any result exists") is the only provenance-free way
-    /// to guarantee "no derived dependency" today.
+    /// to guarantee "no derived dependency" today. Checked before `IsActive`
+    /// because a derived dependency blocks removal regardless of which source
+    /// is active.
     HasDerivatives,
+    /// `remove_active_source` only: the named reference is not the current
+    /// active source. The frontend's confirm-dialog path only fires for the
+    /// active source, so reaching this branch means a stale view raced a
+    /// concurrent mutation (or a direct IPC); the working set is untouched.
+    NotActive(String),
+    /// `remove_active_source` only: the chosen continuation reference is not a
+    /// remaining source -- it is missing, equals the source being removed, or
+    /// is a materialized result. The frontend's candidate list excludes all
+    /// three, so this signals a stale view / direct IPC; the working set is
+    /// untouched.
+    InvalidContinueWith(String),
 }
 
 impl std::fmt::Display for RemoveSourceError {
@@ -486,12 +502,22 @@ impl std::fmt::Display for RemoveSourceError {
             Self::NotFound(name) => write!(f, "找不到引用名为「{name}」的数据集"),
             Self::IsActive { display_name, .. } => write!(
                 f,
-                "「{display_name}」是当前焦点表，删除当前焦点源前请先切换到其他表\
-                 （显式选源能力见后续切片）"
+                "「{display_name}」是当前焦点表，请先在剩余源中选一个继续\
+                 （或中止操作）"
             ),
             Self::HasDerivatives => write!(
                 f,
                 "工作集中存在中间结果，暂不支持删源（级联失效能力见后续切片）"
+            ),
+            Self::NotActive(name) => write!(
+                f,
+                "「{name}」不是当前焦点源，无法按删焦点源流程处理\
+                 （请改用普通删除或刷新工作集后重试）"
+            ),
+            Self::InvalidContinueWith(name) => write!(
+                f,
+                "「{name}」不是剩余可用源之一，无法作为删除后的继续焦点\
+                 （请刷新工作集后重选）"
             ),
         }
     }

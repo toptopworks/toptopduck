@@ -26,6 +26,7 @@ vi.mock("../api", async (importOriginal) => {
     renameDataset: vi.fn(),
     replaceSource: vi.fn(),
     removeSource: vi.fn(),
+    removeActiveSource: vi.fn(),
     setDatasetPrivacy: vi.fn(),
     askQuestion: vi.fn(),
     conversation: vi.fn(async () => []),
@@ -49,6 +50,7 @@ import {
   listWorkingSet,
   readRows,
   removeSource,
+  removeActiveSource,
   renameDataset,
   setDatasetPrivacy,
 } from "../api";
@@ -358,5 +360,105 @@ describe("App delete-source flow (issue #38)", () => {
     expect(screen.queryByText(/重命名失败/)).not.toBeInTheDocument();
     expect(screen.queryByText(/换源失败/)).not.toBeInTheDocument();
     expect(screen.queryByText(/提问失败/)).not.toBeInTheDocument();
+  });
+});
+
+describe("App delete-active-source flow (issue #39)", () => {
+  // A second source distinct from `guidedDataset` (people) so the working set
+  // holds more than one source and the active-source branch fires.
+  const ordersSource: DatasetDescriptor = {
+    ...guidedDataset,
+    reference_name: "orders",
+    display_name: "orders",
+    source_path: "/x/orders.csv",
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [guidedDataset, ordersSource];
+    vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
+    vi.mocked(activeDataset).mockResolvedValue(ordersSource); // active = orders
+    // Pass the per-row "确定删除" confirm so the click reaches the backend.
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+  });
+
+  it("opens a continuation dialog when deleting the active source with others remaining", async () => {
+    // AC1 (issue #39): deleting the active source while others remain does NOT
+    // silently fall back. The frontend opens a dialog (no IPC yet) collecting an
+    // explicit continuation, then removeActiveSource carries both names (AC2).
+    vi.mocked(removeActiveSource).mockImplementation(async (ref) => {
+      state.workingSet = state.workingSet.filter((d) => d.reference_name !== ref);
+      vi.mocked(activeDataset).mockResolvedValue(guidedDataset); // focus moved to people
+    });
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^orders/ })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /删除 orders/ }));
+
+    // Dialog open; no IPC crossed yet (the dialog is the gate, not the backend).
+    await waitFor(() =>
+      expect(screen.getByText(/删除焦点源「orders」/)).toBeInTheDocument(),
+    );
+    expect(removeActiveSource).not.toHaveBeenCalled();
+    expect(removeSource).not.toHaveBeenCalled();
+
+    // AC5: candidates = the full remaining set (people here), pre-selected.
+    expect(screen.getByRole("radio", { name: "people" })).toBeChecked();
+
+    // Confirm with the default-selected continuation (people).
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    await waitFor(() =>
+      expect(removeActiveSource).toHaveBeenCalledWith("orders", "people"),
+    );
+    // AC2: dialog closed after the commit.
+    await waitFor(() =>
+      expect(screen.queryByText(/删除焦点源/)).not.toBeInTheDocument(),
+    );
+  });
+
+  it("cancel in the continuation dialog is a no-op (AC3)", async () => {
+    // AC3: cancel leaves the working set untouched -- nothing crossed IPC while
+    // the dialog was open, so there is nothing to undo.
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^orders/ })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /删除 orders/ }));
+    await waitFor(() => expect(screen.getByText(/删除焦点源/)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "中止" }));
+    await waitFor(() =>
+      expect(screen.queryByText(/删除焦点源/)).not.toBeInTheDocument(),
+    );
+    expect(removeActiveSource).not.toHaveBeenCalled();
+    expect(removeSource).not.toHaveBeenCalled();
+  });
+
+  it("deletes the last active source straight through to removeSource (AC4)", async () => {
+    // AC4: when the active source IS the last source, no continuation dialog --
+    // removal goes straight to removeSource and the working set ends empty (the
+    // UI then shows its upload prompt). No silent jump happens because there is
+    // nothing left to jump to.
+    state.workingSet = [guidedDataset];
+    vi.mocked(activeDataset).mockResolvedValue(guidedDataset); // people active, last source
+    vi.mocked(removeSource).mockImplementation(async (ref) => {
+      state.workingSet = state.workingSet.filter((d) => d.reference_name !== ref);
+      vi.mocked(activeDataset).mockResolvedValue(null); // empty working set
+    });
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /删除/ }));
+
+    // No continuation dialog (only one source); straight to removeSource.
+    await waitFor(() => expect(removeSource).toHaveBeenCalledWith("people"));
+    expect(removeActiveSource).not.toHaveBeenCalled();
+    expect(screen.queryByText(/删除焦点源/)).not.toBeInTheDocument();
+    // Empty working set -> the upload prompt renders.
+    await waitFor(() =>
+      expect(screen.getByText(/工作集为空/)).toBeInTheDocument(),
+    );
   });
 });

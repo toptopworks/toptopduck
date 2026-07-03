@@ -208,21 +208,64 @@ fn remove_source_drops_a_non_active_no_result_source() {
 }
 
 #[test]
-fn remove_source_refuses_the_active_source() {
-    // AC: removing the active source would silently change the user's analysis
-    // focus (ADR-0035 forbids a silent jump). Explicit re-selection lands in
-    // #39; until then removal of the active source is an honest refusal that
-    // leaves the working set untouched.
+fn remove_source_empties_when_last_active_source_removed() {
+    // AC4 (issue #39): when the active source IS the last source, removal is
+    // allowed through -- the working set goes empty and the UI prompts upload.
+    // No silent focus jump happens because there is nothing left to jump to;
+    // an empty working set is the user's explicit end state. This is the
+    // exception to the IsActive refusal that `remove_active_source` exists to
+    // resolve in the multi-source case.
     let mut session = session_with_scripts(&[]);
     load_source(&mut session, &fixture("people.csv")); // active = people (only source)
-    let err = session.remove_source("people").unwrap_err();
+    session
+        .remove_source("people")
+        .expect("last active source removal allowed");
+
+    assert!(session.list().is_empty(), "working set is empty");
+    assert!(session.get("people").is_none());
     assert!(
-        matches!(err, RemoveSourceError::IsActive { .. }),
-        "active source removal refused, got {err:?}"
+        session.active().is_none(),
+        "no focus in an empty working set"
     );
-    // Refusal left the working set + thread untouched (no Deleted event).
-    assert_eq!(session.list().len(), 1);
+    // The Deleted event still lands -- the timeline records what was removed.
+    assert_eq!(
+        count_events(session.conversation(), SourceLifecycleKind::Deleted),
+        1
+    );
+}
+
+#[test]
+fn remove_source_refuses_active_when_other_sources_remain() {
+    // ADR-0035 / issue #39: removing the active source while OTHER sources
+    // remain would silently move the user's focus. `remove_source` refuses
+    // with `IsActive` so the caller must go through `remove_active_source` to
+    // name an explicit continuation (no silent jump). The refusal leaves the
+    // working set + thread untouched.
+    let mut session = session_with_scripts(&[]);
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv")); // active = orders now
+    assert_eq!(session.list().len(), 2);
+
+    let err = session.remove_source("orders").unwrap_err();
+    match err {
+        RemoveSourceError::IsActive {
+            reference_name,
+            display_name,
+        } => {
+            assert_eq!(reference_name, "orders");
+            assert!(!display_name.is_empty(), "display label carried for the UI");
+        }
+        other => panic!("expected IsActive refusal, got {other:?}"),
+    }
+    // Refusal left the working set + thread untouched.
+    assert_eq!(session.list().len(), 2, "no source dropped on refusal");
+    assert!(session.get("orders").is_some());
     assert!(session.get("people").is_some());
+    assert_eq!(
+        session.active().unwrap().reference_name,
+        "orders",
+        "focus unchanged"
+    );
     assert_eq!(
         count_events(session.conversation(), SourceLifecycleKind::Deleted),
         0
@@ -250,6 +293,154 @@ fn remove_source_refuses_while_results_exist() {
     );
     // Refusal left the source in place; no Deleted event.
     assert!(session.get("people").is_some());
+    assert_eq!(
+        count_events(session.conversation(), SourceLifecycleKind::Deleted),
+        0
+    );
+}
+
+#[test]
+fn remove_active_source_switches_focus_and_deletes() {
+    // AC1/AC2 (issue #39): deleting the active source with an explicit
+    // continuation switches the focus pointer to the chosen source, drops the
+    // removed source, and appends a Deleted event -- no silent jump, the user
+    // picked where focus goes. The alternative of letting `remove_source` fall
+    // through would have moved focus implicitly; this is the explicit path.
+    let mut session = session_with_scripts(&[]);
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv")); // active = orders
+    assert_eq!(session.list().len(), 2);
+
+    let orders_display = session
+        .get("orders")
+        .expect("orders present")
+        .display_name
+        .clone();
+
+    session
+        .remove_active_source("orders", "people")
+        .expect("switch focus + delete");
+
+    // Removed source gone; the other source remains.
+    assert!(session.get("orders").is_none());
+    assert!(session.get("people").is_some());
+    assert_eq!(session.list().len(), 1);
+    // AC2: focus switched to the user's explicit choice.
+    assert_eq!(
+        session.active().unwrap().reference_name,
+        "people",
+        "focus moved to the chosen continuation"
+    );
+    // AC2: one Deleted event carrying the removed source's identity + display.
+    let deleted: Vec<_> = session
+        .conversation()
+        .iter()
+        .filter_map(|e| match e {
+            ThreadEntry::Source(ev) if ev.kind == SourceLifecycleKind::Deleted => Some(ev),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(deleted.len(), 1, "exactly one Deleted event");
+    assert_eq!(deleted[0].reference_name, "orders");
+    assert_eq!(
+        deleted[0].display_name, orders_display,
+        "Deleted event names the removed source's display label"
+    );
+    // The removed source is no longer referenceable.
+    assert!(session.read_rows("orders", 0, 1).is_err());
+}
+
+#[test]
+fn remove_active_source_refuses_non_active() {
+    // The dialog only fires for the active source, so reaching this path with a
+    // non-active name means a stale view raced a concurrent mutation (or a
+    // direct IPC). Refuse with `NotActive` before touching anything; the
+    // caller refreshes and uses `remove_source` instead.
+    let mut session = session_with_scripts(&[]);
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv")); // active = orders
+
+    let err = session
+        .remove_active_source("people", "orders")
+        .unwrap_err();
+    assert!(
+        matches!(err, RemoveSourceError::NotActive(ref n) if n == "people"),
+        "non-active ref refused, got {err:?}"
+    );
+    // Refusal left the working set + focus untouched.
+    assert_eq!(session.list().len(), 2);
+    assert!(session.get("people").is_some());
+    assert_eq!(
+        session.active().unwrap().reference_name,
+        "orders",
+        "focus unchanged"
+    );
+    assert_eq!(
+        count_events(session.conversation(), SourceLifecycleKind::Deleted),
+        0
+    );
+}
+
+#[test]
+fn remove_active_source_refuses_invalid_continue() {
+    // The continuation must be a remaining source -- not the removed name, not
+    // missing. (A registered `result_N` name is unreachable on the live path:
+    // its presence means `has_results`, which the next test covers. The
+    // result-name rejection itself is pinned in `workingset::tests`.) Both
+    // invalid forms refuse with `InvalidContinueWith` and leave things put.
+    let mut session = session_with_scripts(&[]);
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv")); // active = orders
+
+    // Equal to the removed name (the dialog lists only the OTHER sources).
+    let err = session
+        .remove_active_source("orders", "orders")
+        .unwrap_err();
+    assert!(
+        matches!(err, RemoveSourceError::InvalidContinueWith(ref n) if n == "orders"),
+        "self-continuation refused, got {err:?}"
+    );
+    // Unknown reference.
+    let err = session.remove_active_source("orders", "ghost").unwrap_err();
+    assert!(
+        matches!(err, RemoveSourceError::InvalidContinueWith(ref n) if n == "ghost"),
+        "unknown continuation refused, got {err:?}"
+    );
+    // Both refusals left the working set + focus untouched.
+    assert_eq!(session.list().len(), 2);
+    assert!(session.get("orders").is_some());
+    assert!(session.get("people").is_some());
+    assert_eq!(session.active().unwrap().reference_name, "orders");
+    assert_eq!(
+        count_events(session.conversation(), SourceLifecycleKind::Deleted),
+        0
+    );
+}
+
+#[test]
+fn remove_active_source_refuses_with_results() {
+    // Same conservative no-derived-dependency guard as `remove_source`: a
+    // result exists, so removal cannot be honored honestly until #40's
+    // cascade-stale engine. The focus pointer stays put.
+    let mut session =
+        session_with_scripts(&[("count", r#"SELECT COUNT(*) AS n FROM "orders".data"#)]);
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv")); // active = orders
+    let outcome = session.ask("count");
+    assert!(matches!(outcome, TurnOutcome::Materialized { .. }));
+    assert!(session.get("result_1").is_some());
+
+    let err = session
+        .remove_active_source("orders", "people")
+        .unwrap_err();
+    assert!(
+        matches!(err, RemoveSourceError::HasDerivatives),
+        "removal refused while results exist, got {err:?}"
+    );
+    // Refusal left everything in place.
+    assert!(session.get("orders").is_some());
+    assert!(session.get("people").is_some());
+    assert!(session.get("result_1").is_some());
     assert_eq!(
         count_events(session.conversation(), SourceLifecycleKind::Deleted),
         0

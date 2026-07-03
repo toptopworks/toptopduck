@@ -54,13 +54,31 @@ export async function replaceSource(
   return invoke<LoadOutcome>("replace_source", { referenceName, path });
 }
 
-// Remove a source dataset from the working set (issue #38, ADR-0040). Detaches
-// the snapshot, deletes its file, drops the reference name, and appends a
-// Deleted source lifecycle event to the thread. Refuses the active source
-// (→ #39) and any removal while materialized results exist (→ #40). Resolves on
-// success; rejects with a plain error string on a refusal or a lock failure.
+// Remove a source dataset from the working set (issue #38/#39, ADR-0040).
+// Detaches the snapshot, deletes its file, drops the reference name, and
+// appends a Deleted source lifecycle event to the thread. Refuses removal while
+// materialized results exist (→ #40), and refuses the ACTIVE source when OTHER
+// sources remain (ADR-0035 → the caller must use removeActiveSource to name an
+// explicit continuation). The LAST active source is allowed through to an
+// empty working set (AC4). Resolves on success; rejects with a plain error
+// string on a refusal or a lock failure.
 export async function removeSource(referenceName: string): Promise<void> {
   await invoke<void>("remove_source", { referenceName });
+}
+
+// Delete the ACTIVE source and repoint focus at an explicit continuation
+// source the user picked from the remaining set (issue #39, ADR-0035 -- no
+// silent focus jump). Atomic: switches the active pointer to `continueWith`,
+// drops the removed source, appends a Deleted event. The dialog lists only
+// remaining sources, so a NotActive / InvalidContinueWith rejection here means
+// the view raced a concurrent mutation -- the caller refreshes and retries.
+// Same HasDerivatives guard as removeSource (→ #40). Rejects with a plain
+// error string; no typed RemoveSourceError crosses IPC.
+export async function removeActiveSource(
+  referenceName: string,
+  continueWith: string,
+): Promise<void> {
+  await invoke<void>("remove_active_source", { referenceName, continueWith });
 }
 
 // Set a dataset's privacy controls (ADR-0011, issue #9 slice 5): per-dataset

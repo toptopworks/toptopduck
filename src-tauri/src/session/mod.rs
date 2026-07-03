@@ -696,11 +696,26 @@ impl Session {
             .ok_or_else(|| RemoveSourceError::NotFound(reference_name.to_string()))?
             .clone();
 
-        // Refuse the active source: removing it would silently move the user's
-        // focus (ADR-0035). Explicit re-selection lands in #39.
+        // Refuse while any materialized result exists: the stale-cascade engine
+        // (#40) is what honestly marks dependent derivations stale, and without
+        // provenance the only honest "no derived dependency" claim is "no result
+        // exists at all". Checked before the active guard: a derived dependency
+        // blocks removal regardless of which source is active, so even an
+        // explicit-continuation path (`remove_active_source`) must hit this.
+        if self.working_set.has_results() {
+            return Err(RemoveSourceError::HasDerivatives);
+        }
+
+        // Refuse the active source WHEN other sources remain: removing it would
+        // silently move the user's focus (ADR-0035) -- the caller must go
+        // through `remove_active_source` (issue #39) to name an explicit
+        // continuation. AC4 exception: when this is the LAST source, fall
+        // through to `commit_removal` -- the working set goes empty and the UI
+        // prompts upload, which IS the user's explicit end state (no silent
+        // jump happens because there is nothing left to jump to).
         // NOTE: `working_set.active()` (last-registered source) is used rather
         // than `Session::active`/resolve_active (user focus = latest result,
-        // else active source) because the `has_results()` guard below ensures
+        // else active source) because the `has_results()` guard above ensures
         // no result exists, where the two coincide. When #40 lifts that guard,
         // re-check this against the resolve_active semantics.
         let is_active = self
@@ -708,40 +723,123 @@ impl Session {
             .active()
             .map(|a| a.reference_name == reference_name)
             .unwrap_or(false);
-        if is_active {
+        if is_active && self.working_set.list().len() > 1 {
             return Err(RemoveSourceError::IsActive {
                 reference_name: reference_name.to_string(),
                 display_name: descriptor.display_name,
             });
         }
 
-        // Refuse while any materialized result exists: the stale-cascade engine
-        // (#40) is what honestly marks dependent derivations stale, and without
-        // provenance the only honest "no derived dependency" claim is "no result
-        // exists at all".
+        self.commit_removal(reference_name, &descriptor.display_name);
+        Ok(())
+    }
+
+    /// Delete the current ACTIVE source and repoint the focus pointer at an
+    /// explicit continuation source the user chose from the remaining set
+    /// (issue #39, ADR-0035 -- no silent fallback). Atomic w.r.t. the working
+    /// set: the focus moves to `continue_with` AND the removed source is
+    /// dropped + a `Deleted` event appended in one call.
+    ///
+    /// Guards (each surfaces a distinct `RemoveSourceError` so a stale view /
+    /// direct IPC cannot smuggle an inconsistent state):
+    /// - `reference_name` must be the active source (else `NotActive`);
+    /// - `continue_with` must be a remaining source -- registered, not the
+    ///   removed name, not a `result_N` (else `InvalidContinueWith`);
+    /// - no materialized result may exist (else `HasDerivatives`, same
+    ///   conservative guard as `remove_source` -- `remove_active_source` is a
+    ///   variant of the same removal, not a way around it).
+    ///
+    /// The frontend's confirm dialog already excludes every
+    /// `InvalidContinueWith` / `NotActive` case, so reaching those branches
+    /// means the view raced a concurrent mutation; the working set is left
+    /// untouched and the caller refreshes and retries.
+    pub fn remove_active_source(
+        &mut self,
+        reference_name: &str,
+        continue_with: &str,
+    ) -> Result<(), RemoveSourceError> {
+        // Snapshot the descriptor before any mutation: its display label rides
+        // the Deleted event once the source is gone.
+        let descriptor = self
+            .working_set
+            .get(reference_name)
+            .ok_or_else(|| RemoveSourceError::NotFound(reference_name.to_string()))?
+            .clone();
+
+        // The dialog only fires for the active source; a non-active `ref` here
+        // is a stale view or a direct IPC. Refuse before touching anything --
+        // the caller should refresh and pick the right path (`remove_source`).
+        let is_active = self
+            .working_set
+            .active()
+            .map(|a| a.reference_name == reference_name)
+            .unwrap_or(false);
+        if !is_active {
+            return Err(RemoveSourceError::NotActive(reference_name.to_string()));
+        }
+
+        // The continuation must differ from the removed name (the dialog lists
+        // only the OTHER sources; an equal name is a logic bug / stale view).
+        if continue_with == reference_name {
+            return Err(RemoveSourceError::InvalidContinueWith(
+                continue_with.to_string(),
+            ));
+        }
+
+        // Same derived-dependency guard as `remove_source`, BEFORE the pointer
+        // move so a refusal leaves nothing mutated.
         if self.working_set.has_results() {
             return Err(RemoveSourceError::HasDerivatives);
         }
 
-        // Detach the read-only snapshot catalog. Best-effort + logged (mirrors
-        // rollback_excel): a DETACH failure leaves a ghost attachment that
-        // cannot affect correctness (the working set no longer names it; a
-        // later same-name ingest de-conflicts), but is kept diagnosable.
+        // Repoint the focus at the chosen continuation BEFORE the removal.
+        // `set_active` gates on registered + non-result, so a `false` here =
+        // `continue_with` is not a remaining source (missing or a `result_N`);
+        // nothing was mutated yet (active stays on the original focus).
+        if !self.working_set.set_active(continue_with) {
+            return Err(RemoveSourceError::InvalidContinueWith(
+                continue_with.to_string(),
+            ));
+        }
+
+        // Active now names `continue_with`, so `commit_removal`'s
+        // `working_set.remove(reference_name)` will NOT clear active (the
+        // matched-name branch only fires when active == the removed name) --
+        // the focus stays on the user's explicit choice.
+        self.commit_removal(reference_name, &descriptor.display_name);
+        Ok(())
+    }
+
+    /// Commit a source removal: DETACH the read-only snapshot catalog, delete
+    /// its snapshot file, drop the working-set entry, and append a `Deleted`
+    /// lifecycle event. Extracted from `remove_source` so `remove_active_source`
+    /// shares the exact same commit steps (KISS / DRY -- one place that owns
+    /// the best-effort I/O + event append). All I/O here is best-effort +
+    /// logged: a failure leaves a ghost attachment or a stray temp file, but
+    /// the working set (source of truth) still reflects the removal and the
+    /// session temp dir is wiped on drop. The session Mutex serializes this
+    /// against an in-flight turn; the frontend's shared `loading` flag adds the
+    /// ADR-0040 execution-window UX guard, so no in-flight guard is needed here.
+    fn commit_removal(&mut self, reference_name: &str, display_name: &str) {
+        // DETACH the read-only snapshot catalog (mirrors rollback_excel). A
+        // DETACH failure leaves a ghost attachment that cannot affect
+        // correctness (the working set no longer names it; a later same-name
+        // ingest de-conflicts), but is kept diagnosable.
         if let Err(e) = self
             .conn
             .execute_batch(&format!("DETACH {};", quote_ident(reference_name)))
         {
             log::warn!(
                 target: "toptopduck::session",
-                "DETACH failed during remove_source for {reference_name}: {e}"
+                "DETACH failed during removal for {reference_name}: {e}"
             );
         }
 
         // Delete the snapshot file. source_files holds the real attached path
         // (a replace may have left it at a swap path); fall back to the formal
-        // <ref>.duckdb name only when no entry was tracked. Best-effort +
-        // logged: on Windows a held handle can make remove_file fail, but the
-        // session temp dir is wiped on drop either way.
+        // <ref>.duckdb name only when no entry was tracked. On Windows a held
+        // handle can make remove_file fail, but the session temp dir is wiped
+        // on drop either way.
         let snapshot_path = self
             .source_files
             .remove(reference_name)
@@ -749,20 +847,15 @@ impl Session {
         if let Err(e) = fs::remove_file(&snapshot_path) {
             log::warn!(
                 target: "toptopduck::session",
-                "snapshot file removal failed during remove_source for {reference_name}: {e}"
+                "snapshot file removal failed during removal for {reference_name}: {e}"
             );
         }
 
-        // Commit: drop the dataset (also clears active-if-match + results
-        // membership) and append the Deleted event. The display label was
-        // captured above, so the event still names what was removed.
+        // Drop the dataset (clears active-if-match + results membership) and
+        // append the Deleted event. The display label was captured by the
+        // caller, so the event still names what was removed.
         self.working_set.remove(reference_name);
-        self.append_source_event(
-            SourceLifecycleKind::Deleted,
-            reference_name,
-            &descriptor.display_name,
-        );
-        Ok(())
+        self.append_source_event(SourceLifecycleKind::Deleted, reference_name, display_name);
     }
 
     /// Re-upload a file onto an existing dataset's reference name (ADR-0042,

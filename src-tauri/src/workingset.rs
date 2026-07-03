@@ -126,6 +126,31 @@ impl WorkingSet {
         self.active.as_ref().and_then(|r| self.get(r))
     }
 
+    /// Repoint the active source pointer at an existing source (ADR-0035,
+    /// issue #39): used only by `remove_active_source` to honor a user's
+    /// explicit continuation choice after deleting the current focus. Unlike
+    /// `register`/`replace` (which set active as a side of adding data), this
+    /// is a pure pointer move -- no dataset is added or swapped.
+    ///
+    /// Returns `false` (a logic bug, not a user error) when `reference_name` is
+    /// not a registered non-result source, leaving `active` unchanged. The
+    /// session's `remove_active_source` gates this call on those conditions, so
+    /// a `false` here signals a stale view raced a concurrent mutation; the
+    /// caller refuses honestly rather than silently writing a dangling pointer.
+    /// `result_N` names are rejected so the active pointer never aliases a
+    /// materialized result (resolve_active handles results separately, ADR-0022).
+    pub fn set_active(&mut self, reference_name: &str) -> bool {
+        let is_source = self
+            .get(reference_name)
+            .map(|d| !self.results.contains(&d.reference_name))
+            .unwrap_or(false);
+        if !is_source {
+            return false;
+        }
+        self.active = Some(reference_name.to_string());
+        true
+    }
+
     pub fn get(&self, reference_name: &str) -> Option<&DatasetDescriptor> {
         self.datasets
             .iter()
@@ -366,6 +391,47 @@ mod tests {
         assert_eq!(ws.active().unwrap().reference_name, "b");
         // older source remains in the shared namespace
         assert!(ws.get("a").is_some());
+    }
+
+    #[test]
+    fn set_active_repoints_to_a_registered_source() {
+        // ADR-0035 / issue #39: remove_active_source switches the focus pointer
+        // to the user's explicit choice. The pointer actually moves (the prior
+        // active is no longer reported as active), and the previous focus stays
+        // registered -- only the pointer moved, no dataset was dropped here.
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("orders"));
+        ws.register(descriptor("people")); // active = people (most recent)
+        assert!(ws.set_active("orders"));
+        assert_eq!(ws.active().unwrap().reference_name, "orders");
+        assert!(ws.get("people").is_some(), "prior focus still registered");
+    }
+
+    #[test]
+    fn set_active_rejects_unknown_name_leaving_pointer_unchanged() {
+        // A stale view racing a concurrent mutation names a source that no
+        // longer exists -- refuse rather than write a dangling pointer.
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("orders"));
+        assert!(!ws.set_active("ghost"));
+        assert_eq!(ws.active().unwrap().reference_name, "orders");
+    }
+
+    #[test]
+    fn set_active_rejects_a_materialized_result_name() {
+        // The active pointer must alias a source, never a result_N (resolve_active
+        // handles results separately, ADR-0022). A result name is registered, so
+        // a plain membership check would wrongly accept it -- the result-set
+        // guard is what keeps the pointer in the source domain.
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("orders"));
+        ws.register_result(descriptor("result_1"));
+        assert!(!ws.set_active("result_1"));
+        assert_eq!(
+            ws.active().unwrap().reference_name,
+            "orders",
+            "pointer stayed on a source"
+        );
     }
 
     #[test]
