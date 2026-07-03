@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use rust_xlsxwriter::Workbook;
 use toptopduck_lib::{
     FakeProvider, LoadOutcome, ProviderReply, RemoveSourceError, Session, SheetGuidance,
-    SheetRectify, SourceLifecycleKind, ThreadEntry, TurnOutcome,
+    SheetRectify, SourceLifecycleKind, StaleReason, ThreadEntry, TurnOutcome,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -817,5 +817,190 @@ fn already_stale_result_keeps_first_anchor_on_second_cascade() {
             .reference_name,
         "orders",
         "second cascade did not overwrite the first anchor"
+    );
+}
+
+// --- Source replace cascade (issue #41, ADR-0025/0041) ---------------------
+//
+// Replacing a source (re-upload under the same reference name) cascades its
+// dependent result_N stale, each anchored to a Replaced event. Mirrors the
+// delete-cascade shape: the reference name is stable (the new snapshot takes
+// it over), so the cascade keys correctly; a result already stale keeps its
+// first anchor (ADR-0041 终局死轮). Distinct from delete: the source stays
+// registered (now backing onto the new snapshot) and a Replaced event lands.
+
+#[test]
+fn replace_source_cascades_stale_to_dependent_result() {
+    // AC1 (issue #41): replacing a source marks every result_N that derived
+    // from it stale, anchored to the Replaced event (ADR-0040 traceability).
+    // result_1 FROM people -> replace people with flat.json -> result_1 stays
+    // registered but carries a stale anchor whose reason is Replaced.
+    let mut session =
+        session_with_scripts(&[("count people", r#"SELECT COUNT(*) AS n FROM "people".data"#)]);
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv")); // active = orders
+    let outcome = session.ask("count people");
+    assert!(matches!(outcome, TurnOutcome::Materialized { .. }));
+    assert!(session.get("result_1").is_some(), "a result exists now");
+
+    // Replace people (non-active) with flat.json -> cascade result_1 stale.
+    match session.replace_source("people", &fixture("flat.json")) {
+        LoadOutcome::Loaded(_) => {}
+        other => panic!("expected replace to succeed, got {other:?}"),
+    }
+
+    // result_1 stays registered (visible) but is now stale, anchored to people
+    // with reason Replaced -- distinguishing a replace-cascade from a delete.
+    let result_1 = session
+        .get("result_1")
+        .expect("result_1 still registered after replace cascade");
+    let anchor = result_1
+        .stale
+        .as_ref()
+        .expect("result_1 marked stale after its source was replaced");
+    assert_eq!(
+        anchor.reference_name, "people",
+        "anchor names the replaced source event"
+    );
+    assert_eq!(
+        anchor.reason,
+        StaleReason::Replaced,
+        "anchor reason is Replaced, distinguishing a delete-cascade"
+    );
+}
+
+#[test]
+fn replace_source_appends_a_replaced_event() {
+    // AC1 (issue #41): a replace appends exactly one Replaced source lifecycle
+    // event carrying the stable reference name + carried-over display label.
+    // First-class in the thread (always visible, occupies a slot) but NOT a
+    // turn -- never enters the LLM window (ADR-0040).
+    let mut session = session_with_scripts(&[]);
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv")); // active = orders
+    let people_display = session
+        .get("people")
+        .expect("people present")
+        .display_name
+        .clone();
+
+    match session.replace_source("people", &fixture("flat.json")) {
+        LoadOutcome::Loaded(_) => {}
+        other => panic!("expected replace to succeed, got {other:?}"),
+    }
+
+    let replaced: Vec<_> = session
+        .conversation()
+        .iter()
+        .filter_map(|e| match e {
+            ThreadEntry::Source(ev) if ev.kind == SourceLifecycleKind::Replaced => Some(ev),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replaced.len(), 1, "exactly one Replaced event");
+    assert_eq!(replaced[0].reference_name, "people");
+    assert_eq!(
+        replaced[0].display_name, people_display,
+        "Replaced event carries the source's display label"
+    );
+    // A replace is NOT also an Added or Deleted -- only Replaced lands.
+    assert_eq!(
+        count_events(session.conversation(), SourceLifecycleKind::Added),
+        2,
+        "two Added events (people + orders) from the initial loads"
+    );
+    assert_eq!(
+        count_events(session.conversation(), SourceLifecycleKind::Deleted),
+        0,
+        "a replace never emits a Deleted event"
+    );
+}
+
+#[test]
+fn replace_does_not_revive_stale_result_fresh_ask_yields_new_number() {
+    // AC5 / ADR-0041 (issue #41): a stale result_N is never revived. After a
+    // replace cascades result_1 stale, asking the same question again does NOT
+    // reuse result_1; it produces result_2 (max+1, ADR-0022). The stale SQL
+    // stays in the visible thread (a reference for the LLM within the window,
+    // ADR-0023) but the system never auto-reruns it.
+    let mut session = session_with_scripts(&[
+        ("q1", r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        ("q2", r#"SELECT COUNT(*) AS n FROM "people".data"#),
+    ]);
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv")); // active = orders
+    session.ask("q1"); // result_1
+    assert!(session.get("result_1").is_some());
+
+    match session.replace_source("people", &fixture("flat.json")) {
+        LoadOutcome::Loaded(_) => {}
+        other => panic!("expected replace to succeed, got {other:?}"),
+    }
+    // result_1 is stale now.
+    assert!(session.get("result_1").expect("result_1").stale.is_some());
+
+    // Re-asking the same question produces a fresh result_2, NOT a revival of
+    // result_1 (ADR-0041 终局死轮; ADR-0022 编号不重用).
+    let second = session.ask("q2");
+    match second {
+        TurnOutcome::Materialized { dataset, .. } => {
+            assert_eq!(
+                dataset.reference_name, "result_2",
+                "fresh result_2, not a revival of stale result_1"
+            );
+        }
+        other => panic!("expected Materialized, got {other:?}"),
+    }
+    // result_1 is still registered AND still stale -- visible but dead.
+    let r1 = session.get("result_1").expect("result_1 still registered");
+    assert!(r1.stale.is_some(), "result_1 stays stale (not revived)");
+}
+
+#[test]
+fn replace_cascade_keeps_already_stale_first_anchor() {
+    // ADR-0041 (issue #41): a result already stale from a delete keeps its
+    // first (Deleted) anchor when a later replace of another source ripples
+    // through it again -- the earliest invalidating event is the truth. This
+    // mirrors `already_stale_result_keeps_first_anchor_on_second_cascade` but
+    // with the second cascade triggered by a replace instead of a delete.
+    //
+    // leading_zero is loaded last so it becomes active; both orders and people
+    // are non-active, so the delete + replace go through the plain paths.
+    let mut session = session_with_scripts(&[(
+        "both",
+        r#"SELECT COUNT(*) AS n FROM "orders".data UNION ALL SELECT COUNT(*) AS n FROM "people".data"#,
+    )]);
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv"));
+    load_source(&mut session, &fixture("leading_zero.csv")); // active = leading_zero
+    session.ask("both"); // result_1 depends on {orders, people}
+
+    // First: delete orders -> result_1 stale, anchored to orders (Deleted).
+    session.remove_source("orders").expect("remove orders");
+    let r1 = session.get("result_1").expect("result_1");
+    let anchor = r1.stale.as_ref().expect("stale after orders delete");
+    assert_eq!(
+        anchor.reason,
+        StaleReason::Deleted,
+        "first anchor is a Deleted reason"
+    );
+    assert_eq!(anchor.reference_name, "orders");
+
+    // Second: replace people -> cascade reaches result_1 again, but it keeps
+    // its first anchor (orders, Deleted) -- the replace does not revise it.
+    match session.replace_source("people", &fixture("flat.json")) {
+        LoadOutcome::Loaded(_) => {}
+        other => panic!("expected replace to succeed, got {other:?}"),
+    }
+    let r1 = session.get("result_1").expect("result_1 still registered");
+    let anchor = r1.stale.as_ref().expect("still stale");
+    assert_eq!(
+        anchor.reference_name, "orders",
+        "first anchor (orders) preserved across the replace cascade"
+    );
+    assert_eq!(
+        anchor.reason,
+        StaleReason::Deleted,
+        "first anchor reason (Deleted) preserved, not overwritten by Replaced"
     );
 }

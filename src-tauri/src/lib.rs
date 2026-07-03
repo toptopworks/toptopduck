@@ -29,8 +29,8 @@ pub use model::{
     ChartKind, ColumnSchema, DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet,
     LoadError, LoadOutcome, ProviderConfig, ProviderConfigView, RectifyProvenance,
     RemoveSourceError, RenameError, RowPage, SheetGuidance, SheetRectify, SourceLifecycleEvent,
-    SourceLifecycleKind, StaleAnchor, TextKind, ThreadEntry, TurnError, TurnOutcome, TurnRecord,
-    VizSpec, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
+    SourceLifecycleKind, StaleAnchor, StaleReason, TextKind, ThreadEntry, TurnError, TurnOutcome,
+    TurnRecord, VizSpec, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
 };
 pub use provider::anthropic::AnthropicProvider;
 pub use provider::fake::FakeProvider;

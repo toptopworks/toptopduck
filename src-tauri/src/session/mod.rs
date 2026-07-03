@@ -28,8 +28,8 @@ use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
     RectifyProvenance, RemoveSourceError, RenameError, RowPage, SheetGuidance, SheetRectify,
-    SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, ThreadEntry, TurnError, TurnOutcome,
-    TurnRecord, EXECUTE_FAIL_PREFIX, RESOURCE_FAIL_PREFIX,
+    SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, StaleReason, ThreadEntry, TurnError,
+    TurnOutcome, TurnRecord, EXECUTE_FAIL_PREFIX, RESOURCE_FAIL_PREFIX,
 };
 use crate::provider::{Provider, ProviderError, ProviderReply, UnwiredProvider};
 use crate::session::snapshot::derive_table;
@@ -826,6 +826,7 @@ impl Session {
             StaleAnchor {
                 reference_name: reference_name.to_string(),
                 display_name: display_name.to_string(),
+                reason: StaleReason::Deleted,
             },
         );
         if !newly_stale.is_empty() {
@@ -1050,12 +1051,42 @@ impl Session {
         self.source_files
             .insert(reference_name.to_string(), PathBuf::from(&attach_path));
 
+        // Capture the carried-over display label before the descriptor swap --
+        // the Replaced event + cascade anchor name what was replaced, and a
+        // future carry-over rule change must not retroactively alter either.
+        let display_name = existing.display_name.clone();
+
+        // Cascade stale (issue #41, ADR-0025/0041): before the new descriptor
+        // commits, transitively mark every result_N downstream of this source
+        // stale, each carrying this Replaced event's identity with reason =
+        // Replaced. The reference name is stable (the new snapshot just took it
+        // over), so the cascade keys correctly; a result already stale keeps
+        // its first anchor (ADR-0041 终局死轮). Mirrors `commit_removal`'s
+        // delete-cascade -- distinct in reason, and in that the source stays
+        // registered (the descriptor swap happens just below).
+        let newly_stale = self.working_set.cascade_stale(
+            reference_name,
+            StaleAnchor {
+                reference_name: reference_name.to_string(),
+                display_name: display_name.clone(),
+                reason: StaleReason::Replaced,
+            },
+        );
+        if !newly_stale.is_empty() {
+            log::info!(
+                target: "toptopduck::session",
+                "换源「{reference_name}」级联失效：{}", newly_stale.join(", ")
+            );
+        }
+
         // Commit: update the descriptor in place. The reference name is stable
         // (every existing reference now resolves to the new data); the display
         // label carries over (a user rename survives the replace, ADR-0037); the
         // privacy config carries over too (issue #9 AC4: a source's privacy
         // intent survives a re-upload -- entries for columns that no longer exist
         // are ignored at read time, ADR-0011); the body reflects the new snapshot.
+        // A source itself is never stale (the cascade marks result_N, not the
+        // source descriptor).
         let updated = DatasetDescriptor {
             reference_name: reference_name.to_string(),
             display_name: existing.display_name,
@@ -1069,6 +1100,13 @@ impl Session {
             stale: None,
         };
         self.working_set.replace(updated.clone());
+
+        // Append the Replaced source lifecycle event (ADR-0040, issue #41):
+        // first-class in the thread (always visible, occupies a slot) but NOT a
+        // turn -- never enters the LLM window or advances result_N. The display
+        // label was captured above so the event still names what was replaced.
+        self.append_source_event(SourceLifecycleKind::Replaced, reference_name, &display_name);
+
         LoadOutcome::Loaded(updated)
     }
 
