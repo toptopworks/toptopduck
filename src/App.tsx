@@ -474,10 +474,10 @@ export default function App() {
           // AC5: every remaining dataset but the removed one. On the live path
           // this dialog only opens in the no-result case (activeName resolves to
           // a source), so these ARE the remaining sources. A stale view that
-          // opens it while a result exists is refused by the backend's NotActive
-          // guard -- result removal is #40's scope, not this slice, and the
-          // DatasetDescriptor carries no source/result flag for the frontend to
-          // pre-filter without a round-trip.
+          // opens it while a result exists is refused by the backend's
+          // HasDerivatives guard -- result removal is #40's scope, not this
+          // slice, and the DatasetDescriptor carries no source/result flag for
+          // the frontend to pre-filter without a round-trip.
           candidates={datasets.filter(
             (d) => d.reference_name !== pendingActiveDelete.reference_name,
           )}
