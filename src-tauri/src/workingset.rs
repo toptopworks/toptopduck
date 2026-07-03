@@ -377,15 +377,16 @@ impl WorkingSet {
     }
 
     /// Transitively mark every result_N downstream of `removed_ref` as stale,
-    /// each carrying `anchor` (the Deleted source event identity, for
-    /// traceability ADR-0040). The walk is the provenance-graph transitive
-    /// closure over direct dependents: a source delete ripples through chained
-    /// results (result_2 FROM result_1 FROM source). A result already stale
-    /// keeps its FIRST anchor (the earliest invalidating event), matching
-    /// ADR-0041's "终局死轮" (a dead turn is never revived, so the first death
-    /// is the truth). Returns the newly-staled names so the caller can log the
-    /// cascade's reach. `removed_ref` itself is the source being deleted; its
-    /// dependents (not the source) are what get marked.
+    /// each carrying `anchor` (the invalidating source event identity -- Deleted
+    /// per #40 or Replaced per #41, for traceability ADR-0040). The walk is the
+    /// provenance-graph transitive closure over direct dependents: a source
+    /// delete/replace ripples through chained results (result_2 FROM result_1
+    /// FROM source). A result already stale keeps its FIRST anchor (the earliest
+    /// invalidating event), matching ADR-0041's "终局死轮" (a dead turn is never
+    /// revived, so the first death is the truth). Returns the newly-staled names
+    /// so the caller can log the cascade's reach. `removed_ref` itself is the
+    /// source being deleted/replaced; its dependents (not the source) are what
+    /// get marked.
     pub fn cascade_stale(&mut self, removed_ref: &str, anchor: StaleAnchor) -> Vec<String> {
         let mut frontier: Vec<String> = self.dependents_of(removed_ref);
         let mut newly_stale: Vec<String> = Vec::new();

@@ -70,8 +70,9 @@ export interface DatasetDescriptor {
 export type StaleReason = "Deleted" | "Replaced";
 
 // Why a result_N is stale and which source lifecycle event invalidated it
-// (issue #40/#41, ADR-0013/0040): a snapshot of the invalidating source event's
-// identity, captured when the cascade marked this result stale. Mirrors the
+// (issue #40/#41): a snapshot of the invalidating source event's identity -- the
+// ADR-0040 traceability anchor (the soft-invalidate mechanism itself is
+// ADR-0013), captured when the cascade marked this result stale. Mirrors the
 // Rust StaleAnchor. `reason` says which kind of event (Deleted vs Replaced); the
 // display label lets the UI render "因「Orders」已删除/已更新而失效" after the
 // source itself is gone or swapped.

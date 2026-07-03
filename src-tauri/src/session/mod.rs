@@ -1035,8 +1035,10 @@ impl Session {
         // cannot fail -- the same file attached successfully in the pre-attach
         // step, and the session is single-threaded under its Mutex -- so the
         // only realistic triggers are OS-level (e.g. an AV scan locking the
-        // renamed path). Recovery is a session restart; accepted as the cost of
-        // skipping a swap-then-cleanup round-trip (ADR-0042).
+        // renamed path). Recovery is a session restart; accepted as the
+        // implementation-level cost of skipping a swap-then-cleanup round-trip
+        // (not an ADR-level decision -- a second attach-pass would complicate
+        // the replace path for a near-zero-probability OS-level failure).
         if let Err(e) = self.conn.execute_batch(&format!(
             "ATTACH '{attach_path}' AS {} (READ_ONLY);",
             quote_ident(reference_name)
@@ -1099,7 +1101,15 @@ impl Session {
             privacy: existing.privacy,
             stale: None,
         };
-        self.working_set.replace(updated.clone());
+        // `replace` returns `false` only on an unregistered name -- a logic bug,
+        // not a user error (the `existing` lookup at the top confirmed
+        // registration, and the cascade above marks result_N, not the source
+        // descriptor). Assert so a future regression can't silently leave the
+        // source unswapped while the Replaced event still lands below.
+        assert!(
+            self.working_set.replace(updated.clone()),
+            "replace_source targets a confirmed-existing source"
+        );
 
         // Append the Replaced source lifecycle event (ADR-0040, issue #41):
         // first-class in the thread (always visible, occupies a slot) but NOT a
