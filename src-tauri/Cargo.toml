@@ -54,6 +54,14 @@ keyring = "3"
 # (tauri-plugin-log, or env_logger in tests) is installed; until then they are
 # no-ops, which still beats silent `let _ =` swallows.
 log = "0.4"
+# `sqlparser` parses provider SQL to extract the FROM/JOIN reference-name set
+# for the stale-cascade provenance graph (issue #40, ADR-0013/0025/0040): each
+# materialized result_N records which working-set members its SQL named, so a
+# source delete can transitively mark dependents stale. A failed parse falls
+# back to "depends on every current member", so the cascade stays sound (it
+# never under-invalidates -- "宁可多失效不漏失效", issue #40). default-features
+# off: only the parser is needed, no backend.
+sqlparser = { version = "0.52", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

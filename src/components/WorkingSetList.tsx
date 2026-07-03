@@ -87,13 +87,18 @@ export function WorkingSetList({
       {datasets.map((d) => (
         <li
           key={d.reference_name}
-          className={d.reference_name === activeName ? "active" : ""}
+          className={`${d.reference_name === activeName ? "active" : ""}${d.stale ? " stale" : ""}`}
         >
           <button type="button" onClick={() => onSelect(d.reference_name)}>
             {d.display_name}
             {d.reference_name === activeName ? " · 当前表" : ""}
             <small> {d.row_count} 行</small>
           </button>
+          {d.stale && (
+            <span className="stale-badge">
+              因「{d.stale.display_name}」已删除而失效
+            </span>
+          )}
           <button
             type="button"
             className="rename"

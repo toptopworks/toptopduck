@@ -2,9 +2,9 @@
 //! de-conflicts reference names, and holds the active-dataset pointer (= the
 //! most recently uploaded source).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use crate::model::{DatasetDescriptor, DatasetPrivacy, RenameError};
+use crate::model::{DatasetDescriptor, DatasetPrivacy, RenameError, StaleAnchor};
 
 #[derive(Debug, Default)]
 pub struct WorkingSet {
@@ -17,6 +17,12 @@ pub struct WorkingSet {
     /// by name pattern) so a source whose sanitized name happens to look like
     /// `result_N` can never be mistaken for a derived result.
     results: HashSet<String>,
+    /// 血缘图（issue #40, ADR-0025/0040）：result_N → 它依赖的上游引用名
+    /// 集合（源 + 其他 result_N）。在 result 物化时记录（provenance 解析
+    /// provider SQL 的 FROM/JOIN），供删源时的 stale 级联传递闭包使用。保守
+    /// 兜底（解析失败）记全部当时成员，保证"宁可多失效不漏失效"（issue #40）。
+    /// 仅内存，不跨 IPC / 不进 recipe（持久化 PRD 的职责）。
+    provenance: HashMap<String, HashSet<String>>,
 }
 
 impl WorkingSet {
@@ -277,13 +283,17 @@ impl WorkingSet {
 
     /// Remove a dataset from the working set by reference name, returning the
     /// removed descriptor (or `None` when the name isn't registered). Used by the
-    /// delete-source path (issue #38): the descriptor's display label rides the
-    /// `Deleted` source lifecycle event so the thread can still name what was
+    /// delete-source path (issues #38/#40): the descriptor's display label rides
+    /// the `Deleted` source lifecycle event so the thread can still name what was
     /// removed after the dataset is gone. Clears the active pointer when it
-    /// pointed at the removed name and drops any `result_N` membership entry --
-    /// both are defensive: the session's remove guard only ever calls this on a
-    /// non-active source with no materialized results, so neither branch fires
-    /// on the live path, but the working set stays correct if that ever changes.
+    /// pointed at the removed name, drops any `result_N` membership entry, and
+    /// drops the provenance graph edge -- all defensive bookkeeping: the
+    /// session's `commit_removal` runs the stale-cascade first, so a delete may
+    /// well leave dependent (now-stale) results registered, but the removed
+    /// name's own entries are cleared here so nothing dangles. The active-clear
+    /// branch does not fire on the live path (`remove_source` refuses the active
+    /// source; `remove_active_source` repoints active first), but the working
+    /// set stays correct if that ever changes.
     pub fn remove(&mut self, reference_name: &str) -> Option<DatasetDescriptor> {
         let idx = self
             .datasets
@@ -291,20 +301,11 @@ impl WorkingSet {
             .position(|d| d.reference_name == reference_name)?;
         let removed = self.datasets.remove(idx);
         self.results.remove(reference_name);
+        self.provenance.remove(reference_name);
         if self.active.as_deref() == Some(reference_name) {
             self.active = None;
         }
         Some(removed)
-    }
-
-    /// Whether any materialized `result_N` is currently registered -- the
-    /// session's delete-source guard uses this to refuse removal while derived
-    /// results exist (issue #38 conservative rule; cascade-stale lands in #40).
-    /// Provenance-free: it does not check which source a result derived from,
-    /// only whether any result exists at all, which is the only honest
-    /// "no-derived-dependency" claim possible before the stale-cascade engine.
-    pub fn has_results(&self) -> bool {
-        !self.results.is_empty()
     }
 
     pub fn len(&self) -> usize {
@@ -313,6 +314,115 @@ impl WorkingSet {
 
     pub fn is_empty(&self) -> bool {
         self.datasets.is_empty()
+    }
+
+    // --- Stale cascade (issue #40, ADR-0013/0025/0040) ----------------------
+    //
+    // Dependent result_N are soft-invalidated when an upstream source is
+    // removed: the cascade walks the provenance graph transitively, marking
+    // each dependent's descriptor with the StaleAnchor of the Deleted source
+    // event. A stale result stays registered (visible: read_rows / thread) but
+    // is excluded from the LLM working set and refused as a new SQL reference
+    // (ADR-0013 three invariants).
+
+    /// Whether `reference_name` is a stale result (ADR-0013). A source is never
+    /// stale (sources are removed outright, not soft-invalidated); a result_N
+    /// is stale once the cascade marked its descriptor.
+    pub fn is_stale(&self, reference_name: &str) -> bool {
+        self.get(reference_name)
+            .map(|d| d.stale.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Reference names of every stale result currently registered (ADR-0013).
+    /// Used by the sandbox mirror + window assembler to exclude stale results
+    /// from the LLM-visible working set.
+    pub fn stale_results(&self) -> Vec<String> {
+        self.datasets
+            .iter()
+            .filter(|d| self.results.contains(&d.reference_name) && d.stale.is_some())
+            .map(|d| d.reference_name.clone())
+            .collect()
+    }
+
+    /// result_N that directly depend on `reference_name` (name it as a member
+    /// of their provenance set). The forward edge of the cascade.
+    fn dependents_of(&self, reference_name: &str) -> Vec<String> {
+        self.provenance
+            .iter()
+            .filter(|(_, deps)| deps.contains(reference_name))
+            .map(|(r, _)| r.clone())
+            .collect()
+    }
+
+    /// Record a freshly materialized result's provenance (issue #40,
+    /// ADR-0025): the working-set reference names its SQL named as FROM/JOIN
+    /// targets. The cascade reads this on a later source delete to find
+    /// dependents. The caller pre-intersects with the live working set and has
+    /// already checked no name is a stale reference (ADR-0013 invariant 2). A
+    /// conservative fallback (parse failure) records every current member so a
+    /// delete never under-cascades.
+    pub fn record_provenance(&mut self, result_name: &str, deps: HashSet<String>) {
+        self.provenance.insert(result_name.to_string(), deps);
+    }
+
+    /// The reference names of every currently registered member (sources +
+    /// results, stale or active) -- the conservative-fallback dependency set
+    /// (issue #40 "宁可多失效不漏失效").
+    pub fn member_names(&self) -> HashSet<String> {
+        self.datasets
+            .iter()
+            .map(|d| d.reference_name.clone())
+            .collect()
+    }
+
+    /// Transitively mark every result_N downstream of `removed_ref` as stale,
+    /// each carrying `anchor` (the Deleted source event identity, for
+    /// traceability ADR-0040). The walk is the provenance-graph transitive
+    /// closure over direct dependents: a source delete ripples through chained
+    /// results (result_2 FROM result_1 FROM source). A result already stale
+    /// keeps its FIRST anchor (the earliest invalidating event), matching
+    /// ADR-0041's "终局死轮" (a dead turn is never revived, so the first death
+    /// is the truth). Returns the newly-staled names so the caller can log the
+    /// cascade's reach. `removed_ref` itself is the source being deleted; its
+    /// dependents (not the source) are what get marked.
+    pub fn cascade_stale(&mut self, removed_ref: &str, anchor: StaleAnchor) -> Vec<String> {
+        let mut frontier: Vec<String> = self.dependents_of(removed_ref);
+        let mut newly_stale: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        while let Some(dep) = frontier.pop() {
+            if !seen.insert(dep.clone()) {
+                continue;
+            }
+            // Only mark + expand a registered, currently-active result. An
+            // already-stale result keeps its first anchor (ADR-0041); a name
+            // since removed is skipped (dependents_of may lag a removal).
+            let is_live_result = self
+                .get(&dep)
+                .map(|d| self.results.contains(&dep) && d.stale.is_none())
+                .unwrap_or(false);
+            if !is_live_result {
+                continue;
+            }
+            self.mark_stale(&dep, anchor.clone());
+            newly_stale.push(dep.clone());
+            // Ripple: results depending on the just-staled result also fall.
+            frontier.extend(self.dependents_of(&dep));
+        }
+        newly_stale
+    }
+
+    /// Mark one result_N stale by setting its descriptor's anchor. Private --
+    /// the only caller is `cascade_stale` (stale is a consequence of a source
+    /// event, never a standalone mutation).
+    fn mark_stale(&mut self, reference_name: &str, anchor: StaleAnchor) {
+        if let Some(slot) = self
+            .datasets
+            .iter_mut()
+            .find(|d| d.reference_name == reference_name)
+        {
+            slot.stale = Some(anchor);
+        }
     }
 }
 
@@ -351,6 +461,7 @@ mod tests {
             fingerprint: reference_name.into(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
+            stale: None,
         }
     }
 
@@ -635,6 +746,7 @@ mod tests {
             fingerprint: name.into(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
+            stale: None,
         }
     }
 
@@ -743,19 +855,5 @@ mod tests {
         // idempotent on the live name too: a second remove after the first is None
         ws.remove("orders");
         assert!(ws.remove("orders").is_none());
-    }
-
-    #[test]
-    fn has_results_tracks_whether_any_result_is_registered() {
-        // The delete-source guard refuses removal while results exist (issue
-        // #38). Sources alone -> false; registering a result -> true; removing
-        // it -> false again.
-        let mut ws = WorkingSet::default();
-        ws.register(descriptor("orders"));
-        assert!(!ws.has_results());
-        ws.register_result(result_descriptor("result_1"));
-        assert!(ws.has_results());
-        ws.remove("result_1");
-        assert!(!ws.has_results());
     }
 }

@@ -54,6 +54,25 @@ export interface DatasetDescriptor {
   // Privacy controls (ADR-0011, issue #9 slice 5): what of this dataset may
   // leave the local trust boundary. Defaults to samples on, no type-only cols.
   privacy: DatasetPrivacy;
+  // Stale-state anchor (issue #40, ADR-0013): absent on an active dataset;
+  // present when this result_N was invalidated by a source removal (stale-
+  // cascade). A stale result stays visible (history / read_rows) but is excluded
+  // from the LLM working set and refused as a new SQL reference. Mirrors the
+  // Rust `Option<StaleAnchor>` -- `skip_serializing_if` omits it on the wire
+  // when active, so it is optional and never `null`.
+  stale?: StaleAnchor;
+}
+
+// Why a result_N is stale and which source lifecycle event invalidated it
+// (issue #40, ADR-0013/0040): a snapshot of the Deleted source event's
+// identity, captured when the cascade marked this result stale. Mirrors the
+// Rust StaleAnchor. The display label lets the UI render "因「Orders」已删除而
+// 失效" after the source itself is gone.
+export interface StaleAnchor {
+  // Reference name of the source whose removal invalidated this result.
+  reference_name: string;
+  // Display label of that source at event time (rendered in the stale badge).
+  display_name: string;
 }
 
 // Discriminated union (serde adjacently-tagged: `#[serde(tag="kind", content="data")]`).
