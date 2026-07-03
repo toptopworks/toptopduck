@@ -323,10 +323,45 @@ fn turn_record_pairs_question_and_outcome() {
 fn source_lifecycle_kind_serializes_as_a_bare_variant_string() {
     // ADR-0040: SourceLifecycleKind is a plain (untagged) enum, so each variant
     // crosses IPC as its bare name string -- the shape src/types.ts mirrors.
-    // Replaced is reserved for #41 and intentionally absent (YAGNI) here.
+    // Replaced lands with #41 (ADR-0025): a source re-upload under the same
+    // reference name, distinct from Added (new name) and Deleted (name gone).
     use toptopduck_lib::SourceLifecycleKind;
     assert_wire(&SourceLifecycleKind::Added, r#""Added""#);
     assert_wire(&SourceLifecycleKind::Deleted, r#""Deleted""#);
+    assert_wire(&SourceLifecycleKind::Replaced, r#""Replaced""#);
+}
+
+#[test]
+fn stale_anchor_carries_reference_display_and_reason() {
+    // ADR-0013/0040/0041: a StaleAnchor is a flat { reference_name, display_name,
+    // reason } object. `reason` distinguishes a Deleted-cascade anchor (source
+    // removed) from a Replaced-cascade anchor (source re-uploaded), so the UI
+    // can render "因源已删除而失效" vs "因源已更新而失效" (issue #41 AC4). It
+    // defaults to Deleted on deserialize (#[serde(default)]), so recipes
+    // written before #41 (no reason field) still load.
+    use toptopduck_lib::{StaleAnchor, StaleReason};
+    assert_wire(
+        &StaleAnchor {
+            reference_name: "orders".into(),
+            display_name: "Q3 订单".into(),
+            reason: StaleReason::Replaced,
+        },
+        r#"{"reference_name":"orders","display_name":"Q3 订单","reason":"Replaced"}"#,
+    );
+    assert_wire(
+        &StaleAnchor {
+            reference_name: "orders".into(),
+            display_name: "Q3 订单".into(),
+            reason: StaleReason::Deleted,
+        },
+        r#"{"reference_name":"orders","display_name":"Q3 订单","reason":"Deleted"}"#,
+    );
+    // Backward compat: a pre-#41 StaleAnchor JSON (no `reason`) deserializes
+    // with reason = Deleted (the only stale cause that existed before #41).
+    let legacy: StaleAnchor =
+        serde_json::from_str(r#"{"reference_name":"orders","display_name":"Q3 订单"}"#)
+            .expect("legacy StaleAnchor without reason deserializes");
+    assert_eq!(legacy.reason, StaleReason::Deleted);
 }
 
 #[test]

@@ -63,16 +63,30 @@ export interface DatasetDescriptor {
   stale?: StaleAnchor;
 }
 
+// Which kind of source event invalidated a result_N (issue #40/#41, mirrors the
+// Rust StaleReason). The UI renders each variant distinctly in the stale badge
+// (issue #41 AC4): "Deleted" -> "已删除"; "Replaced" -> "已更新". Bare variant
+// string across IPC (like SourceLifecycleKind).
+export type StaleReason = "Deleted" | "Replaced";
+
 // Why a result_N is stale and which source lifecycle event invalidated it
-// (issue #40, ADR-0013/0040): a snapshot of the Deleted source event's
-// identity, captured when the cascade marked this result stale. Mirrors the
-// Rust StaleAnchor. The display label lets the UI render "因「Orders」已删除而
-// 失效" after the source itself is gone.
+// (issue #40/#41): a snapshot of the invalidating source event's identity -- the
+// ADR-0040 traceability anchor (the soft-invalidate mechanism itself is
+// ADR-0013), captured when the cascade marked this result stale. Mirrors the
+// Rust StaleAnchor. `reason` says which kind of event (Deleted vs Replaced); the
+// display label lets the UI render "因「Orders」已删除/已更新而失效" after the
+// source itself is gone or swapped.
 export interface StaleAnchor {
-  // Reference name of the source whose removal invalidated this result.
+  // Reference name of the source whose removal/replacement invalidated this
+  // result.
   reference_name: string;
   // Display label of that source at event time (rendered in the stale badge).
   display_name: string;
+  // Which kind of source event invalidated this result (issue #41). Mirrors the
+  // Rust #[serde(default)] -> Deleted, but the field is required on the wire:
+  // the backend always serializes it, and older payloads predate #40 entirely
+  // (stale was absent), so there is no "missing reason" shape to deserialize.
+  reason: StaleReason;
 }
 
 // Discriminated union (serde adjacently-tagged: `#[serde(tag="kind", content="data")]`).
@@ -172,11 +186,11 @@ export interface TurnRecord {
   outcome: TurnOutcome;
 }
 
-// Which kind of source lifecycle mutation produced an event (ADR-0040). Mirrors
-// the Rust SourceLifecycleKind as a bare variant string (like TextKind). This
-// slice (#38) lands Added + Deleted; Replaced is reserved for #41 and is not
-// emitted yet.
-export type SourceLifecycleKind = "Added" | "Deleted";
+// Which kind of source lifecycle mutation produced an event (ADR-0040/0025).
+// Mirrors the Rust SourceLifecycleKind as a bare variant string (like TextKind).
+// Added = every ingest; Deleted = remove (issue #38); Replaced = re-upload
+// under an existing reference name (issue #41, ADR-0025).
+export type SourceLifecycleKind = "Added" | "Deleted" | "Replaced";
 
 // A source lifecycle event (ADR-0040): a user-driven mutation of the working
 // set's source membership. First-class in the thread (always visible, occupies a

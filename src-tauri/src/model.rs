@@ -148,9 +148,10 @@ pub struct DatasetDescriptor {
     /// (and recipes) deserializing to that default.
     #[serde(default)]
     pub privacy: DatasetPrivacy,
-    /// Stale-state anchor (issue #40, ADR-0013): `None` for an active dataset;
-    /// `Some` for a stale result_N whose upstream source was removed, naming the
-    /// source lifecycle event that invalidated it (traceability, ADR-0040). A
+    /// Stale-state anchor (issue #40/#41, ADR-0013): `None` for an active
+    /// dataset; `Some` for a stale result_N whose upstream source was removed
+    /// or replaced, naming the source lifecycle event that invalidated it
+    /// (traceability, ADR-0040). A
     /// stale result stays visible (read_rows / thread) but is excluded from the
     /// LLM working set and refused as a new SQL reference. `#[serde(default)]`
     /// keeps older descriptors (and recipes) deserializing to active -- a result
@@ -161,22 +162,51 @@ pub struct DatasetDescriptor {
     pub stale: Option<StaleAnchor>,
 }
 
+/// Why a result_N went stale and which kind of source event invalidated it
+/// (issue #40/#41, ADR-0013/0040/0041). The UI renders each variant distinctly
+/// in the stale badge (issue #41 AC4): `Deleted` -> "因源已删除而失效";
+/// `Replaced` -> "因源已更新而失效". Crosses IPC as a bare variant string (like
+/// [`SourceLifecycleKind`]).
+// `Default` -> `Deleted` is intentional: a StaleAnchor deserialized from a
+// pre-#41 recipe carries no `reason` field, and Deleted was the only stale
+// cause that existed before #41's replace-cascade, so defaulting to Deleted
+// preserves the prior semantics byte-for-byte (an older session's stale
+// results were all delete-cascaded).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum StaleReason {
+    /// The source was removed (issue #38/#40): the reference name is gone from
+    /// the shared namespace and its data is truly unreachable.
+    #[default]
+    Deleted,
+    /// The source was re-uploaded under the same reference name (ADR-0025,
+    /// issue #41): the name still resolves (now to a new snapshot), but v1
+    /// treats the cascade as a dead turn (ADR-0041) -- the old derivation is
+    /// never revived, the user re-asks against the new data.
+    Replaced,
+}
+
 /// Why a result_N is stale and which source lifecycle event invalidated it
-/// (issue #40, ADR-0013/0040): a snapshot of the `Deleted` source event's
-/// identity, captured on the dependent when the cascade marks it. The reference
-/// name is the stable identity (the same key SQL / the recipe chain used); the
-/// display label is carried verbatim so the UI can render "因「Orders」已删除而
-/// 失效" after the source itself is gone from the working set. Each stale
-/// result traces back to exactly one invalidating source event (ADR-0040
-/// traceability anchor).
+/// (issue #40/#41, ADR-0013/0040): a snapshot of the invalidating source
+/// event's identity, captured on the dependent when the cascade marks it. The
+/// reference name is the stable identity (the same key SQL / the recipe chain
+/// used); the display label is carried verbatim so the UI can render "因
+/// 「Orders」已删除而失效" / "因「Orders」已更新而失效" after the source itself
+/// is gone or swapped. Each stale result traces back to exactly one
+/// invalidating source event (ADR-0040 traceability anchor); [`StaleReason`]
+/// says which kind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StaleAnchor {
-    /// Reference name of the source whose removal invalidated this result --
-    /// the stable key that named the source in SQL / the recipe chain.
+    /// Reference name of the source whose removal/replacement invalidated this
+    /// result -- the stable key that named the source in SQL / the recipe chain.
     pub reference_name: String,
     /// Display label of that source at event time, so the thread still names
-    /// what was removed after the descriptor is gone.
+    /// what was removed/replaced after the descriptor is gone.
     pub display_name: String,
+    /// Which kind of source event invalidated this result (issue #41).
+    /// `#[serde(default)]` -> [`StaleReason::Deleted`] keeps pre-#41 recipes
+    /// loading (reason was the only stale cause before the replace-cascade).
+    #[serde(default)]
+    pub reason: StaleReason,
 }
 
 /// One visible Excel sheet's raw preview for the guided-load dialog: enough rows
@@ -440,11 +470,11 @@ pub struct TurnRecord {
 // window assembler (crate::window) consumes turns only, so source events are
 // naturally excluded from the provider payload.
 
-/// Which kind of source lifecycle mutation produced an event (ADR-0040). Mirrors
-/// the Rust enum as a bare variant string across IPC (like [`TextKind`]). This
-/// slice (#38) lands `Added` (every ingest) and `Deleted` (remove path);
-/// `Replaced` is reserved for the replace-cascade slice (#41) and is not emitted
-/// yet -- it is omitted from the enum entirely (YAGNI) until that slice adds it.
+/// Which kind of source lifecycle mutation produced an event (ADR-0040/0025).
+/// Mirrors the Rust enum as a bare variant string across IPC (like
+/// [`TextKind`]). `Added` lands on every ingest; `Deleted` on a remove (issue
+/// #38); `Replaced` on a re-upload under an existing reference name (issue
+/// #41, ADR-0025 -- the name stays but the snapshot is swapped).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceLifecycleKind {
     /// A source Dataset entered the working set (ADR-0022). Appended by every
@@ -454,6 +484,12 @@ pub enum SourceLifecycleKind {
     /// reference name is gone from the shared namespace; its snapshot is
     /// detached + file deleted.
     Deleted,
+    /// A source Dataset's backing snapshot was swapped under the same reference
+    /// name (ADR-0025, issue #41): a fresh re-upload takes over the name, the
+    /// old snapshot is discarded, dependent result_N cascade stale, and this
+    /// event lands in the timeline. Unlike `Deleted` the reference name stays
+    /// (still queryable, now resolving to new data).
+    Replaced,
 }
 
 /// A source lifecycle event (ADR-0040): first-class in the thread, never a turn.

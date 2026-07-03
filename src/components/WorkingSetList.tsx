@@ -1,5 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import type { DatasetDescriptor } from "../types";
+import { staleBadgeText } from "../staleBadge";
 
 export function WorkingSetList({
   datasets,
@@ -95,9 +96,7 @@ export function WorkingSetList({
             <small> {d.row_count} 行</small>
           </button>
           {d.stale && (
-            <span className="stale-badge">
-              因「{d.stale.display_name}」已删除而失效
-            </span>
+            <span className="stale-badge">{staleBadgeText(d.stale)}</span>
           )}
           <button
             type="button"

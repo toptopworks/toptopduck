@@ -1,4 +1,5 @@
 import type { SourceLifecycleKind, StaleAnchor, ThreadEntry, TurnRecord, VizSpec } from "../types";
+import { staleBadgeText } from "../staleBadge";
 
 interface ThreadProps {
   /** The unified timeline (ADR-0040): turns interleaved with source lifecycle
@@ -11,14 +12,15 @@ interface ThreadProps {
   /** Click a result turn to show its rows in the result pane. Carries the
    * turn's assumption so the side note is preserved across re-selections. */
   onSelectResult: (referenceName: string, assumption: string | null, viz: VizSpec | null) => void;
-  /** Stale result_N anchors keyed by reference name (issue #40, ADR-0013): a
-   * Materialized turn whose result is now stale renders a "因源已删除而失效"
-   * badge naming the removed source. The stale flag lives on the live working-
-   * set descriptor (a TurnRecord's dataset snapshot is the at-materialization
-   * state, always fresh), so the caller derives this map from the current
-   * working set and passes it down -- the thread itself holds no state.
-   * Optional so call sites that don't exercise stale rendering (tests) can
-   * omit it; defaults to an empty map (no badges rendered). */
+  /** Stale result_N anchors keyed by reference name (issue #40/#41,
+   * ADR-0013): a Materialized turn whose result is now stale renders a
+   * "因源已删除/已更新而失效" badge naming the invalidating source. The stale
+   * flag lives on the live working-set descriptor (a TurnRecord's dataset
+   * snapshot is the at-materialization state, always fresh), so the caller
+   * derives this map from the current working set and passes it down -- the
+   * thread itself holds no state. Optional so call sites that don't exercise
+   * stale rendering (tests) can omit it; defaults to an empty map (no badges
+   * rendered). */
   staleByReference?: ReadonlyMap<string, StaleAnchor>;
 }
 
@@ -27,11 +29,11 @@ interface ThreadProps {
 // render distinctly (Materialized / Textual[Clarify,Refuse] / Failed /
 // Cancelled), and the optional assumption note (ADR-0009/0018) shows as a
 // correctable side note. A result turn is clickable to (re)show its rows, and a
-// now-stale result (issue #40) carries an "因源已删除而失效" badge while staying
-// visible (soft invalidation, ADR-0013). Source lifecycle events (Added/
-// Deleted) render as non-interactive markers -- they occupy a timeline slot and
-// are always visible but are NOT turns, so they never show a question/outcome
-// and never enter the LLM window.
+// now-stale result (issue #40/#41) carries an "因源已删除/已更新而失效" badge
+// while staying visible (soft invalidation, ADR-0013). Source lifecycle events
+// (Added/Deleted/Replaced) render as non-interactive markers -- they occupy a
+// timeline slot and are always visible but are NOT turns, so they never show a
+// question/outcome and never enter the LLM window.
 export function Thread({ entries, selectedResult, onSelectResult, staleByReference = new Map() }: ThreadProps) {
   if (entries.length === 0) return null;
   return (
@@ -65,9 +67,11 @@ export function Thread({ entries, selectedResult, onSelectResult, staleByReferen
 }
 
 // A source lifecycle event rendered as a non-interactive timeline marker
-// (ADR-0040): distinct from a turn (no question, no outcome). Added = "+", a
-// source entered the working set; Deleted = "−", a source left it. The display
-// label is carried on the event so a deletion still names what was removed.
+// (ADR-0040): distinct from a turn (no question, no outcome). Added = "＋", a
+// source entered the working set; Deleted = "－", a source left it; Replaced =
+// "↻", a source's backing snapshot was swapped under the same reference name
+// (issue #41, ADR-0025). The display label is carried on the event so it still
+// names what was added/removed/replaced after the descriptor is gone.
 function SourceEvent({ kind, displayName }: { kind: SourceLifecycleKind; displayName: string }) {
   const { marker, verb } = sourceLifecycleText(kind);
   return (
@@ -89,6 +93,10 @@ function sourceLifecycleText(kind: SourceLifecycleKind): { marker: string; verb:
       return { marker: "＋", verb: "加载了" };
     case "Deleted":
       return { marker: "－", verb: "删除了" };
+    case "Replaced":
+      // Mirrors the working-set list's ↻ replace glyph; "换源了" carries the
+      // PRD term (CONTEXT.md / ADR-0025), distinct from 加载了 (a new name).
+      return { marker: "↻", verb: "换源了" };
     default: {
       const unhandled: never = kind;
       throw new Error(`unhandled source lifecycle kind: ${JSON.stringify(unhandled)}`);
@@ -137,10 +145,10 @@ function TurnBody({ record, selectedResult, onSelectResult, staleByReference }: 
     case "Materialized": {
       const { dataset, assumption, viz } = record.outcome.data;
       const active = dataset.reference_name === selectedResult;
-      // Issue #40 / ADR-0013: if this result has since gone stale, render the
-      // traceability badge naming the removed source. The result stays visible
-      // (soft invalidation) -- the badge is what tells the user it's no longer
-      // valid to build on.
+      // Issue #40/#41 / ADR-0013: if this result has since gone stale, render
+      // the traceability badge naming the invalidating source (removed or
+      // re-uploaded). The result stays visible (soft invalidation) -- the
+      // badge is what tells the user it's no longer valid to build on.
       const staleAnchor = staleByReference.get(dataset.reference_name);
       return (
         <p className="turn-outcome">
@@ -153,9 +161,7 @@ function TurnBody({ record, selectedResult, onSelectResult, staleByReference }: 
             结果：{dataset.reference_name}
           </button>
           {staleAnchor && (
-            <span className="stale-badge">
-              因「{staleAnchor.display_name}」已删除而失效
-            </span>
+            <span className="stale-badge">{staleBadgeText(staleAnchor)}</span>
           )}
           <AssumptionNote assumption={assumption} />
         </p>

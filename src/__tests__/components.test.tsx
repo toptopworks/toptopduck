@@ -478,6 +478,31 @@ describe("WorkingSetList", () => {
     );
     expect(screen.getByRole("button", { name: /删除/ })).toBeDisabled();
   });
+
+  it("renders a stale badge whose verb follows the anchor reason (issue #41 AC4)", () => {
+    // AC4: a stale result row carries a badge naming the invalidating source,
+    // with "已删除" for a Deleted anchor and "已更新" for a Replaced anchor
+    // (single-sourced via staleBadgeText, shared with the Thread badge).
+    const stale: DatasetDescriptor = {
+      ...mockDataset,
+      reference_name: "result_1",
+      display_name: "count",
+      stale: {
+        reference_name: "people",
+        display_name: "员工表",
+        reason: "Deleted" as const,
+      },
+    };
+    render(
+      <WorkingSetList
+        datasets={[stale]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    expect(screen.getByText(/因「员工表」已删除而失效/)).toBeInTheDocument();
+  });
 });
 
 describe("GuidedLoadDialog", () => {
@@ -874,6 +899,46 @@ describe("Thread", () => {
     expect(screen.getByText("问 result_1")).toBeInTheDocument();
     // Source markers carry no clickable result link (only the turn does).
     expect(screen.getAllByRole("button").length).toBe(1);
+  });
+
+  it("renders a Replaced source event with its own marker verb (issue #41)", () => {
+    // ADR-0025 / issue #41: a re-upload under an existing reference name lands a
+    // Replaced event, distinct from Added (new name) and Deleted (name gone) --
+    // its marker verb is "换源了", carrying the PRD term (CONTEXT.md).
+    const entries: ThreadEntry[] = [
+      {
+        entry: "Source",
+        data: { kind: "Replaced", reference_name: "people", display_name: "员工表" },
+      },
+    ];
+    render(<Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />);
+    expect(screen.getByText(/换源了「员工表」/)).toBeInTheDocument();
+  });
+
+  it("renders a stale badge whose verb follows the anchor reason (issue #41 AC4)", () => {
+    // AC4: a stale result's badge says "已删除" when its source was deleted and
+    // "已更新" when its source was replaced -- same traceability anchor shape,
+    // two wording paths driven by StaleReason (Deleted vs Replaced).
+    const entries: ThreadEntry[] = [turnEntry(materializedRecord("result_1", null))];
+    const staleByReference = new Map([
+      [
+        "result_1",
+        {
+          reference_name: "people",
+          display_name: "员工表",
+          reason: "Replaced" as const,
+        },
+      ],
+    ]);
+    render(
+      <Thread
+        entries={entries}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        staleByReference={staleByReference}
+      />,
+    );
+    expect(screen.getByText(/因「员工表」已更新而失效/)).toBeInTheDocument();
   });
 });
 
