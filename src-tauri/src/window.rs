@@ -65,7 +65,19 @@ pub fn assemble(
 /// the window happened to keep -- do not "fix" this to read the windowed slice.
 pub fn resolve_active(working_set: &WorkingSet, history: &[TurnRecord]) -> Option<String> {
     let last_result = history.iter().rev().find_map(|t| match &t.outcome {
-        TurnOutcome::Materialized { dataset, .. } => Some(dataset.reference_name.clone()),
+        TurnOutcome::Materialized { dataset, .. } => {
+            // Skip stale results (issue #40, ADR-0013): the focus must never
+            // land on a soft-invalidated result. The stale flag lives on the
+            // working-set descriptor (the TurnRecord snapshot is the at-
+            // materialization state), so check the live working set by name --
+            // a stale result keeps producing turns visible in the thread, this
+            // only stops it from being the next question's default target.
+            if working_set.is_stale(&dataset.reference_name) {
+                None
+            } else {
+                Some(dataset.reference_name.clone())
+            }
+        }
         _ => None,
     });
     last_result.or_else(|| working_set.active().map(|d| d.reference_name.clone()))
@@ -107,6 +119,10 @@ fn assemble_datasets(working_set: &WorkingSet, history: &[TurnRecord]) -> Vec<Da
     working_set
         .list()
         .iter()
+        // Exclude stale results (issue #40, ADR-0013 invariant 3): a stale
+        // result_N must not enter the LLM-visible working set. Sources are
+        // never stale (removed outright, not soft-invalidated).
+        .filter(|d| d.stale.is_none())
         .map(|d| dataset_ref(d, working_set, &in_window_results))
         .collect()
 }
@@ -263,6 +279,7 @@ mod tests {
             fingerprint: String::new(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
+            stale: None,
         }
     }
 
@@ -278,6 +295,7 @@ mod tests {
             fingerprint: String::new(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
+            stale: None,
         }
     }
 

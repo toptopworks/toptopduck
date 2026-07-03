@@ -148,6 +148,35 @@ pub struct DatasetDescriptor {
     /// (and recipes) deserializing to that default.
     #[serde(default)]
     pub privacy: DatasetPrivacy,
+    /// Stale-state anchor (issue #40, ADR-0013): `None` for an active dataset;
+    /// `Some` for a stale result_N whose upstream source was removed, naming the
+    /// source lifecycle event that invalidated it (traceability, ADR-0040). A
+    /// stale result stays visible (read_rows / thread) but is excluded from the
+    /// LLM working set and refused as a new SQL reference. `#[serde(default)]`
+    /// keeps older descriptors (and recipes) deserializing to active -- a result
+    /// is fresh unless explicitly marked stale by the cascade. Omitted on the
+    /// wire when active (`skip_serializing_if`), so a fresh descriptor's JSON is
+    /// byte-identical to pre-#40 (an active result never carried the field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale: Option<StaleAnchor>,
+}
+
+/// Why a result_N is stale and which source lifecycle event invalidated it
+/// (issue #40, ADR-0013/0040): a snapshot of the `Deleted` source event's
+/// identity, captured on the dependent when the cascade marks it. The reference
+/// name is the stable identity (the same key SQL / the recipe chain used); the
+/// display label is carried verbatim so the UI can render "因「Orders」已删除而
+/// 失效" after the source itself is gone from the working set. Each stale
+/// result traces back to exactly one invalidating source event (ADR-0040
+/// traceability anchor).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaleAnchor {
+    /// Reference name of the source whose removal invalidated this result --
+    /// the stable key that named the source in SQL / the recipe chain.
+    pub reference_name: String,
+    /// Display label of that source at event time, so the thread still names
+    /// what was removed after the descriptor is gone.
+    pub display_name: String,
 }
 
 /// One visible Excel sheet's raw preview for the guided-load dialog: enough rows
@@ -453,11 +482,12 @@ pub enum ThreadEntry {
     Source(SourceLifecycleEvent),
 }
 
-/// Why a source removal was rejected (issue #38). Three honest refusals:
-/// `NotFound` (no such reference name), `IsActive` (silent-jump ban, ADR-0035;
-/// explicit re-selection lands in #39), and `HasDerivatives` (no stale-cascade
-/// engine yet, #40). The latter two are deferred to later slices and surface
-/// here as honest rejections rather than partial handling.
+/// Why a source removal was rejected (issues #38/#39/#40). Two honest refusals
+/// remain after #40 landed the stale-cascade engine: `NotFound` (no such
+/// reference name) and `IsActive` (silent-jump ban, ADR-0035; explicit re-
+/// selection lands in #39). Dependent results no longer block removal -- #40
+/// transitively marks them stale (ADR-0013/0040), so a delete always cascades
+/// instead of refusing.
 /// Does NOT cross IPC as a typed value: the remove command surfaces it as a
 /// plain error string (the same shape rename / replace use), so (unlike
 /// [`LoadError`]) it carries no serde wire contract and no types.ts mirror.
@@ -475,14 +505,6 @@ pub enum RemoveSourceError {
         reference_name: String,
         display_name: String,
     },
-    /// The working set holds one or more materialized `result_N`. Without the
-    /// stale-cascade engine (#40) the session cannot honestly mark those
-    /// derivations stale, so removal is refused until that slice lands. The
-    /// conservative guard ("any result exists") is the only provenance-free way
-    /// to guarantee "no derived dependency" today. Checked before `IsActive`
-    /// because a derived dependency blocks removal regardless of which source
-    /// is active.
-    HasDerivatives,
     /// `remove_active_source` only: the named reference is not the current
     /// active source. The frontend's confirm-dialog path only fires for the
     /// active source, so reaching this branch means a stale view raced a
@@ -504,10 +526,6 @@ impl std::fmt::Display for RemoveSourceError {
                 f,
                 "「{display_name}」是当前焦点表，请先在剩余源中选一个继续\
                  （或中止操作）"
-            ),
-            Self::HasDerivatives => write!(
-                f,
-                "工作集中存在中间结果，暂不支持删源（级联失效能力见后续切片）"
             ),
             Self::NotActive(name) => write!(
                 f,

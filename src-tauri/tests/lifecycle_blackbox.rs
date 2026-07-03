@@ -273,10 +273,11 @@ fn remove_source_refuses_active_when_other_sources_remain() {
 }
 
 #[test]
-fn remove_source_refuses_while_results_exist() {
-    // AC: without the stale-cascade engine (#40) the session cannot honestly
-    // mark dependent result_N stale, so removal is refused while any result
-    // exists -- the conservative, provenance-free "no derived dependency" guard.
+fn remove_source_cascades_stale_to_dependent_result() {
+    // AC1/AC7 (issue #40): deleting a source marks every result_N that derived
+    // from it stale (instead of the #38 conservative refusal). result_1 FROM
+    // people -> delete people -> result_1 stays registered but carries a stale
+    // anchor tracing back to the Deleted people event (ADR-0040 traceability).
     let mut session =
         session_with_scripts(&[("count people", r#"SELECT COUNT(*) AS n FROM "people".data"#)]);
     load_source(&mut session, &fixture("people.csv"));
@@ -285,17 +286,26 @@ fn remove_source_refuses_while_results_exist() {
     assert!(matches!(outcome, TurnOutcome::Materialized { .. }));
     assert!(session.get("result_1").is_some(), "a result exists now");
 
-    // people is non-active, but a result exists -> HasDerivatives refusal.
-    let err = session.remove_source("people").unwrap_err();
-    assert!(
-        matches!(err, RemoveSourceError::HasDerivatives),
-        "removal refused while results exist, got {err:?}"
-    );
-    // Refusal left the source in place; no Deleted event.
-    assert!(session.get("people").is_some());
+    // people is non-active -> remove_source proceeds, cascading result_1 stale.
+    session
+        .remove_source("people")
+        .expect("cascade-stale removal instead of refusal");
+
+    // result_1 stays registered (visible) but is now stale, anchored to people.
+    let result_1 = session
+        .get("result_1")
+        .expect("result_1 still registered after cascade");
+    let anchor = result_1
+        .stale
+        .as_ref()
+        .expect("result_1 marked stale after its source was deleted");
     assert_eq!(
-        count_events(session.conversation(), SourceLifecycleKind::Deleted),
-        0
+        anchor.reference_name, "people",
+        "anchor names the deleted source event"
+    );
+    assert!(
+        !anchor.display_name.is_empty(),
+        "anchor carries the source's display label"
     );
 }
 
@@ -418,10 +428,12 @@ fn remove_active_source_refuses_invalid_continue() {
 }
 
 #[test]
-fn remove_active_source_refuses_with_results() {
-    // Same conservative no-derived-dependency guard as `remove_source`: a
-    // result exists, so removal cannot be honored honestly until #40's
-    // cascade-stale engine. The focus pointer stays put.
+fn remove_active_source_cascades_stale_to_dependent_result() {
+    // AC1/AC7 (issue #40): the cascade reaches the active-source path too --
+    // deleting the focus source with an explicit continuation still marks its
+    // dependent results stale. result_1 FROM orders ->
+    // remove_active_source(orders, people) -> result_1 stale (anchored to
+    // orders), focus now on the chosen continuation.
     let mut session =
         session_with_scripts(&[("count", r#"SELECT COUNT(*) AS n FROM "orders".data"#)]);
     load_source(&mut session, &fixture("people.csv"));
@@ -430,21 +442,20 @@ fn remove_active_source_refuses_with_results() {
     assert!(matches!(outcome, TurnOutcome::Materialized { .. }));
     assert!(session.get("result_1").is_some());
 
-    let err = session
+    session
         .remove_active_source("orders", "people")
-        .unwrap_err();
-    assert!(
-        matches!(err, RemoveSourceError::HasDerivatives),
-        "removal refused while results exist, got {err:?}"
-    );
-    // Refusal left everything in place.
-    assert!(session.get("orders").is_some());
-    assert!(session.get("people").is_some());
-    assert!(session.get("result_1").is_some());
+        .expect("cascade-stale active removal");
+
+    // Focus moved to the explicit continuation (ADR-0035 / issue #39).
     assert_eq!(
-        count_events(session.conversation(), SourceLifecycleKind::Deleted),
-        0
+        session.active().unwrap().reference_name,
+        "people",
+        "focus moved to the chosen continuation"
     );
+    // result_1 stale, anchored to orders (the removed source).
+    let result_1 = session.get("result_1").expect("result_1 still registered");
+    let anchor = result_1.stale.as_ref().expect("result_1 marked stale");
+    assert_eq!(anchor.reference_name, "orders");
 }
 
 #[test]
@@ -453,9 +464,11 @@ fn timeline_interleaves_turns_and_source_events_in_order() {
     // correct chronological position. ingest -> ingest -> delete -> ask yields
     // [Added, Added, Deleted, Turn] -- the delete is stamped at its own slot
     // (not folded into a turn) and the following turn keeps question + outcome.
-    // (The delete must precede the ask: a materialized result would otherwise
-    // make the remove guard refuse with HasDerivatives -- the conservative
-    // rule this slice pins until cascade-stale lands in #40.)
+    // (The delete precedes the ask so result_1 -- produced by the ask -- is
+    // not yet registered when people is removed. #40's cascade would otherwise
+    // mark a result that derived from people stale; here people has no
+    // dependent at delete time, so the cascade is empty and the order only
+    // pins the timeline interleaving.)
     let mut session =
         session_with_scripts(&[("count", r#"SELECT COUNT(*) AS n FROM "orders".data"#)]);
     load_source(&mut session, &fixture("people.csv")); // [Added]
@@ -569,5 +582,189 @@ fn source_events_neither_advance_result_n_nor_are_turns() {
             );
         }
         other => panic!("expected Materialized, got {other:?}"),
+    }
+}
+
+#[test]
+fn delete_source_cascades_transitively_through_chained_results() {
+    // AC2 (issue #40): the cascade is transitive. result_1 FROM orders, then
+    // result_2 FROM result_1; deleting orders marks BOTH result_1 (direct) and
+    // result_2 (via the now-stale result_1) stale.
+    let mut session = session_with_scripts(&[
+        ("first", r#"SELECT COUNT(*) AS n FROM "orders".data"#),
+        ("second", r#"SELECT * FROM "result_1""#),
+    ]);
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv")); // active = orders
+    session.ask("first"); // result_1 FROM orders
+    session.ask("second"); // result_2 FROM result_1
+    assert!(session.get("result_2").is_some());
+
+    // delete orders -> cascade: result_1 (direct) + result_2 (via result_1).
+    session
+        .remove_active_source("orders", "people")
+        .expect("cascade");
+    let r1 = session.get("result_1").expect("result_1 registered");
+    let r2 = session.get("result_2").expect("result_2 registered");
+    assert!(r1.stale.is_some(), "result_1 stale (direct dependency)");
+    assert!(
+        r2.stale.is_some(),
+        "result_2 stale (transitive via result_1)"
+    );
+}
+
+#[test]
+fn stale_result_remains_visible_in_working_set_and_thread() {
+    // AC3 (issue #40): a stale result stays in the working set list AND its
+    // producing turn stays in the thread -- soft invalidation keeps the user's
+    // visible history. (Staleness is rendered off the descriptor's anchor; the
+    // turn entry itself is unchanged, ADR-0028 always-visible.)
+    let mut session =
+        session_with_scripts(&[("count", r#"SELECT COUNT(*) AS n FROM "orders".data"#)]);
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv"));
+    session.ask("count"); // result_1
+    session
+        .remove_active_source("orders", "people")
+        .expect("cascade");
+
+    // Working set still lists result_1 (soft, not removed).
+    assert!(
+        session
+            .list()
+            .iter()
+            .any(|d| d.reference_name == "result_1"),
+        "stale result stays in working set list"
+    );
+    // Thread still has the producing turn (always-visible, ADR-0028).
+    assert!(
+        session.conversation().iter().any(|e| matches!(
+            e,
+            ThreadEntry::Turn(t) if matches!(&t.outcome,
+                TurnOutcome::Materialized { dataset, .. }
+                if dataset.reference_name == "result_1")
+        )),
+        "stale result's producing turn stays in thread"
+    );
+}
+
+#[test]
+fn new_question_referencing_stale_result_is_rejected() {
+    // AC4 (issue #40, ADR-0013 invariant 2): a stale result_N may not anchor a
+    // new derivation -- the provenance pre-check refuses the SQL with a Failed
+    // turn naming the dead reference, no retry, no execution.
+    let mut session = session_with_scripts(&[
+        ("count", r#"SELECT COUNT(*) AS n FROM "orders".data"#),
+        ("again", r#"SELECT * FROM "result_1""#),
+    ]);
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv")); // active = orders
+    session.ask("count"); // result_1 FROM orders
+                          // delete orders -> result_1 (FROM orders) goes stale.
+    session
+        .remove_active_source("orders", "people")
+        .expect("cascade");
+    assert!(session.get("result_1").unwrap().stale.is_some());
+
+    let outcome = session.ask("again"); // SQL FROM result_1 -> refused
+    match outcome {
+        TurnOutcome::Failed { reason } => {
+            assert!(
+                reason.contains("result_1") && reason.contains("失效"),
+                "refusal names the stale reference: {reason}"
+            );
+        }
+        other => panic!("expected Failed for stale reference, got {other:?}"),
+    }
+}
+
+#[test]
+fn stale_result_excluded_from_llm_window() {
+    // AC5 (issue #40, ADR-0013 invariant 3): a stale result_N does not enter
+    // the LLM-visible working set. Proved by inspecting the request the window
+    // assembler handed the fake: after result_1 goes stale, the next ask's
+    // dataset list omits it (while the still-active source remains).
+    let mut provider = FakeProvider::new();
+    provider = provider
+        .scripted(
+            "count",
+            reply_sql(r#"SELECT COUNT(*) AS n FROM "orders".data"#),
+        )
+        .scripted("next", reply_sql(r#"SELECT 1 AS n"#));
+    let captured = provider.captured();
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv")); // active = orders
+    session.ask("count"); // result_1 from orders
+    session
+        .remove_active_source("orders", "people")
+        .expect("cascade"); // result_1 stale
+    session.ask("next"); // window built here
+
+    let reqs = captured.lock().expect("capture lock");
+    let last = reqs.last().expect("a request captured");
+    let dataset_names: Vec<&str> = last
+        .datasets
+        .iter()
+        .map(|d| d.reference_name.as_str())
+        .collect();
+    assert!(
+        !dataset_names.contains(&"result_1"),
+        "stale result_1 excluded from LLM window, got: {dataset_names:?}"
+    );
+    assert!(
+        dataset_names.contains(&"people"),
+        "active source still present: {dataset_names:?}"
+    );
+}
+
+#[test]
+fn read_rows_returns_history_for_stale_result() {
+    // AC6 (issue #40, ADR-0013 invariant 1): a stale result stays VISIBLE --
+    // read_rows still returns its historical data (the point of soft
+    // invalidation vs a hard delete that would erase the user's results).
+    let mut session =
+        session_with_scripts(&[("count", r#"SELECT COUNT(*) AS n FROM "orders".data"#)]);
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv"));
+    session.ask("count"); // result_1 (COUNT -> 1 row)
+    session
+        .remove_active_source("orders", "people")
+        .expect("cascade");
+    assert!(session.get("result_1").unwrap().stale.is_some());
+
+    // read_rows still works on the stale result, returning its preserved rows.
+    let page = session
+        .read_rows("result_1", 0, 10)
+        .expect("stale result history is readable");
+    assert_eq!(page.total, 1, "result_1 row count preserved while stale");
+}
+
+#[test]
+fn result_number_takes_max_plus_one_after_stale() {
+    // AC8 (issue #40, ADR-0022/0013): after a result goes stale, the next
+    // materialization takes max(existing)+1 -- stale numbers are never reused
+    // and gaps are never back-filled. result_1 stale -> next is result_2.
+    let mut session = session_with_scripts(&[
+        ("count", r#"SELECT COUNT(*) AS n FROM "orders".data"#),
+        ("more", r#"SELECT COUNT(*) AS n FROM "people".data"#),
+    ]);
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv")); // active = orders
+    session.ask("count"); // result_1 from orders
+    session
+        .remove_active_source("orders", "people")
+        .expect("cascade"); // result_1 stale; people now active source
+    assert!(session.get("result_1").unwrap().stale.is_some());
+
+    let outcome = session.ask("more"); // FROM people -> new result
+    match outcome {
+        TurnOutcome::Materialized { dataset, .. } => {
+            assert_eq!(
+                dataset.reference_name, "result_2",
+                "next result is max+1, never reusing the stale number"
+            );
+        }
+        other => panic!("expected Materialized result_2, got {other:?}"),
     }
 }

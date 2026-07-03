@@ -103,14 +103,19 @@ pub(crate) fn attach_sources(
 /// Mirror each prior turn result (`result_N`, a base table on admin) into the
 /// sandbox as a base table so chained references resolve. The mirror is a
 /// type-agnostic Value round-trip via [`copy_table`]. Streaming (one row at a
-/// time), so memory is O(one row), not O(whole table).
+/// time), so memory is O(one row), not O(whole table). Stale results (issue
+/// #40, ADR-0013 invariant 2) are NOT mirrored: a stale result may not anchor a
+/// new derivation, so a `FROM result_N` against one fails at execution ("Table
+/// does not exist") -- a defense-in-depth backstop for the provenance pre-check
+/// that catches the common case before execution. read_rows reads stale
+/// results from admin directly, so visibility is unaffected.
 pub(crate) fn mirror_results(
     sandbox: &Connection,
     admin: &Connection,
     working_set: &WorkingSet,
 ) -> Result<(), ExecError> {
     for d in working_set.list() {
-        if working_set.is_result(&d.reference_name) {
+        if working_set.is_result(&d.reference_name) && !working_set.is_stale(&d.reference_name) {
             copy_table(admin, &d.reference_name, sandbox, &d.reference_name)?;
         }
     }

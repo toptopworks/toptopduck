@@ -28,8 +28,8 @@ use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
     RectifyProvenance, RemoveSourceError, RenameError, RowPage, SheetGuidance, SheetRectify,
-    SourceLifecycleEvent, SourceLifecycleKind, ThreadEntry, TurnError, TurnOutcome, TurnRecord,
-    EXECUTE_FAIL_PREFIX, RESOURCE_FAIL_PREFIX,
+    SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, ThreadEntry, TurnError, TurnOutcome,
+    TurnRecord, EXECUTE_FAIL_PREFIX, RESOURCE_FAIL_PREFIX,
 };
 use crate::provider::{Provider, ProviderError, ProviderReply, UnwiredProvider};
 use crate::session::snapshot::derive_table;
@@ -269,6 +269,7 @@ impl Session {
             fingerprint: snap.fingerprint,
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
+            stale: None,
         };
         self.working_set.register(descriptor.clone());
         // ADR-0040: a successful add appends a source lifecycle event -- a
@@ -510,6 +511,7 @@ impl Session {
             fingerprint: snap.fingerprint,
             rectify,
             privacy: DatasetPrivacy::default(),
+            stale: None,
         })
     }
 
@@ -696,15 +698,9 @@ impl Session {
             .ok_or_else(|| RemoveSourceError::NotFound(reference_name.to_string()))?
             .clone();
 
-        // Refuse while any materialized result exists: the stale-cascade engine
-        // (#40) is what honestly marks dependent derivations stale, and without
-        // provenance the only honest "no derived dependency" claim is "no result
-        // exists at all". Checked before the active guard: a derived dependency
-        // blocks removal regardless of which source is active, so even an
-        // explicit-continuation path (`remove_active_source`) must hit this.
-        if self.working_set.has_results() {
-            return Err(RemoveSourceError::HasDerivatives);
-        }
+        // Dependent results no longer block removal (#40 stale-cascade engine):
+        // commit_removal transitively marks every downstream result_N stale
+        // (ADR-0013/0040), so a delete always cascades instead of refusing.
 
         // Refuse the active source WHEN other sources remain: removing it would
         // silently move the user's focus (ADR-0035) -- the caller must go
@@ -713,11 +709,13 @@ impl Session {
         // through to `commit_removal` -- the working set goes empty and the UI
         // prompts upload, which IS the user's explicit end state (no silent
         // jump happens because there is nothing left to jump to).
-        // NOTE: `working_set.active()` (last-registered source) is used rather
-        // than `Session::active`/resolve_active (user focus = latest result,
-        // else active source) because the `has_results()` guard above ensures
-        // no result exists, where the two coincide. When #40 lifts that guard,
-        // re-check this against the resolve_active semantics.
+        // NOTE: `working_set.active()` (the active-SOURCE pointer = most-recent
+        // source) is the right check here, not `Session::active`/resolve_active
+        // (user focus = latest result, else active source). Removing a source
+        // concerns only the source pointer: a result may exist and the cascade
+        // marks its downstream stale, but that does not move the source pointer
+        // -- the focus pointer is handled by remove_active_source's explicit
+        // continuation path.
         let is_active = self
             .working_set
             .active()
@@ -744,10 +742,10 @@ impl Session {
     /// direct IPC cannot smuggle an inconsistent state):
     /// - `reference_name` must be the active source (else `NotActive`);
     /// - `continue_with` must be a remaining source -- registered, not the
-    ///   removed name, not a `result_N` (else `InvalidContinueWith`);
-    /// - no materialized result may exist (else `HasDerivatives`, same
-    ///   conservative guard as `remove_source` -- `remove_active_source` is a
-    ///   variant of the same removal, not a way around it).
+    ///   removed name, not a `result_N` (else `InvalidContinueWith`).
+    ///
+    /// Dependent results no longer block removal (#40 cascade marks them stale
+    /// on commit), so there is no `HasDerivatives` refusal on this path.
     ///
     /// The frontend's confirm dialog already excludes every
     /// `InvalidContinueWith` / `NotActive` case, so reaching those branches
@@ -786,11 +784,8 @@ impl Session {
             ));
         }
 
-        // Same derived-dependency guard as `remove_source`, BEFORE the pointer
-        // move so a refusal leaves nothing mutated.
-        if self.working_set.has_results() {
-            return Err(RemoveSourceError::HasDerivatives);
-        }
+        // No derived-dependency guard: #40's cascade marks downstream results
+        // stale on commit, so removal proceeds regardless of results.
 
         // Repoint the focus at the chosen continuation BEFORE the removal.
         // `set_active` gates on registered + non-result, so a `false` here =
@@ -821,6 +816,25 @@ impl Session {
     /// against an in-flight turn; the frontend's shared `loading` flag adds the
     /// ADR-0040 execution-window UX guard, so no in-flight guard is needed here.
     fn commit_removal(&mut self, reference_name: &str, display_name: &str) {
+        // Cascade stale (issue #40, ADR-0013/0025/0040): before the source
+        // leaves the working set, transitively mark every result_N downstream
+        // of it (direct + via chained results) as stale, each carrying this
+        // Deleted event's identity as its traceability anchor. Stale results
+        // stay registered (visible) -- only the source is removed below.
+        let newly_stale = self.working_set.cascade_stale(
+            reference_name,
+            StaleAnchor {
+                reference_name: reference_name.to_string(),
+                display_name: display_name.to_string(),
+            },
+        );
+        if !newly_stale.is_empty() {
+            log::info!(
+                target: "toptopduck::session",
+                "删除源「{reference_name}」级联失效：{}", newly_stale.join(", ")
+            );
+        }
+
         // DETACH the read-only snapshot catalog (mirrors rollback_excel). A
         // DETACH failure leaves a ghost attachment that cannot affect
         // correctness (the working set no longer names it; a later same-name
@@ -1052,6 +1066,7 @@ impl Session {
             fingerprint: new_snap.fingerprint,
             rectify: RectifyProvenance::NotApplicable,
             privacy: existing.privacy,
+            stale: None,
         };
         self.working_set.replace(updated.clone());
         LoadOutcome::Loaded(updated)
@@ -1187,6 +1202,18 @@ impl Session {
                                             "{}{}",
                                             RESOURCE_FAIL_PREFIX, exec_err.detail
                                         ),
+                                    };
+                                    return self.record_turn(question, outcome);
+                                }
+                                // Stale reference (issue #40, ADR-0013 invariant
+                                // 2): refuse without retry -- the same SQL would
+                                // reference the same stale result, so retrying
+                                // only burns budget. Honest Failed turn naming
+                                // the dead reference (the pre-check already wrote
+                                // a full Chinese reason into exec_err.detail).
+                                ExecErrorKind::StaleReference => {
+                                    let outcome = TurnOutcome::Failed {
+                                        reason: exec_err.detail.clone(),
                                     };
                                     return self.record_turn(question, outcome);
                                 }
@@ -1339,6 +1366,22 @@ impl Session {
         // a failed attempt registers nothing, so N is stable across retries.
         let n = self.working_set.next_result_number();
         let result_name = format!("result_{n}");
+
+        // Stale-reference refusal (ADR-0013 invariant 2) + provenance record
+        // (issue #40): parse the SQL once before touching the sandbox so a
+        // stale reference is rejected without burning setup or retry budget.
+        // The same analysis yields the dependency set recorded after a
+        // successful materialize -- the cascade reads it on a later source
+        // delete. Conservative parse failure (deps = all members) is recorded
+        // as-is so a delete never under-cascades ("宁可多失效不漏失效").
+        let deps = crate::provenance::analyze(sql, &self.working_set);
+        if let Some(stale_ref) = deps.stale_ref.as_ref() {
+            return Err(ExecError::new(
+                ExecErrorKind::StaleReference,
+                format!("引用了已失效的 {stale_ref}（因源已删除而失效，不能在新查询中引用）"),
+            ));
+        }
+
         // Provider SQL runs on a locked-down sandbox (ADR-0005 read_* closure):
         // a separate instance with LocalFileSystem disabled, so a read_* table
         // function is refused by the engine ("... disabled by configuration").
@@ -1441,7 +1484,7 @@ impl Session {
         };
         let descriptor = DatasetDescriptor {
             reference_name: result_name.clone(),
-            display_name: result_name,
+            display_name: result_name.clone(),
             source_path: String::new(), // derived -- no source file (ADR-0004)
             columns: shape.columns,
             row_count: shape.row_count,
@@ -1449,8 +1492,17 @@ impl Session {
             fingerprint: shape.fingerprint,
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
+            stale: None,
         };
+        // Record the just-materialized result's provenance (issue #40,
+        // ADR-0025): the dependency set the pre-check computed. The cascade
+        // reads this on a later source delete to find dependents. Recorded
+        // under `result_name` (stable identity) AFTER register_result, so the
+        // member_names snapshot at analyze time already excluded this new
+        // result -- no self-dependency. `deps.refs` was pre-intersected with
+        // the then-live working set (members present at the parse moment).
         self.working_set.register_result(descriptor.clone());
+        self.working_set.record_provenance(&result_name, deps.refs);
         Ok(descriptor)
     }
 

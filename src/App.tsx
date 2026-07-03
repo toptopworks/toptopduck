@@ -30,6 +30,7 @@ import type {
   DatasetDescriptor,
   GuidanceRequest,
   SheetGuidance,
+  StaleAnchor,
   ThreadEntry,
   VizSpec,
 } from "./types";
@@ -66,6 +67,13 @@ interface LatestResult {
 
 export default function App() {
   const [datasets, setDatasets] = useState<DatasetDescriptor[]>([]);
+  // Issue #40 stale-cascade: result_N whose upstream source was removed stay
+  // in the working set (visible, ADR-0013) but carry a stale anchor. Keyed by
+  // reference name so the Thread can badge stale results without each
+  // TurnRecord snapshot re-fetching current state. Rebuilt per render -- the
+  // working set is small and this dodges a useMemo for a trivial derivation.
+  const staleByReference = new Map<string, StaleAnchor>();
+  for (const d of datasets) if (d.stale) staleByReference.set(d.reference_name, d.stale);
   const [activeName, setActiveName] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -257,7 +265,7 @@ export default function App() {
   // snapshot, deletes its file, drops the reference name, and appends a Deleted
   // source lifecycle event. Used for non-active sources and for the LAST active
   // source (AC4 -> empty working set). Tagged "delete" so the error prefix
-  // matches the action (a HasDerivatives / IsActive refusal is never mislabelled
+  // matches the action (an IsActive refusal is never mislabelled
   // a load failure). The shared `loading` flag disables source management while
   // the (synchronous, lock-held) removal runs and -- via the same flag set by
   // handleAsk -- while a turn is in flight (ADR-0040 execution window).
@@ -287,7 +295,7 @@ export default function App() {
 
   // AC2 (issue #39): the user picked a continuation -- delete the active source
   // and repoint focus at it in one atomic IPC. Success closes the dialog; a
-  // refusal (stale view / HasDerivatives) keeps it open so the error stays
+  // refusal (stale view / IsActive) keeps it open so the error stays
   // attached to the same action. Mirrors useSimpleMutation's two-error split
   // (commit ok vs refresh failed) but is hand-written so it can clear the
   // pending dialog state on a committed success.
@@ -421,6 +429,7 @@ export default function App() {
         entries={thread}
         selectedResult={latestResult?.referenceName ?? null}
         onSelectResult={handleSelectResult}
+        staleByReference={staleByReference}
       />
       {latestResult && (
         <section className="panel">
@@ -475,9 +484,10 @@ export default function App() {
           // this dialog only opens in the no-result case (activeName resolves to
           // a source), so these ARE the remaining sources. A stale view that
           // opens it while a result exists is refused by the backend's
-          // HasDerivatives guard -- result removal is #40's scope, not this
-          // slice, and the DatasetDescriptor carries no source/result flag for
-          // the frontend to pre-filter without a round-trip.
+          // The DatasetDescriptor carries no source/result flag, so the
+          // frontend cannot pre-filter result_N out of the candidate list
+          // without a round-trip -- the backend's set_active rejects a result
+          // name as InvalidContinueWith if the user picks one.
           candidates={datasets.filter(
             (d) => d.reference_name !== pendingActiveDelete.reference_name,
           )}

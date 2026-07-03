@@ -104,6 +104,7 @@ fn sample_descriptor() -> DatasetDescriptor {
         fingerprint: "abcd".into(),
         rectify: RectifyProvenance::NotApplicable,
         privacy: DatasetPrivacy::default(),
+        stale: None,
     }
 }
 

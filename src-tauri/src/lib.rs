@@ -18,6 +18,7 @@ pub mod commands;
 pub mod guardrail;
 pub mod ingest;
 pub mod model;
+pub mod provenance;
 pub mod provider;
 pub mod session;
 pub mod window;
@@ -28,8 +29,8 @@ pub use model::{
     ChartKind, ColumnSchema, DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet,
     LoadError, LoadOutcome, ProviderConfig, ProviderConfigView, RectifyProvenance,
     RemoveSourceError, RenameError, RowPage, SheetGuidance, SheetRectify, SourceLifecycleEvent,
-    SourceLifecycleKind, TextKind, ThreadEntry, TurnError, TurnOutcome, TurnRecord, VizSpec,
-    DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
+    SourceLifecycleKind, StaleAnchor, TextKind, ThreadEntry, TurnError, TurnOutcome, TurnRecord,
+    VizSpec, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
 };
 pub use provider::anthropic::AnthropicProvider;
 pub use provider::fake::FakeProvider;

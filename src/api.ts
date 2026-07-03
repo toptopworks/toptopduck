@@ -72,8 +72,9 @@ export async function removeSource(referenceName: string): Promise<void> {
 // drops the removed source, appends a Deleted event. The dialog lists only
 // remaining sources, so a NotActive / InvalidContinueWith rejection here means
 // the view raced a concurrent mutation -- the caller refreshes and retries.
-// Same HasDerivatives guard as removeSource (→ #40). Rejects with a plain
-// error string; no typed RemoveSourceError crosses IPC.
+// #40's cascade marks dependent results stale on commit (no HasDerivatives
+// refusal). Rejects with a plain error string; no typed RemoveSourceError
+// crosses IPC.
 export async function removeActiveSource(
   referenceName: string,
   continueWith: string,

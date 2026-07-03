@@ -50,6 +50,15 @@ pub(crate) enum ExecErrorKind {
     /// an `unreachable!` arm, so a future second caller of `try_materialize` that
     /// forgets the pre-check fails loudly instead of silently retrying a cancel.
     Cancelled,
+    /// A provider SQL referenced a stale result_N (issue #40, ADR-0013
+    /// invariant 2). NOT retried: a stale result may not anchor a new
+    /// derivation, and the same SQL would reference the same stale result on a
+    /// retry, so re-running only burns budget. Becomes an immediate Failed
+    /// turn (like Resource) rather than entering the retry loop. Emitted by
+    /// the provenance pre-check in `try_materialize`, never by
+    /// `classify_duckdb_error` (it is not a DuckDB error -- the SQL is
+    /// rejected before the engine runs it).
+    StaleReference,
 }
 
 /// One classified execution failure. `detail` is the honest, user-facing

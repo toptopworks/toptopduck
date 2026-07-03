@@ -1,4 +1,4 @@
-import type { SourceLifecycleKind, ThreadEntry, TurnRecord, VizSpec } from "../types";
+import type { SourceLifecycleKind, StaleAnchor, ThreadEntry, TurnRecord, VizSpec } from "../types";
 
 interface ThreadProps {
   /** The unified timeline (ADR-0040): turns interleaved with source lifecycle
@@ -11,17 +11,28 @@ interface ThreadProps {
   /** Click a result turn to show its rows in the result pane. Carries the
    * turn's assumption so the side note is preserved across re-selections. */
   onSelectResult: (referenceName: string, assumption: string | null, viz: VizSpec | null) => void;
+  /** Stale result_N anchors keyed by reference name (issue #40, ADR-0013): a
+   * Materialized turn whose result is now stale renders a "因源已删除而失效"
+   * badge naming the removed source. The stale flag lives on the live working-
+   * set descriptor (a TurnRecord's dataset snapshot is the at-materialization
+   * state, always fresh), so the caller derives this map from the current
+   * working set and passes it down -- the thread itself holds no state.
+   * Optional so call sites that don't exercise stale rendering (tests) can
+   * omit it; defaults to an empty map (no badges rendered). */
+  staleByReference?: ReadonlyMap<string, StaleAnchor>;
 }
 
 // The always-visible conversation thread (ADR-0028/0039/0040). Turns are listed
 // in order, labeled by the verbatim question; the four TurnOutcome variants
 // render distinctly (Materialized / Textual[Clarify,Refuse] / Failed /
 // Cancelled), and the optional assumption note (ADR-0009/0018) shows as a
-// correctable side note. A result turn is clickable to (re)show its rows.
-// Source lifecycle events (Added/Deleted) render as non-interactive markers --
-// they occupy a timeline slot and are always visible but are NOT turns, so they
-// never show a question/outcome and never enter the LLM window.
-export function Thread({ entries, selectedResult, onSelectResult }: ThreadProps) {
+// correctable side note. A result turn is clickable to (re)show its rows, and a
+// now-stale result (issue #40) carries an "因源已删除而失效" badge while staying
+// visible (soft invalidation, ADR-0013). Source lifecycle events (Added/
+// Deleted) render as non-interactive markers -- they occupy a timeline slot and
+// are always visible but are NOT turns, so they never show a question/outcome
+// and never enter the LLM window.
+export function Thread({ entries, selectedResult, onSelectResult, staleByReference = new Map() }: ThreadProps) {
   if (entries.length === 0) return null;
   return (
     <section className="panel thread" aria-label="对话历史">
@@ -41,6 +52,7 @@ export function Thread({ entries, selectedResult, onSelectResult }: ThreadProps)
                 record={entry.data}
                 selectedResult={selectedResult}
                 onSelectResult={onSelectResult}
+                staleByReference={staleByReference}
               />
             ) : (
               <SourceEvent kind={entry.data.kind} displayName={entry.data.display_name} />
@@ -88,6 +100,7 @@ interface TurnEntryProps {
   record: TurnRecord;
   selectedResult: string | null;
   onSelectResult: (referenceName: string, assumption: string | null, viz: VizSpec | null) => void;
+  staleByReference: ReadonlyMap<string, StaleAnchor>;
 }
 
 // The provider's optional assumption note (ADR-0009/0018), rendered as a
@@ -98,11 +111,16 @@ function AssumptionNote({ assumption }: { assumption: string | null }) {
   return <span className="assumption">假设：{assumption}</span>;
 }
 
-function TurnEntry({ record, selectedResult, onSelectResult }: TurnEntryProps) {
+function TurnEntry({ record, selectedResult, onSelectResult, staleByReference }: TurnEntryProps) {
   return (
     <>
       <p className="turn-question">{record.question}</p>
-      <TurnBody record={record} selectedResult={selectedResult} onSelectResult={onSelectResult} />
+      <TurnBody
+        record={record}
+        selectedResult={selectedResult}
+        onSelectResult={onSelectResult}
+        staleByReference={staleByReference}
+      />
     </>
   );
 }
@@ -111,23 +129,34 @@ interface TurnBodyProps {
   record: TurnRecord;
   selectedResult: string | null;
   onSelectResult: (referenceName: string, assumption: string | null, viz: VizSpec | null) => void;
+  staleByReference: ReadonlyMap<string, StaleAnchor>;
 }
 
-function TurnBody({ record, selectedResult, onSelectResult }: TurnBodyProps) {
+function TurnBody({ record, selectedResult, onSelectResult, staleByReference }: TurnBodyProps) {
   switch (record.outcome.kind) {
     case "Materialized": {
       const { dataset, assumption, viz } = record.outcome.data;
       const active = dataset.reference_name === selectedResult;
+      // Issue #40 / ADR-0013: if this result has since gone stale, render the
+      // traceability badge naming the removed source. The result stays visible
+      // (soft invalidation) -- the badge is what tells the user it's no longer
+      // valid to build on.
+      const staleAnchor = staleByReference.get(dataset.reference_name);
       return (
         <p className="turn-outcome">
           <button
             type="button"
-            className={active ? "result-link active" : "result-link"}
+            className={`${active ? "result-link active" : "result-link"}${staleAnchor ? " stale" : ""}`}
             aria-current={active ? "true" : undefined}
             onClick={() => onSelectResult(dataset.reference_name, assumption, viz)}
           >
             结果：{dataset.reference_name}
           </button>
+          {staleAnchor && (
+            <span className="stale-badge">
+              因「{staleAnchor.display_name}」已删除而失效
+            </span>
+          )}
           <AssumptionNote assumption={assumption} />
         </p>
       );
