@@ -158,6 +158,28 @@ fn resume_restores_working_set_history_and_active() {
         .count();
     assert_eq!(after_result_count, before_result_count);
     assert_eq!(after_result_count, 2, "two productive turns re-materialized");
+
+    // AC: charts render as TABLES after resume (ADR-0036 -- viz is not
+    // persisted). The recipe carries no viz field, and resume_history hard-
+    // codes viz=None on every Materialized turn, so a reopened chart comes
+    // back as a table the user can re-request a chart on (ADR-0033). Pins the
+    // invariant so a future change that accidentally persists/restores viz
+    // fails here.
+    let viz_persisted = resumed
+        .conversation()
+        .iter()
+        .filter_map(|e| match e {
+            ThreadEntry::Turn(t) => match &t.outcome {
+                TurnOutcome::Materialized { viz, .. } => Some(viz.is_some()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .any(|has_viz| has_viz);
+    assert!(
+        !viz_persisted,
+        "viz must not survive resume (ADR-0036); reopened charts render as tables"
+    );
 }
 
 #[test]

@@ -334,18 +334,76 @@ impl Session {
         })?;
         session.session_name = Some(recipe.session_name.clone());
 
-        // 1. Re-read + verify each source. CSV/JSON/Parquet go through ingest;
-        //    the resulting post-rectify fingerprint must match the recipe
-        //    (ADR-0035/0042). The display label is restored after ingest so a
-        //    user rename survives resume (ADR-0037).
-        let total_sources = recipe.sources.len();
+        // Steps 1-3 each rebuild one phase of the live session (sources ->
+        // productive replay -> full timeline); each is an independent fallible
+        // phase (ADR-0035 honest degrade between them).
+        session.resume_sources(path, &recipe, &mut on_progress)?;
+        session.resume_replay(&recipe, &mut on_progress)?;
+        session.resume_history(&recipe)?;
+
+        // 4. Restore the active-SOURCE pointer (ADR-0035/0037; see
+        //    [`Recipe::active`] doc). ingest set it to the last-registered
+        //    source; an explicit user continuation choice after deleting the
+        //    active source (#39) is restored here. This is NOT the user focus
+        //    -- `Session::active()` (focus = latest result else active source,
+        //    via resolve_active) is reproven from the rebuilt timeline, so the
+        //    focus is not persisted. None (empty working set) stays None.
+        if let Some(active) = &recipe.active {
+            if !session.working_set.set_active(active) {
+                return Err(ResumeError::ActiveMissing(active.clone()));
+            }
+        }
+
+        // 5. Re-bind the .duck path so subsequent turns persist (ADR-0034).
+        session.duck_path = Some(path.to_path_buf());
+
+        Ok(session)
+    }
+
+    /// Resolve a recipe source path to a filesystem path (ADR-0036 §4 hybrid
+    /// paths). The relative form -- taken against the `.duck` file's
+    /// directory -- wins when present and the candidate exists; that is the
+    /// form that survives "move the folder" portability. Otherwise the
+    /// absolute `source_path` is the fallback. Fingerprint verification
+    /// upstream catches a wrong pick, so the choice here is safe.
+    fn resolve_source_path(duck_path: &Path, src: &SourceRef) -> PathBuf {
+        let absolute = PathBuf::from(&src.source_path);
+        let Some(relative) = &src.relative_path else {
+            return absolute;
+        };
+        let Some(base) = duck_path.parent() else {
+            return absolute;
+        };
+        let candidate = base.join(relative);
+        if candidate.exists() {
+            candidate
+        } else {
+            absolute
+        }
+    }
+
+    /// Resume phase 1 (ADR-0034/0035/0036/0042): re-read and verify every
+    /// source. The source path resolves hybrid-style
+    /// ([`Self::resolve_source_path`]); CSV/JSON/Parquet go through ingest,
+    /// and the resulting post-rectify fingerprint must match the recipe
+    /// (ADR-0035/0042). The display label is restored after ingest so a user
+    /// rename survives resume (ADR-0037). Fires one `Source` progress event
+    /// per source (ADR-0034 visible progress).
+    fn resume_sources(
+        &mut self,
+        duck_path: &Path,
+        recipe: &Recipe,
+        on_progress: &mut impl FnMut(ResumeEvent),
+    ) -> Result<(), ResumeError> {
+        let total = recipe.sources.len();
         for (i, src) in recipe.sources.iter().enumerate() {
             on_progress(ResumeEvent::Source {
                 index: i + 1,
-                total: total_sources,
+                total,
                 reference_name: src.reference_name.clone(),
             });
-            let descriptor = match session.ingest(Path::new(&src.source_path)) {
+            let path = Self::resolve_source_path(duck_path, src);
+            let descriptor = match self.ingest(&path) {
                 LoadOutcome::Loaded(d) => d,
                 LoadOutcome::Error(e) => {
                     return Err(ResumeError::SourceMissing {
@@ -370,29 +428,36 @@ impl Session {
                 });
             }
             if descriptor.display_name != src.display_name {
-                let _ = session.rename_display(&src.reference_name, &src.display_name);
+                let _ = self.rename_display(&src.reference_name, &src.display_name);
             }
         }
+        Ok(())
+    }
 
-        // 2. Eagerly replay the productive chain (ADR-0034). Reuses the #1
-        //    materialize path so result_N numbering, sandboxing, and shape
-        //    derivation match a live turn (ADR-0009). result_N numbers line
-        //    up: replay starts from an empty result set, so the first
-        //    Materialized turn takes result_1, the next result_2, etc. --
-        //    matching the recipe's recording order.
+    /// Resume phase 2 (ADR-0034): eagerly re-execute the productive SQL chain
+    /// LLM-free (the SQL lives in the recipe). Reuses the #1 materialize path
+    /// so result_N numbering, sandboxing, and shape derivation match a live
+    /// turn (ADR-0009). Replay starts from an empty result set, so result_N
+    /// numbers line up with the recipe's recording order. Fires one `Replay`
+    /// progress event per turn.
+    fn resume_replay(
+        &mut self,
+        recipe: &Recipe,
+        on_progress: &mut impl FnMut(ResumeEvent),
+    ) -> Result<(), ResumeError> {
         let chain = recipe.productive_chain();
-        let total_turns = chain.len();
-        let cancel = Arc::clone(&session.cancel);
+        let total = chain.len();
+        let cancel = Arc::clone(&self.cancel);
         for (i, turn) in chain.iter().enumerate() {
             on_progress(ResumeEvent::Replay {
                 index: i + 1,
-                total: total_turns,
+                total,
                 reference_name: turn.reference_name.clone(),
             });
-            match session.try_materialize(&turn.sql, &cancel) {
+            match self.try_materialize(&turn.sql, &cancel) {
                 Ok(descriptor) => {
                     if descriptor.display_name != turn.display_name {
-                        let _ = session.rename_display(&turn.reference_name, &turn.display_name);
+                        let _ = self.rename_display(&turn.reference_name, &turn.display_name);
                     }
                 }
                 Err(e) => {
@@ -403,13 +468,17 @@ impl Session {
                 }
             }
         }
+        Ok(())
+    }
 
-        // 3. Rebuild the full conversation timeline (ADR-0028/0039/0040). The
-        //    Materialized turns' descriptors come from the working set (just
-        //    re-built by replay, display names restored); no-result turns +
-        //    source events map straight across. viz is None (ADR-0036 not
-        //    persisted), so a reopened chart renders as a table (ADR-0033).
-        session.history = recipe
+    /// Resume phase 3 (ADR-0028/0039/0040): rebuild the full conversation
+    /// timeline from the recipe. The Materialized turns' descriptors come from
+    /// the working set (just re-built by replay, display names restored);
+    /// no-result turns + source events map straight across. viz is None
+    /// (ADR-0036 not persisted), so a reopened chart renders as a table
+    /// (ADR-0033).
+    fn resume_history(&mut self, recipe: &Recipe) -> Result<(), ResumeError> {
+        self.history = recipe
             .history
             .iter()
             .map(|entry| match entry {
@@ -421,10 +490,14 @@ impl Session {
                             assumption,
                             ..
                         } => {
-                            let dataset = session.working_set.get(reference_name).cloned().ok_or_else(|| ResumeError::Replay {
-                                reference_name: reference_name.clone(),
-                                detail: format!("重放后未在 working_set 中找到 {reference_name}"),
-                            })?;
+                            let dataset = self
+                                .working_set
+                                .get(reference_name)
+                                .cloned()
+                                .ok_or_else(|| ResumeError::Replay {
+                                    reference_name: reference_name.clone(),
+                                    detail: format!("重放后未在 working_set 中找到 {reference_name}"),
+                                })?;
                             TurnOutcome::Materialized {
                                 dataset: Box::new(dataset),
                                 sql: Some(sql.clone()),
@@ -440,26 +513,15 @@ impl Session {
                         RecipeOutcome::Failed { reason } => TurnOutcome::Failed { reason: reason.clone() },
                         RecipeOutcome::Cancelled => TurnOutcome::Cancelled,
                     };
-                    Ok(ThreadEntry::Turn(TurnRecord { question: turn.question.clone(), outcome }))
+                    Ok(ThreadEntry::Turn(TurnRecord {
+                        question: turn.question.clone(),
+                        outcome,
+                    }))
                 }
                 RecipeEntry::Source(ev) => Ok(ThreadEntry::Source(ev.clone())),
             })
             .collect::<Result<Vec<_>, ResumeError>>()?;
-
-        // 4. Restore the active pointer (ADR-0037: reference name, stable).
-        //    recipe.active is the pre-close focus; ingest set active to the
-        //    last-replayed source, so re-point to the recorded focus. None
-        //    (empty working set) leaves the default None.
-        if let Some(active) = &recipe.active {
-            if !session.working_set.set_active(active) {
-                return Err(ResumeError::ActiveMissing(active.clone()));
-            }
-        }
-
-        // 5. Re-bind the .duck path so subsequent turns persist (ADR-0034).
-        session.duck_path = Some(path.to_path_buf());
-
-        Ok(session)
+        Ok(())
     }
 
     /// Ingest a file. Transactional: on any failure the working set is unchanged
@@ -1659,17 +1721,38 @@ impl Session {
     /// or been removed is dropped -- it cannot replay; the tracer-bullet
     /// happy path has none (full stale-render lands in a later slice).
     pub fn build_recipe(&self) -> Recipe {
+        // ADR-0036 §4 hybrid paths: `source_path` is always absolute (fallback
+        // resolver); `relative_path` is set when the source lives inside the
+        // .duck file's directory subtree (primary resolver, survives "move the
+        // folder"). strip_prefix succeeds exactly when the source is in the
+        // subtree (cross-volume / outside-subtree -> None). Components are
+        // rejoined with '/' so the stored path is cross-platform portable
+        // (Path::join accepts '/' on Windows; POSIX-only readers can resolve it
+        // too). Computed only when a .duck is bound -- an unbound session has
+        // no .duck directory to be relative to, so relative_path stays None.
+        let duck_dir = self.duck_path.as_deref().and_then(Path::parent);
         let sources: Vec<SourceRef> = self
             .working_set
             .list()
             .iter()
             .filter(|d| !self.working_set.is_result(&d.reference_name))
-            .map(|d| SourceRef {
-                reference_name: d.reference_name.clone(),
-                display_name: d.display_name.clone(),
-                source_path: d.source_path.clone(),
-                rectify: d.rectify.clone(),
-                fingerprint: d.fingerprint.clone(),
+            .map(|d| {
+                let relative_path = duck_dir
+                    .and_then(|dir| Path::new(&d.source_path).strip_prefix(dir).ok())
+                    .map(|rel| {
+                        rel.components()
+                            .filter_map(|c| c.as_os_str().to_str())
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    });
+                SourceRef {
+                    reference_name: d.reference_name.clone(),
+                    display_name: d.display_name.clone(),
+                    source_path: d.source_path.clone(),
+                    relative_path,
+                    rectify: d.rectify.clone(),
+                    fingerprint: d.fingerprint.clone(),
+                }
             })
             .collect();
 
@@ -2178,6 +2261,44 @@ mod tests {
         assert!(recipe.sources.is_empty());
         assert!(recipe.history.is_empty());
         assert!(recipe.active.is_none());
+    }
+
+    #[test]
+    fn build_recipe_records_relative_path_for_in_subtree_sources() {
+        // ADR-0036 §4 hybrid paths: a source inside the .duck file's directory
+        // subtree is recorded with BOTH a relative path (the primary resolver,
+        // which survives "move the folder" portability) and the absolute path
+        // (the fallback). The out-of-subtree case (relative_path = None) is
+        // covered by the black-box suite, whose fixture lives outside the
+        // .duck tempdir and resumes through the absolute fallback.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let duck = dir.path().join("session.duck");
+        let in_subtree = dir.path().join("data.csv");
+        std::fs::write(&in_subtree, "name,score\nAda,9\n").expect("write csv");
+
+        let mut session = Session::new().expect("session");
+        session
+            .bind_duck(duck.clone(), "混合路径".into())
+            .expect("bind");
+        let reference_name = match session.ingest(&in_subtree) {
+            crate::model::LoadOutcome::Loaded(d) => d.reference_name,
+            other => panic!("in-subtree source should load, got {other:?}"),
+        };
+        let recipe = session.build_recipe();
+        let src = recipe
+            .sources
+            .iter()
+            .find(|s| s.reference_name == reference_name)
+            .expect("source recorded");
+        assert_eq!(
+            src.relative_path.as_deref(),
+            Some("data.csv"),
+            "in-subtree source carries a path relative to the .duck directory"
+        );
+        assert!(
+            std::path::Path::new(&src.source_path).is_absolute(),
+            "absolute path is always present as the fallback resolver"
+        );
     }
 
     // M1 regression: a turn whose shape derivation fails must roll back the

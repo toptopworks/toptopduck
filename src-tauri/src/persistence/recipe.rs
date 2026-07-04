@@ -24,19 +24,35 @@ use crate::model::{RectifyProvenance, SourceLifecycleEvent, TextKind};
 /// this and add a migration transform.
 pub const RECIPE_FORMAT_VERSION: u32 = 1;
 
-/// One source Dataset's portable reference (ADR-0034/0042): the path to
-/// re-read, the user's explicit rectify choices (CSV/JSON/Parquet = N/A;
-/// Excel carries the user header/skip decisions, never the auto-tidy
-/// algorithm), and the content fingerprint of the post-rectify snapshot
-/// (resumed read-only, fixed by re-upload). The display label rides along so
-/// a user rename survives resume (ADR-0037 display-layer only -- the
+/// One source Dataset's portable reference (ADR-0034/0036/0042). Paths use
+/// the **hybrid representation** ADR-0036 §4 mandates: `source_path` is always
+/// absolute (the fallback resolver); `relative_path` is set when the source
+/// lives inside the `.duck` file's directory subtree (the primary resolver --
+/// it survives "move the folder" portability). Cross-volume / outside-subtree
+/// sources carry `relative_path = None`, and resume falls back to
+/// `source_path`. Both forms undergo fingerprint verification (ADR-0035).
+///
+/// The rectify choices are the user's explicit decisions (CSV/JSON/Parquet =
+/// N/A; Excel carries the user header/skip decisions, never the auto-tidy
+/// algorithm), and the fingerprint is the content hash of the post-rectify
+/// snapshot (resumed read-only, fixed by re-upload). The display label rides
+/// along so a user rename survives resume (ADR-0037 display-layer only -- the
 /// reference name is the stable identity SQL / the chain / the active pointer
 /// use).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceRef {
     pub reference_name: String,
     pub display_name: String,
+    /// Absolute filesystem path -- the always-present fallback resolver
+    /// (ADR-0036 §4). Older v1 recipes written before hybrid paths land here
+    /// and resume treats them as absolute-only.
     pub source_path: String,
+    /// Path relative to the `.duck` file's directory, when the source lives in
+    /// that subtree (ADR-0036 §4). `None` when the source is outside the
+    /// subtree or on a different volume (where a relative path is not
+    /// expressible). Resume tries this first, then `source_path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_path: Option<String>,
     #[serde(default)]
     pub rectify: RectifyProvenance,
     pub fingerprint: String,
@@ -138,9 +154,18 @@ pub struct Recipe {
     /// productive replay chain is derived from this at resume time
     /// ([`Self::productive_chain`]).
     pub history: Vec<RecipeEntry>,
-    /// The active-dataset pointer as a reference name (ADR-0037): stable
-    /// across renames, so resume restores the exact pre-close focus. `None`
-    /// when the working set is empty (the last source was removed).
+    /// The active-SOURCE pointer as a reference name (ADR-0035/0037): the
+    /// source the user last focused on at the source layer, stable across
+    /// renames. This is distinct from `Session::active()` -- the user's
+    /// current focus, derived by `window::resolve_active` as the latest result
+    /// if any, else the active source. Resume rebuilds the working set + turn
+    /// timeline deterministically, so `resolve_active` reproduces the same
+    /// focus without persisting it. The source pointer is persisted because it
+    /// can diverge from "most-recently-registered source" once the user
+    /// explicitly picks a continuation source after deleting the active one
+    /// (issue #39, ADR-0035 no-silent-fallback); that choice must survive
+    /// resume. `None` when the working set is empty (the last source was
+    /// removed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<String>,
 }
@@ -185,6 +210,7 @@ mod tests {
             reference_name: name.to_string(),
             display_name: name.to_string(),
             source_path: format!("/data/{name}.csv"),
+            relative_path: None,
             rectify: RectifyProvenance::NotApplicable,
             fingerprint: fp.to_string(),
         }

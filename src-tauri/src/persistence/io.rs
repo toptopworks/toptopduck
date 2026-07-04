@@ -10,6 +10,7 @@
 //! the file back and verifies `format_version` before touching any source
 //! (ADR-0036 honest-refuse on a higher version).
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -137,6 +138,20 @@ pub fn read_duck(path: &Path) -> Result<Recipe, LoadError> {
             recipe.format_version, RECIPE_FORMAT_VERSION
         )));
     }
+    // Parse, don't validate (rust/security.md §input-validation): a hand-edited
+    // or corrupted .duck is external input (ADR-0034 user-owned document), so a
+    // structural invariant like unique source reference names must surface here
+    // as an honest parse error -- not later as a confusing mid-resume ambiguity
+    // over which duplicate source to re-read.
+    let mut seen = HashSet::new();
+    for src in &recipe.sources {
+        if !seen.insert(&src.reference_name) {
+            return Err(LoadError::Parse(format!(
+                "源引用名重复：{}",
+                src.reference_name
+            )));
+        }
+    }
     Ok(recipe)
 }
 
@@ -154,6 +169,7 @@ mod tests {
                 reference_name: "people".into(),
                 display_name: "people".into(),
                 source_path: "/data/people.csv".into(),
+                relative_path: None,
                 rectify: RectifyProvenance::NotApplicable,
                 fingerprint: "fp".into(),
             }],
