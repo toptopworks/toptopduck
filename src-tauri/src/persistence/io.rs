@@ -54,7 +54,10 @@ pub enum LoadError {
     /// ADR-0036: a higher format_version means a newer app made the file. The
     /// honest answer is "please upgrade" (ADR-0017 capability boundary at the
     /// format layer) -- never a heuristic guess at the new layout.
-    VersionMismatch { found: u32, supported: u32 },
+    VersionMismatch {
+        found: u32,
+        supported: u32,
+    },
 }
 
 impl std::fmt::Display for LoadError {

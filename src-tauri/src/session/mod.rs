@@ -97,22 +97,24 @@ impl std::fmt::Display for ResumeError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Self::Load(e) => write!(f, "{e}"),
-            Self::SourceMissing { reference_name, path, detail } => write!(
-                f,
-                "源「{reference_name}」找不到：{path}（{detail}）"
-            ),
-            Self::FingerprintMismatch { reference_name, expected, found } => write!(
+            Self::SourceMissing {
+                reference_name,
+                path,
+                detail,
+            } => write!(f, "源「{reference_name}」找不到：{path}（{detail}）"),
+            Self::FingerprintMismatch {
+                reference_name,
+                expected,
+                found,
+            } => write!(
                 f,
                 "源「{reference_name}」内容已变化（指纹不符；期望 {expected}，实际 {found}）"
             ),
-            Self::Replay { reference_name, detail } => write!(
-                f,
-                "重放「{reference_name}」失败：{detail}"
-            ),
-            Self::ActiveMissing(name) => write!(
-                f,
-                "会话焦点指向未注册的源「{name}」"
-            ),
+            Self::Replay {
+                reference_name,
+                detail,
+            } => write!(f, "重放「{reference_name}」失败：{detail}"),
+            Self::ActiveMissing(name) => write!(f, "会话焦点指向未注册的源「{name}」"),
         }
     }
 }
@@ -124,10 +126,18 @@ impl std::error::Error for ResumeError {}
 #[derive(Debug, Clone, serde::Serialize)]
 pub enum ResumeEvent {
     /// Verifying source `index` of `total` (post-rectify fingerprint check).
-    Source { index: usize, total: usize, reference_name: String },
+    Source {
+        index: usize,
+        total: usize,
+        reference_name: String,
+    },
     /// Replaying productive turn `index` of `total` (re-materializing
     /// `result_N`).
-    Replay { index: usize, total: usize, reference_name: String },
+    Replay {
+        index: usize,
+        total: usize,
+        reference_name: String,
+    },
 }
 
 pub struct Session {
@@ -329,9 +339,8 @@ impl Session {
         mut on_progress: impl FnMut(ResumeEvent),
     ) -> Result<Session, ResumeError> {
         let recipe = read_duck(path).map_err(ResumeError::Load)?;
-        let mut session = Session::with_provider_and_cancel(provider, cancel).map_err(|e| {
-            ResumeError::Load(crate::persistence::io::LoadError::Io(e.to_string()))
-        })?;
+        let mut session = Session::with_provider_and_cancel(provider, cancel)
+            .map_err(|e| ResumeError::Load(crate::persistence::io::LoadError::Io(e.to_string())))?;
         session.session_name = Some(recipe.session_name.clone());
 
         // Steps 1-3 each rebuild one phase of the live session (sources ->
@@ -496,7 +505,9 @@ impl Session {
                                 .cloned()
                                 .ok_or_else(|| ResumeError::Replay {
                                     reference_name: reference_name.clone(),
-                                    detail: format!("重放后未在 working_set 中找到 {reference_name}"),
+                                    detail: format!(
+                                        "重放后未在 working_set 中找到 {reference_name}"
+                                    ),
                                 })?;
                             TurnOutcome::Materialized {
                                 dataset: Box::new(dataset),
@@ -505,12 +516,18 @@ impl Session {
                                 assumption: assumption.clone(),
                             }
                         }
-                        RecipeOutcome::Textual { text_kind, body, assumption } => TurnOutcome::Textual {
+                        RecipeOutcome::Textual {
+                            text_kind,
+                            body,
+                            assumption,
+                        } => TurnOutcome::Textual {
                             text_kind: *text_kind,
                             body: body.clone(),
                             assumption: assumption.clone(),
                         },
-                        RecipeOutcome::Failed { reason } => TurnOutcome::Failed { reason: reason.clone() },
+                        RecipeOutcome::Failed { reason } => TurnOutcome::Failed {
+                            reason: reason.clone(),
+                        },
                         RecipeOutcome::Cancelled => TurnOutcome::Cancelled,
                     };
                     Ok(ThreadEntry::Turn(TurnRecord {
@@ -1816,10 +1833,7 @@ impl Session {
             })
             .collect();
 
-        let active = self
-            .working_set
-            .active()
-            .map(|d| d.reference_name.clone());
+        let active = self.working_set.active().map(|d| d.reference_name.clone());
 
         Recipe {
             format_version: RECIPE_FORMAT_VERSION,

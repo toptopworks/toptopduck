@@ -85,10 +85,7 @@ fn build_session(duck: &Path) -> Session {
 
 /// Collect resume events into a Vec via a shared RefCell so the test can
 /// assert progress fired per source + per replayed turn.
-fn collect_events() -> (
-    Rc<RefCell<Vec<ResumeEvent>>>,
-    impl FnMut(ResumeEvent),
-) {
+fn collect_events() -> (Rc<RefCell<Vec<ResumeEvent>>>, impl FnMut(ResumeEvent)) {
     let cell: Rc<RefCell<Vec<ResumeEvent>>> = Rc::new(RefCell::new(Vec::new()));
     let cb_cell = Rc::clone(&cell);
     let cb = move |ev: ResumeEvent| cb_cell.borrow_mut().push(ev);
@@ -127,7 +124,13 @@ fn resume_restores_working_set_history_and_active() {
     drop(session);
 
     let (_events, cb) = collect_events();
-    let resumed = Session::open_duck(&duck, Arc::new(CancelToken::new()), Box::new(UnwiredProvider), cb).expect("resume");
+    let resumed = Session::open_duck(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(UnwiredProvider),
+        cb,
+    )
+    .expect("resume");
 
     let after_sources: Vec<(String, String)> = resumed
         .list()
@@ -150,14 +153,20 @@ fn resume_restores_working_set_history_and_active() {
             ThreadEntry::Source(ev) => format!("<{}>", ev.reference_name),
         })
         .collect();
-    assert_eq!(after_history, before_history, "full timeline restored verbatim");
+    assert_eq!(
+        after_history, before_history,
+        "full timeline restored verbatim"
+    );
     let after_result_count = resumed
         .list()
         .iter()
         .filter(|d| d.reference_name.starts_with("result_"))
         .count();
     assert_eq!(after_result_count, before_result_count);
-    assert_eq!(after_result_count, 2, "two productive turns re-materialized");
+    assert_eq!(
+        after_result_count, 2,
+        "two productive turns re-materialized"
+    );
 
     // AC: charts render as TABLES after resume (ADR-0036 -- viz is not
     // persisted). The recipe carries no viz field, and resume_history hard-
@@ -218,7 +227,13 @@ fn resume_does_not_replay_no_result_turns() {
     drop(session);
 
     let (_events, cb) = collect_events();
-    let resumed = Session::open_duck(&duck, Arc::new(CancelToken::new()), Box::new(UnwiredProvider), cb).expect("resume");
+    let resumed = Session::open_duck(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(UnwiredProvider),
+        cb,
+    )
+    .expect("resume");
 
     // The refuse turn's body must be present verbatim in the restored thread.
     let refuse_present = resumed.conversation().iter().any(|e| match e {
@@ -227,7 +242,10 @@ fn resume_does_not_replay_no_result_turns() {
         }
         _ => false,
     });
-    assert!(refuse_present, "refuse turn statically rendered after resume");
+    assert!(
+        refuse_present,
+        "refuse turn statically rendered after resume"
+    );
 }
 
 #[test]
@@ -241,7 +259,13 @@ fn resume_emits_visible_progress_events() {
     drop(session);
 
     let (events, cb) = collect_events();
-    let _resumed = Session::open_duck(&duck, Arc::new(CancelToken::new()), Box::new(UnwiredProvider), cb).expect("resume");
+    let _resumed = Session::open_duck(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(UnwiredProvider),
+        cb,
+    )
+    .expect("resume");
     let events = events.borrow();
 
     let source_count = events
@@ -309,15 +333,30 @@ fn rename_survives_resume_and_references_still_resolve() {
     drop(session);
 
     let (_events, cb) = collect_events();
-    let resumed = Session::open_duck(&duck, Arc::new(CancelToken::new()), Box::new(UnwiredProvider), cb).expect("resume");
+    let resumed = Session::open_duck(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(UnwiredProvider),
+        cb,
+    )
+    .expect("resume");
 
     // Display labels survived resume.
     let people = resumed.get("people").expect("people present");
-    assert_eq!(people.display_name, "员工表", "source display label restored");
+    assert_eq!(
+        people.display_name, "员工表",
+        "source display label restored"
+    );
     assert_eq!(people.reference_name, "people", "reference name stable");
     let result_1 = resumed.get("result_1").expect("result_1 present");
-    assert_eq!(result_1.display_name, "总人数", "result display label restored");
-    assert_eq!(result_1.reference_name, "result_1", "result reference name stable");
+    assert_eq!(
+        result_1.display_name, "总人数",
+        "result display label restored"
+    );
+    assert_eq!(
+        result_1.reference_name, "result_1",
+        "result reference name stable"
+    );
 
     // The reference name still resolves for reads -- the same path a SQL FROM
     // takes (working_set.sql_from).

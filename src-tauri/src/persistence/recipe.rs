@@ -280,10 +280,7 @@ mod tests {
         let chain = recipe.productive_chain();
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].reference_name, "result_1");
-        assert_eq!(
-            chain[0].sql,
-            "SELECT COUNT(*) AS n FROM \"people\".data"
-        );
+        assert_eq!(chain[0].sql, "SELECT COUNT(*) AS n FROM \"people\".data");
     }
 
     #[test]
