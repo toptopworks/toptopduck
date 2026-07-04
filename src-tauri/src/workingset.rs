@@ -6,6 +6,13 @@ use std::collections::{HashMap, HashSet};
 
 use crate::model::{DatasetDescriptor, DatasetPrivacy, RenameError, StaleAnchor};
 
+/// Hard ceiling on the number of registered `result_N` (ADR-0013 M=100). When
+/// a freshly materialized result pushes the count over the cap, the oldest
+/// stale results are auto-reclaimed; active results are never auto-deleted.
+/// Tunable via [`crate::session::Session::set_result_count_cap`] (tests lower
+/// it for a fast, deterministic GC trigger -- mirroring the row-cap twin).
+pub const DEFAULT_RESULT_COUNT_CAP: usize = 100;
+
 #[derive(Debug, Default)]
 pub struct WorkingSet {
     datasets: Vec<DatasetDescriptor>,
@@ -345,6 +352,43 @@ impl WorkingSet {
             .collect()
     }
 
+    /// The reference names of stale results to reclaim when the result_N count
+    /// exceeds `cap` (ADR-0013, issue #42). Read-only selection -- the caller
+    /// drops each physical table, then [`Self::remove`]s the name. Returns the
+    /// names ordered oldest-first, taking only as many as the overshoot: if the
+    /// count exceeds `cap` by k, at most k stale results come back.
+    ///
+    /// "Oldest" = smallest `result_N` number: the monotonic never-reused
+    /// numbering (ADR-0022) makes the number the authoritative creation order,
+    /// so the smallest-N stale result is the earliest-produced. A source whose
+    /// sanitized name happens to parse as `result_N` is excluded by the
+    /// `results`-set membership filter (mirrors [`Self::next_result_number`]).
+    ///
+    /// Active results are NEVER selected (ADR-0013: GC only reclaims stale).
+    /// When fewer stale results exist than the overshoot, all of them are
+    /// returned and the count stays over `cap` -- the cap is a soft ceiling
+    /// enforceable only while stale results exist to reclaim. Empty when the
+    /// count is at or under `cap`, or when no stale result is available.
+    pub fn gc_stale_candidates(&self, cap: usize) -> Vec<String> {
+        let over = self.results.len().saturating_sub(cap);
+        if over == 0 {
+            return Vec::new();
+        }
+        let mut stale: Vec<(u64, String)> = self
+            .datasets
+            .iter()
+            .filter(|d| self.results.contains(&d.reference_name) && d.stale.is_some())
+            .filter_map(|d| {
+                d.reference_name
+                    .strip_prefix("result_")
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(|n| (n, d.reference_name.clone()))
+            })
+            .collect();
+        stale.sort_by_key(|(n, _)| *n);
+        stale.into_iter().take(over).map(|(_, name)| name).collect()
+    }
+
     /// result_N that directly depend on `reference_name` (name it as a member
     /// of their provenance set). The forward edge of the cascade.
     fn dependents_of(&self, reference_name: &str) -> Vec<String> {
@@ -439,7 +483,7 @@ fn quote_reference(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ColumnSchema, RectifyProvenance};
+    use crate::model::{ColumnSchema, RectifyProvenance, StaleAnchor, StaleReason};
 
     fn descriptor(name: &str) -> DatasetDescriptor {
         descriptor_with(name, name)
@@ -856,5 +900,142 @@ mod tests {
         // idempotent on the live name too: a second remove after the first is None
         ws.remove("orders");
         assert!(ws.remove("orders").is_none());
+    }
+
+    // --- GC cap (issue #42, ADR-0013) -----------------------------------------
+    //
+    // M=100 default: result_N total over the cap -> auto-reclaim the oldest
+    // stale; active results are never auto-deleted. These unit tests pin the
+    // selection policy in isolation; the session-level GC (physical-table DROP
+    // + thread preservation) is exercised at the black-box seam in
+    // `lifecycle_blackbox.rs`.
+
+    fn anchor() -> StaleAnchor {
+        StaleAnchor {
+            reference_name: "src".into(),
+            display_name: "src".into(),
+            reason: StaleReason::Deleted,
+        }
+    }
+
+    /// Register a result_N and mark it stale -- the GC-eligible shape. Uses the
+    /// private `mark_stale` (accessible from the child test module) so the test
+    /// doesn't have to stand up a provenance graph just to exercise selection.
+    fn register_stale_result(ws: &mut WorkingSet, name: &str) {
+        ws.register_result(result_descriptor(name));
+        ws.mark_stale(name, anchor());
+    }
+
+    #[test]
+    fn gc_returns_empty_when_results_at_or_under_cap() {
+        // AC1 (issue #42): no overshoot -> nothing to reclaim. At-cap and
+        // under-cap both yield an empty selection.
+        let mut ws = WorkingSet::default();
+        register_stale_result(&mut ws, "result_1");
+        ws.register_result(result_descriptor("result_2"));
+        assert!(ws.gc_stale_candidates(2).is_empty(), "at cap -> nothing");
+        assert!(ws.gc_stale_candidates(5).is_empty(), "under cap -> nothing");
+    }
+
+    #[test]
+    fn gc_picks_oldest_stale_when_result_count_exceeds_cap() {
+        // AC2 (issue #42): over cap -> the oldest stale result(s) are selected,
+        // ordered by creation (smallest result_N first).
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("people")); // a source -- not counted, not selectable
+        register_stale_result(&mut ws, "result_1");
+        register_stale_result(&mut ws, "result_2");
+        ws.register_result(result_descriptor("result_3")); // active
+                                                           // 3 results, cap 2 -> overshoot 1 -> oldest stale (result_1) selected.
+        assert_eq!(ws.gc_stale_candidates(2), vec!["result_1".to_string()]);
+    }
+
+    #[test]
+    fn gc_takes_only_as_many_as_the_overshoot() {
+        // Over cap by k -> at most k stale results, oldest-first. GC restores
+        // the cap; it never over-reclaims past the overshoot.
+        let mut ws = WorkingSet::default();
+        register_stale_result(&mut ws, "result_1");
+        register_stale_result(&mut ws, "result_2");
+        register_stale_result(&mut ws, "result_3");
+        register_stale_result(&mut ws, "result_4");
+        // 4 results, cap 2 -> overshoot 2 -> result_1, result_2.
+        assert_eq!(
+            ws.gc_stale_candidates(2),
+            vec!["result_1".to_string(), "result_2".to_string()]
+        );
+    }
+
+    #[test]
+    fn gc_never_selects_active_results_even_when_over_cap() {
+        // AC3 (issue #42): active (non-stale) results are never selected, even
+        // when they are older than every stale result or the count is far over.
+        let mut ws = WorkingSet::default();
+        ws.register_result(result_descriptor("result_1")); // active, oldest
+        ws.register_result(result_descriptor("result_2")); // active
+        register_stale_result(&mut ws, "result_3"); // stale, youngest
+                                                    // 3 results, cap 1 -> overshoot 2, but only 1 stale exists -> just
+                                                    // result_3. result_1/result_2 (active) never selected despite being
+                                                    // older and the count being 3x the cap.
+        assert_eq!(ws.gc_stale_candidates(1), vec!["result_3".to_string()]);
+    }
+
+    #[test]
+    fn gc_returns_empty_when_no_stale_results_to_reclaim() {
+        // Over cap but every result active -> nothing can be reclaimed. The
+        // count stays over the soft cap (active is never auto-deleted). This is
+        // the safety-valve escape hatch: GC is best-effort, not a hard limit.
+        let mut ws = WorkingSet::default();
+        ws.register_result(result_descriptor("result_1"));
+        ws.register_result(result_descriptor("result_2"));
+        ws.register_result(result_descriptor("result_3"));
+        assert!(
+            ws.gc_stale_candidates(2).is_empty(),
+            "no stale results -> nothing to GC even over cap"
+        );
+    }
+
+    #[test]
+    fn gc_excludes_sources_named_like_a_result() {
+        // A source whose sanitized name is `result_1` lives in `datasets` but
+        // not in `results` -> never counted toward the cap, never selected
+        // (mirrors next_result_number's result-set guard).
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("result_1")); // a SOURCE named result_1
+        register_stale_result(&mut ws, "result_2");
+        // 1 actual result (result_2), cap 0 -> overshoot 1 -> only the real
+        // result_2 is selected; the source-named result_1 is left registered.
+        assert_eq!(ws.gc_stale_candidates(0), vec!["result_2".to_string()]);
+        assert!(
+            ws.get("result_1").is_some(),
+            "source named result_1 is not a reclaim target"
+        );
+    }
+
+    #[test]
+    fn remove_clears_provenance_edge() {
+        // AC2 (issue #42): GC reclaims via `remove`, whose contract includes
+        // clearing the provenance edge. Without it, a later source delete's
+        // cascade would still treat the GC'd result as a dependent. The
+        // `is_live_result` guard in `cascade_stale` skips an unregistered name
+        // today, so a stale edge is latent cruft rather than an active bug --
+        // this test pins the contract so a future `remove` rewrite can't
+        // silently drop it. The session-layer GC path (DROP + `remove`) rides
+        // on this guarantee for AC2's "lineage entry reclaimed" limb.
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("people"));
+        ws.register_result(result_descriptor("result_1"));
+        let mut deps = HashSet::new();
+        deps.insert("people".to_string());
+        ws.record_provenance("result_1", deps);
+        assert!(
+            !ws.dependents_of("people").is_empty(),
+            "result_1 depends on people before the remove"
+        );
+        ws.remove("result_1");
+        assert!(
+            ws.dependents_of("people").is_empty(),
+            "provenance edge cleared -- a GC'd result is no longer a dependent"
+        );
     }
 }

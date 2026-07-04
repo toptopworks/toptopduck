@@ -1004,3 +1004,185 @@ fn replace_cascade_keeps_already_stale_first_anchor() {
         "first anchor reason (Deleted) preserved, not overwritten by Replaced"
     );
 }
+
+// --- GC cap (issue #42, ADR-0013) ------------------------------------------
+//
+// result_N total over M=100 -> auto-reclaim the oldest stale; active results
+// are never auto-deleted. Tested with a lowered cap (set_result_count_cap) for
+// a fast, deterministic trigger -- the row-cap twin uses the same approach.
+// Each result depends on `people` so a replace cascades them stale; the fresh
+// question after the replace materializes against the new snapshot and trips
+// the cap. GC runs on the materialize path, so these are plain Session asks.
+
+#[test]
+fn gc_reclaims_oldest_stale_when_result_count_exceeds_cap() {
+    // AC2 (issue #42): materializing past the cap reclaims the oldest stale
+    // result -- its reference name + physical table are gone, the younger
+    // stale siblings + the fresh active result stay. Three results depend on
+    // people; replacing people cascades them stale; the 4th ask trips the cap.
+    let mut session = session_with_scripts(&[
+        ("q1", r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        ("q2", r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        ("q3", r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        ("q4", r#"SELECT COUNT(*) AS n FROM "people".data"#),
+    ]);
+    load_source(&mut session, &fixture("people.csv")); // active = people
+    load_source(&mut session, &fixture("orders.csv")); // active = orders now
+    session.set_result_count_cap(3);
+
+    session.ask("q1"); // result_1 FROM people
+    session.ask("q2"); // result_2 FROM people
+    session.ask("q3"); // result_3 FROM people
+                       // Replace people (non-active) -> result_1/2/3 cascade stale.
+    match session.replace_source("people", &fixture("flat.json")) {
+        LoadOutcome::Loaded(_) => {}
+        other => panic!("expected replace to succeed, got {other:?}"),
+    }
+    for n in ["result_1", "result_2", "result_3"] {
+        assert!(
+            session.get(n).unwrap().stale.is_some(),
+            "{n} stale after the replace cascade"
+        );
+    }
+
+    // q4 materializes against the new people snapshot -> count 4 > cap 3 ->
+    // GC reclaims the oldest stale (result_1).
+    let outcome = session.ask("q4");
+    match outcome {
+        TurnOutcome::Materialized { dataset, .. } => {
+            assert_eq!(dataset.reference_name, "result_4");
+        }
+        other => panic!("expected Materialized result_4, got {other:?}"),
+    }
+
+    // result_1 reclaimed: not registered AND not readable (physical table gone).
+    assert!(
+        session.get("result_1").is_none(),
+        "result_1 GC'd from registry"
+    );
+    assert!(
+        session.read_rows("result_1", 0, 1).is_err(),
+        "result_1 physical table dropped -> unreadable"
+    );
+    // result_2 / result_3 stay registered + stale (younger stale, untouched).
+    let r2 = session.get("result_2").expect("result_2 still registered");
+    assert_eq!(
+        r2.stale
+            .as_ref()
+            .expect("result_2 still stale")
+            .reference_name,
+        "people"
+    );
+    assert!(session
+        .get("result_3")
+        .expect("result_3 still registered")
+        .stale
+        .is_some());
+    // result_4 (the fresh one) is active -- never a GC candidate.
+    assert!(
+        session.get("result_4").unwrap().stale.is_none(),
+        "fresh result is active"
+    );
+}
+
+#[test]
+fn gc_never_reclaims_active_results() {
+    // AC1/AC3 (issue #42): with no stale results to reclaim, the count stays
+    // over the soft cap -- active results are never auto-deleted. Two active
+    // results under a cap of 1: the overshoot finds nothing stale to reclaim.
+    let mut session =
+        session_with_scripts(&[("q1", r#"SELECT 1 AS n"#), ("q2", r#"SELECT 2 AS n"#)]);
+    load_source(&mut session, &fixture("people.csv"));
+    session.set_result_count_cap(1);
+
+    session.ask("q1"); // result_1, active; count 1 = cap -> no GC
+    session.ask("q2"); // result_2, active; count 2 > cap 1, no stale -> none reclaimed
+
+    for n in ["result_1", "result_2"] {
+        let d = session.get(n).expect("active result still registered");
+        assert!(d.stale.is_none(), "{n} stays active (never auto-deleted)");
+    }
+    let result_count = session
+        .list()
+        .iter()
+        .filter(|d| d.reference_name.starts_with("result_"))
+        .count();
+    assert_eq!(
+        result_count, 2,
+        "both active results preserved despite the overshoot"
+    );
+}
+
+#[test]
+fn gc_preserves_producing_turn_in_thread() {
+    // AC4 (issue #42): a GC'd result's producing turn stays in the thread --
+    // visible history is retained; only the result's data becomes
+    // unreferenceable. The TurnRecord names result_1 even after result_1 is
+    // GC'd (its dataset snapshot is at-materialization-time, never rewritten).
+    let mut session = session_with_scripts(&[
+        ("q1", r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        ("q2", r#"SELECT COUNT(*) AS n FROM "people".data"#),
+    ]);
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv")); // active = orders
+    session.set_result_count_cap(1);
+
+    session.ask("q1"); // result_1 FROM people
+    match session.replace_source("people", &fixture("flat.json")) {
+        LoadOutcome::Loaded(_) => {}
+        other => panic!("expected replace to succeed, got {other:?}"),
+    }
+    assert!(session.get("result_1").unwrap().stale.is_some());
+    // q2 -> result_2; count 2 > cap 1 -> GC result_1 (the only stale).
+    session.ask("q2");
+
+    assert!(session.get("result_1").is_none(), "result_1 reclaimed");
+    // The producing turn still names result_1 -- visible history preserved.
+    assert!(
+        session.conversation().iter().any(|e| matches!(e,
+            ThreadEntry::Turn(t) if matches!(&t.outcome,
+                TurnOutcome::Materialized { dataset, .. }
+                if dataset.reference_name == "result_1")
+        )),
+        "result_1's producing turn stays in the thread after GC"
+    );
+}
+
+#[test]
+fn gc_leaves_number_holes_never_reused() {
+    // AC5 (issue #42): after GC, the next result still takes max(existing)+1 --
+    // a GC'd number is a permanent hole (ADR-0022 never-reused). result_1 GC'd
+    // -> the next materialization is result_5 (max of 2/3/4 + 1), NOT result_1.
+    let mut session = session_with_scripts(&[
+        ("q1", r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        ("q2", r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        ("q3", r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        ("q4", r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        ("q5", r#"SELECT COUNT(*) AS n FROM "people".data"#),
+    ]);
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv")); // active = orders
+    session.set_result_count_cap(3);
+
+    session.ask("q1"); // result_1
+    session.ask("q2"); // result_2
+    session.ask("q3"); // result_3
+    match session.replace_source("people", &fixture("flat.json")) {
+        LoadOutcome::Loaded(_) => {}
+        other => panic!("expected replace to succeed, got {other:?}"),
+    }
+    session.ask("q4"); // result_4; GC reclaims result_1 (oldest stale)
+    assert!(session.get("result_1").is_none(), "result_1 GC'd");
+
+    // Next materialization: max(2,3,4)+1 = 5, never reusing the result_1 hole.
+    let outcome = session.ask("q5");
+    match outcome {
+        TurnOutcome::Materialized { dataset, .. } => {
+            assert_eq!(
+                dataset.reference_name, "result_5",
+                "GC'd number is a hole, not reused (ADR-0022)"
+            );
+        }
+        other => panic!("expected Materialized result_5, got {other:?}"),
+    }
+}

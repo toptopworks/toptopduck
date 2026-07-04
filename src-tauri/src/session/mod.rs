@@ -34,7 +34,7 @@ use crate::model::{
 use crate::provider::{Provider, ProviderError, ProviderReply, UnwiredProvider};
 use crate::session::snapshot::derive_table;
 use crate::window;
-use crate::workingset::WorkingSet;
+use crate::workingset::{WorkingSet, DEFAULT_RESULT_COUNT_CAP};
 
 /// Raw rows surfaced per sheet in the guided-load preview -- enough to spot the
 /// header row and any separator/sub-header/footer rows to skip (ADR-0015).
@@ -76,6 +76,13 @@ pub struct Session {
     /// tunable via [`Self::set_result_row_cap`] (e.g. tests lower it for a fast,
     /// deterministic cap-hit).
     result_row_cap: u64,
+    /// Ceiling on the number of registered `result_N` (ADR-0013 M=100). When a
+    /// freshly materialized result pushes the count over the cap, the oldest
+    /// stale results are auto-reclaimed; active results are never auto-deleted.
+    /// Defaults to [`DEFAULT_RESULT_COUNT_CAP`]; tunable via
+    /// [`Self::set_result_count_cap`] (tests lower it for a fast, deterministic
+    /// GC trigger -- the count-cap twin of [`Self::result_row_cap`]).
+    result_count_cap: usize,
     /// Each loaded source's reference name -> the `.duckdb` snapshot file admin
     /// currently holds attached, so the sandbox can re-attach it READ_ONLY
     /// (ADR-0005 read_* closure). Tracked here rather than reconstructed from
@@ -109,6 +116,15 @@ impl Session {
     /// deterministic cap-hit, and a future preferences surface may expose it.
     pub fn set_result_row_cap(&mut self, cap: u64) {
         self.result_row_cap = cap;
+    }
+
+    /// Tune the result-count ceiling (ADR-0013 M=100, "可调"). When the
+    /// registered `result_N` count exceeds `cap`, the oldest stale results are
+    /// auto-reclaimed on the next materialization; active results are never
+    /// auto-deleted. Tests lower it for a fast, deterministic GC trigger
+    /// (mirroring [`Self::set_result_row_cap`]).
+    pub fn set_result_count_cap(&mut self, cap: usize) {
+        self.result_count_cap = cap;
     }
 
     /// Build a session with an explicit provider (tests inject a scripted fake;
@@ -145,6 +161,7 @@ impl Session {
             provider,
             history: Vec::new(),
             result_row_cap: DEFAULT_MAX_RESULT_ROWS,
+            result_count_cap: DEFAULT_RESULT_COUNT_CAP,
             source_files: HashMap::new(),
             cancel,
             turn_timeout: None,
@@ -1551,7 +1568,59 @@ impl Session {
         // the then-live working set (members present at the parse moment).
         self.working_set.register_result(descriptor.clone());
         self.working_set.record_provenance(&result_name, deps.refs);
+
+        // GC cap (ADR-0013 M=100, issue #42): if the result_N total now
+        // exceeds the cap, auto-reclaim the oldest stale results. The fresh
+        // result is active (stale is None), so it is never a candidate; active
+        // results survive even when older than every stale result. Reclaimed
+        // results keep their producing turn in the thread (visible history) --
+        // only their data becomes unreferenceable.
+        let reclaimed = self.gc_stale_results();
+        if !reclaimed.is_empty() {
+            log::info!(
+                target: "toptopduck::session",
+                "GC 回收最老 stale：{}",
+                reclaimed.join(", ")
+            );
+        }
         Ok(descriptor)
+    }
+
+    /// Auto-reclaim the oldest stale results when the `result_N` count exceeds
+    /// the cap (ADR-0013, issue #42). GC runs only against stale results --
+    /// active results are never auto-deleted. For each candidate: drop the
+    /// physical table (best-effort; an orphan from a failed DROP is harmless --
+    /// the working-set removal below is the authority on "gone", and the
+    /// session temp dir is wiped on drop either way), then remove the registry
+    /// entry (reference name + result membership + provenance edge). The
+    /// producing turn stays in the thread (AC: round entries preserved). The
+    /// new result's number is unaffected -- `next_result_number` scans only
+    /// registered results, so a GC'd number becomes a permanent hole
+    /// (ADR-0022). Returns the reclaimed names so the caller can log the
+    /// reclaim's reach.
+    fn gc_stale_results(&mut self) -> Vec<String> {
+        let candidates = self.working_set.gc_stale_candidates(self.result_count_cap);
+        for name in &candidates {
+            let drop_sql = format!("DROP TABLE {}", quote_ident(name));
+            if let Err(e) = self.conn.execute_batch(&drop_sql) {
+                // Best-effort, and deliberately warn (not error). The asymmetry
+                // vs `rollback_result`'s error-grade DROP is grounded in
+                // ADR-0022: rollback drops an UN-registered result_N, so an
+                // orphan makes the next `next_result_number` (max over
+                // registered names) reuse N and clash on CREATE -> wedge. GC
+                // drops an already-registered older result_K, and the
+                // `remove` below drops it from the registry, so the next
+                // number is max(remaining)+1 > K -- the orphan never collides
+                // with a future CREATE. warn keeps a recurring engine failure
+                // observable without overstating a non-wedging cleanup miss.
+                log::warn!(
+                    target: "toptopduck::session",
+                    "GC DROP of stale {name} failed: {e}"
+                );
+            }
+            self.working_set.remove(name);
+        }
+        candidates
     }
 
     /// Drop a just-created result_N table and fold any cleanup failure into the
