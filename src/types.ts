@@ -249,3 +249,23 @@ export interface ProviderConfigView {
   // invariant 3: the decrypted key lives only in the Rust core).
   has_key: boolean;
 }
+
+// One resume-progress event (issue #48, ADR-0034 visible progress). Mirrors
+// the Rust `ResumeEvent` (serde externally-tagged: `"Source"` / `"Replay"` as
+// the variant key). Emitted by the backend `open_duck` command via a Tauri
+// event per source verification and per replayed productive turn.
+export type ResumeEvent =
+  | {
+    Source: {
+      index: number;
+      total: number;
+      reference_name: string;
+    };
+  }
+  | {
+    Replay: {
+      index: number;
+      total: number;
+      reference_name: string;
+    };
+  };

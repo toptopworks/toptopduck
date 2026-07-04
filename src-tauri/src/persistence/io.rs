@@ -1,0 +1,242 @@
+//! Atomic `.duck` file IO (ADR-0034/0035): every per-turn persistence write
+//! is a temp-file + rename whole-file rewrite, so a crash mid-write never
+//! leaves a corrupt recipe (it leaves either the prior complete recipe or
+//! the next complete one -- never a half-written file). The temp file lands
+//! in the SAME directory as the target so the rename is intra-volume (atomic
+//! on NTFS / POSIX local filesystems).
+//!
+//! The recipe is small text, so a whole-file rewrite per terminal turn is
+//! the KISS choice (ADR-0034 explicitly defers journaling). Resume reads
+//! the file back and verifies `format_version` before touching any source
+//! (ADR-0036 honest-refuse on a higher version).
+
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use crate::persistence::recipe::{Recipe, RECIPE_FORMAT_VERSION};
+
+/// Suffix appended to the target file name for the temp file. Same directory
+/// as the target so the `rename` is intra-volume (atomic). The temp file is
+/// created fresh each save (`File::create` truncates), so a stale temp from
+/// a prior crashed write is overwritten, not appended to.
+const TMP_SUFFIX: &str = ".tmp";
+
+/// Why a save failed. Every failure leaves the prior recipe file (if any)
+/// untouched: a serialize error happens before any IO; an IO or rename
+/// failure leaves the temp file behind but the target unchanged. The temp
+/// is best-effort cleaned up on a rename failure.
+#[derive(Debug)]
+pub enum SaveError {
+    Serialize(String),
+    Io(String),
+    Rename(String),
+}
+
+impl std::fmt::Display for SaveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::Serialize(d) => write!(f, "序列化 .duck 失败：{d}"),
+            Self::Io(d) => write!(f, "写 .duck 临时文件失败：{d}"),
+            Self::Rename(d) => write!(f, "替换 .duck 失败：{d}"),
+        }
+    }
+}
+impl std::error::Error for SaveError {}
+
+/// Why a read failed. `VersionMismatch` is the ADR-0036 honest-refuse case:
+/// a file made by a newer app must not be silently mis-parsed.
+#[derive(Debug)]
+pub enum LoadError {
+    Io(String),
+    Parse(String),
+    /// ADR-0036: a higher format_version means a newer app made the file. The
+    /// honest answer is "please upgrade" (ADR-0017 capability boundary at the
+    /// format layer) -- never a heuristic guess at the new layout.
+    VersionMismatch { found: u32, supported: u32 },
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::Io(d) => write!(f, "读取 .duck 失败：{d}"),
+            Self::Parse(d) => write!(f, "解析 .duck 失败：{d}"),
+            Self::VersionMismatch { found, supported } => write!(
+                f,
+                "此 .duck 由更高版本（format_version={found}）制作，\
+                 当前 app 仅支持 {supported}，请升级 app 后再打开"
+            ),
+        }
+    }
+}
+impl std::error::Error for LoadError {}
+
+/// The temp-file path for a target (same directory, name + TMP_SUFFIX).
+/// Public so a caller / test can locate a stale temp after a simulated
+/// mid-write crash.
+pub fn temp_path_for(target: &Path) -> Option<PathBuf> {
+    let file_name = target.file_name()?.to_str()?;
+    Some(target.with_file_name(format!("{file_name}{TMP_SUFFIX}")))
+}
+
+/// Write a recipe atomically: serialize to JSON (pretty, for human-readable
+/// .duck and git-friendly diffs), write to `<target>.tmp` in the same
+/// directory, `fsync`, then rename over the target. The rename is atomic on
+/// the same volume; a crash before rename leaves the prior target intact and
+/// a stale temp behind (overwritten on the next save).
+pub fn save_atomic(target: &Path, recipe: &Recipe) -> Result<(), SaveError> {
+    // pretty + sorted keys is unnecessary (serde_json::to_string_pretty keeps
+    // struct order, which is stable), so plain pretty suffices and reads
+    // cleanly in a text editor / git diff.
+    let json =
+        serde_json::to_string_pretty(recipe).map_err(|e| SaveError::Serialize(e.to_string()))?;
+    let tmp = temp_path_for(target).ok_or_else(|| SaveError::Io("无法推导临时文件路径".into()))?;
+
+    {
+        let mut file = fs::File::create(&tmp).map_err(|e| SaveError::Io(e.to_string()))?;
+        file.write_all(json.as_bytes())
+            .map_err(|e| SaveError::Io(e.to_string()))?;
+        // fsync the data before the rename so a crash right after the rename
+        // never leaves a 0-byte / partially-flushed target. Best-effort on
+        // platforms where fsync is a no-op for some FS.
+        file.sync_all().map_err(|e| SaveError::Io(e.to_string()))?;
+    }
+
+    if let Err(e) = fs::rename(&tmp, target) {
+        // Clean up the temp so it doesn't pile up across saves; the target is
+        // untouched (the rename never happened). A failed remove here is
+        // swallowed -- it would mask the real (rename) failure.
+        let _ = fs::remove_file(&tmp);
+        return Err(SaveError::Rename(e.to_string()));
+    }
+    Ok(())
+}
+
+/// Read a recipe, verifying `format_version` (ADR-0036). A higher version is
+/// an honest refusal; an equal version is the normal path. Forward migration
+/// (lower version) lands in a future slice and would transform in memory
+/// before returning -- v1 has no older version today, so this is an exact
+/// match.
+pub fn read_duck(path: &Path) -> Result<Recipe, LoadError> {
+    let text = fs::read_to_string(path).map_err(|e| LoadError::Io(e.to_string()))?;
+    let recipe: Recipe =
+        serde_json::from_str(&text).map_err(|e| LoadError::Parse(e.to_string()))?;
+    if recipe.format_version > RECIPE_FORMAT_VERSION {
+        return Err(LoadError::VersionMismatch {
+            found: recipe.format_version,
+            supported: RECIPE_FORMAT_VERSION,
+        });
+    }
+    // Lower (older) versions would forward-migrate here (ADR-0036); none
+    // exist today, so any non-equal-lower is treated as corrupt (the parse
+    // already accepted the struct, but a future field could default-fill an
+    // unknown older shape -- that lands WITH the migration transform).
+    if recipe.format_version < RECIPE_FORMAT_VERSION {
+        return Err(LoadError::Parse(format!(
+            "未知的旧 format_version={}（当前仅支持 {}）",
+            recipe.format_version, RECIPE_FORMAT_VERSION
+        )));
+    }
+    Ok(recipe)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::RectifyProvenance;
+    use crate::persistence::recipe::{RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef};
+
+    fn sample_recipe(name: &str) -> Recipe {
+        Recipe {
+            format_version: RECIPE_FORMAT_VERSION,
+            session_name: name.into(),
+            sources: vec![SourceRef {
+                reference_name: "people".into(),
+                display_name: "people".into(),
+                source_path: "/data/people.csv".into(),
+                rectify: RectifyProvenance::NotApplicable,
+                fingerprint: "fp".into(),
+            }],
+            history: vec![RecipeEntry::Turn(RecipeTurn {
+                question: "q".into(),
+                outcome: RecipeOutcome::Materialized {
+                    reference_name: "result_1".into(),
+                    display_name: "result_1".into(),
+                    sql: "SELECT 1".into(),
+                    assumption: None,
+                },
+            })],
+            active: Some("result_1".into()),
+        }
+    }
+
+    #[test]
+    fn save_then_read_round_trips() {
+        // ADR-0034: write a recipe, read it back, get the same recipe -- the
+        // .duck is a faithful portable document of the working set.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.duck");
+        let recipe = sample_recipe("round-trip");
+        save_atomic(&path, &recipe).expect("save");
+        let back = read_duck(&path).expect("read");
+        assert_eq!(back, recipe);
+    }
+
+    #[test]
+    fn save_leaves_no_temp_file_behind() {
+        // ADR-0034 atomic write: a successful save renames the temp over the
+        // target, so no `.tmp` litters the directory (a stale temp would pile
+        // up across saves without this).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.duck");
+        save_atomic(&path, &sample_recipe("clean")).expect("save");
+        let tmp = temp_path_for(&path).expect("temp path");
+        assert!(!tmp.exists(), "temp file must not linger after save");
+        assert!(path.exists(), "target file exists");
+    }
+
+    #[test]
+    fn save_overwrites_an_existing_file_atomically() {
+        // ADR-0034 per-turn rewrite: each terminal turn rewrites the whole
+        // file. A second save on the same path replaces the first recipe
+        // entirely (not appended, not merged).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.duck");
+        save_atomic(&path, &sample_recipe("first")).expect("save 1");
+        save_atomic(&path, &sample_recipe("second")).expect("save 2");
+        let back = read_duck(&path).expect("read");
+        assert_eq!(back.session_name, "second");
+    }
+
+    #[test]
+    fn read_refuses_a_higher_format_version() {
+        // ADR-0036 honest-refuse: a file made by a newer app (higher
+        // format_version) must NOT be silently mis-parsed. The error names
+        // both versions so the user understands they must upgrade.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("future.duck");
+        // Hand-write a recipe whose format_version is ahead of v1.
+        let future = format!(
+            "{{\"format_version\":{future},\"session_name\":\"x\",\"sources\":[],\"history\":[]}}",
+            future = RECIPE_FORMAT_VERSION + 1
+        );
+        fs::write(&path, &future).expect("write");
+        match read_duck(&path) {
+            Err(LoadError::VersionMismatch { found, supported }) => {
+                assert_eq!(found, RECIPE_FORMAT_VERSION + 1);
+                assert_eq!(supported, RECIPE_FORMAT_VERSION);
+            }
+            other => panic!("expected VersionMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_surfaces_a_corrupt_file_as_parse_error() {
+        // ADR-0036 / ADR-0017 honest-degrade: a file that is not a valid recipe
+        // surfaces as a parse error, not a silent empty recipe.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("broken.duck");
+        fs::write(&path, b"not json {").expect("write");
+        assert!(matches!(read_duck(&path), Err(LoadError::Parse(_))));
+    }
+}

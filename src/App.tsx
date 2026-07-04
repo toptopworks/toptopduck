@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { ActiveSourceDeleteDialog } from "./components/ActiveSourceDeleteDialog";
 import { FileDropzone } from "./components/FileDropzone";
 import { WorkingSetList } from "./components/WorkingSetList";
@@ -19,16 +20,20 @@ import {
   ingestFile,
   ingestFileGuided,
   listWorkingSet,
+  openDuck,
+  onResumeProgress,
   renameDataset,
   removeSource,
   removeActiveSource,
   replaceSource,
+  saveAsDuck,
   setDatasetPrivacy,
 } from "./api";
 import { loadErrorMessage } from "./loadErrorMessage";
 import type {
   DatasetDescriptor,
   GuidanceRequest,
+  ResumeEvent,
   SheetGuidance,
   StaleAnchor,
   ThreadEntry,
@@ -102,6 +107,11 @@ export default function App() {
   // no-op (AC3).
   const [pendingActiveDelete, setPendingActiveDelete] =
     useState<DatasetDescriptor | null>(null);
+  // Resume progress (issue #48, ADR-0034 visible progress): the textual status
+  // line shown while Session::open_duck re-reads sources + re-executes the
+  // productive chain. null when no resume is running. Updates come from the
+  // backend `resume-progress` Tauri event.
+  const [resumeStatus, setResumeStatus] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setDatasets(await listWorkingSet());
@@ -402,6 +412,68 @@ export default function App() {
     }
   }, []);
 
+  // Save the live session to a .duck path (issue #48, ADR-0034). After this
+  // every terminal turn / source event atomically rewrites the recipe; the
+  // session name defaults to the file stem. A cancel (empty path) is a no-op.
+  const handleSaveAs = useCallback(async () => {
+    const path = await saveDialog({
+      filters: [{ name: "toptopduck", extensions: ["duck"] }],
+    });
+    if (!path) return;
+    const stem =
+      path.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? "session";
+    setLoading(true);
+    setError(null);
+    try {
+      await saveAsDuck(path, stem);
+      await refresh();
+    } catch (e) {
+      setError({ message: fmtError(e), kind: "load" });
+    } finally {
+      setLoading(false);
+    }
+  }, [refresh]);
+
+  // Open a .duck and resume the session across the restart boundary
+  // (issue #48, ADR-0034). Resume runs off the UI thread; the resume-progress
+  // event drives the status line, and on completion the working set / thread
+  // / active are refreshed from the resumed backend session. A cancel (no file
+  // picked) is a no-op.
+  const handleOpenDuck = useCallback(async () => {
+    const selected = await openDialog({
+      filters: [{ name: "toptopduck", extensions: ["duck"] }],
+      multiple: false,
+    });
+    const path = typeof selected === "string" ? selected : null;
+    if (!path) return;
+    setLoading(true);
+    setError(null);
+    setResumeStatus("正在打开…");
+    const unlisten = await onResumeProgress((ev: ResumeEvent) => {
+      if ("Source" in ev) {
+        setResumeStatus(
+          `校验源 ${ev.Source.index}/${ev.Source.total}：${ev.Source.reference_name}`,
+        );
+      } else if ("Replay" in ev) {
+        setResumeStatus(
+          `重放 ${ev.Replay.index}/${ev.Replay.total}：${ev.Replay.reference_name}`,
+        );
+      }
+    });
+    try {
+      await openDuck(path);
+      setResumeStatus(null);
+      setLatestResult(null);
+      await refresh();
+    } catch (e) {
+      setError({ message: fmtError(e), kind: "load" });
+      setResumeStatus(null);
+    } finally {
+      void unlisten();
+      setLoading(false);
+    }
+  }, [refresh]);
+
   const shown = datasets.find((d) => d.reference_name === selected) ?? null;
 
   return (
@@ -410,11 +482,26 @@ export default function App() {
         <h1>toptopduck</h1>
         <DisclosureBanner />
         <div className="header-actions">
+          <button
+            onClick={() => void handleOpenDuck()}
+            disabled={loading || resumeStatus !== null}
+            title="打开 .duck 恢复此前的分析"
+          >
+            打开 .duck
+          </button>
+          <button
+            onClick={() => void handleSaveAs()}
+            disabled={loading || resumeStatus !== null}
+            title="把当前会话另存为 .duck（之后每轮自动保存）"
+          >
+            另存为 .duck
+          </button>
           <span className={hasKey ? "key-ok" : "key-missing"}>
             {hasKey ? "LLM key 已配置" : "未配置 LLM key——提问将失败"}
           </span>
           <button onClick={() => setSettingsOpen(true)}>设置</button>
         </div>
+        {resumeStatus && <p className="resume-progress">{resumeStatus}</p>}
       </header>
 
       <FileDropzone onIngest={handleIngest} loading={loading} />

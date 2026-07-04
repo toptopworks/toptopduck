@@ -31,6 +31,10 @@ use crate::model::{
     SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, StaleReason, ThreadEntry, TurnError,
     TurnOutcome, TurnRecord, EXECUTE_FAIL_PREFIX, RESOURCE_FAIL_PREFIX,
 };
+use crate::persistence::recipe::{
+    Recipe, RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef, RECIPE_FORMAT_VERSION,
+};
+use crate::persistence::{read_duck, save_atomic, SaveError};
 use crate::provider::{Provider, ProviderError, ProviderReply, UnwiredProvider};
 use crate::session::snapshot::derive_table;
 use crate::window;
@@ -53,6 +57,78 @@ const MAX_READ_ROWS: u64 = 10_000;
 /// outcome in #28. The retry is invisible to the user: one question = one
 /// thread entry = one outcome.
 const TURN_RETRY_BUDGET: u32 = 2;
+
+/// Why a resume failed (ADR-0035 honest degrade). Each variant names the
+/// reference / path involved so the user can act on it (re-link, re-upload,
+/// or report a corrupt recipe). The tracer bullet surfaces these as errors;
+/// the re-link / partial-resume UI lands in a later slice.
+#[derive(Debug)]
+pub enum ResumeError {
+    /// Reading or parsing the .duck failed (ADR-0036 version / parse / IO).
+    Load(crate::persistence::io::LoadError),
+    /// A source file could not be re-read at its recorded path (ADR-0035
+    /// "source missing" -- deleted / moved / renamed).
+    SourceMissing {
+        reference_name: String,
+        path: String,
+        detail: String,
+    },
+    /// A source's post-rectify fingerprint changed since the recipe was
+    /// written (ADR-0035 "source drift"). Honest stop, not silent recompute.
+    FingerprintMismatch {
+        reference_name: String,
+        expected: String,
+        found: String,
+    },
+    /// Re-executing a productive turn's SQL failed (ADR-0035 replay break).
+    /// Resume stops at this turn; the working set is materialized up to the
+    /// break point (ADR-0034 honest partial state).
+    Replay {
+        reference_name: String,
+        detail: String,
+    },
+    /// The recipe's active pointer names a source no longer registered after
+    /// resume (the source was removed in a prior session and the recipe was
+    /// not updated, or the recipe is corrupt).
+    ActiveMissing(String),
+}
+
+impl std::fmt::Display for ResumeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::Load(e) => write!(f, "{e}"),
+            Self::SourceMissing { reference_name, path, detail } => write!(
+                f,
+                "源「{reference_name}」找不到：{path}（{detail}）"
+            ),
+            Self::FingerprintMismatch { reference_name, expected, found } => write!(
+                f,
+                "源「{reference_name}」内容已变化（指纹不符；期望 {expected}，实际 {found}）"
+            ),
+            Self::Replay { reference_name, detail } => write!(
+                f,
+                "重放「{reference_name}」失败：{detail}"
+            ),
+            Self::ActiveMissing(name) => write!(
+                f,
+                "会话焦点指向未注册的源「{name}」"
+            ),
+        }
+    }
+}
+impl std::error::Error for ResumeError {}
+
+/// One progress event during resume (ADR-0034 visible progress). Fired per
+/// source verification and per replayed turn so the UI can render a
+/// deterministic progress bar.
+#[derive(Debug, Clone, serde::Serialize)]
+pub enum ResumeEvent {
+    /// Verifying source `index` of `total` (post-rectify fingerprint check).
+    Source { index: usize, total: usize, reference_name: String },
+    /// Replaying productive turn `index` of `total` (re-materializing
+    /// `result_N`).
+    Replay { index: usize, total: usize, reference_name: String },
+}
 
 pub struct Session {
     conn: Connection,
@@ -103,6 +179,15 @@ pub struct Session {
     /// (default) means no turn-level timeout; engine resource caps
     /// (ADR-0005 L3) still bound runaway queries. Tunable for tests.
     turn_timeout: Option<Duration>,
+    /// The bound `.duck` path (ADR-0034). When `Some`, every terminal turn
+    /// and source lifecycle event atomically rewrites the recipe at this path
+    /// (temp + rename, whole-file). `None` until the user saves / opens a
+    /// `.duck` -- an in-memory-only session (the pre-persistence behavior).
+    duck_path: Option<PathBuf>,
+    /// The user-facing session name (ADR-0034). Carried in the recipe header
+    /// and shown on resume; `None` for an in-memory-only session (the recipe
+    /// falls back to an empty name).
+    session_name: Option<String>,
 }
 
 impl Session {
@@ -165,6 +250,8 @@ impl Session {
             source_files: HashMap::new(),
             cancel,
             turn_timeout: None,
+            duck_path: None,
+            session_name: None,
         })
     }
 
@@ -199,6 +286,180 @@ impl Session {
     /// resource caps still apply). Tunable for deterministic timeout tests.
     pub fn set_turn_timeout(&mut self, timeout: Option<Duration>) {
         self.turn_timeout = timeout;
+    }
+
+    /// Bind this session to a `.duck` path (ADR-0034) and immediately persist
+    /// one full recipe. After this, every terminal turn and source lifecycle
+    /// event atomically rewrites the recipe (temp + rename). The session name
+    /// rides the recipe header and is shown on resume. Returns the save error
+    /// (if any) so the caller can surface it -- the binding still takes effect
+    /// so in-memory state is correct even if the first write fails.
+    pub fn bind_duck(&mut self, path: PathBuf, session_name: String) -> Result<(), SaveError> {
+        self.duck_path = Some(path);
+        self.session_name = Some(session_name);
+        self.persist()
+    }
+
+    /// The bound `.duck` path, if any (ADR-0034). `None` for an in-memory-only
+    /// session (the pre-persistence behavior).
+    pub fn duck_path(&self) -> Option<&Path> {
+        self.duck_path.as_deref()
+    }
+
+    /// The user-facing session name, if bound to a `.duck` (ADR-0034).
+    pub fn session_name(&self) -> Option<&str> {
+        self.session_name.as_deref()
+    }
+
+    /// Open a `.duck` and resume the session (ADR-0034): read the recipe,
+    /// verify each source's post-rectify fingerprint (ADR-0035/0042), eagerly
+    /// re-execute the productive SQL chain LLM-free (the SQL lives in the
+    /// recipe), and rebuild the conversation timeline + active pointer. The
+    /// `on_progress` callback fires per source verification and per replayed
+    /// turn so the UI renders visible progress (ADR-0034).
+    ///
+    /// Tracer-bullet happy path: every source is present at its recorded path
+    /// with an unchanged fingerprint, and every replay SQL succeeds. Drift /
+    /// missing-source / replay-break each surface as a typed [`ResumeError`]
+    /// (ADR-0035 honest degrade); re-link / partial-resume UI land later.
+    pub fn open_duck(
+        path: &Path,
+        cancel: Arc<CancelToken>,
+        provider: Box<dyn Provider>,
+        mut on_progress: impl FnMut(ResumeEvent),
+    ) -> Result<Session, ResumeError> {
+        let recipe = read_duck(path).map_err(ResumeError::Load)?;
+        let mut session = Session::with_provider_and_cancel(provider, cancel).map_err(|e| {
+            ResumeError::Load(crate::persistence::io::LoadError::Io(e.to_string()))
+        })?;
+        session.session_name = Some(recipe.session_name.clone());
+
+        // 1. Re-read + verify each source. CSV/JSON/Parquet go through ingest;
+        //    the resulting post-rectify fingerprint must match the recipe
+        //    (ADR-0035/0042). The display label is restored after ingest so a
+        //    user rename survives resume (ADR-0037).
+        let total_sources = recipe.sources.len();
+        for (i, src) in recipe.sources.iter().enumerate() {
+            on_progress(ResumeEvent::Source {
+                index: i + 1,
+                total: total_sources,
+                reference_name: src.reference_name.clone(),
+            });
+            let descriptor = match session.ingest(Path::new(&src.source_path)) {
+                LoadOutcome::Loaded(d) => d,
+                LoadOutcome::Error(e) => {
+                    return Err(ResumeError::SourceMissing {
+                        reference_name: src.reference_name.clone(),
+                        path: src.source_path.clone(),
+                        detail: e.to_string(),
+                    });
+                }
+                LoadOutcome::NeedsGuidance(_) => {
+                    return Err(ResumeError::SourceMissing {
+                        reference_name: src.reference_name.clone(),
+                        path: src.source_path.clone(),
+                        detail: "resume 不支持需引导规整的源（tracer bullet）".into(),
+                    });
+                }
+            };
+            if descriptor.fingerprint != src.fingerprint {
+                return Err(ResumeError::FingerprintMismatch {
+                    reference_name: src.reference_name.clone(),
+                    expected: src.fingerprint.clone(),
+                    found: descriptor.fingerprint,
+                });
+            }
+            if descriptor.display_name != src.display_name {
+                let _ = session.rename_display(&src.reference_name, &src.display_name);
+            }
+        }
+
+        // 2. Eagerly replay the productive chain (ADR-0034). Reuses the #1
+        //    materialize path so result_N numbering, sandboxing, and shape
+        //    derivation match a live turn (ADR-0009). result_N numbers line
+        //    up: replay starts from an empty result set, so the first
+        //    Materialized turn takes result_1, the next result_2, etc. --
+        //    matching the recipe's recording order.
+        let chain = recipe.productive_chain();
+        let total_turns = chain.len();
+        let cancel = Arc::clone(&session.cancel);
+        for (i, turn) in chain.iter().enumerate() {
+            on_progress(ResumeEvent::Replay {
+                index: i + 1,
+                total: total_turns,
+                reference_name: turn.reference_name.clone(),
+            });
+            match session.try_materialize(&turn.sql, &cancel) {
+                Ok(descriptor) => {
+                    if descriptor.display_name != turn.display_name {
+                        let _ = session.rename_display(&turn.reference_name, &turn.display_name);
+                    }
+                }
+                Err(e) => {
+                    return Err(ResumeError::Replay {
+                        reference_name: turn.reference_name.clone(),
+                        detail: e.detail,
+                    });
+                }
+            }
+        }
+
+        // 3. Rebuild the full conversation timeline (ADR-0028/0039/0040). The
+        //    Materialized turns' descriptors come from the working set (just
+        //    re-built by replay, display names restored); no-result turns +
+        //    source events map straight across. viz is None (ADR-0036 not
+        //    persisted), so a reopened chart renders as a table (ADR-0033).
+        session.history = recipe
+            .history
+            .iter()
+            .map(|entry| match entry {
+                RecipeEntry::Turn(turn) => {
+                    let outcome = match &turn.outcome {
+                        RecipeOutcome::Materialized {
+                            reference_name,
+                            sql,
+                            assumption,
+                            ..
+                        } => {
+                            let dataset = session.working_set.get(reference_name).cloned().ok_or_else(|| ResumeError::Replay {
+                                reference_name: reference_name.clone(),
+                                detail: format!("重放后未在 working_set 中找到 {reference_name}"),
+                            })?;
+                            TurnOutcome::Materialized {
+                                dataset: Box::new(dataset),
+                                sql: Some(sql.clone()),
+                                viz: None,
+                                assumption: assumption.clone(),
+                            }
+                        }
+                        RecipeOutcome::Textual { text_kind, body, assumption } => TurnOutcome::Textual {
+                            text_kind: *text_kind,
+                            body: body.clone(),
+                            assumption: assumption.clone(),
+                        },
+                        RecipeOutcome::Failed { reason } => TurnOutcome::Failed { reason: reason.clone() },
+                        RecipeOutcome::Cancelled => TurnOutcome::Cancelled,
+                    };
+                    Ok(ThreadEntry::Turn(TurnRecord { question: turn.question.clone(), outcome }))
+                }
+                RecipeEntry::Source(ev) => Ok(ThreadEntry::Source(ev.clone())),
+            })
+            .collect::<Result<Vec<_>, ResumeError>>()?;
+
+        // 4. Restore the active pointer (ADR-0037: reference name, stable).
+        //    recipe.active is the pre-close focus; ingest set active to the
+        //    last-replayed source, so re-point to the recorded focus. None
+        //    (empty working set) leaves the default None.
+        if let Some(active) = &recipe.active {
+            if !session.working_set.set_active(active) {
+                return Err(ResumeError::ActiveMissing(active.clone()));
+            }
+        }
+
+        // 5. Re-bind the .duck path so subsequent turns persist (ADR-0034).
+        session.duck_path = Some(path.to_path_buf());
+
+        Ok(session)
     }
 
     /// Ingest a file. Transactional: on any failure the working set is unchanged
@@ -1361,6 +1622,11 @@ impl Session {
             question: question.to_string(),
             outcome: outcome.clone(),
         }));
+        // ADR-0034 per-terminal-turn atomic write: the recipe is rewritten
+        // whole-file at the bound path (temp + rename). No-op when no .duck
+        // is bound; a failure is logged (the prior file is intact and the
+        // next turn retries).
+        self.persist_if_bound();
         outcome
     }
 
@@ -1379,6 +1645,129 @@ impl Session {
             reference_name: reference_name.to_string(),
             display_name: display_name.to_string(),
         }));
+        // ADR-0034 / ADR-0040: a source lifecycle operation also lands its
+        // terminal state to the recipe atomically (changing the current
+        // source set is a recipe mutation, not just a thread entry).
+        self.persist_if_bound();
+    }
+
+    /// Build the recipe (ADR-0034) describing the current working set. The
+    /// recipe is organized by current state, not as a historical ledger:
+    /// only still-valid productive turns ride the replayable chain, and the
+    /// history mirrors the always-visible timeline (turns + source events).
+    /// A Materialized turn whose `result_N` has since gone stale (cascade)
+    /// or been removed is dropped -- it cannot replay; the tracer-bullet
+    /// happy path has none (full stale-render lands in a later slice).
+    pub fn build_recipe(&self) -> Recipe {
+        let sources: Vec<SourceRef> = self
+            .working_set
+            .list()
+            .iter()
+            .filter(|d| !self.working_set.is_result(&d.reference_name))
+            .map(|d| SourceRef {
+                reference_name: d.reference_name.clone(),
+                display_name: d.display_name.clone(),
+                source_path: d.source_path.clone(),
+                rectify: d.rectify.clone(),
+                fingerprint: d.fingerprint.clone(),
+            })
+            .collect();
+
+        let history: Vec<RecipeEntry> = self
+            .history
+            .iter()
+            .filter_map(|entry| match entry {
+                ThreadEntry::Turn(record) => {
+                    let outcome = match &record.outcome {
+                        TurnOutcome::Materialized {
+                            dataset,
+                            sql,
+                            viz: _,
+                            assumption,
+                        } => {
+                            // Only keep a Materialized turn if its result_N is
+                            // still an active member (registered + not stale).
+                            let live = self.working_set.get(&dataset.reference_name);
+                            let active = live.map(|d| d.stale.is_none()).unwrap_or(false);
+                            if !active {
+                                return None;
+                            }
+                            // sql is Some on every fresh Materialized turn; a
+                            // None predates the field and cannot replay, so
+                            // drop the turn rather than fabricate SQL.
+                            let sql = sql.clone()?;
+                            // display_name comes from the working set's CURRENT
+                            // state, not the ask-time snapshot in history -- a
+                            // user rename (ADR-0037) updates the working set,
+                            // not the history entry, so the snapshot is stale.
+                            let display_name = live
+                                .map(|d| d.display_name.clone())
+                                .unwrap_or_else(|| dataset.display_name.clone());
+                            RecipeOutcome::Materialized {
+                                reference_name: dataset.reference_name.clone(),
+                                display_name,
+                                sql,
+                                assumption: assumption.clone(),
+                            }
+                        }
+                        TurnOutcome::Textual {
+                            text_kind,
+                            body,
+                            assumption,
+                        } => RecipeOutcome::Textual {
+                            text_kind: *text_kind,
+                            body: body.clone(),
+                            assumption: assumption.clone(),
+                        },
+                        TurnOutcome::Failed { reason } => RecipeOutcome::Failed {
+                            reason: reason.clone(),
+                        },
+                        TurnOutcome::Cancelled => RecipeOutcome::Cancelled,
+                    };
+                    Some(RecipeEntry::Turn(RecipeTurn {
+                        question: record.question.clone(),
+                        outcome,
+                    }))
+                }
+                ThreadEntry::Source(ev) => Some(RecipeEntry::Source(ev.clone())),
+            })
+            .collect();
+
+        let active = self
+            .working_set
+            .active()
+            .map(|d| d.reference_name.clone());
+
+        Recipe {
+            format_version: RECIPE_FORMAT_VERSION,
+            session_name: self.session_name.clone().unwrap_or_default(),
+            sources,
+            history,
+            active,
+        }
+    }
+
+    /// Rewrite the recipe at the bound path (ADR-0034 atomic write). No-op
+    /// when no `.duck` is bound (in-memory-only session). A save failure does
+    /// NOT roll back the in-memory turn -- the user's work stays live; the
+    /// next turn retries the write and the prior recipe on disk is intact
+    /// (temp + rename never leaves a half-written target).
+    fn persist(&self) -> Result<(), SaveError> {
+        let Some(path) = &self.duck_path else {
+            return Ok(());
+        };
+        let recipe = self.build_recipe();
+        save_atomic(path, &recipe)
+    }
+
+    /// Fire [`Self::persist`] after a terminal event, logging a failure
+    /// instead of propagating: a per-turn save error must not abort the turn
+    /// (the in-memory state is already advanced; the disk copy self-heals on
+    /// the next successful write, and the prior file is intact).
+    fn persist_if_bound(&self) {
+        if let Err(e) = self.persist() {
+            log::error!(target: "toptopduck::session", "自动保存 .duck 失败：{e}");
+        }
     }
 
     /// The turn-only view of the timeline, cloned out for the window assembler
@@ -1747,6 +2136,49 @@ mod tests {
     use crate::provider::fake::FakeProvider;
     use crate::provider::ProviderReply;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn build_recipe_for_a_fresh_session_is_empty() {
+        // ADR-0034: a brand-new session has no sources, no turns, no active
+        // dataset. Its recipe is the minimal valid v1 shape -- the same one
+        // an empty working set persists to on first save.
+        let session = Session::new().expect("session");
+        let recipe = session.build_recipe();
+        assert_eq!(
+            recipe.format_version,
+            crate::persistence::RECIPE_FORMAT_VERSION
+        );
+        assert!(recipe.sources.is_empty(), "no sources");
+        assert!(recipe.history.is_empty(), "no turns/events");
+        assert!(recipe.active.is_none(), "no active dataset");
+        assert!(recipe.session_name.is_empty(), "no name bound");
+    }
+
+    #[test]
+    fn bind_duck_writes_a_readable_recipe_at_the_path() {
+        // ADR-0034: bind_duck immediately persists one recipe at the bound
+        // path (temp + rename), so the .duck exists after the call even
+        // before any turn. The file reads back as a v1 recipe carrying the
+        // session name.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.duck");
+        let mut session = Session::new().expect("session");
+        session
+            .bind_duck(path.clone(), "我的分析".into())
+            .expect("bind");
+        assert_eq!(session.duck_path(), Some(path.as_path()));
+        assert_eq!(session.session_name(), Some("我的分析"));
+        let recipe = crate::persistence::read_duck(&path).expect("read back");
+        assert_eq!(
+            recipe.format_version,
+            crate::persistence::RECIPE_FORMAT_VERSION
+        );
+        assert_eq!(recipe.session_name, "我的分析");
+        // Empty working set round-trips: no sources, no history, no active.
+        assert!(recipe.sources.is_empty());
+        assert!(recipe.history.is_empty());
+        assert!(recipe.active.is_none());
+    }
 
     // M1 regression: a turn whose shape derivation fails must roll back the
     // already-created result_N. Here the derivation's fingerprint dump cannot be

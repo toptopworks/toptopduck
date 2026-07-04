@@ -18,6 +18,7 @@ pub mod commands;
 pub mod guardrail;
 pub mod ingest;
 pub mod model;
+pub mod persistence;
 pub mod provenance;
 pub mod provider;
 pub mod session;
@@ -40,7 +41,7 @@ pub use provider::{
     ColumnRef, DatasetRef, Provider, ProviderError, ProviderReply, ProviderRequest,
     ResponsePayload, TurnPayload, UnwiredProvider,
 };
-pub use session::Session;
+pub use session::{ResumeError, ResumeEvent, Session};
 
 use std::sync::{Arc, Mutex};
 
@@ -87,6 +88,8 @@ pub fn run() {
             commands::clear_api_key,
             commands::get_provider_config,
             commands::set_provider_config,
+            commands::save_as_duck,
+            commands::open_duck,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

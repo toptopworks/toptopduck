@@ -1,10 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import type {
   DatasetDescriptor,
   DatasetPrivacy,
   LoadOutcome,
   ProviderConfig,
   ProviderConfigView,
+  ResumeEvent,
   RowPage,
   SheetGuidance,
   ThreadEntry,
@@ -180,4 +183,35 @@ export async function setProviderConfig(
   config: ProviderConfig,
 ): Promise<ProviderConfigView> {
   return invoke<ProviderConfigView>("set_provider_config", { config });
+}
+
+// --- Cross-session persistence (issue #48, ADR-0034/0036) -----------------
+//
+// Save / open a .duck recipe document. Save binds the live session to a path;
+// every subsequent terminal turn atomically rewrites it. Open resumes the
+// session across the restart boundary: re-read + fingerprint-verify each
+// source, eagerly re-execute the productive SQL chain LLM-free, restore the
+// thread + active pointer.
+
+// Bind the session to a .duck path and write one recipe immediately. After
+// this every terminal turn / source event atomically rewrites the recipe.
+export async function saveAsDuck(path: string, sessionName: string): Promise<void> {
+  await invoke<void>("save_as_duck", { path, sessionName });
+}
+
+// Open a .duck and resume the session (ADR-0034). Runs off the UI thread; a
+// `resume-progress` event fires per source verification and per replayed turn
+// (subscribe via onResumeProgress). On success the backend Session is replaced
+// with the resumed one -- the caller refreshes its view of the working set /
+// thread / active after the promise resolves.
+export async function openDuck(path: string): Promise<void> {
+  await invoke<void>("open_duck", { path });
+}
+
+// Subscribe to resume-progress events (ADR-0034 visible progress). Returns an
+// unlisten handle the caller invokes when the view unmounts / the resume ends.
+export async function onResumeProgress(
+  cb: (ev: ResumeEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<ResumeEvent>("resume-progress", (e) => cb(e.payload));
 }
