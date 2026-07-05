@@ -1,5 +1,5 @@
-//! Process-global registry of currently-open `.duck` paths (ADR-0035 §3,
-//! issue #50): in-process single-writer enforcement. The same `.duck` opened
+//! Process-global registry of currently-open `.duck` paths (ADR-0035
+//! Decision 3, issue #50): in-process single-writer enforcement. The same `.duck` opened
 //! twice in the same process is the highest-frequency concurrency hazard (two
 //! app windows on one file), and a process-local path set solves it with zero
 //! OS locks and no stale-lock cleanup. Cross-process / external-edit detection
@@ -57,22 +57,48 @@ pub fn canonicalize_duck(path: &Path) -> Result<PathBuf, std::io::Error> {
 
 /// Atomically acquire a canonical path for this process: returns `true` when
 /// the path was newly added (acquired), `false` when another Session already
-/// holds it (single-writer violation). The check-and-add runs under one lock so
-/// two concurrent acquires of the same path cannot both succeed.
+/// holds it (single-writer violation) OR when the registry lock is poisoned
+/// (a prior panic left the registry inconsistent -- every acquire then refuses
+/// until process restart, so the user must restart the app rather than close
+/// another window). The check-and-add runs under one lock so two concurrent
+/// acquires of the same path cannot both succeed.
 pub fn try_acquire(canonical: &Path) -> bool {
     match open_ducks().lock() {
         Ok(mut set) => set.insert(canonical.to_path_buf()),
-        Err(_) => false,
+        Err(_) => {
+            // Poisoned: a panic left the registry inconsistent. Surface as
+            // `false` (fail-closed -- a false refusal is safer than a double
+            // writer) and log at error level so the support symptom
+            // ("suddenly no file opens") is diagnosable. The caller maps this
+            // to AlreadyOpen; recovery requires process restart.
+            log::error!(
+                target: "toptopduck::persistence",
+                "single-writer registry poisoned; all acquires will refuse until process restart"
+            );
+            false
+        }
     }
 }
 
 /// Release a canonical path (idempotent). Called by a Session's Drop and by
 /// the bind / save-as path when moving from one `.duck` to another. A poisoned
-/// lock is swallowed -- the session is dropping anyway, and a stale entry's
-/// worst case is a false "already open" on a path the user can retry.
+/// lock is logged at error level and swallowed -- Drop must not panic, and a
+/// poisoned registry disables single-writer enforcement process-wide until
+/// restart (every acquire refuses; every release no-ops), so the path may
+/// appear falsely "already open" on the next open attempt.
 pub fn release(canonical: &Path) {
-    if let Ok(mut set) = open_ducks().lock() {
-        set.remove(canonical);
+    match open_ducks().lock() {
+        Ok(mut set) => {
+            set.remove(canonical);
+        }
+        Err(_) => {
+            log::error!(
+                target: "toptopduck::persistence",
+                "single-writer registry poisoned during release of {}; \
+                 the path may appear 'already open' until process restart",
+                canonical.display()
+            );
+        }
     }
 }
 
@@ -82,7 +108,7 @@ mod tests {
 
     #[test]
     fn canonicalize_collapses_relative_and_dot_spellings() {
-        // ADR-0035 §3: the registry keys on the canonical path, so a trivially
+        // ADR-0035 Decision 3: the registry keys on the canonical path, so a trivially
         // different spelling of the same file does not evade single-writer.
         // `a.duck`, `./a.duck`, and the absolute path all canonicalize to one
         // key when the file exists.
@@ -117,7 +143,7 @@ mod tests {
 
     #[test]
     fn try_acquire_rejects_a_duplicate_and_releases_allow_reopen() {
-        // ADR-0035 §3 single-writer: a second acquire of the same canonical
+        // ADR-0035 Decision 3 single-writer: a second acquire of the same canonical
         // path fails; after release, it can be re-acquired (e.g. drop + reopen).
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("once.duck");

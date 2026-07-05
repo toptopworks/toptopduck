@@ -27,14 +27,14 @@ const TMP_SUFFIX: &str = ".tmp";
 /// untouched: a serialize error happens before any IO; an IO or rename
 /// failure leaves the temp file behind but the target unchanged. The temp
 /// is best-effort cleaned up on a rename failure. `AlreadyOpen` is the
-/// ADR-0035 §3 single-writer refusal -- the canonical path is already held
+/// ADR-0035 Decision 3 single-writer refusal -- the canonical path is already held
 /// by another Session in this process, so the save never touches the file.
 #[derive(Debug)]
 pub enum SaveError {
     Serialize(String),
     Io(String),
     Rename(String),
-    /// ADR-0035 §3 / issue #50: the canonical `.duck` path is already held
+    /// ADR-0035 Decision 3 / issue #50: the canonical `.duck` path is already held
     /// open by another Session in this process. The save is refused BEFORE
     /// any IO so the existing file is never clobbered. Carries the canonical
     /// path so the UI can name exactly which file is double-open.

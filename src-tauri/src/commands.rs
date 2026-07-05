@@ -392,7 +392,7 @@ pub fn take_persist_error(state: State<'_, Arc<Mutex<Session>>>) -> Result<Optio
     Ok(s.take_persist_error())
 }
 
-/// Read + clear the pending external-change conflict, if any (ADR-0035 §3 /
+/// Read + clear the pending external-change conflict, if any (ADR-0035 Decision 3 /
 /// issue #50). The frontend polls this after each turn / source event / resume:
 /// a non-`None` value means the auto-write was suspended because the `.duck`
 /// file's on-disk hash diverged from the session's baseline (another window,
