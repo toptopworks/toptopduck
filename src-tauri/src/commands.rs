@@ -2,10 +2,10 @@
 //! the ingest pipeline is the black box tested in tests/ingest_blackbox.rs, and
 //! the ask -> result loop in tests/query_blackbox.rs (issue #22).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::cancel::CancelToken;
 use crate::model::{
@@ -13,7 +13,7 @@ use crate::model::{
     SheetGuidance, ThreadEntry, TurnOutcome, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
 };
 use crate::provider::keychain::KeychainStore;
-use crate::session::Session;
+use crate::session::{ResumeEvent, Session};
 
 /// Ingest a file. Runs the DuckDB copy-in off the async/UI thread (AC8: does not
 /// freeze the app) and returns the outcome descriptor or a clear error.
@@ -299,4 +299,80 @@ pub fn set_provider_config(
         model: config.model,
         has_key: store.has_key(),
     })
+}
+
+// --- Cross-session persistence (issue #48, ADR-0034/0036) -------------------
+//
+// Save / open a `.duck` recipe document. Save binds the live session to a
+// path (every subsequent terminal turn atomically rewrites it). Open resumes
+// the session across the restart boundary: each source is re-read + fingerprint-
+// verified, the productive SQL chain is eagerly re-executed LLM-free, and the
+// conversation thread + active pointer are restored. Resume progress is
+// emitted as a `resume-progress` Tauri event the frontend renders.
+
+/// Bind the session to a `.duck` path and write one recipe immediately
+/// (ADR-0034). After this every terminal turn / source event atomically
+/// rewrites the recipe. Synchronous: a small whole-file rewrite.
+#[tauri::command]
+pub fn save_as_duck(
+    state: State<'_, Arc<Mutex<Session>>>,
+    path: String,
+    session_name: String,
+) -> Result<(), String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    s.bind_duck(PathBuf::from(path), session_name)
+        .map_err(|e| e.to_string())
+}
+
+/// Open a `.duck` and resume the session across the restart boundary
+/// (ADR-0034). Runs off the async/UI thread (AC8): resume re-reads every
+/// source and re-executes the productive SQL chain, which can take seconds.
+/// Progress is emitted as a `resume-progress` event per source verification
+/// and per replayed turn (ADR-0034 visible progress). On success the managed
+/// Session is replaced with the resumed one (the SAME managed cancel-token
+/// Arc is reused, so the cancel command keeps working against the new
+/// session).
+#[tauri::command]
+pub async fn open_duck(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<Mutex<Session>>>,
+    cancel: State<'_, Arc<CancelToken>>,
+    keychain: State<'_, KeychainStore>,
+    path: String,
+) -> Result<(), String> {
+    let path = PathBuf::from(path);
+    let session_arc = state.inner().clone();
+    let cancel_arc = Arc::clone(cancel.inner());
+    // The resumed session reuses the SAME provider wiring as a fresh session
+    // (ADR-0007): the real Anthropic client reading the key from the OS
+    // keychain. Resume itself is LLM-free (it re-executes stored SQL), but the
+    // next new turn after resume must reach a live provider -- so the provider
+    // is wired at open time, not deferred.
+    let provider = Box::new(crate::AnthropicProvider::new(Box::new(
+        keychain.inner().clone(),
+    )));
+    tauri::async_runtime::spawn_blocking(move || {
+        let new_session = Session::open_duck(&path, cancel_arc, provider, |ev: ResumeEvent| {
+            let _ = app.emit("resume-progress", &ev);
+        })
+        .map_err(|e| e.to_string())?;
+        let mut s = session_arc.lock().map_err(|e| e.to_string())?;
+        *s = new_session;
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Read + clear the most recent per-turn persistence failure, if any
+/// (ADR-0034/0035 honest signal). The frontend polls this after each turn /
+/// source event / resume: a non-blocking "未保存到磁盘" banner surfaces the
+/// disk-vs-memory drift so the user knows a save dropped (instead of relying
+/// on the next successful write to silently self-heal, which would mask the
+/// window where closing the app loses the unsaved turns). Returns `None`
+/// after a clean save or after a prior read cleared the failure.
+#[tauri::command]
+pub fn take_persist_error(state: State<'_, Arc<Mutex<Session>>>) -> Result<Option<String>, String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    Ok(s.take_persist_error())
 }
