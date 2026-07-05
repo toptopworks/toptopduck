@@ -604,7 +604,19 @@ impl Session {
                             // Match -- restore the recipe's display label over
                             // the path-derived one (ADR-0037 rename survives).
                             if descriptor.display_name != src.display_name {
-                                let _ = self.rename_display(&src.reference_name, &src.display_name);
+                                // ADR-0035 honest signal: a failure to restore
+                                // the recipe's label is logged, not swallowed --
+                                // the user would otherwise see a path-derived
+                                // label without knowing the rename was lost.
+                                if let Err(e) =
+                                    self.rename_display(&src.reference_name, &src.display_name)
+                                {
+                                    log::warn!(
+                                        target: "toptopduck::session",
+                                        "restore label「{}」for re-linked source {} failed: {e}",
+                                        src.display_name, src.reference_name,
+                                    );
+                                }
                             }
                             break; // next source
                         }
@@ -775,7 +787,17 @@ impl Session {
             match self.try_materialize(&turn.sql, &cancel) {
                 Ok(descriptor) => {
                     if descriptor.display_name != turn.display_name {
-                        let _ = self.rename_display(&turn.reference_name, &turn.display_name);
+                        // ADR-0035 honest signal: log a label-restore failure
+                        // during replay instead of swallowing it silently.
+                        if let Err(e) =
+                            self.rename_display(&turn.reference_name, &turn.display_name)
+                        {
+                            log::warn!(
+                                target: "toptopduck::session",
+                                "restore label「{}」for replayed turn {} failed: {e}",
+                                turn.display_name, turn.reference_name,
+                            );
+                        }
                     }
                 }
                 Err(e) => {
@@ -961,13 +983,28 @@ impl Session {
     /// leaves a ghost attachment, but the working set is the source of truth
     /// and the session temp dir is wiped on drop.
     fn detach_snapshot(&mut self, reference_name: &str) {
+        // Detach + drop the snapshot file + working-set entry, WITHOUT the
+        // cascade-stale / Deleted-event steps of `commit_removal`. Used during
+        // resume re-link / drift retry: the source is being re-ingested under
+        // the same name (re-link) or abandoned mid-resume (Rebuild). The
+        // shared best-effort I/O lives in `release_snapshot`.
+        self.release_snapshot(reference_name);
+    }
+
+    /// Release a source's snapshot: DETACH the catalog + delete the snapshot
+    /// file + drop the working-set entry. Best-effort + logged I/O shared by
+    /// [`Self::detach_snapshot`] (resume re-link / drift retry) and
+    /// [`Self::commit_removal`] (source removal). A failure leaves a ghost
+    /// attachment or a stray temp file, but the working set (source of truth)
+    /// still reflects the removal; the session temp dir is wiped on drop.
+    fn release_snapshot(&mut self, reference_name: &str) {
         if let Err(e) = self
             .conn
             .execute_batch(&format!("DETACH {};", quote_ident(reference_name)))
         {
             log::warn!(
                 target: "toptopduck::session",
-                "DETACH during resume re-link for {reference_name} failed: {e}"
+                "DETACH failed for {reference_name}: {e}"
             );
         }
         let snapshot_path = self
@@ -977,7 +1014,7 @@ impl Session {
         if let Err(e) = fs::remove_file(&snapshot_path) {
             log::warn!(
                 target: "toptopduck::session",
-                "snapshot file removal during resume re-link for {reference_name}: {e}"
+                "snapshot file removal failed for {reference_name}: {e}"
             );
         }
         self.working_set.remove(reference_name);
@@ -1635,40 +1672,15 @@ impl Session {
             );
         }
 
-        // DETACH the read-only snapshot catalog (mirrors rollback_excel). A
-        // DETACH failure leaves a ghost attachment that cannot affect
-        // correctness (the working set no longer names it; a later same-name
-        // ingest de-conflicts), but is kept diagnosable.
-        if let Err(e) = self
-            .conn
-            .execute_batch(&format!("DETACH {};", quote_ident(reference_name)))
-        {
-            log::warn!(
-                target: "toptopduck::session",
-                "DETACH failed during removal for {reference_name}: {e}"
-            );
-        }
+        // Release the snapshot (DETACH + remove file + drop working-set entry).
+        // Shared with `detach_snapshot`; best-effort + logged I/O. A failure
+        // leaves a ghost attachment or a stray temp file, but the working set
+        // (source of truth) already reflects the removal and the session temp
+        // dir is wiped on drop.
+        self.release_snapshot(reference_name);
 
-        // Delete the snapshot file. source_files holds the real attached path
-        // (a replace may have left it at a swap path); fall back to the formal
-        // <ref>.duckdb name only when no entry was tracked. On Windows a held
-        // handle can make remove_file fail, but the session temp dir is wiped
-        // on drop either way.
-        let snapshot_path = self
-            .source_files
-            .remove(reference_name)
-            .unwrap_or_else(|| self.temp_path.join(format!("{reference_name}.duckdb")));
-        if let Err(e) = fs::remove_file(&snapshot_path) {
-            log::warn!(
-                target: "toptopduck::session",
-                "snapshot file removal failed during removal for {reference_name}: {e}"
-            );
-        }
-
-        // Drop the dataset (clears active-if-match + results membership) and
-        // append the Deleted event. The display label was captured by the
+        // Append the Deleted event. The display label was captured by the
         // caller, so the event still names what was removed.
-        self.working_set.remove(reference_name);
         self.append_source_event(SourceLifecycleKind::Deleted, reference_name, display_name);
     }
 

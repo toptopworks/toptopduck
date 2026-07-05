@@ -656,6 +656,59 @@ fn resume_reports_drift_without_silently_replaying() {
 }
 
 #[test]
+fn resume_aborts_on_drift_without_replaying() {
+    // AC3 (中止 branch): source content drifted at the same path -> Drift ->
+    // user picks Abort -> resume stops, session is NOT entered, recipe is left
+    // byte-for-byte untouched. Mirrors AC2's Missing+Abort contract; the
+    // Rebuild branch is covered by resume_reports_drift_without_silently_replaying.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let original = plant_people(dir.path());
+    let session = build_single_source_session(&duck, &original);
+    drop(session);
+
+    let recipe_before = fs::read_to_string(&duck).expect("read .duck");
+
+    // Replace the content in place (different fingerprint = drift).
+    fs::write(&original, "id,name,score\n9,Zoe,1.1\n").expect("write drifted content");
+
+    let drift_seen = Rc::new(RefCell::new(false));
+    let drift_for_cb = Rc::clone(&drift_seen);
+    let outcome = Session::open_duck(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(UnwiredProvider),
+        |_| {},
+        move |issue| match issue {
+            SourceIssue::Drift { reference_name, .. } => {
+                assert_eq!(reference_name, "people");
+                *drift_for_cb.borrow_mut() = true;
+                SourceResolution::Abort
+            }
+            SourceIssue::Missing { .. } => panic!("expected Drift, got Missing"),
+        },
+        |_| ActiveResolution::Abort,
+    );
+    match outcome {
+        Err(ResumeError::Aborted) => {}
+        Err(other) => panic!("expected Aborted, got: {other}"),
+        Ok(_) => panic!("expected Aborted, but resume succeeded"),
+    }
+
+    assert!(
+        *drift_seen.borrow(),
+        "Drift was reported before abort (no silent replay)"
+    );
+
+    // The on-disk recipe is unchanged -- Abort does not persist partial state.
+    let recipe_after = fs::read_to_string(&duck).expect("read .duck after");
+    assert_eq!(
+        recipe_before, recipe_after,
+        "recipe untouched after Drift+Abort (AC3 中止原状保留)"
+    );
+}
+
+#[test]
 fn resume_handles_each_source_independently_multi_source() {
     // AC4: a multi-source session where ONE source is missing and the others
     // are intact. The missing source goes through re-link; the intact source
