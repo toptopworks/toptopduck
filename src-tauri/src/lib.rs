@@ -41,7 +41,10 @@ pub use provider::{
     ColumnRef, DatasetRef, Provider, ProviderError, ProviderReply, ProviderRequest,
     ResponsePayload, TurnPayload, UnwiredProvider,
 };
-pub use session::{ResumeError, ResumeEvent, Session};
+pub use session::{
+    ActiveAbandoned, ActiveResolution, ResumeError, ResumeEvent, Session, SourceIssue,
+    SourceResolution,
+};
 
 use std::sync::{Arc, Mutex};
 

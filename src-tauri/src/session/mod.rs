@@ -58,44 +58,57 @@ const MAX_READ_ROWS: u64 = 10_000;
 /// thread entry = one outcome.
 const TURN_RETRY_BUDGET: u32 = 2;
 
-/// Why a resume failed (ADR-0035 honest degrade). Each variant names the
-/// reference / path involved so the user can act on it (re-link, re-upload,
-/// or report a corrupt recipe). The tracer bullet surfaces these as errors;
-/// the re-link / partial-resume UI lands in a later slice.
+/// Why a resume failed (ADR-0035 honest degrade). The interactive re-link /
+/// drift / active-abandoned decisions land via [`SourceIssue`] /
+/// [`ActiveAbandoned`] callbacks; this enum covers the non-interactive
+/// failures (corrupt recipe, path-traversal refusal, user cancel / abort).
 #[derive(Debug)]
 pub enum ResumeError {
     /// Reading or parsing the .duck failed (ADR-0036 version / parse / IO).
     Load(crate::persistence::io::LoadError),
-    /// A source file could not be re-read at its recorded path (ADR-0035
-    /// "source missing" -- deleted / moved / renamed).
+    /// A source path was refused at the resume boundary for a non-recoverable
+    /// reason -- today, a relative_path that escapes the `.duck`'s directory
+    /// subtree (path-traversal refusal, ADR-0036 trust boundary). Distinct
+    /// from the interactive [`SourceIssue::Missing`]: a traversal is a hard
+    /// engine refusal (re-linking to the same traversed path would not help),
+    /// while a plain missing file is a user-resolvable re-link.
     SourceMissing {
         reference_name: String,
         path: String,
         detail: String,
     },
-    /// A source's post-rectify fingerprint changed since the recipe was
-    /// written (ADR-0035 "source drift"). Honest stop, not silent recompute.
-    FingerprintMismatch {
-        reference_name: String,
-        expected: String,
-        found: String,
-    },
-    /// Re-executing a productive turn's SQL failed (ADR-0035 replay break).
-    /// Resume stops at this turn; the working set is materialized up to the
-    /// break point (ADR-0034 honest partial state).
+    /// A working-set invariant violation surfaced while rebuilding the
+    /// conversation timeline: a Materialized turn that should have been
+    /// re-materialized by [`Session::resume_replay`] is not registered. A
+    /// replay SQL failure itself is NOT reported here -- it lands as a partial
+    /// session with that turn rendered as `Failed` (ADR-0035 honest partial
+    /// state). This variant signals a logic bug or a hand-edited recipe whose
+    /// history references a result the chain never produced.
     Replay {
         reference_name: String,
         detail: String,
     },
-    /// The recipe's active pointer names a source no longer registered after
-    /// resume (the source was removed in a prior session and the recipe was
-    /// not updated, or the recipe is corrupt).
+    /// The recipe's active pointer does not resolve to a usable registered
+    /// source. Two paths land here, both honest stops (the engine never
+    /// silently picks a different active source): (1) a corrupt recipe whose
+    /// `active` was never in `recipe.sources` -- the write path never
+    /// persists such a name, so this signals external editing; (2) the
+    /// caller's [`ActiveResolution::ContinueWith`] named a source not in the
+    /// `remaining` menu -- a stale view or a direct IPC race. Distinct from
+    /// an active source that WAS in the recipe but got rebuilt: that case is
+    /// resolvable via [`ActiveAbandoned`] and never reaches this variant.
     ActiveMissing(String),
     /// The user cancelled resume (ADR-0021): the cancel token fired during
-    /// source verification or replay. Distinct from [`Self::Replay`] so the UI
-    /// can show "已取消" instead of a confusing data-corruption error -- a
-    /// cancelled replay is not a broken recipe.
+    /// source verification or replay. Distinct from [`Self::Aborted`] so the
+    /// UI can show "已取消" instead of "已中止" -- a cancel is an engine
+    /// interrupt, not a user dialog choice.
     Cancelled,
+    /// The user chose Abort in a re-link or active-abandoned dialog
+    /// (ADR-0035): resume stops at the decision point and the on-disk recipe
+    /// is left untouched (no partial state is persisted). Distinct from
+    /// [`Self::Cancelled`] (engine interrupt) and from Rebuild (which abandons
+    /// ONE source and continues -- Abort abandons the whole resume).
+    Aborted,
 }
 
 impl std::fmt::Display for ResumeError {
@@ -107,24 +120,130 @@ impl std::fmt::Display for ResumeError {
                 path,
                 detail,
             } => write!(f, "源「{reference_name}」找不到：{path}（{detail}）"),
-            Self::FingerprintMismatch {
-                reference_name,
-                expected,
-                found,
-            } => write!(
-                f,
-                "源「{reference_name}」内容已变化（指纹不符；期望 {expected}，实际 {found}）"
-            ),
             Self::Replay {
                 reference_name,
                 detail,
             } => write!(f, "重放「{reference_name}」失败：{detail}"),
             Self::ActiveMissing(name) => write!(f, "会话焦点指向未注册的源「{name}」"),
             Self::Cancelled => write!(f, "已取消恢复"),
+            Self::Aborted => write!(f, "已中止恢复"),
         }
     }
 }
 impl std::error::Error for ResumeError {}
+
+/// Per-source integrity issue surfaced during resume (ADR-0035 honest degrade,
+/// issue #49). Passed to the caller's [`Session::open_duck`] `on_source_issue`
+/// callback so the UI (or test) can drive the re-link / abort / rebuild
+/// decision -- the engine NEVER silently picks. Each variant names the source
+/// + the path/fingerprint context the decision needs.
+#[derive(Debug, Clone)]
+pub enum SourceIssue {
+    /// The recorded path no longer exists (deleted / moved / renamed). The
+    /// user may re-link to the moved file, abort, or rebuild (re-upload later).
+    /// Distinct from [`Self::Unreadable`]: a Missing file is a re-link
+    /// candidate (the user likely knows where it moved); an Unreadable file
+    /// is a format/parse problem the user must diagnose before re-linking
+    /// would help. Confusing the two would mislead the UI into offering a
+    /// re-link dialog for a file that is right where the recipe recorded it
+    /// (ADR-0035 honest signal -- the issue's kind drives the user action).
+    Missing {
+        reference_name: String,
+        /// The path the recipe recorded (absolute fallback form).
+        recorded_path: String,
+    },
+    /// The file IS present at its resolved path but could not be read into a
+    /// usable snapshot: parse error, unsupported format, refused Excel
+    /// workbook (multi-sheet guided rectify needs its own resume path), or a
+    /// DuckDB ATTACH failure. The user sees the underlying reason so they can
+    /// tell a corrupt/unsupported file from a moved one. The same re-link /
+    /// abort / rebuild resolutions apply -- re-linking to a different file of
+    /// a supported format is the typical fix.
+    Unreadable {
+        reference_name: String,
+        /// The path actually read (post resolve, after any prior re-link).
+        path: String,
+        /// The underlying read failure detail (LoadError display string).
+        reason: String,
+    },
+    /// The source is present at its path but the post-rectify fingerprint
+    /// differs from the recipe's record (ADR-0035 "drift") -- the data
+    /// changed since the recipe was written. The engine must NEVER silently
+    /// replay with the new data; the user decides to rebuild (the data is
+    /// genuinely different) or abort. A re-link to a backup whose fingerprint
+    /// matches the recipe is also accepted (the verify loop re-checks).
+    Drift {
+        reference_name: String,
+        /// The path actually read (post resolve, after any prior re-link).
+        path: String,
+        /// The fingerprint the recipe recorded (the canonical-content hash).
+        expected: String,
+        /// The fingerprint computed from the file currently at `path`.
+        found: String,
+    },
+}
+
+/// The caller's resolution to a [`SourceIssue`] (ADR-0035). Returned from the
+/// `on_source_issue` callback; the engine acts on it without second-guessing.
+#[derive(Debug, Clone)]
+pub enum SourceResolution {
+    /// Re-link: the user pointed at a new path for this source. Resume
+    /// re-ingests + fingerprint-verifies; on a match the recipe is updated to
+    /// the new path (canonical params + fingerprint UNCHANGED -- same content,
+    /// ADR-0035). On a mismatch the issue re-surfaces (loop), giving the user
+    /// another chance to pick the right file or abort.
+    Relink(PathBuf),
+    /// Abort: stop resume entirely. The session is NOT entered; the on-disk
+    /// recipe is untouched (AC2 -- "原状保留").
+    Abort,
+    /// Rebuild: abandon THIS source (it is dropped from the working set + the
+    /// persisted recipe), and resume continues with the remaining sources
+    /// (AC4 -- per-source independent handling). The user will re-upload the
+    /// data in a later turn. If the rebuilt source was the active source AND
+    /// at least one other source remains, [`ActiveAbandoned`] fires next
+    /// (AC5). When it was the last source, no callback fires -- the empty
+    /// working set IS the honest end (AC5 supplement: there is nothing left
+    /// to silently fall back to).
+    Rebuild,
+}
+
+/// Notice that the active-SOURCE pointer was abandoned (AC5, ADR-0035
+/// no-silent-fallback). Passed to the `on_active_abandoned` callback ONLY when
+/// the active source was rebuilt (or otherwise unresolvable) AND at least one
+/// other source remains. When the last source is rebuilt the working set goes
+/// empty + `active` becomes `None` without a callback (the empty state IS the
+/// honest end -- there is nothing left to silently fall back to).
+#[derive(Debug, Clone)]
+pub struct ActiveAbandoned {
+    /// The reference name of the abandoned active source.
+    pub abandoned: String,
+    /// The remaining registered source reference names, in working-set order.
+    /// Always non-empty when this is fired (empty -> no callback).
+    pub remaining: Vec<String>,
+}
+
+/// The caller's resolution to an [`ActiveAbandoned`] notice (ADR-0035).
+#[derive(Debug, Clone)]
+pub enum ActiveResolution {
+    /// Continue with an explicit source from `remaining`. ADR-0035 forbids
+    /// auto-fallback, so the user must name the continuation source; the
+    /// engine never picks "the first remaining" on its own.
+    ContinueWith(String),
+    /// Abort resume entirely (the user declined to pick a continuation).
+    Abort,
+}
+
+/// Where the replay chain broke (ADR-0035 honest partial state, issue #49 AC6).
+/// Round K's SQL failed; the working set holds K-1 materialized results, and
+/// the timeline ends at turn K rendered as `Failed` (ADR-0028 outcome C).
+/// Turns after K in the recipe's history are dropped (the conversation stops at
+/// the breakpoint). Internal to resume -- the partial state is observable via
+/// the resumed Session's working set + history.
+#[derive(Debug, Clone)]
+struct ReplayBreak {
+    reference_name: String,
+    reason: String,
+}
 
 /// One progress event during resume (ADR-0034 visible progress). Fired per
 /// source verification and per replayed turn so the UI can render a
@@ -336,72 +455,94 @@ impl Session {
         self.session_name.as_deref()
     }
 
-    /// Open a `.duck` and resume the session (ADR-0034): read the recipe,
-    /// verify each source's post-rectify fingerprint (ADR-0035/0042), eagerly
-    /// re-execute the productive SQL chain LLM-free (the SQL lives in the
-    /// recipe), and rebuild the conversation timeline + active pointer. The
-    /// `on_progress` callback fires per source verification and per replayed
-    /// turn so the UI renders visible progress (ADR-0034).
+    /// Open a `.duck` and resume the session across the restart boundary
+    /// (ADR-0034/0035, issue #49). Reads the recipe, re-reads + fingerprint-
+    /// verifies each source (interactive re-link / rebuild on Missing / Drift),
+    /// resolves the active-SOURCE pointer (interactive continuation if the
+    /// active was abandoned + others remain), eagerly re-executes the
+    /// productive SQL chain LLM-free (partial on a round-K failure: K-1
+    /// results preserved, K rendered as Failed, post-K turns dropped), and
+    /// rebuilds the conversation timeline truncated at any replay breakpoint.
     ///
-    /// Tracer-bullet happy path: every source is present at its recorded path
-    /// with an unchanged fingerprint, and every replay SQL succeeds. Drift /
-    /// missing-source / replay-break each surface as a typed [`ResumeError`]
-    /// (ADR-0035 honest degrade); re-link / partial-resume UI land later.
+    /// The three callbacks are the honest-degrade decision points
+    /// (ADR-0035 -- the engine NEVER silently picks):
+    /// - `on_progress`: per-source verification + per-replayed-turn progress
+    ///   (ADR-0034 visible progress).
+    /// - `on_source_issue`: per-source Missing / Drift resolution. Each source
+    ///   is handled independently (AC4); a Rebuild drops just that source.
+    /// - `on_active_abandoned`: fired ONLY when the active source was rebuilt
+    ///   AND other sources remain (AC5 -- no silent fallback).
+    ///
+    /// Resume itself is LLM-free (AC7): it re-executes stored SQL and asks the
+    /// caller (not a cloud model) for every integrity decision. The provider is
+    /// wired only so the next NEW turn after resume reaches a live model.
+    ///
+    /// On success the `.duck` is rewritten to reflect the post-resume state
+    /// (relinked paths, rebuilt sources dropped, truncated timeline with the
+    /// failed turn) -- a failure here is captured in `persist_error` (non-
+    /// blocking; the session is live regardless, ADR-0035 honest signal). On
+    /// [`ResumeError::Aborted`] the on-disk recipe is left untouched (AC2).
     pub fn open_duck(
         path: &Path,
         cancel: Arc<CancelToken>,
         provider: Box<dyn Provider>,
         mut on_progress: impl FnMut(ResumeEvent),
+        mut on_source_issue: impl FnMut(SourceIssue) -> SourceResolution,
+        mut on_active_abandoned: impl FnMut(ActiveAbandoned) -> ActiveResolution,
     ) -> Result<Session, ResumeError> {
         // Mark resume as in-flight + clear any stale cancel request, mirroring
         // `ask`'s per-turn guard (ADR-0021). The resume_sources / resume_replay
         // loops poll is_requested() between items so a user cancel lands as
-        // [`ResumeError::Cancelled`] (a clean signal), not a masked `Replay`
-        // failure indistinguishable from data corruption. Drop on exit clears
+        // [`ResumeError::Cancelled`] (a clean signal), not a masked partial
+        // state indistinguishable from data corruption. Drop on exit clears
         // in-flight and the interrupt slot (RAII -- every exit from open_duck,
         // success or error, drops the guard). The resumed Session reuses the
         // SAME Arc<CancelToken>, so the next ask's begin_turn composes cleanly.
         let _guard = cancel.begin_turn();
 
-        let recipe = read_duck(path).map_err(ResumeError::Load)?;
+        let mut recipe = read_duck(path).map_err(ResumeError::Load)?;
         let mut session = Session::with_provider_and_cancel(provider, cancel)
             .map_err(|e| ResumeError::Load(crate::persistence::io::LoadError::Io(e.to_string())))?;
         session.session_name = Some(recipe.session_name.clone());
 
-        // Steps 1-3 each rebuild one phase of the live session (sources ->
-        // productive replay -> full timeline); each is an independent fallible
-        // phase (ADR-0035 honest degrade between them).
-        session.resume_sources(path, &recipe, &mut on_progress)?;
-        session.resume_replay(&recipe, &mut on_progress)?;
-        session.resume_history(&recipe)?;
+        // Phase 1: re-read + verify each source (interactive re-link / rebuild).
+        // Returns the set of rebuilt (dropped) sources; recipe.sources[i] is
+        // updated in place for any relinked path.
+        let rebuilt =
+            session.resume_sources(path, &mut recipe, &mut on_progress, &mut on_source_issue)?;
 
-        // 4. Restore the active-SOURCE pointer (ADR-0035/0037; see
-        //    [`Recipe::active`] doc). ingest set it to the last-registered
-        //    source; an explicit user continuation choice after deleting the
-        //    active source (#39) is restored here. This is NOT the user focus
-        //    -- `Session::active()` (focus = latest result else active source,
-        //    via resolve_active) is reproven from the rebuilt timeline, so the
-        //    focus is not persisted. None (empty working set) stays None.
-        if let Some(active) = &recipe.active {
-            if !session.working_set.set_active(active) {
-                return Err(ResumeError::ActiveMissing(active.clone()));
-            }
-        }
+        // Phase 2: resolve the active-SOURCE pointer. The happy path restores
+        // recipe.active; if the active was rebuilt + others remain, the caller
+        // picks an explicit continuation (ADR-0035 no-silent-fallback, AC5).
+        session.resolve_active_pointer(&recipe, &rebuilt, &mut on_active_abandoned)?;
 
-        // 5. Re-bind the .duck path so subsequent turns persist (ADR-0034).
+        // Phase 3: replay the productive SQL chain (partial on failure -- K-1
+        // results preserved, K rendered as Failed, AC6).
+        let replay_break = session.resume_replay(&recipe, &mut on_progress)?;
+
+        // Phase 4: rebuild the conversation timeline, truncated at the replay
+        // breakpoint (if any). Post-break entries are dropped ("对话停在断点").
+        session.resume_history(&recipe, replay_break.as_ref())?;
+
+        // Phase 5: re-bind the .duck path + persist the post-resume state.
+        // build_recipe reads the live working set, so relinked paths, dropped
+        // (rebuilt) sources, and the truncated timeline (failed turn at K)
+        // land in the persisted recipe. A failure is non-blocking -- the
+        // session is live; the banner surfaces the disk-vs-memory drift.
         session.duck_path = Some(path.to_path_buf());
+        session.persist_if_bound();
 
         Ok(session)
     }
 
-    /// Resolve a recipe source path to a filesystem path (ADR-0036 §4 hybrid
-    /// paths). The relative form -- taken against the `.duck` file's
+    /// Resolve a recipe source path to a filesystem path (ADR-0036 Decision 4
+    /// hybrid paths). The relative form -- taken against the `.duck` file's
     /// directory -- wins when present and the candidate exists; that is the
     /// form that survives "move the folder" portability. Otherwise the
     /// absolute `source_path` is the fallback. Fingerprint verification
     /// upstream catches a wrong pick, so the choice here is safe.
     ///
-    /// Trust boundary (rust/security.md §input-validation + ADR-0036): the
+    /// Trust boundary (rust/security.md Input Validation section + ADR-0036): the
     /// `.duck` is external input. A hand-edited or externally-sourced recipe
     /// whose `relative_path` escapes the `.duck`'s directory subtree
     /// (`../../etc/passwd`, `~/../.ssh/id_rsa`, ...) would otherwise let a
@@ -438,79 +579,237 @@ impl Session {
         Ok(absolute)
     }
 
-    /// Resume phase 1 (ADR-0034/0035/0036/0042): re-read and verify every
-    /// source. The source path resolves hybrid-style
-    /// ([`Self::resolve_source_path`]); CSV/JSON/Parquet go through ingest,
-    /// and the resulting post-rectify fingerprint must match the recipe
-    /// (ADR-0035/0042). The display label is restored after ingest so a user
-    /// rename survives resume (ADR-0037). Fires one `Source` progress event
-    /// per source (ADR-0034 visible progress).
+    /// Resume phase 1 (ADR-0034/0035/0036/0042, issue #49): re-read and verify
+    /// every source, interactively. The source path resolves hybrid-style
+    /// ([`Self::resolve_source_path`]); the source is ingested under the
+    /// recipe's reference name via [`Self::resume_ingest_at`] (no name derive
+    /// / de-conflict / Added-event -- resume replays the recipe's own events
+    /// in phase 4, not new ones); the resulting post-rectify fingerprint must
+    /// match the recipe (ADR-0035/0042). On Missing (path gone / unreadable)
+    /// or Drift (present but fingerprint differs) the caller's `on_source_issue`
+    /// callback decides: Relink (re-ingest a new path + re-verify, looping),
+    /// Abort (stop resume, on-disk recipe untouched), or Rebuild (drop this one
+    /// source, continue with the rest -- AC4 per-source independence).
+    ///
+    /// Returns the set of rebuilt source reference names so phase 2 can decide
+    /// whether the active pointer needs an interactive continuation. Mutates
+    /// `recipe.sources[i]` in place for any relinked path (source_path updated,
+    /// relative_path cleared) so phase 5's persist writes the new path. Fires
+    /// one `Source` progress event per source (ADR-0034 visible progress).
     fn resume_sources(
         &mut self,
         duck_path: &Path,
-        recipe: &Recipe,
+        recipe: &mut Recipe,
         on_progress: &mut impl FnMut(ResumeEvent),
-    ) -> Result<(), ResumeError> {
+        on_source_issue: &mut impl FnMut(SourceIssue) -> SourceResolution,
+    ) -> Result<HashSet<String>, ResumeError> {
         let total = recipe.sources.len();
-        for (i, src) in recipe.sources.iter().enumerate() {
+        let mut rebuilt: HashSet<String> = HashSet::new();
+        for i in 0..recipe.sources.len() {
             if self.cancel.is_requested() {
                 return Err(ResumeError::Cancelled);
             }
+            // Snapshot the reference name for the progress event before any
+            // mutable borrow of recipe.sources below.
+            let reference_name = recipe.sources[i].reference_name.clone();
             on_progress(ResumeEvent::Source {
                 index: i + 1,
                 total,
-                reference_name: src.reference_name.clone(),
+                reference_name: reference_name.clone(),
             });
-            let path = Self::resolve_source_path(duck_path, src)?;
-            let descriptor = match self.ingest(&path) {
-                LoadOutcome::Loaded(d) => d,
-                LoadOutcome::Error(e) => {
-                    return Err(ResumeError::SourceMissing {
-                        reference_name: src.reference_name.clone(),
-                        path: src.source_path.clone(),
-                        detail: e.to_string(),
-                    });
+            // Re-link / drift retry loop: each iteration resolves the path,
+            // ingests under the recipe's name, and verifies the fingerprint.
+            // A Relink resolution updates the path and loops; Abort returns;
+            // Rebuild drops the source and breaks to the next one.
+            loop {
+                let src = recipe.sources[i].clone();
+                let path = Self::resolve_source_path(duck_path, &src)?;
+                match self.resume_ingest_at(&src.reference_name, &src.display_name, &path) {
+                    Ok(descriptor) => {
+                        if descriptor.fingerprint == src.fingerprint {
+                            // Match -- restore the recipe's display label over
+                            // the path-derived one (ADR-0037 rename survives).
+                            if descriptor.display_name != src.display_name {
+                                // ADR-0035 honest signal: a failure to restore
+                                // the recipe's label is logged, not swallowed --
+                                // the user would otherwise see a path-derived
+                                // label without knowing the rename was lost.
+                                if let Err(e) =
+                                    self.rename_display(&src.reference_name, &src.display_name)
+                                {
+                                    log::warn!(
+                                        target: "toptopduck::session",
+                                        "restore label「{}」for re-linked source {} failed: {e}",
+                                        src.display_name, src.reference_name,
+                                    );
+                                }
+                            }
+                            break; // next source
+                        }
+                        // Drift: present at path, fingerprint differs. NEVER
+                        // silently replay with the new data (ADR-0035).
+                        let resolution = on_source_issue(SourceIssue::Drift {
+                            reference_name: src.reference_name.clone(),
+                            path: path.to_string_lossy().to_string(),
+                            expected: src.fingerprint.clone(),
+                            found: descriptor.fingerprint,
+                        });
+                        match resolution {
+                            SourceResolution::Relink(new_path) => {
+                                // Drop the just-ingested drifted snapshot so
+                                // the next loop's copy-in can attach under the
+                                // same name without colliding.
+                                self.detach_snapshot(&src.reference_name);
+                                recipe.sources[i].source_path =
+                                    new_path.to_string_lossy().to_string();
+                                recipe.sources[i].relative_path = None;
+                                continue; // re-verify with the new path
+                            }
+                            SourceResolution::Abort => return Err(ResumeError::Aborted),
+                            SourceResolution::Rebuild => {
+                                self.detach_snapshot(&src.reference_name);
+                                rebuilt.insert(src.reference_name.clone());
+                                break; // next source (this one abandoned)
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Distinguish Absent (path doesn't exist -> re-link is
+                        // the natural fix) from Unreadable (file present but
+                        // parse / format / ATTACH failed -> the user needs the
+                        // reason to diagnose). ADR-0035 honest signal: the
+                        // issue kind drives the user's next action, so
+                        // conflating them would offer a re-link dialog for a
+                        // file that is right where the recipe recorded it.
+                        // `path` is the resolved candidate (relative preferred,
+                        // absolute fallback) from resolve_source_path above.
+                        let issue = if path.exists() {
+                            SourceIssue::Unreadable {
+                                reference_name: src.reference_name.clone(),
+                                path: path.to_string_lossy().to_string(),
+                                reason: e.to_string(),
+                            }
+                        } else {
+                            SourceIssue::Missing {
+                                reference_name: src.reference_name.clone(),
+                                recorded_path: src.source_path.clone(),
+                            }
+                        };
+                        let resolution = on_source_issue(issue);
+                        match resolution {
+                            SourceResolution::Relink(new_path) => {
+                                recipe.sources[i].source_path =
+                                    new_path.to_string_lossy().to_string();
+                                recipe.sources[i].relative_path = None;
+                                continue; // re-verify with the new path
+                            }
+                            SourceResolution::Abort => return Err(ResumeError::Aborted),
+                            SourceResolution::Rebuild => {
+                                rebuilt.insert(src.reference_name.clone());
+                                break; // next source (never ingested)
+                            }
+                        }
+                    }
                 }
-                LoadOutcome::NeedsGuidance(_) => {
-                    return Err(ResumeError::SourceMissing {
-                        reference_name: src.reference_name.clone(),
-                        path: src.source_path.clone(),
-                        detail: "resume 不支持需引导规整的源（tracer bullet）".into(),
-                    });
-                }
-            };
-            if descriptor.fingerprint != src.fingerprint {
-                return Err(ResumeError::FingerprintMismatch {
-                    reference_name: src.reference_name.clone(),
-                    expected: src.fingerprint.clone(),
-                    found: descriptor.fingerprint,
-                });
-            }
-            if descriptor.display_name != src.display_name {
-                let _ = self.rename_display(&src.reference_name, &src.display_name);
             }
         }
-        Ok(())
+        Ok(rebuilt)
     }
 
-    /// Resume phase 2 (ADR-0034): eagerly re-execute the productive SQL chain
-    /// LLM-free (the SQL lives in the recipe). Reuses the #1 materialize path
-    /// so result_N numbering, sandboxing, and shape derivation match a live
-    /// turn (ADR-0009). Replay starts from an empty result set, so result_N
-    /// numbers line up with the recipe's recording order. Fires one `Replay`
-    /// progress event per turn.
+    /// Resume phase 2 (ADR-0035, issue #49 AC5): resolve the active-SOURCE
+    /// pointer after the per-source integrity pass. The happy path restores
+    /// `recipe.active` (still registered). If the active source was rebuilt
+    /// (dropped) and other sources remain, ADR-0035 forbids auto-fallback --
+    /// the caller must name an explicit continuation. When the last source was
+    /// rebuilt (no sources remain), the working set stays empty + `active` is
+    /// `None` without a callback (the empty state IS the honest end). A
+    /// corrupt recipe whose `active` was never a registered source surfaces as
+    /// [`ResumeError::ActiveMissing`] (never the interactive path).
+    fn resolve_active_pointer(
+        &mut self,
+        recipe: &Recipe,
+        rebuilt: &HashSet<String>,
+        on_active_abandoned: &mut impl FnMut(ActiveAbandoned) -> ActiveResolution,
+    ) -> Result<(), ResumeError> {
+        let Some(active_name) = recipe.active.clone() else {
+            return Ok(()); // no active pointer (empty working set recipe)
+        };
+        // Happy path: active still registered. Restore the pointer (ingest
+        // left it on the last-registered source; an explicit prior user
+        // continuation choice must be re-applied here, ADR-0035/0037).
+        if self.working_set.get(&active_name).is_some() {
+            return if self.working_set.set_active(&active_name) {
+                Ok(())
+            } else {
+                // set_active rejects a result_N name; the recipe invariant says
+                // active is always a source, so a failure here is corruption.
+                Err(ResumeError::ActiveMissing(active_name))
+            };
+        }
+        // Active not in the working set. If it was NOT rebuilt, it names a
+        // source that was never in recipe.sources -> corrupt recipe.
+        if !rebuilt.contains(&active_name) {
+            return Err(ResumeError::ActiveMissing(active_name));
+        }
+        // Active was rebuilt. ADR-0035: no silent fallback. The remaining
+        // registered sources (excluding result_N) are the continuation menu.
+        let remaining: Vec<String> = self
+            .working_set
+            .list()
+            .iter()
+            .filter(|d| !self.working_set.is_result(&d.reference_name))
+            .map(|d| d.reference_name.clone())
+            .collect();
+        if remaining.is_empty() {
+            // The last source was rebuilt -> empty working set, active None.
+            // (working_set.remove already cleared active when the rebuilt
+            // active source was detached.) No callback -- nothing to choose
+            // from, and the empty state is the user's honest end (upload new).
+            return Ok(());
+        }
+        match on_active_abandoned(ActiveAbandoned {
+            abandoned: active_name,
+            remaining: remaining.clone(),
+        }) {
+            ActiveResolution::ContinueWith(name) => {
+                if remaining.contains(&name) && self.working_set.set_active(&name) {
+                    Ok(())
+                } else {
+                    // Caller named a source not in `remaining` -- a stale view
+                    // or a direct IPC race. Surface as ActiveMissing rather
+                    // than silently writing a dangling pointer.
+                    Err(ResumeError::ActiveMissing(name))
+                }
+            }
+            ActiveResolution::Abort => Err(ResumeError::Aborted),
+        }
+    }
+
+    /// Resume phase 3 (ADR-0034/0035, issue #49 AC6): eagerly re-execute the
+    /// productive SQL chain LLM-free (the SQL lives in the recipe). Reuses the
+    /// #1 materialize path so result_N numbering, sandboxing, and shape
+    /// derivation match a live turn (ADR-0009). Replay starts from an empty
+    /// result set, so result_N numbers line up with the recipe's recording
+    /// order. Fires one `Replay` progress event per turn.
+    ///
+    /// On a round-K SQL failure (data drift / dropped column / abandoned
+    /// source referenced by the chain) resume does NOT abort: turn K is
+    /// rendered as `Failed` (ADR-0028 outcome C), turns K+1.. are dropped
+    /// ("对话停在断点"), and K-1's materialized results stay in the working set
+    /// (ADR-0035 honest partial state). Returns the [`ReplayBreak`] so phase 4
+    /// knows where to truncate; `None` means the whole chain replayed.
     fn resume_replay(
         &mut self,
         recipe: &Recipe,
         on_progress: &mut impl FnMut(ResumeEvent),
-    ) -> Result<(), ResumeError> {
+    ) -> Result<Option<ReplayBreak>, ResumeError> {
         let chain = recipe.productive_chain();
         let total = chain.len();
         let cancel = Arc::clone(&self.cancel);
         for (i, turn) in chain.iter().enumerate() {
             // Honor a user cancel between turns (ADR-0021): without this poll
             // a click of 停止 during replay would only get the engine interrupt
-            // on the CURRENT SQL, surface as ResumeError::Replay, and look
+            // on the CURRENT SQL, surface as a partial break, and look
             // indistinguishable from data corruption. The cancel lands here as
             // ResumeError::Cancelled BEFORE the next turn's SQL starts.
             if cancel.is_requested() {
@@ -524,29 +823,87 @@ impl Session {
             match self.try_materialize(&turn.sql, &cancel) {
                 Ok(descriptor) => {
                     if descriptor.display_name != turn.display_name {
-                        let _ = self.rename_display(&turn.reference_name, &turn.display_name);
+                        // ADR-0035 honest signal: log a label-restore failure
+                        // during replay instead of swallowing it silently.
+                        if let Err(e) =
+                            self.rename_display(&turn.reference_name, &turn.display_name)
+                        {
+                            log::warn!(
+                                target: "toptopduck::session",
+                                "restore label「{}」for replayed turn {} failed: {e}",
+                                turn.display_name, turn.reference_name,
+                            );
+                        }
                     }
                 }
                 Err(e) => {
-                    return Err(ResumeError::Replay {
+                    // Round K failed -- stop here. K-1 results are in the
+                    // working set; K will render as Failed; K+1.. are dropped
+                    // by resume_history (truncate at this reference name).
+                    return Ok(Some(ReplayBreak {
                         reference_name: turn.reference_name.clone(),
-                        detail: e.detail,
-                    });
+                        reason: format!("{}{}", EXECUTE_FAIL_PREFIX, e.detail),
+                    }));
                 }
             }
         }
-        Ok(())
+        Ok(None)
     }
 
-    /// Resume phase 3 (ADR-0028/0039/0040): rebuild the full conversation
-    /// timeline from the recipe. The Materialized turns' descriptors come from
-    /// the working set (just re-built by replay, display names restored);
-    /// no-result turns + source events map straight across. viz is None
-    /// (ADR-0036 not persisted), so a reopened chart renders as a table
-    /// (ADR-0033).
-    fn resume_history(&mut self, recipe: &Recipe) -> Result<(), ResumeError> {
-        self.history = recipe
-            .history
+    /// Resume phase 4 (ADR-0028/0039/0040, issue #49 AC6): rebuild the
+    /// conversation timeline from the recipe, truncated at the replay
+    /// breakpoint if any. The Materialized turns' descriptors come from the
+    /// working set (just re-built by replay, display names restored); the
+    /// break turn (if any) renders as `Failed` with the replay's reason
+    /// (ADR-0028 outcome C); entries strictly after the break turn are dropped
+    /// (the conversation stops at the breakpoint). viz is None (ADR-0036 not
+    /// persisted), so a reopened chart renders as a table (ADR-0033).
+    fn resume_history(
+        &mut self,
+        recipe: &Recipe,
+        break_at: Option<&ReplayBreak>,
+    ) -> Result<(), ResumeError> {
+        // Locate the break turn's history index (if any) to truncate there.
+        // The productive_chain is the Materialized turns in timeline order, so
+        // turn K in that order maps to one history entry by reference name.
+        let break_idx = break_at.and_then(|brk| {
+            recipe.history.iter().position(|entry| match entry {
+                RecipeEntry::Turn(t) => matches!(
+                    &t.outcome,
+                    RecipeOutcome::Materialized { reference_name, .. }
+                        if reference_name == &brk.reference_name
+                ),
+                _ => false,
+            })
+        });
+        // Invariant: if break_at is Some, the break turn's reference_name MUST
+        // appear in recipe.history as a Materialized entry (the productive_chain
+        // and the history are two views of the same turn list). A None
+        // break_idx with a Some break_at means the invariant is violated (a
+        // hand-edited recipe whose history lost the break turn, or a logic bug
+        // in resume_replay). Surfacing as Replay rather than silently rendering
+        // the full timeline (which would hide the replay failure from the
+        // user) is the ADR-0035 honest answer.
+        let end = match (break_at, break_idx) {
+            (None, _) => recipe.history.len(),
+            (Some(_), Some(idx)) => idx + 1,
+            (Some(brk), None) => {
+                log::error!(
+                    target: "toptopduck::session",
+                    "replay break reference {} not found in recipe history -- invariant violation",
+                    brk.reference_name
+                );
+                return Err(ResumeError::Replay {
+                    reference_name: brk.reference_name.clone(),
+                    detail: format!(
+                        "重放断点「{}」在 history 中找不到对应条目（recipe 不一致）",
+                        brk.reference_name
+                    ),
+                });
+            }
+        };
+
+        self.history = recipe.history[..end]
             .iter()
             .map(|entry| match entry {
                 RecipeEntry::Turn(turn) => {
@@ -557,21 +914,31 @@ impl Session {
                             assumption,
                             ..
                         } => {
-                            let dataset = self
-                                .working_set
-                                .get(reference_name)
-                                .cloned()
-                                .ok_or_else(|| ResumeError::Replay {
-                                    reference_name: reference_name.clone(),
-                                    detail: format!(
-                                        "重放后未在 working_set 中找到 {reference_name}"
-                                    ),
-                                })?;
-                            TurnOutcome::Materialized {
-                                dataset: Box::new(dataset),
-                                sql: Some(sql.clone()),
-                                viz: None,
-                                assumption: assumption.clone(),
+                            // The break turn renders as Failed (replay broke
+                            // here), NOT as Materialized -- the result was
+                            // never re-materialized.
+                            if let Some(b) =
+                                break_at.filter(|b| b.reference_name == *reference_name)
+                            {
+                                TurnOutcome::Failed {
+                                    reason: b.reason.clone(),
+                                }
+                            } else {
+                                let dataset =
+                                    self.working_set.get(reference_name).cloned().ok_or_else(
+                                        || ResumeError::Replay {
+                                            reference_name: reference_name.clone(),
+                                            detail: format!(
+                                                "重放后未在 working_set 中找到 {reference_name}"
+                                            ),
+                                        },
+                                    )?;
+                                TurnOutcome::Materialized {
+                                    dataset: Box::new(dataset),
+                                    sql: Some(sql.clone()),
+                                    viz: None,
+                                    assumption: assumption.clone(),
+                                }
                             }
                         }
                         RecipeOutcome::Textual {
@@ -597,6 +964,118 @@ impl Session {
             })
             .collect::<Result<Vec<_>, ResumeError>>()?;
         Ok(())
+    }
+
+    /// Ingest a source for resume under an explicit reference name + display
+    /// label (no derive / de-conflict / Added-event append). The recipe
+    /// already fixed the name + the timeline; resume just needs the snapshot
+    /// attached read-only + the descriptor registered so fingerprint
+    /// verification and replay can proceed. CSV/JSON/Parquet share the single
+    /// copy-in path; Excel is refused (its multi-sheet + guided rectify
+    /// semantics need their own resume path, out of scope for #49 -- a
+    /// refused resume is more honest than silently re-tidying into shapes the
+    /// recipe did not record). Returns the freshly-read descriptor.
+    fn resume_ingest_at(
+        &mut self,
+        reference_name: &str,
+        display_name: &str,
+        path: &Path,
+    ) -> Result<DatasetDescriptor, LoadError> {
+        let dispatched = ingest::dispatch(path);
+        let reader = match dispatched {
+            ingest::Dispatched::Xls => return Err(LoadError::LegacyExcel),
+            ingest::Dispatched::Xlsx => {
+                return Err(LoadError::Other {
+                    detail: "resume 不支持 Excel 工作簿（多 sheet 语义）".into(),
+                });
+            }
+            _ => match ingest::reader_for(&dispatched) {
+                Some(r) => r,
+                None => {
+                    let requested = match dispatched {
+                        ingest::Dispatched::Unsupported(ext) => ext,
+                        _ => String::new(),
+                    };
+                    return Err(LoadError::UnsupportedFormat { requested });
+                }
+            },
+        };
+        // copy-in + attach under the explicit reference name (no de-conflict:
+        // the recipe's name is already unique, ADR-0036 parse-time check).
+        let snap = ingest::loader::copy_in(path, &self.temp_path, reference_name, reader)?;
+        let attach_path = snap.file_path.to_string_lossy();
+        let attach_sql = format!(
+            "ATTACH '{attach_path}' AS {} (READ_ONLY);",
+            quote_ident(reference_name)
+        );
+        if let Err(e) = self.conn.execute_batch(&attach_sql) {
+            let _ = fs::remove_file(&snap.file_path);
+            return Err(LoadError::Other {
+                detail: format!("挂载快照失败：{e}"),
+            });
+        }
+        self.source_files
+            .insert(reference_name.to_string(), snap.file_path);
+        let descriptor = DatasetDescriptor {
+            reference_name: reference_name.to_string(),
+            display_name: display_name.to_string(),
+            source_path: path.to_string_lossy().to_string(),
+            columns: snap.columns,
+            row_count: snap.row_count,
+            sample: snap.sample,
+            fingerprint: snap.fingerprint,
+            rectify: RectifyProvenance::NotApplicable,
+            privacy: DatasetPrivacy::default(),
+            stale: None,
+        };
+        self.working_set.register(descriptor.clone());
+        Ok(descriptor)
+    }
+
+    /// Detach a source's read-only snapshot + drop it from the working set,
+    /// WITHOUT appending a lifecycle event or cascading stale. Used during
+    /// resume re-link / drift retry: the source is being re-ingested under the
+    /// same name (re-link) or abandoned mid-resume (Rebuild), so the snapshot
+    /// file must be released before a new copy-in can attach under the same
+    /// name. Best-effort + logged I/O (mirrors `commit_removal`): a failure
+    /// leaves a ghost attachment, but the working set is the source of truth
+    /// and the session temp dir is wiped on drop.
+    fn detach_snapshot(&mut self, reference_name: &str) {
+        // Detach + drop the snapshot file + working-set entry, WITHOUT the
+        // cascade-stale / Deleted-event steps of `commit_removal`. Used during
+        // resume re-link / drift retry: the source is being re-ingested under
+        // the same name (re-link) or abandoned mid-resume (Rebuild). The
+        // shared best-effort I/O lives in `release_snapshot`.
+        self.release_snapshot(reference_name);
+    }
+
+    /// Release a source's snapshot: DETACH the catalog + delete the snapshot
+    /// file + drop the working-set entry. Best-effort + logged I/O shared by
+    /// [`Self::detach_snapshot`] (resume re-link / drift retry) and
+    /// [`Self::commit_removal`] (source removal). A failure leaves a ghost
+    /// attachment or a stray temp file, but the working set (source of truth)
+    /// still reflects the removal; the session temp dir is wiped on drop.
+    fn release_snapshot(&mut self, reference_name: &str) {
+        if let Err(e) = self
+            .conn
+            .execute_batch(&format!("DETACH {};", quote_ident(reference_name)))
+        {
+            log::warn!(
+                target: "toptopduck::session",
+                "DETACH failed for {reference_name}: {e}"
+            );
+        }
+        let snapshot_path = self
+            .source_files
+            .remove(reference_name)
+            .unwrap_or_else(|| self.temp_path.join(format!("{reference_name}.duckdb")));
+        if let Err(e) = fs::remove_file(&snapshot_path) {
+            log::warn!(
+                target: "toptopduck::session",
+                "snapshot file removal failed for {reference_name}: {e}"
+            );
+        }
+        self.working_set.remove(reference_name);
     }
 
     /// Ingest a file. Transactional: on any failure the working set is unchanged
@@ -1251,40 +1730,15 @@ impl Session {
             );
         }
 
-        // DETACH the read-only snapshot catalog (mirrors rollback_excel). A
-        // DETACH failure leaves a ghost attachment that cannot affect
-        // correctness (the working set no longer names it; a later same-name
-        // ingest de-conflicts), but is kept diagnosable.
-        if let Err(e) = self
-            .conn
-            .execute_batch(&format!("DETACH {};", quote_ident(reference_name)))
-        {
-            log::warn!(
-                target: "toptopduck::session",
-                "DETACH failed during removal for {reference_name}: {e}"
-            );
-        }
+        // Release the snapshot (DETACH + remove file + drop working-set entry).
+        // Shared with `detach_snapshot`; best-effort + logged I/O. A failure
+        // leaves a ghost attachment or a stray temp file, but the working set
+        // (source of truth) already reflects the removal and the session temp
+        // dir is wiped on drop.
+        self.release_snapshot(reference_name);
 
-        // Delete the snapshot file. source_files holds the real attached path
-        // (a replace may have left it at a swap path); fall back to the formal
-        // <ref>.duckdb name only when no entry was tracked. On Windows a held
-        // handle can make remove_file fail, but the session temp dir is wiped
-        // on drop either way.
-        let snapshot_path = self
-            .source_files
-            .remove(reference_name)
-            .unwrap_or_else(|| self.temp_path.join(format!("{reference_name}.duckdb")));
-        if let Err(e) = fs::remove_file(&snapshot_path) {
-            log::warn!(
-                target: "toptopduck::session",
-                "snapshot file removal failed during removal for {reference_name}: {e}"
-            );
-        }
-
-        // Drop the dataset (clears active-if-match + results membership) and
-        // append the Deleted event. The display label was captured by the
+        // Append the Deleted event. The display label was captured by the
         // caller, so the event still names what was removed.
-        self.working_set.remove(reference_name);
         self.append_source_event(SourceLifecycleKind::Deleted, reference_name, display_name);
     }
 
@@ -1796,7 +2250,7 @@ impl Session {
     /// or been removed is dropped -- it cannot replay; the tracer-bullet
     /// happy path has none (full stale-render lands in a later slice).
     pub fn build_recipe(&self) -> Recipe {
-        // ADR-0036 §4 hybrid paths: `source_path` is always absolute (fallback
+        // ADR-0036 Decision 4 hybrid paths: `source_path` is always absolute (fallback
         // resolver); `relative_path` is set when the source lives inside the
         // .duck file's directory subtree (primary resolver, survives "move the
         // folder"). strip_prefix succeeds exactly when the source is in the
@@ -2353,7 +2807,7 @@ mod tests {
 
     #[test]
     fn build_recipe_records_relative_path_for_in_subtree_sources() {
-        // ADR-0036 §4 hybrid paths: a source inside the .duck file's directory
+        // ADR-0036 Decision 4 hybrid paths: a source inside the .duck file's directory
         // subtree is recorded with BOTH a relative path (the primary resolver,
         // which survives "move the folder" portability) and the absolute path
         // (the fallback). The out-of-subtree case (relative_path = None) is

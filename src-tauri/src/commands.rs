@@ -352,9 +352,24 @@ pub async fn open_duck(
         keychain.inner().clone(),
     )));
     tauri::async_runtime::spawn_blocking(move || {
-        let new_session = Session::open_duck(&path, cancel_arc, provider, |ev: ResumeEvent| {
-            let _ = app.emit("resume-progress", &ev);
-        })
+        let new_session = Session::open_duck(
+            &path,
+            cancel_arc,
+            provider,
+            |ev: ResumeEvent| {
+                let _ = app.emit("resume-progress", &ev);
+            },
+            // Issue #49 honest-degrade callbacks: the engine surfaces Missing
+            // / Unreadable / Drift / ActiveAbandoned decisions to the caller.
+            // The re-link / continuation UI is deferred to a follow-up of
+            // #49 (not yet scheduled -- the engine + test seam land in this
+            // slice, the frontend dialogs do not) -- until then any issue
+            // aborts resume (matching the prior all-or-nothing behavior). The
+            // engine never silently picks, so the typed ResumeError::Aborted
+            // surfaces to the user as "resume stopped" rather than a guess.
+            |_| crate::SourceResolution::Abort,
+            |_| crate::ActiveResolution::Abort,
+        )
         .map_err(|e| e.to_string())?;
         let mut s = session_arc.lock().map_err(|e| e.to_string())?;
         *s = new_session;
