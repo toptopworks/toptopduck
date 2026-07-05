@@ -59,7 +59,9 @@ impl std::fmt::Display for SaveError {
 impl std::error::Error for SaveError {}
 
 /// Why a read failed. `VersionMismatch` is the ADR-0036 honest-refuse case:
-/// a file made by a newer app must not be silently mis-parsed.
+/// a file made by a newer app must not be silently mis-parsed. `Migration`
+/// preserves the typed [`MigrationError`] so a failing transform names its
+/// field/gap instead of flattening to a string at this boundary.
 #[derive(Debug)]
 pub enum LoadError {
     Io(String),
@@ -71,6 +73,18 @@ pub enum LoadError {
         found: u32,
         supported: u32,
     },
+    /// ADR-0036 forward migration failed: the file's `format_version` is below
+    /// the current app's, but a per-version transform rejected the shape (a
+    /// missing/ill-typed field, or a gap in the migration chain -- no
+    /// transform registered for the source version). Carries the typed error
+    /// so the UI can name the failing step rather than a flattened string.
+    Migration(crate::persistence::migration::MigrationError),
+}
+
+impl From<crate::persistence::migration::MigrationError> for LoadError {
+    fn from(e: crate::persistence::migration::MigrationError) -> Self {
+        Self::Migration(e)
+    }
 }
 
 impl std::fmt::Display for LoadError {
@@ -83,6 +97,9 @@ impl std::fmt::Display for LoadError {
                 "此 .duck 由更高版本（format_version={found}）制作，\
                  当前 app 仅支持 {supported}，请升级 app 后再打开"
             ),
+            // Delegate to MigrationError's Display (Chinese, names the failing
+            // step / field) -- preserve the typed error instead of flattening.
+            Self::Migration(e) => write!(f, "{e}"),
         }
     }
 }
@@ -155,7 +172,10 @@ pub fn read_duck(path: &Path) -> Result<Recipe, LoadError> {
             supported: RECIPE_FORMAT_VERSION,
         });
     } else if version < RECIPE_FORMAT_VERSION {
-        migrate_to_current(value, version).map_err(|e| LoadError::Parse(e.to_string()))?
+        // `?` lifts MigrationError into LoadError::Migration via From,
+        // preserving the typed error (ADR-0036) instead of flattening to a
+        // Parse string at this boundary.
+        migrate_to_current(value, version)?
     } else {
         value
     };

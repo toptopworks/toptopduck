@@ -116,20 +116,34 @@ mod transforms {
             }
         }
 
-        // (2) semantic-remap on the outcome discriminator across history.
+        // (2) semantic-remap on the outcome discriminator across history. The
+        // per-entry remap lives in its own helper so this loop stays a flat map
+        // (early-return inside the helper beats a 5-deep if-let chain -- the
+        // >4-level nesting guideline from coding-style.md).
         if let Some(history) = value.get_mut("history").and_then(|h| h.as_array_mut()) {
             for entry in history.iter_mut() {
-                if let Some(outcome) = entry.get_mut("data").and_then(|d| d.get_mut("outcome")) {
-                    if let Some(obj) = outcome.as_object_mut() {
-                        if let Some(tag) = obj.remove("outcome_kind") {
-                            obj.entry("kind").or_insert(tag);
-                        }
-                    }
-                }
+                rename_outcome_kind_in_place(entry);
             }
         }
 
         Ok(value)
+    }
+
+    /// Rename a Turn entry's legacy outcome discriminator `outcome_kind` ->
+    /// `kind` in place (ADR-0036 semantic remap). No-ops on entries whose
+    /// outcome is absent (Source-lifecycle entries carry no `outcome` field)
+    /// or whose outcome is not an object -- per-entry defensive so the caller
+    /// loop above stays a flat map instead of a 5-deep if-let chain.
+    fn rename_outcome_kind_in_place(entry: &mut Value) {
+        let Some(outcome) = entry.get_mut("data").and_then(|d| d.get_mut("outcome")) else {
+            return;
+        };
+        let Some(obj) = outcome.as_object_mut() else {
+            return;
+        };
+        if let Some(tag) = obj.remove("outcome_kind") {
+            obj.entry("kind").or_insert(tag);
+        }
     }
 }
 

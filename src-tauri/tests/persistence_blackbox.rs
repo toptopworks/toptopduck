@@ -1577,6 +1577,22 @@ fn open_duck_migrates_a_lower_version_recipe_and_persists_current_shape() {
         !disk.contains("outcome_kind"),
         "legacy outcome_kind gone after migration persisted: {disk}",
     );
+
+    // ADR-0036 KISS (issue #51 AC5): migration lands the new shape via the
+    // normal atomic save -- it does NOT back up the original v0 bytes. The
+    // .duck's directory holds exactly the rewritten file: no `.bak`, no `~`,
+    // no shadow copy, no stale `.tmp` left by save_atomic.
+    let mut dir_entries: Vec<String> = fs::read_dir(duck.parent().expect("duck has parent"))
+        .expect("read dir")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    dir_entries.sort();
+    assert_eq!(
+        dir_entries,
+        vec!["v0.duck".to_string()],
+        "no backup produced by migration (only the rewritten .duck on disk)",
+    );
 }
 
 /// AC1: move the .duck AND its in-subtree source together -> the relative
@@ -1730,5 +1746,104 @@ fn resume_relinks_when_both_relative_and_absolute_paths_fail() {
     assert!(
         resumed.get("result_1").is_some(),
         "result_1 replayed after re-link",
+    );
+}
+
+/// AC3: a boundary-case source (BOTH relative + absolute stored, ADR-0036)
+/// whose relative candidate resolves FIRST -- the absolute is NOT consulted
+/// even when it points at a DIFFERENT file. Pins the "relative primary,
+/// absolute fallback" precedence (not "both tried, last wins"): a hand-edited
+/// absolute pointing at a decoy must not paper over the in-subtree real file.
+#[test]
+fn resume_prefers_relative_when_both_paths_stored_and_match_fingerprint() {
+    use toptopduck_lib::persistence::{save_atomic, Recipe, SourceRef, RECIPE_FORMAT_VERSION};
+    use toptopduck_lib::RectifyProvenance;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sub = dir.path().join("sub");
+    fs::create_dir(&sub).expect("mkdir");
+    let duck = sub.join("s.duck");
+
+    // The real in-subtree source the relative path will resolve to.
+    let real = sub.join("data.csv");
+    fs::write(&real, "name,score\nAda,9\n").expect("write real");
+
+    // A decoy OUTSIDE the subtree whose content DIFFERS (different fingerprint).
+    let decoy = dir.path().join("decoy.csv");
+    fs::write(&decoy, "name,score\nBo,1\n").expect("write decoy");
+
+    // Ingest the REAL file once to capture its fingerprint, then hand-write a
+    // recipe whose source carries BOTH the decoy absolute and the real
+    // relative -- the resolver must pick the relative (real) and the decoy's
+    // bytes never reach the working set.
+    let mut probe = Session::with_provider(Box::new(FakeProvider::new())).expect("session");
+    load_source(&mut probe, &real);
+    let fingerprint = probe.get("data").expect("data").fingerprint.clone();
+    drop(probe);
+
+    let recipe = Recipe {
+        format_version: RECIPE_FORMAT_VERSION,
+        session_name: "boundary".into(),
+        sources: vec![SourceRef {
+            reference_name: "data".into(),
+            display_name: "data".into(),
+            source_path: decoy.to_string_lossy().to_string(),
+            relative_path: Some("data.csv".into()),
+            rectify: RectifyProvenance::NotApplicable,
+            fingerprint: fingerprint.clone(),
+        }],
+        history: vec![],
+        active: None,
+    };
+    save_atomic(&duck, &recipe).expect("save");
+
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
+    let data = resumed.get("data").expect("data present via relative");
+    // The fingerprint matches the REAL file, not the decoy -- proof the
+    // resolver went through the relative path, not the absolute.
+    assert_eq!(
+        data.fingerprint, fingerprint,
+        "relative took precedence; decoy absolute never read",
+    );
+}
+
+/// AC6: opening a hand-written .duck whose format_version is AHEAD of the
+/// current app surfaces an honest refusal at the open_duck seam -- never a
+/// silent mis-parse, never a partial session. The error reaches the caller
+/// as `ResumeError::Load(LoadError::VersionMismatch)`, whose Display carries
+/// the "请升级 app" prompt (ADR-0036 / ADR-0017 capability boundary at the
+/// format layer). The unit test on `read_duck` covers the io layer; this
+/// pins the full open_duck seam (read -> ResumeError::Load -> UI message).
+#[test]
+fn open_duck_refuses_a_higher_format_version_with_upgrade_prompt() {
+    use toptopduck_lib::persistence::{LoadError, RECIPE_FORMAT_VERSION};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("future.duck");
+    let future = serde_json::json!({
+        "format_version": RECIPE_FORMAT_VERSION + 1,
+        "session_name": "from-the-future",
+        "sources": [],
+        "history": [],
+        "active": null,
+    });
+    fs::write(&duck, serde_json::to_string(&future).unwrap()).expect("write future");
+
+    let outcome = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {});
+    let err = match outcome {
+        Err(e) => e,
+        Ok(_) => panic!("expected honest refuse, but resume succeeded"),
+    };
+    match &err {
+        ResumeError::Load(LoadError::VersionMismatch { found, supported }) => {
+            assert_eq!(*found, RECIPE_FORMAT_VERSION + 1);
+            assert_eq!(*supported, RECIPE_FORMAT_VERSION);
+        }
+        other => panic!("expected VersionMismatch, got: {other:?}"),
+    }
+    let msg = err.to_string();
+    assert!(
+        msg.contains("请升级"),
+        "upgrade prompt surfaces to the user: {msg}",
     );
 }
