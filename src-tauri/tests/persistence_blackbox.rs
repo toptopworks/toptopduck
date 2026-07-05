@@ -1299,3 +1299,42 @@ fn stable_file_across_resume_produces_no_false_conflict() {
         "follow-up write after resume does not false-conflict"
     );
 }
+
+/// Regression (ADR-0035 §3 / #50): `conflict_save_as_new` must release the
+/// OLD canonical key on success so a different session can subsequently open
+/// the original file. An earlier ordering released the old key BEFORE the
+/// post-write hash; on a hash failure the new key leaked (the session had
+/// already dropped the old canonical, so its Drop could not release the new
+/// key it never recorded) and the session stayed bound to the old path whose
+/// key was gone -- a second session could open the same file, breaking the
+/// single-writer contract. The fix hashes before releasing; this test pins
+/// the success-path invariant (old key released, original reopenable).
+#[test]
+fn conflict_save_as_new_releases_old_key_so_original_can_be_reopened() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("a.duck");
+    let new_duck = dir.path().join("saved.duck");
+    let mut session = build_session(&duck);
+
+    let original = fs::read_to_string(&duck).expect("read baseline");
+    fs::write(&duck, original.replace("\"分析 A\"", "\"外部编辑\"")).expect("external write");
+
+    load_source(&mut session, &fixture("orders.csv"));
+    let _conflict = session.take_pending_conflict().expect("conflict");
+
+    session
+        .conflict_save_as_new(new_duck.clone())
+        .expect("save as new resolves");
+
+    // The original file's registry key was released on the rebind -- once
+    // this session drops the new key, a fresh session can resume the
+    // original. single-writer must NOT false-reject a path moved away from.
+    drop(session);
+    let (_events, cb) = collect_events();
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb)
+        .expect("reopen original after save_as_new");
+    assert_eq!(resumed.duck_path(), Some(duck.as_path()));
+    // The original was preserved verbatim by save_as_new -- resume carries
+    // the externally-edited recipe, not the in-memory state that moved away.
+    assert_eq!(resumed.session_name(), Some("外部编辑"));
+}

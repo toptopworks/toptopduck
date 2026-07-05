@@ -2664,7 +2664,15 @@ impl Session {
             .ok_or_else(|| SaveError::Io("未绑定 .duck，无法解决冲突".into()))?;
         let recipe = self.build_recipe();
         save_atomic(&path, &recipe)?;
-        if let Some(h) = hash_file(&path).map_err(|e| SaveError::Io(e.to_string()))? {
+        // save succeeded -- the conflict IS resolved (disk now holds in-memory
+        // state, the external edit overwritten by explicit user choice).
+        // Refresh the baseline best-effort: a hash failure leaves the stale
+        // baseline, and the next persist_if_bound re-detects + self-heals
+        // (never a silent clobber). Propagating the hash error after a
+        // successful save would mislead the caller into retrying an
+        // already-applied resolution AND leave pending_conflict set, so the
+        // session contradicts itself (disk resolved, memory says not).
+        if let Some(h) = hash_file(&path).ok().flatten() {
             self.last_written_hash = Some(h);
         }
         self.pending_conflict = None;
@@ -2702,13 +2710,28 @@ impl Session {
             release(&canonical);
             return Err(e);
         }
-        // Write succeeded -- re-bind: release the old canonical key + acquire
-        // the new one is complete (already acquired above), so just drop the
-        // old from the registry and update fields.
+        // Hash the new file BEFORE releasing the old key. The prior ordering
+        // (release old, then hash) leaked the new registry key on a hash
+        // failure: the session had already dropped the old canonical, so its
+        // Drop could not release the new key it never recorded, AND the
+        // session stayed bound to the old path whose key was gone -- a second
+        // session could open that same file, breaking the single-writer
+        // contract. Hashing first means a hash failure rolls back the new
+        // key and leaves the session bound to the OLD path (correct state);
+        // the cost is an orphan file on the new path, which the caller can
+        // retry or ignore -- preferable to a registry leak.
+        let new_hash = match hash_file(&new_path) {
+            Ok(h) => h,
+            Err(e) => {
+                release(&canonical);
+                return Err(SaveError::Io(e.to_string()));
+            }
+        };
+        // All fallible ops succeeded -- commit the rebind: release the old
+        // canonical key and swing the session to the new path.
         if let Some(old) = self.duck_canonical.take() {
             release(&old);
         }
-        let new_hash = hash_file(&new_path).map_err(|e| SaveError::Io(e.to_string()))?;
         self.duck_canonical = Some(canonical);
         self.duck_path = Some(new_path);
         self.last_written_hash = new_hash;
