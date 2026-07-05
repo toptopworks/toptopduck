@@ -16,9 +16,29 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use toptopduck_lib::{
-    CancelToken, FakeProvider, LoadOutcome, ProviderReply, ResumeEvent, Session, TextKind,
-    ThreadEntry, TurnOutcome, UnwiredProvider,
+    ActiveAbandoned, ActiveResolution, CancelToken, FakeProvider, LoadOutcome, ProviderReply,
+    ResumeError, ResumeEvent, Session, SourceIssue, SourceResolution, TextKind, ThreadEntry,
+    TurnOutcome, UnwiredProvider,
 };
+
+/// Resume with default Abort callbacks for the issue #49 interactive decision
+/// points. For happy-path tests that never perturb sources -- equivalent to the
+/// pre-#49 `open_duck` seam (any Missing/Drift/ActiveAbandoned aborts, which
+/// never fires when sources + active are intact).
+fn resume_defaults(
+    duck: &Path,
+    cancel: Arc<CancelToken>,
+    on_progress: impl FnMut(ResumeEvent),
+) -> Result<Session, ResumeError> {
+    Session::open_duck(
+        duck,
+        cancel,
+        Box::new(UnwiredProvider),
+        on_progress,
+        |_| SourceResolution::Abort,
+        |_| ActiveResolution::Abort,
+    )
+}
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -124,13 +144,7 @@ fn resume_restores_working_set_history_and_active() {
     drop(session);
 
     let (_events, cb) = collect_events();
-    let resumed = Session::open_duck(
-        &duck,
-        Arc::new(CancelToken::new()),
-        Box::new(UnwiredProvider),
-        cb,
-    )
-    .expect("resume");
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("resume");
 
     let after_sources: Vec<(String, String)> = resumed
         .list()
@@ -227,13 +241,7 @@ fn resume_does_not_replay_no_result_turns() {
     drop(session);
 
     let (_events, cb) = collect_events();
-    let resumed = Session::open_duck(
-        &duck,
-        Arc::new(CancelToken::new()),
-        Box::new(UnwiredProvider),
-        cb,
-    )
-    .expect("resume");
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("resume");
 
     // The refuse turn's body must be present verbatim in the restored thread.
     let refuse_present = resumed.conversation().iter().any(|e| match e {
@@ -259,13 +267,7 @@ fn resume_emits_visible_progress_events() {
     drop(session);
 
     let (events, cb) = collect_events();
-    let _resumed = Session::open_duck(
-        &duck,
-        Arc::new(CancelToken::new()),
-        Box::new(UnwiredProvider),
-        cb,
-    )
-    .expect("resume");
+    let _resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("resume");
     let events = events.borrow();
 
     let source_count = events
@@ -333,13 +335,7 @@ fn rename_survives_resume_and_references_still_resolve() {
     drop(session);
 
     let (_events, cb) = collect_events();
-    let resumed = Session::open_duck(
-        &duck,
-        Arc::new(CancelToken::new()),
-        Box::new(UnwiredProvider),
-        cb,
-    )
-    .expect("resume");
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("resume");
 
     // Display labels survived resume.
     let people = resumed.get("people").expect("people present");
@@ -404,12 +400,7 @@ fn resume_refuses_a_relative_path_that_escapes_the_duck_dir() {
     };
     save_atomic(&duck, &malicious).expect("save");
 
-    let outcome = Session::open_duck(
-        &duck,
-        Arc::new(CancelToken::new()),
-        Box::new(UnwiredProvider),
-        |_| {},
-    );
+    let outcome = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {});
     match outcome {
         Err(ResumeError::SourceMissing { detail, .. }) => {
             assert!(
@@ -443,15 +434,504 @@ fn resume_is_cancellable_mid_replay() {
     // so with a single source the cancel lands cleanly at the first iteration
     // of resume_replay -- before any SQL runs.
     let mut fired = false;
-    let outcome = Session::open_duck(&duck, cancel, Box::new(UnwiredProvider), move |_ev| {
-        if !fired {
-            fired = true;
-            cancel_for_cb.request();
-        }
-    });
+    let outcome = Session::open_duck(
+        &duck,
+        cancel,
+        Box::new(UnwiredProvider),
+        move |_ev| {
+            if !fired {
+                fired = true;
+                cancel_for_cb.request();
+            }
+        },
+        |_| SourceResolution::Abort,
+        |_| ActiveResolution::Abort,
+    );
     match outcome {
         Err(ResumeError::Cancelled) => {}
         Err(other) => panic!("expected Cancelled, got: {other}"),
         Ok(_) => panic!("expected error, but resume succeeded"),
     }
+}
+
+// --- Issue #49: honest degrade (ADR-0035) -------------------------------------
+//
+// Re-link / drift / active-abandoned / replay-break. Each test injects a
+// source perturbation between close and resume, then asserts the engine's
+// honest behavior through the interactive callbacks. All use UnwiredProvider
+// (AC7: the degradation path never calls a cloud LLM -- resume re-executes
+// stored SQL + asks the caller, not a model, for every decision).
+
+/// Build a single-source session bound to `duck` with the source at
+/// `source_path` (a copy the test can move/modify between close and resume).
+/// The source file's stem MUST be `people` so the derived reference name is
+/// `people` (the scripted SQL names `"people".data`).
+fn build_single_source_session(duck: &Path, source_path: &Path) -> Session {
+    let provider = FakeProvider::new().scripted(
+        "多少人",
+        reply_sql("SELECT COUNT(*) AS n FROM \"people\".data"),
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, source_path);
+    let _ = session.ask("多少人");
+    session
+        .bind_duck(duck.to_path_buf(), "t".into())
+        .expect("bind");
+    session
+}
+
+/// Copy `people.csv` into `dir` as `people.csv` and return its path.
+fn plant_people(dir: &Path) -> PathBuf {
+    let p = dir.join("people.csv");
+    fs::copy(fixture("people.csv"), &p).expect("copy people.csv");
+    p
+}
+
+#[test]
+fn resume_relinks_a_missing_source_and_updates_recipe_path() {
+    // AC1: source moved away -> Missing -> user re-links to the new path ->
+    // fingerprint matches -> recipe updates ONLY the path (fingerprint +
+    // rectify unchanged -- same content) -> replay succeeds.
+    use toptopduck_lib::persistence::read_duck;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let original = plant_people(dir.path());
+    let session = build_single_source_session(&duck, &original);
+    let people_fp = session.get("people").expect("people").fingerprint.clone();
+    drop(session);
+
+    // Move the source file (simulating the user relocating it).
+    let moved = dir.path().join("moved-people.csv");
+    fs::rename(&original, &moved).expect("move");
+
+    let moved_for_cb = moved.clone();
+    let issues = Rc::new(RefCell::new(Vec::<SourceIssue>::new()));
+    let issues_for_cb = Rc::clone(&issues);
+    let resumed = Session::open_duck(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(UnwiredProvider),
+        |_| {},
+        move |issue| {
+            issues_for_cb.borrow_mut().push(issue.clone());
+            match issue {
+                SourceIssue::Missing { reference_name, .. } => {
+                    assert_eq!(reference_name, "people");
+                    SourceResolution::Relink(moved_for_cb.clone())
+                }
+                SourceIssue::Drift { .. } => panic!("expected Missing, got Drift"),
+            }
+        },
+        |_| ActiveResolution::Abort,
+    )
+    .expect("resume");
+
+    // Exactly one Missing issue fired (re-link matched on the first try).
+    let issues = issues.borrow();
+    assert_eq!(issues.len(), 1, "Missing fired once (re-link matched)");
+    assert!(matches!(issues[0], SourceIssue::Missing { .. }));
+
+    // Source is in the working set with the ORIGINAL fingerprint (same content,
+    // only the path moved -- ADR-0035 re-link updates only the path).
+    let people = resumed.get("people").expect("people present");
+    assert_eq!(people.fingerprint, people_fp, "fingerprint unchanged");
+    // Replay succeeded (result_1 re-materialized).
+    assert!(resumed.get("result_1").is_some(), "result_1 replayed");
+
+    // The persisted recipe now carries the NEW path (re-link survived a
+    // hypothetical re-close). Read it back and check.
+    let persisted = read_duck(&duck).expect("read persisted");
+    let src = persisted
+        .sources
+        .iter()
+        .find(|s| s.reference_name == "people")
+        .expect("people in recipe");
+    assert_eq!(
+        src.source_path,
+        moved.to_string_lossy(),
+        "recipe path updated to the re-linked location"
+    );
+    assert_eq!(src.fingerprint, people_fp, "recipe fingerprint unchanged");
+}
+
+#[test]
+fn resume_abort_in_relink_dialog_stops_resume_and_leaves_recipe_untouched() {
+    // AC2: user picks Abort in the re-link dialog -> session is NOT entered,
+    // and the on-disk recipe is left byte-for-byte untouched ("原状保留").
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let original = plant_people(dir.path());
+    let session = build_single_source_session(&duck, &original);
+    drop(session);
+
+    let recipe_before = fs::read_to_string(&duck).expect("read .duck");
+
+    // Move the source away, then Abort on the Missing issue.
+    let moved = dir.path().join("moved.csv");
+    fs::rename(&original, &moved).expect("move");
+    let outcome = Session::open_duck(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(UnwiredProvider),
+        |_| {},
+        |_| SourceResolution::Abort,
+        |_| ActiveResolution::Abort,
+    );
+    match outcome {
+        Err(ResumeError::Aborted) => {}
+        Err(other) => panic!("expected Aborted, got: {other}"),
+        Ok(_) => panic!("expected Aborted, but resume succeeded"),
+    }
+
+    // The on-disk recipe is unchanged -- Abort does not persist partial state.
+    let recipe_after = fs::read_to_string(&duck).expect("read .duck after");
+    assert_eq!(
+        recipe_before, recipe_after,
+        "recipe untouched after Abort (AC2 原状保留)"
+    );
+}
+
+#[test]
+fn resume_reports_drift_without_silently_replaying() {
+    // AC3: source content changed at the same path -> Drift -> the engine
+    // NEVER silently replays with the new data. User chooses Rebuild -> source
+    // dropped, the chain's turn referencing it renders as Failed (not silent).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let original = plant_people(dir.path());
+    let session = build_single_source_session(&duck, &original);
+    drop(session);
+
+    // Replace the content in place (different fingerprint = drift).
+    fs::write(&original, "id,name,score\n9,Zoe,1.1\n").expect("write drifted content");
+
+    let drift_seen = Rc::new(RefCell::new(false));
+    let drift_for_cb = Rc::clone(&drift_seen);
+    let resumed = Session::open_duck(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(UnwiredProvider),
+        |_| {},
+        move |issue| match issue {
+            SourceIssue::Drift { reference_name, .. } => {
+                assert_eq!(reference_name, "people");
+                *drift_for_cb.borrow_mut() = true;
+                SourceResolution::Rebuild
+            }
+            SourceIssue::Missing { .. } => panic!("expected Drift, got Missing"),
+        },
+        // active = people was rebuilt, but no other sources remain -> empty
+        // working set, no callback (AC5 supplement).
+        |_| ActiveResolution::Abort,
+    )
+    .expect("resume");
+
+    assert!(
+        *drift_seen.borrow(),
+        "Drift was reported (no silent replay)"
+    );
+    // The drifted source was dropped (Rebuild), and result_1's SQL (which
+    // names "people") failed on replay -> Failed, not materialized.
+    assert!(
+        resumed.get("people").is_none(),
+        "drifted source dropped after Rebuild"
+    );
+    assert!(
+        resumed.get("result_1").is_none(),
+        "result_1 NOT silently materialized from drifted data"
+    );
+    // The timeline shows result_1 as Failed (ADR-0028 outcome C) -- the
+    // honest presentation, not a silent gap.
+    let result_1_failed = resumed.conversation().iter().any(|e| match e {
+        ThreadEntry::Turn(t) => {
+            t.question == "多少人" && matches!(&t.outcome, TurnOutcome::Failed { .. })
+        }
+        _ => false,
+    });
+    assert!(
+        result_1_failed,
+        "result_1 rendered as Failed (drift disclosed)"
+    );
+}
+
+#[test]
+fn resume_handles_each_source_independently_multi_source() {
+    // AC4: a multi-source session where ONE source is missing and the others
+    // are intact. The missing source goes through re-link; the intact source
+    // verifies normally. Each source is handled independently.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let people_p = plant_people(dir.path());
+    let orders_p = dir.path().join("orders.csv");
+    fs::copy(fixture("orders.csv"), &orders_p).expect("copy orders.csv");
+
+    let provider = FakeProvider::new()
+        .scripted(
+            "多少人",
+            reply_sql("SELECT COUNT(*) AS n FROM \"people\".data"),
+        )
+        .scripted(
+            "多少单",
+            reply_sql("SELECT COUNT(*) AS n FROM \"orders\".data"),
+        );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &people_p);
+    load_source(&mut session, &orders_p);
+    let _ = session.ask("多少人"); // result_1 from people
+    let _ = session.ask("多少单"); // result_2 from orders
+    session
+        .bind_duck(duck.clone(), "multi".into())
+        .expect("bind");
+    drop(session);
+
+    // Move ONLY people away; orders stays put.
+    let moved_people = dir.path().join("moved-people.csv");
+    fs::rename(&people_p, &moved_people).expect("move people");
+
+    let moved_for_cb = moved_people.clone();
+    let missing_seen = Rc::new(RefCell::new(0usize));
+    let seen_for_cb = Rc::clone(&missing_seen);
+    let resumed = Session::open_duck(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(UnwiredProvider),
+        |_| {},
+        move |issue| match issue {
+            SourceIssue::Missing { reference_name, .. } if reference_name == "people" => {
+                *seen_for_cb.borrow_mut() += 1;
+                SourceResolution::Relink(moved_for_cb.clone())
+            }
+            other => panic!("expected Missing for people only, got {other:?}"),
+        },
+        // active = orders (last registered) is intact, so this never fires.
+        |_| ActiveResolution::Abort,
+    )
+    .expect("resume");
+
+    assert_eq!(
+        *missing_seen.borrow(),
+        1,
+        "people went through re-link exactly once"
+    );
+    // Both sources ended up in the working set -- people re-linked, orders
+    // verified normally without any callback.
+    assert!(resumed.get("people").is_some(), "people re-linked");
+    assert!(resumed.get("orders").is_some(), "orders verified normally");
+    // Both productive turns replayed.
+    assert!(resumed.get("result_1").is_some());
+    assert!(resumed.get("result_2").is_some());
+}
+
+#[test]
+fn resume_blocks_when_active_source_abandoned_until_user_picks() {
+    // AC5: the active source is rebuilt AND other sources remain -> the engine
+    // does NOT auto-fallback. on_active_abandoned fires with the remaining
+    // menu; the user must name an explicit continuation source.
+    use toptopduck_lib::persistence::read_duck;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let people_p = plant_people(dir.path());
+    let orders_p = dir.path().join("orders.csv");
+    fs::copy(fixture("orders.csv"), &orders_p).expect("copy orders.csv");
+
+    let provider = FakeProvider::new().scripted(
+        "多少人",
+        reply_sql("SELECT COUNT(*) AS n FROM \"people\".data"),
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &orders_p); // orders first
+    load_source(&mut session, &people_p); // people second -> active = people
+    let _ = session.ask("多少人");
+    session
+        .bind_duck(duck.clone(), "active-abandon".into())
+        .expect("bind");
+    drop(session);
+
+    // Sanity: the recipe persisted active = people (the last-registered source).
+    let recipe_before = read_duck(&duck).expect("read before");
+    assert_eq!(recipe_before.active.as_deref(), Some("people"));
+
+    // Move people (the active source) away + Rebuild it on resume.
+    let moved_people = dir.path().join("moved.csv");
+    fs::rename(&people_p, &moved_people).expect("move people");
+
+    let active_calls = Rc::new(RefCell::new(0usize));
+    let calls_for_cb = Rc::clone(&active_calls);
+    let resumed = Session::open_duck(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(UnwiredProvider),
+        |_| {},
+        // Rebuild the missing active source.
+        |issue| match issue {
+            SourceIssue::Missing { reference_name, .. } if reference_name == "people" => {
+                SourceResolution::Rebuild
+            }
+            other => panic!("unexpected issue: {other:?}"),
+        },
+        move |abandoned: ActiveAbandoned| {
+            *calls_for_cb.borrow_mut() += 1;
+            assert_eq!(abandoned.abandoned, "people");
+            assert!(
+                abandoned.remaining.contains(&"orders".to_string()),
+                "remaining menu includes orders: {:?}",
+                abandoned.remaining
+            );
+            ActiveResolution::ContinueWith("orders".into())
+        },
+    )
+    .expect("resume");
+
+    assert_eq!(
+        *active_calls.borrow(),
+        1,
+        "on_active_abandoned fired exactly once"
+    );
+    // orders survived; the active pointer moved to the user's explicit choice.
+    assert!(resumed.get("orders").is_some(), "orders still registered");
+    assert!(resumed.get("people").is_none(), "people rebuilt (dropped)");
+    // The persisted recipe now records active = orders.
+    let recipe_after = read_duck(&duck).expect("read after");
+    assert_eq!(
+        recipe_after.active.as_deref(),
+        Some("orders"),
+        "active pointer moved to the user's explicit continuation"
+    );
+}
+
+#[test]
+fn resume_active_abandoned_no_sources_left_resumes_empty_without_callback() {
+    // AC5 supplement: the ONLY source (which is active) is rebuilt -> the
+    // working set goes empty + active becomes None. on_active_abandoned does
+    // NOT fire (nothing to choose from -- the empty state IS the honest end).
+    use toptopduck_lib::persistence::read_duck;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let people_p = plant_people(dir.path());
+    let session = build_single_source_session(&duck, &people_p);
+    drop(session);
+
+    // Drift the only source -> Rebuild -> empty working set.
+    fs::write(&people_p, "id,name,score\n9,Zoe,1.1\n").expect("write drifted");
+
+    let active_called = Rc::new(RefCell::new(false));
+    let called_for_cb = Rc::clone(&active_called);
+    let resumed = Session::open_duck(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(UnwiredProvider),
+        |_| {},
+        |_| SourceResolution::Rebuild,
+        move |_| {
+            *called_for_cb.borrow_mut() = true;
+            ActiveResolution::Abort
+        },
+    )
+    .expect("resume");
+
+    assert!(
+        !*active_called.borrow(),
+        "no on_active_abandoned callback when no sources remain"
+    );
+    assert!(resumed.list().is_empty(), "empty working set");
+    let recipe = read_duck(&duck).expect("read");
+    assert_eq!(recipe.active, None, "active None after empty resume");
+    assert!(
+        recipe.sources.is_empty(),
+        "rebuilt source dropped from recipe"
+    );
+}
+
+#[test]
+fn resume_replay_failure_marks_turn_failed_and_preserves_prior_results() {
+    // AC6: replay reaches turn K whose SQL fails -> turn K is rendered as
+    // Failed (ADR-0028 outcome C), replay STOPS at K, and the K-1 results
+    // already materialized stay in the working set. Turns after K are dropped.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let people_p = plant_people(dir.path());
+    let orders_p = dir.path().join("orders.csv");
+    fs::copy(fixture("orders.csv"), &orders_p).expect("copy orders.csv");
+
+    let provider = FakeProvider::new()
+        .scripted(
+            "多少人",
+            reply_sql("SELECT COUNT(*) AS n FROM \"people\".data"),
+        )
+        .scripted(
+            "多少单",
+            reply_sql("SELECT COUNT(*) AS n FROM \"orders\".data"),
+        );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &orders_p); // orders first
+    load_source(&mut session, &people_p); // people second -> active = people
+    let _ = session.ask("多少人"); // result_1 from people
+    let _ = session.ask("多少单"); // result_2 from orders
+    session
+        .bind_duck(duck.clone(), "break".into())
+        .expect("bind");
+    drop(session);
+
+    // Move orders away + Rebuild it on resume. active = people stays valid, so
+    // no active-abandoned callback. result_1 (people) replays fine; result_2
+    // (orders) fails because orders is gone -> break at result_2.
+    let moved_orders = dir.path().join("moved-orders.csv");
+    fs::rename(&orders_p, &moved_orders).expect("move orders");
+
+    let resumed = Session::open_duck(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(UnwiredProvider),
+        |_| {},
+        |issue| match issue {
+            SourceIssue::Missing { reference_name, .. } if reference_name == "orders" => {
+                SourceResolution::Rebuild
+            }
+            other => panic!("unexpected issue: {other:?}"),
+        },
+        // active = people is intact -> never fires.
+        |_| ActiveResolution::Abort,
+    )
+    .expect("resume");
+
+    // K-1 = result_1 preserved in the working set.
+    assert!(
+        resumed.get("result_1").is_some(),
+        "result_1 (K-1) preserved after the break"
+    );
+    // K = result_2 NOT materialized (replay broke here).
+    assert!(
+        resumed.get("result_2").is_none(),
+        "result_2 (K) NOT materialized -- replay stopped"
+    );
+    // The timeline shows result_2 as Failed (ADR-0028 outcome C) and nothing
+    // after it (truncated at the breakpoint).
+    let mut found_failed = false;
+    let mut idx = 0;
+    for (i, entry) in resumed.conversation().iter().enumerate() {
+        if let ThreadEntry::Turn(t) = entry {
+            if t.question == "多少单" {
+                found_failed = matches!(&t.outcome, TurnOutcome::Failed { .. });
+                idx = i;
+                break;
+            }
+        }
+    }
+    assert!(
+        found_failed,
+        "result_2 rendered as Failed (ADR-0028 outcome C)"
+    );
+    // No turn entries after the break turn (source events after it are also
+    // dropped -- the conversation stops at the breakpoint).
+    let after = &resumed.conversation()[idx + 1..];
+    assert!(
+        after.is_empty(),
+        "no entries after the breakpoint, got {after:?}"
+    );
+    // AC7 (no cloud LLM): resume succeeded with UnwiredProvider, which would
+    // have returned NotWired on any provider.generate() call. The whole
+    // productive chain replayed LLM-free.
 }
