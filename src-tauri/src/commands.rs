@@ -360,8 +360,10 @@ pub async fn open_duck(
                 let _ = app.emit("resume-progress", &ev);
             },
             // Issue #49 honest-degrade callbacks: the engine surfaces Missing
-            // / Drift / ActiveAbandoned decisions to the caller. The re-link /
-            // continuation UI lands in a later slice -- until then any issue
+            // / Unreadable / Drift / ActiveAbandoned decisions to the caller.
+            // The re-link / continuation UI is deferred to a follow-up of
+            // #49 (not yet scheduled -- the engine + test seam land in this
+            // slice, the frontend dialogs do not) -- until then any issue
             // aborts resume (matching the prior all-or-nothing behavior). The
             // engine never silently picks, so the typed ResumeError::Aborted
             // surfaces to the user as "resume stopped" rather than a guess.

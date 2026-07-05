@@ -88,11 +88,15 @@ pub enum ResumeError {
         reference_name: String,
         detail: String,
     },
-    /// The recipe's active pointer names a source that was never in
-    /// `recipe.sources` (a corrupt recipe -- the write path never persists an
-    /// active name that is not a registered source). Distinct from an active
-    /// source that WAS in the recipe but got rebuilt: that case is resolvable
-    /// via [`ActiveAbandoned`] and never reaches this variant.
+    /// The recipe's active pointer does not resolve to a usable registered
+    /// source. Two paths land here, both honest stops (the engine never
+    /// silently picks a different active source): (1) a corrupt recipe whose
+    /// `active` was never in `recipe.sources` -- the write path never
+    /// persists such a name, so this signals external editing; (2) the
+    /// caller's [`ActiveResolution::ContinueWith`] named a source not in the
+    /// `remaining` menu -- a stale view or a direct IPC race. Distinct from
+    /// an active source that WAS in the recipe but got rebuilt: that case is
+    /// resolvable via [`ActiveAbandoned`] and never reaches this variant.
     ActiveMissing(String),
     /// The user cancelled resume (ADR-0021): the cancel token fired during
     /// source verification or replay. Distinct from [`Self::Aborted`] so the
@@ -135,13 +139,32 @@ impl std::error::Error for ResumeError {}
 /// + the path/fingerprint context the decision needs.
 #[derive(Debug, Clone)]
 pub enum SourceIssue {
-    /// The recorded path no longer exists (deleted / moved / renamed), or the
-    /// file is present but unreadable (parse error / unsupported format). The
+    /// The recorded path no longer exists (deleted / moved / renamed). The
     /// user may re-link to the moved file, abort, or rebuild (re-upload later).
+    /// Distinct from [`Self::Unreadable`]: a Missing file is a re-link
+    /// candidate (the user likely knows where it moved); an Unreadable file
+    /// is a format/parse problem the user must diagnose before re-linking
+    /// would help. Confusing the two would mislead the UI into offering a
+    /// re-link dialog for a file that is right where the recipe recorded it
+    /// (ADR-0035 honest signal -- the issue's kind drives the user action).
     Missing {
         reference_name: String,
         /// The path the recipe recorded (absolute fallback form).
         recorded_path: String,
+    },
+    /// The file IS present at its resolved path but could not be read into a
+    /// usable snapshot: parse error, unsupported format, refused Excel
+    /// workbook (multi-sheet guided rectify needs its own resume path), or a
+    /// DuckDB ATTACH failure. The user sees the underlying reason so they can
+    /// tell a corrupt/unsupported file from a moved one. The same re-link /
+    /// abort / rebuild resolutions apply -- re-linking to a different file of
+    /// a supported format is the typical fix.
+    Unreadable {
+        reference_name: String,
+        /// The path actually read (post resolve, after any prior re-link).
+        path: String,
+        /// The underlying read failure detail (LoadError display string).
+        reason: String,
     },
     /// The source is present at its path but the post-rectify fingerprint
     /// differs from the recipe's record (ADR-0035 "drift") -- the data
@@ -176,8 +199,11 @@ pub enum SourceResolution {
     /// Rebuild: abandon THIS source (it is dropped from the working set + the
     /// persisted recipe), and resume continues with the remaining sources
     /// (AC4 -- per-source independent handling). The user will re-upload the
-    /// data in a later turn. If the rebuilt source was the active source,
-    /// [`ActiveAbandoned`] fires next (AC5).
+    /// data in a later turn. If the rebuilt source was the active source AND
+    /// at least one other source remains, [`ActiveAbandoned`] fires next
+    /// (AC5). When it was the last source, no callback fires -- the empty
+    /// working set IS the honest end (AC5 supplement: there is nothing left
+    /// to silently fall back to).
     Rebuild,
 }
 
@@ -509,14 +535,14 @@ impl Session {
         Ok(session)
     }
 
-    /// Resolve a recipe source path to a filesystem path (ADR-0036 §4 hybrid
-    /// paths). The relative form -- taken against the `.duck` file's
+    /// Resolve a recipe source path to a filesystem path (ADR-0036 Decision 4
+    /// hybrid paths). The relative form -- taken against the `.duck` file's
     /// directory -- wins when present and the candidate exists; that is the
     /// form that survives "move the folder" portability. Otherwise the
     /// absolute `source_path` is the fallback. Fingerprint verification
     /// upstream catches a wrong pick, so the choice here is safe.
     ///
-    /// Trust boundary (rust/security.md §input-validation + ADR-0036): the
+    /// Trust boundary (rust/security.md Input Validation section + ADR-0036): the
     /// `.duck` is external input. A hand-edited or externally-sourced recipe
     /// whose `relative_path` escapes the `.duck`'s directory subtree
     /// (`../../etc/passwd`, `~/../.ssh/id_rsa`, ...) would otherwise let a
@@ -647,19 +673,29 @@ impl Session {
                             }
                         }
                     }
-                    Err(_) => {
-                        // Missing: path doesn't exist or unreadable (parse
-                        // error / unsupported format / Excel needs guidance).
-                        // The user may re-link to the moved file (path updated,
-                        // recipe re-verified), abort, or rebuild (skip this
-                        // source). The raw LoadError detail is intentionally
-                        // not surfaced -- the issue's recorded_path is enough
-                        // for the user to act, and the engine's contract is
-                        // "this source is unavailable", not "here is why".
-                        let resolution = on_source_issue(SourceIssue::Missing {
-                            reference_name: src.reference_name.clone(),
-                            recorded_path: src.source_path.clone(),
-                        });
+                    Err(e) => {
+                        // Distinguish Absent (path doesn't exist -> re-link is
+                        // the natural fix) from Unreadable (file present but
+                        // parse / format / ATTACH failed -> the user needs the
+                        // reason to diagnose). ADR-0035 honest signal: the
+                        // issue kind drives the user's next action, so
+                        // conflating them would offer a re-link dialog for a
+                        // file that is right where the recipe recorded it.
+                        // `path` is the resolved candidate (relative preferred,
+                        // absolute fallback) from resolve_source_path above.
+                        let issue = if path.exists() {
+                            SourceIssue::Unreadable {
+                                reference_name: src.reference_name.clone(),
+                                path: path.to_string_lossy().to_string(),
+                                reason: e.to_string(),
+                            }
+                        } else {
+                            SourceIssue::Missing {
+                                reference_name: src.reference_name.clone(),
+                                recorded_path: src.source_path.clone(),
+                            }
+                        };
+                        let resolution = on_source_issue(issue);
                         match resolution {
                             SourceResolution::Relink(new_path) => {
                                 recipe.sources[i].source_path =
@@ -840,9 +876,32 @@ impl Session {
                 _ => false,
             })
         });
-        // Truncate inclusive of the break turn -- it becomes the Failed entry
-        // at the end. Entries after it are dropped ("对话停在断点").
-        let end = break_idx.map(|i| i + 1).unwrap_or(recipe.history.len());
+        // Invariant: if break_at is Some, the break turn's reference_name MUST
+        // appear in recipe.history as a Materialized entry (the productive_chain
+        // and the history are two views of the same turn list). A None
+        // break_idx with a Some break_at means the invariant is violated (a
+        // hand-edited recipe whose history lost the break turn, or a logic bug
+        // in resume_replay). Surfacing as Replay rather than silently rendering
+        // the full timeline (which would hide the replay failure from the
+        // user) is the ADR-0035 honest answer.
+        let end = match (break_at, break_idx) {
+            (None, _) => recipe.history.len(),
+            (Some(_), Some(idx)) => idx + 1,
+            (Some(brk), None) => {
+                log::error!(
+                    target: "toptopduck::session",
+                    "replay break reference {} not found in recipe history -- invariant violation",
+                    brk.reference_name
+                );
+                return Err(ResumeError::Replay {
+                    reference_name: brk.reference_name.clone(),
+                    detail: format!(
+                        "重放断点「{}」在 history 中找不到对应条目（recipe 不一致）",
+                        brk.reference_name
+                    ),
+                });
+            }
+        };
 
         self.history = recipe.history[..end]
             .iter()
@@ -858,12 +917,11 @@ impl Session {
                             // The break turn renders as Failed (replay broke
                             // here), NOT as Materialized -- the result was
                             // never re-materialized.
-                            if break_at
-                                .map(|b| b.reference_name == *reference_name)
-                                .unwrap_or(false)
+                            if let Some(b) =
+                                break_at.filter(|b| b.reference_name == *reference_name)
                             {
                                 TurnOutcome::Failed {
-                                    reason: break_at.unwrap().reason.clone(),
+                                    reason: b.reason.clone(),
                                 }
                             } else {
                                 let dataset =
@@ -2192,7 +2250,7 @@ impl Session {
     /// or been removed is dropped -- it cannot replay; the tracer-bullet
     /// happy path has none (full stale-render lands in a later slice).
     pub fn build_recipe(&self) -> Recipe {
-        // ADR-0036 §4 hybrid paths: `source_path` is always absolute (fallback
+        // ADR-0036 Decision 4 hybrid paths: `source_path` is always absolute (fallback
         // resolver); `relative_path` is set when the source lives inside the
         // .duck file's directory subtree (primary resolver, survives "move the
         // folder"). strip_prefix succeeds exactly when the source is in the
@@ -2749,7 +2807,7 @@ mod tests {
 
     #[test]
     fn build_recipe_records_relative_path_for_in_subtree_sources() {
-        // ADR-0036 §4 hybrid paths: a source inside the .duck file's directory
+        // ADR-0036 Decision 4 hybrid paths: a source inside the .duck file's directory
         // subtree is recorded with BOTH a relative path (the primary resolver,
         // which survives "move the folder" portability) and the absolute path
         // (the fallback). The out-of-subtree case (relative_path = None) is

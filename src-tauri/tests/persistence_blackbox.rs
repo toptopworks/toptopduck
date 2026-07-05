@@ -521,6 +521,7 @@ fn resume_relinks_a_missing_source_and_updates_recipe_path() {
                     SourceResolution::Relink(moved_for_cb.clone())
                 }
                 SourceIssue::Drift { .. } => panic!("expected Missing, got Drift"),
+                SourceIssue::Unreadable { .. } => panic!("expected Missing, got Unreadable"),
             }
         },
         |_| ActiveResolution::Abort,
@@ -620,6 +621,7 @@ fn resume_reports_drift_without_silently_replaying() {
                 SourceResolution::Rebuild
             }
             SourceIssue::Missing { .. } => panic!("expected Drift, got Missing"),
+            SourceIssue::Unreadable { .. } => panic!("expected Drift, got Unreadable"),
         },
         // active = people was rebuilt, but no other sources remain -> empty
         // working set, no callback (AC5 supplement).
@@ -686,6 +688,7 @@ fn resume_aborts_on_drift_without_replaying() {
                 SourceResolution::Abort
             }
             SourceIssue::Missing { .. } => panic!("expected Drift, got Missing"),
+            SourceIssue::Unreadable { .. } => panic!("expected Drift, got Unreadable"),
         },
         |_| ActiveResolution::Abort,
     );
