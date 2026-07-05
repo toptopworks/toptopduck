@@ -228,6 +228,7 @@ mod tests {
                     display_name: "result_1".into(),
                     sql: "SELECT 1".into(),
                     assumption: None,
+                    stale: None,
                 },
             })],
             active: Some("result_1".into()),

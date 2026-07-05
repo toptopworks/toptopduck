@@ -1847,3 +1847,352 @@ fn open_duck_refuses_a_higher_format_version_with_upgrade_prompt() {
         "upgrade prompt surfaces to the user: {msg}",
     );
 }
+
+// --- Issue #52: source lifecycle atomic write + stale resume exclusion -------
+//
+// ADR-0034/0040/0041: source ops (add/replace/remove) hit the SAME atomic
+// temp+rename write path as turn finalization (AC4), and a cascade-invalidated
+// result_N -- a stale dead turn -- stays in the recipe timeline for display +
+// the LLM window (ADR-0041 point 2) but is excluded from the replay chain on
+// resume (AC5). After reopen the stale result_N is still in the working set,
+// marked stale (AC6, ADR-0013 -- never silently discarded).
+
+/// AC1: adding a source after bind atomically rewrites the .duck -- the new
+/// source is in `sources` and an Added event is in the timeline. The rewrite
+/// goes through the same temp+rename path turns use (AC4).
+#[test]
+fn add_source_atomically_rewrites_duck_with_source_and_added_event() {
+    use toptopduck_lib::persistence::{read_duck, RecipeEntry};
+    use toptopduck_lib::SourceLifecycleKind;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let csv = fixture("people.csv");
+    let mut session = Session::with_provider(Box::new(FakeProvider::new())).expect("session");
+    load_source(&mut session, &csv);
+    session
+        .bind_duck(duck.clone(), "add-test".into())
+        .expect("bind");
+
+    let before = read_duck(&duck).expect("read before add");
+    assert_eq!(
+        before.sources.len(),
+        1,
+        "precondition: one source before add"
+    );
+
+    // Add a second source -- append_source_event -> persist_if_bound rewrites.
+    load_source(&mut session, &fixture("orders.csv"));
+
+    let after = read_duck(&duck).expect("read after add");
+    assert_eq!(after.sources.len(), 2, "sources grew by one on disk");
+    assert!(
+        after.sources.iter().any(|s| s.reference_name == "orders"),
+        "orders landed in the recipe source set"
+    );
+    let added_orders = after.history.iter().any(|e| match e {
+        RecipeEntry::Source(ev) => {
+            ev.kind == SourceLifecycleKind::Added && ev.reference_name == "orders"
+        }
+        _ => false,
+    });
+    assert!(added_orders, "Added event for orders in the timeline");
+    // The bytes on disk changed -- the add itself triggered a rewrite (AC1),
+    // not just the initial bind.
+    assert_ne!(
+        serde_json::to_string(&before).unwrap(),
+        serde_json::to_string(&after).unwrap(),
+        "recipe on disk changed after the add"
+    );
+}
+
+/// AC2: replacing a source atomically rewrites the .duck -- the source's
+/// fingerprint + path update, every dependent result_N's turn stays in the
+/// timeline marked stale (Replaced anchor), and a Replaced event appends.
+#[test]
+fn replace_source_atomically_rewrites_duck_with_stale_chain_and_replaced_event() {
+    use toptopduck_lib::persistence::{read_duck, RecipeEntry, RecipeOutcome};
+    use toptopduck_lib::{SourceLifecycleKind, StaleReason};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let people = fixture("people.csv");
+    let orders = fixture("orders.csv");
+
+    let provider = FakeProvider::new().scripted(
+        "多少人",
+        reply_sql("SELECT COUNT(*) AS n FROM \"people\".data"),
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &people);
+    let _ = session.ask("多少人"); // result_1 from people
+    session
+        .bind_duck(duck.clone(), "replace-test".into())
+        .expect("bind");
+
+    let people_fp_before = read_duck(&duck)
+        .expect("read before")
+        .sources
+        .iter()
+        .find(|s| s.reference_name == "people")
+        .expect("people")
+        .fingerprint
+        .clone();
+
+    // Replace people with orders -- cascade result_1 stale, triggers rewrite.
+    session.replace_source("people", &orders);
+
+    let recipe = read_duck(&duck).expect("read after replace");
+    let people_after = recipe
+        .sources
+        .iter()
+        .find(|s| s.reference_name == "people")
+        .expect("people still registered (name stable, backing swapped)");
+    assert_ne!(
+        people_after.fingerprint, people_fp_before,
+        "fingerprint updated to the new snapshot"
+    );
+    assert_eq!(
+        people_after.source_path,
+        orders.to_string_lossy().to_string(),
+        "source_path updated to the new file"
+    );
+
+    // result_1's turn is STILL in history, marked stale with a Replaced anchor
+    // (ADR-0041 point 2: kept for display, never silently dropped).
+    let stale_anchor = recipe
+        .history
+        .iter()
+        .find_map(|e| match e {
+            RecipeEntry::Turn(t) => match &t.outcome {
+                RecipeOutcome::Materialized {
+                    reference_name,
+                    stale: Some(a),
+                    ..
+                } if reference_name == "result_1" => Some(a.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("result_1 turn present in history and marked stale");
+    assert_eq!(stale_anchor.reason, StaleReason::Replaced);
+    assert_eq!(
+        stale_anchor.reference_name, "people",
+        "anchor names the invalidating source event"
+    );
+
+    let replaced_event = recipe.history.iter().any(|e| match e {
+        RecipeEntry::Source(ev) => {
+            ev.kind == SourceLifecycleKind::Replaced && ev.reference_name == "people"
+        }
+        _ => false,
+    });
+    assert!(replaced_event, "Replaced event for people appended");
+}
+
+/// AC3: removing a source atomically rewrites the .duck -- the source leaves
+/// `sources`, dependent result_N turns stay in the timeline marked stale
+/// (Deleted anchor), and a Deleted event appends.
+#[test]
+fn remove_source_atomically_rewrites_duck_with_stale_chain_and_deleted_event() {
+    use toptopduck_lib::persistence::{read_duck, RecipeEntry, RecipeOutcome};
+    use toptopduck_lib::{SourceLifecycleKind, StaleReason};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let people = fixture("people.csv");
+    let orders = fixture("orders.csv");
+
+    let provider = FakeProvider::new().scripted(
+        "多少人",
+        reply_sql("SELECT COUNT(*) AS n FROM \"people\".data"),
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &people);
+    load_source(&mut session, &orders); // active = orders (most recent source)
+    let _ = session.ask("多少人"); // result_1 from people
+    session
+        .bind_duck(duck.clone(), "remove-test".into())
+        .expect("bind");
+
+    // Remove people (non-active) -- cascade result_1 stale, triggers rewrite.
+    session.remove_source("people").expect("remove people");
+
+    let recipe = read_duck(&duck).expect("read after remove");
+    assert!(
+        recipe.sources.iter().all(|s| s.reference_name != "people"),
+        "people removed from the source set"
+    );
+    let stale_anchor = recipe
+        .history
+        .iter()
+        .find_map(|e| match e {
+            RecipeEntry::Turn(t) => match &t.outcome {
+                RecipeOutcome::Materialized {
+                    reference_name,
+                    stale: Some(a),
+                    ..
+                } if reference_name == "result_1" => Some(a.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("result_1 turn present and marked stale");
+    assert_eq!(stale_anchor.reason, StaleReason::Deleted);
+    let deleted_event = recipe.history.iter().any(|e| match e {
+        RecipeEntry::Source(ev) => {
+            ev.kind == SourceLifecycleKind::Deleted && ev.reference_name == "people"
+        }
+        _ => false,
+    });
+    assert!(deleted_event, "Deleted event for people appended");
+}
+
+/// AC5/AC6/AC7 (replace): cross-restart black-box. A session with a replaced
+/// source + a post-replace live result. Close + reopen: the dead turn
+/// (result_1, stale) is NOT replayed but stays in the timeline and working set
+/// marked stale; the live result_2 IS replayed. The main test seam is the
+/// application as a black box across the restart boundary.
+#[test]
+fn resume_after_replace_excludes_stale_from_replay_but_keeps_marked_stale() {
+    use toptopduck_lib::StaleReason;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let people = fixture("people.csv");
+    let orders = fixture("orders.csv");
+
+    let provider = FakeProvider::new()
+        .scripted(
+            "多少人",
+            reply_sql("SELECT COUNT(*) AS n FROM \"people\".data"),
+        )
+        .scripted(
+            "现在多少",
+            reply_sql("SELECT COUNT(*) AS m FROM \"people\".data"),
+        );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &people);
+    let _ = session.ask("多少人"); // result_1 from old people
+    session.replace_source("people", &orders); // result_1 cascade stale (Replaced)
+    let _ = session.ask("现在多少"); // result_2 from new people (orders data)
+    session
+        .bind_duck(duck.clone(), "stale-resume".into())
+        .expect("bind");
+    drop(session);
+
+    let (events, cb) = collect_events();
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("resume");
+    let events = events.borrow();
+
+    // AC5: replay chain excluded the stale turn -- only result_2 replayed.
+    let replayed: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            ResumeEvent::Replay { reference_name, .. } => Some(reference_name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replayed,
+        vec!["result_2"],
+        "only the live result_2 replayed; result_1 (stale dead turn) skipped"
+    );
+
+    // AC6: result_1 in the working set, marked stale (Replaced anchor) -- NOT
+    // silently discarded. ADR-0013 stale visibility survives the restart.
+    let result_1 = resumed
+        .get("result_1")
+        .expect("result_1 still in the working set after resume");
+    let anchor = result_1.stale.as_ref().expect("result_1 marked stale");
+    assert_eq!(anchor.reason, StaleReason::Replaced);
+    assert_eq!(anchor.reference_name, "people");
+    // result_2 is live (replayed, no stale marker).
+    let result_2 = resumed.get("result_2").expect("result_2 present");
+    assert!(result_2.stale.is_none(), "result_2 is live after replay");
+
+    // AC7: the conversation timeline is preserved end-to-end. The stale turn
+    // renders as Materialized (carrying the stale descriptor), NOT dropped.
+    let has_stale_turn = resumed.conversation().iter().any(|e| match e {
+        ThreadEntry::Turn(t) => {
+            t.question == "多少人"
+                && matches!(
+                    &t.outcome,
+                    TurnOutcome::Materialized { dataset, .. } if dataset.stale.is_some()
+                )
+        }
+        _ => false,
+    });
+    assert!(
+        has_stale_turn,
+        "stale result_1 turn stays in the timeline as a stale Materialized entry"
+    );
+    let has_live_turn = resumed
+        .conversation()
+        .iter()
+        .any(|e| matches!(e, ThreadEntry::Turn(t) if t.question == "现在多少"));
+    assert!(has_live_turn, "live result_2 turn in the timeline");
+}
+
+/// AC5/AC6 (remove): cross-restart. After removing a source, its dependent
+/// result_N is a stale dead turn -- excluded from replay, but present in the
+/// working set marked stale (Deleted anchor) after reopen.
+#[test]
+fn resume_after_remove_excludes_stale_from_replay_but_keeps_marked_stale() {
+    use toptopduck_lib::StaleReason;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let people = fixture("people.csv");
+    let orders = fixture("orders.csv");
+
+    let provider = FakeProvider::new()
+        .scripted(
+            "多少人",
+            reply_sql("SELECT COUNT(*) AS n FROM \"people\".data"),
+        )
+        .scripted(
+            "多少单",
+            reply_sql("SELECT COUNT(*) AS m FROM \"orders\".data"),
+        );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &people);
+    load_source(&mut session, &orders); // active = orders
+    let _ = session.ask("多少人"); // result_1 from people
+    let _ = session.ask("多少单"); // result_2 from orders
+    session.remove_source("people").expect("remove people"); // result_1 stale (Deleted)
+    session
+        .bind_duck(duck.clone(), "stale-remove".into())
+        .expect("bind");
+    drop(session);
+
+    let (events, cb) = collect_events();
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("resume");
+    let events = events.borrow();
+
+    let replayed: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            ResumeEvent::Replay { reference_name, .. } => Some(reference_name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replayed,
+        vec!["result_2"],
+        "only result_2 (orders) replayed; result_1 (people-dependent) skipped"
+    );
+
+    let result_1 = resumed
+        .get("result_1")
+        .expect("result_1 still in the working set (stale placeholder)");
+    let anchor = result_1.stale.as_ref().expect("marked stale");
+    assert_eq!(anchor.reason, StaleReason::Deleted);
+    // people is gone (removed); orders + result_2 remain.
+    assert!(resumed.get("people").is_none(), "people removed");
+    assert!(resumed.get("orders").is_some(), "orders intact");
+    assert!(
+        resumed.get("result_2").is_some(),
+        "result_2 replayed and live"
+    );
+}
