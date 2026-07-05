@@ -17,7 +17,7 @@
    - sample 进 LLM payload 前不做 PII redaction（ADR-0011 隐私层在 v1 仅靠用户开关 / 列标记，不扫描内容）；
    - recipe SQL 重放按**半信任**处理——fingerprint gating 保护源内容完整性，但不做 SQL AST 白名单（仅依赖 #1 沙箱 + subquery 包裹挡 mutating 语句，与 live turn 同语义）。
 
-   跨用户共享（portable duckdoc：邮件 / U 盘 / attach）留待 v2 评估，届时需引入 PII redaction 层 + SQL AST 白名单 + 「打开外部 .duck」风险提示 UI；升级时新开 ADR 校准本 §5。
+   跨用户共享（portable duckdoc：邮件 / U 盘 / attach）留待 v2 评估，届时需引入 PII redaction 层 + SQL AST 白名单 + 「打开外部 .duck」风险提示 UI；升级时新开 ADR 校准本 Decision 5。
 
 ## Context
 
@@ -30,7 +30,7 @@
 3. **secrets-never 是 0029 key-in-Rust 在新持久 artifact 上的延伸**——可分享文件是新的 key 泄露面，必须关上。
 4. **内容边界把"recipe 装什么"钉死**，避免派生 / 临时态 / app 级配置污染持久契约；viz 出（重算）与 0033 一致——v1 无用户手改 viz，故无持久物。
 5. **混合路径是可移植承诺的现实落地**：搬文件夹场景下"就是能用"；指纹校验守住内容时效（0035），路径对上但内容变了仍按漂移处理。
-6. **v1 = single-user 是诚实承诺**：tracer-bullet 范围只走 happy path（用户自生成的 .duck 源都在原位、指纹都对）；portable 需 PII redaction + SQL AST 白名单 + 路径可移植性，属后续大切片。把 v1 边界写明，不阻断未来升级到 portable——只需新开 ADR 校准本 §5。
+6. **v1 = single-user 是诚实承诺**：tracer-bullet 范围只走 happy path（用户自生成的 .duck 源都在原位、指纹都对）；portable 需 PII redaction + SQL AST 白名单 + 路径可移植性，属后续大切片。把 v1 边界写明，不阻断未来升级到 portable——只需新开 ADR 校准本 Decision 5。
 
 ## Considered options
 
@@ -49,5 +49,5 @@
 - **延伸 ADR-0029 不变量 3（key 仅 Rust）**：在新持久 artifact 上补一条「key 绝不进 .duck」——非改 0029 文本，是其安全隔离向持久化层的延伸。
 - 实现侧：.duck schema 含 `format_version`；向前迁移变换；打开时版本路由；源路径相对 / 绝对双存 + 解析；内容边界序列化（**密钥绝不序列化**——BYOK 走 app 级 keychain / Rust，ADR-0006/0029）。
 - 若未来加「用户手动调 viz」，那份手改状态须进 recipe（届时另开 ADR 校准本内容边界）。
-- **v1 实现侧（信任边界）**：`Session::resolve_source_path` 对相对路径做 `canonicalize` + `starts_with(duck_dir)` 边界检查，越界即 `ResumeError::SourceMissing`（detail 含「路径遍历」）；绝对路径 fallback 信任用户首次 ingest 选择；`resume_replay` 复用 #1 沙箱与 `try_materialize` 包裹（与 live turn 同语义）；不做 PII redaction / SQL AST 白名单。
-- v2 升级 portable 时须新开 ADR 校准本 §5，并补 PII redaction + AST 白名单 + 外部 .duck 风险提示。
+- **v1 实现侧（信任边界）**：相对路径在解析边界做 sandbox 检查（canonicalize 后须仍在 .duck 目录子树内），越界按源缺失诚实拒绝；绝对路径 fallback 信任用户首次 ingest 选择；recipe SQL 重放复用与 live turn 相同的沙箱与 wrapping（不另立重放专用规则）；不做 PII redaction / SQL AST 白名单。
+- v2 升级 portable 时须新开 ADR 校准本 Decision 5，并补 PII redaction + AST 白名单 + 外部 .duck 风险提示。
