@@ -1015,7 +1015,7 @@ impl Session {
                 total,
                 reference_name: turn.reference_name.clone(),
             });
-            match self.try_materialize(&turn.sql, &cancel) {
+            match self.try_materialize(&turn.sql, &cancel, turn.reference_name.clone()) {
                 Ok(descriptor) => {
                     if descriptor.display_name != turn.display_name {
                         // ADR-0035 honest signal: log a label-restore failure
@@ -1098,6 +1098,12 @@ impl Session {
             }
         };
 
+        // Stale turns are absent from the productive chain (ADR-0041), so the
+        // rebuild closure below must find their descriptors already in the
+        // working set -- register the placeholders first (ADR-0013: stale is
+        // not silently discarded).
+        self.register_stale_placeholders(recipe, end);
+
         self.history = recipe.history[..end]
             .iter()
             .map(|entry| match entry {
@@ -1119,6 +1125,13 @@ impl Session {
                                     reason: b.reason.clone(),
                                 }
                             } else {
+                                // Live turns: re-materialized by resume_replay.
+                                // Stale turns: a placeholder was registered in
+                                // the pre-pass above (ADR-0041 dead turn). In
+                                // both cases the working set holds the
+                                // descriptor, so the get() succeeds and the
+                                // Materialized outcome carries the stale flag
+                                // through to the UI badge.
                                 let dataset =
                                     self.working_set.get(reference_name).cloned().ok_or_else(
                                         || ResumeError::Replay {
@@ -1159,6 +1172,58 @@ impl Session {
             })
             .collect::<Result<Vec<_>, ResumeError>>()?;
         Ok(())
+    }
+
+    /// Pre-pass (ADR-0041, issue #52): register a placeholder descriptor for
+    /// each stale Materialized turn in the timeline slice `..end`. These dead
+    /// turns are absent from the productive chain, so resume_replay never
+    /// re-materialized their tables -- but they stay in history for display
+    /// and feed the LLM conversation-thread window (ADR-0041 point 2). The
+    /// placeholder carries no backing data (columns / sample empty -- the
+    /// materialized rows are not persisted, ADR-0036) but DOES carry the stale
+    /// anchor, so:
+    ///   - the conversation renders the stale badge (descriptor.stale);
+    ///   - session.get / list surface it marked stale (ADR-0013 "not
+    ///     silently discarded");
+    ///   - resolve_active skips it (focus never lands on a dead turn);
+    ///   - the placeholder is excluded from the LLM's dataset working set
+    ///     (ADR-0013); the stale turn's verbatim SQL still reaches the model
+    ///     via the conversation-thread window (ADR-0041 point 2).
+    ///
+    /// Called ahead of the rebuild closure in `resume_history` so that closure
+    /// stays `&self` (a `&mut` register inside the `&self` closure would not
+    /// borrow-check).
+    fn register_stale_placeholders(&mut self, recipe: &Recipe, end: usize) {
+        for entry in &recipe.history[..end] {
+            let RecipeEntry::Turn(turn) = entry else {
+                continue;
+            };
+            let RecipeOutcome::Materialized {
+                reference_name,
+                display_name,
+                stale: Some(anchor),
+                ..
+            } = &turn.outcome
+            else {
+                continue;
+            };
+            if self.working_set.get(reference_name).is_some() {
+                continue;
+            }
+            let placeholder = DatasetDescriptor {
+                reference_name: reference_name.clone(),
+                display_name: display_name.clone(),
+                source_path: String::new(),
+                columns: Vec::new(),
+                row_count: 0,
+                sample: Vec::new(),
+                fingerprint: String::new(),
+                rectify: RectifyProvenance::NotApplicable,
+                privacy: DatasetPrivacy::default(),
+                stale: Some(anchor.clone()),
+            };
+            self.working_set.register_result(placeholder);
+        }
     }
 
     /// Ingest a source for resume under an explicit reference name + display
@@ -2289,7 +2354,13 @@ impl Session {
                     if cancel.is_requested() {
                         return self.record_turn(question, TurnOutcome::Cancelled);
                     }
-                    match self.try_materialize(&sql, &cancel) {
+                    // result_N for this attempt: a failed attempt registers
+                    // nothing, so next_result_number is stable across retries
+                    // (ADR-0022 never-reused). Computed here (not inside
+                    // try_materialize) so resume_replay can pass the recipe's
+                    // recorded name for the same function.
+                    let result_name = format!("result_{}", self.working_set.next_result_number());
+                    match self.try_materialize(&sql, &cancel, result_name) {
                         Ok(dataset) => {
                             let outcome = TurnOutcome::Materialized {
                                 dataset: Box::new(dataset),
@@ -2439,11 +2510,12 @@ impl Session {
 
     /// Build the recipe (ADR-0034) describing the current working set. The
     /// recipe is organized by current state, not as a historical ledger:
-    /// only still-valid productive turns ride the replayable chain, and the
-    /// history mirrors the always-visible timeline (turns + source events).
-    /// A Materialized turn whose `result_N` has since gone stale (cascade)
-    /// or been removed is dropped -- it cannot replay; the tracer-bullet
-    /// happy path has none (full stale-render lands in a later slice).
+    /// only LIVE productive turns ride the replayable chain, while a stale
+    /// (cascade-invalidated) result_N's turn stays in `history` marked stale
+    /// (ADR-0041 point 2: kept for display + the LLM window, never replayed)
+    /// rather than being silently dropped. A Materialized turn whose
+    /// `result_N` is gone entirely (removed/GC'd, no descriptor) is dropped
+    /// -- without a descriptor the turn cannot replay or render.
     pub fn build_recipe(&self) -> Recipe {
         // ADR-0036 Decision 4 hybrid paths: `source_path` is always absolute (fallback
         // resolver); `relative_path` is set when the source lives inside the
@@ -2492,29 +2564,36 @@ impl Session {
                             viz: _,
                             assumption,
                         } => {
-                            // Only keep a Materialized turn if its result_N is
-                            // still an active member (registered + not stale).
-                            let live = self.working_set.get(&dataset.reference_name);
-                            let active = live.map(|d| d.stale.is_none()).unwrap_or(false);
-                            if !active {
-                                return None;
-                            }
+                            // The result_N must still be registered (a GC'd or
+                            // otherwise removed descriptor leaves no trace --
+                            // the turn cannot replay or render, so drop it).
+                            // `?` here returns None from the filter_map closure
+                            // (drop this entry), NOT from build_recipe.
+                            let descriptor = self.working_set.get(&dataset.reference_name)?;
                             // sql is Some on every fresh Materialized turn; a
                             // None predates the field and cannot replay, so
-                            // drop the turn rather than fabricate SQL.
+                            // drop the turn rather than fabricate SQL. (A stale
+                            // turn also keeps its SQL -- ADR-0041 point 2: the
+                            // verbatim SQL stays visible in the window.)
                             let sql = sql.clone()?;
                             // display_name comes from the working set's CURRENT
                             // state, not the ask-time snapshot in history -- a
                             // user rename (ADR-0037) updates the working set,
                             // not the history entry, so the snapshot is stale.
-                            let display_name = live
-                                .map(|d| d.display_name.clone())
-                                .unwrap_or_else(|| dataset.display_name.clone());
+                            let display_name = descriptor.display_name.clone();
                             RecipeOutcome::Materialized {
                                 reference_name: dataset.reference_name.clone(),
                                 display_name,
                                 sql,
                                 assumption: assumption.clone(),
+                                // ADR-0041: a live result -> stale None
+                                // (replayed); a cascade-invalidated result ->
+                                // the anchor from its descriptor (dead turn,
+                                // kept in history, never replayed). The anchor
+                                // is what the UI's stale badge reads, so a
+                                // reopen renders the same "invalidated by"
+                                // provenance as the live session did.
+                                stale: descriptor.stale.clone(),
                             }
                         }
                         TurnOutcome::Textual {
@@ -2817,11 +2896,14 @@ impl Session {
         &mut self,
         sql: &str,
         cancel: &crate::cancel::CancelToken,
+        result_name: String,
     ) -> Result<DatasetDescriptor, ExecError> {
-        // result_N is max+1, never reused (ADR-0022). Re-derived each attempt:
-        // a failed attempt registers nothing, so N is stable across retries.
-        let n = self.working_set.next_result_number();
-        let result_name = format!("result_{n}");
+        // result_N is max+1, never reused (ADR-0022). The caller computes the
+        // name: the live ask path derives next_result_number per attempt (a
+        // failed attempt registers nothing, so N is stable across retries);
+        // resume_replay passes the recipe's recorded name verbatim so a stale
+        // gap (e.g. result_1 dead, result_2 live) does not renumber the live
+        // turn -- the chain recreates each result_N under its stable identity.
 
         // Stale-reference refusal (ADR-0013 invariant 2) + provenance record
         // (issue #40): parse the SQL once before touching the sandbox so a

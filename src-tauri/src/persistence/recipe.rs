@@ -16,7 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{RectifyProvenance, SourceLifecycleEvent, TextKind};
+use crate::model::{RectifyProvenance, SourceLifecycleEvent, StaleAnchor, TextKind};
 
 /// v1 recipe format version (ADR-0036). Opening routes on this value: equal
 /// -> normal; lower -> forward-migrate; higher -> honest refuse. v1 is the
@@ -109,13 +109,26 @@ pub struct RecipeTurn {
 #[serde(tag = "kind", content = "data")]
 pub enum RecipeOutcome {
     /// Outcome A -- a result turn. Replayed on resume to re-materialize
-    /// `result_N` (reusing the same number, ADR-0022).
+    /// `result_N` (reusing the same number, ADR-0022) UNLESS `stale` is set.
     Materialized {
         reference_name: String,
         display_name: String,
         sql: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assumption: Option<String>,
+        /// ADR-0041 stale marker (issue #52). `None` = live turn, replayed on
+        /// resume. `Some(anchor)` = the result_N was cascade-invalidated by a
+        /// source replace/remove -- a dead turn: kept in the timeline for
+        /// display and the LLM window (ADR-0041 point 2 -- the verbatim SQL
+        /// stays visible so the user / model can reference the prior logic),
+        /// but excluded from [`Recipe::productive_chain`] so resume never
+        /// re-executes it. The anchor carries the invalidating source event's
+        /// identity + reason (ADR-0040 traceability), so the stale badge
+        /// renders the same way after resume as it did live.
+        /// `#[serde(default)]` so a pre-#52 v1 recipe (whose stale turns were
+        /// dropped at write time under the old contract) deserializes as live.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stale: Option<StaleAnchor>,
     },
     /// Outcome B -- a textual turn (ADR-0017 refuse / ADR-0018 clarify).
     /// Statically rendered on resume; the disambiguation choice is already
@@ -134,10 +147,12 @@ pub enum RecipeOutcome {
 }
 
 /// The recipe (ADR-0034): the current working set as a portable text
-/// document. Organized by current state, not as a historical ledger -- stale
-/// results (cascade-failed after a source replace/remove) are NOT here; the
-/// history holds only the still-valid turns plus every no-result turn and
-/// source event (ADR-0040 always-visible display).
+/// document. Organized by current state, not as a historical ledger -- a
+/// removed source is absent from `sources`, and a stale (cascade-invalidated)
+/// result_N's turn stays in `history` marked stale (ADR-0041 point 2: kept
+/// for display + the LLM window, never replayed) rather than being silently
+/// dropped. Every no-result turn and every source lifecycle event is always
+/// visible (ADR-0040).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Recipe {
     /// Format version (ADR-0036). v1 today; opening refuses a higher version
@@ -171,11 +186,12 @@ pub struct Recipe {
 }
 
 impl Recipe {
-    /// The still-valid productive chain (ADR-0034): the Materialized turns in
-    /// timeline order. This is what resume re-executes -- one SQL per entry,
-    /// reusing the `result_N` numbering (ADR-0022). Stale results are already
-    /// absent from the recipe history (filtered at write time), so every
-    /// Materialized entry here is replayable.
+    /// The still-valid productive chain (ADR-0034/0041): the LIVE Materialized
+    /// turns in timeline order -- stale ones (`stale: Some`) are dead turns
+    /// (ADR-0041 point 1) and never replayed. This is what resume re-executes:
+    /// one SQL per entry, reusing the `result_N` numbering (ADR-0022). Stale
+    /// turns remain in `history` for display + the LLM window (point 2) but are
+    /// absent here, so the replay chain is exactly the live derivations.
     pub fn productive_chain(&self) -> Vec<ProductiveTurn> {
         self.history
             .iter()
@@ -186,12 +202,15 @@ impl Recipe {
                         display_name,
                         sql,
                         assumption,
+                        stale: None,
                     } => Some(ProductiveTurn {
                         reference_name: reference_name.clone(),
                         display_name: display_name.clone(),
                         sql: sql.clone(),
                         assumption: assumption.clone(),
                     }),
+                    // Stale dead turn (ADR-0041) -- display-only, not replayed.
+                    RecipeOutcome::Materialized { stale: Some(_), .. } => None,
                     _ => None,
                 },
                 RecipeEntry::Source(_) => None,
@@ -203,7 +222,7 @@ impl Recipe {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{SourceLifecycleEvent, SourceLifecycleKind};
+    use crate::model::{SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, StaleReason};
 
     fn csv_source(name: &str, fp: &str) -> SourceRef {
         SourceRef {
@@ -237,6 +256,7 @@ mod tests {
                         display_name: "result_1".into(),
                         sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
                         assumption: None,
+                        stale: None,
                     },
                 }),
                 RecipeEntry::Turn(RecipeTurn {
@@ -299,6 +319,7 @@ mod tests {
                         display_name: "result_1".into(),
                         sql: "SELECT 1".into(),
                         assumption: None,
+                        stale: None,
                     },
                 }),
                 RecipeEntry::Turn(RecipeTurn {
@@ -308,6 +329,7 @@ mod tests {
                         display_name: "result_2".into(),
                         sql: "SELECT * FROM \"result_1\"".into(),
                         assumption: None,
+                        stale: None,
                     },
                 }),
             ],
@@ -360,5 +382,166 @@ mod tests {
         let json = serde_json::to_string(&recipe).expect("serialize");
         let back: Recipe = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, recipe);
+    }
+
+    /// Helper: a Materialized outcome with an explicit stale anchor (the shape
+    /// `build_recipe` writes for a cascade-invalidated result_N, issue #52).
+    fn stale_materialized(
+        reference_name: &str,
+        sql: &str,
+        anchor_ref: &str,
+        reason: StaleReason,
+    ) -> RecipeOutcome {
+        RecipeOutcome::Materialized {
+            reference_name: reference_name.into(),
+            display_name: reference_name.into(),
+            sql: sql.into(),
+            assumption: None,
+            stale: Some(StaleAnchor {
+                reference_name: anchor_ref.into(),
+                display_name: anchor_ref.into(),
+                reason,
+            }),
+        }
+    }
+
+    #[test]
+    fn productive_chain_excludes_stale_materialized_turns() {
+        // ADR-0041 point 1 (issue #52): a stale result_N is a dead turn --
+        // kept in history (point 2) but NEVER replayed. With one live and one
+        // stale Materialized turn, productive_chain returns only the live one.
+        let recipe = Recipe {
+            format_version: RECIPE_FORMAT_VERSION,
+            session_name: "stale-chain".into(),
+            sources: vec![csv_source("people", "fp")],
+            history: vec![
+                RecipeEntry::Turn(RecipeTurn {
+                    question: "live".into(),
+                    outcome: RecipeOutcome::Materialized {
+                        reference_name: "result_1".into(),
+                        display_name: "result_1".into(),
+                        sql: "SELECT 1".into(),
+                        assumption: None,
+                        stale: None,
+                    },
+                }),
+                RecipeEntry::Turn(RecipeTurn {
+                    question: "stale".into(),
+                    outcome: stale_materialized(
+                        "result_2",
+                        "SELECT * FROM \"people\".data",
+                        "people",
+                        StaleReason::Replaced,
+                    ),
+                }),
+            ],
+            active: Some("result_1".into()),
+        };
+        let chain = recipe.productive_chain();
+        assert_eq!(
+            chain
+                .iter()
+                .map(|t| t.reference_name.clone())
+                .collect::<Vec<_>>(),
+            vec!["result_1".to_string()],
+            "stale turn excluded from the replay chain"
+        );
+    }
+
+    #[test]
+    fn stale_materialized_turn_round_trips_with_anchor() {
+        // ADR-0041 point 2 (issue #52): the stale turn (with its anchor) must
+        // survive serialize -> deserialize so resume can rebuild the timeline
+        // AND mark the result_N stale in the working set. A dropped or
+        // truncated anchor would silently lose the stale badge after reopen.
+        let turn = RecipeTurn {
+            question: "stale".into(),
+            outcome: stale_materialized(
+                "result_2",
+                "SELECT COUNT(*) FROM \"orders\".data",
+                "orders",
+                StaleReason::Deleted,
+            ),
+        };
+        let json = serde_json::to_string(&turn).expect("serialize");
+        let back: RecipeTurn = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, turn);
+        // The anchor's reason is preserved (not defaulted back to Deleted).
+        match &back.outcome {
+            RecipeOutcome::Materialized { stale: Some(a), .. } => {
+                assert_eq!(a.reason, StaleReason::Deleted);
+                assert_eq!(a.reference_name, "orders");
+            }
+            other => panic!("expected stale Materialized, got {other:?}"),
+        }
+    }
+
+    /// Pre-#52 forward-compat (issue #52): a v1 recipe written before the
+    /// `stale` field existed omits it on disk. `#[serde(default)]` must
+    /// deserialize such a turn as live (`stale: None`) -- removing the default
+    /// would break reopening every pre-#52 .duck file with a cryptic
+    /// "missing field `stale`" error. Pins the load-bearing serde attribute.
+    #[test]
+    fn materialized_outcome_without_stale_field_deserializes_as_live() {
+        let json = r#"{"kind":"Materialized","data":{"reference_name":"result_1","display_name":"result_1","sql":"SELECT 1"}}"#;
+        let back: RecipeOutcome = serde_json::from_str(json).expect("deserialize pre-#52 form");
+        match back {
+            RecipeOutcome::Materialized { stale: None, .. } => {}
+            other => panic!("expected live Materialized (stale: None), got {other:?}"),
+        }
+    }
+
+    /// ADR-0041 ordering invariant (issue #52): an interleaved chain
+    /// (live, stale, live) keeps both live turns in timeline order and drops
+    /// only the stale middle one. Single-stale coverage above does not
+    /// generalize to the interleaved case without this test.
+    #[test]
+    fn productive_chain_keeps_interleaved_live_stale_live_in_order() {
+        let recipe = Recipe {
+            format_version: RECIPE_FORMAT_VERSION,
+            session_name: "interleaved".into(),
+            sources: vec![csv_source("people", "fp")],
+            history: vec![
+                RecipeEntry::Turn(RecipeTurn {
+                    question: "first live".into(),
+                    outcome: RecipeOutcome::Materialized {
+                        reference_name: "result_1".into(),
+                        display_name: "result_1".into(),
+                        sql: "SELECT 1".into(),
+                        assumption: None,
+                        stale: None,
+                    },
+                }),
+                RecipeEntry::Turn(RecipeTurn {
+                    question: "stale middle".into(),
+                    outcome: stale_materialized(
+                        "result_2",
+                        "SELECT * FROM \"people\".data",
+                        "people",
+                        StaleReason::Replaced,
+                    ),
+                }),
+                RecipeEntry::Turn(RecipeTurn {
+                    question: "live after gap".into(),
+                    outcome: RecipeOutcome::Materialized {
+                        reference_name: "result_3".into(),
+                        display_name: "result_3".into(),
+                        sql: "SELECT 3".into(),
+                        assumption: None,
+                        stale: None,
+                    },
+                }),
+            ],
+            active: Some("result_3".into()),
+        };
+        let chain = recipe.productive_chain();
+        assert_eq!(
+            chain
+                .iter()
+                .map(|t| t.reference_name.clone())
+                .collect::<Vec<_>>(),
+            vec!["result_1".to_string(), "result_3".to_string()],
+            "interleaved chain keeps live turns in order, skips the stale middle",
+        );
     }
 }
