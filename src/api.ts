@@ -215,3 +215,13 @@ export async function onResumeProgress(
 ): Promise<UnlistenFn> {
   return listen<ResumeEvent>("resume-progress", (e) => cb(e.payload));
 }
+
+// Read + clear the most recent per-turn persistence failure, if any
+// (ADR-0034/0035 honest signal). The frontend polls this after each turn /
+// source event / resume: a non-blocking banner surfaces the disk-vs-memory
+// drift so the user knows a save dropped, instead of relying on the next
+// successful write to silently self-heal. Returns null when the last save
+// was clean (or after a prior poll already cleared the failure).
+export async function takePersistError(): Promise<string | null> {
+  return invoke<string | null>("take_persist_error");
+}

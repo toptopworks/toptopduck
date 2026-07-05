@@ -365,3 +365,93 @@ fn rename_survives_resume_and_references_still_resolve() {
         .expect("read people by reference name");
     assert!(page.total > 0, "reference name resolves to the data");
 }
+
+#[test]
+fn resume_refuses_a_relative_path_that_escapes_the_duck_dir() {
+    // Review H1 (path traversal): a hand-edited or externally-sourced .duck
+    // whose relative_path escapes the .duck's directory would otherwise let a
+    // malicious recipe pull arbitrary files (`~/.ssh/id_rsa`, `/etc/passwd`,
+    // ...) into the DuckDB snapshot and from there into LLM samples / column
+    // names. resolve_source_path MUST refuse such a path at the resume
+    // boundary -- never silently canonicalize back to a file outside the dir.
+    use toptopduck_lib::persistence::{save_atomic, Recipe, SourceRef, RECIPE_FORMAT_VERSION};
+    use toptopduck_lib::RectifyProvenance;
+    use toptopduck_lib::ResumeError;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Put the .duck in a sub-dir so "../evil.csv" cleanly escapes it.
+    let sub = dir.path().join("sub");
+    fs::create_dir(&sub).expect("mkdir");
+    let duck = sub.join("session.duck");
+    // Plant a sibling file in the .duck dir's PARENT -- canonicalize resolves
+    // it to the parent, which does NOT start with the .duck dir.
+    let outside = dir.path().join("evil.csv");
+    fs::write(&outside, b"col\nval\n").expect("write");
+
+    let malicious = Recipe {
+        format_version: RECIPE_FORMAT_VERSION,
+        session_name: "evil".into(),
+        sources: vec![SourceRef {
+            reference_name: "evil".into(),
+            display_name: "evil".into(),
+            source_path: outside.to_string_lossy().to_string(),
+            relative_path: Some("../evil.csv".into()),
+            rectify: RectifyProvenance::NotApplicable,
+            fingerprint: "any".into(),
+        }],
+        history: vec![],
+        active: None,
+    };
+    save_atomic(&duck, &malicious).expect("save");
+
+    let outcome = Session::open_duck(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(UnwiredProvider),
+        |_| {},
+    );
+    match outcome {
+        Err(ResumeError::SourceMissing { detail, .. }) => {
+            assert!(
+                detail.contains("路径遍历"),
+                "expected traversal refusal, got: {detail}"
+            );
+        }
+        Err(other) => panic!("expected SourceMissing, got: {other}"),
+        Ok(_) => panic!("expected error, but resume succeeded"),
+    }
+}
+
+#[test]
+fn resume_is_cancellable_mid_replay() {
+    // Review H3 (ADR-0021 cancel surface): without an is_requested() poll in
+    // the resume loops, a user click of 停止 during resume would only get the
+    // engine interrupt on the CURRENT SQL, surface as a `Replay` failure, and
+    // look indistinguishable from data corruption. The poll must route a
+    // mid-resume cancel to `ResumeError::Cancelled` (a clean signal).
+    use toptopduck_lib::ResumeError;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("session.duck");
+    let session = build_session(&duck);
+    drop(session);
+
+    let cancel = Arc::new(CancelToken::new());
+    let cancel_for_cb = Arc::clone(&cancel);
+    // Fire cancel on the FIRST Source event. resume_sources checks
+    // is_requested() at the top of each iteration (after on_progress fires),
+    // so with a single source the cancel lands cleanly at the first iteration
+    // of resume_replay -- before any SQL runs.
+    let mut fired = false;
+    let outcome = Session::open_duck(&duck, cancel, Box::new(UnwiredProvider), move |_ev| {
+        if !fired {
+            fired = true;
+            cancel_for_cb.request();
+        }
+    });
+    match outcome {
+        Err(ResumeError::Cancelled) => {}
+        Err(other) => panic!("expected Cancelled, got: {other}"),
+        Ok(_) => panic!("expected error, but resume succeeded"),
+    }
+}

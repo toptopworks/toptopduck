@@ -363,3 +363,16 @@ pub async fn open_duck(
     .await
     .map_err(|e| e.to_string())?
 }
+
+/// Read + clear the most recent per-turn persistence failure, if any
+/// (ADR-0034/0035 honest signal). The frontend polls this after each turn /
+/// source event / resume: a non-blocking "未保存到磁盘" banner surfaces the
+/// disk-vs-memory drift so the user knows a save dropped (instead of relying
+/// on the next successful write to silently self-heal, which would mask the
+/// window where closing the app loses the unsaved turns). Returns `None`
+/// after a clean save or after a prior read cleared the failure.
+#[tauri::command]
+pub fn take_persist_error(state: State<'_, Arc<Mutex<Session>>>) -> Result<Option<String>, String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    Ok(s.take_persist_error())
+}

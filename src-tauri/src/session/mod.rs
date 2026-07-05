@@ -91,6 +91,11 @@ pub enum ResumeError {
     /// resume (the source was removed in a prior session and the recipe was
     /// not updated, or the recipe is corrupt).
     ActiveMissing(String),
+    /// The user cancelled resume (ADR-0021): the cancel token fired during
+    /// source verification or replay. Distinct from [`Self::Replay`] so the UI
+    /// can show "已取消" instead of a confusing data-corruption error -- a
+    /// cancelled replay is not a broken recipe.
+    Cancelled,
 }
 
 impl std::fmt::Display for ResumeError {
@@ -115,6 +120,7 @@ impl std::fmt::Display for ResumeError {
                 detail,
             } => write!(f, "重放「{reference_name}」失败：{detail}"),
             Self::ActiveMissing(name) => write!(f, "会话焦点指向未注册的源「{name}」"),
+            Self::Cancelled => write!(f, "已取消恢复"),
         }
     }
 }
@@ -198,6 +204,14 @@ pub struct Session {
     /// and shown on resume; `None` for an in-memory-only session (the recipe
     /// falls back to an empty name).
     session_name: Option<String>,
+    /// The most recent per-turn atomic-write failure (ADR-0034). Set by
+    /// [`Self::persist_if_bound`] when a save fails; cleared by
+    /// [`Self::take_persist_error`]. The in-memory turn always advances
+    /// regardless (the user's work stays live); this field lets the UI
+    /// surface the disk-vs-memory drift instead of silently relying on the
+    /// next successful write to self-heal (ADR-0035 honest signal -- a
+    /// dropped save is a correctness gap, not just a log line).
+    persist_error: Option<String>,
 }
 
 impl Session {
@@ -262,6 +276,7 @@ impl Session {
             turn_timeout: None,
             duck_path: None,
             session_name: None,
+            persist_error: None,
         })
     }
 
@@ -338,6 +353,16 @@ impl Session {
         provider: Box<dyn Provider>,
         mut on_progress: impl FnMut(ResumeEvent),
     ) -> Result<Session, ResumeError> {
+        // Mark resume as in-flight + clear any stale cancel request, mirroring
+        // `ask`'s per-turn guard (ADR-0021). The resume_sources / resume_replay
+        // loops poll is_requested() between items so a user cancel lands as
+        // [`ResumeError::Cancelled`] (a clean signal), not a masked `Replay`
+        // failure indistinguishable from data corruption. Drop on exit clears
+        // in-flight and the interrupt slot (RAII -- every exit from open_duck,
+        // success or error, drops the guard). The resumed Session reuses the
+        // SAME Arc<CancelToken>, so the next ask's begin_turn composes cleanly.
+        let _guard = cancel.begin_turn();
+
         let recipe = read_duck(path).map_err(ResumeError::Load)?;
         let mut session = Session::with_provider_and_cancel(provider, cancel)
             .map_err(|e| ResumeError::Load(crate::persistence::io::LoadError::Io(e.to_string())))?;
@@ -375,20 +400,42 @@ impl Session {
     /// form that survives "move the folder" portability. Otherwise the
     /// absolute `source_path` is the fallback. Fingerprint verification
     /// upstream catches a wrong pick, so the choice here is safe.
-    fn resolve_source_path(duck_path: &Path, src: &SourceRef) -> PathBuf {
+    ///
+    /// Trust boundary (rust/security.md §input-validation + ADR-0036): the
+    /// `.duck` is external input. A hand-edited or externally-sourced recipe
+    /// whose `relative_path` escapes the `.duck`'s directory subtree
+    /// (`../../etc/passwd`, `~/../.ssh/id_rsa`, ...) would otherwise let a
+    /// malicious recipe pull arbitrary files into the DuckDB snapshot (and
+    /// from there into LLM samples / column names). The relative candidate
+    /// is canonicalized and MUST remain inside the `.duck`'s directory; an
+    /// escape is rejected at this boundary as a `SourceMissing` (path
+    /// traversal refused). A missing candidate falls through to the absolute
+    /// fallback, which fingerprint verification then refuses if it is also
+    /// missing or drifted (ADR-0035 honest degrade -- not a silent traversal).
+    fn resolve_source_path(duck_path: &Path, src: &SourceRef) -> Result<PathBuf, ResumeError> {
         let absolute = PathBuf::from(&src.source_path);
         let Some(relative) = &src.relative_path else {
-            return absolute;
+            return Ok(absolute);
         };
         let Some(base) = duck_path.parent() else {
-            return absolute;
+            return Ok(absolute);
         };
         let candidate = base.join(relative);
-        if candidate.exists() {
-            candidate
-        } else {
-            absolute
+        // canonicalize requires the file to exist; a missing candidate falls
+        // through to the absolute fallback (fingerprint check decides there).
+        if let Ok(canonical) = candidate.canonicalize() {
+            if let Ok(base_canonical) = base.canonicalize() {
+                if !canonical.starts_with(&base_canonical) {
+                    return Err(ResumeError::SourceMissing {
+                        reference_name: src.reference_name.clone(),
+                        path: relative.clone(),
+                        detail: "相对路径越出 .duck 目录（已拒绝路径遍历）".into(),
+                    });
+                }
+                return Ok(canonical);
+            }
         }
+        Ok(absolute)
     }
 
     /// Resume phase 1 (ADR-0034/0035/0036/0042): re-read and verify every
@@ -406,12 +453,15 @@ impl Session {
     ) -> Result<(), ResumeError> {
         let total = recipe.sources.len();
         for (i, src) in recipe.sources.iter().enumerate() {
+            if self.cancel.is_requested() {
+                return Err(ResumeError::Cancelled);
+            }
             on_progress(ResumeEvent::Source {
                 index: i + 1,
                 total,
                 reference_name: src.reference_name.clone(),
             });
-            let path = Self::resolve_source_path(duck_path, src);
+            let path = Self::resolve_source_path(duck_path, src)?;
             let descriptor = match self.ingest(&path) {
                 LoadOutcome::Loaded(d) => d,
                 LoadOutcome::Error(e) => {
@@ -458,6 +508,14 @@ impl Session {
         let total = chain.len();
         let cancel = Arc::clone(&self.cancel);
         for (i, turn) in chain.iter().enumerate() {
+            // Honor a user cancel between turns (ADR-0021): without this poll
+            // a click of 停止 during replay would only get the engine interrupt
+            // on the CURRENT SQL, surface as ResumeError::Replay, and look
+            // indistinguishable from data corruption. The cancel lands here as
+            // ResumeError::Cancelled BEFORE the next turn's SQL starts.
+            if cancel.is_requested() {
+                return Err(ResumeError::Cancelled);
+            }
             on_progress(ResumeEvent::Replay {
                 index: i + 1,
                 total,
@@ -1857,14 +1915,30 @@ impl Session {
         save_atomic(path, &recipe)
     }
 
-    /// Fire [`Self::persist`] after a terminal event, logging a failure
+    /// Fire [`Self::persist`] after a terminal event, capturing a failure
     /// instead of propagating: a per-turn save error must not abort the turn
     /// (the in-memory state is already advanced; the disk copy self-heals on
-    /// the next successful write, and the prior file is intact).
-    fn persist_if_bound(&self) {
+    /// the next successful write, and the prior file is intact). The failure
+    /// is captured in [`Self::persist_error`] so the UI can surface it as a
+    /// non-blocking "未保存到磁盘" banner (ADR-0035 honest signal) -- silently
+    /// relying on the next write to self-heal would mask a disk-vs-memory
+    /// drift that closes the app losing the unsaved turns.
+    fn persist_if_bound(&mut self) {
         if let Err(e) = self.persist() {
             log::error!(target: "toptopduck::session", "自动保存 .duck 失败：{e}");
+            // Stash the latest failure (overwrites a prior unread one -- the
+            // most recent is the most actionable). Cleared by take_persist_error.
+            self.persist_error = Some(e.to_string());
         }
+    }
+
+    /// Take (read + clear) the most recent per-turn persistence failure, if
+    /// any. The command layer exposes this so the frontend can show a
+    /// non-blocking banner after each turn / source event / resume. The
+    /// failure is cleared on read so a turn that subsequently saves
+    /// successfully does not re-surface the stale error.
+    pub fn take_persist_error(&mut self) -> Option<String> {
+        self.persist_error.take()
     }
 
     /// The turn-only view of the timeline, cloned out for the window assembler

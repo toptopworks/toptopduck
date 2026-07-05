@@ -90,6 +90,7 @@ pub fn run() {
             commands::set_provider_config,
             commands::save_as_duck,
             commands::open_duck,
+            commands::take_persist_error,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

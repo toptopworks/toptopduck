@@ -28,6 +28,7 @@ import {
   replaceSource,
   saveAsDuck,
   setDatasetPrivacy,
+  takePersistError,
 } from "./api";
 import { loadErrorMessage } from "./loadErrorMessage";
 import type {
@@ -112,6 +113,30 @@ export default function App() {
   // productive chain. null when no resume is running. Updates come from the
   // backend `resume-progress` Tauri event.
   const [resumeStatus, setResumeStatus] = useState<string | null>(null);
+  // persistenceBusy (review H6): blocks both save/open buttons for the ENTIRE
+  // handler -- including the native dialog window -- not just the post-dialog
+  // invoke. Without it the buttons stay enabled while the OS dialog is open
+  // and a user can trigger both handlers concurrently; two invokes then race
+  // the session mutex and the resume-progress listener.
+  const [persistenceBusy, setPersistenceBusy] = useState(false);
+  // persistError (review H4): the most recent per-turn save failure, shown as
+  // a non-blocking banner. The in-memory turn always advances, so without this
+  // signal the user has no way to learn the disk fell behind -- closing the
+  // app in that window loses the unsaved turns. Cleared by the next clean poll.
+  const [persistError, setPersistError] = useState<string | null>(null);
+
+  /** Poll the backend for the most recent per-turn persistence failure
+   * (review H4). Called at the end of every mutating handler so a dropped
+   * save surfaces here instead of relying on the next successful write to
+   * silently self-heal. Best-effort: an IPC failure here is swallowed rather
+   * than shown as a separate error (it must not mask the real operation). */
+  const pollPersistError = useCallback(async () => {
+    try {
+      setPersistError(await takePersistError());
+    } catch {
+      // swallow -- persist-status polling must not surface its own failure
+    }
+  }, []);
 
   const refresh = useCallback(async () => {
     setDatasets(await listWorkingSet());
@@ -161,6 +186,7 @@ export default function App() {
         } catch (e) {
           setError({ message: fmtError(e), kind });
           setLoading(false);
+          void pollPersistError();
           return;
         }
         try {
@@ -172,6 +198,7 @@ export default function App() {
           });
         }
         setLoading(false);
+        void pollPersistError();
       },
       [kind, fn],
     );
@@ -195,9 +222,10 @@ export default function App() {
         setError({ message: fmtError(e), kind: "load" });
       } finally {
         setLoading(false);
+        void pollPersistError();
       }
     },
-    [refresh],
+    [refresh, pollPersistError],
   );
 
   const handleGuidedSubmit = useCallback(
@@ -225,9 +253,10 @@ export default function App() {
         setError({ message: fmtError(e), kind: "load" });
       } finally {
         setLoading(false);
+        void pollPersistError();
       }
     },
-    [guidance, refresh],
+    [guidance, refresh, pollPersistError],
   );
 
   const handleRename = useSimpleMutation("rename", renameDataset);
@@ -382,9 +411,12 @@ export default function App() {
         setError({ message: fmtError(e), kind: "ask" });
       } finally {
         setLoading(false);
+        // Surface a per-turn save failure (review H4): the ask just wrote (or
+        // tried to write) the recipe, so this is the right poll point.
+        void pollPersistError();
       }
     },
-    [refresh],
+    [refresh, pollPersistError],
   );
 
   // Re-show a past result turn's rows in the result pane (ADR-0028 always-
@@ -416,23 +448,29 @@ export default function App() {
   // every terminal turn / source event atomically rewrites the recipe; the
   // session name defaults to the file stem. A cancel (empty path) is a no-op.
   const handleSaveAs = useCallback(async () => {
-    const path = await saveDialog({
-      filters: [{ name: "toptopduck", extensions: ["duck"] }],
-    });
-    if (!path) return;
-    const stem =
-      path.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? "session";
-    setLoading(true);
-    setError(null);
+    setPersistenceBusy(true);
     try {
-      await saveAsDuck(path, stem);
-      await refresh();
-    } catch (e) {
-      setError({ message: fmtError(e), kind: "load" });
+      const path = await saveDialog({
+        filters: [{ name: "toptopduck", extensions: ["duck"] }],
+      });
+      if (!path) return;
+      const stem =
+        path.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? "session";
+      setLoading(true);
+      setError(null);
+      try {
+        await saveAsDuck(path, stem);
+        await refresh();
+      } catch (e) {
+        setError({ message: fmtError(e), kind: "load" });
+      } finally {
+        setLoading(false);
+        void pollPersistError();
+      }
     } finally {
-      setLoading(false);
+      setPersistenceBusy(false);
     }
-  }, [refresh]);
+  }, [refresh, pollPersistError]);
 
   // Open a .duck and resume the session across the restart boundary
   // (issue #48, ADR-0034). Resume runs off the UI thread; the resume-progress
@@ -440,39 +478,50 @@ export default function App() {
   // / active are refreshed from the resumed backend session. A cancel (no file
   // picked) is a no-op.
   const handleOpenDuck = useCallback(async () => {
-    const selected = await openDialog({
-      filters: [{ name: "toptopduck", extensions: ["duck"] }],
-      multiple: false,
-    });
-    const path = typeof selected === "string" ? selected : null;
-    if (!path) return;
-    setLoading(true);
-    setError(null);
-    setResumeStatus("正在打开…");
-    const unlisten = await onResumeProgress((ev: ResumeEvent) => {
-      if ("Source" in ev) {
-        setResumeStatus(
-          `校验源 ${ev.Source.index}/${ev.Source.total}：${ev.Source.reference_name}`,
-        );
-      } else if ("Replay" in ev) {
-        setResumeStatus(
-          `重放 ${ev.Replay.index}/${ev.Replay.total}：${ev.Replay.reference_name}`,
-        );
-      }
-    });
+    setPersistenceBusy(true);
     try {
-      await openDuck(path);
-      setResumeStatus(null);
-      setLatestResult(null);
-      await refresh();
-    } catch (e) {
-      setError({ message: fmtError(e), kind: "load" });
-      setResumeStatus(null);
+      const selected = await openDialog({
+        filters: [{ name: "toptopduck", extensions: ["duck"] }],
+        multiple: false,
+      });
+      const path = typeof selected === "string" ? selected : null;
+      if (!path) return;
+      setLoading(true);
+      setError(null);
+      // Subscribe BEFORE openDuck so the first Source event is never missed
+      // (review H5). open_duck spawns a blocking task that emits progress
+      // immediately on entry -- if we awaited openDuck first, the first event
+      // would land with no listener attached (listen() is an async IPC round
+      // trip). Resume status stays null until the listener is confirmed.
+      const unlisten = await onResumeProgress((ev: ResumeEvent) => {
+        if ("Source" in ev) {
+          setResumeStatus(
+            `校验源 ${ev.Source.index}/${ev.Source.total}：${ev.Source.reference_name}`,
+          );
+        } else if ("Replay" in ev) {
+          setResumeStatus(
+            `重放 ${ev.Replay.index}/${ev.Replay.total}：${ev.Replay.reference_name}`,
+          );
+        }
+      });
+      setResumeStatus("正在打开…");
+      try {
+        await openDuck(path);
+        setResumeStatus(null);
+        setLatestResult(null);
+        await refresh();
+      } catch (e) {
+        setError({ message: fmtError(e), kind: "load" });
+        setResumeStatus(null);
+      } finally {
+        void unlisten();
+        setLoading(false);
+        void pollPersistError();
+      }
     } finally {
-      void unlisten();
-      setLoading(false);
+      setPersistenceBusy(false);
     }
-  }, [refresh]);
+  }, [refresh, pollPersistError]);
 
   const shown = datasets.find((d) => d.reference_name === selected) ?? null;
 
@@ -484,14 +533,14 @@ export default function App() {
         <div className="header-actions">
           <button
             onClick={() => void handleOpenDuck()}
-            disabled={loading || resumeStatus !== null}
+            disabled={loading || persistenceBusy || resumeStatus !== null}
             title="打开 .duck 恢复此前的分析"
           >
             打开 .duck
           </button>
           <button
             onClick={() => void handleSaveAs()}
-            disabled={loading || resumeStatus !== null}
+            disabled={loading || persistenceBusy || resumeStatus !== null}
             title="把当前会话另存为 .duck（之后每轮自动保存）"
           >
             另存为 .duck
@@ -501,7 +550,16 @@ export default function App() {
           </span>
           <button onClick={() => setSettingsOpen(true)}>设置</button>
         </div>
-        {resumeStatus && <p className="resume-progress">{resumeStatus}</p>}
+        {resumeStatus && (
+          <p className="resume-progress" role="status" aria-live="polite">
+            {resumeStatus}
+          </p>
+        )}
+        {persistError && (
+          <p className="persist-warning" role="status">
+            自动保存失败：{persistError}（内存中的最新更改未写入磁盘，关闭 app 前请重试保存）
+          </p>
+        )}
       </header>
 
       <FileDropzone onIngest={handleIngest} loading={loading} />
