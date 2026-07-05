@@ -4,20 +4,20 @@
 //! the current version. The pipeline composes -- when v2 ships, adding a
 //! `v1_to_v2` transform extends it without changes to the open path.
 //!
-//! v1 is the only released version, so the registry carries a single
-//! demonstrator `v0_to_v1` transform exercising BOTH migration kinds
+//! (As of v1.) v1 is the only released version, so the registry carries a
+//! single demonstrator `v0_to_v1` transform exercising BOTH migration kinds
 //! ADR-0036 names:
 //! - **add field with default**: a v0 `SourceRef` missing `display_name` is
 //!   filled from its `reference_name`;
 //! - **semantic remap**: a v0 `RecipeOutcome` discriminator key
 //!   `"outcome_kind"` is renamed to v1's `"kind"`.
 //!
-//! v0 was never released -- it is a synthetic fixture shape that exists only
-//! so the migration machinery is built + tested today, not discovered missing
-//! when a real future version needs it (ADR-0036 Why 1: buy out the
-//! hard-to-reverse ambiguity early). The open path's honest refuse on a
-//! HIGHER version (ADR-0036) lives in [`crate::persistence::io`]; this module
-//! owns the LOWER-version path.
+//! (As of v1.) v0 was never released -- it is a synthetic fixture shape that
+//! exists only so the migration machinery is built + tested today, not
+//! discovered missing when a real future version needs it (ADR-0036 Why 1:
+//! buy out the hard-to-reverse ambiguity early). The open path's honest
+//! refuse on a HIGHER version (ADR-0036) lives in [`crate::persistence::io`];
+//! this module owns the LOWER-version path.
 //!
 //! Transforms operate on [`serde_json::Value`] -- before typed deserialize --
 //! because an older shape may not satisfy the current `Recipe` struct's
@@ -32,6 +32,11 @@ use crate::persistence::recipe::RECIPE_FORMAT_VERSION;
 /// the chain is broken -- the file is externally owned input (ADR-0034), so
 /// the engine never best-effort guesses a shape. `Field` names the missing or
 /// ill-typed field a transform required.
+///
+/// (As of v1.) `NoTransform` is unreachable in production: v0 is the only
+/// below-current version, so the chain's first step is always registered. It
+/// exists as the contract guard for when v2 ships -- a forgotten `v1_to_v2`
+/// registration must surface as an honest error, not a silent mis-migrate.
 #[derive(Debug)]
 pub enum MigrationError {
     /// The migration chain has a gap at `from` (no transform registered for
@@ -75,7 +80,15 @@ pub fn migrate_to_current(value: Value, from_version: u32) -> Result<Value, Migr
             }
         };
         v += 1;
-        current["format_version"] = Value::from(v);
+        // Stamp the stepped-to version. A non-object root cannot carry
+        // `format_version` and is a structural error, not a panic -- the
+        // `format_version` honest-parse guard in `read_duck` keeps the
+        // production path on an object root, but this is a pub API so it
+        // defends its own contract (ADR-0034 honest parse).
+        let obj = current.as_object_mut().ok_or_else(|| {
+            MigrationError::Field("recipe 根节点不是对象，无法 stamp format_version".into())
+        })?;
+        obj.insert("format_version".to_string(), Value::from(v));
     }
     Ok(current)
 }
@@ -142,6 +155,12 @@ mod transforms {
             return;
         };
         if let Some(tag) = obj.remove("outcome_kind") {
+            // Non-overwriting: if a v0 entry already carries a `kind` key (a
+            // partial v1 write or a hand edit), keep the existing `kind` and
+            // drop the legacy `outcome_kind` value. v0 was never released so
+            // this is defensive only -- a later invalid `kind` surfaces as
+            // an honest deserialize error, so the legacy tag never silently
+            // wins.
             obj.entry("kind").or_insert(tag);
         }
     }
@@ -343,5 +362,62 @@ mod tests {
             recipe.history[0],
             crate::persistence::recipe::RecipeEntry::Turn(_)
         ));
+    }
+
+    #[test]
+    fn v0_to_v1_rejects_a_source_that_is_not_an_object() {
+        // ADR-0034 honest parse: a v0 source that is not an object (here a
+        // bare string) surfaces as `MigrationError::Field`, never a panic or
+        // silent pass-through. External input -- the engine never
+        // best-effort guesses a shape.
+        let v0 = serde_json::json!({
+            "format_version": 0,
+            "session_name": "x",
+            "sources": ["not-an-object"],
+            "history": [],
+            "active": null,
+        });
+        let err = transforms::v0_to_v1(v0).unwrap_err();
+        assert!(
+            matches!(&err, MigrationError::Field(msg) if msg.contains("对象")),
+            "expected Field error naming the non-object source, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn v0_to_v1_rejects_a_source_missing_reference_name() {
+        // ADR-0036 "add field with default": a v0 source missing both
+        // display_name AND reference_name cannot be filled -- the transform
+        // refuses with `MigrationError::Field` rather than synthesizing an
+        // empty label.
+        let v0 = serde_json::json!({
+            "format_version": 0,
+            "session_name": "x",
+            "sources": [{
+                "source_path": "/data/anon.csv",
+                "fingerprint": "fp",
+            }],
+            "history": [],
+            "active": null,
+        });
+        let err = transforms::v0_to_v1(v0).unwrap_err();
+        assert!(
+            matches!(&err, MigrationError::Field(msg) if msg.contains("reference_name")),
+            "expected Field error naming the missing reference_name, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn migrate_to_current_refuses_a_non_object_root_instead_of_panicking() {
+        // The pipeline stamps `format_version` after each step; a non-object
+        // root (e.g. a bare array) cannot carry the field. The pub API
+        // returns a typed `MigrationError::Field` instead of indexing into
+        // the `Value` and panicking (ADR-0034 honest parse).
+        let arr = serde_json::json!([1, 2, 3]);
+        let err = migrate_to_current(arr, 0).unwrap_err();
+        assert!(
+            matches!(&err, MigrationError::Field(msg) if msg.contains("对象")),
+            "expected Field error naming the non-object root, got {err:?}",
+        );
     }
 }

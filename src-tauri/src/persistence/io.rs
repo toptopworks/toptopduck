@@ -161,11 +161,16 @@ pub fn save_atomic(target: &Path, recipe: &Recipe) -> Result<(), SaveError> {
 pub fn read_duck(path: &Path) -> Result<Recipe, LoadError> {
     let text = fs::read_to_string(path).map_err(|e| LoadError::Io(e.to_string()))?;
     let value: Value = serde_json::from_str(&text).map_err(|e| LoadError::Parse(e.to_string()))?;
-    let version = value
+    let raw = value
         .get("format_version")
         .and_then(|v| v.as_u64())
-        .ok_or_else(|| LoadError::Parse("format_version 缺失或非数值".into()))?
-        as u32;
+        .ok_or_else(|| LoadError::Parse("format_version 缺失或非数值".into()))?;
+    // Reject an out-of-range version instead of truncating with `as u32`: a
+    // hand-edited file with format_version > u32::MAX would wrap and route
+    // to a wrong branch (e.g. 2^32+1 -> 1 -> treated as current, bypassing
+    // the honest-refuse). External input -- ADR-0034 / ADR-0036 never silent.
+    let version = u32::try_from(raw)
+        .map_err(|_| LoadError::Parse(format!("format_version 超出 u32 范围: {raw}")))?;
     let value = if version > RECIPE_FORMAT_VERSION {
         return Err(LoadError::VersionMismatch {
             found: version,
