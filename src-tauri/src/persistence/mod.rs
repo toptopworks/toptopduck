@@ -9,12 +9,16 @@
 //!
 //! - [`recipe`] -- the durable model (what persists, what does NOT).
 //! - [`io`] -- atomic temp+rename whole-file write + version-checked read.
+//! - [`registry`] -- in-process single-writer enforcement (ADR-0035 §3, #50):
+//!   tracks the canonical `.duck` paths currently open in this process.
 
 pub mod io;
 pub mod recipe;
+pub mod registry;
 
 pub use io::{read_duck, save_atomic, LoadError, SaveError};
 pub use recipe::{
     ProductiveTurn, Recipe, RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef,
     RECIPE_FORMAT_VERSION,
 };
+pub use registry::{canonicalize_duck, release, try_acquire};

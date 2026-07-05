@@ -42,8 +42,8 @@ pub use provider::{
     ResponsePayload, TurnPayload, UnwiredProvider,
 };
 pub use session::{
-    ActiveAbandoned, ActiveResolution, ResumeError, ResumeEvent, Session, SourceIssue,
-    SourceResolution,
+    ActiveAbandoned, ActiveResolution, PendingConflict, ResumeError, ResumeEvent, Session,
+    SourceIssue, SourceResolution,
 };
 
 use std::sync::{Arc, Mutex};
@@ -94,6 +94,7 @@ pub fn run() {
             commands::save_as_duck,
             commands::open_duck,
             commands::take_persist_error,
+            commands::take_pending_conflict,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

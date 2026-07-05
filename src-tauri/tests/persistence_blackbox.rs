@@ -15,10 +15,11 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use toptopduck_lib::persistence::SaveError;
 use toptopduck_lib::{
-    ActiveAbandoned, ActiveResolution, CancelToken, FakeProvider, LoadOutcome, ProviderReply,
-    ResumeError, ResumeEvent, Session, SourceIssue, SourceResolution, TextKind, ThreadEntry,
-    TurnOutcome, UnwiredProvider,
+    ActiveAbandoned, ActiveResolution, CancelToken, FakeProvider, LoadOutcome, PendingConflict,
+    ProviderReply, ResumeError, ResumeEvent, Session, SourceIssue, SourceResolution, TextKind,
+    ThreadEntry, TurnOutcome, UnwiredProvider,
 };
 
 /// Resume with default Abort callbacks for the issue #49 interactive decision
@@ -990,4 +991,311 @@ fn resume_replay_failure_marks_turn_failed_and_preserves_prior_results() {
     // AC7 (no cloud LLM): resume succeeded with UnwiredProvider, which would
     // have returned NotWired on any provider.generate() call. The whole
     // productive chain replayed LLM-free.
+}
+
+// --- Concurrency: in-process single-writer + external-change detection -----
+//
+// ADR-0035 §3 / issue #50: the same `.duck` opened twice in one process is
+// refused (process-local registry, zero OS locks); every auto-write hashes the
+// file first and suspends + surfaces a conflict if the on-disk content drifted
+// (never a silent clobber). The three resolutions (reload / keep mine / save
+// as new) are each exercised below.
+
+/// AC1: same `.duck` in the same process -> a second open is refused (clear
+/// error, never a silent second writer). Both the resume (`open_duck`) and the
+/// save (`bind_duck`) entry points enforce the gate.
+#[test]
+fn single_writer_rejects_opening_same_duck_twice() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("a.duck");
+    let _session = build_session(&duck); // acquires the canonical path; held to end
+
+    // open_duck on the same path -> ResumeError::AlreadyOpen.
+    let (_events, cb) = collect_events();
+    let err = resume_defaults(&duck, Arc::new(CancelToken::new()), cb)
+        .err()
+        .expect("AlreadyOpen");
+    assert!(
+        matches!(err, ResumeError::AlreadyOpen(_)),
+        "open_duck should refuse a duplicate opener, got {err:?}"
+    );
+
+    // bind_duck on the same path from a SECOND session -> SaveError::AlreadyOpen.
+    let mut second = Session::with_provider(Box::new(FakeProvider::new())).expect("session");
+    let err = second.bind_duck(duck.clone(), "第二份".into()).unwrap_err();
+    assert!(
+        matches!(err, SaveError::AlreadyOpen(_)),
+        "bind_duck should refuse a duplicate opener, got {err:?}"
+    );
+    // The second session never bound: a subsequent different path works (the
+    // failed acquire left no stray registry entry).
+    let other = dir.path().join("other.duck");
+    second
+        .bind_duck(other, "其它".into())
+        .expect("bind to a different path after a refused duplicate");
+    // `session` + `second` dropped here -> both registry keys released.
+}
+
+/// AC2: different `.duck` paths coexist -- two sessions on two files in one
+/// process are NOT false-rejected.
+#[test]
+fn single_writer_allows_two_different_ducks_in_one_process() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck_a = dir.path().join("a.duck");
+    let duck_b = dir.path().join("b.duck");
+    let session_a = build_session(&duck_a);
+    let session_b = build_session(&duck_b);
+    assert_eq!(session_a.duck_path(), Some(duck_a.as_path()));
+    assert_eq!(session_b.duck_path(), Some(duck_b.as_path()));
+    // Both held simultaneously; neither was rejected.
+}
+
+/// ADR-0035 §3 (drop + reopen): releasing the registry on Drop is what makes
+/// the "reload" conflict-resolution path work -- the caller drops the session,
+/// then reopens the file. Verified end-to-end here as a precondition for the
+/// reload test below.
+#[test]
+fn single_writer_releases_on_drop_allowing_reopen() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("a.duck");
+    let session = build_session(&duck);
+    drop(session); // registry key released
+
+    let (_events, cb) = collect_events();
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("reopen");
+    assert_eq!(resumed.duck_path(), Some(duck.as_path()));
+}
+
+/// Re-binding the SAME canonical path on the SAME session is an update (Save
+/// over the open file), NOT a second opener -- the registry must not reject a
+/// session's own re-save. Without this carve-out every "Save" click on an open
+/// file would falsely fail.
+#[test]
+fn single_writer_rebind_same_path_on_same_session_is_an_update() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("a.duck");
+    let mut session = build_session(&duck);
+    session
+        .bind_duck(duck.clone(), "改个名".into())
+        .expect("re-bind same path on same session is an update");
+    assert_eq!(session.session_name(), Some("改个名"));
+}
+
+/// AC3 / #50 main seam: open a `.duck` -> edit it externally (change its hash)
+/// -> trigger the next auto-write -> the engine detects the mismatch,
+/// SUSPENDS the write, and surfaces a [`PendingConflict`]. The on-disk file is
+/// left as the external editor left it (NEVER silently clobbered).
+#[test]
+fn external_edit_suspends_next_write_and_surfaces_conflict() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("a.duck");
+    let mut session = build_session(&duck);
+
+    // Simulate an external edit: another window / text editor / sync tool
+    // changed the file's session_name after our baseline write. Keep it a
+    // valid recipe so the reload test's open_duck can parse it later.
+    let original = fs::read_to_string(&duck).expect("read baseline");
+    let external = original.replace("\"分析 A\"", "\"外部编辑\"");
+    assert_ne!(external, original, "external edit must change the bytes");
+    fs::write(&duck, &external).expect("external write");
+
+    // Trigger an auto-write by adding a source (append_source_event ->
+    // persist_if_bound runs the hash check).
+    load_source(&mut session, &fixture("orders.csv"));
+
+    // AC: conflict surfaced, not silently clobbered.
+    let conflict: PendingConflict = session
+        .take_pending_conflict()
+        .expect("external edit must surface a conflict");
+    assert_eq!(conflict.path, duck);
+    assert_ne!(
+        conflict.expected_hash, conflict.found_hash,
+        "the two hashes differ -- that IS the conflict"
+    );
+
+    // AC: the write was suspended -- the disk file is still the external edit.
+    let disk = fs::read_to_string(&duck).expect("read disk");
+    assert!(
+        disk.contains("外部编辑"),
+        "disk must be unchanged (write suspended), got: {disk}"
+    );
+    // The in-memory session DID advance (orders source loaded) -- the turn /
+    // source event is never blocked by a persistence conflict.
+    assert!(
+        session.list().iter().any(|d| d.reference_name == "orders"),
+        "in-memory state advanced despite the suspended write"
+    );
+    // Pending stays Some until the caller resolves (a second take returns None
+    // because the first cleared it).
+    assert!(session.take_pending_conflict().is_none());
+}
+
+/// AC4/5 "Keep Mine": the user explicitly chooses to overwrite the externally-
+/// edited file with the in-memory state. After resolution the disk carries the
+/// in-memory recipe, the baseline is refreshed, and a subsequent auto-write
+/// does NOT re-conflict.
+#[test]
+fn conflict_keep_mine_overwrites_disk_with_inmemory_state() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("a.duck");
+    let mut session = build_session(&duck);
+
+    let original = fs::read_to_string(&duck).expect("read baseline");
+    fs::write(&duck, original.replace("\"分析 A\"", "\"外部编辑\"")).expect("external write");
+
+    load_source(&mut session, &fixture("orders.csv"));
+    let _conflict = session
+        .take_pending_conflict()
+        .expect("conflict before resolution");
+
+    // Resolve: keep mine (force-overwrite).
+    session.conflict_keep_mine().expect("keep mine resolves");
+
+    // Disk now reflects the in-memory recipe (the external edit is gone).
+    let disk = fs::read_to_string(&duck).expect("read disk");
+    assert!(
+        disk.contains("\"分析 A\""),
+        "in-memory session_name on disk after keep_mine"
+    );
+    assert!(
+        !disk.contains("外部编辑"),
+        "external edit overwritten by explicit keep_mine"
+    );
+    assert!(
+        disk.contains("orders"),
+        "the unwritten orders source landed on disk via keep_mine"
+    );
+    assert!(
+        session.take_pending_conflict().is_none(),
+        "conflict cleared after resolution"
+    );
+
+    // Baseline refreshed -> a follow-up auto-write does NOT re-conflict.
+    load_source(&mut session, &fixture("leading_zero.csv"));
+    assert!(
+        session.take_pending_conflict().is_none(),
+        "no re-conflict after keep_mine refreshed the baseline"
+    );
+}
+
+/// AC4/5 "Save As New": write the in-memory recipe to a NEW path, leaving the
+/// original (externally-edited) file untouched. The session re-binds to the
+/// new path so subsequent auto-writes target it (not the preserved original).
+#[test]
+fn conflict_save_as_new_preserves_original_and_rebinds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("a.duck");
+    let new_duck = dir.path().join("saved.duck");
+    let mut session = build_session(&duck);
+
+    let original = fs::read_to_string(&duck).expect("read baseline");
+    fs::write(&duck, original.replace("\"分析 A\"", "\"外部编辑\"")).expect("external write");
+
+    load_source(&mut session, &fixture("orders.csv"));
+    let _conflict = session.take_pending_conflict().expect("conflict");
+
+    // Resolve: save as new.
+    session
+        .conflict_save_as_new(new_duck.clone())
+        .expect("save as new resolves");
+
+    // Original file is untouched (still the external edit).
+    let original_disk = fs::read_to_string(&duck).expect("read original");
+    assert!(
+        original_disk.contains("外部编辑"),
+        "original file preserved verbatim"
+    );
+
+    // New file carries the in-memory recipe.
+    let new_disk = fs::read_to_string(&new_duck).expect("read new");
+    assert!(
+        new_disk.contains("\"分析 A\""),
+        "new file has the in-memory session_name"
+    );
+    assert!(!new_disk.contains("外部编辑"));
+
+    // Session re-bound to the new path; subsequent auto-writes land there.
+    assert_eq!(session.duck_path(), Some(new_duck.as_path()));
+    assert!(
+        session.take_pending_conflict().is_none(),
+        "conflict cleared"
+    );
+    load_source(&mut session, &fixture("leading_zero.csv"));
+    let new_disk_after = fs::read_to_string(&new_duck).expect("read new again");
+    assert!(
+        new_disk_after.contains("leading_zero"),
+        "follow-up auto-write targeted the new path"
+    );
+    let original_after = fs::read_to_string(&duck).expect("read original again");
+    assert!(
+        original_after.contains("外部编辑"),
+        "original STILL untouched by the follow-up write"
+    );
+}
+
+/// AC4/5 "Reload": discard the unwritten in-memory changes and re-read from
+/// the disk file. Implemented as drop + `open_duck` -- the registry releases
+/// on drop, and resume re-acquires + replays from the externally-edited file.
+/// The unwritten orders source is discarded; the resumed session reflects the
+/// disk state (the external edit's session_name + the original sources).
+#[test]
+fn conflict_reload_via_drop_and_reopen_adopts_disk_state() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("a.duck");
+    let mut session = build_session(&duck);
+
+    let original = fs::read_to_string(&duck).expect("read baseline");
+    let external = original.replace("\"分析 A\"", "\"外部版本\"");
+    fs::write(&duck, &external).expect("external write");
+
+    load_source(&mut session, &fixture("orders.csv"));
+    let _conflict = session.take_pending_conflict().expect("conflict");
+
+    // Resolve: reload = drop + reopen.
+    drop(session);
+    let (_events, cb) = collect_events();
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("reload");
+
+    // The resumed session carries the DISK state (external edit), not the
+    // in-memory orders source that was never written.
+    assert_eq!(
+        resumed.session_name(),
+        Some("外部版本"),
+        "session_name from the externally-edited recipe"
+    );
+    assert!(
+        !resumed.list().iter().any(|d| d.reference_name == "orders"),
+        "unwritten orders source discarded by reload"
+    );
+    assert!(
+        resumed.list().iter().any(|d| d.reference_name == "people"),
+        "original people source restored from disk recipe"
+    );
+}
+
+/// Edge guard: a STABLE file across resume must NOT produce a false conflict.
+/// The resume baseline is seeded from the file as read; resume's own post-
+/// resume write refreshes the baseline in lockstep, so the next auto-write
+/// compares against what resume wrote (not the pre-resume bytes). This pins
+/// the happy path so the external-edit detection does not cry wolf.
+#[test]
+fn stable_file_across_resume_produces_no_false_conflict() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("a.duck");
+    let session = build_session(&duck);
+    drop(session); // write the baseline recipe + release the registry
+
+    let (_events, cb) = collect_events();
+    let mut resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("resume");
+    assert!(
+        resumed.take_pending_conflict().is_none(),
+        "no false conflict when the file is stable across resume"
+    );
+    // A follow-up auto-write (add a source) on the resumed session also stays
+    // conflict-free -- the baseline tracked resume's own write.
+    load_source(&mut resumed, &fixture("orders.csv"));
+    assert!(
+        resumed.take_pending_conflict().is_none(),
+        "follow-up write after resume does not false-conflict"
+    );
 }

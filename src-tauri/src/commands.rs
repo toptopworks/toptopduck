@@ -391,3 +391,19 @@ pub fn take_persist_error(state: State<'_, Arc<Mutex<Session>>>) -> Result<Optio
     let mut s = state.lock().map_err(|e| e.to_string())?;
     Ok(s.take_persist_error())
 }
+
+/// Read + clear the pending external-change conflict, if any (ADR-0035 §3 /
+/// issue #50). The frontend polls this after each turn / source event / resume:
+/// a non-`None` value means the auto-write was suspended because the `.duck`
+/// file's on-disk hash diverged from the session's baseline (another window,
+/// a text editor, or a sync tool edited the file). The frontend surfaces a
+/// three-option conflict UI (reload / keep mine / save as new); the engine
+/// NEVER silently clobbers the externally-edited file. Returns `None` when no
+/// conflict is pending or after a prior read cleared it.
+#[tauri::command]
+pub fn take_pending_conflict(
+    state: State<'_, Arc<Mutex<Session>>>,
+) -> Result<Option<crate::PendingConflict>, String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    Ok(s.take_pending_conflict())
+}
