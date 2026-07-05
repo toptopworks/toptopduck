@@ -58,6 +58,54 @@ fn load_source(session: &mut Session, path: &Path) {
     }
 }
 
+/// Mirror of `load_source` for the replace path (L5): `replace_source` returns
+/// `LoadOutcome`, not `Result`, so a bare call silently drops a non-`Loaded`
+/// outcome. Asserting `Loaded` here keeps the replace tests honest if the
+/// signature ever flips to a fallible form.
+fn replace_source_loaded(session: &mut Session, reference_name: &str, path: &Path) {
+    match session.replace_source(reference_name, path) {
+        LoadOutcome::Loaded(_) => {}
+        other => panic!("expected replace_source to load, got {other:?}"),
+    }
+}
+
+/// AC4 evidence (issue #52): source ops and turn finalization share a single
+/// `save_atomic` temp+rename path. After a successful rewrite the `.tmp` is
+/// consumed by the rename and the bind dir holds only the `.duck`. A black box
+/// cannot name the code path, but this pins its observable signature -- a
+/// regression introducing a second non-atomic write would leave a temp residue
+/// or a different artifact. `TMP_SUFFIX` is `io.rs`-private, so the `.tmp`
+/// literal here is duplicated against that constant.
+fn assert_save_atomic_left_no_residue(duck: &Path) {
+    let tmp = duck.with_file_name(format!(
+        "{}.tmp",
+        duck.file_name()
+            .expect("duck has a file name")
+            .to_str()
+            .expect("duck file name is utf-8"),
+    ));
+    assert!(
+        !tmp.exists(),
+        "save_atomic must consume its temp via rename; found {tmp:?}",
+    );
+    let artifacts: Vec<String> = fs::read_dir(duck.parent().expect("duck has a parent"))
+        .expect("read bind dir")
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().map(|t| !t.is_dir()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    let expected = duck
+        .file_name()
+        .expect("duck file name")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        artifacts,
+        vec![expected],
+        "bind dir holds only the .duck after atomic rewrite (AC4 single-path signature)",
+    );
+}
+
 fn reply_sql(sql: &str) -> ProviderReply {
     ProviderReply::Sql {
         sql: sql.to_string(),
@@ -1904,6 +1952,10 @@ fn add_source_atomically_rewrites_duck_with_source_and_added_event() {
         serde_json::to_string(&after).unwrap(),
         "recipe on disk changed after the add"
     );
+    // AC4: the rewrite rode the single `save_atomic` temp+rename path shared
+    // with turn finalization -- no temp residue, no second artifact in the
+    // bind dir. Bytes-changed alone would not catch a non-atomic second path.
+    assert_save_atomic_left_no_residue(&duck);
 }
 
 /// AC2: replacing a source atomically rewrites the .duck -- the source's
@@ -1940,7 +1992,7 @@ fn replace_source_atomically_rewrites_duck_with_stale_chain_and_replaced_event()
         .clone();
 
     // Replace people with orders -- cascade result_1 stale, triggers rewrite.
-    session.replace_source("people", &orders);
+    replace_source_loaded(&mut session, "people", &orders);
 
     let recipe = read_duck(&duck).expect("read after replace");
     let people_after = recipe
@@ -1988,6 +2040,8 @@ fn replace_source_atomically_rewrites_duck_with_stale_chain_and_replaced_event()
         _ => false,
     });
     assert!(replaced_event, "Replaced event for people appended");
+    // AC4: the replace rewrite rode the single `save_atomic` path.
+    assert_save_atomic_left_no_residue(&duck);
 }
 
 /// AC3: removing a source atomically rewrites the .duck -- the source leaves
@@ -2046,6 +2100,8 @@ fn remove_source_atomically_rewrites_duck_with_stale_chain_and_deleted_event() {
         _ => false,
     });
     assert!(deleted_event, "Deleted event for people appended");
+    // AC4: the remove rewrite rode the single `save_atomic` path.
+    assert_save_atomic_left_no_residue(&duck);
 }
 
 /// AC5/AC6/AC7 (replace): cross-restart black-box. A session with a replaced
@@ -2074,7 +2130,7 @@ fn resume_after_replace_excludes_stale_from_replay_but_keeps_marked_stale() {
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &people);
     let _ = session.ask("多少人"); // result_1 from old people
-    session.replace_source("people", &orders); // result_1 cascade stale (Replaced)
+    replace_source_loaded(&mut session, "people", &orders); // result_1 cascade stale (Replaced)
     let _ = session.ask("现在多少"); // result_2 from new people (orders data)
     session
         .bind_duck(duck.clone(), "stale-resume".into())
@@ -2110,6 +2166,14 @@ fn resume_after_replace_excludes_stale_from_replay_but_keeps_marked_stale() {
     // result_2 is live (replayed, no stale marker).
     let result_2 = resumed.get("result_2").expect("result_2 present");
     assert!(result_2.stale.is_none(), "result_2 is live after replay");
+    // resolve_active never lands on the stale placeholder (ADR-0013 +
+    // register_stale_placeholders): the active pointer tracks a live dataset,
+    // never a dead turn.
+    assert_ne!(
+        resumed.active().map(|d| d.reference_name),
+        Some("result_1".into()),
+        "active must not resolve to the stale placeholder",
+    );
 
     // AC7: the conversation timeline is preserved end-to-end. The stale turn
     // renders as Materialized (carrying the stale descriptor), NOT dropped.
@@ -2194,5 +2258,12 @@ fn resume_after_remove_excludes_stale_from_replay_but_keeps_marked_stale() {
     assert!(
         resumed.get("result_2").is_some(),
         "result_2 replayed and live"
+    );
+    // resolve_active never lands on the stale placeholder (ADR-0013 +
+    // register_stale_placeholders): the active pointer tracks a live dataset.
+    assert_ne!(
+        resumed.active().map(|d| d.reference_name),
+        Some("result_1".into()),
+        "active must not resolve to the stale placeholder",
     );
 }

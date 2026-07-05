@@ -475,4 +475,73 @@ mod tests {
             other => panic!("expected stale Materialized, got {other:?}"),
         }
     }
+
+    /// Pre-#52 forward-compat (issue #52): a v1 recipe written before the
+    /// `stale` field existed omits it on disk. `#[serde(default)]` must
+    /// deserialize such a turn as live (`stale: None`) -- removing the default
+    /// would break reopening every pre-#52 .duck file with a cryptic
+    /// "missing field `stale`" error. Pins the load-bearing serde attribute.
+    #[test]
+    fn materialized_outcome_without_stale_field_deserializes_as_live() {
+        let json = r#"{"kind":"Materialized","data":{"reference_name":"result_1","display_name":"result_1","sql":"SELECT 1"}}"#;
+        let back: RecipeOutcome = serde_json::from_str(json).expect("deserialize pre-#52 form");
+        match back {
+            RecipeOutcome::Materialized { stale: None, .. } => {}
+            other => panic!("expected live Materialized (stale: None), got {other:?}"),
+        }
+    }
+
+    /// ADR-0041 ordering invariant (issue #52): an interleaved chain
+    /// (live, stale, live) keeps both live turns in timeline order and drops
+    /// only the stale middle one. Single-stale coverage above does not
+    /// generalize to the interleaved case without this test.
+    #[test]
+    fn productive_chain_keeps_interleaved_live_stale_live_in_order() {
+        let recipe = Recipe {
+            format_version: RECIPE_FORMAT_VERSION,
+            session_name: "interleaved".into(),
+            sources: vec![csv_source("people", "fp")],
+            history: vec![
+                RecipeEntry::Turn(RecipeTurn {
+                    question: "first live".into(),
+                    outcome: RecipeOutcome::Materialized {
+                        reference_name: "result_1".into(),
+                        display_name: "result_1".into(),
+                        sql: "SELECT 1".into(),
+                        assumption: None,
+                        stale: None,
+                    },
+                }),
+                RecipeEntry::Turn(RecipeTurn {
+                    question: "stale middle".into(),
+                    outcome: stale_materialized(
+                        "result_2",
+                        "SELECT * FROM \"people\".data",
+                        "people",
+                        StaleReason::Replaced,
+                    ),
+                }),
+                RecipeEntry::Turn(RecipeTurn {
+                    question: "live after gap".into(),
+                    outcome: RecipeOutcome::Materialized {
+                        reference_name: "result_3".into(),
+                        display_name: "result_3".into(),
+                        sql: "SELECT 3".into(),
+                        assumption: None,
+                        stale: None,
+                    },
+                }),
+            ],
+            active: Some("result_3".into()),
+        };
+        let chain = recipe.productive_chain();
+        assert_eq!(
+            chain
+                .iter()
+                .map(|t| t.reference_name.clone())
+                .collect::<Vec<_>>(),
+            vec!["result_1".to_string(), "result_3".to_string()],
+            "interleaved chain keeps live turns in order, skips the stale middle",
+        );
+    }
 }
