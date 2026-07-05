@@ -1490,3 +1490,245 @@ fn bind_duck_canonicalize_failure_returns_save_error_io_and_leaves_session_unbou
         .expect("bind to a real path after a canonicalize failure");
     assert_eq!(session.duck_path(), Some(real.as_path()));
 }
+
+// --- Issue #51: format_version routing + hybrid source paths (ADR-0036) -----
+//
+// Two ADR-0036 contracts exercised end-to-end across the open_duck seam:
+// (1) format_version routing -- a hand-written LOWER-version .duck
+// forward-migrates in memory and the post-resume auto-write lands the
+// current-version shape on disk (longevity: older files stay openable, and
+// the migration is durable, not just in-memory);
+// (2) hybrid source paths -- a source recorded with BOTH a relative and an
+// absolute path resolves correctly under folder moves (relative primary),
+// falls back to the absolute when the relative dangles, and surfaces re-link
+// when both fail (ADR-0035 honest degrade). The "higher version honest
+// refuse" path is covered by the io unit test read_refuses_a_higher_format_version.
+
+/// AC5/AC8: open a hand-written v0 .duck -> forward-migrates -> resumes
+/// normally -> the post-resume auto-write lands the migrated v1 shape on
+/// disk. Pins ADR-0036's longevity contract for the lower-version branch.
+#[test]
+fn open_duck_migrates_a_lower_version_recipe_and_persists_current_shape() {
+    use toptopduck_lib::persistence::{read_duck, RECIPE_FORMAT_VERSION};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("v0.duck");
+    let csv = fixture("people.csv");
+
+    // Build a real v1 session first to capture the post-rectify fingerprint of
+    // people.csv under the same ingest path the v0 recipe will name.
+    let session = build_single_source_session(&duck, &csv);
+    let fingerprint = session.get("people").expect("people").fingerprint.clone();
+    let csv_path = csv.to_string_lossy().to_string();
+    drop(session);
+
+    // Overwrite the .duck with a synthetic v0 shape. Two migration-relevant
+    // features: sources[*] missing display_name (filled by the v0->v1
+    // transform), and the outcome tagged outcome_kind (renamed to kind). The
+    // source lives outside the .duck tempdir (fixture path), so its absolute
+    // path is the resolver.
+    let v0 = serde_json::json!({
+        "format_version": 0,
+        "session_name": "v0 分析",
+        "sources": [{
+            "reference_name": "people",
+            "source_path": csv_path,
+            "fingerprint": fingerprint,
+        }],
+        "history": [{
+            "entry": "Turn",
+            "data": {
+                "question": "多少人",
+                "outcome": {
+                    "outcome_kind": "Materialized",
+                    "data": {
+                        "reference_name": "result_1",
+                        "display_name": "result_1",
+                        "sql": "SELECT COUNT(*) AS n FROM \"people\".data",
+                    },
+                },
+            },
+        }],
+        "active": "people",
+    });
+    fs::write(&duck, serde_json::to_string(&v0).unwrap()).expect("write v0");
+
+    // Resume: forward-migrate -> re-ingest (fingerprint match) -> replay ->
+    // post-resume persist lands the migrated v1 shape.
+    let (_events, cb) = collect_events();
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("resume");
+
+    // The migrated display_name (filled from reference_name) survived into the
+    // working set.
+    let people = resumed.get("people").expect("people present");
+    assert_eq!(
+        people.display_name, "people",
+        "migrated display_name restored"
+    );
+    assert!(resumed.get("result_1").is_some(), "result_1 replayed");
+
+    // The on-disk .duck is now the migrated v1 shape (read_duck reads it
+    // back at current version; the legacy outcome_kind field is gone).
+    let persisted = read_duck(&duck).expect("read persisted");
+    assert_eq!(persisted.format_version, RECIPE_FORMAT_VERSION);
+    assert_eq!(persisted.sources[0].display_name, "people");
+    let disk = fs::read_to_string(&duck).expect("read disk");
+    assert!(
+        !disk.contains("outcome_kind"),
+        "legacy outcome_kind gone after migration persisted: {disk}",
+    );
+}
+
+/// AC1: move the .duck AND its in-subtree source together -> the relative
+/// path resolves against the .duck's NEW parent, so no re-link fires and the
+/// source re-ingests cleanly. This is the "just works" portability promise
+/// ADR-0036 hybrid paths makes for folder moves.
+#[test]
+fn resume_resolves_relative_path_after_moving_the_folder() {
+    use toptopduck_lib::persistence::read_duck;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sub = dir.path().join("sub");
+    fs::create_dir(&sub).expect("mkdir");
+    let csv = sub.join("people.csv");
+    fs::copy(fixture("people.csv"), &csv).expect("copy into subtree");
+    let duck = sub.join("s.duck");
+
+    let session = build_single_source_session(&duck, &csv);
+    // Precondition: in-subtree -> relative path recorded (boundary case where
+    // BOTH a relative and an absolute representation are stored).
+    let persisted = read_duck(&duck).expect("read");
+    assert_eq!(
+        persisted.sources[0].relative_path.as_deref(),
+        Some("people.csv"),
+        "precondition: relative path recorded for in-subtree source",
+    );
+    drop(session);
+
+    // Move the entire subtree (both .duck + source) to a sibling location.
+    let moved = dir.path().join("moved");
+    fs::rename(&sub, &moved).expect("move subtree");
+    let moved_duck = moved.join("s.duck");
+
+    // Resume on the moved .duck: resolve_source_path joins the relative path
+    // against the .duck's NEW parent -> moved/people.csv exists -> match.
+    let resumed =
+        resume_defaults(&moved_duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
+    assert!(
+        resumed.get("people").is_some(),
+        "people resolved via relative path after the folder move",
+    );
+    assert!(
+        resumed.get("result_1").is_some(),
+        "result_1 replayed without re-link",
+    );
+}
+
+/// AC3: a boundary-case source (BOTH relative + absolute stored) whose
+/// relative candidate is missing falls back to the absolute path and the
+/// fingerprint check passes. ADR-0036's "both stored" makes the absolute a
+/// real safety net, not a decorative second copy.
+#[test]
+fn resume_falls_back_to_absolute_when_relative_path_is_missing() {
+    use toptopduck_lib::persistence::{save_atomic, Recipe, SourceRef, RECIPE_FORMAT_VERSION};
+    use toptopduck_lib::RectifyProvenance;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    // A real source whose absolute path is resolvable.
+    let outside = dir.path().join("data.csv");
+    fs::write(&outside, "name,score\nAda,9\n").expect("write source");
+
+    // Ingest once to capture the fingerprint, then drop and hand-write a
+    // recipe with a STALE relative path (inner/missing.csv) alongside the
+    // real absolute path.
+    let mut probe = Session::with_provider(Box::new(FakeProvider::new())).expect("session");
+    load_source(&mut probe, &outside);
+    let fingerprint = probe.get("data").expect("data").fingerprint.clone();
+    drop(probe);
+
+    let recipe = Recipe {
+        format_version: RECIPE_FORMAT_VERSION,
+        session_name: "boundary".into(),
+        sources: vec![SourceRef {
+            reference_name: "data".into(),
+            display_name: "data".into(),
+            source_path: outside.to_string_lossy().to_string(),
+            relative_path: Some("inner/missing.csv".into()),
+            rectify: RectifyProvenance::NotApplicable,
+            fingerprint,
+        }],
+        history: vec![],
+        active: None,
+    };
+    save_atomic(&duck, &recipe).expect("save");
+
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
+    assert!(
+        resumed.get("data").is_some(),
+        "absolute fallback resolved (relative candidate missing)",
+    );
+}
+
+/// AC4: a boundary-case source (relative + absolute both stored) whose file
+/// is gone entirely surfaces as Missing and goes through re-link (ADR-0035
+/// honest degrade). The boundary case must not silently pick one
+/// representation and paper over the missing-file reality.
+#[test]
+fn resume_relinks_when_both_relative_and_absolute_paths_fail() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sub = dir.path().join("sub");
+    fs::create_dir(&sub).expect("mkdir");
+    let csv = sub.join("people.csv");
+    fs::copy(fixture("people.csv"), &csv).expect("copy into subtree");
+    let duck = sub.join("s.duck");
+
+    let session = build_single_source_session(&duck, &csv);
+    // Precondition: boundary case -> relative + absolute both stored.
+    let persisted = toptopduck_lib::persistence::read_duck(&duck).expect("read");
+    assert!(
+        persisted.sources[0].relative_path.is_some(),
+        "precondition: relative path stored for in-subtree source",
+    );
+    drop(session);
+
+    // Remove the source entirely (both representations now dangle).
+    fs::remove_file(&csv).expect("remove source");
+
+    // Plant a relink target elsewhere in the subtree.
+    let relocated = sub.join("moved-people.csv");
+    fs::copy(fixture("people.csv"), &relocated).expect("plant relink target");
+    let relocated_for_cb = relocated.clone();
+
+    let missing_seen = Rc::new(RefCell::new(false));
+    let seen_for_cb = Rc::clone(&missing_seen);
+    let resumed = Session::open_duck(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(UnwiredProvider),
+        |_| {},
+        move |issue| match issue {
+            SourceIssue::Missing { reference_name, .. } => {
+                assert_eq!(reference_name, "people");
+                *seen_for_cb.borrow_mut() = true;
+                SourceResolution::Relink(relocated_for_cb.clone())
+            }
+            other => panic!("expected Missing, got {other:?}"),
+        },
+        |_| ActiveResolution::Abort,
+    )
+    .expect("resume");
+
+    assert!(
+        *missing_seen.borrow(),
+        "Missing fired for the boundary-case source",
+    );
+    assert!(
+        resumed.get("people").is_some(),
+        "re-linked into the working set"
+    );
+    assert!(
+        resumed.get("result_1").is_some(),
+        "result_1 replayed after re-link",
+    );
+}

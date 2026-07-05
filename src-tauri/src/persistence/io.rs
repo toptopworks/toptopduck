@@ -15,7 +15,10 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::persistence::migration::migrate_to_current;
 use crate::persistence::recipe::{Recipe, RECIPE_FORMAT_VERSION};
+
+use serde_json::Value;
 
 /// Suffix appended to the target file name for the temp file. Same directory
 /// as the target so the `rename` is intra-volume (atomic). The temp file is
@@ -126,31 +129,38 @@ pub fn save_atomic(target: &Path, recipe: &Recipe) -> Result<(), SaveError> {
     Ok(())
 }
 
-/// Read a recipe, verifying `format_version` (ADR-0036). A higher version is
-/// an honest refusal; an equal version is the normal path. Forward migration
-/// (lower version) lands in a future slice and would transform in memory
-/// before returning -- v1 has no older version today, so this is an exact
-/// match.
+/// Read a recipe, routing on `format_version` (ADR-0036 Decision 1). The file
+/// is parsed to [`Value`] BEFORE the typed deserialize so an older shape can be
+/// reshaped first: equal -> deserialize directly; lower -> forward-migrate via
+/// [`migrate_to_current`] (each per-version transform fills defaults / remaps
+/// semantics), then deserialize; higher -> honest refuse (a newer-made file is
+/// never silently mis-parsed). A missing or non-numeric `format_version` is an
+/// honest Parse error -- the field is mandatory on every v1+ .duck (ADR-0036).
+///
+/// The forward-migrate path returns the recipe in memory; ADR-0036 KISS lands
+/// persistence of the migrated shape on the next normal auto-write (the
+/// caller's `open_duck` persists post-resume), so this function itself stays
+/// side-effect free and never backs up the original file (YAGNI).
 pub fn read_duck(path: &Path) -> Result<Recipe, LoadError> {
     let text = fs::read_to_string(path).map_err(|e| LoadError::Io(e.to_string()))?;
-    let recipe: Recipe =
-        serde_json::from_str(&text).map_err(|e| LoadError::Parse(e.to_string()))?;
-    if recipe.format_version > RECIPE_FORMAT_VERSION {
+    let value: Value = serde_json::from_str(&text).map_err(|e| LoadError::Parse(e.to_string()))?;
+    let version = value
+        .get("format_version")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| LoadError::Parse("format_version 缺失或非数值".into()))?
+        as u32;
+    let value = if version > RECIPE_FORMAT_VERSION {
         return Err(LoadError::VersionMismatch {
-            found: recipe.format_version,
+            found: version,
             supported: RECIPE_FORMAT_VERSION,
         });
-    }
-    // Lower (older) versions would forward-migrate here (ADR-0036); none
-    // exist today, so any non-equal-lower is treated as corrupt (the parse
-    // already accepted the struct, but a future field could default-fill an
-    // unknown older shape -- that lands WITH the migration transform).
-    if recipe.format_version < RECIPE_FORMAT_VERSION {
-        return Err(LoadError::Parse(format!(
-            "未知的旧 format_version={}（当前仅支持 {}）",
-            recipe.format_version, RECIPE_FORMAT_VERSION
-        )));
-    }
+    } else if version < RECIPE_FORMAT_VERSION {
+        migrate_to_current(value, version).map_err(|e| LoadError::Parse(e.to_string()))?
+    } else {
+        value
+    };
+    let recipe: Recipe =
+        serde_json::from_value(value).map_err(|e| LoadError::Parse(e.to_string()))?;
     // Parse, don't validate (rust/security.md §input-validation): a hand-edited
     // or corrupted .duck is external input (ADR-0034 user-owned document), so a
     // structural invariant like unique source reference names must surface here
@@ -267,5 +277,60 @@ mod tests {
         let path = dir.path().join("broken.duck");
         fs::write(&path, b"not json {").expect("write");
         assert!(matches!(read_duck(&path), Err(LoadError::Parse(_))));
+    }
+
+    #[test]
+    fn read_duck_migrates_a_lower_version_to_current() {
+        // ADR-0036 forward migration: a file whose format_version is BELOW the
+        // current app version is reshaped through the migration pipeline and
+        // returned as a current-version Recipe -- not refused. Uses the
+        // synthetic v0 shape (sources missing display_name; outcome carries
+        // the legacy outcome_kind discriminator) so both migration kinds are
+        // exercised at the read boundary.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("v0.duck");
+        let v0 = serde_json::json!({
+            "format_version": 0,
+            "session_name": "v0 分析",
+            "sources": [{
+                "reference_name": "people",
+                "source_path": "/data/people.csv",
+                "fingerprint": "fp",
+            }],
+            "history": [{
+                "entry": "Turn",
+                "data": {
+                    "question": "多少人",
+                    "outcome": {
+                        "outcome_kind": "Materialized",
+                        "data": {
+                            "reference_name": "result_1",
+                            "display_name": "result_1",
+                            "sql": "SELECT COUNT(*) AS n FROM \"people\".data",
+                        },
+                    },
+                },
+            }],
+            "active": "result_1",
+        });
+        fs::write(&path, serde_json::to_string(&v0).unwrap()).expect("write");
+
+        let recipe = read_duck(&path).expect("migrated read");
+        assert_eq!(recipe.format_version, RECIPE_FORMAT_VERSION);
+        assert_eq!(
+            recipe.sources[0].display_name, "people",
+            "default display_name filled by the v0->v1 transform",
+        );
+        // The outcome discriminator was renamed so the Materialized variant
+        // deserialized -- a failed remap would have surfaced as a Parse error.
+        match &recipe.history[0] {
+            RecipeEntry::Turn(t) => match &t.outcome {
+                RecipeOutcome::Materialized { reference_name, .. } => {
+                    assert_eq!(reference_name, "result_1");
+                }
+                other => panic!("expected Materialized after migration, got {other:?}"),
+            },
+            other => panic!("expected Turn after migration, got {other:?}"),
+        }
     }
 }

@@ -65,6 +65,12 @@ sqlparser = { version = "0.52", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
+# Synthetic v0 .duck fixtures for the forward-migration black-box seam
+# (ADR-0036, issue #51): the `json!` macro builds the lower-version shape
+# cleanly (and escapes Windows path backslashes), which string formatting
+# cannot. Already a normal [dependencies] entry; re-listed so `tests/*.rs`
+# reach it directly.
+serde_json = "1"
 # Generates .xlsx fixtures (incl. formula cells with cached values) for the
 # black-box ingest seam -- no binary fixtures committed (mirrors the parquet
 # fixture helper).
