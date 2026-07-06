@@ -38,6 +38,7 @@ pub use model::{
     SourceLifecycleKind, StaleAnchor, StaleReason, TextKind, ThreadEntry, TurnError, TurnOutcome,
     TurnRecord, VizSpec, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
 };
+pub use persistence::RecipeError;
 pub use provider::anthropic::AnthropicProvider;
 pub use provider::fake::FakeProvider;
 pub use provider::keychain::{KeychainStore, ProviderConfigSource, StaticConfig};
@@ -48,8 +49,8 @@ pub use provider::{
     ResponsePayload, TurnPayload, UnwiredProvider,
 };
 pub use session::{
-    ActiveAbandoned, ActiveResolution, PendingConflict, ResumeError, ResumeEvent, Session,
-    SourceIssue, SourceResolution,
+    is_resuming, ActiveAbandoned, ActiveResolution, PendingConflict, ResumeError, ResumeEvent,
+    Session, SourceIssue, SourceResolution,
 };
 
 use std::sync::{Arc, Mutex};

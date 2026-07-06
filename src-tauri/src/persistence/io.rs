@@ -210,10 +210,13 @@ mod tests {
     use crate::persistence::recipe::{RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef};
 
     fn sample_recipe(name: &str) -> Recipe {
-        Recipe {
-            format_version: RECIPE_FORMAT_VERSION,
-            session_name: name.into(),
-            sources: vec![SourceRef {
+        // Review H7 (issue #55): construct via the invariant-validating
+        // build() -- the format_version field is now private, so struct-literal
+        // construction from outside the recipe module is impossible. active
+        // names a SOURCE (ADR-0035), not the result_N the prior literal used.
+        Recipe::build(
+            name.into(),
+            vec![SourceRef {
                 reference_name: "people".into(),
                 display_name: "people".into(),
                 source_path: "/data/people.csv".into(),
@@ -221,7 +224,7 @@ mod tests {
                 rectify: RectifyProvenance::NotApplicable,
                 fingerprint: "fp".into(),
             }],
-            history: vec![RecipeEntry::Turn(RecipeTurn {
+            vec![RecipeEntry::Turn(RecipeTurn {
                 question: "q".into(),
                 outcome: RecipeOutcome::Materialized {
                     reference_name: "result_1".into(),
@@ -231,8 +234,9 @@ mod tests {
                     stale: None,
                 },
             })],
-            active: Some("result_1".into()),
-        }
+            Some("people".into()),
+        )
+        .expect("sample_recipe satisfies Recipe::build invariants")
     }
 
     #[test]
@@ -342,7 +346,7 @@ mod tests {
         fs::write(&path, serde_json::to_string(&v0).unwrap()).expect("write");
 
         let recipe = read_duck(&path).expect("migrated read");
-        assert_eq!(recipe.format_version, RECIPE_FORMAT_VERSION);
+        assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
         assert_eq!(
             recipe.sources[0].display_name, "people",
             "default display_name filled by the v0->v1 transform",
