@@ -392,7 +392,9 @@ pub async fn open_duck(
     // LiveProviderConfig. Resume itself is LLM-free (it re-executes stored SQL),
     // but the next new turn after resume must reach a live provider -- so the
     // provider is wired at open time, not deferred.
-    let provider = Box::new(crate::AnthropicProvider::new(Box::new(live.inner().clone())));
+    let provider = Box::new(crate::AnthropicProvider::new(Box::new(
+        live.inner().clone(),
+    )));
     tauri::async_runtime::spawn_blocking(move || {
         let new_session = Session::open_duck(
             &path,
@@ -429,9 +431,7 @@ pub async fn open_duck(
 /// window where closing the app loses the unsaved turns). Returns `None`
 /// after a clean save or after a prior read cleared the failure.
 #[tauri::command]
-pub fn take_persist_error(
-    state: State<'_, Arc<Mutex<Session>>>,
-) -> Result<Option<String>, String> {
+pub fn take_persist_error(state: State<'_, Arc<Mutex<Session>>>) -> Result<Option<String>, String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
     Ok(s.take_persist_error())
 }

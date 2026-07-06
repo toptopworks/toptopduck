@@ -120,9 +120,7 @@ pub struct PrivacyDefaults {
 
 impl Default for PrivacyDefaults {
     fn default() -> Self {
-        Self {
-            send_samples: true,
-        }
+        Self { send_samples: true }
     }
 }
 
@@ -347,7 +345,10 @@ mod tests {
         assert!(cfg.record_recent_file("/a.duck"));
         assert!(cfg.record_recent_file("/b.duck"));
         assert!(cfg.record_recent_file("/a.duck")); // re-open moves to front
-        assert_eq!(cfg.recent_files, vec!["/a.duck".to_string(), "/b.duck".into()]);
+        assert_eq!(
+            cfg.recent_files,
+            vec!["/a.duck".to_string(), "/b.duck".into()]
+        );
 
         // Re-opening the already-front path is a no-op (no spurious write).
         assert!(!cfg.record_recent_file("/a.duck"));
@@ -357,7 +358,10 @@ mod tests {
             cfg.record_recent_file(&format!("/f{i}.duck"));
         }
         assert_eq!(cfg.recent_files.len(), RECENT_FILES_CAP);
-        assert_eq!(cfg.recent_files[0], format!("/f{}.duck", RECENT_FILES_CAP + 2));
+        assert_eq!(
+            cfg.recent_files[0],
+            format!("/f{}.duck", RECENT_FILES_CAP + 2)
+        );
     }
 
     #[test]
@@ -376,14 +380,8 @@ mod tests {
             serde_json::to_string(&Theme::System).unwrap(),
             r#""system""#
         );
-        assert_eq!(
-            serde_json::to_string(&Theme::Light).unwrap(),
-            r#""light""#
-        );
-        assert_eq!(
-            serde_json::to_string(&Theme::Dark).unwrap(),
-            r#""dark""#
-        );
+        assert_eq!(serde_json::to_string(&Theme::Light).unwrap(), r#""light""#);
+        assert_eq!(serde_json::to_string(&Theme::Dark).unwrap(), r#""dark""#);
     }
 
     #[test]

@@ -114,7 +114,8 @@ pub fn temp_path_for(target: &Path) -> Option<std::path::PathBuf> {
 /// before rename leaves the prior target intact and a stale temp behind
 /// (overwritten on the next write). Mirrors the `.duck` atomic write.
 pub fn write_at(target: &Path, cfg: &AppConfig) -> Result<(), WriteError> {
-    let json = serde_json::to_string_pretty(cfg).map_err(|e| WriteError::Serialize(e.to_string()))?;
+    let json =
+        serde_json::to_string_pretty(cfg).map_err(|e| WriteError::Serialize(e.to_string()))?;
     let tmp = temp_path_for(target).ok_or_else(|| WriteError::Io("无法推导临时文件路径".into()))?;
 
     {
@@ -170,7 +171,10 @@ pub fn read_at(path: &Path) -> AppConfig {
             AppConfig::defaults()
         }
         Err(reason) => {
-            log::warn!("app-config read degraded to defaults ({reason}): {}", path.display());
+            log::warn!(
+                "app-config read degraded to defaults ({reason}): {}",
+                path.display()
+            );
             AppConfig::defaults()
         }
     }
@@ -182,10 +186,13 @@ pub fn read_at(path: &Path) -> AppConfig {
 fn parse_at(path: &Path) -> Result<AppConfig, AppConfigReadError> {
     let text = match fs::read_to_string(path) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(AppConfigReadError::Missing),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AppConfigReadError::Missing)
+        }
         Err(e) => return Err(AppConfigReadError::Io(e.to_string())),
     };
-    let value: Value = serde_json::from_str(&text).map_err(|e| AppConfigReadError::Parse(e.to_string()))?;
+    let value: Value =
+        serde_json::from_str(&text).map_err(|e| AppConfigReadError::Parse(e.to_string()))?;
 
     // Secrets-never: scan the raw JSON for any secret-named key BEFORE
     // deserializing. serde would otherwise silently drop an unknown `api_key`
@@ -411,7 +418,10 @@ mod tests {
         let cfg = read_at(&path);
         assert_eq!(cfg.theme, Theme::Dark); // the one field that was present
         assert_eq!(cfg.engine, EngineDefaults::default()); // gap filled
-        assert_eq!(cfg.provider, crate::app_config::model::ProviderEndpoint::default());
+        assert_eq!(
+            cfg.provider,
+            crate::app_config::model::ProviderEndpoint::default()
+        );
     }
 
     #[test]
