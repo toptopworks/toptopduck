@@ -275,6 +275,9 @@ impl AppConfig {
     /// valid. Only the fields whose invalid value would break a downstream
     /// invariant are touched (the rest are persisted verbatim -- over-clamping
     /// now would mask values a follow-up slice needs to apply):
+    /// - `format_version` pinned to the current schema version (a wrong/foreign
+    ///   value would make the next read honest-degrade the WHOLE config to
+    ///   defaults, silently losing every pref the user just saved);
     /// - empty/whitespace `base_url` / `model` -> the canonical defaults (so the
     ///   provider always has a valid endpoint; mirrors the legacy
     ///   `set_provider_config` normalization);
@@ -282,6 +285,7 @@ impl AppConfig {
     /// - `window_turns` clamped to >= 1 (0 would summarize every turn, which is
     ///   nonsensical rather than dangerous).
     pub fn normalize(&mut self) {
+        self.format_version = APP_CONFIG_FORMAT_VERSION;
         let base_url = self.provider.base_url.trim().to_string();
         self.provider.base_url = if base_url.is_empty() {
             DEFAULT_PROVIDER_BASE_URL.to_string()
@@ -418,5 +422,22 @@ mod tests {
         cfg.normalize();
         assert_eq!(cfg.engine.threads, 1);
         assert_eq!(cfg.tunables.window_turns, 1);
+    }
+
+    #[test]
+    fn normalize_pins_format_version_to_current() {
+        // A frontend-supplied wrong/foreign format_version must be overwritten
+        // with the current schema version on write -- otherwise the next read
+        // would honest-degrade the WHOLE config to defaults, losing every pref
+        // the user just saved.
+        let mut cfg = AppConfig::defaults();
+        cfg.format_version = APP_CONFIG_FORMAT_VERSION + 1; // a "future" version
+        cfg.normalize();
+        assert_eq!(cfg.format_version, APP_CONFIG_FORMAT_VERSION);
+
+        let mut low = AppConfig::defaults();
+        low.format_version = 0; // impossibly low
+        low.normalize();
+        assert_eq!(low.format_version, APP_CONFIG_FORMAT_VERSION);
     }
 }

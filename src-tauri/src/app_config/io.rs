@@ -245,9 +245,14 @@ fn find_secret_field(value: &Value) -> Option<String> {
 }
 
 /// True if `name` matches a secret key name, ignoring case and non-alphanumeric
-/// separators. `apiKey`, `API_KEY`, `api-key`, and `apikey` all collapse to the
-/// same `apikey` token, so the comparison catches the realistic casing variants
-/// without an exhaustive list.
+/// separators, using SUBSTRING matching so prefixed variants also trip:
+/// `my_api_key`, `openai_api_key`, `claude_api_key`, `anthropic_key` all contain
+/// a known secret token after collapse. `apiKey`, `API_KEY`, `api-key`, and
+/// `apikey` collapse to the same `apikey` token. The app-config field set
+/// (`base_url`, `model`, `theme`, `window`, `engine`, ...) collapses to tokens
+/// that contain NO secret name, so substring matching stays false-positive-free
+/// across the real schema. The primary secrets-never defense is the model having
+/// no key field; this scan is the read-time backstop for hand-edited files.
 fn is_secret_name(name: &str) -> bool {
     let collapsed: String = name
         .chars()
@@ -260,7 +265,7 @@ fn is_secret_name(name: &str) -> bool {
             .filter(|c| c.is_ascii_alphanumeric())
             .map(|c| c.to_ascii_lowercase())
             .collect();
-        s == collapsed
+        collapsed.contains(&s)
     })
 }
 
@@ -402,6 +407,27 @@ mod tests {
         assert!(!is_secret_name("base_url"));
         assert!(!is_secret_name("model"));
         assert!(!is_secret_name("theme"));
+    }
+
+    #[test]
+    fn secret_scan_catches_prefixed_variants() {
+        // Substring (not exact) matching: a smuggled key under a prefixed name
+        // (my_api_key, openai_api_key, claude_api_key, anthropic_key) must also
+        // trip the scan. The prior exact-match missed these, weakening the
+        // secrets-never defense-in-depth (the primary defense is the model having
+        // no key field; this scan is the read-time backstop for hand-edited files).
+        assert!(is_secret_name("my_api_key"));
+        assert!(is_secret_name("openai_api_key"));
+        assert!(is_secret_name("claude_api_key"));
+        assert!(is_secret_name("anthropic_key"));
+        // The legit app-config field set must still NOT trip -- no secret name
+        // is a substring of any collapsed field token.
+        assert!(!is_secret_name("base_url"));
+        assert!(!is_secret_name("memory_limit"));
+        assert!(!is_secret_name("statement_timeout_ms"));
+        assert!(!is_secret_name("format_version"));
+        assert!(!is_secret_name("default_format"));
+        assert!(!is_secret_name("window_turns"));
     }
 
     #[test]

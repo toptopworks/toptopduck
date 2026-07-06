@@ -94,9 +94,17 @@ pub fn run() {
             };
             // The atomic write renames a temp file inside the parent dir, so the
             // parent must exist. create_dir_all is idempotent; a failure is
-            // non-fatal (the write later honest-errors, app-config degrades).
+            // non-fatal (the write later honest-errors, app-config degrades),
+            // but without this log the failure is invisible -- every subsequent
+            // write_at also fails, prefs never persist across launches, and the
+            // user sees "my config resets every restart" with no diagnostic.
             if let Some(parent) = app_config_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    log::warn!(
+                        "failed to create app-config dir {}: {e}; prefs will not persist",
+                        parent.display()
+                    );
+                }
             }
 
             let keychain = KeychainStore::new();

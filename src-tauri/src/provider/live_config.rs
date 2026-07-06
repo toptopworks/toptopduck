@@ -18,6 +18,7 @@
 //! is absent AND a legacy blob is present, so it is idempotent across launches).
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use crate::app_config::{self, AppConfig};
 use crate::model::ProviderConfig;
@@ -31,6 +32,13 @@ use crate::provider::keychain::{KeychainStore, ProviderConfigSource};
 pub struct LiveProviderConfig {
     keychain: KeychainStore,
     path: PathBuf,
+    /// Serializes the in-process writers (`store` + `record_recent_file`). Both
+    /// do read-modify-write on the config file; without coordination two writers
+    /// interleave and lose an entire update (`T1 load -> T2 load -> T1 write ->
+    /// T2 write` drops T1). Mirrors the `.duck` single-writer (issue #50).
+    /// Pure reads (`load`) do NOT take this lock -- they honest-degrade and
+    /// tolerate reading a value that is about to be overwritten.
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl LiveProviderConfig {
@@ -38,7 +46,11 @@ impl LiveProviderConfig {
     /// the Tauri `app_data_dir`). The path's parent directory must exist; the
     /// config file itself is created lazily on the first [`Self::store`].
     pub fn new(keychain: KeychainStore, path: PathBuf) -> Self {
-        Self { keychain, path }
+        Self {
+            keychain,
+            path,
+            write_lock: Arc::new(Mutex::new(())),
+        }
     }
 
     /// The configured app-config path (for tests / diagnostics).
@@ -67,10 +79,10 @@ impl LiveProviderConfig {
 
     /// Load the app-config. On the FIRST launch after the ADR-0038 move (the
     /// config file is absent AND a legacy keychain blob is present), seed the
-    /// provider section from that blob, best-effort clear it, persist, and return
-    /// the seeded config. Otherwise: honest-degrade read (missing/corrupt ->
-    /// defaults, ADR-0038). Idempotent: once the file exists, the migration never
-    /// fires again, so repeated loads are plain reads.
+    /// provider section from that blob, persist, then best-effort clear it, and
+    /// return the seeded config. Otherwise: honest-degrade read (missing/corrupt
+    /// -> defaults, ADR-0038). Idempotent: once the file exists, the migration
+    /// never fires again, so repeated loads are plain reads.
     pub fn load(&self) -> AppConfig {
         if !self.path.exists() {
             if let Some(blob) = self.keychain.fetch_legacy_provider_blob() {
@@ -83,27 +95,57 @@ impl LiveProviderConfig {
     }
 
     /// One-time migration: seed a fresh app-config's provider section from the
-    /// legacy keychain blob, clear the blob, persist, and return the seeded config.
-    /// A corrupt blob yields defaults (the legacy entry never bricks the app);
-    /// a write failure is swallowed (the in-memory seeded config is still returned
-    /// and the next load retries the migration since the file is still absent).
+    /// legacy keychain blob, persist, clear the blob, and return the seeded
+    /// config. A corrupt blob yields defaults (the legacy entry never bricks the
+    /// app); a write failure is logged and the blob is RETAINED so the next load
+    /// can retry -- the prior clear-then-write order lost the user's endpoint
+    /// pref permanently if the write failed (blob gone, file never created).
+    /// Runs inside `load()` (a pure-read path), so it does NOT take
+    /// [`Self::write_lock`]; the atomic write_at cannot corrupt the file, and a
+    /// race with a concurrent `store` only risks a lost update on the migration
+    /// value, which the next load re-reads from disk.
     fn migrate_from_legacy_blob(&self, blob: String) -> AppConfig {
         let mut cfg = AppConfig::defaults();
         if let Ok(legacy) = serde_json::from_str::<ProviderConfig>(&blob) {
             cfg.provider = legacy;
         }
-        // Best-effort cleanup whether or not the blob parsed. Swallowed: the
-        // migration already produced a valid in-memory config; a lingering non-
-        // secret entry is harmless (it just triggers this branch again next load
-        // if the write below failed).
+        cfg.normalize();
+        // Persist FIRST, clear the legacy blob AFTER. Writing first keeps the
+        // blob as a retry source until the migration is durably on disk.
+        if let Err(e) = app_config::write_at(&self.path, &cfg) {
+            log::warn!(
+                "legacy provider-config migration write failed; blob retained for retry: {e}"
+            );
+            return cfg;
+        }
+        // Best-effort cleanup now that the file is durably written. A clear
+        // failure is harmless -- the file exists so this branch never fires
+        // again; a lingering non-secret entry is just a wasted keychain slot.
         self.keychain.clear_legacy_provider_config();
-        let _ = app_config::write_at(&self.path, &cfg);
         cfg
     }
 
     /// Normalize + atomically persist the app-config, returning the normalized
     /// value that was stored. The caller receives exactly what landed on disk.
-    pub fn store(&self, mut cfg: AppConfig) -> Result<AppConfig, app_config::WriteError> {
+    /// Acquires [`Self::write_lock`] so concurrent writers (`store` and
+    /// `record_recent_file`) serialize -- app-config has no version/CAS, so
+    /// last-writer-wins needs the lock to avoid lost updates (issue #53).
+    pub fn store(&self, cfg: AppConfig) -> Result<AppConfig, app_config::WriteError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("app-config write_lock poisoned");
+        self.store_inner(cfg)
+    }
+
+    /// Normalize + persist WITHOUT taking [`Self::write_lock`] -- for callers
+    /// (`record_recent_file`) that already hold the lock as part of a load-
+    /// modify-write transaction. `std::sync::Mutex` is NOT reentrant, so `store`
+    /// cannot recurse into this while a guard is held. (`migrate_from_legacy_blob`
+    /// inlines its own normalize + write_at rather than calling this, because it
+    /// must return the in-memory cfg even when the write fails, and store_inner
+    /// consumes cfg by value.)
+    fn store_inner(&self, mut cfg: AppConfig) -> Result<AppConfig, app_config::WriteError> {
         cfg.normalize();
         app_config::write_at(&self.path, &cfg)?;
         Ok(cfg)
@@ -113,14 +155,20 @@ impl LiveProviderConfig {
     /// the recent-files list actually changed so the caller can skip work when it
     /// did not. A read or write failure is swallowed and reported as "no change"
     /// -- the recent-files list is a convenience, never a correctness surface.
+    /// Holds [`Self::write_lock`] across the whole load-modify-write so a
+    /// concurrent `store` cannot interleave and lose either side's update.
     pub fn record_recent_file(&self, path: &str) -> bool {
+        let Ok(_guard) = self.write_lock.lock() else {
+            return false;
+        };
         let mut cfg = self.load();
         if !cfg.record_recent_file(path) {
             return false;
         }
-        // A store failure is swallowed: the list is advisory. The next open
-        // re-reads whatever is on disk and retries.
-        self.store(cfg).is_ok()
+        // store_inner (not store): the guard is already held, and std::sync::Mutex
+        // is not reentrant. A failure is swallowed -- the list is advisory; the
+        // next open re-reads whatever is on disk and retries.
+        self.store_inner(cfg).is_ok()
     }
 }
 
@@ -209,6 +257,41 @@ mod tests {
             cfg.recent_files,
             vec!["/tmp/a.duck".to_string(), "/tmp/b.duck".into()]
         );
+    }
+
+    #[test]
+    fn record_recent_file_concurrent_writers_do_not_lose_updates_or_deadlock() {
+        // H1 regression: store + record_recent_file both take write_lock (shared
+        // across clones via the inner Arc<Mutex>). Multiple concurrent recorders
+        // must each land their path (no lost-update) and the test must complete
+        // (no deadlock). Without the lock, two interleaved read-modify-write
+        // transactions would drop whichever wrote first.
+        use std::thread;
+
+        let (_dir, live) = live();
+        let paths: Vec<String> = (0..8)
+            .map(|i| format!("/tmp/concurrent-{i}.duck"))
+            .collect();
+        let handles: Vec<_> = paths
+            .iter()
+            .map(|p| {
+                let live = live.clone();
+                let p = p.clone();
+                thread::spawn(move || live.record_recent_file(&p))
+            })
+            .collect();
+        for h in handles {
+            assert!(h.join().expect("worker thread panicked"));
+        }
+        // Every path landed -- no lost update. Order depends on the scheduler,
+        // so check set membership, not order.
+        let cfg = live.load();
+        for p in &paths {
+            assert!(
+                cfg.recent_files.contains(p),
+                "concurrent record lost path {p}"
+            );
+        }
     }
 
     #[test]
