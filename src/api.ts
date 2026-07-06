@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  AppConfig,
   DatasetDescriptor,
   DatasetPrivacy,
   LoadOutcome,
@@ -224,4 +225,30 @@ export async function onResumeProgress(
 // was clean (or after a prior poll already cleared the failure).
 export async function takePersistError(): Promise<string | null> {
   return invoke<string | null>("take_persist_error");
+}
+
+// --- App-level config (issue #53, ADR-0038) --------------------------------
+//
+// The second at-rest artifact: preferences, defaults, window geometry, recent
+// files, and the no-key endpoint config. Lives in the OS app-data directory;
+// honest-degrades to defaults on any read failure. The API key is NOT part of
+// AppConfig -- it stays in the OS keychain via has/set/clearApiKey above.
+
+// Read the full app-config. The backend honest-degrades to built-in defaults on
+// any failure (missing/corrupt -> defaults), so this always resolves.
+export async function getAppConfig(): Promise<AppConfig> {
+  return invoke<AppConfig>("get_app_config");
+}
+
+// Persist the full app-config atomically. The backend normalizes (empty
+// endpoint -> defaults, threads/window_turns clamped to >=1) and returns the
+// normalized value that landed on disk.
+export async function setAppConfig(config: AppConfig): Promise<AppConfig> {
+  return invoke<AppConfig>("set_app_config", { config });
+}
+
+// Record a recently-opened .duck path (read-modify-write on the backend). Fire-
+// and-forget at the call sites (save / open success); the list is advisory.
+export async function recordRecentFile(path: string): Promise<void> {
+  await invoke<void>("record_recent_file", { path });
 }
