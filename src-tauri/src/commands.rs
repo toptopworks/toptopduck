@@ -16,16 +16,21 @@ use crate::model::{
 use crate::provider::live_config::LiveProviderConfig;
 use crate::session::{is_resuming, ResumeEvent, Session};
 
-/// Reject a mutating command while a resume is in flight (review H8, issue
-/// #55). The managed `Arc<Mutex<Session>>` still holds the PRE-resume session
-/// while [`Session::open_duck`] runs in `open_duck`'s `spawn_blocking`, so a
-/// concurrent `ask` / `ingest_file` / `replace_source` / `remove_source` /
-/// `remove_active_source` would silently operate on the stale session and be
-/// overwritten when the resumed session lands (`*s = new_session`). The
-/// frontend's shared `loading` flag is the primary defense; this is the
-/// Rust-side backstop for races the frontend cannot see (a second window, an
-/// IPC replay). Returns a user-facing Chinese error so the call surfaces
-/// honestly rather than appearing to succeed then vanishing.
+/// Reject a mutating command while a resume is in flight. The managed
+/// `Arc<Mutex<Session>>` still holds the PRE-resume session while
+/// [`Session::open_duck`] runs in `open_duck`'s `spawn_blocking`, so a
+/// concurrent mutating command (`ask` / `ingest_file` / `ingest_file_guided`
+/// / `replace_source` / `remove_source` / `remove_active_source` /
+/// `rename_dataset` / `set_dataset_privacy` / `save_as_duck`) would silently
+/// operate on the stale session and be overwritten when the resumed session
+/// lands (`*s = new_session`). The frontend's shared `loading` flag is the
+/// primary defense; this check is the Rust-side backstop for races the
+/// frontend cannot see (a second window, an IPC replay). It SHRINKS the
+/// window, not closes it: the flag is sampled before the session lock is
+/// taken, so a resume that lands in between lets the command proceed against
+/// the resumed session (correct) rather than reject. Returns a user-facing
+/// Chinese error so a rejected call surfaces honestly rather than appearing
+/// to succeed then vanishing.
 fn reject_if_resuming() -> Result<(), String> {
     if is_resuming() {
         return Err("正在恢复会话，请稍候再操作".into());
@@ -106,6 +111,7 @@ pub fn rename_dataset(
     reference_name: String,
     new_display: String,
 ) -> Result<DatasetDescriptor, String> {
+    reject_if_resuming()?;
     let mut s = state.lock().map_err(|e| e.to_string())?;
     s.rename_display(&reference_name, &new_display)
         .map_err(|e| e.to_string())
@@ -141,6 +147,7 @@ pub fn set_dataset_privacy(
     reference_name: String,
     privacy: DatasetPrivacy,
 ) -> Result<DatasetDescriptor, String> {
+    reject_if_resuming()?;
     let mut s = state.lock().map_err(|e| e.to_string())?;
     s.set_privacy(&reference_name, privacy)
         .ok_or_else(|| format!("找不到引用名为「{reference_name}」的数据集"))
@@ -385,6 +392,7 @@ pub fn save_as_duck(
     path: String,
     session_name: String,
 ) -> Result<(), String> {
+    reject_if_resuming()?;
     let mut s = state.lock().map_err(|e| e.to_string())?;
     s.bind_duck(PathBuf::from(path), session_name)
         .map_err(|e| e.to_string())
@@ -473,4 +481,23 @@ pub fn take_pending_conflict(
 ) -> Result<Option<crate::PendingConflict>, String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
     Ok(s.take_pending_conflict())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The IPC-layer guard rejects mutating commands while a resume is in
+    /// flight. The happy path (no resume) is exercised implicitly by every
+    /// integration test that drives a command; this pins the rejection branch
+    /// itself -- previously the only untested path in the resume-guard slice.
+    #[test]
+    fn reject_if_resuming_blocks_while_a_resume_is_in_flight() {
+        let _guard = crate::session::acquire_test_resume_flag();
+        let err = reject_if_resuming().unwrap_err();
+        assert_eq!(err, "正在恢复会话，请稍候再操作");
+        // `_guard` drops here -> RESUMING_COUNT decrements. We do NOT assert
+        // resuming_count() == 0: parallel unit tests in this binary may also
+        // hold a guard, so only the block-branch (not the drain) is pinned.
+    }
 }

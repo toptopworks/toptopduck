@@ -18,7 +18,9 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{RectifyProvenance, SourceLifecycleEvent, StaleAnchor, TextKind};
+use crate::model::{
+    RectifyProvenance, SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, TextKind,
+};
 
 /// v1 recipe format version (ADR-0036). Opening routes on this value: equal
 /// -> normal; lower -> forward-migrate; higher -> honest refuse. v1 is the
@@ -156,7 +158,7 @@ pub enum RecipeOutcome {
 /// dropped. Every no-result turn and every source lifecycle event is always
 /// visible (ADR-0040).
 ///
-/// **Construction invariant (review H7, issue #55):** a `Recipe` is built
+/// **Construction invariant:** a `Recipe` is built
 /// only through [`Recipe::build`] on the write path ([`Session::build_recipe`])
 /// or deserialized via [`crate::persistence::io::read_duck`] (which routes on
 /// `format_version` and deduplicates source names). `format_version` is the
@@ -204,7 +206,7 @@ pub struct Recipe {
     pub active: Option<String>,
 }
 
-/// Why [`Recipe::build`] rejected a proposed recipe (review H7, issue #55).
+/// Why [`Recipe::build`] rejected a proposed recipe.
 /// Each variant names the offending field so the caller (today only
 /// [`crate::session::Session::build_recipe`], the single write point) surfaces
 /// a precise invariant violation rather than a generic "invalid recipe" --
@@ -224,11 +226,16 @@ pub enum RecipeError {
     /// would shadow the other on resume).
     DuplicateResultReference { reference_name: String },
     /// A source-lifecycle event in `history` carries an empty `reference_name`
-    /// -- minimal reference-name validation (review H7). Full lifecycle consistency
+    /// -- minimal reference-name validation. Full lifecycle consistency
     /// (Added-before-Deleted ordering, etc.) is enforced by the live write
     /// path and deferred here; an empty name is the unambiguous corruption
-    /// signal.
-    EmptySourceEventReference,
+    /// signal. Carries the offending event's history `index` and `kind` so a
+    /// hand-edited recipe's corruption can be pinpointed without re-scanning
+    /// the timeline.
+    EmptySourceEventReference {
+        index: usize,
+        kind: SourceLifecycleKind,
+    },
 }
 
 impl std::fmt::Display for RecipeError {
@@ -242,17 +249,18 @@ impl std::fmt::Display for RecipeError {
                 f,
                 "history 中存在重复的 Materialized 引用名「{reference_name}」（result_N 不可复用）"
             ),
-            Self::EmptySourceEventReference => {
-                write!(f, "history 中存在引用名为空的源生命周期事件")
-            }
+            Self::EmptySourceEventReference { index, kind } => write!(
+                f,
+                "history 第 {index} 个条目是引用名为空的源生命周期事件（{kind:?}）"
+            ),
         }
     }
 }
 impl std::error::Error for RecipeError {}
 
 impl Recipe {
-    /// Construct a recipe with the cross-field invariants validated (review
-    /// H7, issue #55). This is the SINGLE write point -- [`Session::build_recipe`]
+    /// Construct a recipe with the cross-field invariants validated. This is
+    /// the SINGLE write point -- [`Session::build_recipe`]
     /// calls it, and no other production path constructs a `Recipe` (the open
     /// path goes through serde deserialize, which `read_duck`'s version routing
     /// and duplicate-source check guards). The constructor is the Rust-side
@@ -286,7 +294,7 @@ impl Recipe {
             }
         }
         let mut seen_results: HashSet<String> = HashSet::new();
-        for entry in &history {
+        for (index, entry) in history.iter().enumerate() {
             match entry {
                 RecipeEntry::Turn(turn) => {
                     if let RecipeOutcome::Materialized { reference_name, .. } = &turn.outcome {
@@ -299,7 +307,10 @@ impl Recipe {
                 }
                 RecipeEntry::Source(ev) => {
                     if ev.reference_name.is_empty() {
-                        return Err(RecipeError::EmptySourceEventReference);
+                        return Err(RecipeError::EmptySourceEventReference {
+                            index,
+                            kind: ev.kind,
+                        });
                     }
                 }
             }
@@ -682,7 +693,7 @@ mod tests {
         );
     }
 
-    // --- Recipe::build invariant constructor (review H7, issue #55) -------------
+    // --- Recipe::build invariant constructor ------------------------------------
     //
     // The constructor makes the cross-field illegal states unrepresentable from
     // the write side. The happy path is covered implicitly by every other test
@@ -798,9 +809,17 @@ mod tests {
             Some("people".into()),
         )
         .unwrap_err();
+        // The event is history[0]; its kind is the Added constructed above.
+        // The payload pinpoints the corruption rather than just the variant.
         assert!(
-            matches!(err, RecipeError::EmptySourceEventReference),
-            "expected EmptySourceEventReference, got {err:?}",
+            matches!(
+                err,
+                RecipeError::EmptySourceEventReference {
+                    index: 0,
+                    kind: SourceLifecycleKind::Added,
+                }
+            ),
+            "expected EmptySourceEventReference {{ index: 0, kind: Added }}, got {err:?}",
         );
     }
 

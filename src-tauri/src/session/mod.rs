@@ -317,7 +317,7 @@ fn hash_file(path: &Path) -> Result<Option<String>, std::io::Error> {
     Ok(Some(digest.iter().map(|b| format!("{b:02x}")).collect()))
 }
 
-/// Process-global count of in-flight resumes (review H8, issue #55): > 0 while
+/// Process-global count of in-flight resumes: > 0 while
 /// any [`Session::open_duck`] is rebuilding a session across the restart
 /// boundary. During resume the managed `Arc<Mutex<Session>>` still holds the
 /// PRE-resume session -- a concurrent mutating IPC command (`ask` /
@@ -347,6 +347,13 @@ pub fn is_resuming() -> bool {
     RESUMING_COUNT.load(Ordering::SeqCst) > 0
 }
 
+/// The number of in-flight resumes (0 when idle). Exposed for tests and
+/// diagnostics so an observer can distinguish "one resume" from "many" --
+/// [`is_resuming`] folds the count to a bool, losing that detail.
+pub fn resuming_count() -> usize {
+    RESUMING_COUNT.load(Ordering::SeqCst)
+}
+
 /// RAII guard that increments [`RESUMING_COUNT`] on construction and
 /// decrements on drop. Acquired at the top of [`Session::open_duck`]; held to
 /// the end of the function so every exit path (success, load error, cancel,
@@ -354,6 +361,7 @@ pub fn is_resuming() -> bool {
 /// `mem::forget`-transferred to the resumed Session (unlike the registry key)
 /// -- the counter marks "resume is running", and resume ends when `open_duck`
 /// returns, not when the Session later drops.
+#[must_use = "dropping the guard early decrements RESUMING_COUNT; keep it bound for the whole resume scope"]
 struct ResumeFlagGuard;
 
 impl ResumeFlagGuard {
@@ -367,6 +375,15 @@ impl Drop for ResumeFlagGuard {
     fn drop(&mut self) {
         RESUMING_COUNT.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+/// Test-only handle that marks resume as in-flight for its lifetime, so
+/// command-layer guard tests can exercise `reject_if_resuming` without
+/// driving a real `open_duck`. Dropping decrements the counter. Not built
+/// into the production binary (`#[cfg(test)]`).
+#[cfg(test)]
+pub(crate) fn acquire_test_resume_flag() -> impl Drop {
+    ResumeFlagGuard::acquire()
 }
 
 /// RAII guard for the single-writer registry key acquired at the top of
@@ -708,12 +725,12 @@ impl Session {
         mut on_source_issue: impl FnMut(SourceIssue) -> SourceResolution,
         mut on_active_abandoned: impl FnMut(ActiveAbandoned) -> ActiveResolution,
     ) -> Result<Session, ResumeError> {
-        // Review H8 (issue #55): mark resume in-flight for the WHOLE function
-        // so concurrent mutating commands reject at the command layer instead
-        // of silently racing the stale pre-resume session. RAII -- every exit
-        // (including `?` error propagation) drops the guard and clears the
-        // flag. Acquired FIRST so even a registry-refuse / load-fail resume
-        // holds the flag for its full (short) duration.
+        // Mark resume in-flight for the WHOLE function so concurrent mutating
+        // commands reject at the command layer instead of silently racing the
+        // stale pre-resume session. RAII -- every exit (including `?` error
+        // propagation) drops the guard and clears the flag. Acquired FIRST so
+        // even a registry-refuse / load-fail resume holds the flag for its
+        // full (short) duration.
         let _resume_flag = ResumeFlagGuard::acquire();
         // Single-writer acquire (ADR-0035 Decision 3, issue #50). Held across all
         // resume phases; the guard's Drop releases the key on every error
@@ -1044,15 +1061,16 @@ impl Session {
     /// result set, so result_N numbers line up with the recipe's recording
     /// order. Fires one `Replay` progress event per turn.
     ///
-    /// **Trust boundary (review H2, ADR-0036 Decision 5):** the recipe SQL
-    /// re-executed here is **parse-time untrusted** at the resume boundary.
+    /// **Trust boundary (ADR-0036 Decision 5):** the recipe SQL re-executed
+    /// here is **parse-time untrusted** at the resume boundary.
     /// The per-source fingerprint gating in [`Self::resume_sources`] protects
     /// the SOURCE CONTENT (the bytes a re-link swapped in match what was
     /// recorded) -- it does NOT validate the SQL itself. v1 treats the `.duck`
     /// as a **single-user, self-produced** document (ADR-0036 Decision 5), so
     /// resume reuses the SAME defenses a live turn relies on rather than a
     /// recipe-specific SQL AST whitelist. The #1 sandbox
-    /// ([`crate::session::sandbox`]) runs provider SQL with `LocalFileSystem`
+    /// ([`crate::session::sandbox`]) runs provider / recipe SQL with
+    /// `LocalFileSystem`
     /// disabled, refusing `read_*` table functions; the subquery wrapping
     /// (`CREATE TABLE result_N AS SELECT * FROM (<sql>) ...`) rejects
     /// non-SELECT statements (DROP/ALTER/INSERT/COPY/ATTACH/INSTALL/LOAD) as
@@ -2702,9 +2720,9 @@ impl Session {
 
         let active = self.working_set.active().map(|d| d.reference_name.clone());
 
-        // Review H7 (issue #55): route construction through the invariant-
-        // validating constructor. The working set's own invariants guarantee
-        // build() succeeds here -- `active` always tracks a registered source
+        // Route construction through the invariant-validating constructor.
+        // The working set's own invariants guarantee build() succeeds here
+        // -- `active` always tracks a registered source
         // (or None), `result_N` numbering is never reused (ADR-0022), and
         // source events always carry non-empty names -- so a failure is a
         // logic bug, surfaced fail-fast rather than persisted as a corrupt

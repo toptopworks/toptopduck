@@ -2442,6 +2442,20 @@ fn resume_renders_a_broken_sql_turn_as_failed_and_preserves_prior_results() {
                     stale: None,
                 },
             }),
+            // A third turn whose SQL WOULD succeed if replayed -- pins that
+            // turns after the break (K+1..) are dropped, not silently skipped
+            // then recovered. If the truncation invariant broke, result_3
+            // would materialize and this test would fail.
+            RecipeEntry::Turn(RecipeTurn {
+                question: "after-break".into(),
+                outcome: RecipeOutcome::Materialized {
+                    reference_name: "result_3".into(),
+                    display_name: "result_3".into(),
+                    sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
+                    assumption: None,
+                    stale: None,
+                },
+            }),
         ],
         Some("people".into()),
     )
@@ -2456,6 +2470,10 @@ fn resume_renders_a_broken_sql_turn_as_failed_and_preserves_prior_results() {
     assert!(
         resumed.get("result_2").is_none(),
         "result_2 (K) NOT materialized -- replay broke"
+    );
+    assert!(
+        resumed.get("result_3").is_none(),
+        "result_3 (K+1) dropped after the break -- truncation, not skip-and-recover"
     );
     let broke_failed = resumed.conversation().iter().any(|e| match e {
         ThreadEntry::Turn(t) => {
