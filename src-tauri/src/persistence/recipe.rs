@@ -224,7 +224,7 @@ pub enum RecipeError {
     /// would shadow the other on resume).
     DuplicateResultReference { reference_name: String },
     /// A source-lifecycle event in `history` carries an empty `reference_name`
-    /// -- minimal "引用合法" validation (review H7). Full lifecycle consistency
+    /// -- minimal reference-name validation (review H7). Full lifecycle consistency
     /// (Added-before-Deleted ordering, etc.) is enforced by the live write
     /// path and deferred here; an empty name is the unambiguous corruption
     /// signal.
@@ -270,7 +270,7 @@ impl Recipe {
     /// - Every `Materialized` turn's `reference_name` is unique in `history`
     ///   (ADR-0022 result_N never-reused).
     /// - Every source-lifecycle event in `history` carries a non-empty
-    ///   `reference_name` (minimal "引用合法" check; full lifecycle ordering is
+    ///   `reference_name` (minimal reference-name check; full lifecycle ordering is
     ///   the write path's responsibility).
     pub fn build(
         session_name: String,
@@ -785,7 +785,7 @@ mod tests {
         // corruption (a hand edit or a logic bug); build surfaces it rather
         // than persisting a recipe whose timeline cannot name what it refers
         // to. Full lifecycle ordering (Added-before-Deleted) stays the write
-        // path's job -- this is the minimal "引用合法" check.
+        // path's job -- this is the minimal reference-name check.
         use crate::model::SourceLifecycleKind;
         let err = Recipe::build(
             "empty-ev".into(),
