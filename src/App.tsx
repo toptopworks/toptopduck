@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { LogicalPosition, LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
 import { ActiveSourceDeleteDialog } from "./components/ActiveSourceDeleteDialog";
 import { FileDropzone } from "./components/FileDropzone";
 import { WorkingSetList } from "./components/WorkingSetList";
@@ -16,27 +17,32 @@ import {
   cancelQuery,
   conversation,
   fmtError,
+  getAppConfig,
   getProviderConfig,
   ingestFile,
   ingestFileGuided,
   listWorkingSet,
   openDuck,
   onResumeProgress,
+  recordRecentFile,
   renameDataset,
   removeSource,
   removeActiveSource,
   replaceSource,
   saveAsDuck,
+  setAppConfig,
   setDatasetPrivacy,
   takePersistError,
 } from "./api";
 import { loadErrorMessage } from "./loadErrorMessage";
 import type {
+  AppConfig,
   DatasetDescriptor,
   GuidanceRequest,
   ResumeEvent,
   SheetGuidance,
   StaleAnchor,
+  Theme,
   ThreadEntry,
   VizSpec,
 } from "./types";
@@ -69,6 +75,18 @@ interface LatestResult {
    * ResultView renders or degrades to the table with a disclosure. Carried so a
    * re-selected past result re-renders its chart too. */
   viz: VizSpec | null;
+}
+
+/** Acquire the main window, or `null` when the Tauri bridge is absent (jsdom
+ * tests). Every window-geometry call site is a no-op without it -- geometry
+ * persistence is a convenience, never a correctness surface, so a missing
+ * bridge must never crash the render. */
+function safeMainWindow(): ReturnType<typeof getCurrentWindow> | null {
+  try {
+    return getCurrentWindow();
+  } catch {
+    return null;
+  }
 }
 
 export default function App() {
@@ -124,6 +142,19 @@ export default function App() {
   // signal the user has no way to learn the disk fell behind -- closing the
   // app in that window loses the unsaved turns. Cleared by the next clean poll.
   const [persistError, setPersistError] = useState<string | null>(null);
+  // App-level config (issue #53, ADR-0038): preferences, window geometry, recent
+  // files, and the no-key endpoint config. null until the first getAppConfig
+  // resolves. The theme + window geometry apply on load; the recent-files list
+  // renders in the header. A read failure honest-degrades server-side, so this
+  // always resolves to a usable AppConfig.
+  const [appConfig, setAppConfigState] = useState<AppConfig | null>(null);
+  // Latest AppConfig behind a ref so the debounced window-geometry persist
+  // writes the freshest values without depending on stale state in its closure.
+  const appConfigRef = useRef<AppConfig | null>(null);
+  // Avoid restoring window geometry more than once: the first time appConfig
+  // lands, apply the stored size/position; later loads (after a save) must NOT
+  // re-apply (would snap the user's just-resized window back).
+  const geometryRestoredRef = useRef(false);
 
   /** Poll the backend for the most recent per-turn persistence failure
    * (review H4). Called at the end of every mutating handler so a dropped
@@ -166,7 +197,123 @@ export default function App() {
     void refresh();
     // refreshKeyStatus swallows its own errors, so no disable is needed here.
     void refreshKeyStatus();
+    // Load app-config (ADR-0038): theme + window geometry + recent files. Errors
+    // are swallowed server-side (honest-degrade), so a reject here is an IPC
+    // fault -- non-fatal, the app keeps defaults-equivalent null state.
+    void getAppConfig()
+      .then((cfg) => {
+        appConfigRef.current = cfg;
+
+        setAppConfigState(cfg);
+      })
+      .catch(() => {
+        // Keep null; theme defaults to "system" (no attribute), no recent files.
+      });
   }, [refresh, refreshKeyStatus]);
+
+  /** Push `cfg` into state + ref and persist it atomically. Centralizes the
+   * "mutate AppConfig" flow so every caller keeps state, ref, and disk aligned.
+   * A persist failure surfaces as a top-level error tagged "load" (the closest
+   * existing kind -- there is no dedicated "settings" kind yet). */
+  const commitAppConfig = useCallback(async (cfg: AppConfig): Promise<void> => {
+    appConfigRef.current = cfg;
+    setAppConfigState(cfg);
+    await setAppConfig(cfg);
+  }, []);
+
+  /** Apply the theme to the document root (ADR-0050). "system" clears the
+   * attribute so the OS preference + CSS media query decide; light/dark set the
+   * data-theme attribute the stylesheet keys off. The actual color CSS is wired
+   * per ADR-0050; this slice persists + restores the choice. */
+  useEffect(() => {
+    const theme: Theme = appConfig?.theme ?? "system";
+    const root = document.documentElement;
+    if (theme === "system") {
+      delete root.dataset.theme;
+    } else {
+      root.dataset.theme = theme;
+    }
+  }, [appConfig?.theme]);
+
+  /** Restore the persisted window geometry ONCE on the first app-config load
+   * (ADR-0038). Guarded: the Tauri window API is absent in jsdom, so every call
+   * is wrapped to no-op on failure rather than crash the render. Later loads
+   * (after a save) skip restore -- re-applying would snap a just-resized window
+   * back to the stored value. */
+  useEffect(() => {
+    if (!appConfig || geometryRestoredRef.current) return;
+    const win = safeMainWindow();
+    if (!win) return;
+    geometryRestoredRef.current = true;
+    const { width, height, x, y, maximized } = appConfig.window;
+    if (maximized) {
+      void win.maximize().catch(() => {});
+    } else {
+      void win
+        .setSize(new LogicalSize(width, height))
+        .then(async () => {
+          if (x !== null && y !== null) {
+            await win.setPosition(new LogicalPosition(x, y)).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }
+  }, [appConfig]);
+
+  /** Persist window geometry on resize/move, debounced (ADR-0038). Each event
+   * reads the live size/position from the Tauri window and patches the latest
+   * AppConfig via read-modify-write. Guarded so a missing window API (jsdom) or
+   * an IPC fault never surfaces -- geometry persistence is a convenience, never
+   * a correctness surface. */
+  useEffect(() => {
+    const win = safeMainWindow();
+    if (!win) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const flush = () => {
+      timer = null;
+      Promise.all([win.innerSize(), win.outerPosition(), win.isMaximized()])
+        .then(([size, pos, maximized]) => {
+          const base = appConfigRef.current;
+          if (!base) return;
+          const next: AppConfig = {
+            ...base,
+            window: {
+              width: size.width,
+              height: size.height,
+              x: pos.x,
+              y: pos.y,
+              maximized,
+            },
+          };
+          // Fire-and-forget: a failure here must not loop or surface.
+          void commitAppConfig(next).catch(() => {});
+        })
+        .catch(() => {});
+    };
+    const schedule = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(flush, 500);
+    };
+    const unresizedP = win.onResized(schedule).catch(() => () => {});
+    const unmovedP = win.onMoved(schedule).catch(() => () => {});
+    return () => {
+      if (timer) clearTimeout(timer);
+      void unresizedP.then((un) => un()).catch(() => {});
+      void unmovedP.then((un) => un()).catch(() => {});
+    };
+  }, [commitAppConfig]);
+
+  /** Refresh the recent-files list from the backend after a save/open records a
+   * new path. Swallows errors -- the list is advisory. */
+  const refreshRecentFiles = useCallback(async () => {
+    try {
+      const cfg = await getAppConfig();
+      appConfigRef.current = cfg;
+      setAppConfigState(cfg);
+    } catch {
+      // advisory; leave the stale list.
+    }
+  }, []);
 
   /** Generic mutation hook for simple backend-then-refresh patterns (rename,
    * privacy -- ADR-0037 / ADR-0011). Separates the operation error from a
@@ -460,6 +607,10 @@ export default function App() {
       setError(null);
       try {
         await saveAsDuck(path, stem);
+        // Record into the app-config recent-files list (issue #53). Fire-and-
+        // forget + refresh so the list renders the new entry; a failure is
+        // swallowed inside the backend (advisory).
+        void recordRecentFile(path).then(() => void refreshRecentFiles());
         await refresh();
       } catch (e) {
         setError({ message: fmtError(e), kind: "load" });
@@ -470,22 +621,16 @@ export default function App() {
     } finally {
       setPersistenceBusy(false);
     }
-  }, [refresh, pollPersistError]);
+  }, [refresh, pollPersistError, refreshRecentFiles]);
 
   // Open a .duck and resume the session across the restart boundary
   // (issue #48, ADR-0034). Resume runs off the UI thread; the resume-progress
   // event drives the status line, and on completion the working set / thread
   // / active are refreshed from the resumed backend session. A cancel (no file
-  // picked) is a no-op.
-  const handleOpenDuck = useCallback(async () => {
-    setPersistenceBusy(true);
-    try {
-      const selected = await openDialog({
-        filters: [{ name: "toptopduck", extensions: ["duck"] }],
-        multiple: false,
-      });
-      const path = typeof selected === "string" ? selected : null;
-      if (!path) return;
+  // picked) is a no-op. The recent-files list (issue #53) reuses
+  // openDuckByPath for click-to-open without the OS dialog.
+  const openDuckByPath = useCallback(
+    async (path: string) => {
       setLoading(true);
       setError(null);
       // Subscribe BEFORE openDuck so the first Source event is never missed
@@ -507,6 +652,9 @@ export default function App() {
       setResumeStatus("正在打开…");
       try {
         await openDuck(path);
+        // Record into the recent-files list (issue #53). Fire-and-forget +
+        // refresh; a failure is swallowed inside the backend (advisory).
+        void recordRecentFile(path).then(() => void refreshRecentFiles());
         setResumeStatus(null);
         setLatestResult(null);
         await refresh();
@@ -518,10 +666,35 @@ export default function App() {
         setLoading(false);
         void pollPersistError();
       }
+    },
+    [refresh, pollPersistError, refreshRecentFiles],
+  );
+
+  const handleOpenDuck = useCallback(async () => {
+    setPersistenceBusy(true);
+    try {
+      const selected = await openDialog({
+        filters: [{ name: "toptopduck", extensions: ["duck"] }],
+        multiple: false,
+      });
+      const path = typeof selected === "string" ? selected : null;
+      if (!path) return;
+      await openDuckByPath(path);
     } finally {
       setPersistenceBusy(false);
     }
-  }, [refresh, pollPersistError]);
+  }, [openDuckByPath]);
+
+  /** Open a recent file by its stored path (issue #53). Same resume flow as the
+   * OS-dialog open, minus the dialog. A path that fails to resume (moved /
+   * deleted) surfaces the normal open error; the entry stays in the list so the
+   * user can retry or ignore it. */
+  const handleOpenRecent = useCallback(
+    (path: string) => {
+      void openDuckByPath(path);
+    },
+    [openDuckByPath],
+  );
 
   const shown = datasets.find((d) => d.reference_name === selected) ?? null;
 
@@ -559,6 +732,25 @@ export default function App() {
           <p className="persist-warning" role="status">
             自动保存失败：{persistError}（内存中的最新更改未写入磁盘，关闭 app 前请重试保存）
           </p>
+        )}
+        {appConfig && appConfig.recent_files.length > 0 && (
+          <nav className="recent-files" aria-label="最近文件">
+            <span className="muted">最近：</span>
+            {appConfig.recent_files.map((p) => {
+              const base = p.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? p;
+              return (
+                <button
+                  key={p}
+                  className="recent-file"
+                  title={p}
+                  disabled={loading || persistenceBusy || resumeStatus !== null}
+                  onClick={() => handleOpenRecent(p)}
+                >
+                  {base}
+                </button>
+              );
+            })}
+          </nav>
         )}
       </header>
 
@@ -641,8 +833,10 @@ export default function App() {
         />
       )}
 
-      {settingsOpen && (
+      {settingsOpen && appConfig && (
         <SettingsDialog
+          appConfig={appConfig}
+          onCommitAppConfig={(cfg) => void commitAppConfig(cfg)}
           // Closing the dialog also refreshes the key indicator, so a save or
           // clear is reflected in the header status immediately.
           onClose={() => {

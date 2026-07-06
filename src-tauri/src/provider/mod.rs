@@ -14,6 +14,7 @@
 pub mod anthropic;
 pub mod fake;
 pub mod keychain;
+pub mod live_config;
 pub mod prompt;
 
 use crate::model::TextKind;

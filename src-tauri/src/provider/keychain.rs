@@ -1,27 +1,30 @@
 //! Key isolation (ADR-0029 invariant 3): the decrypted API key lives only in
 //! the Rust core process. The frontend never holds it -- it sends the key once
 //! via IPC to be stored, and thereafter learns only "is one set?" (a bool). The
-//! provider fetches the key per turn from the OS keychain and attaches it to
-//! the LLM HTTP call (which the Rust core, not the webview, places).
+//! provider fetches the key per turn from the OS keychain and attaches it to the
+//! LLM HTTP call (which the Rust core, not the webview, places).
 //!
-//! Two keychain entries back the v1 config:
-//! - the secret API key (service `toptopduck`, account `anthropic-api-key`);
-//! - a non-secret config JSON blob `{base_url, model}` (account
-//!   `provider-config`). ADR-0038 defers a full app-config file; for v1 both
-//!   ride the keychain as persistent Rust-side storage. The key never enters
-//!   the config blob, and [`ProviderConfigView`] never returns the key.
+//! As of ADR-0038 / issue #53, [`KeychainStore`] is **key-only**. The non-secret
+//! provider config (`{base_url, model}`) moved to the app-config file -- the
+//! keychain is no longer its home. A legacy `provider-config` keychain entry
+//! from an older build is surfaced via [`KeychainStore::fetch_legacy_provider_blob`]
+//! so [`crate::provider::LiveProviderConfig`] can seed app-config on first launch
+//! (one-time migration), then cleared via [`KeychainStore::clear_legacy_provider_config`].
+//! The key itself NEVER enters app-config (ADR-0038 secrets-never, enforced
+//! structurally -- the app-config model has no key field -- plus a read-time
+//! secret scan).
 //!
 //! [`KeychainStore`] is stateless -- each call opens the OS entry fresh, so the
-//! provider and the IPC commands always see live key/config without caching
-//! (a user who clears the key sees the next turn refuse, not a stale copy).
+//! provider and the IPC commands always see the live key without caching (a user
+//! who clears the key sees the next turn refuse, not a stale copy).
 
 use keyring::Entry;
 
-use crate::model::ProviderConfig;
-
 /// Read-only provider configuration + key access. The provider depends on this
 /// abstraction so its unit tests inject fixed values ([`StaticConfig`]) instead
-/// of touching the OS keychain; production wires [`KeychainStore`].
+/// of touching the OS keychain; production wires
+/// [`crate::provider::LiveProviderConfig`] (key from this keychain + baseURL/model
+/// from app-config, ADR-0038).
 pub trait ProviderConfigSource: Send {
     /// The decrypted API key, or `None` when none is stored (the provider then
     /// refuses the turn as not-wired -- ADR-0028 `NotWired`).
@@ -33,14 +36,19 @@ pub trait ProviderConfigSource: Send {
     fn model(&self) -> String;
 }
 
-/// Service/account coordinates for the two keychain entries.
+/// Service/account coordinates for the two keychain entries. The provider-config
+/// account is now a LEGACY migration source only (ADR-0038 moved its contents to
+/// app-config); it is read once on first launch and best-effort cleared.
 const SERVICE: &str = "toptopduck";
 const KEY_ACCOUNT: &str = "anthropic-api-key";
 const CONFIG_ACCOUNT: &str = "provider-config";
 
-/// Production keychain-backed store (ADR-0029 invariant 3). Stateless and cheap
-/// to clone (no fields); managed as Tauri state for the IPC commands and held
-/// by the real provider for per-turn key/config reads.
+/// Production keychain-backed store (ADR-0029 invariant 3). Key-only as of
+/// ADR-0038: the non-secret provider config moved to app-config. Stateless and
+/// cheap to clone (no fields); managed as Tauri state (inside
+/// [`crate::provider::LiveProviderConfig`]) for the IPC commands, and the real
+/// provider fetches the key per turn via the [`ProviderConfigSource`] impl on
+/// [`crate::provider::LiveProviderConfig`].
 #[derive(Clone, Default)]
 pub struct KeychainStore;
 
@@ -77,46 +85,33 @@ impl KeychainStore {
         }
     }
 
-    /// The stored non-secret config, or the v1 defaults when nothing is stored
-    /// yet / the blob is unreadable (a corrupt blob never bricks the app).
-    pub fn get_config(&self) -> ProviderConfig {
-        let Some(blob) = self.fetch_config_blob() else {
-            return ProviderConfig::defaults();
-        };
-        serde_json::from_str(&blob).unwrap_or_else(|_| ProviderConfig::defaults())
-    }
-
-    /// Store the non-secret config (base URL + model). The key never enters
-    /// this blob (ADR-0029: key confined to its own entry).
-    pub fn set_config(&self, cfg: &ProviderConfig) -> Result<(), String> {
-        let blob = serde_json::to_string(cfg).map_err(|e| e.to_string())?;
-        let entry = Entry::new(SERVICE, CONFIG_ACCOUNT).map_err(keychain_err)?;
-        entry.set_password(&blob).map_err(keychain_err)?;
-        Ok(())
-    }
-
-    fn fetch_key(&self) -> Option<String> {
+    /// The stored API key, or `None` when nothing is stored. The provider reads
+    /// this per turn (stateless: each call opens the OS entry fresh).
+    pub fn fetch_key(&self) -> Option<String> {
         let entry = Entry::new(SERVICE, KEY_ACCOUNT).ok()?;
         entry.get_password().ok()
     }
 
-    fn fetch_config_blob(&self) -> Option<String> {
+    /// Read the LEGACY provider-config blob (`{base_url, model}` JSON) that older
+    /// builds stored in the keychain, or `None` when none is stored. ADR-0038
+    /// moved this to app-config; this accessor exists ONLY for the one-time
+    /// first-launch migration in [`crate::provider::LiveProviderConfig`]. A
+    /// corrupt / unparseable blob yields `None` (the migration then falls back to
+    /// app-config defaults) -- a corrupt legacy entry never bricks the app.
+    pub fn fetch_legacy_provider_blob(&self) -> Option<String> {
         let entry = Entry::new(SERVICE, CONFIG_ACCOUNT).ok()?;
         entry.get_password().ok()
     }
-}
 
-impl ProviderConfigSource for KeychainStore {
-    fn api_key(&self) -> Option<String> {
-        self.fetch_key()
-    }
-    fn base_url(&self) -> String {
-        // get_config already fell back to defaults when no/empty stored value,
-        // so the effective base URL is the stored-or-default field verbatim.
-        self.get_config().base_url
-    }
-    fn model(&self) -> String {
-        self.get_config().model
+    /// Best-effort delete of the legacy provider-config entry. Called after the
+    /// migration seeds app-config so the stale non-secret blob does not linger.
+    /// Idempotent and never fails the caller: a missing entry or a keychain error
+    /// is swallowed (the migration already succeeded; cleanup is best-effort).
+    pub fn clear_legacy_provider_config(&self) {
+        let Ok(entry) = Entry::new(SERVICE, CONFIG_ACCOUNT) else {
+            return;
+        };
+        let _ = entry.delete_credential();
     }
 }
 
@@ -130,7 +125,7 @@ fn keychain_err(e: keyring::Error) -> String {
 /// Test double for [`ProviderConfigSource`]: fixed key + base URL + model, no OS
 /// access. Lets the real provider's HTTP/auth/parse path run against a mockito
 /// server without any keychain (the orchestrator integration test uses it too).
-/// Not used in production, where [`KeychainStore`] is wired.
+/// Not used in production, where [`crate::provider::LiveProviderConfig`] is wired.
 pub struct StaticConfig {
     pub key: Option<String>,
     pub base_url: String,

@@ -7,12 +7,13 @@ use std::sync::{Arc, Mutex};
 
 use tauri::{Emitter, State};
 
+use crate::app_config::AppConfig;
 use crate::cancel::CancelToken;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, LoadOutcome, ProviderConfig, ProviderConfigView, RowPage,
-    SheetGuidance, ThreadEntry, TurnOutcome, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
+    SheetGuidance, ThreadEntry, TurnOutcome,
 };
-use crate::provider::keychain::KeychainStore;
+use crate::provider::live_config::LiveProviderConfig;
 use crate::session::{ResumeEvent, Session};
 
 /// Ingest a file. Runs the DuckDB copy-in off the async/UI thread (AC8: does not
@@ -234,71 +235,113 @@ pub async fn read_rows(
     .map_err(|e| e.to_string())?
 }
 
-// --- LLM provider key + config (issue #29, ADR-0007/0019/0029) -------------
+// --- LLM provider key + endpoint config (issue #29/#53, ADR-0007/0019/0029/0038) ---
 //
 // The API key crosses IPC exactly once (frontend -> Rust, stored), and
-// thereafter the frontend learns only a boolean. The non-secret config (base
-// URL + model) crosses both ways. Every read/write hits the OS keychain via the
-// managed [`KeychainStore`] (ADR-0029 invariant 3: the decrypted key lives only
-// in the Rust core; the webview has no keychain access and no HTTP egress).
+// thereafter the frontend learns only a boolean. The non-secret endpoint config
+// (base URL + model) crosses both ways. As of ADR-0038 the key lives in the OS
+// keychain and the endpoint config lives in the app-config file -- both reached
+// through the single managed [`LiveProviderConfig`] (the key never enters
+// app-config; the endpoint never enters the keychain).
 
 /// Whether an API key is stored. Returns a boolean only -- never the key
 /// itself (ADR-0029 invariant 3). The frontend uses this to decide whether to
 /// prompt for configuration before the first turn.
 #[tauri::command]
-pub fn has_api_key(store: State<'_, KeychainStore>) -> Result<bool, String> {
-    Ok(store.has_key())
+pub fn has_api_key(live: State<'_, LiveProviderConfig>) -> Result<bool, String> {
+    Ok(live.has_key())
 }
 
 /// Store the API key the frontend collected (ADR-0029: a one-shot
 /// frontend-to-Rust transfer; the key is never returned back across IPC).
 #[tauri::command]
-pub fn set_api_key(store: State<'_, KeychainStore>, key: String) -> Result<(), String> {
-    store.set_key(&key)
+pub fn set_api_key(live: State<'_, LiveProviderConfig>, key: String) -> Result<(), String> {
+    live.set_key(&key)
 }
 
 /// Remove the stored API key. Idempotent: a missing entry is success; a real
 /// keychain error propagates so the frontend can tell the user the key did not
 /// come out. After a successful clear, `has_api_key` is false and the next turn
-/// refuses as not-wired.
+/// refuses honestly as not-wired.
 #[tauri::command]
-pub fn clear_api_key(store: State<'_, KeychainStore>) -> Result<(), String> {
-    store.clear_key()
+pub fn clear_api_key(live: State<'_, LiveProviderConfig>) -> Result<(), String> {
+    live.clear_key()
 }
 
-/// Read the effective provider config + whether a key is set (ADR-0019/0029).
-/// The base URL + model cross IPC; the key does not (only the boolean).
+/// Read the effective provider endpoint + whether a key is set (ADR-0019/0029/
+/// 0038). The base URL + model cross IPC from app-config; the key does not (only
+/// the boolean, from the keychain).
 #[tauri::command]
-pub fn get_provider_config(store: State<'_, KeychainStore>) -> Result<ProviderConfigView, String> {
-    let cfg = store.get_config();
+pub fn get_provider_config(
+    live: State<'_, LiveProviderConfig>,
+) -> Result<ProviderConfigView, String> {
+    let cfg = live.load();
     Ok(ProviderConfigView {
-        base_url: cfg.base_url,
-        model: cfg.model,
-        has_key: store.has_key(),
+        base_url: cfg.provider.base_url,
+        model: cfg.provider.model,
+        has_key: live.has_key(),
     })
 }
 
-/// Save the non-secret provider config (Anthropic-protocol base URL + model,
-/// ADR-0019). Empty fields normalize to the v1 defaults so the stored blob is
-/// always valid (and `get_provider_config` then reads consistent values). The
-/// API key never enters this path (ADR-0029: key confined to its own entry).
+/// Save the non-secret provider endpoint (Anthropic-protocol base URL + model,
+/// ADR-0019/0038) into app-config. Empty fields normalize to the v1 defaults so
+/// the stored config is always valid (and `get_provider_config` then reads
+/// consistent values). The API key never enters this path (ADR-0029/0038: key
+/// confined to the OS keychain; app-config has no key field at all).
 #[tauri::command]
 pub fn set_provider_config(
-    store: State<'_, KeychainStore>,
-    mut config: ProviderConfig,
+    live: State<'_, LiveProviderConfig>,
+    config: ProviderConfig,
 ) -> Result<ProviderConfigView, String> {
-    if config.base_url.trim().is_empty() {
-        config.base_url = DEFAULT_PROVIDER_BASE_URL.to_string();
-    }
-    if config.model.trim().is_empty() {
-        config.model = DEFAULT_PROVIDER_MODEL.to_string();
-    }
-    store.set_config(&config)?;
+    let mut cfg = live.load();
+    cfg.provider = config;
+    let stored = live.store(cfg).map_err(|e| e.to_string())?;
     Ok(ProviderConfigView {
-        base_url: config.base_url,
-        model: config.model,
-        has_key: store.has_key(),
+        base_url: stored.provider.base_url,
+        model: stored.provider.model,
+        has_key: live.has_key(),
     })
+}
+
+// --- App-level config (issue #53, ADR-0038) --------------------------------
+//
+// The second at-rest artifact: preferences, defaults, window geometry, recent
+// files, and the no-key endpoint config. Lives in the OS app-data directory,
+// orthogonal to the portable `.duck`. Honest-degrades to defaults on any read
+// failure (missing/corrupt -> built-in defaults, never a crash). The frontend
+// loads it on startup (theme + window geometry + recent files) and persists
+// edits through `set_app_config`.
+
+/// Read the full app-config (ADR-0038). Honest-degrades to built-in defaults on
+/// any failure, so the frontend always receives a usable config. On the first
+/// launch after the ADR-0038 move, seeds the endpoint section from the legacy
+/// keychain blob if one exists (one-time migration inside [`LiveProviderConfig`]).
+#[tauri::command]
+pub fn get_app_config(live: State<'_, LiveProviderConfig>) -> Result<AppConfig, String> {
+    Ok(live.load())
+}
+
+/// Persist the full app-config atomically (ADR-0038). Normalizes (empty endpoint
+/// -> defaults, threads/window_turns clamped to >=1) so the stored file is always
+/// valid, and returns the normalized value that landed on disk. The key never
+/// enters app-config -- the [`AppConfig`] model has no key field, and the write
+/// path cannot synthesize one.
+#[tauri::command]
+pub fn set_app_config(
+    live: State<'_, LiveProviderConfig>,
+    config: AppConfig,
+) -> Result<AppConfig, String> {
+    live.store(config).map_err(|e| e.to_string())
+}
+
+/// Record a recently-opened `.duck` path into the app-config recent-files list
+/// (issue #53). Read-modify-write: load, unshift + dedupe + trim, persist.
+/// Returns nothing -- the list is advisory; a write failure is swallowed inside
+/// [`LiveProviderConfig::record_recent_file`] rather than failing the open.
+#[tauri::command]
+pub fn record_recent_file(live: State<'_, LiveProviderConfig>, path: String) -> Result<(), String> {
+    live.record_recent_file(&path);
+    Ok(())
 }
 
 // --- Cross-session persistence (issue #48, ADR-0034/0036) -------------------
@@ -337,20 +380,19 @@ pub async fn open_duck(
     app: tauri::AppHandle,
     state: State<'_, Arc<Mutex<Session>>>,
     cancel: State<'_, Arc<CancelToken>>,
-    keychain: State<'_, KeychainStore>,
+    live: State<'_, LiveProviderConfig>,
     path: String,
 ) -> Result<(), String> {
     let path = PathBuf::from(path);
     let session_arc = state.inner().clone();
     let cancel_arc = Arc::clone(cancel.inner());
     // The resumed session reuses the SAME provider wiring as a fresh session
-    // (ADR-0007): the real Anthropic client reading the key from the OS
-    // keychain. Resume itself is LLM-free (it re-executes stored SQL), but the
-    // next new turn after resume must reach a live provider -- so the provider
-    // is wired at open time, not deferred.
-    let provider = Box::new(crate::AnthropicProvider::new(Box::new(
-        keychain.inner().clone(),
-    )));
+    // (ADR-0007): the real Anthropic client reading the key from the OS keychain
+    // and the endpoint from app-config (ADR-0038), via the shared
+    // LiveProviderConfig. Resume itself is LLM-free (it re-executes stored SQL),
+    // but the next new turn after resume must reach a live provider -- so the
+    // provider is wired at open time, not deferred.
+    let provider = Box::new(crate::AnthropicProvider::new(Box::new(live.inner().clone())));
     tauri::async_runtime::spawn_blocking(move || {
         let new_session = Session::open_duck(
             &path,
@@ -387,7 +429,9 @@ pub async fn open_duck(
 /// window where closing the app loses the unsaved turns). Returns `None`
 /// after a clean save or after a prior read cleared the failure.
 #[tauri::command]
-pub fn take_persist_error(state: State<'_, Arc<Mutex<Session>>>) -> Result<Option<String>, String> {
+pub fn take_persist_error(
+    state: State<'_, Arc<Mutex<Session>>>,
+) -> Result<Option<String>, String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
     Ok(s.take_persist_error())
 }
