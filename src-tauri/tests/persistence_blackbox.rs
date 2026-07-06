@@ -13,13 +13,15 @@ use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use toptopduck_lib::persistence::SaveError;
 use toptopduck_lib::{
-    ActiveAbandoned, ActiveResolution, CancelToken, FakeProvider, LoadOutcome, PendingConflict,
-    ProviderReply, ResumeError, ResumeEvent, Session, SourceIssue, SourceResolution, TextKind,
-    ThreadEntry, TurnOutcome, UnwiredProvider,
+    is_resuming, ActiveAbandoned, ActiveResolution, CancelToken, FakeProvider, LoadOutcome,
+    PendingConflict, Provider, ProviderError, ProviderReply, ProviderRequest, ResumeError,
+    ResumeEvent, Session, SourceIssue, SourceResolution, TextKind, ThreadEntry, TurnOutcome,
+    UnwiredProvider,
 };
 
 /// Resume with default Abort callbacks for the issue #49 interactive decision
@@ -419,7 +421,7 @@ fn resume_refuses_a_relative_path_that_escapes_the_duck_dir() {
     // ...) into the DuckDB snapshot and from there into LLM samples / column
     // names. resolve_source_path MUST refuse such a path at the resume
     // boundary -- never silently canonicalize back to a file outside the dir.
-    use toptopduck_lib::persistence::{save_atomic, Recipe, SourceRef, RECIPE_FORMAT_VERSION};
+    use toptopduck_lib::persistence::{save_atomic, Recipe, SourceRef};
     use toptopduck_lib::RectifyProvenance;
     use toptopduck_lib::ResumeError;
 
@@ -433,10 +435,12 @@ fn resume_refuses_a_relative_path_that_escapes_the_duck_dir() {
     let outside = dir.path().join("evil.csv");
     fs::write(&outside, b"col\nval\n").expect("write");
 
-    let malicious = Recipe {
-        format_version: RECIPE_FORMAT_VERSION,
-        session_name: "evil".into(),
-        sources: vec![SourceRef {
+    // Review H7 (issue #55): construct via Recipe::build -- format_version is
+    // private, so struct-literal construction is impossible outside the recipe
+    // module. active = None keeps it structurally valid for build().
+    let malicious = Recipe::build(
+        "evil".into(),
+        vec![SourceRef {
             reference_name: "evil".into(),
             display_name: "evil".into(),
             source_path: outside.to_string_lossy().to_string(),
@@ -444,9 +448,10 @@ fn resume_refuses_a_relative_path_that_escapes_the_duck_dir() {
             rectify: RectifyProvenance::NotApplicable,
             fingerprint: "any".into(),
         }],
-        history: vec![],
-        active: None,
-    };
+        vec![],
+        None,
+    )
+    .expect("build malicious recipe");
     save_atomic(&duck, &malicious).expect("save");
 
     let outcome = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {});
@@ -1618,7 +1623,7 @@ fn open_duck_migrates_a_lower_version_recipe_and_persists_current_shape() {
     // The on-disk .duck is now the migrated v1 shape (read_duck reads it
     // back at current version; the legacy outcome_kind field is gone).
     let persisted = read_duck(&duck).expect("read persisted");
-    assert_eq!(persisted.format_version, RECIPE_FORMAT_VERSION);
+    assert_eq!(persisted.format_version(), RECIPE_FORMAT_VERSION);
     assert_eq!(persisted.sources[0].display_name, "people");
     let disk = fs::read_to_string(&duck).expect("read disk");
     assert!(
@@ -1694,7 +1699,7 @@ fn resume_resolves_relative_path_after_moving_the_folder() {
 /// real safety net, not a decorative second copy.
 #[test]
 fn resume_falls_back_to_absolute_when_relative_path_is_missing() {
-    use toptopduck_lib::persistence::{save_atomic, Recipe, SourceRef, RECIPE_FORMAT_VERSION};
+    use toptopduck_lib::persistence::{save_atomic, Recipe, SourceRef};
     use toptopduck_lib::RectifyProvenance;
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1705,16 +1710,16 @@ fn resume_falls_back_to_absolute_when_relative_path_is_missing() {
 
     // Ingest once to capture the fingerprint, then drop and hand-write a
     // recipe with a STALE relative path (inner/missing.csv) alongside the
-    // real absolute path.
+    // real absolute path. Review H7: Recipe::build is the only constructor
+    // (format_version is private); active = None keeps it valid.
     let mut probe = Session::with_provider(Box::new(FakeProvider::new())).expect("session");
     load_source(&mut probe, &outside);
     let fingerprint = probe.get("data").expect("data").fingerprint.clone();
     drop(probe);
 
-    let recipe = Recipe {
-        format_version: RECIPE_FORMAT_VERSION,
-        session_name: "boundary".into(),
-        sources: vec![SourceRef {
+    let recipe = Recipe::build(
+        "boundary".into(),
+        vec![SourceRef {
             reference_name: "data".into(),
             display_name: "data".into(),
             source_path: outside.to_string_lossy().to_string(),
@@ -1722,9 +1727,10 @@ fn resume_falls_back_to_absolute_when_relative_path_is_missing() {
             rectify: RectifyProvenance::NotApplicable,
             fingerprint,
         }],
-        history: vec![],
-        active: None,
-    };
+        vec![],
+        None,
+    )
+    .expect("build boundary recipe");
     save_atomic(&duck, &recipe).expect("save");
 
     let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
@@ -1804,7 +1810,7 @@ fn resume_relinks_when_both_relative_and_absolute_paths_fail() {
 /// absolute pointing at a decoy must not paper over the in-subtree real file.
 #[test]
 fn resume_prefers_relative_when_both_paths_stored_and_match_fingerprint() {
-    use toptopduck_lib::persistence::{save_atomic, Recipe, SourceRef, RECIPE_FORMAT_VERSION};
+    use toptopduck_lib::persistence::{save_atomic, Recipe, SourceRef};
     use toptopduck_lib::RectifyProvenance;
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1829,10 +1835,9 @@ fn resume_prefers_relative_when_both_paths_stored_and_match_fingerprint() {
     let fingerprint = probe.get("data").expect("data").fingerprint.clone();
     drop(probe);
 
-    let recipe = Recipe {
-        format_version: RECIPE_FORMAT_VERSION,
-        session_name: "boundary".into(),
-        sources: vec![SourceRef {
+    let recipe = Recipe::build(
+        "boundary".into(),
+        vec![SourceRef {
             reference_name: "data".into(),
             display_name: "data".into(),
             source_path: decoy.to_string_lossy().to_string(),
@@ -1840,9 +1845,10 @@ fn resume_prefers_relative_when_both_paths_stored_and_match_fingerprint() {
             rectify: RectifyProvenance::NotApplicable,
             fingerprint: fingerprint.clone(),
         }],
-        history: vec![],
-        active: None,
-    };
+        vec![],
+        None,
+    )
+    .expect("build boundary recipe");
     save_atomic(&duck, &recipe).expect("save");
 
     let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
@@ -2265,5 +2271,580 @@ fn resume_after_remove_excludes_stale_from_replay_but_keeps_marked_stale() {
         resumed.active().map(|d| d.reference_name),
         Some("result_1".into()),
         "active must not resolve to the stale placeholder",
+    );
+}
+
+// --- Issue #55: PR #54 review follow-up -- negative-path coverage (T2-T8) ----
+//
+// The original tracer-bullet suite covered only the happy path; these tests
+// pin the negative branches that were typed but never executed. Each maps to
+// a review item: SourceMissing (T2), FingerprintMismatch (T3), Replay-break
+// (T4), ActiveMissing (T5), SaveError (T6), in-flight-no-write (AC2), resume-
+// no-LLM (T8), and the is_resuming backend guard (H8).
+
+/// A provider that counts `generate()` calls (review T8, issue #55). Wraps the
+/// not-wired semantics (every call returns NotWired) behind a counter so a test
+/// can prove resume is LLM-free: across a full resume with a productive chain,
+/// the counter stays at zero. `Send` so the session can hold it behind the
+/// `Box<dyn Provider>`.
+struct CountingProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Provider for CountingProvider {
+    fn generate(&self, _request: &ProviderRequest) -> Result<ProviderReply, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(ProviderError::NotWired)
+    }
+}
+
+/// T8 / AC7 (issue #55): resume re-executes stored SQL and asks the CALLER
+/// (not a cloud model) for every integrity decision. A counting provider must
+/// observe ZERO `generate()` calls across a full resume of a session that had
+/// two productive turns + a textual turn -- every replay ran LLM-free.
+#[test]
+fn resume_does_not_call_the_cloud_llm() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let session = build_session(&duck); // 2 productive + 1 textual turn
+    drop(session);
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let provider = CountingProvider {
+        calls: Arc::clone(&counter),
+    };
+    let (_events, cb) = collect_events();
+    let resumed = Session::open_duck(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(provider),
+        cb,
+        |_| SourceResolution::Abort,
+        |_| ActiveResolution::Abort,
+    )
+    .expect("resume");
+
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "resume must not call the cloud LLM (replays stored SQL LLM-free)"
+    );
+    // The chain replayed without any provider call.
+    assert!(resumed.get("result_1").is_some());
+    assert!(resumed.get("result_2").is_some());
+}
+
+/// T5 (issue #55): a hand-edited `.duck` whose `active` names a source never
+/// in `sources` surfaces as `ResumeError::ActiveMissing` -- the engine never
+/// silently picks a different active source. `Recipe::build` rejects this
+/// shape, so the corruption must arrive through the serde path (a hand edit or
+/// external tool); `read_duck` accepts it (it does not re-validate `active`),
+/// and `resolve_active_pointer` catches it at resume.
+#[test]
+fn resume_rejects_a_recipe_whose_active_points_at_an_unregistered_source() {
+    use toptopduck_lib::persistence::{Recipe, SourceRef};
+    use toptopduck_lib::RectifyProvenance;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let csv = fixture("people.csv");
+
+    // Capture a valid fingerprint so the source verifies and resume reaches
+    // the active-pointer check.
+    let mut probe = Session::with_provider(Box::new(FakeProvider::new())).expect("session");
+    load_source(&mut probe, &csv);
+    let fingerprint = probe.get("people").expect("people").fingerprint.clone();
+    drop(probe);
+
+    // Build a VALID recipe (active = "people", a real source), serialize it,
+    // then corrupt the JSON's `active` to name a source that was never
+    // registered. This bypasses Recipe::build's validation -- the corruption
+    // is post-serialization, the way a hand edit would arrive.
+    let valid = Recipe::build(
+        "active-ghost".into(),
+        vec![SourceRef {
+            reference_name: "people".into(),
+            display_name: "people".into(),
+            source_path: csv.to_string_lossy().to_string(),
+            relative_path: None,
+            rectify: RectifyProvenance::NotApplicable,
+            fingerprint,
+        }],
+        vec![],
+        Some("people".into()),
+    )
+    .expect("build valid base");
+    let mut json = serde_json::to_value(&valid).expect("serialize");
+    json["active"] = serde_json::Value::String("ghost".into());
+    fs::write(&duck, serde_json::to_string(&json).expect("reserialize")).expect("write corrupt");
+
+    let err = match resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}) {
+        Err(e) => e,
+        Ok(_) => panic!("expected ActiveMissing, but resume succeeded"),
+    };
+    match err {
+        ResumeError::ActiveMissing(name) => assert_eq!(name, "ghost"),
+        other => panic!("expected ActiveMissing, got {other}"),
+    }
+}
+
+/// T4 (issue #55): a `.duck` whose productive SQL references a nonexistent
+/// relation breaks replay at that turn. The turn renders as `Failed`
+/// (ADR-0028 outcome C), prior results stay in the working set, and later
+/// turns are dropped -- the honest partial state, not a silent gap.
+#[test]
+fn resume_renders_a_broken_sql_turn_as_failed_and_preserves_prior_results() {
+    use toptopduck_lib::persistence::{
+        save_atomic, Recipe, RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef,
+    };
+    use toptopduck_lib::RectifyProvenance;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let csv = fixture("people.csv");
+
+    let mut probe = Session::with_provider(Box::new(FakeProvider::new())).expect("session");
+    load_source(&mut probe, &csv);
+    let fingerprint = probe.get("people").expect("people").fingerprint.clone();
+    drop(probe);
+
+    // One good turn (result_1 from people) then one broken turn whose SQL
+    // FROMs a relation that does not exist -- replay succeeds for result_1,
+    // fails at result_2.
+    let recipe = Recipe::build(
+        "broken-sql".into(),
+        vec![SourceRef {
+            reference_name: "people".into(),
+            display_name: "people".into(),
+            source_path: csv.to_string_lossy().to_string(),
+            relative_path: None,
+            rectify: RectifyProvenance::NotApplicable,
+            fingerprint,
+        }],
+        vec![
+            RecipeEntry::Turn(RecipeTurn {
+                question: "good".into(),
+                outcome: RecipeOutcome::Materialized {
+                    reference_name: "result_1".into(),
+                    display_name: "result_1".into(),
+                    sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
+                    assumption: None,
+                    stale: None,
+                },
+            }),
+            RecipeEntry::Turn(RecipeTurn {
+                question: "broken".into(),
+                outcome: RecipeOutcome::Materialized {
+                    reference_name: "result_2".into(),
+                    display_name: "result_2".into(),
+                    sql: "SELECT * FROM nonexistent_relation".into(),
+                    assumption: None,
+                    stale: None,
+                },
+            }),
+        ],
+        Some("people".into()),
+    )
+    .expect("build");
+    save_atomic(&duck, &recipe).expect("save");
+
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
+    assert!(
+        resumed.get("result_1").is_some(),
+        "result_1 (K-1) preserved after the break"
+    );
+    assert!(
+        resumed.get("result_2").is_none(),
+        "result_2 (K) NOT materialized -- replay broke"
+    );
+    let broke_failed = resumed.conversation().iter().any(|e| match e {
+        ThreadEntry::Turn(t) => {
+            t.question == "broken" && matches!(&t.outcome, TurnOutcome::Failed { .. })
+        }
+        _ => false,
+    });
+    assert!(
+        broke_failed,
+        "broken-SQL turn rendered as Failed (ADR-0028 outcome C)"
+    );
+}
+
+/// T3 (issue #55): the `Drift` issue carries `expected` (the recipe's recorded
+/// fingerprint) and `found` (the file's current fingerprint). A regression that
+/// swapped them would make the drift signal meaningless -- pin the order so
+/// `expected` is the original and `found` is the drifted, and they differ.
+#[test]
+fn resume_drift_issue_reports_expected_and_found_in_correct_order() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let original = plant_people(dir.path());
+    let session = build_single_source_session(&duck, &original);
+    let people_fp = session.get("people").expect("people").fingerprint.clone();
+    drop(session);
+
+    // Drift the content in place.
+    fs::write(&original, "id,name,score\n9,Zoe,1.1\n").expect("write drifted content");
+
+    // Re-ingest the drifted file to capture its (different) fingerprint.
+    let mut probe = Session::with_provider(Box::new(FakeProvider::new())).expect("session");
+    load_source(&mut probe, &original);
+    let drifted_fp = probe.get("people").expect("people").fingerprint.clone();
+    drop(probe);
+    assert_ne!(
+        people_fp, drifted_fp,
+        "precondition: drift changed the fingerprint"
+    );
+
+    let captured = Rc::new(RefCell::new(None::<SourceIssue>));
+    let captured_for_cb = Rc::clone(&captured);
+    let _ = Session::open_duck(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(UnwiredProvider),
+        |_| {},
+        move |issue| {
+            *captured_for_cb.borrow_mut() = Some(issue.clone());
+            SourceResolution::Abort
+        },
+        |_| ActiveResolution::Abort,
+    );
+
+    let issue = captured
+        .borrow()
+        .as_ref()
+        .expect("Drift issue fired")
+        .clone();
+    match issue {
+        SourceIssue::Drift {
+            expected, found, ..
+        } => {
+            assert_eq!(
+                expected, people_fp,
+                "expected = recipe's recorded fingerprint"
+            );
+            assert_eq!(found, drifted_fp, "found = drifted file's fingerprint");
+            assert_ne!(expected, found);
+        }
+        other => panic!("expected Drift, got {other:?}"),
+    }
+}
+
+/// T2 (issue #55): when the source file is gone, the `Missing` issue carries
+/// `recorded_path` (the recipe's stored absolute path) so the UI can show
+/// "was here, now gone" and offer re-link. Pin the field so a regression that
+/// dropped it (or filled it with the resolved path) fails.
+#[test]
+fn resume_missing_issue_carries_the_recorded_absolute_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let original = plant_people(dir.path());
+    let session = build_single_source_session(&duck, &original);
+    drop(session);
+
+    // Remove the source file entirely.
+    fs::remove_file(&original).expect("remove source");
+
+    let captured = Rc::new(RefCell::new(None::<SourceIssue>));
+    let captured_for_cb = Rc::clone(&captured);
+    let _ = Session::open_duck(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(UnwiredProvider),
+        |_| {},
+        move |issue| {
+            *captured_for_cb.borrow_mut() = Some(issue.clone());
+            SourceResolution::Abort
+        },
+        |_| ActiveResolution::Abort,
+    );
+
+    let issue = captured
+        .borrow()
+        .as_ref()
+        .expect("Missing issue fired")
+        .clone();
+    match issue {
+        SourceIssue::Missing {
+            reference_name,
+            recorded_path,
+        } => {
+            assert_eq!(reference_name, "people");
+            assert_eq!(
+                recorded_path,
+                original.to_string_lossy().to_string(),
+                "recorded_path is the recipe's absolute source_path"
+            );
+        }
+        other => panic!("expected Missing, got {other:?}"),
+    }
+}
+
+/// H8 (issue #55): the process-global `is_resuming` flag is `true` for the
+/// entire `open_duck` duration and cleared on every exit. A mutating command
+/// checking the flag mid-resume would reject. Captured via the progress
+/// callback (fires after the flag is set, before resume completes).
+#[test]
+fn is_resuming_flag_is_true_during_open_duck_and_cleared_after() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let session = build_session(&duck);
+    drop(session);
+
+    let flag_during = Rc::new(RefCell::new(None::<bool>));
+    let flag_for_cb = Rc::clone(&flag_during);
+    let resumed = Session::open_duck(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(UnwiredProvider),
+        move |_ev| {
+            // Capture the flag on the first progress event (mid-resume).
+            if flag_for_cb.borrow().is_none() {
+                *flag_for_cb.borrow_mut() = Some(is_resuming());
+            }
+        },
+        |_| SourceResolution::Abort,
+        |_| ActiveResolution::Abort,
+    )
+    .expect("resume");
+
+    assert_eq!(
+        *flag_during.borrow(),
+        Some(true),
+        "flag is true during resume (mutating commands would reject)"
+    );
+    // The flag clears on every exit (RAII). Other parallel tests in this bin
+    // may also drive resume, so poll for the drained state rather than
+    // asserting a single instantaneous sample.
+    wait_for_is_resuming_clear();
+    assert!(resumed.get("people").is_some(), "session still usable");
+}
+
+/// H8 (issue #55): the `is_resuming` flag is cleared on an ERROR exit too --
+/// a resume that aborts must not leave the flag stuck true (which would block
+/// every later mutating command). Pins the RAII guarantee on ResumeFlagGuard.
+#[test]
+fn is_resuming_flag_is_cleared_on_a_resume_error_exit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let csv = fixture("people.csv");
+    let local = dir.path().join("people.csv");
+    fs::copy(&csv, &local).expect("copy people into tempdir");
+    let single_duck = dir.path().join("single.duck");
+    let single = build_single_source_session(&single_duck, &local);
+    drop(single);
+    fs::remove_file(&local).expect("remove local source");
+
+    match resume_defaults(&single_duck, Arc::new(CancelToken::new()), |_| {}) {
+        Err(_) => {}
+        Ok(_) => panic!("expected resume to fail (source removed)"),
+    }
+    // The error exit dropped the ResumeFlagGuard -> flag cleared. Poll to
+    // drain concurrent resumes from other parallel tests.
+    wait_for_is_resuming_clear();
+}
+
+/// Poll the process-global `is_resuming` flag until it clears (review H8,
+/// issue #55). Tests in this binary run in parallel and many drive `open_duck`,
+/// so an instantaneous `assert!(!is_resuming())` flakes when a peer test's
+/// resume is mid-flight. Polling drains the peer resumes; a stuck-true flag
+/// (the actual regression -- `ResumeFlagGuard::Drop` failing to clear) still
+/// fails by timeout. Caps at 5s so a genuine stuck flag is caught, not hung.
+fn wait_for_is_resuming_clear() {
+    for _ in 0..500 {
+        if !is_resuming() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("is_resuming stayed true for 5s -- flag stuck (ResumeFlagGuard::Drop regression?)");
+}
+
+/// T6 (issue #55): `save_atomic` surfaces `SaveError::Io` when the temp file
+/// cannot be created (here: the target's parent directory does not exist).
+/// The `Serialize` branch is unreachable in practice (a `Recipe` always
+/// serializes); the `Rename` branch is platform-specific (Windows read-only
+/// target). The temp+rename structure guarantees the existing file is never
+/// half-written on any failure -- the rename is atomic, so the target is
+/// either the prior complete recipe or the next complete one.
+#[test]
+fn save_atomic_returns_io_error_when_the_target_directory_does_not_exist() {
+    use toptopduck_lib::persistence::{save_atomic, Recipe, SourceRef};
+    use toptopduck_lib::RectifyProvenance;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let nonexistent = dir.path().join("missing-subdir").join("s.duck");
+    assert!(
+        !nonexistent.parent().unwrap().exists(),
+        "precondition: parent dir absent"
+    );
+
+    let recipe = Recipe::build(
+        "io-test".into(),
+        vec![SourceRef {
+            reference_name: "x".into(),
+            display_name: "x".into(),
+            source_path: "/data/x.csv".into(),
+            relative_path: None,
+            rectify: RectifyProvenance::NotApplicable,
+            fingerprint: "fp".into(),
+        }],
+        vec![],
+        None,
+    )
+    .expect("build");
+
+    let err = save_atomic(&nonexistent, &recipe).unwrap_err();
+    assert!(
+        matches!(err, SaveError::Io(_)),
+        "expected SaveError::Io for a nonexistent parent dir, got {err:?}"
+    );
+}
+
+/// T6 supplement (issue #55): a FAILED save leaves any existing recipe at the
+/// target UNCHANGED -- the temp+rename contract never half-writes the target.
+/// Triggered cross-platform by making the target FILE read-only before the
+/// rename step: on Windows `MoveFileEx(MOVEFILE_REPLACE_EXISTING)` refuses a
+/// read-only destination, surfacing as `SaveError::Rename`. (On POSIX the
+/// rename would succeed against a read-only file, so this test is Windows-only
+/// -- the Io-branch test above covers the failure surface cross-platform.)
+#[cfg(windows)]
+#[test]
+#[allow(clippy::permissions_set_readonly_false)] // restoring writability for tempdir cleanup on Windows
+fn save_atomic_failure_leaves_existing_recipe_bytes_unchanged() {
+    use toptopduck_lib::persistence::{save_atomic, Recipe, SourceRef};
+    use toptopduck_lib::RectifyProvenance;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+
+    let make_recipe = |name: &str| {
+        Recipe::build(
+            name.into(),
+            vec![SourceRef {
+                reference_name: "x".into(),
+                display_name: "x".into(),
+                source_path: "/data/x.csv".into(),
+                relative_path: None,
+                rectify: RectifyProvenance::NotApplicable,
+                fingerprint: "fp".into(),
+            }],
+            vec![],
+            None,
+        )
+        .expect("build")
+    };
+
+    save_atomic(&duck, &make_recipe("first")).expect("save first");
+    let bytes_before = fs::read(&duck).expect("read before");
+
+    // Make the target read-only -> the rename step cannot replace it.
+    let mut perms = fs::metadata(&duck).expect("metadata").permissions();
+    perms.set_readonly(true);
+    fs::set_permissions(&duck, perms).expect("set readonly");
+
+    let err = save_atomic(&duck, &make_recipe("second")).unwrap_err();
+    // Restore writability so tempdir cleanup can delete the file.
+    let mut perms = fs::metadata(&duck).expect("metadata").permissions();
+    perms.set_readonly(false);
+    let _ = fs::set_permissions(&duck, perms);
+
+    assert!(
+        matches!(err, SaveError::Rename(_) | SaveError::Io(_)),
+        "expected Rename (or Io) on a read-only target, got {err:?}"
+    );
+    let bytes_after = fs::read(&duck).expect("read after");
+    assert_eq!(
+        bytes_before, bytes_after,
+        "existing recipe bytes unchanged on a failed save"
+    );
+}
+
+/// AC2 (issue #55): during an in-flight turn that blocks in the provider call,
+/// the recipe is NOT written; exactly ONE write lands at the terminal outcome
+/// (Cancelled). Proves "在飞轮次不写" -- `persist_if_bound` is reachable only
+/// from `record_turn` (after the provider returns), so no mid-flight write can
+/// occur. Verified by probing the file bytes mid-flight.
+struct WriteProbeProvider {
+    duck: PathBuf,
+    cancel: Arc<CancelToken>,
+    /// Snapshot of the recipe bytes taken inside `generate()` (mid-flight),
+    /// before cancel fires -- stashed so the test can compare against the
+    /// pre-turn bytes.
+    mid_flight: Arc<Mutex<Option<Vec<u8>>>>,
+}
+
+impl Provider for WriteProbeProvider {
+    fn generate(&self, _request: &ProviderRequest) -> Result<ProviderReply, ProviderError> {
+        // Mid-flight snapshot: persist_if_bound has NOT run yet (it runs in
+        // record_turn, AFTER generate returns), so this should equal the
+        // pre-turn bytes.
+        if let Ok(bytes) = fs::read(&self.duck) {
+            *self.mid_flight.lock().expect("mid_flight poisoned") = Some(bytes);
+        }
+        // Block until cancel fires.
+        while !self.cancel.is_requested() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // Reply discarded -- the orchestrator sees the cancel flag and lands
+        // Cancelled.
+        Ok(ProviderReply::Sql {
+            sql: "SELECT 1".into(),
+            viz: None,
+            assumption: None,
+        })
+    }
+}
+
+#[test]
+fn cancelled_in_flight_turn_writes_recipe_once_at_terminal_not_mid_flight() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let csv = fixture("people.csv");
+
+    let cancel = Arc::new(CancelToken::new());
+    let mid_flight: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+    let provider = WriteProbeProvider {
+        duck: duck.clone(),
+        cancel: Arc::clone(&cancel),
+        mid_flight: Arc::clone(&mid_flight),
+    };
+    let mut session = Session::with_provider_and_cancel(Box::new(provider), Arc::clone(&cancel))
+        .expect("session");
+    load_source(&mut session, &csv);
+    session
+        .bind_duck(duck.clone(), "in-flight".into())
+        .expect("bind");
+
+    let bytes_before = fs::read(&duck).expect("read before turn");
+
+    // Fire cancel from a separate thread after a short delay -- the ask
+    // thread blocks inside generate() until the flag flips.
+    let cancel_for_thread = Arc::clone(&cancel);
+    let handle = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        cancel_for_thread.request();
+    });
+    let outcome = session.ask("blocking-question");
+    handle.join().expect("cancel thread panicked");
+
+    assert!(
+        matches!(outcome, TurnOutcome::Cancelled),
+        "blocked turn lands as Cancelled"
+    );
+
+    // Mid-flight bytes == pre-turn bytes: NO write happened during the block.
+    let mid = mid_flight
+        .lock()
+        .expect("mid_flight poisoned")
+        .clone()
+        .expect("mid-flight snapshot captured");
+    assert_eq!(
+        mid, bytes_before,
+        "no recipe write during the in-flight provider call (persist_if_bound runs only at record_turn)"
+    );
+    // After the terminal Cancelled outcome, exactly ONE write landed.
+    let bytes_after = fs::read(&duck).expect("read after turn");
+    assert_ne!(
+        bytes_after, bytes_before,
+        "terminal Cancelled outcome wrote the recipe exactly once"
     );
 }

@@ -355,7 +355,7 @@ mod tests {
         let v1 = migrate_to_current(v0, 0).expect("migrate");
         let recipe: Recipe =
             serde_json::from_value(v1).expect("migrated shape deserializes as v1 Recipe");
-        assert_eq!(recipe.format_version, RECIPE_FORMAT_VERSION);
+        assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
         assert_eq!(recipe.sources[0].display_name, "people");
         assert_eq!(recipe.sources[0].reference_name, "people");
         assert!(matches!(

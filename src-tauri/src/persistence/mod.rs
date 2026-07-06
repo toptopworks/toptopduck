@@ -22,7 +22,7 @@ pub mod registry;
 pub use io::{read_duck, save_atomic, LoadError, SaveError};
 pub use migration::{migrate_to_current, MigrationError};
 pub use recipe::{
-    ProductiveTurn, Recipe, RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef,
+    ProductiveTurn, Recipe, RecipeEntry, RecipeError, RecipeOutcome, RecipeTurn, SourceRef,
     RECIPE_FORMAT_VERSION,
 };
 pub use registry::{canonicalize_duck, release, try_acquire};

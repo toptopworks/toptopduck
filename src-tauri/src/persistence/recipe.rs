@@ -14,6 +14,8 @@
 //! (ADR-0040). The productive replay chain is derived from this history at
 //! resume time, so the recipe has one source of truth, not two.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::model::{RectifyProvenance, SourceLifecycleEvent, StaleAnchor, TextKind};
@@ -153,11 +155,28 @@ pub enum RecipeOutcome {
 /// for display + the LLM window, never replayed) rather than being silently
 /// dropped. Every no-result turn and every source lifecycle event is always
 /// visible (ADR-0040).
+///
+/// **Construction invariant (review H7, issue #55):** a `Recipe` is built
+/// only through [`Recipe::build`] on the write path ([`Session::build_recipe`])
+/// or deserialized via [`crate::persistence::io::read_duck`] (which routes on
+/// `format_version` and deduplicates source names). `format_version` is the
+/// one PRIVATE field: it is always [`RECIPE_FORMAT_VERSION`] (pinned by
+/// `build`, never caller-settable), so a struct-literal construction from
+/// outside this module is impossible (Rust requires every field reachable for
+/// a literal) -- external code MUST go through `build` (validated) or serde
+/// (reader-checked). The other fields stay `pub` for read access (mirroring
+/// `SourceRef` / `RecipeEntry`, whose fields are `pub`); the strong guarantee
+/// -- "no illegal state reaches disk" -- is carried by the private
+/// `format_version` + `build`'s validation, not by field-level encapsulation.
+/// Serde still (de)serializes `format_version` because the derive lives in
+/// this module -- the field rides the `.duck` file for version routing
+/// (ADR-0036), even though the Rust value is the constant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Recipe {
     /// Format version (ADR-0036). v1 today; opening refuses a higher version
-    /// honestly so a newer-made file is never silently mis-parsed.
-    pub format_version: u32,
+    /// honestly so a newer-made file is never silently mis-parsed. Private --
+    /// always [`RECIPE_FORMAT_VERSION`], pinned by [`Recipe::build`].
+    format_version: u32,
     pub session_name: String,
     /// The currently-loaded source Datasets (ADR-0034 current source set):
     /// each is re-read on resume and its post-rectify fingerprint verified
@@ -185,7 +204,124 @@ pub struct Recipe {
     pub active: Option<String>,
 }
 
+/// Why [`Recipe::build`] rejected a proposed recipe (review H7, issue #55).
+/// Each variant names the offending field so the caller (today only
+/// [`crate::session::Session::build_recipe`], the single write point) surfaces
+/// a precise invariant violation rather than a generic "invalid recipe" --
+/// the violations are unreachable on the live write path (the working set's
+/// own invariants already guarantee these), so reaching a variant signals a
+/// logic bug or a hand-edited recipe fed back through the constructor.
+#[derive(Debug)]
+pub enum RecipeError {
+    /// `active` names a reference that is not in `sources` (and is not
+    /// `None`). A live [`Session::build_recipe`] cannot produce this -- the
+    /// active pointer always tracks a registered source -- so it signals a
+    /// bug or external tampering.
+    ActiveNotInSources { active: String },
+    /// Two `Materialized` turns in `history` share a `reference_name`.
+    /// `result_N` numbering is never-reused (ADR-0022), so a duplicate is
+    /// always corrupt and must not silently reach the replay chain (one turn
+    /// would shadow the other on resume).
+    DuplicateResultReference { reference_name: String },
+    /// A source-lifecycle event in `history` carries an empty `reference_name`
+    /// -- minimal "引用合法" validation (review H7). Full lifecycle consistency
+    /// (Added-before-Deleted ordering, etc.) is enforced by the live write
+    /// path and deferred here; an empty name is the unambiguous corruption
+    /// signal.
+    EmptySourceEventReference,
+}
+
+impl std::fmt::Display for RecipeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::ActiveNotInSources { active } => write!(
+                f,
+                "活跃指针指向未注册的源「{active}」（active 必须为 None 或 sources 内的名字）"
+            ),
+            Self::DuplicateResultReference { reference_name } => write!(
+                f,
+                "history 中存在重复的 Materialized 引用名「{reference_name}」（result_N 不可复用）"
+            ),
+            Self::EmptySourceEventReference => {
+                write!(f, "history 中存在引用名为空的源生命周期事件")
+            }
+        }
+    }
+}
+impl std::error::Error for RecipeError {}
+
 impl Recipe {
+    /// Construct a recipe with the cross-field invariants validated (review
+    /// H7, issue #55). This is the SINGLE write point -- [`Session::build_recipe`]
+    /// calls it, and no other production path constructs a `Recipe` (the open
+    /// path goes through serde deserialize, which `read_duck`'s version routing
+    /// and duplicate-source check guards). The constructor is the Rust-side
+    /// mirror of the parse-time checks in `read_duck`: it makes the illegal
+    /// states unrepresentable from the write side too, so a future internal
+    /// caller cannot persist a recipe the reader would reject.
+    ///
+    /// `format_version` is NOT a parameter -- it is always pinned to
+    /// [`RECIPE_FORMAT_VERSION`] (ADR-0036); the caller has no business
+    /// choosing it, and pinning it here removes the last field a struct
+    /// literal could otherwise mis-set.
+    ///
+    /// Validated:
+    /// - `active` is `None` or names an entry in `sources`.
+    /// - Every `Materialized` turn's `reference_name` is unique in `history`
+    ///   (ADR-0022 result_N never-reused).
+    /// - Every source-lifecycle event in `history` carries a non-empty
+    ///   `reference_name` (minimal "引用合法" check; full lifecycle ordering is
+    ///   the write path's responsibility).
+    pub fn build(
+        session_name: String,
+        sources: Vec<SourceRef>,
+        history: Vec<RecipeEntry>,
+        active: Option<String>,
+    ) -> Result<Recipe, RecipeError> {
+        if let Some(name) = active.as_deref() {
+            if !sources.iter().any(|s| s.reference_name == name) {
+                return Err(RecipeError::ActiveNotInSources {
+                    active: name.to_string(),
+                });
+            }
+        }
+        let mut seen_results: HashSet<String> = HashSet::new();
+        for entry in &history {
+            match entry {
+                RecipeEntry::Turn(turn) => {
+                    if let RecipeOutcome::Materialized { reference_name, .. } = &turn.outcome {
+                        if !seen_results.insert(reference_name.clone()) {
+                            return Err(RecipeError::DuplicateResultReference {
+                                reference_name: reference_name.clone(),
+                            });
+                        }
+                    }
+                }
+                RecipeEntry::Source(ev) => {
+                    if ev.reference_name.is_empty() {
+                        return Err(RecipeError::EmptySourceEventReference);
+                    }
+                }
+            }
+        }
+        Ok(Recipe {
+            format_version: RECIPE_FORMAT_VERSION,
+            session_name,
+            sources,
+            history,
+            active,
+        })
+    }
+
+    /// The format version this recipe carries (ADR-0036). Always
+    /// [`RECIPE_FORMAT_VERSION`] for a recipe built via [`Recipe::build`] or
+    /// read through [`crate::persistence::io::read_duck`] (which routes on the
+    /// file's version before deserializing). Exposed as an accessor because
+    /// the field is private (caller-settable versions are illegal).
+    pub fn format_version(&self) -> u32 {
+        self.format_version
+    }
+
     /// The still-valid productive chain (ADR-0034/0041): the LIVE Materialized
     /// turns in timeline order -- stale ones (`stale: Some`) are dead turns
     /// (ADR-0041 point 1) and never replayed. This is what resume re-executes:
@@ -268,7 +404,8 @@ mod tests {
                     },
                 }),
             ],
-            active: Some("result_1".into()),
+            // active points at a SOURCE name (ADR-0035), never a result_N.
+            active: Some("people".into()),
         }
     }
 
@@ -333,7 +470,7 @@ mod tests {
                     },
                 }),
             ],
-            active: Some("result_2".into()),
+            active: Some("people".into()),
         };
         let chain = recipe.productive_chain();
         assert_eq!(
@@ -435,7 +572,7 @@ mod tests {
                     ),
                 }),
             ],
-            active: Some("result_1".into()),
+            active: Some("people".into()),
         };
         let chain = recipe.productive_chain();
         assert_eq!(
@@ -532,7 +669,7 @@ mod tests {
                     },
                 }),
             ],
-            active: Some("result_3".into()),
+            active: Some("people".into()),
         };
         let chain = recipe.productive_chain();
         assert_eq!(
@@ -542,6 +679,141 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["result_1".to_string(), "result_3".to_string()],
             "interleaved chain keeps live turns in order, skips the stale middle",
+        );
+    }
+
+    // --- Recipe::build invariant constructor (review H7, issue #55) -------------
+    //
+    // The constructor makes the cross-field illegal states unrepresentable from
+    // the write side. The happy path is covered implicitly by every other test
+    // above (they construct via struct literal in-module, but Session's live
+    // write path goes through build); these tests pin the rejection branches so
+    // a future loosening of build() fails loudly here rather than silently
+    // persisting a recipe read_duck would later reject.
+
+    #[test]
+    fn build_accepts_a_valid_recipe_and_pins_format_version() {
+        // The minimal valid shape: one source, the active pointer inside it,
+        // one productive turn. format_version comes from the constant -- the
+        // caller does not pass it.
+        let recipe = Recipe::build(
+            "valid".into(),
+            vec![csv_source("people", "fp")],
+            vec![RecipeEntry::Turn(RecipeTurn {
+                question: "多少人".into(),
+                outcome: RecipeOutcome::Materialized {
+                    reference_name: "result_1".into(),
+                    display_name: "result_1".into(),
+                    sql: "SELECT 1".into(),
+                    assumption: None,
+                    stale: None,
+                },
+            })],
+            Some("people".into()),
+        )
+        .expect("valid recipe builds");
+        assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
+        assert_eq!(recipe.active.as_deref(), Some("people"));
+    }
+
+    #[test]
+    fn build_accepts_none_active_for_an_empty_working_set() {
+        // ADR-0035: empty sources + None active is a valid recipe (the last
+        // source was removed). build must not reject it.
+        let recipe = Recipe::build("空".into(), Vec::new(), Vec::new(), None)
+            .expect("empty working set builds");
+        assert!(recipe.sources.is_empty());
+        assert!(recipe.active.is_none());
+    }
+
+    #[test]
+    fn build_rejects_active_pointing_at_an_unregistered_source() {
+        // active must be None or name a source in `sources`. A name that is
+        // neither -- here a result_N mistaken for a source -- is the exact
+        // corruption struct-literal construction used to allow (the in-module
+        // helpers above were corrected for it). build closes the hole.
+        let err = Recipe::build(
+            "bad-active".into(),
+            vec![csv_source("people", "fp")],
+            Vec::new(),
+            Some("result_1".into()),
+        )
+        .unwrap_err();
+        match err {
+            RecipeError::ActiveNotInSources { active } => {
+                assert_eq!(active, "result_1");
+            }
+            other => panic!("expected ActiveNotInSources, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_rejects_a_duplicate_materialized_reference_name() {
+        // ADR-0022 result_N is never reused. Two Materialized turns sharing a
+        // name would shadow one another on the replay chain; build refuses.
+        let dup_turn = RecipeTurn {
+            question: "q".into(),
+            outcome: RecipeOutcome::Materialized {
+                reference_name: "result_1".into(),
+                display_name: "result_1".into(),
+                sql: "SELECT 1".into(),
+                assumption: None,
+                stale: None,
+            },
+        };
+        let err = Recipe::build(
+            "dup".into(),
+            vec![csv_source("people", "fp")],
+            vec![
+                RecipeEntry::Turn(dup_turn.clone()),
+                RecipeEntry::Turn(dup_turn),
+            ],
+            Some("people".into()),
+        )
+        .unwrap_err();
+        match err {
+            RecipeError::DuplicateResultReference { reference_name } => {
+                assert_eq!(reference_name, "result_1");
+            }
+            other => panic!("expected DuplicateResultReference, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_rejects_an_empty_source_event_reference_name() {
+        // A source-lifecycle event with an empty reference_name is unambiguous
+        // corruption (a hand edit or a logic bug); build surfaces it rather
+        // than persisting a recipe whose timeline cannot name what it refers
+        // to. Full lifecycle ordering (Added-before-Deleted) stays the write
+        // path's job -- this is the minimal "引用合法" check.
+        use crate::model::SourceLifecycleKind;
+        let err = Recipe::build(
+            "empty-ev".into(),
+            vec![csv_source("people", "fp")],
+            vec![RecipeEntry::Source(SourceLifecycleEvent {
+                kind: SourceLifecycleKind::Added,
+                reference_name: String::new(),
+                display_name: "people".into(),
+            })],
+            Some("people".into()),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, RecipeError::EmptySourceEventReference),
+            "expected EmptySourceEventReference, got {err:?}",
+        );
+    }
+
+    /// The accessor returns the same value the field holds -- pins that build
+    /// routes through the constant (not, say, defaulting to 0). A regression
+    /// that left format_version at its `u32::default()` would fail here.
+    #[test]
+    fn build_format_version_is_the_current_constant_not_default() {
+        let recipe = Recipe::build("v".into(), Vec::new(), Vec::new(), None).expect("build");
+        assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
+        assert_ne!(
+            RECIPE_FORMAT_VERSION, 0,
+            "test precondition: constant is non-zero"
         );
     }
 }

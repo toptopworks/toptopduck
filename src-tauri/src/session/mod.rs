@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -32,9 +32,7 @@ use crate::model::{
     SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, StaleReason, ThreadEntry, TurnError,
     TurnOutcome, TurnRecord, EXECUTE_FAIL_PREFIX, RESOURCE_FAIL_PREFIX,
 };
-use crate::persistence::recipe::{
-    Recipe, RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef, RECIPE_FORMAT_VERSION,
-};
+use crate::persistence::recipe::{Recipe, RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef};
 use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
 use crate::persistence::{read_duck, save_atomic, SaveError};
 use crate::provider::{Provider, ProviderError, ProviderReply, UnwiredProvider};
@@ -317,6 +315,58 @@ fn hash_file(path: &Path) -> Result<Option<String>, std::io::Error> {
     hasher.update(&bytes);
     let digest = hasher.finalize();
     Ok(Some(digest.iter().map(|b| format!("{b:02x}")).collect()))
+}
+
+/// Process-global count of in-flight resumes (review H8, issue #55): > 0 while
+/// any [`Session::open_duck`] is rebuilding a session across the restart
+/// boundary. During resume the managed `Arc<Mutex<Session>>` still holds the
+/// PRE-resume session -- a concurrent mutating IPC command (`ask` /
+/// `ingest_file` / `replace_source` / `remove_source` /
+/// `remove_active_source`) would silently operate on that stale session and
+/// have its work overwritten when the resumed session lands
+/// (`*s = new_session`). The frontend's shared `loading` flag is the primary
+/// defense; this counter is the Rust-side backstop for the cases the frontend
+/// cannot see (a second window, an IPC replay).
+///
+/// A COUNT (not a boolean) so concurrent resumes compose correctly: two
+/// `open_duck` calls in two windows each acquire (+1), and one finishing
+/// (−1) leaves the counter > 0 while the other is still running -- a mutating
+/// command stays blocked until ALL resumes complete. A boolean would be
+/// falsely cleared by the first finisher. Process-global (not per-Session)
+/// because the hazard spans two Session instances -- the old one in managed
+/// state and the new one under construction.
+static RESUMING_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether any [`Session::open_duck`] resume is currently in flight. Checked
+/// at the top of every mutating command (see `commands.rs`) so a concurrent
+/// IPC call during resume is rejected with a clear error instead of silently
+/// operating on the stale pre-resume session. The count returns to zero on
+/// every exit from `open_duck` (success or error) via the [`ResumeFlagGuard`]
+/// RAII guard, so a resume failure can never leave it stuck > 0.
+pub fn is_resuming() -> bool {
+    RESUMING_COUNT.load(Ordering::SeqCst) > 0
+}
+
+/// RAII guard that increments [`RESUMING_COUNT`] on construction and
+/// decrements on drop. Acquired at the top of [`Session::open_duck`]; held to
+/// the end of the function so every exit path (success, load error, cancel,
+/// abort, replay invariant violation) drops the guard and decrements. NOT
+/// `mem::forget`-transferred to the resumed Session (unlike the registry key)
+/// -- the counter marks "resume is running", and resume ends when `open_duck`
+/// returns, not when the Session later drops.
+struct ResumeFlagGuard;
+
+impl ResumeFlagGuard {
+    fn acquire() -> Self {
+        RESUMING_COUNT.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for ResumeFlagGuard {
+    fn drop(&mut self) {
+        RESUMING_COUNT.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// RAII guard for the single-writer registry key acquired at the top of
@@ -658,6 +708,13 @@ impl Session {
         mut on_source_issue: impl FnMut(SourceIssue) -> SourceResolution,
         mut on_active_abandoned: impl FnMut(ActiveAbandoned) -> ActiveResolution,
     ) -> Result<Session, ResumeError> {
+        // Review H8 (issue #55): mark resume in-flight for the WHOLE function
+        // so concurrent mutating commands reject at the command layer instead
+        // of silently racing the stale pre-resume session. RAII -- every exit
+        // (including `?` error propagation) drops the guard and clears the
+        // flag. Acquired FIRST so even a registry-refuse / load-fail resume
+        // holds the flag for its full (short) duration.
+        let _resume_flag = ResumeFlagGuard::acquire();
         // Single-writer acquire (ADR-0035 Decision 3, issue #50). Held across all
         // resume phases; the guard's Drop releases the key on every error
         // exit, and `mem::forget` on success transfers ownership to the
@@ -986,6 +1043,30 @@ impl Session {
     /// derivation match a live turn (ADR-0009). Replay starts from an empty
     /// result set, so result_N numbers line up with the recipe's recording
     /// order. Fires one `Replay` progress event per turn.
+    ///
+    /// **Trust boundary (review H2, ADR-0036 Decision 5):** the recipe SQL
+    /// re-executed here is **parse-time untrusted** at the resume boundary.
+    /// The per-source fingerprint gating in [`Self::resume_sources`] protects
+    /// the SOURCE CONTENT (the bytes a re-link swapped in match what was
+    /// recorded) -- it does NOT validate the SQL itself. v1 treats the `.duck`
+    /// as a **single-user, self-produced** document (ADR-0036 Decision 5), so
+    /// resume reuses the SAME defenses a live turn relies on rather than a
+    /// recipe-specific SQL AST whitelist. The #1 sandbox
+    /// ([`crate::session::sandbox`]) runs provider SQL with `LocalFileSystem`
+    /// disabled, refusing `read_*` table functions; the subquery wrapping
+    /// (`CREATE TABLE result_N AS SELECT * FROM (<sql>) ...`) rejects
+    /// non-SELECT statements (DROP/ALTER/INSERT/COPY/ATTACH/INSTALL/LOAD) as
+    /// parser errors before they touch a source or the filesystem
+    /// (ADR-0005).
+    ///
+    /// These are the live-turn semantics. A portable / cross-user `.duck`
+    /// (email / USB / attach) would additionally need a SQL AST whitelist
+    /// (only `reference_name`s in `sources`), a PII redaction layer, and an
+    /// "opened an external .duck" risk prompt; all three are explicitly v2
+    /// per ADR-0036 Decision 5 and would require a new ADR calibrating this
+    /// boundary. Until then, recipe SQL that slips past the sandbox plus the
+    /// wrapping is met with the same engine-level guardrails as a live
+    /// provider reply.
     ///
     /// On a round-K SQL failure (data drift / dropped column / abandoned
     /// source referenced by the chain) resume does NOT abort: turn K is
@@ -2621,13 +2702,20 @@ impl Session {
 
         let active = self.working_set.active().map(|d| d.reference_name.clone());
 
-        Recipe {
-            format_version: RECIPE_FORMAT_VERSION,
-            session_name: self.session_name.clone().unwrap_or_default(),
+        // Review H7 (issue #55): route construction through the invariant-
+        // validating constructor. The working set's own invariants guarantee
+        // build() succeeds here -- `active` always tracks a registered source
+        // (or None), `result_N` numbering is never reused (ADR-0022), and
+        // source events always carry non-empty names -- so a failure is a
+        // logic bug, surfaced fail-fast rather than persisted as a corrupt
+        // recipe read_duck would later reject.
+        Recipe::build(
+            self.session_name.clone().unwrap_or_default(),
             sources,
             history,
             active,
-        }
+        )
+        .expect("Session::build_recipe produces a recipe satisfying Recipe::build invariants")
     }
 
     /// Rewrite the recipe at the bound path (ADR-0034 atomic write). No-op
@@ -3241,7 +3329,7 @@ mod tests {
         let session = Session::new().expect("session");
         let recipe = session.build_recipe();
         assert_eq!(
-            recipe.format_version,
+            recipe.format_version(),
             crate::persistence::RECIPE_FORMAT_VERSION
         );
         assert!(recipe.sources.is_empty(), "no sources");
@@ -3266,7 +3354,7 @@ mod tests {
         assert_eq!(session.session_name(), Some("我的分析"));
         let recipe = crate::persistence::read_duck(&path).expect("read back");
         assert_eq!(
-            recipe.format_version,
+            recipe.format_version(),
             crate::persistence::RECIPE_FORMAT_VERSION
         );
         assert_eq!(recipe.session_name, "我的分析");

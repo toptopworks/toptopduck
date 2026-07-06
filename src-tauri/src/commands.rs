@@ -14,7 +14,24 @@ use crate::model::{
     SheetGuidance, ThreadEntry, TurnOutcome,
 };
 use crate::provider::live_config::LiveProviderConfig;
-use crate::session::{ResumeEvent, Session};
+use crate::session::{is_resuming, ResumeEvent, Session};
+
+/// Reject a mutating command while a resume is in flight (review H8, issue
+/// #55). The managed `Arc<Mutex<Session>>` still holds the PRE-resume session
+/// while [`Session::open_duck`] runs in `open_duck`'s `spawn_blocking`, so a
+/// concurrent `ask` / `ingest_file` / `replace_source` / `remove_source` /
+/// `remove_active_source` would silently operate on the stale session and be
+/// overwritten when the resumed session lands (`*s = new_session`). The
+/// frontend's shared `loading` flag is the primary defense; this is the
+/// Rust-side backstop for races the frontend cannot see (a second window, an
+/// IPC replay). Returns a user-facing Chinese error so the call surfaces
+/// honestly rather than appearing to succeed then vanishing.
+fn reject_if_resuming() -> Result<(), String> {
+    if is_resuming() {
+        return Err("正在恢复会话，请稍候再操作".into());
+    }
+    Ok(())
+}
 
 /// Ingest a file. Runs the DuckDB copy-in off the async/UI thread (AC8: does not
 /// freeze the app) and returns the outcome descriptor or a clear error.
@@ -23,6 +40,7 @@ pub async fn ingest_file(
     state: State<'_, Arc<Mutex<Session>>>,
     path: String,
 ) -> Result<LoadOutcome, String> {
+    reject_if_resuming()?;
     let session = state.inner().clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = session.lock().map_err(|e| e.to_string())?;
@@ -42,6 +60,7 @@ pub async fn ingest_file_guided(
     path: String,
     guidance: Vec<SheetGuidance>,
 ) -> Result<LoadOutcome, String> {
+    reject_if_resuming()?;
     let session = state.inner().clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = session.lock().map_err(|e| e.to_string())?;
@@ -102,6 +121,7 @@ pub async fn replace_source(
     reference_name: String,
     path: String,
 ) -> Result<LoadOutcome, String> {
+    reject_if_resuming()?;
     let session = state.inner().clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = session.lock().map_err(|e| e.to_string())?;
@@ -143,6 +163,7 @@ pub fn remove_source(
     state: State<'_, Arc<Mutex<Session>>>,
     reference_name: String,
 ) -> Result<(), String> {
+    reject_if_resuming()?;
     let mut s = state.lock().map_err(|e| e.to_string())?;
     s.remove_source(&reference_name).map_err(|e| e.to_string())
 }
@@ -163,6 +184,7 @@ pub fn remove_active_source(
     reference_name: String,
     continue_with: String,
 ) -> Result<(), String> {
+    reject_if_resuming()?;
     let mut s = state.lock().map_err(|e| e.to_string())?;
     s.remove_active_source(&reference_name, &continue_with)
         .map_err(|e| e.to_string())
@@ -179,6 +201,7 @@ pub async fn ask(
     state: State<'_, Arc<Mutex<Session>>>,
     question: String,
 ) -> Result<TurnOutcome, String> {
+    reject_if_resuming()?;
     let session = state.inner().clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = session.lock().map_err(|e| e.to_string())?;
