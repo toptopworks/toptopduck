@@ -373,14 +373,24 @@ mod fake {
             _sql: &str,
             _cancel: &CancelToken,
             _result_name: String,
-            _deps: &mut TurnDeps,
+            deps: &mut TurnDeps,
         ) -> Result<DatasetDescriptor, ExecError> {
             let n = self.calls.fetch_add(1, Ordering::SeqCst);
             let idx = n.min(self.results.len().saturating_sub(1));
-            self.results
-                .get(idx)
-                .cloned()
-                .unwrap_or_else(|| Err(ExecError::new(ExecErrorKind::Runtime, "fake".to_string())))
+            match self.results.get(idx).cloned() {
+                // Mirror RealMaterializer's working-set side effect so a
+                // Resumer / TurnRunner unit test can assert "K-1 results
+                // preserved in the working set" after a replay / turn without
+                // touching DuckDB. Only register_result is mirrored -- GC +
+                // provenance are not observable from the orchestration tests
+                // that consume this fake, so they stay out (KISS).
+                Some(Ok(descriptor)) => {
+                    deps.working_set.register_result(descriptor.clone());
+                    Ok(descriptor)
+                }
+                Some(Err(e)) => Err(e),
+                None => Err(ExecError::new(ExecErrorKind::Runtime, "fake".to_string())),
+            }
         }
     }
 }
