@@ -2,16 +2,16 @@
 //! result_N) plus READ_ONLY-attached source snapshots (ADR-0004/0005/0012). The
 //! per-session temp dir holds the snapshot files and is cleared on drop (ADR-0012).
 
+pub mod materializer;
 pub mod sandbox;
 pub mod snapshot;
+pub mod turn_runner;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 
 use calamine::Data;
@@ -20,9 +20,7 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use crate::cancel::CancelToken;
-use crate::guardrail::{
-    apply_resource_caps, classify_duckdb_error, ExecError, ExecErrorKind, DEFAULT_MAX_RESULT_ROWS,
-};
+use crate::guardrail::{apply_resource_caps, DEFAULT_MAX_RESULT_ROWS};
 use crate::ingest;
 use crate::ingest::schema::quote_ident;
 use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
@@ -30,13 +28,14 @@ use crate::model::{
     DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
     RectifyProvenance, RemoveSourceError, RenameError, RowPage, SheetGuidance, SheetRectify,
     SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, StaleReason, ThreadEntry, TurnError,
-    TurnOutcome, TurnRecord, EXECUTE_FAIL_PREFIX, RESOURCE_FAIL_PREFIX,
+    TurnOutcome, TurnRecord, EXECUTE_FAIL_PREFIX,
 };
 use crate::persistence::recipe::{Recipe, RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef};
 use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
 use crate::persistence::{read_duck, save_atomic, SaveError};
-use crate::provider::{Provider, ProviderError, ProviderReply, UnwiredProvider};
-use crate::session::snapshot::derive_table;
+use crate::provider::{Provider, UnwiredProvider};
+use crate::session::materializer::{Materializer, RealMaterializer, TurnDeps};
+use crate::session::turn_runner::TurnRunner;
 use crate::window;
 use crate::workingset::{WorkingSet, DEFAULT_RESULT_COUNT_CAP};
 
@@ -48,15 +47,6 @@ const GUIDANCE_PREVIEW_ROWS: usize = 12;
 /// requested limit is clamped so a malformed/hostile caller can't pull the whole
 /// table into memory; the physical table still holds the full result.
 const MAX_READ_ROWS: u64 = 10_000;
-
-/// Single retry budget per turn (ADR-0028): malformed contract violations and
-/// schema/runtime execution errors share one budget. The initial attempt plus
-/// this many retries (default 2 -> 3 total attempts); exhaustion yields a
-/// failed outcome with an honest reason. Resource caps / timeouts do NOT enter
-/// the loop (the same SQL would hit the same wall) -- those become the cancel
-/// outcome in #28. The retry is invisible to the user: one question = one
-/// thread entry = one outcome.
-const TURN_RETRY_BUDGET: u32 = 2;
 
 /// Why a resume failed (ADR-0035 honest degrade). The interactive re-link /
 /// drift / active-abandoned decisions land via [`SourceIssue`] /
@@ -418,11 +408,13 @@ pub struct Session {
     working_set: WorkingSet,
     _temp_dir: TempDir, // held to keep its dir alive; cleared on drop (ADR-0012)
     temp_path: PathBuf,
-    /// The LLM provider behind the turn orchestrator (ADR-0007). Defaults to
-    /// [`UnwiredProvider`] (real Claude wires in #29); tests inject a scripted
-    /// fake via [`Self::with_provider`]. `Send` so the session is shareable
-    /// behind an `Arc<Mutex>` and turns can run on a blocking thread.
-    provider: Box<dyn Provider>,
+    /// The turn orchestrator (ADR-0053): owns the retry loop, the cancel/in-
+    /// flight guard, the optional timeout watchdog, and the outcome routing.
+    /// Holds the provider and the materializer behind `Box<dyn ...>` (dyn, not
+    /// generic) so this struct does not parameterize `commands.rs` / `lib.rs`.
+    /// Built in [`Self::with_provider_and_cancel`]; `ask` is a facade over its
+    /// [`TurnRunner::run`].
+    turn_runner: TurnRunner,
     /// The conversation thread (ADR-0028/0039/0040): a unified timeline of turns
     /// AND source lifecycle events, in order. The source of truth the frontend
     /// renders; the window assembler reads only the turns (via [`Self::turns`]),
@@ -455,13 +447,6 @@ pub struct Session {
     /// for the whole turn. Clone it out via [`Self::cancel_token`] before the
     /// lock is taken (e.g. the command layer registers it as managed state).
     cancel: Arc<CancelToken>,
-    /// Optional wall-clock ceiling on one turn (ADR-0005/0021 statement-timeout
-    /// path). When set, `ask` arms a watchdog that fires `cancel.request()` on
-    /// expiry; the running query is interrupted and the turn lands as Cancelled
-    /// (ADR-0028 outcome D -- timeout shares the cancel abort path). `None`
-    /// (default) means no turn-level timeout; engine resource caps
-    /// (ADR-0005 L3) still bound runaway queries. Tunable for tests.
-    turn_timeout: Option<Duration>,
     /// The bound `.duck` path (ADR-0034). When `Some`, every terminal turn
     /// and source lifecycle event atomically rewrites the recipe at this path
     /// (temp + rename, whole-file). `None` until the user saves / opens a
@@ -551,18 +536,24 @@ impl Session {
         // any query runs so a runaway LLM SQL cannot OOM or monopolize the
         // machine. Best-effort; apply_resource_caps logs+swallows a rejection.
         apply_resource_caps(&conn);
+        // TurnRunner owns the provider + materializer behind `Box<dyn>` (dyn,
+        // not generic) so this struct does not parameterize the IPC layer
+        // (ADR-0053). The materializer is stateless (RealMaterializer); the
+        // admin connection / source_files / working_set it borrows live on this
+        // Session and are passed per turn via TurnDeps.
+        let turn_runner =
+            TurnRunner::new(provider, Box::new(RealMaterializer), Arc::clone(&cancel));
         Ok(Self {
             conn,
             working_set: WorkingSet::default(),
             _temp_dir: temp_dir,
             temp_path,
-            provider,
+            turn_runner,
             history: Vec::new(),
             result_row_cap: DEFAULT_MAX_RESULT_ROWS,
             result_count_cap: DEFAULT_RESULT_COUNT_CAP,
             source_files: HashMap::new(),
             cancel,
-            turn_timeout: None,
             duck_path: None,
             session_name: None,
             persist_error: None,
@@ -597,12 +588,13 @@ impl Session {
     }
 
     /// Set a wall-clock ceiling on each turn (ADR-0005/0021 statement-timeout
-    /// path). When set, `ask` arms a watchdog that fires cancel on expiry; the
-    /// running query is interrupted and the turn lands as Cancelled (ADR-0028
-    /// outcome D). `None` disables the turn-level timeout (the default; engine
-    /// resource caps still apply). Tunable for deterministic timeout tests.
+    /// path). Forwards to the [`TurnRunner`], whose watchdog fires cancel on
+    /// expiry; the running query is interrupted and the turn lands as Cancelled
+    /// (ADR-0028 outcome D). `None` disables the turn-level timeout (the
+    /// default; engine resource caps still apply). Tunable for deterministic
+    /// timeout tests.
     pub fn set_turn_timeout(&mut self, timeout: Option<Duration>) {
-        self.turn_timeout = timeout;
+        self.turn_runner.set_turn_timeout(timeout);
     }
 
     /// Bind this session to a `.duck` path (ADR-0034) and immediately persist
@@ -1114,7 +1106,28 @@ impl Session {
                 total,
                 reference_name: turn.reference_name.clone(),
             });
-            match self.try_materialize(&turn.sql, &cancel, turn.reference_name.clone()) {
+            // Re-materialize via the production materializer (ADR-0053): resume
+            // is LLM-free -- it re-executes stored SQL -- so the real (not
+            // injected) materializer is correct here. TurnDeps borrows the same
+            // shared state the live turn path borrows; the block scope releases
+            // those borrows before `rename_display` takes its own `&mut self`.
+            let materialized = {
+                let mut deps = TurnDeps {
+                    conn: &self.conn,
+                    source_files: &self.source_files,
+                    working_set: &mut self.working_set,
+                    result_row_cap: self.result_row_cap,
+                    result_count_cap: self.result_count_cap,
+                    temp_path: &self.temp_path,
+                };
+                RealMaterializer.try_materialize(
+                    &turn.sql,
+                    &cancel,
+                    turn.reference_name.clone(),
+                    &mut deps,
+                )
+            };
+            match materialized {
                 Ok(descriptor) => {
                     if descriptor.display_name != turn.display_name {
                         // ADR-0035 honest signal: log a label-restore failure
@@ -2357,215 +2370,35 @@ impl Session {
     /// in the conversation thread (always visible, ADR-0028/0039); only a result
     /// advances result_N. Infallible -- a question always yields one outcome.
     pub fn ask(&mut self, question: &str) -> TurnOutcome {
-        // Single in-flight + cancellation (ADR-0021, issue #28): begin the turn
-        // on the shared token (marks in-flight, clears any stale request from a
-        // prior turn) and arm the optional timeout watchdog. The guard is held
-        // to end of scope -- its Drop clears in-flight + the interrupt slot on
-        // every exit (including the early Cancelled returns below) and
-        // invalidates the watchdog so a late timeout cannot fire into the next
-        // turn. Clone the Arc into a local so `&cancel` borrows that local, not
-        // `&mut self` (try_materialize takes &mut self).
-        let cancel = Arc::clone(&self.cancel);
-        let guard = cancel.begin_turn();
-        if let Some(timeout) = self.turn_timeout {
-            let alive = guard.watchdog_alive();
-            let token = Arc::clone(&cancel);
-            // Detached: the alive flag is its only tie to this turn. A turn that
-            // finishes before the deadline drops the guard -> alive=false -> the
-            // watchdog wakes, sees false, and does not fire. KNOWN RACE (follow-up
-            // to #28): if the watchdog reads alive=true and then the turn ends and
-            // a new turn begins before request() runs, the cancel lands on the new
-            // turn. The window is a handful of instructions between the load and
-            // request(), only reachable when timeout ~= the prior turn's runtime;
-            // default turn_timeout=None spawns nothing, so production exposure is
-            // near zero. A generation/turn-id guard closes it fully (deferred).
-            // catch_unwind keeps this detached thread self-sufficient: request()
-            // degrades on lock poison (see CancelToken::request), but any residual
-            // panic is logged instead of killing the thread silently.
-            thread::spawn(move || {
-                thread::sleep(timeout);
-                if alive.load(Ordering::SeqCst)
-                    && catch_unwind(AssertUnwindSafe(|| token.request())).is_err()
-                {
-                    log::error!(
-                        target: "toptopduck::session",
-                        "turn watchdog panicked firing cancel; timeout path may be impaired"
-                    );
-                }
-            });
-        }
-
-        // The window assembler consumes turns only (ADR-0040): source lifecycle
-        // events live in the same timeline but are filtered out here, so they
-        // never enter the LLM turn window or occupy an N=20 slot.
+        // Facade over TurnRunner (ADR-0053): assemble the provider request,
+        // compute the stable result_N (a failed attempt registers nothing, so N
+        // is stable across retries -- ADR-0022), drive the orchestrator with the
+        // shared session state borrowed via TurnDeps, then record the outcome.
+        // The retry / cancel / error-routing that used to live inline here
+        // moved to [`TurnRunner::run`]; `record_turn` stays on the facade (the
+        // conversation timeline + persistence are session concerns, not turn
+        // orchestration -- ADR-0053 Decision 2).
         let turns = self.turns();
         let request = window::assemble(question, &self.working_set, &turns);
-        // Collect each attempt's failure so exhaustion surfaces them all, not
-        // just the last -- a SQL execution error (the actionable kind) would
-        // otherwise be overwritten by a later transient Unavailable. Consecutive
-        // identical failures dedupe so a persistently-bad SQL isn't repeated
-        // across attempts.
-        let mut failures: Vec<String> = Vec::new();
-        for _attempt in 0..=TURN_RETRY_BUDGET {
-            // Cancel check at the loop top: a cancel that arrived before the
-            // first attempt or during the prior attempt aborts immediately as
-            // Cancelled (ADR-0021/0028 outcome D). No retry -- the user asked to
-            // stop, and a timed-out SQL would re-hit the same wall.
-            if cancel.is_requested() {
-                return self.record_turn(question, TurnOutcome::Cancelled);
-            }
-            match self.provider.generate(&request) {
-                // Textual branch (ADR-0017/0018): a valid non-result turn -- no
-                // retry, no result_N. The provider's text + assumption ride the
-                // outcome verbatim. A cancel that arrived during the (possibly
-                // slow) provider call wins over a textual reply: the user asked
-                // to stop, so this is Cancelled, not a clarification.
-                Ok(ProviderReply::Text {
-                    kind,
-                    body,
-                    assumption,
-                }) => {
-                    if cancel.is_requested() {
-                        return self.record_turn(question, TurnOutcome::Cancelled);
-                    }
-                    let outcome = TurnOutcome::Textual {
-                        text_kind: kind,
-                        body,
-                        assumption,
-                    };
-                    return self.record_turn(question, outcome);
-                }
-                // SQL branch: execute + materialize. A schema/runtime failure
-                // (bad reference, type error) consumes the budget and retries;
-                // a resource-cap hit does NOT retry (the same SQL would hit the
-                // same wall, ADR-0005/0028) and fails immediately. A cancel
-                // during the query interrupts DuckDB; the resulting error is a
-                // Cancelled turn, not a retryable failure. Success materializes
-                // result_N.
-                Ok(ProviderReply::Sql {
-                    sql,
-                    viz,
-                    assumption,
-                }) => {
-                    // Re-check after the (possibly slow) provider call: if the
-                    // provider blocked past a cancel/timeout, stop now without
-                    // touching DuckDB.
-                    if cancel.is_requested() {
-                        return self.record_turn(question, TurnOutcome::Cancelled);
-                    }
-                    // result_N for this attempt: a failed attempt registers
-                    // nothing, so next_result_number is stable across retries
-                    // (ADR-0022 never-reused). Computed here (not inside
-                    // try_materialize) so resume_replay can pass the recipe's
-                    // recorded name for the same function.
-                    let result_name = format!("result_{}", self.working_set.next_result_number());
-                    match self.try_materialize(&sql, &cancel, result_name) {
-                        Ok(dataset) => {
-                            let outcome = TurnOutcome::Materialized {
-                                dataset: Box::new(dataset),
-                                sql: Some(sql),
-                                viz,
-                                assumption,
-                            };
-                            return self.record_turn(question, outcome);
-                        }
-                        Err(exec_err) => {
-                            // A cancel during the query (engine interrupt or a
-                            // mid-query flag) is Cancelled, not a retryable
-                            // failure -- check the flag before routing on kind.
-                            if cancel.is_requested() {
-                                return self.record_turn(question, TurnOutcome::Cancelled);
-                            }
-                            match exec_err.kind {
-                                // Resource cap: abort now -- retrying cannot help.
-                                ExecErrorKind::Resource => {
-                                    let outcome = TurnOutcome::Failed {
-                                        reason: format!(
-                                            "{}{}",
-                                            RESOURCE_FAIL_PREFIX, exec_err.detail
-                                        ),
-                                    };
-                                    return self.record_turn(question, outcome);
-                                }
-                                // Stale reference (issue #40, ADR-0013 invariant
-                                // 2): refuse without retry -- the same SQL would
-                                // reference the same stale result, so retrying
-                                // only burns budget. Honest Failed turn naming
-                                // the dead reference (the pre-check already wrote
-                                // a full Chinese reason into exec_err.detail).
-                                ExecErrorKind::StaleReference => {
-                                    let outcome = TurnOutcome::Failed {
-                                        reason: exec_err.detail.clone(),
-                                    };
-                                    return self.record_turn(question, outcome);
-                                }
-                                // Guard-checked above: try_materialize only emits
-                                // Cancelled when is_requested() is true, which the
-                                // pre-check already routed to TurnOutcome::Cancelled.
-                                // The arm turns the invariant into a runtime contract
-                                // -- a future second caller of try_materialize that
-                                // forgets the pre-check fails loudly here instead of
-                                // silently retrying a cancel.
-                                ExecErrorKind::Cancelled => unreachable!(
-                                    "Cancelled kind is guard-checked above; \
-                                     try_materialize only emits it when is_requested() \
-                                     is true"
-                                ),
-                                // Schema/runtime: feed the budget and retry.
-                                _ => Self::push_failure(
-                                    &mut failures,
-                                    format!("{}{}", EXECUTE_FAIL_PREFIX, exec_err.detail),
-                                ),
-                            }
-                        }
-                    }
-                }
-                // NotWired is permanent (no provider configured) -- retrying
-                // cannot help, so the turn fails immediately without consuming
-                // the budget.
-                Err(ProviderError::NotWired) => {
-                    let outcome = TurnOutcome::Failed {
-                        reason: ProviderError::NotWired.to_string(),
-                    };
-                    return self.record_turn(question, outcome);
-                }
-                // A contract violation / transient call failure -- consume the
-                // budget and retry with the SAME request (blind retry). The real
-                // client's error re-feed lands in #29; the scripted fake's queue
-                // advances per call.
-                Err(ProviderError::Unavailable(detail)) => {
-                    Self::push_failure(
-                        &mut failures,
-                        ProviderError::Unavailable(detail).to_string(),
-                    );
-                }
-            }
-        }
-        // Budget exhausted: surface the accumulated failures honestly as a failed
-        // turn. The "重试预算耗尽" prefix distinguishes this from a permanent
-        // NotWired failure (which never consumes the budget, ADR-0028), so the
-        // two failure paths read distinctly to the user.
-        let detail = if failures.is_empty() {
-            "未知错误".to_string()
-        } else {
-            failures.join("；")
-        };
-        let outcome = TurnOutcome::Failed {
-            reason: format!("重试预算耗尽：{detail}"),
+        let result_name = format!("result_{}", self.working_set.next_result_number());
+        // Disjoint field borrows: `run` takes `&mut self.turn_runner` while
+        // TurnDeps borrows `&self.conn` / `&self.source_files` /
+        // `&mut self.working_set` / `&self.temp_path` -- distinct Session
+        // fields, so they coexist without widening to `&mut self`. The block
+        // scope drops the deps borrow before `record_turn` takes its own
+        // `&mut self`.
+        let outcome = {
+            let mut deps = TurnDeps {
+                conn: &self.conn,
+                source_files: &self.source_files,
+                working_set: &mut self.working_set,
+                result_row_cap: self.result_row_cap,
+                result_count_cap: self.result_count_cap,
+                temp_path: &self.temp_path,
+            };
+            self.turn_runner.run(&request, result_name, &mut deps)
         };
         self.record_turn(question, outcome)
-    }
-
-    /// Record one retry attempt's failure, deduping consecutive identical
-    /// failures: a persistent error isn't repeated across attempts, while
-    /// distinct failures (e.g. a SQL error then a transient Unavailable) are
-    /// all kept so budget exhaustion surfaces the full picture, not just the
-    /// last attempt.
-    fn push_failure(failures: &mut Vec<String>, detail: String) {
-        match failures.last() {
-            Some(last) if last == &detail => {} // consecutive duplicate -- skip
-            _ => failures.push(detail),
-        }
     }
 
     /// Append a turn to the conversation thread and return its outcome. Every
@@ -2971,260 +2804,6 @@ impl Session {
                 ThreadEntry::Source(_) => None,
             })
             .collect()
-    }
-
-    /// Execute one provider SQL and materialize it as result_N (ADR-0003/0024),
-    /// deriving + registering the result. Returns `Err` carrying a classified
-    /// [`ExecError`] on any failure: a rejected CREATE (engine error -- the
-    /// wrapping rejects mutating statements and COPY/ATTACH/INSTALL/LOAD as
-    /// parser errors; ADR-0005), a hit resource cap, or a shape-derivation
-    /// failure. The caller's retry loop routes on the kind: Resource aborts,
-    /// Schema/Runtime retry (ADR-0028).
-    ///
-    /// On a shape-derivation failure the just-created result_N is rolled back
-    /// first: an orphan table left unregistered would make the next attempt's
-    /// `next_result_number` reuse N and clash on CREATE, wedging every later
-    /// turn (ADR-0022 never-reused). The DROP is best-effort but its own failure
-    /// is folded into the detail so a wedged session is observable, not
-    /// silently masked (M1 regression).
-    ///
-    /// Engine guardrails (ADR-0005): the SQL runs on a locked-down sandbox
-    /// ([`crate::session::sandbox`]) with LocalFileSystem disabled, then is
-    /// embedded as `CREATE TABLE result_N AS SELECT * FROM (<sql>) LIMIT cap+1`.
-    /// The disabled filesystem refuses read_* table functions; the subquery
-    /// wrapping means a non-SELECT statement (DROP/ALTER/INSERT/UPDATE/DELETE,
-    /// COPY/ATTACH/INSTALL/LOAD) is a parser error before it can touch a source
-    /// or the filesystem; the LIMIT pushes down into the scan so at most cap+1
-    /// rows materialize, capping memory on a runaway join. The result name is
-    /// tool-generated; the SQL is provider-supplied -- the only live provider
-    /// returning SQL today is the scripted test fake (the real LLM wires in #29).
-    fn try_materialize(
-        &mut self,
-        sql: &str,
-        cancel: &crate::cancel::CancelToken,
-        result_name: String,
-    ) -> Result<DatasetDescriptor, ExecError> {
-        // result_N is max+1, never reused (ADR-0022). The caller computes the
-        // name: the live ask path derives next_result_number per attempt (a
-        // failed attempt registers nothing, so N is stable across retries);
-        // resume_replay passes the recipe's recorded name verbatim so a stale
-        // gap (e.g. result_1 dead, result_2 live) does not renumber the live
-        // turn -- the chain recreates each result_N under its stable identity.
-
-        // Stale-reference refusal (ADR-0013 invariant 2) + provenance record
-        // (issue #40): parse the SQL once before touching the sandbox so a
-        // stale reference is rejected without burning setup or retry budget.
-        // The same analysis yields the dependency set recorded after a
-        // successful materialize -- the cascade reads it on a later source
-        // delete. Conservative parse failure (deps = all members) is recorded
-        // as-is so a delete never under-cascades ("宁可多失效不漏失效").
-        let deps = crate::provenance::analyze(sql, &self.working_set);
-        if let Some(stale_ref) = deps.stale_ref.as_ref() {
-            return Err(ExecError::new(
-                ExecErrorKind::StaleReference,
-                format!("引用了已失效的 {stale_ref}（因源已删除而失效，不能在新查询中引用）"),
-            ));
-        }
-
-        // Provider SQL runs on a locked-down sandbox (ADR-0005 read_* closure):
-        // a separate instance with LocalFileSystem disabled, so a read_* table
-        // function is refused by the engine ("... disabled by configuration").
-        // Sources are re-attached READ_ONLY (zero-copy; concurrent read-only
-        // attach is allowed) and prior results are mirrored in, so the SQL
-        // resolves identically to admin. Only the sandbox runs provider SQL;
-        // admin runs tool-controlled DML. The sandbox is dropped at end of scope
-        // (lockdown is irreversible, so it is single-use).
-        let sandbox_conn = sandbox::open()?;
-        sandbox::attach_sources(&sandbox_conn, &self.working_set, &self.source_files)?;
-        sandbox::mirror_results(&sandbox_conn, &self.conn, &self.working_set)?;
-        sandbox::lockdown(&sandbox_conn)?;
-
-        // Register the sandbox interrupt handle so a cancel can abort THIS query
-        // at source (ADR-0021 DuckDB interrupt). Scoped to the provider SQL only:
-        // cleared right after the CREATE+count, so the tool-controlled
-        // install/derive steps below (fast, on admin) are never disrupted by a
-        // cancel -- the orchestrator's post-call flag check lands those as
-        // Cancelled without touching the working set.
-        cancel.set_interrupt(sandbox_conn.interrupt_handle());
-
-        // Resource cap (ADR-0005 L3): bracket the query and LIMIT to cap+1 so a
-        // runaway cross-join cannot balloon memory (DuckDB pushes LIMIT into the
-        // scan, so only cap+1 rows ever materialize). The brackets make LIMIT
-        // bind to the whole query output; a trailing ';' is stripped so the
-        // subquery parses. Below, a count of cap+1 means the true result
-        // exceeded the cap -> abort (silent truncation is forbidden, ADR-0030).
-        let inner = sql.trim().trim_end_matches(';').trim_end();
-        let cap_plus_one = self.result_row_cap.saturating_add(1);
-        let create_sql = format!(
-            "CREATE TABLE {} AS SELECT * FROM ({inner}) AS _src LIMIT {cap_plus_one}",
-            quote_ident(&result_name),
-        );
-        let create_outcome = sandbox_conn.execute_batch(&create_sql);
-        // The provider SQL is done (success or failure) -- stop associating the
-        // interrupt handle so a later cancel cannot reach this connection.
-        cancel.clear_interrupt();
-        if let Err(e) = create_outcome {
-            // The engine rejected the CREATE on the sandbox -- a parser error
-            // from a mutating statement / COPY / ATTACH the wrapping bars, a
-            // read_* refusal ("disabled by configuration"), a schema error, a
-            // runtime error, OR the interrupt from a cancel (surfaces as a
-            // generic DuckDB failure -> Runtime here). The caller re-checks the
-            // cancel flag and routes a cancel to Cancelled before any retry, so
-            // the kind only chooses the non-cancel routing.
-            return Err(ExecError::new(
-                classify_duckdb_error(&e.to_string()),
-                e.to_string(),
-            ));
-        }
-        // Row-count governor on the sandbox: count == cap+1 -> the true result
-        // exceeded the cap. Aborts as Resource; the sandbox is dropped (admin
-        // untouched), so -- unlike the install/derive steps below -- no rollback
-        // of result_N is needed here.
-        let rows: i64 = match sandbox_conn.query_row(
-            &format!("SELECT COUNT(*) FROM {}", quote_ident(&result_name)),
-            [],
-            |r| r.get(0),
-        ) {
-            Ok(rows) => rows,
-            Err(e) => return Err(ExecError::new(ExecErrorKind::Runtime, e.to_string())),
-        };
-        if rows as u64 > self.result_row_cap {
-            return Err(ExecError::new(
-                ExecErrorKind::Resource,
-                format!("结果行数（{rows}）超过上限 {}", self.result_row_cap),
-            ));
-        }
-        // Cancel landed between the query's success and the install: the partial
-        // result_N exists on the sandbox only (admin untouched), so no rollback
-        // is needed -- drop the sandbox and let the caller record Cancelled. The
-        // check goes after the resource governor so a genuine over-cap result is
-        // not misread as a cancel. The kind is Cancelled (not Resource) so the
-        // signal stays type-honest -- outcome D, not a cap hit (ADR-0028).
-        if cancel.is_requested() {
-            return Err(ExecError::new(
-                ExecErrorKind::Cancelled,
-                "查询已取消".to_string(),
-            ));
-        }
-
-        // Install the new result onto admin (Value mirror). A failure can leave
-        // a partial result_N on admin, so roll it back (ADR-0022 never-reused).
-        if let Err(e) =
-            sandbox::install_result(&self.conn, &sandbox_conn, &result_name, &result_name)
-        {
-            let detail = Self::rollback_result(&self.conn, &result_name, e.detail);
-            return Err(ExecError::new(ExecErrorKind::Runtime, detail));
-        }
-
-        // Derive the result's shape from admin's installed table -- the same
-        // derivation a source snapshot uses (DRY). A derive failure also rolls
-        // back result_N (orphan table would wedge later turns, ADR-0022).
-        let shape = match derive_table(&self.conn, &result_name, &self.temp_path, &result_name) {
-            Ok(shape) => shape,
-            Err(e) => {
-                let detail = Self::rollback_result(&self.conn, &result_name, e.to_string());
-                return Err(ExecError::new(ExecErrorKind::Runtime, detail));
-            }
-        };
-        let descriptor = DatasetDescriptor {
-            reference_name: result_name.clone(),
-            display_name: result_name.clone(),
-            source_path: String::new(), // derived -- no source file (ADR-0004)
-            columns: shape.columns,
-            row_count: shape.row_count,
-            sample: shape.sample,
-            fingerprint: shape.fingerprint,
-            rectify: RectifyProvenance::NotApplicable,
-            privacy: DatasetPrivacy::default(),
-            stale: None,
-        };
-        // Record the just-materialized result's provenance (issue #40,
-        // ADR-0025): the dependency set the pre-check computed. The cascade
-        // reads this on a later source delete to find dependents. Recorded
-        // under `result_name` (stable identity) AFTER register_result, so the
-        // member_names snapshot at analyze time already excluded this new
-        // result -- no self-dependency. `deps.refs` was pre-intersected with
-        // the then-live working set (members present at the parse moment).
-        self.working_set.register_result(descriptor.clone());
-        self.working_set.record_provenance(&result_name, deps.refs);
-
-        // GC cap (ADR-0013 M=100, issue #42): if the result_N total now
-        // exceeds the cap, auto-reclaim the oldest stale results. The fresh
-        // result is active (stale is None), so it is never a candidate; active
-        // results survive even when older than every stale result. Reclaimed
-        // results keep their producing turn in the thread (visible history) --
-        // only their data becomes unreferenceable.
-        let reclaimed = self.gc_stale_results();
-        if !reclaimed.is_empty() {
-            log::info!(
-                target: "toptopduck::session",
-                "GC 回收最老 stale：{}",
-                reclaimed.join(", ")
-            );
-        }
-        Ok(descriptor)
-    }
-
-    /// Auto-reclaim the oldest stale results when the `result_N` count exceeds
-    /// the cap (ADR-0013, issue #42). GC runs only against stale results --
-    /// active results are never auto-deleted. For each candidate: drop the
-    /// physical table (best-effort; an orphan from a failed DROP is harmless --
-    /// the working-set removal below is the authority on "gone", and the
-    /// session temp dir is wiped on drop either way), then remove the registry
-    /// entry (reference name + result membership + provenance edge). The
-    /// producing turn stays in the thread (AC: round entries preserved). The
-    /// new result's number is unaffected -- `next_result_number` scans only
-    /// registered results, so a GC'd number becomes a permanent hole
-    /// (ADR-0022). Returns the reclaimed names so the caller can log the
-    /// reclaim's reach.
-    fn gc_stale_results(&mut self) -> Vec<String> {
-        let candidates = self.working_set.gc_stale_candidates(self.result_count_cap);
-        for name in &candidates {
-            let drop_sql = format!("DROP TABLE {}", quote_ident(name));
-            if let Err(e) = self.conn.execute_batch(&drop_sql) {
-                // Best-effort, and deliberately warn (not error). The asymmetry
-                // vs `rollback_result`'s error-grade DROP is grounded in
-                // ADR-0022: rollback drops an UN-registered result_N, so an
-                // orphan makes the next `next_result_number` (max over
-                // registered names) reuse N and clash on CREATE -> wedge. GC
-                // drops an already-registered older result_K, and the
-                // `remove` below drops it from the registry, so the next
-                // number is max(remaining)+1 > K -- the orphan never collides
-                // with a future CREATE. warn keeps a recurring engine failure
-                // observable without overstating a non-wedging cleanup miss.
-                log::warn!(
-                    target: "toptopduck::session",
-                    "GC DROP of stale {name} failed: {e}"
-                );
-            }
-            self.working_set.remove(name);
-        }
-        candidates
-    }
-
-    /// Drop a just-created result_N table and fold any cleanup failure into the
-    /// reported detail. An orphan result_N would make the next attempt's
-    /// `next_result_number` reuse N and clash on CREATE, wedging every later
-    /// turn (ADR-0022 never-reused) -- the M1 regression. Surfacing the DROP
-    /// failure keeps a wedged session observable instead of silently masked.
-    fn rollback_result(conn: &Connection, result_name: &str, detail: String) -> String {
-        let drop_sql = format!("DROP TABLE {}", quote_ident(result_name));
-        match conn.execute_batch(&drop_sql) {
-            Ok(()) => detail,
-            Err(drop_err) => {
-                // Session-wedge-grade failure: an orphan result_N makes the next
-                // attempt reuse N and clash on CREATE, wedging every later turn
-                // (ADR-0022). Log at error so it is observable server-side, not
-                // just folded into the user-facing reason string.
-                log::error!(
-                    target: "toptopduck::session",
-                    "rollback DROP of {result_name} failed: {drop_err}; session may wedge on next result_N reuse (ADR-0022)"
-                );
-                format!(
-                    "{detail}; cleanup DROP of {result_name} also failed: {drop_err} (orphan table may wedge later turns)"
-                )
-            }
-        }
     }
 
     /// The conversation thread (ADR-0028/0039/0040): the unified timeline of
