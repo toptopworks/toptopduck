@@ -497,7 +497,18 @@ mod tests {
             TurnRunner::new(Box::new(provider), Box::new(materializer), cancel.clone());
         let cancel_for_thread = cancel.clone();
         thread::spawn(move || {
-            thread::sleep(Duration::from_millis(20));
+            // Wait until run() has called begin_turn (in_flight=true) before
+            // firing: begin_turn unconditionally clears `requested`
+            // (cancel.rs), so a request landing before it -- easy on a CI
+            // runner where the main thread reaches begin_turn slower than the
+            // old 20ms sleep -- is silently dropped and the blocking poll
+            // loop in generate() hangs forever. Polling in_flight gates us to
+            // "after begin_turn"; the short extra sleep lets generate() enter
+            // its blocking loop before we fire.
+            while !cancel_for_thread.is_in_flight() {
+                thread::sleep(Duration::from_millis(1));
+            }
+            thread::sleep(Duration::from_millis(5));
             cancel_for_thread.request();
         });
         let conn = Connection::open_in_memory().expect("in-memory db");
