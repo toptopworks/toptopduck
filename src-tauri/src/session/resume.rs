@@ -158,7 +158,7 @@ pub(crate) enum ResolvedActive {
 /// Turns after K in the recipe's history are dropped (the conversation stops at
 /// the breakpoint). Internal to resume -- the partial state is observable via
 /// the resumed Session's working set + history.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct ReplayBreak {
     reference_name: String,
     reason: String,
@@ -794,6 +794,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn resolve_active_missing_when_callback_picks_source_not_in_remaining() {
+        // Contract: the active-abandoned callback returns a name NOT in the
+        // `remaining` menu (a stale view, or an IPC race). Phase 2 must refuse
+        // to write a dangling active pointer -- ActiveMissing surfaces rather
+        // than a silent guess. Unreachable from production today (commands.rs
+        // returns Abort until the active-abandoned dialog lands); this test
+        // fixes the contract the dialog will rely on.
+        let recipe = recipe_with(Vec::new(), Some("people"));
+        let mut ws = WorkingSet::default();
+        // "people" was rebuilt + detached; "orders" is the only valid pick.
+        ws.register(source_descriptor("orders"));
+        let rebuilt: HashSet<String> = ["people".into()].into_iter().collect();
+        let cancel = Arc::new(CancelToken::new());
+        let mut fake = FakeMaterializer::new(Vec::new());
+        let resumer = Resumer::new(&cancel, &mut fake, &recipe);
+        let err = resumer
+            .resolve_active(&mut ws, &rebuilt, &mut |abandoned: ActiveAbandoned| {
+                assert_eq!(abandoned.remaining, vec!["orders".to_string()]);
+                ActiveResolution::ContinueWith("ghost".into()) // not in remaining
+            })
+            .unwrap_err();
+        match err {
+            ResumeError::ActiveMissing(name) => assert_eq!(name, "ghost"),
+            other => panic!("expected ActiveMissing, got {other:?}"),
+        }
+    }
+
     // --- phase 3: replay -----------------------------------------------------
 
     #[test]
@@ -998,5 +1026,40 @@ mod tests {
             placeholder.stale.is_some(),
             "placeholder must carry the stale anchor"
         );
+    }
+
+    #[test]
+    fn rebuild_timeline_errors_when_break_reference_absent_from_history() {
+        // Contract: replay returned a break whose reference_name is NOT in
+        // recipe.history (a hand-edited recipe that lost the break turn, or a
+        // logic bug). The productive_chain and the history are two views of one
+        // turn list, so a missing break reference is an invariant violation --
+        // fail loudly as ResumeError::Replay instead of silently rendering the
+        // full timeline (which would hide the replay failure from the user).
+        let recipe = recipe_with(
+            vec![materialized_turn("result_1", "SELECT 1")],
+            Some("people"),
+        );
+        let mut ws = WorkingSet::default();
+        ws.register_result(result_descriptor("result_1"));
+        let cancel = Arc::new(CancelToken::new());
+        let mut fake = FakeMaterializer::new(Vec::new());
+        let resumer = Resumer::new(&cancel, &mut fake, &recipe);
+        // "result_99" is absent from recipe.history -> invariant violation.
+        let brk = ReplayBreak {
+            reference_name: "result_99".into(),
+            reason: format!("{}resource cap", EXECUTE_FAIL_PREFIX),
+        };
+        let err = resumer.rebuild_timeline(&mut ws, Some(&brk)).unwrap_err();
+        match err {
+            ResumeError::Replay {
+                reference_name,
+                detail,
+            } => {
+                assert_eq!(reference_name, "result_99");
+                assert!(detail.contains("result_99"), "got {detail}");
+            }
+            other => panic!("expected ResumeError::Replay, got {other:?}"),
+        }
     }
 }
