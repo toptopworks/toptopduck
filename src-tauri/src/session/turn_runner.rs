@@ -234,7 +234,7 @@ impl TurnRunner {
                                      is true"
                                 ),
                                 // Schema/runtime: feed the budget and retry.
-                                _ => Self::push_failure(
+                                _ => push_failure(
                                     &mut failures,
                                     format!("{}{}", EXECUTE_FAIL_PREFIX, exec_err.detail),
                                 ),
@@ -255,7 +255,7 @@ impl TurnRunner {
                 // client's error re-feed lands in #29; the scripted fake's queue
                 // advances per call.
                 Err(ProviderError::Unavailable(detail)) => {
-                    Self::push_failure(
+                    push_failure(
                         &mut failures,
                         ProviderError::Unavailable(detail).to_string(),
                     );
@@ -275,17 +275,17 @@ impl TurnRunner {
             reason: format!("重试预算耗尽：{detail}"),
         }
     }
+}
 
-    /// Record one retry attempt's failure, deduping consecutive identical
-    /// failures: a persistent error isn't repeated across attempts, while
-    /// distinct failures (e.g. a SQL error then a transient Unavailable) are
-    /// all kept so budget exhaustion surfaces the full picture, not just the
-    /// last attempt.
-    fn push_failure(failures: &mut Vec<String>, detail: String) {
-        match failures.last() {
-            Some(last) if last == &detail => {} // consecutive duplicate -- skip
-            _ => failures.push(detail),
-        }
+/// Record one retry attempt's failure, deduping consecutive identical
+/// failures: a persistent error isn't repeated across attempts, while
+/// distinct failures (e.g. a SQL error then a transient Unavailable) are
+/// all kept so budget exhaustion surfaces the full picture, not just the
+/// last attempt.
+fn push_failure(failures: &mut Vec<String>, detail: String) {
+    match failures.last() {
+        Some(last) if last == &detail => {} // consecutive duplicate -- skip
+        _ => failures.push(detail),
     }
 }
 
@@ -335,10 +335,6 @@ mod tests {
         }
     }
 
-    /// A throwaway TurnDeps. The fakes never touch DuckDB / the working set /
-    /// the temp dir, so the contents are inert -- the struct only needs to
-    /// satisfy the `&mut TurnDeps` parameter so the live signature is tested,
-    /// not a parallel test-only one.
     /// A throwaway TurnDeps. The fakes never touch DuckDB / the working set /
     /// the temp dir, so the contents are inert -- the struct only needs to
     /// satisfy the `&mut TurnDeps` parameter so the live signature is tested,
