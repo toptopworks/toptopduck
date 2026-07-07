@@ -3,6 +3,7 @@
 //! per-session temp dir holds the snapshot files and is cleared on drop (ADR-0012).
 
 pub mod materializer;
+pub mod resume;
 pub mod sandbox;
 pub mod snapshot;
 pub mod turn_runner;
@@ -10,7 +11,6 @@ pub mod turn_runner;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,16 +28,25 @@ use crate::model::{
     DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
     RectifyProvenance, RemoveSourceError, RenameError, RowPage, SheetGuidance, SheetRectify,
     SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, StaleReason, ThreadEntry, TurnError,
-    TurnOutcome, TurnRecord, EXECUTE_FAIL_PREFIX,
+    TurnOutcome, TurnRecord,
 };
 use crate::persistence::recipe::{Recipe, RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef};
 use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
 use crate::persistence::{read_duck, save_atomic, SaveError};
 use crate::provider::{Provider, UnwiredProvider};
-use crate::session::materializer::{Materializer, RealMaterializer, TurnDeps};
+use crate::session::materializer::{RealMaterializer, TurnDeps};
 use crate::session::turn_runner::TurnRunner;
 use crate::window;
 use crate::workingset::{WorkingSet, DEFAULT_RESULT_COUNT_CAP};
+
+// Re-export the resume global-state read gate + test flag (ADR-0053 Decision 3)
+// so the command layer's `crate::session::is_resuming` /
+// `crate::session::acquire_test_resume_flag` paths stay transparent after the
+// move into `session::resume`. `is_resuming` is further re-exported from
+// `lib.rs` for the integration tests.
+#[cfg(test)]
+pub(crate) use resume::acquire_test_resume_flag;
+pub use resume::{is_resuming, resuming_count};
 
 /// Raw rows surfaced per sheet in the guided-load preview -- enough to spot the
 /// header row and any separator/sub-header/footer rows to skip (ADR-0015).
@@ -256,18 +265,6 @@ pub struct PendingConflict {
     pub found_hash: String,
 }
 
-/// Where the replay chain broke (ADR-0035 honest partial state, issue #49 AC6).
-/// Round K's SQL failed; the working set holds K-1 materialized results, and
-/// the timeline ends at turn K rendered as `Failed` (ADR-0028 outcome C).
-/// Turns after K in the recipe's history are dropped (the conversation stops at
-/// the breakpoint). Internal to resume -- the partial state is observable via
-/// the resumed Session's working set + history.
-#[derive(Debug, Clone)]
-struct ReplayBreak {
-    reference_name: String,
-    reason: String,
-}
-
 /// One progress event during resume (ADR-0034 visible progress). Fired per
 /// source verification and per replayed turn so the UI can render a
 /// deterministic progress bar.
@@ -305,102 +302,6 @@ fn hash_file(path: &Path) -> Result<Option<String>, std::io::Error> {
     hasher.update(&bytes);
     let digest = hasher.finalize();
     Ok(Some(digest.iter().map(|b| format!("{b:02x}")).collect()))
-}
-
-/// Process-global count of in-flight resumes: > 0 while
-/// any [`Session::open_duck`] is rebuilding a session across the restart
-/// boundary. During resume the managed `Arc<Mutex<Session>>` still holds the
-/// PRE-resume session -- a concurrent mutating IPC command (`ask` /
-/// `ingest_file` / `replace_source` / `remove_source` /
-/// `remove_active_source`) would silently operate on that stale session and
-/// have its work overwritten when the resumed session lands
-/// (`*s = new_session`). The frontend's shared `loading` flag is the primary
-/// defense; this counter is the Rust-side backstop for the cases the frontend
-/// cannot see (a second window, an IPC replay).
-///
-/// A COUNT (not a boolean) so concurrent resumes compose correctly: two
-/// `open_duck` calls in two windows each acquire (+1), and one finishing
-/// (−1) leaves the counter > 0 while the other is still running -- a mutating
-/// command stays blocked until ALL resumes complete. A boolean would be
-/// falsely cleared by the first finisher. Process-global (not per-Session)
-/// because the hazard spans two Session instances -- the old one in managed
-/// state and the new one under construction.
-static RESUMING_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-/// Whether any [`Session::open_duck`] resume is currently in flight. Checked
-/// at the top of every mutating command (see `commands.rs`) so a concurrent
-/// IPC call during resume is rejected with a clear error instead of silently
-/// operating on the stale pre-resume session. The count returns to zero on
-/// every exit from `open_duck` (success or error) via the [`ResumeFlagGuard`]
-/// RAII guard, so a resume failure can never leave it stuck > 0.
-pub fn is_resuming() -> bool {
-    RESUMING_COUNT.load(Ordering::SeqCst) > 0
-}
-
-/// The number of in-flight resumes (0 when idle). Exposed for tests and
-/// diagnostics so an observer can distinguish "one resume" from "many" --
-/// [`is_resuming`] folds the count to a bool, losing that detail.
-pub fn resuming_count() -> usize {
-    RESUMING_COUNT.load(Ordering::SeqCst)
-}
-
-/// RAII guard that increments [`RESUMING_COUNT`] on construction and
-/// decrements on drop. Acquired at the top of [`Session::open_duck`]; held to
-/// the end of the function so every exit path (success, load error, cancel,
-/// abort, replay invariant violation) drops the guard and decrements. NOT
-/// `mem::forget`-transferred to the resumed Session (unlike the registry key)
-/// -- the counter marks "resume is running", and resume ends when `open_duck`
-/// returns, not when the Session later drops.
-#[must_use = "dropping the guard early decrements RESUMING_COUNT; keep it bound for the whole resume scope"]
-struct ResumeFlagGuard;
-
-impl ResumeFlagGuard {
-    fn acquire() -> Self {
-        RESUMING_COUNT.fetch_add(1, Ordering::SeqCst);
-        Self
-    }
-}
-
-impl Drop for ResumeFlagGuard {
-    fn drop(&mut self) {
-        RESUMING_COUNT.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
-/// Test-only handle that marks resume as in-flight for its lifetime, so
-/// command-layer guard tests can exercise `reject_if_resuming` without
-/// driving a real `open_duck`. Dropping decrements the counter. Not built
-/// into the production binary (`#[cfg(test)]`).
-#[cfg(test)]
-pub(crate) fn acquire_test_resume_flag() -> impl Drop {
-    ResumeFlagGuard::acquire()
-}
-
-/// RAII guard for the single-writer registry key acquired at the top of
-/// [`Session::open_duck`] (ADR-0035 Decision 3, issue #50). Resume can fail at several
-/// points (load, source verify, replay, history rebuild) -- each `?` would
-/// leak the registry entry, blocking the path until process exit. The guard's
-/// Drop releases the key on every error exit; on success,
-/// [`std::mem::forget`] disarms the guard so the resumed Session owns the key
-/// (and releases it on its own Drop).
-struct OpenDuckGuard(PathBuf);
-
-impl OpenDuckGuard {
-    /// Acquire the canonical path or return [`ResumeError::AlreadyOpen`] --
-    /// the file is already held by another Session in this process.
-    fn acquire(canonical: PathBuf) -> Result<Self, ResumeError> {
-        if try_acquire(&canonical) {
-            Ok(Self(canonical))
-        } else {
-            Err(ResumeError::AlreadyOpen(canonical))
-        }
-    }
-}
-
-impl Drop for OpenDuckGuard {
-    fn drop(&mut self) {
-        release(&self.0);
-    }
 }
 
 pub struct Session {
@@ -723,7 +624,7 @@ impl Session {
         // propagation) drops the guard and clears the flag. Acquired FIRST so
         // even a registry-refuse / load-fail resume holds the flag for its
         // full (short) duration.
-        let _resume_flag = ResumeFlagGuard::acquire();
+        let _resume_flag = resume::ResumeFlagGuard::acquire();
         // Single-writer acquire (ADR-0035 Decision 3, issue #50). Held across all
         // resume phases; the guard's Drop releases the key on every error
         // exit, and `mem::forget` on success transfers ownership to the
@@ -732,7 +633,7 @@ impl Session {
         // state.
         let canonical = canonicalize_duck(path)
             .map_err(|e| ResumeError::Load(crate::persistence::io::LoadError::Io(e.to_string())))?;
-        let registry = OpenDuckGuard::acquire(canonical.clone())?;
+        let registry = resume::OpenDuckGuard::acquire(canonical.clone())?;
 
         // Mark resume as in-flight + clear any stale cancel request, mirroring
         // `ask`'s per-turn guard (ADR-0021). The resume_sources / resume_replay
@@ -763,18 +664,44 @@ impl Session {
         let rebuilt =
             session.resume_sources(path, &mut recipe, &mut on_progress, &mut on_source_issue)?;
 
-        // Phase 2: resolve the active-SOURCE pointer. The happy path restores
-        // recipe.active; if the active was rebuilt + others remain, the caller
-        // picks an explicit continuation (ADR-0035 no-silent-fallback, AC5).
-        session.resolve_active_pointer(&recipe, &rebuilt, &mut on_active_abandoned)?;
-
-        // Phase 3: replay the productive SQL chain (partial on failure -- K-1
-        // results preserved, K rendered as Failed, AC6).
-        let replay_break = session.resume_replay(&recipe, &mut on_progress)?;
-
-        // Phase 4: rebuild the conversation timeline, truncated at the replay
-        // breakpoint (if any). Post-break entries are dropped ("对话停在断点").
-        session.resume_history(&recipe, replay_break.as_ref())?;
+        // Phase 2/3/4 via the Resumer deep module (ADR-0053 Decision 3): the
+        // Resumer borrows the shared cancel + the SAME Materializer trait
+        // object the live-turn path drives + the recipe. It does NOT hold the
+        // Session -- each phase method borrows working_set / TurnDeps and
+        // returns a structured result, which open_duck applies. Scoped so the
+        // Resumer (and its disjoint-field borrows of session.cancel /
+        // session.turn_runner) drops before phase 5's &mut session persist.
+        {
+            let mut resumer = resume::Resumer::new(
+                &session.cancel,
+                session.turn_runner.materializer_mut(),
+                &recipe,
+            );
+            // Phase 2: resolve the active-SOURCE pointer. The happy path
+            // restores recipe.active; if the active was rebuilt + others
+            // remain, the caller picks an explicit continuation (ADR-0035
+            // no-silent-fallback, AC5).
+            resumer.resolve_active(&mut session.working_set, &rebuilt, &mut on_active_abandoned)?;
+            // Phase 3: replay the productive SQL chain (partial on failure --
+            // K-1 results preserved, K rendered as Failed, AC6).
+            let replay_break = {
+                let mut deps = TurnDeps {
+                    conn: &session.conn,
+                    source_files: &session.source_files,
+                    working_set: &mut session.working_set,
+                    result_row_cap: session.result_row_cap,
+                    result_count_cap: session.result_count_cap,
+                    temp_path: &session.temp_path,
+                };
+                resumer.replay(&mut deps, &mut on_progress)?
+            };
+            // Phase 4: rebuild the conversation timeline, truncated at the
+            // replay breakpoint (if any). Post-break entries are dropped
+            // ("对话停在断点").
+            let timeline =
+                resumer.rebuild_timeline(&mut session.working_set, replay_break.as_ref())?;
+            session.history = timeline;
+        }
 
         // Phase 5: re-bind the .duck path + persist the post-resume state.
         // build_recipe reads the live working set, so relinked paths, dropped
@@ -975,367 +902,6 @@ impl Session {
             }
         }
         Ok(rebuilt)
-    }
-
-    /// Resume phase 2 (ADR-0035, issue #49 AC5): resolve the active-SOURCE
-    /// pointer after the per-source integrity pass. The happy path restores
-    /// `recipe.active` (still registered). If the active source was rebuilt
-    /// (dropped) and other sources remain, ADR-0035 forbids auto-fallback --
-    /// the caller must name an explicit continuation. When the last source was
-    /// rebuilt (no sources remain), the working set stays empty + `active` is
-    /// `None` without a callback (the empty state IS the honest end). A
-    /// corrupt recipe whose `active` was never a registered source surfaces as
-    /// [`ResumeError::ActiveMissing`] (never the interactive path).
-    fn resolve_active_pointer(
-        &mut self,
-        recipe: &Recipe,
-        rebuilt: &HashSet<String>,
-        on_active_abandoned: &mut impl FnMut(ActiveAbandoned) -> ActiveResolution,
-    ) -> Result<(), ResumeError> {
-        let Some(active_name) = recipe.active.clone() else {
-            return Ok(()); // no active pointer (empty working set recipe)
-        };
-        // Happy path: active still registered. Restore the pointer (ingest
-        // left it on the last-registered source; an explicit prior user
-        // continuation choice must be re-applied here, ADR-0035/0037).
-        if self.working_set.get(&active_name).is_some() {
-            return if self.working_set.set_active(&active_name) {
-                Ok(())
-            } else {
-                // set_active rejects a result_N name; the recipe invariant says
-                // active is always a source, so a failure here is corruption.
-                Err(ResumeError::ActiveMissing(active_name))
-            };
-        }
-        // Active not in the working set. If it was NOT rebuilt, it names a
-        // source that was never in recipe.sources -> corrupt recipe.
-        if !rebuilt.contains(&active_name) {
-            return Err(ResumeError::ActiveMissing(active_name));
-        }
-        // Active was rebuilt. ADR-0035: no silent fallback. The remaining
-        // registered sources (excluding result_N) are the continuation menu.
-        let remaining: Vec<String> = self
-            .working_set
-            .list()
-            .iter()
-            .filter(|d| !self.working_set.is_result(&d.reference_name))
-            .map(|d| d.reference_name.clone())
-            .collect();
-        if remaining.is_empty() {
-            // The last source was rebuilt -> empty working set, active None.
-            // (working_set.remove already cleared active when the rebuilt
-            // active source was detached.) No callback -- nothing to choose
-            // from, and the empty state is the user's honest end (upload new).
-            return Ok(());
-        }
-        match on_active_abandoned(ActiveAbandoned {
-            abandoned: active_name,
-            remaining: remaining.clone(),
-        }) {
-            ActiveResolution::ContinueWith(name) => {
-                if remaining.contains(&name) && self.working_set.set_active(&name) {
-                    Ok(())
-                } else {
-                    // Caller named a source not in `remaining` -- a stale view
-                    // or a direct IPC race. Surface as ActiveMissing rather
-                    // than silently writing a dangling pointer.
-                    Err(ResumeError::ActiveMissing(name))
-                }
-            }
-            ActiveResolution::Abort => Err(ResumeError::Aborted),
-        }
-    }
-
-    /// Resume phase 3 (ADR-0034/0035, issue #49 AC6): eagerly re-execute the
-    /// productive SQL chain LLM-free (the SQL lives in the recipe). Reuses the
-    /// #1 materialize path so result_N numbering, sandboxing, and shape
-    /// derivation match a live turn (ADR-0009). Replay starts from an empty
-    /// result set, so result_N numbers line up with the recipe's recording
-    /// order. Fires one `Replay` progress event per turn.
-    ///
-    /// **Trust boundary (ADR-0036 Decision 5):** the recipe SQL re-executed
-    /// here is **parse-time untrusted** at the resume boundary.
-    /// The per-source fingerprint gating in [`Self::resume_sources`] protects
-    /// the SOURCE CONTENT (the bytes a re-link swapped in match what was
-    /// recorded) -- it does NOT validate the SQL itself. v1 treats the `.duck`
-    /// as a **single-user, self-produced** document (ADR-0036 Decision 5), so
-    /// resume reuses the SAME defenses a live turn relies on rather than a
-    /// recipe-specific SQL AST whitelist. The #1 sandbox
-    /// ([`crate::session::sandbox`]) runs provider / recipe SQL with
-    /// `LocalFileSystem`
-    /// disabled, refusing `read_*` table functions; the subquery wrapping
-    /// (`CREATE TABLE result_N AS SELECT * FROM (<sql>) ...`) rejects
-    /// non-SELECT statements (DROP/ALTER/INSERT/COPY/ATTACH/INSTALL/LOAD) as
-    /// parser errors before they touch a source or the filesystem
-    /// (ADR-0005).
-    ///
-    /// These are the live-turn semantics. A portable / cross-user `.duck`
-    /// (email / USB / attach) would additionally need a SQL AST whitelist
-    /// (only `reference_name`s in `sources`), a PII redaction layer, and an
-    /// "opened an external .duck" risk prompt; all three are explicitly v2
-    /// per ADR-0036 Decision 5 and would require a new ADR calibrating this
-    /// boundary. Until then, recipe SQL that slips past the sandbox plus the
-    /// wrapping is met with the same engine-level guardrails as a live
-    /// provider reply.
-    ///
-    /// On a round-K SQL failure (data drift / dropped column / abandoned
-    /// source referenced by the chain) resume does NOT abort: turn K is
-    /// rendered as `Failed` (ADR-0028 outcome C), turns K+1.. are dropped
-    /// ("对话停在断点"), and K-1's materialized results stay in the working set
-    /// (ADR-0035 honest partial state). Returns the [`ReplayBreak`] so phase 4
-    /// knows where to truncate; `None` means the whole chain replayed.
-    fn resume_replay(
-        &mut self,
-        recipe: &Recipe,
-        on_progress: &mut impl FnMut(ResumeEvent),
-    ) -> Result<Option<ReplayBreak>, ResumeError> {
-        let chain = recipe.productive_chain();
-        let total = chain.len();
-        let cancel = Arc::clone(&self.cancel);
-        for (i, turn) in chain.iter().enumerate() {
-            // Honor a user cancel between turns (ADR-0021): without this poll
-            // a click of 停止 during replay would only get the engine interrupt
-            // on the CURRENT SQL, surface as a partial break, and look
-            // indistinguishable from data corruption. The cancel lands here as
-            // ResumeError::Cancelled BEFORE the next turn's SQL starts.
-            if cancel.is_requested() {
-                return Err(ResumeError::Cancelled);
-            }
-            on_progress(ResumeEvent::Replay {
-                index: i + 1,
-                total,
-                reference_name: turn.reference_name.clone(),
-            });
-            // Re-materialize via the production materializer (ADR-0053): resume
-            // is LLM-free -- it re-executes stored SQL -- so the real (not
-            // injected) materializer is correct here. TurnDeps borrows the same
-            // shared state the live turn path borrows; the block scope releases
-            // those borrows before `rename_display` takes its own `&mut self`.
-            let materialized = {
-                let mut deps = TurnDeps {
-                    conn: &self.conn,
-                    source_files: &self.source_files,
-                    working_set: &mut self.working_set,
-                    result_row_cap: self.result_row_cap,
-                    result_count_cap: self.result_count_cap,
-                    temp_path: &self.temp_path,
-                };
-                RealMaterializer.try_materialize(
-                    &turn.sql,
-                    &cancel,
-                    turn.reference_name.clone(),
-                    &mut deps,
-                )
-            };
-            match materialized {
-                Ok(descriptor) => {
-                    if descriptor.display_name != turn.display_name {
-                        // ADR-0035 honest signal: log a label-restore failure
-                        // during replay instead of swallowing it silently.
-                        if let Err(e) =
-                            self.rename_display(&turn.reference_name, &turn.display_name)
-                        {
-                            log::warn!(
-                                target: "toptopduck::session",
-                                "restore label「{}」for replayed turn {} failed: {e}",
-                                turn.display_name, turn.reference_name,
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Round K failed -- stop here. K-1 results are in the
-                    // working set; K will render as Failed; K+1.. are dropped
-                    // by resume_history (truncate at this reference name).
-                    return Ok(Some(ReplayBreak {
-                        reference_name: turn.reference_name.clone(),
-                        reason: format!("{}{}", EXECUTE_FAIL_PREFIX, e.detail),
-                    }));
-                }
-            }
-        }
-        Ok(None)
-    }
-
-    /// Resume phase 4 (ADR-0028/0039/0040, issue #49 AC6): rebuild the
-    /// conversation timeline from the recipe, truncated at the replay
-    /// breakpoint if any. The Materialized turns' descriptors come from the
-    /// working set (just re-built by replay, display names restored); the
-    /// break turn (if any) renders as `Failed` with the replay's reason
-    /// (ADR-0028 outcome C); entries strictly after the break turn are dropped
-    /// (the conversation stops at the breakpoint). viz is None (ADR-0036 not
-    /// persisted), so a reopened chart renders as a table (ADR-0033).
-    fn resume_history(
-        &mut self,
-        recipe: &Recipe,
-        break_at: Option<&ReplayBreak>,
-    ) -> Result<(), ResumeError> {
-        // Locate the break turn's history index (if any) to truncate there.
-        // The productive_chain is the Materialized turns in timeline order, so
-        // turn K in that order maps to one history entry by reference name.
-        let break_idx = break_at.and_then(|brk| {
-            recipe.history.iter().position(|entry| match entry {
-                RecipeEntry::Turn(t) => matches!(
-                    &t.outcome,
-                    RecipeOutcome::Materialized { reference_name, .. }
-                        if reference_name == &brk.reference_name
-                ),
-                _ => false,
-            })
-        });
-        // Invariant: if break_at is Some, the break turn's reference_name MUST
-        // appear in recipe.history as a Materialized entry (the productive_chain
-        // and the history are two views of the same turn list). A None
-        // break_idx with a Some break_at means the invariant is violated (a
-        // hand-edited recipe whose history lost the break turn, or a logic bug
-        // in resume_replay). Surfacing as Replay rather than silently rendering
-        // the full timeline (which would hide the replay failure from the
-        // user) is the ADR-0035 honest answer.
-        let end = match (break_at, break_idx) {
-            (None, _) => recipe.history.len(),
-            (Some(_), Some(idx)) => idx + 1,
-            (Some(brk), None) => {
-                log::error!(
-                    target: "toptopduck::session",
-                    "replay break reference {} not found in recipe history -- invariant violation",
-                    brk.reference_name
-                );
-                return Err(ResumeError::Replay {
-                    reference_name: brk.reference_name.clone(),
-                    detail: format!(
-                        "重放断点「{}」在 history 中找不到对应条目（recipe 不一致）",
-                        brk.reference_name
-                    ),
-                });
-            }
-        };
-
-        // Stale turns are absent from the productive chain (ADR-0041), so the
-        // rebuild closure below must find their descriptors already in the
-        // working set -- register the placeholders first (ADR-0013: stale is
-        // not silently discarded).
-        self.register_stale_placeholders(recipe, end);
-
-        self.history = recipe.history[..end]
-            .iter()
-            .map(|entry| match entry {
-                RecipeEntry::Turn(turn) => {
-                    let outcome = match &turn.outcome {
-                        RecipeOutcome::Materialized {
-                            reference_name,
-                            sql,
-                            assumption,
-                            ..
-                        } => {
-                            // The break turn renders as Failed (replay broke
-                            // here), NOT as Materialized -- the result was
-                            // never re-materialized.
-                            if let Some(b) =
-                                break_at.filter(|b| b.reference_name == *reference_name)
-                            {
-                                TurnOutcome::Failed {
-                                    reason: b.reason.clone(),
-                                }
-                            } else {
-                                // Live turns: re-materialized by resume_replay.
-                                // Stale turns: a placeholder was registered in
-                                // the pre-pass above (ADR-0041 dead turn). In
-                                // both cases the working set holds the
-                                // descriptor, so the get() succeeds and the
-                                // Materialized outcome carries the stale flag
-                                // through to the UI badge.
-                                let dataset =
-                                    self.working_set.get(reference_name).cloned().ok_or_else(
-                                        || ResumeError::Replay {
-                                            reference_name: reference_name.clone(),
-                                            detail: format!(
-                                                "重放后未在 working_set 中找到 {reference_name}"
-                                            ),
-                                        },
-                                    )?;
-                                TurnOutcome::Materialized {
-                                    dataset: Box::new(dataset),
-                                    sql: Some(sql.clone()),
-                                    viz: None,
-                                    assumption: assumption.clone(),
-                                }
-                            }
-                        }
-                        RecipeOutcome::Textual {
-                            text_kind,
-                            body,
-                            assumption,
-                        } => TurnOutcome::Textual {
-                            text_kind: *text_kind,
-                            body: body.clone(),
-                            assumption: assumption.clone(),
-                        },
-                        RecipeOutcome::Failed { reason } => TurnOutcome::Failed {
-                            reason: reason.clone(),
-                        },
-                        RecipeOutcome::Cancelled => TurnOutcome::Cancelled,
-                    };
-                    Ok(ThreadEntry::Turn(TurnRecord {
-                        question: turn.question.clone(),
-                        outcome,
-                    }))
-                }
-                RecipeEntry::Source(ev) => Ok(ThreadEntry::Source(ev.clone())),
-            })
-            .collect::<Result<Vec<_>, ResumeError>>()?;
-        Ok(())
-    }
-
-    /// Pre-pass (ADR-0041, issue #52): register a placeholder descriptor for
-    /// each stale Materialized turn in the timeline slice `..end`. These dead
-    /// turns are absent from the productive chain, so resume_replay never
-    /// re-materialized their tables -- but they stay in history for display
-    /// and feed the LLM conversation-thread window (ADR-0041 point 2). The
-    /// placeholder carries no backing data (columns / sample empty -- the
-    /// materialized rows are not persisted, ADR-0036) but DOES carry the stale
-    /// anchor, so:
-    ///   - the conversation renders the stale badge (descriptor.stale);
-    ///   - session.get / list surface it marked stale (ADR-0013 "not
-    ///     silently discarded");
-    ///   - resolve_active skips it (focus never lands on a dead turn);
-    ///   - the placeholder is excluded from the LLM's dataset working set
-    ///     (ADR-0013); the stale turn's verbatim SQL still reaches the model
-    ///     via the conversation-thread window (ADR-0041 point 2).
-    ///
-    /// Called ahead of the rebuild closure in `resume_history` so that closure
-    /// stays `&self` (a `&mut` register inside the `&self` closure would not
-    /// borrow-check).
-    fn register_stale_placeholders(&mut self, recipe: &Recipe, end: usize) {
-        for entry in &recipe.history[..end] {
-            let RecipeEntry::Turn(turn) = entry else {
-                continue;
-            };
-            let RecipeOutcome::Materialized {
-                reference_name,
-                display_name,
-                stale: Some(anchor),
-                ..
-            } = &turn.outcome
-            else {
-                continue;
-            };
-            if self.working_set.get(reference_name).is_some() {
-                continue;
-            }
-            let placeholder = DatasetDescriptor {
-                reference_name: reference_name.clone(),
-                display_name: display_name.clone(),
-                source_path: String::new(),
-                columns: Vec::new(),
-                row_count: 0,
-                sample: Vec::new(),
-                fingerprint: String::new(),
-                rectify: RectifyProvenance::NotApplicable,
-                privacy: DatasetPrivacy::default(),
-                stale: Some(anchor.clone()),
-            };
-            self.working_set.register_result(placeholder);
-        }
     }
 
     /// Ingest a source for resume under an explicit reference name + display

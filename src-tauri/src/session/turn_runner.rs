@@ -72,6 +72,17 @@ impl TurnRunner {
         self.turn_timeout = timeout;
     }
 
+    /// Borrow the shared materializer (ADR-0053 Decision 2/3): the resume path
+    /// reuses the SAME `Materializer` trait object the live-turn path drives,
+    /// so a fake materializer injected for a `Resumer` unit test exercises the
+    /// replay branch without DuckDB / a filesystem. Returns `&mut dyn` (dyn, not
+    /// generic) so `Session` stays unparameterized across `commands.rs` --
+    /// disjoint-field borrow of `session.turn_runner` lets `open_duck` mutably
+    /// borrow `session.working_set` concurrently.
+    pub(crate) fn materializer_mut(&mut self) -> &mut dyn Materializer {
+        &mut *self.materializer
+    }
+
     /// Run one turn: drive the provider, route the reply, and on a SQL reply
     /// drive the materializer -- retrying transient failures up to the budget
     /// and short-circuiting permanent ones. Returns the terminal outcome; the
