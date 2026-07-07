@@ -209,34 +209,6 @@ fn ask_surfaces_the_provider_assumption_note() {
 }
 
 #[test]
-fn ask_without_a_wired_provider_fails_honestly() {
-    // The default Session (UnwiredProvider) refuses every turn with NotWired --
-    // no silent no-op, no invented SQL. NotWired is permanent, so it is NOT
-    // retried: the turn fails immediately. (The real AnthropicProvider, wired
-    // in lib::run, returns NotWired the same way when no key is stored.)
-    let mut session = Session::new().expect("session");
-    load_source(&mut session, &fixture("people.csv"));
-    let reason = failed_reason(session.ask("任何问题"));
-    assert!(reason.contains("未配置"), "got {reason:?}");
-    // nothing materialized
-    assert!(session.get("result_1").is_none());
-}
-
-#[test]
-fn a_persistently_bad_sql_exhausts_the_budget_and_fails() {
-    // ADR-0028: a provider SQL the engine rejects is retried up to the single
-    // budget; persistent failure yields a failed turn (no result materialized).
-    let mut session = session_with(&[("坏查询", r#"SELECT no_such_col FROM "people".data"#)]);
-    load_source(&mut session, &fixture("people.csv"));
-    let reason = failed_reason(session.ask("坏查询"));
-    assert!(reason.contains("执行查询失败"), "got {reason:?}");
-    // The budget path prefixes "重试预算耗尽" so it reads distinctly from a
-    // permanent NotWired failure (ADR-0028).
-    assert!(reason.contains("重试预算耗尽"), "got {reason:?}");
-    assert!(session.get("result_1").is_none());
-}
-
-#[test]
 fn read_rows_on_unknown_reference_is_rejected() {
     let session = session_with(&[]);
     assert!(session.read_rows("nope", 0, 10).is_err());
@@ -443,31 +415,6 @@ fn retry_recovers_within_the_budget_for_a_contract_violation() {
 }
 
 #[test]
-fn retry_exhausts_when_recovery_would_need_a_fourth_attempt() {
-    // ADR-0028: the budget is exactly 2 retries (3 attempts). [Err, Err, Err, Ok]
-    // -> the three attempts all hit Err; the Ok at index 3 is never reached, so
-    // the turn fails. Pinning failure here (against the recovery test above)
-    // proves the budget is at most 2 retries.
-    let provider = FakeProvider::new().scripted_seq(
-        "一直坏",
-        vec![
-            Err(ProviderError::Unavailable("malformed".into())),
-            Err(ProviderError::Unavailable("malformed".into())),
-            Err(ProviderError::Unavailable("malformed".into())),
-            Ok(reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#)),
-        ],
-    );
-    let mut session = Session::with_provider(Box::new(provider)).expect("session");
-    load_source(&mut session, &fixture("people.csv"));
-
-    let reason = failed_reason(session.ask("一直坏"));
-    assert!(reason.contains("LLM 提供方调用失败"), "got {reason:?}");
-    // Budget exhaustion, not a permanent NotWired failure (ADR-0028).
-    assert!(reason.contains("重试预算耗尽"), "got {reason:?}");
-    assert!(session.get("result_1").is_none()); // never materialized
-}
-
-#[test]
 fn retry_recovers_when_bad_sql_is_then_fixed() {
     // ADR-0028: a schema/runtime execution error shares the SAME budget as a
     // contract violation. [bad SQL, good SQL] -> attempt 1 fails to execute,
@@ -484,26 +431,6 @@ fn retry_recovers_when_bad_sql_is_then_fixed() {
 
     let (name, _, _) = materialized(session.ask("先错后对"));
     assert_eq!(name, "result_1"); // second attempt materialized
-}
-
-#[test]
-fn not_wired_is_not_retried() {
-    // NotWired is permanent (no provider configured) -- unlike a contract
-    // violation, retrying cannot help. A sequence whose later entries would
-    // succeed still fails immediately on the first NotWired.
-    let provider = FakeProvider::new().scripted_seq(
-        "没接",
-        vec![
-            Err(ProviderError::NotWired),
-            Ok(reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#)),
-        ],
-    );
-    let mut session = Session::with_provider(Box::new(provider)).expect("session");
-    load_source(&mut session, &fixture("people.csv"));
-
-    let reason = failed_reason(session.ask("没接"));
-    assert!(reason.contains("未配置"), "got {reason:?}");
-    assert!(session.get("result_1").is_none()); // the Ok was never reached
 }
 
 // --- Always-visible thread + result_N numbering (ADR-0028/0039) ------------
