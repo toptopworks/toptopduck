@@ -34,6 +34,8 @@ ADR-0045 的 Decision 只写了「两栏 = thread rail + workspace」，`Conside
 - **仅 `minWidth` 硬挡、不给折叠**：拖不到更窄但用户失去窄屏全宽 workspace 的选择；折叠近免费，纯硬挡是更严 KISS 但损失灵活性。**否决（作更严 KISS 备选标注）**。
 - **rail 宽度响应式断点**：复杂、违 KISS；`minWidth` 兜底已足够覆盖极端窄窗。**否决**。
 - **截断保尾部（头部省略）**：提问句柄头部更可辨识，保头部符合 ADR-0039 身份语义。**否决**。
+- **自动折叠（按窗口宽阈值）**：不可预测，违用户控制。**否决**。
+- **会话栏折叠成图标条**：仍占宽，窄窗退化不彻底。**否决**。
 
 ## Consequences
 
@@ -42,3 +44,4 @@ ADR-0045 的 Decision 只写了「两栏 = thread rail + workspace」，`Conside
 - **前端实现**：shell grid（固定 rail 列 + flex workspace 列）+ rail 折叠状态（React 原生 UI 态，ADR-0051 客户端态范畴）+ Tauri window `minWidth` / `minHeight` 配置。
 - **折叠状态持久化**走 ADR-0038（app 级 preference，与 theme / locale 同 store 模式）；折叠态是 preference、非领域概念，不进 CONTEXT.md。
 - **留实现期 / 视觉打磨**（非架构）：精确 px 值（rail 宽、`minWidth` / `minHeight`、`--radius`，呼应 ADR-0050「精确 spacing 值是视觉迭代、非架构」）、折叠按钮位置 / 图标 / 动画、rail 折叠时源事件标记条（ADR-0040）的呈现。
+- **延伸：三级手动折叠退化**——rail 折叠（本 ADR）+ 会话栏折叠（0060 新增栏）= 三级手动折叠（不自动）：会话栏先（**完全隐藏** + 顶栏按钮呼出，非图标条）→ rail（本 ADR，workspace 全宽）→ Tauri `minWidth` 兜底（含会话栏宽度）；折叠态走 0038（与 rail 折叠态 / theme / locale 同 store）。

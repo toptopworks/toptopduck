@@ -55,6 +55,9 @@ ADR-0045 定了 thread rail 为 shell 左栏、承载「轮次卡片 + 源事件
 - **stale 折叠成源事件上计数**（藏单卡）：违反 0013 保留可见 + 0041 死轮须可历史检视。**否决**。
 - **stale 同亮度仅加小图标**：一眼分不出新鲜 vs 死亡。**否决**。
 - **换源 / 删源 stale 措辞合并**：背叛 0041 诚实区分。**否决**。
+- **Schema 独立选择（脱离 viewedResult）**：双焦点，违单一焦点。**否决**。
+- **加/换/删源切到工作集 tab**：打断用户当前查看。**否决**。
+- **空态作 rail 第三物种**：违本 ADR「物种 = 恒可见数据条目」，placeholder 有数据后消失。**否决**。
 
 ## Consequences
 
@@ -62,10 +65,11 @@ ADR-0045 定了 thread rail 为 shell 左栏、承载「轮次卡片 + 源事件
 - 复用 `styles.css` 既有色板（teal / red / grey）；新色留视觉系统 ADR 统一定。
 - assumption 仅在 workspace 结果展示渲染（0010 / 0016），rail 卡片不带。
 - stage stale 复用 `DisclosureBanner`（0033）模式。
-- **Q8（workspace tab 选择路由）不入本 ADR**——它属 workspace 交互、非 rail 视觉，且多 codify 既有 `App.tsx` 行为（`handleAsk` / `handleSelectResult` / `WorkingSetList onSelect`），惊讶度低；作为实现细节由 0045 / 0040 / 0028 指导即可。若后续需固化再开 ADR。
+- **workspace tab 选择路由定案**——选择驱动 + viewedResult 单一焦点 + Schema 派生 + 非结果事件不切：点 rail Materialized 卡 / 工作集 tab 点 Dataset / 新结果产出 → `setViewedResult`（0051，不碰 active）+ 切「结果」tab；点 rail 非 Materialized（B/C/D）→ 不动 viewedResult、切「结果」显文本卡（0050）；Schema tab 打开时显示当前 viewedResult schema（跟随）；加/换/删源（0040 非结果事件）→ 不动 viewedResult、不切 tab。
 - **被 ADR-0045 限定**：rail 是 shell 左栏（0045）；本 ADR 定其内部视觉语言，不改 shell 结构。
 - **未决（留视觉系统 ADR）**：具体字形集（`●/○/✗/⊘` vs 表/泡/警/删线）、字体 / 密度 / 明暗、Vega-Lite 主题、「结果」tab 对 B/C/D 的标签 wrinkle、截断策略（头部 vs 尾部留字符）。
 - **被 ADR-0049 改写前提 + 闭合字形集未决**：色板从「复用 `styles.css`」改为「迁入 Tailwind theme tokens（取值由 0050 定）」；「字形集未决」闭合——outcome / 源事件 / stale 字形用 Lucide（精确映射在 0050）。见 ADR-0049。
 - **被 ADR-0050 闭合 open item**：色板取值（teal→`--primary` 等迁入 Tailwind tokens）+ 字形集（Lucide：A=`Table2` B=`MessageSquareQuestion` C=`TriangleAlert` D=`Ban`；源 加=`Plus` 换=`RefreshCw` 删=`Trash2`；stale=`CircleOff`）。见 ADR-0050。
 - **stale chip 跳选源事件标记条的映射规则**：`StaleAnchor`（descriptor 内自包含因果快照：`reference_name` + `display_name` + `reason`）**无事件锚**；chip 跳选 = 「thread 中该 result 的 Turn **之后**、`reference_name` + `reason` 匹配的**最近一个** `SourceLifecycleEvent`」。因果方向保证时序（result 被某源事件失效，该事件必在其 Turn 之后）；「最近一个」消除同源多次生命周期的匹配歧义；**不加 `event_id`** 守 YAGNI（动 Rust `StaleAnchor` 契约 + recipe 序列化的不对称代价，与 ADR-0051「不加 turn id」同款论证），出口保留。v1 瑕疵：resume 后同源再次替换，「最近一个」会跳到新事件而非最初失效者（极边角、同类同源 `display_name` 多半相同），v2 加 `event_id` 出口。
 - **被 ADR-0054 闭合 open item**：原「未决」中的「截断策略（头部 vs 尾部留字符）」定为**尾部 ellipsis**（rail 固定宽 → 卡宽确定 → 保头部截尾部，呼应提问为身份句柄 ADR-0039），已从「未决」移除。见 ADR-0054。
+- **空态 placeholder 精确化**：「物种 = 恒可见数据条目类型」，placeholder 有数据后消失、不恒可见，**非 rail 第三物种**。

@@ -28,6 +28,8 @@ ADR-0008（Tauri）与 0016（React + Vega-Lite）定了框架与渲染管线，
 - **DB 工具壳（c）**：工作集左栏为主导航 + 主舞台 + thread 折叠。与「当前表」通常无需感知相悖、把表抬成主角。**否决**。
 - **三栏（ii，工作集常驻最左）**：rename/replace/privacy 零跳转，但为低频操作永久占视口、违背 active 隐式语义、比参照系更重。**否决**；active 速览用 QuestionBar 下拉吸收。
 - **参照 Codex CLI 单列 TUI**：等同 a。**否决**。
+- **QuestionBar 下拉持久锁定 active**：前端锁定与后端 active（0051 服务端真相）双真相。**否决**。
+- **QuestionBar 下拉快捷点名**：与提问内点名重复，v1 YAGNI。**否决**。
 
 ## Consequences
 
@@ -43,3 +45,5 @@ ADR-0008（Tauri）与 0016（React + Vega-Lite）定了框架与渲染管线，
 - **被 ADR-0049 改写前提**：「`styles.css` 的 `.layout` 须重写」升级为「`styles.css` 被 Tailwind utilities + shadcn 组件**取代**」——前端样式栈定为 shadcn/ui v4 + Tailwind v4 + Lucide。见 ADR-0049。
 - **被 ADR-0054 填边界遗漏**：本 ADR 只定两栏 shell **结构**（rail + workspace），未定义桌面窗口可变尺寸下的行为（rail 宽度策略 / 折叠 / 最小尺寸 / 缩放退化）；窗口尺寸策略（rail 固定宽 + 可折叠 + Tauri `minWidth` 兜底）与尾部 ellipsis 截断（连带闭合 0047 / 0050 截断 open item）在 ADR-0054 定。见 ADR-0054。
 - **被 ADR-0057 延伸**：workspace「结果」tab 的渲染落点定案——行服务端分页 + 列原生全量 + 数值类型右对齐，不引入虚拟化 / 跳页 / column cap。见 ADR-0057。
+- **被 ADR-0060 改写（导航载体）**：shell 经 0060 由两栏（本 ADR）扩为三栏（+ 左会话栏取代 0046 顶栏 tabs）。见 ADR-0060。
+- **QuestionBar 指示器改写（原「可下拉显式点名覆盖」→「只读显示 active + 点名走提问内」）**：指示器只读显示当前 active（ADR-0051 服务端真相）的显示名（ADR-0037）；取消下拉——显式点名走提问内（CONTEXT.md 本意，LLM 解析那一轮），轮内生效、非持久锁定。

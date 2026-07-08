@@ -74,3 +74,4 @@ ADR-0046 Consequences 明确写"单 Tauri webview 内 React 状态持有多个�
   - **Q5 流式通道**：v1 `ask` 是阻塞式 IPC（等 outcome，ADR-0009 / 0021），非流式；未来 LLM token 流 / SQL 执行进度若引入，走 Tauri event → `queryClient.setQueryData` 增量更新 thread，或在 query 之外加独立 event store——届时细化。
   - **Q6 recipe 同步 invalidate 时机**：换源级联失效（ADR-0025）/ source replacement 后哪些 query 要 invalidate、resume 重开时 cache 冷启策略，在实现期钉死具体规则。
   - tab 拖拽重排、会话命名 UI（继承 0046 未决）。
+- **被 ADR-0060 改写措辞**：「per-tab `<SessionPane>`」载体从顶栏 tabs → 左会话栏（0060），「tab」重映射为「左栏选中态 / 非活跃会话」，机制不变（hidden 保活 / removeQueries / in-flight cancel）；「tab 拖拽重排」随 tabs 取消作废、「会话命名 UI」由 0060 定（左栏弹菜单）。见 ADR-0060。

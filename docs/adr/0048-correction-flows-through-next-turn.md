@@ -5,7 +5,7 @@
 两类「用户修正 LLM 理解」的交互——**澄清应答**（B 轮，ADR-0018）与**假设纠偏**（A 轮 `assumption`，ADR-0010/0009）——都走**同一条回路：用户的下一条自然语言轮次**，**不引入任何新 UI 原语**（无 quick-reply chips、无 inline-edit、无结构化选项）：
 
 **（1）澄清应答（B 轮，rare）**
-- LLM 返澄清文本（B 轮、无 SQL，ADR-0018 窄门槛）→ rail 一张 `○` 卡（0047）+ workspace 文本载荷卡显示澄清问题（0045 / Q8 路由）。
+- LLM 返澄清文本（B 轮、无 SQL，ADR-0018 窄门槛）→ rail 一张 `○` 卡（0047）+ workspace 文本载荷卡显示澄清问题（0045 / workspace tab 路由）。
 - 用户**直接在下一条 QuestionBar 输入回答**——无 quick-reply chips、无选项按钮、无预填魔法内容（最多占位提示）。
 - LLM 从 ADR-0028 的 N=20 窗口读到澄清轮 + 回答轮，据此生成下一轮 SQL。
 

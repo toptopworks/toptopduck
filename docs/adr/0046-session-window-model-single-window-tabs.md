@@ -1,5 +1,7 @@
 # 多会话窗口模型：单窗口 + 顶栏会话 tabs（关 tab = 落 recipe + 卸载，非销毁）
 
+> 本 ADR 的「顶栏 tabs」导航决策**被 ADR-0060 取代**为左会话栏（三栏 shell）；关 tab 落 recipe / 软上限 / 重开 resume / 单 webview 低内存语义**保留**，仅载体从 tabs 迁到左会话栏。见 ADR-0060。
+
 ## Decision
 
 多会话窗口模型——ADR-0027 line 5 / line 30 punt 的 UX 子决策——定为**单窗口 + 顶栏会话 tabs**：

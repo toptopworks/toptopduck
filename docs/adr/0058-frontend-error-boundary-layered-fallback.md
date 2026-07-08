@@ -13,19 +13,19 @@
 | **L2 渲染（新增）** | **render 阶段 throw** | 组件 map 炸、数据运行时变形 | **分区降级卡** |
 | **L3 顶层兜底（新增）** | L2 边界自身 throw / shell 级异常 | 罕见 | 整页降级卡 + 重载 |
 
-**（1）分区粒度（B-1）**
+**（1）分区粒度**
 - 关键区域各包 ErrorBoundary：**workspace 结果区（ResultView）** / **Thread rail** / **SessionPane 会话级**。
 - **顶层 ErrorBoundary** 作最后防线（shell 骨架级 throw）。
 - 否决单一顶层边界（≈ 白屏等价）与每组件都包（噪音）。
 
-**（2）降级语义（B-2）**
+**（2）降级语义**
 - 降级卡 = 友好文案 + "重试"按钮 + 可展开"技术详情"（dev 模式/折叠，守 ADR-0017 诚实——不藏着但不吓人）。
 - **重试 = `key` bump remount + `invalidateQueries` 该区域服务端态**（0051 的 thread/rows/workingSet query）。
 - 区域内客户端 UI 态（如分页 offset）随 remount 丢弃；会话级 UI 态（viewedResult）保留。
 - shell 骨架（header / 会话 tabs / QuestionBar）恒保——降级卡只替换崩掉的那一块。
 - 重试后仍致异：降级卡保持、不再无限重试；持续致异由 L3 兜底接（"重开会话/重载"出口）。
 
-**（3）分层契约（B-3）**
+**（3）分层契约**
 - **0033 Vega try/catch 保留在 `ResultView` 内部**——Vega 失败有精确语义（退化表格 + 披露），丢给 ErrorBoundary 会丢失退化能力。
 - **ErrorBoundary 只接 render 阶段 throw**——React 技术事实：ErrorBoundary 不 catch event handler / `useEffect` / async / Promise rejection，故 L1 操作级与 L0 的 Vega（useEffect）**技术上不可能被边界接住**，天然不重叠。
 - **不把 ErrorBoundary 当兜垃圾筐**——业务错误（IPC 拒绝 / 越界拒绝 ADR-0017 / cancel）继续走 L1 精确语义，不上抬到 L2（上抬丢文案前缀、outcome 类型、诚实拒绝语义）。

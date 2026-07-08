@@ -24,7 +24,7 @@
 - **组件映射原则**：标准面用 shadcn 原语；bespoke 仅限 rail 两物种（轮次卡 + 源事件条，0047）；图标全 Lucide。
   - `Tabs`→workspace tabs（0045）+ 会话 tabs（0046）；`Dialog`→Settings（BYOK + 主题）/ GuidedLoad（0015）；`Button`+`Textarea`→QuestionBar；`Badge`→active / stale / 纠偏 chip + key 状态；`Alert`→stale 披露 / viz 退化披露（0033）/ 软上限提示（0046）；`Tooltip`→卡片截断全文；`Switch`→privacy；`Table`+`Tabs`→schema / 详情。
   - Lucide 字形：A=`Table2` / B=`MessageSquareQuestion` / C=`TriangleAlert` / D=`Ban`；源事件 加=`Plus` 换=`RefreshCw` 删=`Trash2`；stale=`CircleOff`。B 拆「澄清 / 拒绝」子图标留视觉打磨期（v1 守 0028 四类 + 0047 B 单视觉）。
-- **「结果」tab 对 B/C/D 标签 wrinkle（闭合 0049 open item）**：保留「结果」tab 标签；B/C/D 在其中渲染为**明显异于表格的文本卡**（无表）+ outcome 字形已明示语义——不另设 tab、不改名（守 Q8 选择驱动路由 + KISS）。
+- **「结果」tab 对 B/C/D 标签 wrinkle（闭合 0049 open item）**：保留「结果」tab 标签；B/C/D 在其中渲染为**明显异于表格的文本卡**（无表）+ outcome 字形已明示语义——不另设 tab、不改名（守选择驱动路由 + KISS）。
 
 ## Context
 
