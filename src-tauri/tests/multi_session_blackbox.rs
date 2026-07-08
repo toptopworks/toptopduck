@@ -14,7 +14,8 @@ use std::thread;
 use std::time::Duration;
 
 use toptopduck_lib::{
-    CancelToken, FakeProvider, LoadOutcome, ProviderReply, SessionStore, TurnOutcome,
+    ActiveResolution, CancelToken, FakeProvider, LoadOutcome, ProviderReply, Session, SessionStore,
+    SourceResolution, TurnOutcome,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -296,4 +297,106 @@ fn store_lock_not_held_during_a_long_turn() {
         matches!(outcome, TurnOutcome::Cancelled),
         "A's turn lands as Cancelled after release, got {outcome:?}"
     );
+}
+
+// --- open_duck reuses the session_id (ADR-0056) ----------------------------
+
+#[test]
+fn open_duck_replaces_contents_in_place_other_sessions_unaffected() {
+    // ADR-0056 acceptance: open_duck resumes INTO an existing session_id --
+    // the command layer replaces the handle's Session (`*s = new_session`),
+    // it does NOT mint a new id. This black-box test covers the cross-axis
+    // invariant the resume unit tests do not: Session::open_duck running in a
+    // MULTI-session store. It drives Session::open_duck and installs the result
+    // the way the command does, then asserts (1) the save -> open round-trip
+    // restored result_1, (2) the subject id still resolves and no new entry was
+    // minted, and (3) another session's working set is untouched by the resume
+    // (ADR-0027 isolation holds across the resume path).
+    //
+    // The id-reuse step itself (`*s = new_session` rather than `store.create`)
+    // is structural in the command layer and is reproduced here by hand --
+    // black-box tests cannot invoke the tauri command, so this is the closest
+    // seam that still exercises Session::open_duck end-to-end.
+    let store = SessionStore::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("a.duck");
+
+    // Producer session: bind + one source-free turn so the .duck recipe holds
+    // result_1, then close it to release the registry key (held by the binding
+    // session until it drops) so open_duck can acquire the same file.
+    let cancel_p = Arc::new(CancelToken::new());
+    let provider_p = FakeProvider::new().scripted("建结果", reply_sql("SELECT 1 AS n"));
+    let producer = store
+        .create(cancel_p, Box::new(provider_p))
+        .expect("create producer");
+    let handle_p = store.get(&producer).expect("handle producer");
+    {
+        let mut s = handle_p.session.lock().unwrap();
+        s.bind_duck(duck.clone(), "P".into()).expect("bind");
+        let outcome = s.ask("建结果");
+        assert!(
+            matches!(outcome, TurnOutcome::Materialized { .. }),
+            "producer turn should materialize, got {outcome:?}"
+        );
+    }
+    drop(handle_p);
+    store.close(&producer).expect("close producer");
+
+    // The multi-session context: A (empty, the open target) + B (with a source
+    // A must not see, so isolation is checkable).
+    let a = fresh_session(&store);
+    let handle_a = store.get(&a).expect("handle a");
+    let b = fresh_session(&store);
+    let handle_b = store.get(&b).expect("handle b");
+    {
+        let mut s = handle_b.session.lock().unwrap();
+        match s.ingest(&fixture("people.csv")) {
+            LoadOutcome::Loaded(_) => {}
+            other => panic!("expected people to load, got {other:?}"),
+        }
+    }
+
+    // Resume-open the .duck and install it INTO A's handle (the command layer's
+    // id-reuse swap). Resume is LLM-free -- it re-executes stored SQL in a fresh
+    // DuckDB -- so an UnwiredProvider is enough (no turn is asked of it). The
+    // source-issue / active-abandoned callbacks never fire: the recipe has no
+    // sources and active is None.
+    let resumed = Session::open_duck(
+        &duck,
+        Arc::clone(&handle_a.cancel),
+        Box::new(toptopduck_lib::UnwiredProvider),
+        |_| {},
+        |_| SourceResolution::Abort,
+        |_| ActiveResolution::Abort,
+    )
+    .expect("resume open");
+    {
+        let mut s = handle_a.session.lock().unwrap();
+        *s = resumed;
+    }
+
+    // (1) Round-trip: result_1 is restored and served through A's same handle.
+    {
+        let s = handle_a.session.lock().unwrap();
+        let list = s.list();
+        let names: Vec<&str> = list.iter().map(|d| d.reference_name.as_str()).collect();
+        assert!(
+            names.contains(&"result_1"),
+            "resumed A has result_1: {names:?}"
+        );
+    }
+    assert!(store.get(&a).is_ok(), "A's id still resolves after open");
+
+    // (2) A's resume did not touch B: B's working set is unchanged (ADR-0027
+    //     isolation across the resume path).
+    assert!(store.get(&b).is_ok(), "B's id still resolves");
+    {
+        let s = handle_b.session.lock().unwrap();
+        let names: Vec<String> = s.list().iter().map(|d| d.reference_name.clone()).collect();
+        assert_eq!(
+            names,
+            vec!["people".to_string()],
+            "B's working set must be unchanged by A's resume (ADR-0027)"
+        );
+    }
 }
