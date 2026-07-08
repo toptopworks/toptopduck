@@ -4,7 +4,7 @@
 //! its target by `session_id` (the new first parameter), clones the
 //! `Arc<SessionHandle>`, and runs against it.
 //!
-//! ## Concurrency model (ADR-0056 Decision 3)
+//! ## Concurrency model (ADR-0056)
 //!
 //! The store lock is held ONLY for the brief map lookup / insert / remove -- a
 //! long turn (`ask`, `read_rows`) clones the `Arc<SessionHandle>` and releases
@@ -26,19 +26,18 @@
 //!
 //! ## Type-enforced invariants (issue #73)
 //!
-//! PR #71/#72 left several ADR-0055/0056 invariants at the doc/convention
+//! Previously several ADR-0055/0056 invariants lived at the doc/convention
 //! layer only; this module sinks them into the type system so illegal states
 //! are unrepresentable:
 //!
 //! - [`SessionId`] is a newtype: the command boundary parses `&str -> SessionId`
 //!   once, and a malformed id surfaces as [`SessionError::InvalidId`] rather
-//!   than collapsing into "unknown session" (review H1).
+//!   than collapsing into "unknown session".
 //! - [`SessionHandle`] fields are private and reached only through accessors;
 //!   [`ClosingFlag`] exposes `set` (store true) but NO unset, so a holder of a
-//!   cloned flag cannot revoke a close (review H2 / ADR-0055 once-closing).
+//!   cloned flag cannot revoke a close (ADR-0055 once-closing).
 //! - [`SessionError`] distinguishes `InvalidId` / `NotFound` / `Resuming` /
-//!   `InFlight` / `Engine` instead of merging them into one `Err(String)`
-//!   (review M8).
+//!   `InFlight` / `Engine` instead of merging them into one `Err(String)`.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -55,7 +54,7 @@ use crate::session::Session;
 /// `SessionError::NotFound.to_string()` is asserted to equal this.
 pub const UNKNOWN_SESSION: &str = "会话不存在或已关闭";
 
-/// Backend-generated session id (ADR-0056, review H1). A newtype over UUID v4
+/// Backend-generated session id (ADR-0056). A newtype over UUID v4
 /// so a session-scoped command cannot accept an arbitrary string: the command
 /// boundary parses `&str -> SessionId` once (a malformed id fails as
 /// [`SessionError::InvalidId`], NOT collapsed into "unknown session"), and the
@@ -82,7 +81,7 @@ impl SessionId {
 
     /// Mint a fresh v4 id. Store-internal: only [`SessionStore::create`] mints
     /// ids, keeping the id <-> resource binding atomic (the id is issued only
-    /// after the DuckDB instance exists and the insert lands, ADR-0056 Why 2).
+    /// after the DuckDB instance exists and the insert lands; see ADR-0056).
     fn new() -> Self {
         Self(uuid::Uuid::new_v4())
     }
@@ -94,7 +93,7 @@ impl fmt::Display for SessionId {
     }
 }
 
-/// Typed session-scoped command errors (issue #73, review M8). Replaces the
+/// Typed session-scoped command errors (issue #73). Replaces the
 /// bare `Err(String)` the store and reject guards used to return: the distinct
 /// failure modes (malformed id, unknown session, resuming, in-flight, engine)
 /// were merged into one string, so the frontend could not programmatically
@@ -105,7 +104,7 @@ impl fmt::Display for SessionId {
 /// Rust-side boundary can now match on the variant.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize)]
 pub enum SessionError {
-    /// The session id was not a valid UUID (review H1). Distinct from
+    /// The session id was not a valid UUID. Distinct from
     /// [`Self::NotFound`] so a malformed id (typo, truncation, a value that was
     /// never an id) is not confused with a well-formed id whose session closed.
     #[error("会话 id 格式错误")]
@@ -130,7 +129,7 @@ pub enum SessionError {
 }
 
 /// Map a typed session error to the IPC error string at the command boundary
-/// (review M8). Every `#[tauri::command]` returns `Result<T, String>`; this
+/// (issue #73). Every `#[tauri::command]` returns `Result<T, String>`; this
 /// impl lets `store.get(id)?`, `SessionId::parse(s)?`, and the reject guards
 /// propagate with `?` directly, while the IPC facade still emits the Display
 /// string the frontend has always rendered. Keeping the conversion here (not
@@ -142,7 +141,7 @@ impl From<SessionError> for String {
     }
 }
 
-/// ADR-0055 monotonic closing flag (review H2): once `close_session` marks a
+/// ADR-0055 monotonic closing flag: once `close_session` marks a
 /// session closing, it stays closing. The type exposes [`Self::set`] (store
 /// true) and [`Self::get`] (load) only -- there is deliberately NO unset path,
 /// so a holder of a cloned flag cannot revoke a close (the prior
@@ -186,7 +185,7 @@ impl Default for ClosingFlag {
 /// entry, but an in-flight ask's clone keeps it alive until the turn finishes
 /// (ADR-0055).
 ///
-/// All four fields are private and reached only through accessors (review H2):
+/// All four fields are private and reached only through accessors:
 /// the `closing` flag is monotonic via [`ClosingFlag`] (no unset), the cancel
 /// token and session mutex never escape as raw `Arc`s, and the resume flag
 /// toggles through `&self`. A command that needs the session off-thread clones
@@ -308,7 +307,7 @@ impl SessionStore {
     /// Build a fresh session, bind it to a backend-generated id (UUID v4), and
     /// insert it. The id is generated AFTER the DuckDB instance exists and the
     /// insert completes, so the id <-> resource binding is atomic -- there is
-    /// no "id issued, resource unbuilt" window (ADR-0056 Why 2). The cancel
+    /// no "id issued, resource unbuilt" window (see ADR-0056). The cancel
     /// token is supplied by the caller (the command layer) so a test with a
     /// blocking `FakeProvider` can share the token with the provider before
     /// the session exists; the real `create_session` command allocates a fresh
@@ -348,12 +347,12 @@ impl SessionStore {
     /// unknown / closed session (a malformed id is caught earlier by
     /// [`SessionId::parse`] and surfaces as [`SessionError::InvalidId`]).
     ///
-    /// # ADR-0056 brief-lock invariant (review M7)
+    /// # ADR-0056 brief-lock invariant
     ///
     /// The returned `Arc<SessionHandle>` must NOT be held across Tauri turns:
     /// a single command clones it, uses it within that one invocation, and
     /// drops it before returning. Holding it longer would violate "the store
-    /// lock is held only for lookup / insert / remove" (ADR-0056 Decision 3) --
+    /// lock is held only for lookup / insert / remove" (see ADR-0056) --
     /// a stale Arc bypasses the map and could race a `close` + `create` that
     /// recycles state. The handle's fields are private and reached only through
     /// accessors, so no internal field can escape; an offending cross-turn hold
@@ -438,13 +437,25 @@ mod tests {
     /// A non-v4 UUID (nil, v1, v3, v5) is InvalidId, not silently accepted:
     /// the store only mints v4, so a well-formed non-v4 id was never a real
     /// session id. A well-formed v4 that is simply absent is NotFound (covered
-    /// by `malformed_id_is_invalid_not_not_found` above).
+    /// by `malformed_id_is_invalid_not_not_found` above). All four non-v4
+    /// shapes are pinned: nil yields version `None`, v1 / v3 / v5 yield
+    /// `Some(V1/V3/V5)` -- the nil case alone cannot prove the version-
+    /// comparison branch fires.
     #[test]
     fn non_v4_uuid_is_invalid_even_if_well_formed() {
-        // Nil UUID: valid format, but no version -- not v4.
-        let err = SessionId::parse("00000000-0000-0000-0000-000000000000")
-            .expect_err("nil uuid is not v4");
-        assert_eq!(err, SessionError::InvalidId);
+        // Nil (version None) and v1 / v3 / v5 (version Some(!=Random)): each is
+        // a well-formed UUID but none is v4, so all reject as InvalidId. The
+        // nil case exercises the None-branch of the version check; v1 / v3 /
+        // v5 exercise the Some(!=Random)-branch.
+        for wire in [
+            "00000000-0000-0000-0000-000000000000", // nil -- version None
+            "a0eebc99-9c0b-1ef8-bb6d-6249ebb38000", // v1
+            "a0eebc99-9c0b-3ef8-bb6d-6249ebb38000", // v3
+            "a0eebc99-9c0b-5ef8-bb6d-6249ebb38000", // v5
+        ] {
+            let err = SessionId::parse(wire).expect_err("non-v4 id should reject");
+            assert_eq!(err, SessionError::InvalidId, "must be InvalidId: {wire}");
+        }
     }
 
     /// `NotFound` carries the canonical wording the frontend has always
@@ -471,15 +482,34 @@ mod tests {
         assert_eq!(SessionError::Engine("boom".into()).to_string(), "boom");
     }
 
-    /// `From<SessionError> for String` yields the Display string, so the
-    /// command boundary's `?` propagates the exact wording the frontend sees.
+    /// `From<SessionError> for String` yields the Display string for EVERY
+    /// variant, so the command boundary's `?` propagates the exact wording
+    /// the frontend string-matches. Each variant is asserted against its
+    /// canonical string (mirroring `ipc_contract::session_error_display_*`);
+    /// `Engine` carries a free-text payload whose Display is the payload.
     #[test]
     fn from_session_error_for_string_is_the_display_string() {
-        let s: String = SessionError::Resuming.into();
-        assert_eq!(s, "正在恢复会话，请稍候再操作");
+        let cases: [(SessionError, &str); 4] = [
+            (SessionError::InvalidId, "会话 id 格式错误"),
+            (SessionError::NotFound, UNKNOWN_SESSION),
+            (SessionError::Resuming, "正在恢复会话，请稍候再操作"),
+            (
+                SessionError::InFlight,
+                "该会话有查询进行中，请先取消或等待完成",
+            ),
+        ];
+        for (variant, expected) in cases {
+            let s: String = variant.into();
+            assert_eq!(
+                s, expected,
+                "From<SessionError> for String must equal Display"
+            );
+        }
+        let s: String = SessionError::Engine("boom".into()).into();
+        assert_eq!(s, "boom", "Engine Display is the payload as-is");
     }
 
-    /// `ClosingFlag` is monotonic (review H2): `set` flips false -> true, and a
+    /// `ClosingFlag` is monotonic: `set` flips false -> true, and a
     /// second `set` stays true. There is no unset method on the type -- the
     /// non-existence is the invariant (a future `unset` would have to be added
     /// deliberately, and a code review would flag it).
@@ -505,7 +535,7 @@ mod tests {
     }
 
     /// `SessionHandle::mark_closing` is observable through `is_closing` and
-    /// monotonic (review H2): the prior `pub Arc<AtomicBool>` path that let a
+    /// monotonic: the prior `pub Arc<AtomicBool>` path that let a
     /// caller `store(false)` no longer exists.
     #[test]
     fn handle_mark_closing_is_observable_and_monotonic() {

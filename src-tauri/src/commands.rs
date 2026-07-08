@@ -3,13 +3,13 @@
 //! every session-scoped command takes `session_id` as its first parameter,
 //! parses it into a typed [`SessionId`] (a malformed id surfaces as
 //! [`SessionError::InvalidId`], distinct from a closed session's
-//! [`SessionError::NotFound`] -- review H1, issue #73), looks up the target
+//! [`SessionError::NotFound`] -- issue #73), looks up the target
 //! handle, and runs against it. The store lock is held only for the brief
 //! lookup; long turns run against a cloned `Arc<SessionHandle>` with no store
 //! lock held (ADR-0056 concurrency model). All command functions return
 //! `Result<T, String>` for IPC (the frontend string-matches the error); the
 //! typed [`SessionError`] is mapped to that string via `From<SessionError> for
-//! String` so `?` propagates the exact wording (review M8).
+//! String` so `?` propagates the exact wording.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -36,7 +36,7 @@ use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore}
 /// replay). A DIFFERENT session's resume does NOT block this command -- the
 /// flag is per-handle, not process-global. Returns the typed
 /// [`SessionError::Resuming`] so the command boundary's `?` maps it to the
-/// user-facing Chinese error string the frontend renders (review M8).
+/// user-facing Chinese error string the frontend renders.
 fn reject_if_resuming(handle: &SessionHandle) -> Result<(), SessionError> {
     if handle.is_resuming() {
         return Err(SessionError::Resuming);
@@ -51,7 +51,7 @@ fn reject_if_resuming(handle: &SessionHandle) -> Result<(), SessionError> {
 /// each session has its own token. The session `Mutex` is the correctness
 /// backstop for the check-then-acquire race; this fast-path keeps a stray
 /// second call from blocking <=120s on the first turn's HTTP. Returns the
-/// typed [`SessionError::InFlight`] (review M8).
+/// typed [`SessionError::InFlight`].
 fn reject_if_in_flight(handle: &SessionHandle) -> Result<(), SessionError> {
     if handle.is_in_flight() {
         return Err(SessionError::InFlight);
@@ -546,7 +546,7 @@ pub async fn open_duck(
     reject_if_resuming(&handle)?;
     handle.set_resuming(true);
     let path = PathBuf::from(path);
-    // Pull the handle's shared tokens out via accessors (review H2: the fields
+    // Pull the handle's shared tokens out via accessors (the fields
     // are private). The resumed session reuses the SAME cancel token + closing
     // flag so a close/cancel during or after resume reaches it; the closing
     // flag is monotonic (ClosingFlag), so re-attaching it cannot weaken the
@@ -710,7 +710,7 @@ mod tests {
         reject_if_in_flight(&handle).expect("ask allowed after turn ends");
     }
 
-    /// An unknown / closed session_id rejects with NotFound (review H1/M8). The
+    /// An unknown / closed session_id rejects with NotFound. The
     /// malformed-id path (InvalidId) is covered in session_store tests; this
     /// pins the NotFound branch the command boundary surfaces.
     #[test]
@@ -724,7 +724,7 @@ mod tests {
     }
 
     /// A malformed id is InvalidId at the parse step, distinct from NotFound
-    /// (review H1): the command boundary surfaces the distinction so a typo
+    /// -- the command boundary surfaces the distinction so a typo
     /// reads differently from a closed session. Pins the command-layer parse
     /// the typed store cannot express (the store takes a typed SessionId).
     #[test]
