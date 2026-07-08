@@ -4725,6 +4725,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tempfile",
  "ureq",
+ "uuid",
 ]
 
 [[package]]

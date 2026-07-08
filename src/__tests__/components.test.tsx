@@ -572,8 +572,8 @@ describe("ResultView", () => {
       offset: 0,
       limit: 100,
     });
-    render(<ResultView referenceName="result_1" assumption="把 id 当作主键" viz={null} />);
-    await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 0, 100));
+    render(<ResultView sessionId="sess-1" referenceName="result_1" assumption="把 id 当作主键" viz={null} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 0, 100));
     expect(screen.getByText(/行数：1/)).toBeInTheDocument();
     expect(screen.getByText("n")).toBeInTheDocument(); // column header
     expect(screen.getByText("5")).toBeInTheDocument(); // cell value
@@ -590,11 +590,11 @@ describe("ResultView", () => {
       offset: 0,
       limit: 2,
     });
-    render(<ResultView referenceName="result_1" assumption={null} viz={null} pageSize={2} />);
-    await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 0, 2));
+    render(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} pageSize={2} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 0, 2));
     expect(screen.getByText(/共 5 行/)).toBeInTheDocument(); // total disclosed
     fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
-    await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 2, 2));
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 2, 2));
   });
 
   it("renders the empty-state row and a zero total for a 0-row result", async () => {
@@ -607,8 +607,8 @@ describe("ResultView", () => {
       offset: 0,
       limit: 100,
     });
-    render(<ResultView referenceName="result_1" assumption={null} viz={null} />);
-    await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 0, 100));
+    render(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 0, 100));
     expect(screen.getByText(/行数：0/)).toBeInTheDocument();
     expect(screen.getByText(/（无数据行）/)).toBeInTheDocument();
   });
@@ -636,12 +636,12 @@ describe("ResultView", () => {
         offset: 0,
         limit: 2,
       });
-    render(<ResultView referenceName="result_1" assumption={null} viz={null} pageSize={2} />);
-    await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 0, 2));
+    render(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} pageSize={2} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 0, 2));
     fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
-    await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 2, 2));
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 2, 2));
     fireEvent.click(screen.getByRole("button", { name: /上一页/ }));
-    await waitFor(() => expect(readRows).toHaveBeenCalledWith("result_1", 0, 2));
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 0, 2));
   });
 });
 
@@ -668,6 +668,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     vi.mocked(embed).mockResolvedValue(embedOk());
     const { container } = render(
       <ResultView
+        sessionId="sess-1"
         referenceName="result_1"
         assumption={null}
         viz={{ kind: "bar", spec: JSON.stringify({ mark: "bar" }) }}
@@ -686,6 +687,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     // called: decodeViz rejects before rendering.
     const { container } = render(
       <ResultView
+        sessionId="sess-1"
         referenceName="result_1"
         assumption={null}
         viz={{ kind: "bar", spec: "not-valid-json" }}
@@ -703,6 +705,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     // degrades. Whitelist = bar/line/area/scatter/pie only.
     render(
       <ResultView
+        sessionId="sess-1"
         referenceName="result_1"
         assumption={null}
         viz={{ kind: "bar", spec: JSON.stringify({ mark: "rect" }) }}
@@ -720,6 +723,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     vi.mocked(embed).mockRejectedValue(new Error("vega render boom"));
     render(
       <ResultView
+        sessionId="sess-1"
         referenceName="result_1"
         assumption={null}
         viz={{ kind: "bar", spec: JSON.stringify({ mark: "bar" }) }}
@@ -735,7 +739,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
   it("renders a plain table with no disclosure when viz is null", async () => {
     // ADR-0033: a null viz is the default table turn -- NOT a degradation, so no
     // disclosure shows and Vega-Embed is never called.
-    render(<ResultView referenceName="result_1" assumption={null} viz={null} />);
+    render(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />);
     await waitFor(() => expect(readRows).toHaveBeenCalled());
     expect(embed).not.toHaveBeenCalled();
     expect(screen.queryByText(/图表无法渲染/)).not.toBeInTheDocument();
@@ -753,6 +757,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     );
     const { unmount } = render(
       <ResultView
+        sessionId="sess-1"
         referenceName="result_1"
         assumption={null}
         viz={{ kind: "bar", spec: JSON.stringify({ mark: "bar" }) }}

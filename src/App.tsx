@@ -16,6 +16,7 @@ import {
   askQuestion,
   cancelQuery,
   conversation,
+  createSession,
   fmtError,
   getAppConfig,
   getProviderConfig,
@@ -155,6 +156,14 @@ export default function App() {
   // lands, apply the stored size/position; later loads (after a save) must NOT
   // re-apply (would snap the user's just-resized window back).
   const geometryRestoredRef = useRef(false);
+  // ADR-0056 multi-session addressing: the backend tracks sessions by id;
+  // this single-session shell mints ONE id on mount and threads it into every
+  // session-scoped call (the multi-tab UI lands in a later PRD). null only
+  // between mount and the createSession promise resolving -- the render gates
+  // on it so no session-scoped call runs before the id lands. The ref lets the
+  // useCallback handlers read the current id without re-creating on every set.
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
 
   /** Poll the backend for the most recent per-turn persistence failure
    * (review H4). Called at the end of every mutating handler so a dropped
@@ -162,19 +171,20 @@ export default function App() {
    * silently self-heal. Best-effort: an IPC failure here is swallowed rather
    * than shown as a separate error (it must not mask the real operation). */
   const pollPersistError = useCallback(async () => {
+    if (!sessionId) return;
     try {
-      setPersistError(await takePersistError());
+      setPersistError(await takePersistError(sessionId));
     } catch {
       // swallow -- persist-status polling must not surface its own failure
     }
-  }, []);
+  }, [sessionId]);
 
-  const refresh = useCallback(async () => {
-    setDatasets(await listWorkingSet());
-    const act = await activeDataset();
+  const refresh = useCallback(async (sid: string) => {
+    setDatasets(await listWorkingSet(sid));
+    const act = await activeDataset(sid);
     setActiveName(act?.reference_name ?? null);
     setSelected((cur) => cur ?? act?.reference_name ?? null);
-    setThread(await conversation());
+    setThread(await conversation(sid));
   }, []);
 
   // Refresh the LLM key-configured indicator (issue #29). Called on mount and
@@ -190,11 +200,34 @@ export default function App() {
     }
   }, []);
 
+  // ADR-0056: mint the single session id once on mount. Lands before any
+  // session-scoped call runs (the sync effect below waits on sessionId). A
+  // create failure surfaces as a load error; the gated render keeps the UI in
+  // a loading state until the id resolves.
   useEffect(() => {
-    // Mount-time sync from the Tauri backend (external system -> state): a
-    // legitimate one-shot fetch, not the avoidable cascade this rule targets.
+    let cancelled = false;
+    createSession()
+      .then((id) => {
+        if (cancelled) return;
+        sessionIdRef.current = id;
+        setSessionId(id);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError({ message: fmtError(e), kind: "load" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    // Wait for the session id before issuing any session-scoped call. Mount-time
+    // sync from the Tauri backend (external system -> state): a legitimate
+    // one-shot fetch, not the avoidable cascade this rule targets.
+    if (!sessionId) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    void refresh();
+    void refresh(sessionId);
     // refreshKeyStatus swallows its own errors, so no disable is needed here.
     void refreshKeyStatus();
     // Load app-config (ADR-0038): theme + window geometry + recent files. Errors
@@ -209,7 +242,7 @@ export default function App() {
       .catch(() => {
         // Keep null; theme defaults to "system" (no attribute), no recent files.
       });
-  }, [refresh, refreshKeyStatus]);
+  }, [sessionId, refresh, refreshKeyStatus]);
 
   /** Push `cfg` into state + ref and persist it atomically. Centralizes the
    * "mutate AppConfig" flow so every caller keeps state, ref, and disk aligned.
@@ -322,14 +355,15 @@ export default function App() {
    * mislabelling a succeeded operation as a failure. */
   function useSimpleMutation<Args extends unknown[]>(
     kind: AppError["kind"],
-    fn: (...args: Args) => Promise<unknown>,
+    fn: (sessionId: string, ...args: Args) => Promise<unknown>,
   ) {
     return useCallback(
       async (...args: Args) => {
+        if (!sessionId) return;
         setLoading(true);
         setError(null);
         try {
-          await fn(...args);
+          await fn(sessionId, ...args);
         } catch (e) {
           setError({ message: fmtError(e), kind });
           setLoading(false);
@@ -337,7 +371,7 @@ export default function App() {
           return;
         }
         try {
-          await refresh();
+          await refresh(sessionId);
         } catch (refreshErr) {
           setError({
             message: `${ERROR_PREFIX[kind].replace("失败：", "")}已保存，但刷新工作集失败：${fmtError(refreshErr)}`,
@@ -347,18 +381,26 @@ export default function App() {
         setLoading(false);
         void pollPersistError();
       },
-      [kind, fn],
+      // `sessionId` is in deps (not read via ref) so the hook recomputes when
+      // the session id lands; refresh + pollPersistError are stable useCallbacks.
+      // exhaustive-deps false-positives on this factory pattern (it misreads
+      // the useState value as a non-reactive outer-scope binding), so the deps
+      // are pinned here -- removing sessionId would freeze the closure at null.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      [kind, fn, sessionId, refresh, pollPersistError],
     );
   }
 
   const handleIngest = useCallback(
     async (path: string) => {
+      const sid = sessionIdRef.current;
+      if (!sid) return;
       setLoading(true);
       setError(null);
       try {
-        const outcome = await ingestFile(path);
+        const outcome = await ingestFile(sid, path);
         if (outcome.kind === "Loaded") {
-          await refresh();
+          await refresh(sid);
           setSelected(outcome.data.reference_name);
         } else if (outcome.kind === "NeedsGuidance") {
           setGuidance({ request: outcome.data, path });
@@ -378,14 +420,16 @@ export default function App() {
   const handleGuidedSubmit = useCallback(
     async (sheetGuidance: SheetGuidance[]) => {
       if (!guidance) return;
+      const sid = sessionIdRef.current;
+      if (!sid) return;
       const { path } = guidance;
       setLoading(true);
       setError(null);
       try {
-        const outcome = await ingestFileGuided(path, sheetGuidance);
+        const outcome = await ingestFileGuided(sid, path, sheetGuidance);
         if (outcome.kind === "Loaded") {
           setGuidance(null);
-          await refresh();
+          await refresh(sid);
           setSelected(outcome.data.reference_name);
         } else if (outcome.kind === "Error") {
           setError({ message: loadErrorMessage(outcome.data), kind: "load" });
@@ -416,12 +460,14 @@ export default function App() {
   // (never mislabelled a load failure).
   const handleReplace = useCallback(
     async (referenceName: string, path: string) => {
+      const sid = sessionIdRef.current;
+      if (!sid) return;
       setLoading(true);
       setError(null);
       try {
-        const outcome = await replaceSource(referenceName, path);
+        const outcome = await replaceSource(sid, referenceName, path);
         if (outcome.kind === "Loaded") {
-          await refresh();
+          await refresh(sid);
           setSelected(outcome.data.reference_name);
         } else if (outcome.kind === "NeedsGuidance") {
           // Structured replace never yields NeedsGuidance; defensive guard.
@@ -489,10 +535,12 @@ export default function App() {
     async (continueWith: string) => {
       const target = pendingActiveDelete;
       if (!target) return;
+      const sid = sessionIdRef.current;
+      if (!sid) return;
       setLoading(true);
       setError(null);
       try {
-        await removeActiveSource(target.reference_name, continueWith);
+        await removeActiveSource(sid, target.reference_name, continueWith);
       } catch (e) {
         setError({ message: fmtError(e), kind: "delete" });
         setLoading(false);
@@ -500,7 +548,7 @@ export default function App() {
       }
       setPendingActiveDelete(null);
       try {
-        await refresh();
+        await refresh(sid);
       } catch (refreshErr) {
         setError({
           message: `删源已保存，但刷新工作集失败：${fmtError(refreshErr)}`,
@@ -526,10 +574,12 @@ export default function App() {
   // load failure).
   const handleAsk = useCallback(
     async (question: string) => {
+      const sid = sessionIdRef.current;
+      if (!sid) return;
       setLoading(true);
       setError(null);
       try {
-        const outcome = await askQuestion(question);
+        const outcome = await askQuestion(sid, question);
         if (outcome.kind === "Materialized") {
           const referenceName = outcome.data.dataset.reference_name;
           // Select before refresh -- the user sees the result even when the
@@ -542,14 +592,14 @@ export default function App() {
           });
           setSelected(referenceName);
           try {
-            await refresh(); // working set + thread
+            await refresh(sid); // working set + thread
           } catch (e) {
             setError({ message: `结果已生成，但工作集刷新失败：${fmtError(e)}`, kind: "ask" });
           }
         } else {
           // Textual / failed / cancelled: no working-set change, only the thread.
           try {
-            setThread(await conversation());
+            setThread(await conversation(sid));
           } catch (e) {
             setError({ message: `对话刷新失败：${fmtError(e)}`, kind: "ask" });
           }
@@ -584,8 +634,10 @@ export default function App() {
   // the input -- the ask itself still resolves (Cancelled or otherwise) and
   // clears loading on its own.
   const handleCancel = useCallback(async () => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
     try {
-      await cancelQuery();
+      await cancelQuery(sid);
     } catch (e) {
       setError({ message: fmtError(e), kind: "ask" });
     }
@@ -606,12 +658,14 @@ export default function App() {
       setLoading(true);
       setError(null);
       try {
-        await saveAsDuck(path, stem);
+        const sid = sessionIdRef.current;
+        if (!sid) return;
+        await saveAsDuck(sid, path, stem);
         // Record into the app-config recent-files list (issue #53). Fire-and-
         // forget + refresh so the list renders the new entry; a failure is
         // swallowed inside the backend (advisory).
         void recordRecentFile(path).then(() => void refreshRecentFiles());
-        await refresh();
+        await refresh(sid);
       } catch (e) {
         setError({ message: fmtError(e), kind: "load" });
       } finally {
@@ -631,6 +685,8 @@ export default function App() {
   // openDuckByPath for click-to-open without the OS dialog.
   const openDuckByPath = useCallback(
     async (path: string) => {
+      const sid = sessionIdRef.current;
+      if (!sid) return;
       setLoading(true);
       setError(null);
       // Subscribe BEFORE openDuck so the first Source event is never missed
@@ -651,13 +707,13 @@ export default function App() {
       });
       setResumeStatus("正在打开…");
       try {
-        await openDuck(path);
+        await openDuck(sid, path);
         // Record into the recent-files list (issue #53). Fire-and-forget +
         // refresh; a failure is swallowed inside the backend (advisory).
         void recordRecentFile(path).then(() => void refreshRecentFiles());
         setResumeStatus(null);
         setLatestResult(null);
-        await refresh();
+        await refresh(sid);
       } catch (e) {
         setError({ message: fmtError(e), kind: "load" });
         setResumeStatus(null);
@@ -695,6 +751,17 @@ export default function App() {
     },
     [openDuckByPath],
   );
+
+  // ADR-0056: gate the UI until the session id lands -- no session-scoped call
+  // can run before it. Once set, every handler reads it via sessionIdRef and
+  // the render can treat it as a known string below.
+  if (!sessionId) {
+    return (
+      <main>
+        <p>正在初始化会话…</p>
+      </main>
+    );
+  }
 
   const shown = datasets.find((d) => d.reference_name === selected) ?? null;
 
@@ -771,6 +838,7 @@ export default function App() {
       {latestResult && (
         <section className="panel">
           <ResultView
+            sessionId={sessionId}
             key={latestResult.referenceName}
             referenceName={latestResult.referenceName}
             assumption={latestResult.assumption}

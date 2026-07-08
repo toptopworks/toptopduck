@@ -1,9 +1,12 @@
-//! Tauri command boundary (frontend <-> Rust). Thin wrappers over [`Session`];
-//! the ingest pipeline is the black box tested in tests/ingest_blackbox.rs, and
-//! the ask -> result loop in tests/query_blackbox.rs (issue #22).
+//! Tauri command boundary (frontend <-> Rust). Thin wrappers over the
+//! multi-session [`SessionStore`](crate::session_store::SessionStore) (ADR-0056):
+//! every session-scoped command takes `session_id` as its first parameter,
+//! looks up the target handle, and runs against it. The store lock is held
+//! only for the brief lookup; long turns run against a cloned
+//! `Arc<SessionHandle>` with no store lock held (ADR-0056 concurrency model).
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tauri::{Emitter, State};
 
@@ -14,39 +17,94 @@ use crate::model::{
     SheetGuidance, ThreadEntry, TurnOutcome,
 };
 use crate::provider::live_config::LiveProviderConfig;
-use crate::session::{is_resuming, ResumeEvent, Session};
+use crate::session::{ResumeEvent, Session};
+use crate::session_store::{SessionHandle, SessionStore};
 
-/// Reject a mutating command while a resume is in flight. The managed
-/// `Arc<Mutex<Session>>` still holds the PRE-resume session while
-/// [`Session::open_duck`] runs in `open_duck`'s `spawn_blocking`, so a
-/// concurrent mutating command (`ask` / `ingest_file` / `ingest_file_guided`
-/// / `replace_source` / `remove_source` / `remove_active_source` /
-/// `rename_dataset` / `set_dataset_privacy` / `save_as_duck`) would silently
-/// operate on the stale session and be overwritten when the resumed session
-/// lands (`*s = new_session`). The frontend's shared `loading` flag is the
-/// primary defense; this check is the Rust-side backstop for races the
-/// frontend cannot see (a second window, an IPC replay). It SHRINKS the
-/// window, not closes it: the flag is sampled before the session lock is
-/// taken, so a resume that lands in between lets the command proceed against
-/// the resumed session (correct) rather than reject. Returns a user-facing
-/// Chinese error so a rejected call surfaces honestly rather than appearing
-/// to succeed then vanishing.
-fn reject_if_resuming() -> Result<(), String> {
-    if is_resuming() {
+/// Reject a mutating command while THIS session is resuming (ADR-0053, made
+/// per-session by ADR-0056). `open_duck(session_id, ...)` rebuilds that one
+/// session's contents off-thread; a concurrent mutating command targeting the
+/// SAME session would silently operate on the stale pre-resume session and be
+/// overwritten when `*s = new_session` lands. The frontend's shared `loading`
+/// flag is the primary defense; this per-session check is the Rust-side
+/// backstop for races the frontend cannot see (a second window, an IPC
+/// replay). A DIFFERENT session's resume does NOT block this command -- the
+/// flag is per-handle, not process-global. Returns a user-facing Chinese error
+/// so a rejected call surfaces honestly rather than appearing to succeed then
+/// vanishing.
+fn reject_if_resuming(handle: &SessionHandle) -> Result<(), String> {
+    if handle.is_resuming() {
         return Err("正在恢复会话，请稍候再操作".into());
     }
     Ok(())
 }
 
-/// Ingest a file. Runs the DuckDB copy-in off the async/UI thread (AC8: does not
-/// freeze the app) and returns the outcome descriptor or a clear error.
+/// Reject a second turn on the SAME session while one is in flight (ADR-0021
+/// single-flight, per session via ADR-0056). Read from the session's cancel
+/// token (no session lock needed -- the token is `Arc`-shared). A DIFFERENT
+/// session's in-flight turn never trips this -- each session has its own token.
+/// The session `Mutex` is the correctness backstop for the check-then-acquire
+/// race; this fast-path keeps a stray second call from blocking ≤120s on the
+/// first turn's HTTP.
+fn reject_if_in_flight(handle: &SessionHandle) -> Result<(), String> {
+    if handle.cancel.is_in_flight() {
+        return Err("该会话有查询进行中，请先取消或等待完成".into());
+    }
+    Ok(())
+}
+
+/// Create a new session (ADR-0056): the backend builds an independent in-memory
+/// DuckDB instance (ADR-0012/0027), allocates a per-session cancel token
+/// (ADR-0021), binds them to a backend-generated id (UUID v4), and returns the
+/// id. The id <-> resource binding is atomic (the id is minted only after the
+/// instance exists and the insert lands -- no "id issued, resource unbuilt"
+/// window, ADR-0056 Why 2). This is the `+ tab` action; the frontend tracks the
+/// returned id and passes it as the first parameter to every session-scoped
+/// command.
+#[tauri::command]
+pub fn create_session(
+    store: State<'_, Arc<SessionStore>>,
+    live: State<'_, LiveProviderConfig>,
+) -> Result<String, String> {
+    let cancel = Arc::new(CancelToken::new());
+    // The real LLM provider (ADR-0007): reads the API key from the OS keychain
+    // and the endpoint config from app-config (ADR-0038) via the shared
+    // LiveProviderConfig. A fresh session starts usable once a key is stored;
+    // before that every turn refuses honestly as not-wired.
+    let provider = Box::new(crate::AnthropicProvider::new(Box::new(
+        live.inner().clone(),
+    )));
+    store.create(cancel, provider)
+}
+
+/// Close a session (ADR-0055): mark closing, fire cancel, and remove the entry
+/// from the store. Returns immediately -- it does NOT wait for an in-flight
+/// ask. If a turn is in flight, cancel fires (HTTP still runs to completion
+/// ≤120s, ADR-0021 soft-cancel) and the ask's post-turn check sees `closing`
+/// and discards the outcome (no thread append, no recipe persist). New commands
+/// targeting this id after close reject as unknown session. The DuckDB instance
+/// + the bound `.duck` canonical-writer key are released when the last
+/// `Arc<SessionHandle>` drops (immediately if no ask is in flight, or when the
+/// in-flight ask's clone drops after its discard).
+#[tauri::command]
+pub fn close_session(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+) -> Result<(), String> {
+    store.close(&session_id)
+}
+
+/// Ingest a file into the named session. Runs the DuckDB copy-in off the
+/// async/UI thread (AC8: does not freeze the app) and returns the outcome
+/// descriptor or a clear error.
 #[tauri::command]
 pub async fn ingest_file(
-    state: State<'_, Arc<Mutex<Session>>>,
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
     path: String,
 ) -> Result<LoadOutcome, String> {
-    reject_if_resuming()?;
-    let session = state.inner().clone();
+    let handle = store.get(&session_id)?;
+    reject_if_resuming(&handle)?;
+    let session = Arc::clone(&handle.session);
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = session.lock().map_err(|e| e.to_string())?;
         Ok::<LoadOutcome, String>(s.ingest(Path::new(&path)))
@@ -57,16 +115,19 @@ pub async fn ingest_file(
 }
 
 /// Re-ingest an Excel workbook with the user's guided rectify choices
-/// (ADR-0015/0042). Called after a `NeedsGuidance` outcome once the UI has
-/// gathered header/skip choices per sheet. Runs off the async/UI thread (AC8).
+/// (ADR-0015/0042) into the named session. Called after a `NeedsGuidance`
+/// outcome once the UI has gathered header/skip choices per sheet. Runs off the
+/// async/UI thread (AC8).
 #[tauri::command]
 pub async fn ingest_file_guided(
-    state: State<'_, Arc<Mutex<Session>>>,
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
     path: String,
     guidance: Vec<SheetGuidance>,
 ) -> Result<LoadOutcome, String> {
-    reject_if_resuming()?;
-    let session = state.inner().clone();
+    let handle = store.get(&session_id)?;
+    reject_if_resuming(&handle)?;
+    let session = Arc::clone(&handle.session);
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = session.lock().map_err(|e| e.to_string())?;
         Ok::<LoadOutcome, String>(s.ingest_guided(Path::new(&path), &guidance))
@@ -78,26 +139,32 @@ pub async fn ingest_file_guided(
 
 #[tauri::command]
 pub fn list_working_set(
-    state: State<'_, Arc<Mutex<Session>>>,
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
 ) -> Result<Vec<DatasetDescriptor>, String> {
-    let s = state.lock().map_err(|e| e.to_string())?;
+    let handle = store.get(&session_id)?;
+    let s = handle.session.lock().map_err(|e| e.to_string())?;
     Ok(s.list())
 }
 
 #[tauri::command]
 pub fn active_dataset(
-    state: State<'_, Arc<Mutex<Session>>>,
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
 ) -> Result<Option<DatasetDescriptor>, String> {
-    let s = state.lock().map_err(|e| e.to_string())?;
+    let handle = store.get(&session_id)?;
+    let s = handle.session.lock().map_err(|e| e.to_string())?;
     Ok(s.active())
 }
 
 #[tauri::command]
 pub fn get_dataset(
-    state: State<'_, Arc<Mutex<Session>>>,
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
     reference_name: String,
 ) -> Result<Option<DatasetDescriptor>, String> {
-    let s = state.lock().map_err(|e| e.to_string())?;
+    let handle = store.get(&session_id)?;
+    let s = handle.session.lock().map_err(|e| e.to_string())?;
     Ok(s.get(&reference_name))
 }
 
@@ -107,12 +174,14 @@ pub fn get_dataset(
 /// unknown reference or a label already shown by another dataset.
 #[tauri::command]
 pub fn rename_dataset(
-    state: State<'_, Arc<Mutex<Session>>>,
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
     reference_name: String,
     new_display: String,
 ) -> Result<DatasetDescriptor, String> {
-    reject_if_resuming()?;
-    let mut s = state.lock().map_err(|e| e.to_string())?;
+    let handle = store.get(&session_id)?;
+    reject_if_resuming(&handle)?;
+    let mut s = handle.session.lock().map_err(|e| e.to_string())?;
     s.rename_display(&reference_name, &new_display)
         .map_err(|e| e.to_string())
 }
@@ -123,12 +192,14 @@ pub fn rename_dataset(
 /// take over is explicit. Runs the copy-in off the async/UI thread (AC8).
 #[tauri::command]
 pub async fn replace_source(
-    state: State<'_, Arc<Mutex<Session>>>,
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
     reference_name: String,
     path: String,
 ) -> Result<LoadOutcome, String> {
-    reject_if_resuming()?;
-    let session = state.inner().clone();
+    let handle = store.get(&session_id)?;
+    reject_if_resuming(&handle)?;
+    let session = Arc::clone(&handle.session);
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = session.lock().map_err(|e| e.to_string())?;
         Ok::<LoadOutcome, String>(s.replace_source(&reference_name, Path::new(&path)))
@@ -143,12 +214,14 @@ pub async fn replace_source(
 /// reference name with an error string.
 #[tauri::command]
 pub fn set_dataset_privacy(
-    state: State<'_, Arc<Mutex<Session>>>,
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
     reference_name: String,
     privacy: DatasetPrivacy,
 ) -> Result<DatasetDescriptor, String> {
-    reject_if_resuming()?;
-    let mut s = state.lock().map_err(|e| e.to_string())?;
+    let handle = store.get(&session_id)?;
+    reject_if_resuming(&handle)?;
+    let mut s = handle.session.lock().map_err(|e| e.to_string())?;
     s.set_privacy(&reference_name, privacy)
         .ok_or_else(|| format!("找不到引用名为「{reference_name}」的数据集"))
 }
@@ -167,11 +240,13 @@ pub fn set_dataset_privacy(
 /// independent. The only I/O is a best-effort DETACH + remove_file.
 #[tauri::command]
 pub fn remove_source(
-    state: State<'_, Arc<Mutex<Session>>>,
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
     reference_name: String,
 ) -> Result<(), String> {
-    reject_if_resuming()?;
-    let mut s = state.lock().map_err(|e| e.to_string())?;
+    let handle = store.get(&session_id)?;
+    reject_if_resuming(&handle)?;
+    let mut s = handle.session.lock().map_err(|e| e.to_string())?;
     s.remove_source(&reference_name).map_err(|e| e.to_string())
 }
 
@@ -187,29 +262,37 @@ pub fn remove_source(
 /// as rename / replace / remove_source).
 #[tauri::command]
 pub fn remove_active_source(
-    state: State<'_, Arc<Mutex<Session>>>,
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
     reference_name: String,
     continue_with: String,
 ) -> Result<(), String> {
-    reject_if_resuming()?;
-    let mut s = state.lock().map_err(|e| e.to_string())?;
+    let handle = store.get(&session_id)?;
+    reject_if_resuming(&handle)?;
+    let mut s = handle.session.lock().map_err(|e| e.to_string())?;
     s.remove_active_source(&reference_name, &continue_with)
         .map_err(|e| e.to_string())
 }
 
-/// Ask one question (PRD #1): run one turn and return its ADR-0028 outcome
-/// (result / textual / failed / cancelled). The single retry budget is consumed
-/// invisibly inside the turn. Runs off the async/UI thread (AC8) so a slow
-/// provider never freezes the app. A turn always produces an outcome; the only
-/// `Err` here is a session-lock failure (not a turn failure -- that is a
-/// `Failed` outcome).
+/// Ask one question (PRD #1) against the named session: run one turn and
+/// return its ADR-0028 outcome (result / textual / failed / cancelled). The
+/// single retry budget is consumed invisibly inside the turn. Runs off the
+/// async/UI thread (AC8) so a slow provider never freezes the app. A turn
+/// always produces an outcome; the only `Err` here is an unknown session, a
+/// resume guard rejection, or a session-lock failure (not a turn failure --
+/// that is a `Failed` outcome). ADR-0055: if the session was closed while this
+/// turn was in flight, the outcome is discarded inside `Session::ask` (no
+/// thread append, no recipe persist).
 #[tauri::command]
 pub async fn ask(
-    state: State<'_, Arc<Mutex<Session>>>,
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
     question: String,
 ) -> Result<TurnOutcome, String> {
-    reject_if_resuming()?;
-    let session = state.inner().clone();
+    let handle = store.get(&session_id)?;
+    reject_if_resuming(&handle)?;
+    reject_if_in_flight(&handle)?;
+    let session = Arc::clone(&handle.session);
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = session.lock().map_err(|e| e.to_string())?;
         Ok::<TurnOutcome, String>(s.ask(&question))
@@ -219,43 +302,52 @@ pub async fn ask(
     Ok(outcome)
 }
 
-/// Cancel the in-flight turn (ADR-0021, issue #28). Fires the shared cancel
-/// token, which sets the cooperative flag AND interrupts the running DuckDB
-/// query; the in-flight `ask` lands as a Cancelled outcome at its next check.
-/// Crucially this does NOT take the session lock -- `ask` holds it for the whole
-/// turn, so cancel reaches the token through a separate managed `Arc`. Safe when
-/// no turn is in flight (sets a flag the next `ask` resets before it starts).
-/// Always succeeds: cancel is a best-effort signal, not a transaction.
+/// Cancel the named session's in-flight turn (ADR-0021, issue #28). Fires THAT
+/// session's cancel token, which sets the cooperative flag AND interrupts the
+/// running DuckDB query; the in-flight `ask` lands as a Cancelled outcome at
+/// its next check. Addressed by `session_id` (ADR-0056): each session has its
+/// own token, so a cancel reaches exactly one session's turn without touching
+/// any other. Safe when no turn is in flight (sets a flag the next `ask`
+/// resets before it starts). Always succeeds once the session is known: cancel
+/// is a best-effort signal, not a transaction.
 #[tauri::command]
-pub fn cancel(cancel: State<'_, Arc<CancelToken>>) -> Result<(), String> {
-    cancel.request();
+pub fn cancel(store: State<'_, Arc<SessionStore>>, session_id: String) -> Result<(), String> {
+    let handle = store.get(&session_id)?;
+    handle.cancel.request();
     Ok(())
 }
 
-/// Read the conversation thread (ADR-0028/0039/0040): the unified timeline of
-/// turns AND source lifecycle events, in order. Synchronous -- a snapshot read
-/// of the session history with no copy-in. The frontend renders this as the
-/// always-visible thread (turns + source events); the window assembler reads
-/// only the turns (the session filters source events out before assembly), so
-/// source events never enter the LLM payload.
+/// Read the named session's conversation thread (ADR-0028/0039/0040): the
+/// unified timeline of turns AND source lifecycle events, in order.
+/// Synchronous -- a snapshot read of the session history with no copy-in. The
+/// frontend renders this as the always-visible thread (turns + source events);
+/// the window assembler reads only the turns (the session filters source events
+/// out before assembly), so source events never enter the LLM payload.
 #[tauri::command]
-pub fn conversation(state: State<'_, Arc<Mutex<Session>>>) -> Result<Vec<ThreadEntry>, String> {
-    let s = state.lock().map_err(|e| e.to_string())?;
+pub fn conversation(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+) -> Result<Vec<ThreadEntry>, String> {
+    let handle = store.get(&session_id)?;
+    let s = handle.session.lock().map_err(|e| e.to_string())?;
     Ok(s.conversation().to_vec())
 }
 
-/// Read one page of a dataset's rows (ADR-0024 windowed display). Runs off the
-/// async/UI thread (AC8) like `ask`: a large OFFSET is an O(offset) scan, so
-/// holding the session lock on the IPC path would block every other command.
-/// Rejects an unknown reference name or an engine error with an error string.
+/// Read one page of a dataset's rows from the named session (ADR-0024 windowed
+/// display). Runs off the async/UI thread (AC8) like `ask`: a large OFFSET is
+/// an O(offset) scan, so holding the session lock on the IPC path would block
+/// every other command on that session. Rejects an unknown session, an unknown
+/// reference name, or an engine error with an error string.
 #[tauri::command]
 pub async fn read_rows(
-    state: State<'_, Arc<Mutex<Session>>>,
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
     reference_name: String,
     offset: u64,
     limit: u64,
 ) -> Result<RowPage, String> {
-    let session = state.inner().clone();
+    let handle = store.get(&session_id)?;
+    let session = Arc::clone(&handle.session);
     tauri::async_runtime::spawn_blocking(move || {
         let s = session.lock().map_err(|e| e.to_string())?;
         s.read_rows(&reference_name, offset, limit)
@@ -267,12 +359,14 @@ pub async fn read_rows(
 
 // --- LLM provider key + endpoint config (issue #29/#53, ADR-0007/0019/0029/0038) ---
 //
-// The API key crosses IPC exactly once (frontend -> Rust, stored), and
-// thereafter the frontend learns only a boolean. The non-secret endpoint config
-// (base URL + model) crosses both ways. As of ADR-0038 the key lives in the OS
-// keychain and the endpoint config lives in the app-config file -- both reached
-// through the single managed [`LiveProviderConfig`] (the key never enters
-// app-config; the endpoint never enters the keychain).
+// Session-AGNOSTIC commands (ADR-0056 Decision 4): the API key, the provider
+// endpoint, and the app-level config are NOT tied to any one session, so they
+// take no `session_id`. The API key crosses IPC exactly once (frontend -> Rust,
+// stored), and thereafter the frontend learns only a boolean. The non-secret
+// endpoint config (base URL + model) crosses both ways. As of ADR-0038 the key
+// lives in the OS keychain and the endpoint config lives in the app-config
+// file -- both reached through the single managed [`LiveProviderConfig`] (the
+// key never enters app-config; the endpoint never enters the keychain).
 
 /// Whether an API key is stored. Returns a boolean only -- never the key
 /// itself (ADR-0029 invariant 3). The frontend uses this to decide whether to
@@ -378,45 +472,56 @@ pub fn record_recent_file(live: State<'_, LiveProviderConfig>, path: String) -> 
 //
 // Save / open a `.duck` recipe document. Save binds the live session to a
 // path (every subsequent terminal turn atomically rewrites it). Open resumes
-// the session across the restart boundary: each source is re-read + fingerprint-
-// verified, the productive SQL chain is eagerly re-executed LLM-free, and the
-// conversation thread + active pointer are restored. Resume progress is
-// emitted as a `resume-progress` Tauri event the frontend renders.
+// the session across the restart boundary WITHIN THE SAME session_id
+// (ADR-0056: tab <-> sessionId binding is stable; open_duck reuses the id and
+// replaces the session's contents, it does NOT mint a new id -- that is
+// create_session's job): each source is re-read + fingerprint-verified, the
+// productive SQL chain is eagerly re-executed LLM-free, and the conversation
+// thread + active pointer are restored. Resume progress is emitted as a
+// `resume-progress` Tauri event the frontend renders.
 
-/// Bind the session to a `.duck` path and write one recipe immediately
+/// Bind the named session to a `.duck` path and write one recipe immediately
 /// (ADR-0034). After this every terminal turn / source event atomically
 /// rewrites the recipe. Synchronous: a small whole-file rewrite.
 #[tauri::command]
 pub fn save_as_duck(
-    state: State<'_, Arc<Mutex<Session>>>,
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
     path: String,
     session_name: String,
 ) -> Result<(), String> {
-    reject_if_resuming()?;
-    let mut s = state.lock().map_err(|e| e.to_string())?;
+    let handle = store.get(&session_id)?;
+    reject_if_resuming(&handle)?;
+    let mut s = handle.session.lock().map_err(|e| e.to_string())?;
     s.bind_duck(PathBuf::from(path), session_name)
         .map_err(|e| e.to_string())
 }
 
-/// Open a `.duck` and resume the session across the restart boundary
-/// (ADR-0034). Runs off the async/UI thread (AC8): resume re-reads every
+/// Open a `.duck` and resume the named session across the restart boundary
+/// (ADR-0034/0056). Runs off the async/UI thread (AC8): resume re-reads every
 /// source and re-executes the productive SQL chain, which can take seconds.
 /// Progress is emitted as a `resume-progress` event per source verification
-/// and per replayed turn (ADR-0034 visible progress). On success the managed
-/// Session is replaced with the resumed one (the SAME managed cancel-token
-/// Arc is reused, so the cancel command keeps working against the new
-/// session).
+/// and per replayed turn (ADR-0034 visible progress). On success the session's
+/// CONTENTS are replaced with the resumed ones (ADR-0056: the SAME session_id
+/// is reused -- tab <-> id binding is stable; open does NOT create a new
+/// session). The resumed session inherits the handle's cancel token + closing
+/// flag, so a `cancel` / `close_session` during or after resume still reaches
+/// the right session.
 #[tauri::command]
 pub async fn open_duck(
     app: tauri::AppHandle,
-    state: State<'_, Arc<Mutex<Session>>>,
-    cancel: State<'_, Arc<CancelToken>>,
+    store: State<'_, Arc<SessionStore>>,
     live: State<'_, LiveProviderConfig>,
+    session_id: String,
     path: String,
 ) -> Result<(), String> {
+    let handle = store.get(&session_id)?;
+    reject_if_resuming(&handle)?;
+    handle.set_resuming(true);
     let path = PathBuf::from(path);
-    let session_arc = state.inner().clone();
-    let cancel_arc = Arc::clone(cancel.inner());
+    let cancel_arc = Arc::clone(&handle.cancel);
+    let closing_arc = Arc::clone(&handle.closing);
+    let session_arc = Arc::clone(&handle.session);
     // The resumed session reuses the SAME provider wiring as a fresh session
     // (ADR-0007): the real Anthropic client reading the key from the OS keychain
     // and the endpoint from app-config (ADR-0038), via the shared
@@ -426,13 +531,14 @@ pub async fn open_duck(
     let provider = Box::new(crate::AnthropicProvider::new(Box::new(
         live.inner().clone(),
     )));
-    tauri::async_runtime::spawn_blocking(move || {
-        let new_session = Session::open_duck(
+    let app_for_cb = app.clone();
+    let inner = tauri::async_runtime::spawn_blocking(move || {
+        let mut new_session = Session::open_duck(
             &path,
             cancel_arc,
             provider,
             |ev: ResumeEvent| {
-                let _ = app.emit("resume-progress", &ev);
+                let _ = app_for_cb.emit("resume-progress", &ev);
             },
             // Issue #49 honest-degrade callbacks: the engine surfaces Missing
             // / Unreadable / Drift / ActiveAbandoned decisions to the caller.
@@ -446,58 +552,139 @@ pub async fn open_duck(
             |_| crate::ActiveResolution::Abort,
         )
         .map_err(|e| e.to_string())?;
+        // Re-attach the handle's closing flag so a close_session after resume
+        // still discards in-flight turns on this session (ADR-0055). The cancel
+        // token was already shared via cancel_arc above.
+        new_session.set_closing_flag(closing_arc);
         let mut s = session_arc.lock().map_err(|e| e.to_string())?;
         *s = new_session;
         Ok::<(), String>(())
     })
-    .await
-    .map_err(|e| e.to_string())?
+    .await;
+    // Clear the per-session resume flag on EVERY exit (success, resume error,
+    // join panic) before propagating -- a stuck flag would reject every later
+    // mutating command on this session (ADR-0053).
+    handle.set_resuming(false);
+    inner.map_err(|e| e.to_string())??;
+    Ok(())
 }
 
-/// Read + clear the most recent per-turn persistence failure, if any
-/// (ADR-0034/0035 honest signal). The frontend polls this after each turn /
-/// source event / resume: a non-blocking "未保存到磁盘" banner surfaces the
-/// disk-vs-memory drift so the user knows a save dropped (instead of relying
-/// on the next successful write to silently self-heal, which would mask the
-/// window where closing the app loses the unsaved turns). Returns `None`
+/// Read + clear the named session's most recent per-turn persistence failure,
+/// if any (ADR-0034/0035 honest signal). The frontend polls this after each
+/// turn / source event / resume: a non-blocking "未保存到磁盘" banner surfaces
+/// the disk-vs-memory drift so the user knows a save dropped (instead of
+/// relying on the next successful write to silently self-heal, which would mask
+/// the window where closing the app loses the unsaved turns). Returns `None`
 /// after a clean save or after a prior read cleared the failure.
 #[tauri::command]
-pub fn take_persist_error(state: State<'_, Arc<Mutex<Session>>>) -> Result<Option<String>, String> {
-    let mut s = state.lock().map_err(|e| e.to_string())?;
+pub fn take_persist_error(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+) -> Result<Option<String>, String> {
+    let handle = store.get(&session_id)?;
+    let mut s = handle.session.lock().map_err(|e| e.to_string())?;
     Ok(s.take_persist_error())
 }
 
-/// Read + clear the pending external-change conflict, if any (ADR-0035 Decision 3 /
-/// issue #50). The frontend polls this after each turn / source event / resume:
-/// a non-`None` value means the auto-write was suspended because the `.duck`
-/// file's on-disk hash diverged from the session's baseline (another window,
-/// a text editor, or a sync tool edited the file). The frontend surfaces a
-/// three-option conflict UI (reload / keep mine / save as new); the engine
-/// NEVER silently clobbers the externally-edited file. Returns `None` when no
-/// conflict is pending or after a prior read cleared it.
+/// Read + clear the named session's pending external-change conflict, if any
+/// (ADR-0035 Decision 3 / issue #50). The frontend polls this after each turn /
+/// source event / resume: a non-`None` value means the auto-write was
+/// suspended because the `.duck` file's on-disk hash diverged from the
+/// session's baseline (another window, a text editor, or a sync tool edited
+/// the file). The frontend surfaces a three-option conflict UI (reload / keep
+/// mine / save as new); the engine NEVER silently clobbers the externally-edited
+/// file. Returns `None` when no conflict is pending or after a prior read
+/// cleared it.
 #[tauri::command]
 pub fn take_pending_conflict(
-    state: State<'_, Arc<Mutex<Session>>>,
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
 ) -> Result<Option<crate::PendingConflict>, String> {
-    let mut s = state.lock().map_err(|e| e.to_string())?;
+    let handle = store.get(&session_id)?;
+    let mut s = handle.session.lock().map_err(|e| e.to_string())?;
     Ok(s.take_pending_conflict())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_store::UNKNOWN_SESSION;
+    use crate::CancelToken;
 
-    /// The IPC-layer guard rejects mutating commands while a resume is in
-    /// flight. The happy path (no resume) is exercised implicitly by every
-    /// integration test that drives a command; this pins the rejection branch
-    /// itself -- previously the only untested path in the resume-guard slice.
+    /// The per-session resume guard rejects a mutating command while THAT
+    /// session is resuming. Pin the rejection branch itself (the happy path is
+    /// exercised implicitly by every command that drives a live session).
     #[test]
-    fn reject_if_resuming_blocks_while_a_resume_is_in_flight() {
-        let _guard = crate::session::acquire_test_resume_flag();
-        let err = reject_if_resuming().unwrap_err();
+    fn reject_if_resuming_blocks_while_the_session_is_resuming() {
+        let store = SessionStore::new();
+        let cancel = Arc::new(CancelToken::new());
+        let id = store
+            .create(cancel, Box::new(crate::UnwiredProvider))
+            .expect("create session");
+        let handle = store.get(&id).expect("handle");
+        handle.set_resuming(true);
+        let err = reject_if_resuming(&handle).unwrap_err();
         assert_eq!(err, "正在恢复会话，请稍候再操作");
-        // `_guard` drops here -> RESUMING_COUNT decrements. We do NOT assert
-        // resuming_count() == 0: parallel unit tests in this binary may also
-        // hold a guard, so only the block-branch (not the drain) is pinned.
+    }
+
+    /// A second session's resume flag is independent: resuming one session does
+    /// NOT block a mutating command on another (ADR-0056 per-session isolation).
+    #[test]
+    fn resume_flag_is_per_session_not_global() {
+        let store = SessionStore::new();
+        let a = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+            )
+            .expect("create a");
+        let b = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+            )
+            .expect("create b");
+        store.get(&a).expect("a handle").set_resuming(true);
+        // Session b is NOT resuming -- a mutating command on b proceeds.
+        reject_if_resuming(&store.get(&b).expect("b handle")).expect("b not blocked");
+    }
+
+    /// ADR-0021 single-flight (per session, ADR-0056): while a turn is in
+    /// flight on a session, a second ask on the SAME session rejects. The guard
+    /// keeps in_flight true for the scope of the simulated turn.
+    #[test]
+    fn second_ask_on_same_session_rejects_while_one_is_in_flight() {
+        let store = SessionStore::new();
+        let cancel = Arc::new(CancelToken::new());
+        let id = store
+            .create(cancel, Box::new(crate::UnwiredProvider))
+            .expect("create session");
+        let handle = store.get(&id).expect("handle");
+        // Without a turn in flight, an ask is allowed.
+        reject_if_in_flight(&handle).expect("first ask allowed");
+        // Simulate turn in flight via the token directly (ask does this via
+        // TurnRunner internally); the handle shares the same Arc<CancelToken>.
+        {
+            let _guard = handle.cancel.clone().begin_turn();
+            assert!(handle.cancel.is_in_flight());
+            let err = reject_if_in_flight(&handle).unwrap_err();
+            assert_eq!(err, "该会话有查询进行中，请先取消或等待完成");
+        }
+        // Guard dropped -> in_flight clears -> a later ask is allowed again.
+        assert!(!handle.cancel.is_in_flight());
+        reject_if_in_flight(&handle).expect("ask allowed after turn ends");
+    }
+
+    /// An unknown / closed session_id rejects with the shared message.
+    #[test]
+    fn unknown_session_id_rejects() {
+        let store = SessionStore::new();
+        // `.err()` (not `unwrap_err`) so the assertion does not require
+        // SessionHandle: Debug -- the Ok arm is discarded without formatting.
+        let err = store
+            .get("does-not-exist")
+            .err()
+            .expect("expected unknown-session error");
+        assert_eq!(err, UNKNOWN_SESSION);
     }
 }

@@ -19,6 +19,7 @@ vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
   return {
     ...actual,
+    createSession: vi.fn(async () => "sess-1"),
     ingestFile: vi.fn(),
     ingestFileGuided: vi.fn(),
     listWorkingSet: vi.fn(),
@@ -118,7 +119,7 @@ describe("App guided-load flow", () => {
     fireEvent.click(screen.getByRole("button", { name: /按选择加载/ }));
 
     await waitFor(() =>
-      expect(ingestFileGuided).toHaveBeenCalledWith("/x/m.xlsx", [
+      expect(ingestFileGuided).toHaveBeenCalledWith("sess-1", "/x/m.xlsx", [
         { name: "people", rectify: { header_row: 2, skip_rows: [] } },
       ]),
     );
@@ -153,7 +154,7 @@ describe("App rename flow", () => {
 
     // Rename via prompt; on refresh the working set carries the new label.
     vi.spyOn(window, "prompt").mockReturnValue("员工表");
-    vi.mocked(renameDataset).mockImplementation(async (ref, display) => {
+    vi.mocked(renameDataset).mockImplementation(async (_sid, ref, display) => {
       state.workingSet = state.workingSet.map((d) =>
         d.reference_name === ref ? { ...d, display_name: display } : d,
       );
@@ -162,7 +163,7 @@ describe("App rename flow", () => {
     fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
 
     // The rename carries the stable reference name + the new display label.
-    await waitFor(() => expect(renameDataset).toHaveBeenCalledWith("people", "员工表"));
+    await waitFor(() => expect(renameDataset).toHaveBeenCalledWith("sess-1", "people", "员工表"));
 
     // Selection survived (keyed by reference_name): the list now shows the new
     // label, yet the same dataset's columns are still in the detail pane.
@@ -258,7 +259,7 @@ describe("App ask flow", () => {
     );
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "总共几行" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
-    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("总共几行"));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "总共几行"));
     // the materialized result pane appears (ResultView heading)
     await waitFor(() => expect(screen.getByText(/结果：result_1/)).toBeInTheDocument());
   });
@@ -326,7 +327,7 @@ describe("App delete-source flow (issue #38)", () => {
     // AC: the per-row delete (after a confirm) calls removeSource with the
     // stable reference name, then refreshes so the list no longer shows it.
     vi.spyOn(window, "confirm").mockReturnValue(true);
-    vi.mocked(removeSource).mockImplementation(async (ref) => {
+    vi.mocked(removeSource).mockImplementation(async (_sid, ref) => {
       state.workingSet = state.workingSet.filter((d) => d.reference_name !== ref);
     });
     render(<App />);
@@ -335,7 +336,7 @@ describe("App delete-source flow (issue #38)", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /删除/ }));
 
-    await waitFor(() => expect(removeSource).toHaveBeenCalledWith("people"));
+    await waitFor(() => expect(removeSource).toHaveBeenCalledWith("sess-1", "people"));
     // The refresh after the delete drops the removed source from the list.
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: /^people/ })).not.toBeInTheDocument(),
@@ -386,7 +387,7 @@ describe("App delete-active-source flow (issue #39)", () => {
     // AC1 (issue #39): deleting the active source while others remain does NOT
     // silently fall back. The frontend opens a dialog (no IPC yet) collecting an
     // explicit continuation, then removeActiveSource carries both names (AC2).
-    vi.mocked(removeActiveSource).mockImplementation(async (ref) => {
+    vi.mocked(removeActiveSource).mockImplementation(async (_sid, ref) => {
       state.workingSet = state.workingSet.filter((d) => d.reference_name !== ref);
       vi.mocked(activeDataset).mockResolvedValue(guidedDataset); // focus moved to people
     });
@@ -409,7 +410,7 @@ describe("App delete-active-source flow (issue #39)", () => {
     // Confirm with the default-selected continuation (people).
     fireEvent.click(screen.getByRole("button", { name: "继续" }));
     await waitFor(() =>
-      expect(removeActiveSource).toHaveBeenCalledWith("orders", "people"),
+      expect(removeActiveSource).toHaveBeenCalledWith("sess-1", "orders", "people"),
     );
     // AC2: dialog closed after the commit.
     await waitFor(() =>
@@ -442,7 +443,7 @@ describe("App delete-active-source flow (issue #39)", () => {
     // nothing left to jump to.
     state.workingSet = [guidedDataset];
     vi.mocked(activeDataset).mockResolvedValue(guidedDataset); // people active, last source
-    vi.mocked(removeSource).mockImplementation(async (ref) => {
+    vi.mocked(removeSource).mockImplementation(async (_sid, ref) => {
       state.workingSet = state.workingSet.filter((d) => d.reference_name !== ref);
       vi.mocked(activeDataset).mockResolvedValue(null); // empty working set
     });
@@ -453,7 +454,7 @@ describe("App delete-active-source flow (issue #39)", () => {
     fireEvent.click(screen.getByRole("button", { name: /删除/ }));
 
     // No continuation dialog (only one source); straight to removeSource.
-    await waitFor(() => expect(removeSource).toHaveBeenCalledWith("people"));
+    await waitFor(() => expect(removeSource).toHaveBeenCalledWith("sess-1", "people"));
     expect(removeActiveSource).not.toHaveBeenCalled();
     expect(screen.queryByText(/删除焦点源/)).not.toBeInTheDocument();
     // Empty working set -> the upload prompt renders.

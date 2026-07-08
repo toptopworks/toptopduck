@@ -92,16 +92,6 @@ impl Drop for ResumeFlagGuard {
     }
 }
 
-/// Test-only handle that marks resume as in-flight for its lifetime, so
-/// command-layer guard tests can exercise `reject_if_resuming` without driving
-/// a real `open_duck`. Dropping decrements the counter. Re-exported by the
-/// parent module so `crate::session::acquire_test_resume_flag` stays the call
-/// path (commands.rs test). Not built into the production binary.
-#[cfg(test)]
-pub(crate) fn acquire_test_resume_flag() -> impl Drop {
-    ResumeFlagGuard::acquire()
-}
-
 /// RAII guard for the single-writer registry key acquired at the top of
 /// `Session::open_duck` (ADR-0035 Decision 3, issue #50). Resume can fail at
 /// several points (load, source verify, replay, history rebuild) -- each `?`
