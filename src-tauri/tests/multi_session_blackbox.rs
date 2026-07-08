@@ -14,8 +14,8 @@ use std::thread;
 use std::time::Duration;
 
 use toptopduck_lib::{
-    ActiveResolution, CancelToken, FakeProvider, LoadOutcome, ProviderReply, Session, SessionStore,
-    SourceResolution, TurnOutcome,
+    ActiveResolution, CancelToken, FakeProvider, LoadOutcome, ProviderReply, Session, SessionError,
+    SessionId, SessionStore, SourceResolution, TurnOutcome,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -52,7 +52,7 @@ fn await_in_flight(cancel: &CancelToken, timeout: Duration) {
 
 /// Create a fresh session backed by an UnwiredProvider (every turn refuses --
 /// enough for store-level addressing tests that do not drive a real turn).
-fn fresh_session(store: &SessionStore) -> String {
+fn fresh_session(store: &SessionStore) -> SessionId {
     store
         .create(
             Arc::new(CancelToken::new()),
@@ -83,7 +83,7 @@ fn close_removes_session_and_subsequent_lookups_reject() {
     let id = fresh_session(&store);
     store.close(&id).expect("close");
     let err = store.get(&id).err().expect("closed session rejects");
-    assert_eq!(err, toptopduck_lib::UNKNOWN_SESSION);
+    assert_eq!(err, SessionError::NotFound);
 }
 
 #[test]
@@ -98,8 +98,8 @@ fn close_twice_first_ok_second_rejects_unknown_session() {
     store.close(&id).expect("first close");
     let err = store
         .close(&id)
-        .expect_err("second close rejects with UNKNOWN_SESSION");
-    assert_eq!(err, toptopduck_lib::UNKNOWN_SESSION);
+        .expect_err("second close rejects with NotFound");
+    assert_eq!(err, SessionError::NotFound);
 }
 
 // --- per-session physical isolation (ADR-0027) -----------------------------
@@ -123,7 +123,7 @@ fn two_sessions_are_physically_isolated() {
         .expect("create a");
     let handle_a = store.get(&a).expect("handle a");
     {
-        let mut s = handle_a.session.lock().unwrap();
+        let mut s = handle_a.session_lock().unwrap();
         match s.ingest(&fixture("people.csv")) {
             LoadOutcome::Loaded(_) => {}
             other => panic!("expected people to load, got {other:?}"),
@@ -146,7 +146,7 @@ fn two_sessions_are_physically_isolated() {
     let b = fresh_session(&store);
     let handle_b = store.get(&b).expect("handle b");
     {
-        let s = handle_b.session.lock().unwrap();
+        let s = handle_b.session_lock().unwrap();
         let list = s.list();
         let names: Vec<&str> = list.iter().map(|d| d.reference_name.as_str()).collect();
         assert!(
@@ -169,7 +169,7 @@ fn two_sessions_are_physically_isolated() {
         .expect("create b2");
     let handle_b2 = store.get(&b2).expect("handle b2");
     {
-        let mut s = handle_b2.session.lock().unwrap();
+        let mut s = handle_b2.session_lock().unwrap();
         let outcome = s.ask("引用A的表");
         assert!(
             matches!(outcome, TurnOutcome::Failed { .. }),
@@ -204,7 +204,7 @@ fn close_with_inflight_ask_discards_turn_not_in_thread_or_recipe() {
 
     // Bind to a .duck + run the successful turn (recipe now holds 1 turn).
     {
-        let mut s = handle.session.lock().unwrap();
+        let mut s = handle.session_lock().unwrap();
         s.bind_duck(duck.clone(), "测试".into()).expect("bind");
         let outcome = s.ask("好查询");
         assert!(
@@ -214,9 +214,9 @@ fn close_with_inflight_ask_discards_turn_not_in_thread_or_recipe() {
     }
 
     // Spawn the long ask (blocks in the provider until cancel fires).
-    let session_for_thread = Arc::clone(&handle.session);
+    let handle_for_thread = Arc::clone(&handle);
     let ask = thread::spawn(move || {
-        let mut s = session_for_thread.lock().unwrap();
+        let mut s = handle_for_thread.session_lock().unwrap();
         s.ask("慢查询")
     });
     await_in_flight(&cancel, Duration::from_secs(2));
@@ -234,7 +234,7 @@ fn close_with_inflight_ask_discards_turn_not_in_thread_or_recipe() {
     // remains. The test's handle Arc keeps the Session alive past close so the
     // conversation is still readable.
     {
-        let s = handle.session.lock().unwrap();
+        let s = handle.session_lock().unwrap();
         let thread_questions: Vec<&str> = s
             .conversation()
             .iter()
@@ -281,9 +281,9 @@ fn store_lock_not_held_during_a_long_turn() {
         .expect("create a");
     let handle_a = store.get(&a).expect("handle a");
 
-    let session_for_thread = Arc::clone(&handle_a.session);
+    let handle_for_thread = Arc::clone(&handle_a);
     let ask = thread::spawn(move || {
-        let mut s = session_for_thread.lock().unwrap();
+        let mut s = handle_for_thread.session_lock().unwrap();
         s.ask("慢查询")
     });
     await_in_flight(&cancel_a, Duration::from_secs(2));
@@ -347,7 +347,7 @@ fn open_duck_replaces_contents_in_place_other_sessions_unaffected() {
         .expect("create producer");
     let handle_p = store.get(&producer).expect("handle producer");
     {
-        let mut s = handle_p.session.lock().unwrap();
+        let mut s = handle_p.session_lock().unwrap();
         s.bind_duck(duck.clone(), "P".into()).expect("bind");
         let outcome = s.ask("建结果");
         assert!(
@@ -365,7 +365,7 @@ fn open_duck_replaces_contents_in_place_other_sessions_unaffected() {
     let b = fresh_session(&store);
     let handle_b = store.get(&b).expect("handle b");
     {
-        let mut s = handle_b.session.lock().unwrap();
+        let mut s = handle_b.session_lock().unwrap();
         match s.ingest(&fixture("people.csv")) {
             LoadOutcome::Loaded(_) => {}
             other => panic!("expected people to load, got {other:?}"),
@@ -379,7 +379,7 @@ fn open_duck_replaces_contents_in_place_other_sessions_unaffected() {
     // sources and active is None.
     let resumed = Session::open_duck(
         &duck,
-        Arc::clone(&handle_a.cancel),
+        handle_a.cancel_token(),
         Box::new(toptopduck_lib::UnwiredProvider),
         |_| {},
         |_| SourceResolution::Abort,
@@ -387,13 +387,13 @@ fn open_duck_replaces_contents_in_place_other_sessions_unaffected() {
     )
     .expect("resume open");
     {
-        let mut s = handle_a.session.lock().unwrap();
+        let mut s = handle_a.session_lock().unwrap();
         *s = resumed;
     }
 
     // (1) Round-trip: result_1 is restored and served through A's same handle.
     {
-        let s = handle_a.session.lock().unwrap();
+        let s = handle_a.session_lock().unwrap();
         let list = s.list();
         let names: Vec<&str> = list.iter().map(|d| d.reference_name.as_str()).collect();
         assert!(
@@ -407,12 +407,124 @@ fn open_duck_replaces_contents_in_place_other_sessions_unaffected() {
     //     isolation across the resume path).
     assert!(store.get(&b).is_ok(), "B's id still resolves");
     {
-        let s = handle_b.session.lock().unwrap();
+        let s = handle_b.session_lock().unwrap();
         let names: Vec<String> = s.list().iter().map(|d| d.reference_name.clone()).collect();
         assert_eq!(
             names,
             vec!["people".to_string()],
             "B's working set must be unchanged by A's resume (ADR-0027)"
+        );
+    }
+}
+
+// --- close after resume reuses the shared closing flag (ADR-0055, issue #73) -
+
+#[test]
+fn close_after_resume_discards_inflight_turn_via_shared_closing_flag() {
+    // ADR-0055 across resume (issue #73): `open_duck` re-attaches the handle's
+    // monotonic `ClosingFlag` to the resumed `Session` (the command layer's
+    // `set_closing_flag(handle.closing_flag())` step), so a `close_session`
+    // AFTER resume still discards an in-flight turn -- the resumed session and
+    // the handle read ONE shared flag. Without the re-attach, the resumed
+    // session's default private flag would never trip and close-after-resume
+    // would silently append the turn. This pins the runtime behavior the
+    // private-field + accessor refactor guards; it had no integration coverage.
+    let store = SessionStore::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("session.duck");
+
+    // Producer: bind + one turn so the .duck recipe holds result_1, then close
+    // to release the canonical-writer key so open_duck can re-acquire the file.
+    let cancel_p = Arc::new(CancelToken::new());
+    let provider_p = FakeProvider::new().scripted("建结果", reply_sql("SELECT 1 AS n"));
+    let producer = store
+        .create(cancel_p, Box::new(provider_p))
+        .expect("create producer");
+    let handle_p = store.get(&producer).expect("handle producer");
+    {
+        let mut s = handle_p.session_lock().unwrap();
+        s.bind_duck(duck.clone(), "测试".into()).expect("bind");
+        let outcome = s.ask("建结果");
+        assert!(
+            matches!(outcome, TurnOutcome::Materialized { .. }),
+            "producer turn should materialize, got {outcome:?}"
+        );
+    }
+    drop(handle_p);
+    store.close(&producer).expect("close producer");
+
+    // Subject session A: created with the SAME cancel token the FakeProvider
+    // shares, so a blocking turn on the resumed session is observable and
+    // cancellable. A starts on an UnwiredProvider (placeholder); resume swaps
+    // in the real FakeProvider-backed session.
+    let cancel = Arc::new(CancelToken::new());
+    let provider = FakeProvider::new()
+        .with_cancel(cancel.clone())
+        .scripted("好查询", reply_sql("SELECT 1 AS n"))
+        .scripted_blocking("慢查询", reply_sql("SELECT 1 AS n"));
+    let a = store
+        .create(cancel.clone(), Box::new(toptopduck_lib::UnwiredProvider))
+        .expect("create a");
+    let handle = store.get(&a).expect("handle a");
+
+    // Resume-open the .duck INTO A's handle the way the command does. The
+    // CRITICAL step is re-attaching the handle's closing flag (and cancel
+    // token) so a close / cancel after resume reaches the resumed session.
+    let mut resumed = Session::open_duck(
+        &duck,
+        handle.cancel_token(),
+        Box::new(provider),
+        |_| {},
+        |_| SourceResolution::Abort,
+        |_| ActiveResolution::Abort,
+    )
+    .expect("resume open");
+    {
+        let mut s = handle.session_lock().unwrap();
+        resumed.set_closing_flag(handle.closing_flag());
+        *s = resumed;
+    }
+
+    // Run one successful turn on the resumed session, then spawn the long one.
+    {
+        let mut s = handle.session_lock().unwrap();
+        let outcome = s.ask("好查询");
+        assert!(
+            matches!(outcome, TurnOutcome::Materialized { .. }),
+            "resumed session's first turn should materialize, got {outcome:?}"
+        );
+    }
+    let handle_for_thread = Arc::clone(&handle);
+    let ask = thread::spawn(move || {
+        let mut s = handle_for_thread.session_lock().unwrap();
+        s.ask("慢查询")
+    });
+    await_in_flight(&cancel, Duration::from_secs(2));
+
+    // Close AFTER resume: must still discard the resumed session's in-flight
+    // turn via the shared closing flag.
+    store.close(&a).expect("close");
+
+    let outcome = ask.join().expect("ask thread");
+    assert!(
+        matches!(outcome, TurnOutcome::Cancelled),
+        "resumed session's in-flight turn must land Cancelled after close, got {outcome:?}"
+    );
+
+    // The cancelled turn did NOT enter the thread (ADR-0055 discard).
+    {
+        let s = handle.session_lock().unwrap();
+        let thread_questions: Vec<&str> = s
+            .conversation()
+            .iter()
+            .filter_map(|e| match e {
+                toptopduck_lib::ThreadEntry::Turn(r) => Some(r.question.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !thread_questions.contains(&"慢查询"),
+            "the cancelled resumed turn must not enter the thread: {thread_questions:?}"
         );
     }
 }

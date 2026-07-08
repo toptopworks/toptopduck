@@ -411,3 +411,26 @@ fn thread_entry_source_wraps_a_source_event_under_data() {
         r#"{"entry":"Source","data":{"kind":"Added","reference_name":"people","display_name":"people"}}"#,
     );
 }
+
+#[test]
+fn session_error_display_strings_are_the_ipc_contract() {
+    // SessionError crosses IPC only as its Display string (commands.rs maps it
+    // to the command's `Result<_, String>` via `From<SessionError> for String`,
+    // so the frontend string-matches these exact Chinese wordings). Issue #73
+    // review M8: pin the wording here -- the designated IPC-contract seam -- so
+    // a change is caught before the frontend's hand-mirrored error handling
+    // drifts. `NotFound` is also asserted to equal the UNKNOWN_SESSION constant
+    // the frontend has always matched on.
+    use toptopduck_lib::{SessionError, UNKNOWN_SESSION};
+    assert_eq!(SessionError::NotFound.to_string(), UNKNOWN_SESSION);
+    assert_eq!(SessionError::InvalidId.to_string(), "会话 id 格式错误");
+    assert_eq!(
+        SessionError::Resuming.to_string(),
+        "正在恢复会话，请稍候再操作",
+    );
+    assert_eq!(
+        SessionError::InFlight.to_string(),
+        "该会话有查询进行中，请先取消或等待完成",
+    );
+    assert_eq!(SessionError::Engine("detail".into()).to_string(), "detail");
+}

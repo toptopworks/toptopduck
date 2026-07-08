@@ -66,6 +66,13 @@ sqlparser = { version = "0.52", default-features = false }
 # the id <-> resource binding is atomic (no "id issued, resource unbuilt"
 # window). v4 only -- no serde need; the id crosses IPC as a plain string.
 uuid = { version = "1", features = ["v4"] }
+# Typed session-scoped command errors (issue #73, review M8): the four failure
+# modes the store / reject guards used to collapse into a bare `Err(String)`
+# are now a typed `SessionError` (InvalidId / NotFound / Resuming / InFlight /
+# Engine). thiserror supplies the `Display` impl the command boundary maps to
+# the IPC error string; serde is derived so the enum is IPC-capable if a future
+# command returns it directly (the frontend still sees a string today).
+thiserror = "2"
 
 [dev-dependencies]
 tempfile = "3"

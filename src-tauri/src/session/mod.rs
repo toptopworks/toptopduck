@@ -12,7 +12,6 @@ pub mod turn_runner;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,6 +36,7 @@ use crate::persistence::{read_duck, save_atomic, SaveError};
 use crate::provider::{Provider, UnwiredProvider};
 use crate::session::materializer::{RealMaterializer, TurnDeps};
 use crate::session::turn_runner::TurnRunner;
+use crate::session_store::ClosingFlag;
 use crate::window;
 use crate::workingset::{WorkingSet, DEFAULT_RESULT_COUNT_CAP};
 
@@ -357,8 +357,12 @@ pub struct Session {
     /// session's cancelled turn never enters the productive chain (ADR-0021,
     /// ADR-0034). Defaults to a private false flag for sessions built
     /// outside a store (tests, `new`); the store attaches its own so
-    /// `close_session` and `ask` share one. Read via [`Self::is_closing`].
-    closing: Arc<AtomicBool>,
+    /// `close_session` and `ask` share one. Read via [`Self::is_closing`]. The
+    /// [`ClosingFlag`] newtype exposes set / get but NO unset, so the
+    /// once-closing-always-closing invariant (ADR-0055) is type-enforced
+    /// (review H2, issue #73) -- the prior `Arc<AtomicBool>` let any holder
+    /// `store(false)` and revoke a close.
+    closing: ClosingFlag,
     /// The bound `.duck` path (ADR-0034). When `Some`, every terminal turn
     /// and source lifecycle event atomically rewrites the recipe at this path
     /// (temp + rename, whole-file). `None` until the user saves / opens a
@@ -466,7 +470,7 @@ impl Session {
             result_count_cap: DEFAULT_RESULT_COUNT_CAP,
             source_files: HashMap::new(),
             cancel,
-            closing: Arc::new(AtomicBool::new(false)),
+            closing: ClosingFlag::new(),
             duck_path: None,
             session_name: None,
             persist_error: None,
@@ -486,12 +490,13 @@ impl Session {
 
     /// Attach the store-shared closing flag (ADR-0055). [`SessionStore::create`]
     /// calls this so the flag it holds (and `close_session` sets) is the SAME
-    /// `Arc<AtomicBool>` [`Self::ask`] reads in its post-turn check. A session
+    /// [`ClosingFlag`] [`Self::ask`] reads in its post-turn check. A session
     /// built outside a store keeps its default private flag (always false) --
     /// `is_closing` then never trips, which is correct for tests that never
     /// close. Idempotent-ish: the prior flag is dropped (its only other holder
-    /// is the store, which keeps its own clone).
-    pub fn set_closing_flag(&mut self, closing: Arc<AtomicBool>) {
+    /// is the store, which keeps its own clone). The flag is monotonic (no
+    /// unset), so attaching it cannot weaken the once-closing invariant.
+    pub fn set_closing_flag(&mut self, closing: ClosingFlag) {
         self.closing = closing;
     }
 
@@ -499,7 +504,7 @@ impl Session {
     /// by [`Self::ask`]'s post-turn check to discard an in-flight turn that
     /// finished after close fired cancel.
     pub fn is_closing(&self) -> bool {
-        self.closing.load(Ordering::SeqCst)
+        self.closing.get()
     }
 
     /// Request cancellation of the in-flight turn (ADR-0021). Sets the

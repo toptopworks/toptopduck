@@ -1,9 +1,15 @@
 //! Tauri command boundary (frontend <-> Rust). Thin wrappers over the
 //! multi-session [`SessionStore`](crate::session_store::SessionStore) (ADR-0056):
 //! every session-scoped command takes `session_id` as its first parameter,
-//! looks up the target handle, and runs against it. The store lock is held
-//! only for the brief lookup; long turns run against a cloned
-//! `Arc<SessionHandle>` with no store lock held (ADR-0056 concurrency model).
+//! parses it into a typed [`SessionId`] (a malformed id surfaces as
+//! [`SessionError::InvalidId`], distinct from a closed session's
+//! [`SessionError::NotFound`] -- issue #73), looks up the target
+//! handle, and runs against it. The store lock is held only for the brief
+//! lookup; long turns run against a cloned `Arc<SessionHandle>` with no store
+//! lock held (ADR-0056 concurrency model). All command functions return
+//! `Result<T, String>` for IPC (the frontend string-matches the error); the
+//! typed [`SessionError`] is mapped to that string via `From<SessionError> for
+//! String` so `?` propagates the exact wording.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,7 +24,7 @@ use crate::model::{
 };
 use crate::provider::live_config::LiveProviderConfig;
 use crate::session::{ResumeEvent, Session};
-use crate::session_store::{SessionHandle, SessionStore};
+use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
 
 /// Reject a mutating command while THIS session is resuming (ADR-0053, made
 /// per-session by ADR-0056). `open_duck(session_id, ...)` rebuilds that one
@@ -28,26 +34,27 @@ use crate::session_store::{SessionHandle, SessionStore};
 /// flag is the primary defense; this per-session check is the Rust-side
 /// backstop for races the frontend cannot see (a second window, an IPC
 /// replay). A DIFFERENT session's resume does NOT block this command -- the
-/// flag is per-handle, not process-global. Returns a user-facing Chinese error
-/// so a rejected call surfaces honestly rather than appearing to succeed then
-/// vanishing.
-fn reject_if_resuming(handle: &SessionHandle) -> Result<(), String> {
+/// flag is per-handle, not process-global. Returns the typed
+/// [`SessionError::Resuming`] so the command boundary's `?` maps it to the
+/// user-facing Chinese error string the frontend renders.
+fn reject_if_resuming(handle: &SessionHandle) -> Result<(), SessionError> {
     if handle.is_resuming() {
-        return Err("正在恢复会话，请稍候再操作".into());
+        return Err(SessionError::Resuming);
     }
     Ok(())
 }
 
 /// Reject a second turn on the SAME session while one is in flight (ADR-0021
 /// single-flight, per session via ADR-0056). Read from the session's cancel
-/// token (no session lock needed -- the token is `Arc`-shared). A DIFFERENT
-/// session's in-flight turn never trips this -- each session has its own token.
-/// The session `Mutex` is the correctness backstop for the check-then-acquire
-/// race; this fast-path keeps a stray second call from blocking ≤120s on the
-/// first turn's HTTP.
-fn reject_if_in_flight(handle: &SessionHandle) -> Result<(), String> {
-    if handle.cancel.is_in_flight() {
-        return Err("该会话有查询进行中，请先取消或等待完成".into());
+/// token via the handle accessor (no session lock needed -- the token is
+/// `Arc`-shared). A DIFFERENT session's in-flight turn never trips this --
+/// each session has its own token. The session `Mutex` is the correctness
+/// backstop for the check-then-acquire race; this fast-path keeps a stray
+/// second call from blocking <=120s on the first turn's HTTP. Returns the
+/// typed [`SessionError::InFlight`].
+fn reject_if_in_flight(handle: &SessionHandle) -> Result<(), SessionError> {
+    if handle.is_in_flight() {
+        return Err(SessionError::InFlight);
     }
     Ok(())
 }
@@ -59,7 +66,8 @@ fn reject_if_in_flight(handle: &SessionHandle) -> Result<(), String> {
 /// instance exists and the insert lands -- no "id issued, resource unbuilt"
 /// window, ADR-0056 Why 2). This is the `+ tab` action; the frontend tracks the
 /// returned id and passes it as the first parameter to every session-scoped
-/// command.
+/// command. The returned id is the typed [`SessionId`] Display string (the
+/// wire form the frontend stores and replays).
 #[tauri::command]
 pub fn create_session(
     store: State<'_, Arc<SessionStore>>,
@@ -73,13 +81,14 @@ pub fn create_session(
     let provider = Box::new(crate::AnthropicProvider::new(Box::new(
         live.inner().clone(),
     )));
-    store.create(cancel, provider)
+    let id = store.create(cancel, provider)?;
+    Ok(id.to_string())
 }
 
 /// Close a session (ADR-0055): mark closing, fire cancel, and remove the entry
 /// from the store. Returns immediately -- it does NOT wait for an in-flight
 /// ask. If a turn is in flight, cancel fires (HTTP still runs to completion
-/// ≤120s, ADR-0021 soft-cancel) and the ask's post-turn check sees `closing`
+/// <=120s, ADR-0021 soft-cancel) and the ask's post-turn check sees `closing`
 /// and discards the outcome (no thread append, no recipe persist). New commands
 /// targeting this id after close reject as unknown session. The DuckDB instance
 /// + the bound `.duck` canonical-writer key are released when the last
@@ -90,7 +99,9 @@ pub fn close_session(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<(), String> {
-    store.close(&session_id)
+    let id = SessionId::parse(&session_id)?;
+    store.close(&id)?;
+    Ok(())
 }
 
 /// Ingest a file into the named session. Runs the DuckDB copy-in off the
@@ -102,11 +113,12 @@ pub async fn ingest_file(
     session_id: String,
     path: String,
 ) -> Result<LoadOutcome, String> {
-    let handle = store.get(&session_id)?;
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
-    let session = Arc::clone(&handle.session);
+    let handle = Arc::clone(&handle);
     let outcome = tauri::async_runtime::spawn_blocking(move || {
-        let mut s = session.lock().map_err(|e| e.to_string())?;
+        let mut s = handle.session_lock()?;
         Ok::<LoadOutcome, String>(s.ingest(Path::new(&path)))
     })
     .await
@@ -125,11 +137,12 @@ pub async fn ingest_file_guided(
     path: String,
     guidance: Vec<SheetGuidance>,
 ) -> Result<LoadOutcome, String> {
-    let handle = store.get(&session_id)?;
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
-    let session = Arc::clone(&handle.session);
+    let handle = Arc::clone(&handle);
     let outcome = tauri::async_runtime::spawn_blocking(move || {
-        let mut s = session.lock().map_err(|e| e.to_string())?;
+        let mut s = handle.session_lock()?;
         Ok::<LoadOutcome, String>(s.ingest_guided(Path::new(&path), &guidance))
     })
     .await
@@ -142,8 +155,9 @@ pub fn list_working_set(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Vec<DatasetDescriptor>, String> {
-    let handle = store.get(&session_id)?;
-    let s = handle.session.lock().map_err(|e| e.to_string())?;
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    let s = handle.session_lock()?;
     Ok(s.list())
 }
 
@@ -152,8 +166,9 @@ pub fn active_dataset(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Option<DatasetDescriptor>, String> {
-    let handle = store.get(&session_id)?;
-    let s = handle.session.lock().map_err(|e| e.to_string())?;
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    let s = handle.session_lock()?;
     Ok(s.active())
 }
 
@@ -163,8 +178,9 @@ pub fn get_dataset(
     session_id: String,
     reference_name: String,
 ) -> Result<Option<DatasetDescriptor>, String> {
-    let handle = store.get(&session_id)?;
-    let s = handle.session.lock().map_err(|e| e.to_string())?;
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    let s = handle.session_lock()?;
     Ok(s.get(&reference_name))
 }
 
@@ -179,9 +195,10 @@ pub fn rename_dataset(
     reference_name: String,
     new_display: String,
 ) -> Result<DatasetDescriptor, String> {
-    let handle = store.get(&session_id)?;
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
-    let mut s = handle.session.lock().map_err(|e| e.to_string())?;
+    let mut s = handle.session_lock()?;
     s.rename_display(&reference_name, &new_display)
         .map_err(|e| e.to_string())
 }
@@ -197,11 +214,12 @@ pub async fn replace_source(
     reference_name: String,
     path: String,
 ) -> Result<LoadOutcome, String> {
-    let handle = store.get(&session_id)?;
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
-    let session = Arc::clone(&handle.session);
+    let handle = Arc::clone(&handle);
     let outcome = tauri::async_runtime::spawn_blocking(move || {
-        let mut s = session.lock().map_err(|e| e.to_string())?;
+        let mut s = handle.session_lock()?;
         Ok::<LoadOutcome, String>(s.replace_source(&reference_name, Path::new(&path)))
     })
     .await
@@ -219,9 +237,10 @@ pub fn set_dataset_privacy(
     reference_name: String,
     privacy: DatasetPrivacy,
 ) -> Result<DatasetDescriptor, String> {
-    let handle = store.get(&session_id)?;
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
-    let mut s = handle.session.lock().map_err(|e| e.to_string())?;
+    let mut s = handle.session_lock()?;
     s.set_privacy(&reference_name, privacy)
         .ok_or_else(|| format!("找不到引用名为「{reference_name}」的数据集"))
 }
@@ -229,8 +248,8 @@ pub fn set_dataset_privacy(
 /// Remove a source Dataset from the working set (issue #38/#39, ADR-0040).
 /// Detaches the snapshot, deletes its file, drops the reference name from the
 /// shared namespace, and appends a `Deleted` source lifecycle event to the
-/// thread. Refuses removal while materialized results exist (→ #40 cascade),
-/// and refuses the ACTIVE source when OTHER sources remain (ADR-0035 → issue
+/// thread. Refuses removal while materialized results exist (-> #40 cascade),
+/// and refuses the ACTIVE source when OTHER sources remain (ADR-0035 -> issue
 /// #39: no silent focus jump -- the caller must use `remove_active_source` to
 /// name an explicit continuation). The LAST active source is allowed through
 /// here to an empty working set (AC4, issue #39). Synchronous: the session
@@ -244,9 +263,10 @@ pub fn remove_source(
     session_id: String,
     reference_name: String,
 ) -> Result<(), String> {
-    let handle = store.get(&session_id)?;
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
-    let mut s = handle.session.lock().map_err(|e| e.to_string())?;
+    let mut s = handle.session_lock()?;
     s.remove_source(&reference_name).map_err(|e| e.to_string())
 }
 
@@ -255,7 +275,7 @@ pub fn remove_source(
 /// `IsActive` refusal. The frontend's confirm dialog picks `continue_with` from
 /// the remaining sources; this command atomically switches the active pointer
 /// to it, drops the removed source, and appends a `Deleted` event. Same
-/// `HasDerivatives` guard as `remove_source` (→ #40). Refuses with
+/// `HasDerivatives` guard as `remove_source` (-> #40). Refuses with
 /// `NotActive`/`InvalidContinueWith` when the view raced a concurrent mutation
 /// (the working set is left untouched in those cases). Surfaces all refusals as
 /// a plain error string -- no typed `RemoveSourceError` crosses IPC (same shape
@@ -267,9 +287,10 @@ pub fn remove_active_source(
     reference_name: String,
     continue_with: String,
 ) -> Result<(), String> {
-    let handle = store.get(&session_id)?;
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
-    let mut s = handle.session.lock().map_err(|e| e.to_string())?;
+    let mut s = handle.session_lock()?;
     s.remove_active_source(&reference_name, &continue_with)
         .map_err(|e| e.to_string())
 }
@@ -279,22 +300,23 @@ pub fn remove_active_source(
 /// single retry budget is consumed invisibly inside the turn. Runs off the
 /// async/UI thread (AC8) so a slow provider never freezes the app. A turn
 /// always produces an outcome; the only `Err` here is an unknown session, a
-/// resume guard rejection, or a session-lock failure (not a turn failure --
-/// that is a `Failed` outcome). ADR-0055: if the session was closed while this
-/// turn was in flight, the outcome is discarded inside `Session::ask` (no
-/// thread append, no recipe persist).
+/// resume guard rejection, an in-flight guard rejection, or a session-lock
+/// failure (not a turn failure -- that is a `Failed` outcome). ADR-0055: if the
+/// session was closed while this turn was in flight, the outcome is discarded
+/// inside `Session::ask` (no thread append, no recipe persist).
 #[tauri::command]
 pub async fn ask(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     question: String,
 ) -> Result<TurnOutcome, String> {
-    let handle = store.get(&session_id)?;
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
     reject_if_in_flight(&handle)?;
-    let session = Arc::clone(&handle.session);
+    let handle = Arc::clone(&handle);
     let outcome = tauri::async_runtime::spawn_blocking(move || {
-        let mut s = session.lock().map_err(|e| e.to_string())?;
+        let mut s = handle.session_lock()?;
         Ok::<TurnOutcome, String>(s.ask(&question))
     })
     .await
@@ -312,8 +334,9 @@ pub async fn ask(
 /// is a best-effort signal, not a transaction.
 #[tauri::command]
 pub fn cancel(store: State<'_, Arc<SessionStore>>, session_id: String) -> Result<(), String> {
-    let handle = store.get(&session_id)?;
-    handle.cancel.request();
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    handle.fire_cancel();
     Ok(())
 }
 
@@ -328,8 +351,9 @@ pub fn conversation(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Vec<ThreadEntry>, String> {
-    let handle = store.get(&session_id)?;
-    let s = handle.session.lock().map_err(|e| e.to_string())?;
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    let s = handle.session_lock()?;
     Ok(s.conversation().to_vec())
 }
 
@@ -346,10 +370,11 @@ pub async fn read_rows(
     offset: u64,
     limit: u64,
 ) -> Result<RowPage, String> {
-    let handle = store.get(&session_id)?;
-    let session = Arc::clone(&handle.session);
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    let handle = Arc::clone(&handle);
     tauri::async_runtime::spawn_blocking(move || {
-        let s = session.lock().map_err(|e| e.to_string())?;
+        let s = handle.session_lock()?;
         s.read_rows(&reference_name, offset, limit)
             .map_err(|e| e.to_string())
     })
@@ -490,9 +515,10 @@ pub fn save_as_duck(
     path: String,
     session_name: String,
 ) -> Result<(), String> {
-    let handle = store.get(&session_id)?;
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
-    let mut s = handle.session.lock().map_err(|e| e.to_string())?;
+    let mut s = handle.session_lock()?;
     s.bind_duck(PathBuf::from(path), session_name)
         .map_err(|e| e.to_string())
 }
@@ -515,13 +541,19 @@ pub async fn open_duck(
     session_id: String,
     path: String,
 ) -> Result<(), String> {
-    let handle = store.get(&session_id)?;
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
     handle.set_resuming(true);
     let path = PathBuf::from(path);
-    let cancel_arc = Arc::clone(&handle.cancel);
-    let closing_arc = Arc::clone(&handle.closing);
-    let session_arc = Arc::clone(&handle.session);
+    // Pull the handle's shared tokens out via accessors (the fields
+    // are private). The resumed session reuses the SAME cancel token + closing
+    // flag so a close/cancel during or after resume reaches it; the closing
+    // flag is monotonic (ClosingFlag), so re-attaching it cannot weaken the
+    // once-closing invariant.
+    let cancel_token = handle.cancel_token();
+    let closing_flag = handle.closing_flag();
+    let handle_for_task = Arc::clone(&handle);
     // The resumed session reuses the SAME provider wiring as a fresh session
     // (ADR-0007): the real Anthropic client reading the key from the OS keychain
     // and the endpoint from app-config (ADR-0038), via the shared
@@ -535,7 +567,7 @@ pub async fn open_duck(
     let inner = tauri::async_runtime::spawn_blocking(move || {
         let mut new_session = Session::open_duck(
             &path,
-            cancel_arc,
+            cancel_token,
             provider,
             |ev: ResumeEvent| {
                 let _ = app_for_cb.emit("resume-progress", &ev);
@@ -554,9 +586,10 @@ pub async fn open_duck(
         .map_err(|e| e.to_string())?;
         // Re-attach the handle's closing flag so a close_session after resume
         // still discards in-flight turns on this session (ADR-0055). The cancel
-        // token was already shared via cancel_arc above.
-        new_session.set_closing_flag(closing_arc);
-        let mut s = session_arc.lock().map_err(|e| e.to_string())?;
+        // token was already shared via cancel_token above. The flag is the
+        // monotonic ClosingFlag, so this re-attach preserves once-closing.
+        new_session.set_closing_flag(closing_flag);
+        let mut s = handle_for_task.session_lock()?;
         *s = new_session;
         Ok::<(), String>(())
     })
@@ -581,8 +614,9 @@ pub fn take_persist_error(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Option<String>, String> {
-    let handle = store.get(&session_id)?;
-    let mut s = handle.session.lock().map_err(|e| e.to_string())?;
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    let mut s = handle.session_lock()?;
     Ok(s.take_persist_error())
 }
 
@@ -600,8 +634,9 @@ pub fn take_pending_conflict(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Option<crate::PendingConflict>, String> {
-    let handle = store.get(&session_id)?;
-    let mut s = handle.session.lock().map_err(|e| e.to_string())?;
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    let mut s = handle.session_lock()?;
     Ok(s.take_pending_conflict())
 }
 
@@ -624,7 +659,7 @@ mod tests {
         let handle = store.get(&id).expect("handle");
         handle.set_resuming(true);
         let err = reject_if_resuming(&handle).unwrap_err();
-        assert_eq!(err, "正在恢复会话，请稍候再操作");
+        assert_eq!(err, SessionError::Resuming);
     }
 
     /// A second session's resume flag is independent: resuming one session does
@@ -665,26 +700,37 @@ mod tests {
         // Simulate turn in flight via the token directly (ask does this via
         // TurnRunner internally); the handle shares the same Arc<CancelToken>.
         {
-            let _guard = handle.cancel.clone().begin_turn();
-            assert!(handle.cancel.is_in_flight());
+            let _guard = handle.cancel_token().clone().begin_turn();
+            assert!(handle.is_in_flight());
             let err = reject_if_in_flight(&handle).unwrap_err();
-            assert_eq!(err, "该会话有查询进行中，请先取消或等待完成");
+            assert_eq!(err, SessionError::InFlight);
         }
         // Guard dropped -> in_flight clears -> a later ask is allowed again.
-        assert!(!handle.cancel.is_in_flight());
+        assert!(!handle.is_in_flight());
         reject_if_in_flight(&handle).expect("ask allowed after turn ends");
     }
 
-    /// An unknown / closed session_id rejects with the shared message.
+    /// An unknown / closed session_id rejects with NotFound. The
+    /// malformed-id path (InvalidId) is covered in session_store tests; this
+    /// pins the NotFound branch the command boundary surfaces.
     #[test]
-    fn unknown_session_id_rejects() {
+    fn unknown_session_id_rejects_not_found() {
         let store = SessionStore::new();
-        // `.err()` (not `unwrap_err`) so the assertion does not require
-        // SessionHandle: Debug -- the Ok arm is discarded without formatting.
-        let err = store
-            .get("does-not-exist")
-            .err()
-            .expect("expected unknown-session error");
-        assert_eq!(err, UNKNOWN_SESSION);
+        let parsed = SessionId::parse("550e8400-e29b-41d4-a716-446655440000")
+            .expect("well-formed id parses");
+        let err = store.get(&parsed).err().expect("expected not-found error");
+        assert_eq!(err, SessionError::NotFound);
+        assert_eq!(err.to_string(), UNKNOWN_SESSION);
+    }
+
+    /// A malformed id is InvalidId at the parse step, distinct from NotFound
+    /// -- the command boundary surfaces the distinction so a typo
+    /// reads differently from a closed session. Pins the command-layer parse
+    /// the typed store cannot express (the store takes a typed SessionId).
+    #[test]
+    fn malformed_session_id_is_invalid_not_not_found() {
+        let err = SessionId::parse("not-a-uuid").expect_err("malformed id rejects");
+        assert_eq!(err, SessionError::InvalidId);
+        assert_ne!(err, SessionError::NotFound);
     }
 }
