@@ -40,12 +40,13 @@ use crate::session::turn_runner::TurnRunner;
 use crate::window;
 use crate::workingset::{WorkingSet, DEFAULT_RESULT_COUNT_CAP};
 
-// Re-export the resume global-state read gate (ADR-0053 Decision 3) so the
-// call path `crate::session::is_resuming` stays transparent after the move
-// into `session::resume`. `is_resuming` is further re-exported from `lib.rs`
-// for the integration tests. (The command-layer guard is now per-session on
-// the SessionStore handle -- ADR-0056 -- so the process-global test flag
-// helper is gone.)
+// Re-export the resume global-state probe (ADR-0053 Decision 3) after its
+// move into `session::resume`. Since ADR-0056 the LIVE command-layer resume
+// gate is per-session (`SessionHandle::is_resuming`, read by
+// `commands::reject_if_resuming`); this process-global `is_resuming` /
+// `resuming_count` pair is retained ONLY as the integration-test RAII probe
+// (persistence_blackbox.rs asserts it rises and clears around a resume). It
+// is further re-exported from `lib.rs` so those tests can reach it.
 pub use resume::{is_resuming, resuming_count};
 
 /// Raw rows surfaced per sheet in the guided-load preview -- enough to spot the
@@ -1539,11 +1540,20 @@ impl Session {
         // ADR-0055 post-turn discard: if `close_session` marked this session
         // closing while the turn was in flight (it also fired cancel, so the
         // outcome is typically Cancelled, but a turn that squeaked through in
-        // the narrow window is discarded too), drop the outcome ENTIRELY -- no
-        // thread append, no recipe persist. The cancelled turn must not enter
-        // the productive chain (ADR-0021) or the recipe (ADR-0034). The
-        // session is being torn down; its in-memory state is discarded with it.
+        // the narrow window is discarded too), drop the outcome -- no thread
+        // append, no recipe persist. The cancelled turn must not enter the
+        // productive chain (ADR-0021) or the recipe (ADR-0034). NOTE: this
+        // skips `record_turn` only; `run` may already have materialized a
+        // `result_N` into the working set / admin connection (try_materialize
+        // runs before this check), but the session is being torn down so that
+        // in-memory state is dropped with it and never observed. Log the
+        // discard so an operator can tell a close-induced drop apart from a
+        // normal user cancel (the outcome alone reads as Cancelled either way).
         if self.is_closing() {
+            log::info!(
+                target: "toptopduck::session",
+                "discarding in-flight turn: session closed during the turn (ADR-0055)"
+            );
             return outcome;
         }
         self.record_turn(question, outcome)

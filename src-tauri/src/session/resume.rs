@@ -8,12 +8,16 @@
 //! and `open_duck` applies them. Phase 1 (source file I/O) and phase 5
 //! (persist) stay on `Session::open_duck`.
 //!
-//! The resume global state also lives here -- [`RESUMING_COUNT`] /
-//! [`ResumeFlagGuard`] / [`OpenDuckGuard`] (ADR-0053 Decision 3 extension of
-//! ADR-0035). [`is_resuming`] / [`resuming_count`] are re-exported by the
-//! parent module so the command layer's read gate (`commands::reject_if_resuming`)
-//! stays transparent -- the call path `crate::session::is_resuming` is
-//! unchanged.
+//! The pre-ADR-0056 resume global state also lives here --
+//! [`RESUMING_COUNT`] / [`ResumeFlagGuard`] / [`OpenDuckGuard`] (ADR-0053
+//! Decision 3 extension of ADR-0035). NOTE: since ADR-0056 the LIVE
+//! command-layer resume gate is per-session (`SessionHandle::is_resuming`,
+//! read by `commands::reject_if_resuming`); the process-global
+//! [`is_resuming`] / [`resuming_count`] below are retained ONLY as a
+//! test/diagnostic RAII probe -- `persistence_blackbox.rs` asserts
+//! `Session::open_duck` raises and clears the count around a resume, and no
+//! production call site reads them. They are re-exported by the parent module
+//! and from `lib.rs` so those integration tests can reach them.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -34,30 +38,41 @@ use crate::workingset::WorkingSet;
 // --- Resume global state (ADR-0035 Decision 3, ADR-0053 Decision 3) ---------
 
 /// Process-global count of in-flight resumes: > 0 while any `Session::open_duck`
-/// is rebuilding a session across the restart boundary. During resume the
-/// managed `Arc<Mutex<Session>>` still holds the PRE-resume session -- a
-/// concurrent mutating IPC command (`ask` / `ingest_file` / `replace_source` /
-/// `remove_source` / `remove_active_source`) would silently operate on that
-/// stale session and have its work overwritten when the resumed session lands
-/// (`*s = new_session`). The frontend's shared `loading` flag is the primary
-/// defense; this counter is the Rust-side backstop for the cases the frontend
-/// cannot see (a second window, an IPC replay).
+/// is rebuilding a session across the restart boundary.
 ///
-/// A COUNT (not a boolean) so concurrent resumes compose correctly: two
-/// `open_duck` calls in two windows each acquire (+1), and one finishing (-1)
-/// leaves the counter > 0 while the other is still running -- a mutating
-/// command stays blocked until ALL resumes complete. A boolean would be falsely
-/// cleared by the first finisher. Process-global (not per-Session) because the
-/// hazard spans two Session instances -- the old one in managed state and the
-/// new one under construction.
+/// Historical role (pre-ADR-0056): this was the Rust-side backstop that
+/// `commands::reject_if_resuming` read to refuse a concurrent mutating IPC
+/// command (`ask` / `ingest_file` / `replace_source` / `remove_source` /
+/// `remove_active_source`) during resume -- without it, such a command would
+/// silently operate on the stale pre-resume session and have its work
+/// overwritten when the resumed session lands (`*s = new_session`). The
+/// frontend's shared `loading` flag was the primary defense; this counter was
+/// the backstop for cases the frontend cannot see (a second window, an IPC
+/// replay).
+///
+/// Current role (ADR-0056): the LIVE command-layer gate is now per-session
+/// (`SessionHandle::is_resuming`, read by `commands::reject_if_resuming`), so
+/// this counter has NO production reader. It is retained ONLY as a RAII probe
+/// that `persistence_blackbox.rs` asserts rises and falls around a resume
+/// (`is_resuming_flag_is_true_during_open_duck_and_cleared_after`).
+///
+/// A COUNT (not a boolean) so concurrent resumes compose: two `open_duck`
+/// calls each acquire (+1), one finishing (-1) leaves it > 0 while the other
+/// runs. Process-global (not per-Session) because the hazard historically
+/// spanned two Session instances -- the old one in managed state and the new
+/// one under construction.
 static RESUMING_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-/// Whether any `Session::open_duck` resume is currently in flight. Checked at
-/// the top of every mutating command (see `commands.rs`) so a concurrent IPC
-/// call during resume is rejected with a clear error instead of silently
-/// operating on the stale pre-resume session. The count returns to zero on
-/// every exit from `open_duck` (success or error) via the [`ResumeFlagGuard`]
-/// RAII guard, so a resume failure can never leave it stuck > 0.
+/// Whether any `Session::open_duck` resume is currently in flight.
+///
+/// Historical role (pre-ADR-0056): checked at the top of every mutating
+/// command to reject a concurrent IPC call during resume. Since ADR-0056 the
+/// LIVE command-layer gate is the per-session `SessionHandle::is_resuming`
+/// (read by `commands::reject_if_resuming`); this free function now has NO
+/// production caller and is retained only as the integration-test probe over
+/// [`RESUMING_COUNT`]. The count returns to zero on every exit from
+/// `open_duck` (success or error) via the [`ResumeFlagGuard`] RAII guard, so a
+/// resume failure can never leave it stuck > 0.
 pub fn is_resuming() -> bool {
     RESUMING_COUNT.load(Ordering::SeqCst) > 0
 }

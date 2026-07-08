@@ -17,6 +17,7 @@ import {
   cancelQuery,
   conversation,
   createSession,
+  closeSession,
   fmtError,
   getAppConfig,
   getProviderConfig,
@@ -206,9 +207,18 @@ export default function App() {
   // a loading state until the id resolves.
   useEffect(() => {
     let cancelled = false;
+    let createdId: string | null = null;
     createSession()
       .then((id) => {
-        if (cancelled) return;
+        // Unmounted mid-create: the backend session is now orphaned (no
+        // frontend holder). Close it so ADR-0055's tab<->id binding releases
+        // the DuckDB instance + .duck writer key. Fire-and-forget -- close is
+        // best-effort and never fatal.
+        if (cancelled) {
+          void closeSession(id);
+          return;
+        }
+        createdId = id;
         sessionIdRef.current = id;
         setSessionId(id);
       })
@@ -218,6 +228,11 @@ export default function App() {
       });
     return () => {
       cancelled = true;
+      // Release the session we minted if we unmount with one live
+      // (ADR-0055 close-on-unmount). In the single-session shell App never
+      // unmounts before process exit, but React StrictMode / HMR / tests do,
+      // and without this the backend accumulates orphaned DuckDB instances.
+      if (createdId) void closeSession(createdId);
     };
   }, []);
 
@@ -756,6 +771,17 @@ export default function App() {
   // can run before it. Once set, every handler reads it via sessionIdRef and
   // the render can treat it as a known string below.
   if (!sessionId) {
+    // createSession failed -> surface the error instead of an endless
+    // "initializing" screen. The only error reachable in this gate is a
+    // createSession rejection (kind "load"); any other error is set after the
+    // id lands and never reaches here.
+    if (error) {
+      return (
+        <main>
+          <p>初始化会话失败：{error.message}</p>
+        </main>
+      );
+    }
     return (
       <main>
         <p>正在初始化会话…</p>

@@ -159,8 +159,12 @@ impl SessionStore {
         let handle = self.get(session_id)?;
         handle.closing.store(true, Ordering::SeqCst);
         handle.cancel.request();
-        // Remove so subsequent lookups reject. Idempotent: a concurrent close
-        // that already removed it leaves nothing to remove (harmless).
+        // Remove so subsequent lookups reject. `HashMap::remove` itself is
+        // idempotent, but `close` as a whole is NOT idempotent on a missing
+        // id: the `get` above returns UNKNOWN_SESSION before this line runs,
+        // so a second close of an already-closed id surfaces to the caller as
+        // UNKNOWN_SESSION (the frontend treats any close error on a tab it is
+        // discarding as success).
         let mut map = self.sessions.write().map_err(|e| e.to_string())?;
         map.remove(session_id);
         Ok(())

@@ -19,6 +19,7 @@ vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
   return {
     ...actual,
+    closeSession: vi.fn(async () => {}),
     createSession: vi.fn(async () => "sess-1"),
     ingestFile: vi.fn(),
     ingestFileGuided: vi.fn(),
@@ -46,6 +47,7 @@ import {
   activeDataset,
   askQuestion,
   conversation,
+  createSession,
   ingestFile,
   ingestFileGuided,
   listWorkingSet,
@@ -461,5 +463,24 @@ describe("App delete-active-source flow (issue #39)", () => {
     await waitFor(() =>
       expect(screen.getByText(/工作集为空/)).toBeInTheDocument(),
     );
+  });
+});
+
+describe("App session init failure", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("surfaces a createSession rejection instead of an endless loading screen", async () => {
+    // createSession is the mount-time critical path; a rejection (backend
+    // Session build failure) must surface as a visible error, not leave the UI
+    // stuck on "正在初始化会话…". The gated render shows the error once
+    // sessionId stays null and the load error lands.
+    vi.mocked(createSession).mockRejectedValueOnce("后端会话初始化失败");
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByText(/初始化会话失败/)).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/后端会话初始化失败/)).toBeInTheDocument();
+    // The loading placeholder is gone once the error lands.
+    expect(screen.queryByText(/正在初始化会话/)).not.toBeInTheDocument();
   });
 });

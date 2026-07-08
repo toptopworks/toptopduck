@@ -86,6 +86,22 @@ fn close_removes_session_and_subsequent_lookups_reject() {
     assert_eq!(err, toptopduck_lib::UNKNOWN_SESSION);
 }
 
+#[test]
+fn close_twice_first_ok_second_rejects_unknown_session() {
+    // `close` is NOT idempotent on a missing id: the first close removes the
+    // entry and returns Ok; a second close of the same id fails the internal
+    // `get` lookup and surfaces UNKNOWN_SESSION (the frontend treats any close
+    // error on a tab it is discarding as success). Pins the documented
+    // behavior so a future "make close truly idempotent" change is intentional.
+    let store = SessionStore::new();
+    let id = fresh_session(&store);
+    store.close(&id).expect("first close");
+    let err = store
+        .close(&id)
+        .expect_err("second close rejects with UNKNOWN_SESSION");
+    assert_eq!(err, toptopduck_lib::UNKNOWN_SESSION);
+}
+
 // --- per-session physical isolation (ADR-0027) -----------------------------
 
 #[test]
