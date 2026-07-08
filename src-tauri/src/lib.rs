@@ -23,6 +23,7 @@ pub mod persistence;
 pub mod provenance;
 pub mod provider;
 pub mod session;
+pub mod session_store;
 pub mod window;
 pub mod workingset;
 
@@ -52,17 +53,23 @@ pub use session::{
     is_resuming, ActiveAbandoned, ActiveResolution, PendingConflict, ResumeError, ResumeEvent,
     Session, SourceIssue, SourceResolution,
 };
+pub use session_store::{SessionHandle, SessionStore, UNKNOWN_SESSION};
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tauri::Manager;
 
-/// Boots the Tauri shell. The shared Session is created once and managed behind
-/// an Arc<Mutex>; ingest and turns run on a blocking thread so the UI never
-/// freezes (AC8). The cancel token is shared (Arc) between the Session and the
-/// cancel command so a cancel fires without the session lock `ask` holds for the
-/// whole turn (ADR-0021, issue #28). The real LLM provider (AnthropicProvider,
-/// #29) is wired behind the Provider trait -- it reads the API key from the OS
-/// keychain per turn, and the endpoint config (`{base_url, model}`) from the
+/// Boots the Tauri shell. A single [`SessionStore`] (ADR-0056) is created once
+/// and managed as Tauri state; it holds the `Map<SessionId, Arc<SessionHandle>>`
+/// the session-scoped commands address. The store starts EMPTY -- the frontend
+/// mints each session via `create_session` (the `+ tab` action) and passes the
+/// returned id as the first parameter to every session-scoped command. Each
+/// session owns an independent in-memory DuckDB instance (ADR-0012/0027), its
+/// own per-session cancel token (ADR-0021), and its own `Mutex<Session>` (the
+/// single-flight gate); the store lock is held only for the brief lookup, so a
+/// long turn never blocks another session's `close_session` / `create_session`
+/// (ADR-0056 concurrency model). The real LLM provider (AnthropicProvider, #29)
+/// is wired per session at `create_session` -- it reads the API key from the OS
+/// keychain per turn and the endpoint config (`{base_url, model}`) from the
 /// app-config file (ADR-0038 / issue #53), via a single [`LiveProviderConfig`]
 /// held as Tauri state. The app starts usable once a key is stored; before that
 /// every turn refuses honestly as not-wired.
@@ -75,7 +82,6 @@ use tauri::Manager;
 /// across launches) rather than crashing.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let cancel = Arc::new(CancelToken::new());
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
@@ -110,17 +116,17 @@ pub fn run() {
 
             let keychain = KeychainStore::new();
             let live = LiveProviderConfig::new(keychain, app_config_path);
-            let session = Session::with_provider_and_cancel(
-                Box::new(AnthropicProvider::new(Box::new(live.clone()))),
-                cancel.clone(),
-            )
-            .expect("failed to create session");
-            app.manage(Arc::new(Mutex::new(session)));
-            app.manage(cancel.clone());
+            // ADR-0056: the multi-session store is the single managed state for
+            // session-scoped commands. It starts empty; the frontend creates
+            // sessions on demand. LiveProviderConfig is shared -- the per-session
+            // provider reads key + endpoint through it.
+            app.manage(Arc::new(SessionStore::new()));
             app.manage(live);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::create_session,
+            commands::close_session,
             commands::ingest_file,
             commands::ingest_file_guided,
             commands::list_working_set,

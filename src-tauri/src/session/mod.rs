@@ -12,6 +12,7 @@ pub mod turn_runner;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,13 +40,13 @@ use crate::session::turn_runner::TurnRunner;
 use crate::window;
 use crate::workingset::{WorkingSet, DEFAULT_RESULT_COUNT_CAP};
 
-// Re-export the resume global-state read gate + test flag (ADR-0053 Decision 3)
-// so the command layer's `crate::session::is_resuming` /
-// `crate::session::acquire_test_resume_flag` paths stay transparent after the
-// move into `session::resume`. `is_resuming` is further re-exported from
-// `lib.rs` for the integration tests.
-#[cfg(test)]
-pub(crate) use resume::acquire_test_resume_flag;
+// Re-export the resume global-state probe (ADR-0053 Decision 3) after its
+// move into `session::resume`. Since ADR-0056 the LIVE command-layer resume
+// gate is per-session (`SessionHandle::is_resuming`, read by
+// `commands::reject_if_resuming`); this process-global `is_resuming` /
+// `resuming_count` pair is retained ONLY as the integration-test RAII probe
+// (persistence_blackbox.rs asserts it rises and clears around a resume). It
+// is further re-exported from `lib.rs` so those tests can reach it.
 pub use resume::{is_resuming, resuming_count};
 
 /// Raw rows surfaced per sheet in the guided-load preview -- enough to spot the
@@ -348,6 +349,16 @@ pub struct Session {
     /// for the whole turn. Clone it out via [`Self::cancel_token`] before the
     /// lock is taken (e.g. the command layer registers it as managed state).
     cancel: Arc<CancelToken>,
+    /// ADR-0055 close-tab lifecycle: the shared closing flag, set by
+    /// `close_session` (via the [`SessionStore`](crate::session_store::SessionStore)
+    /// handle) and read by [`Self::ask`]'s post-turn check. When set, an
+    /// in-flight turn that finishes (Cancelled or otherwise) is DISCARDED -- not
+    /// appended to the thread, not persisted to the recipe -- so a closed
+    /// session's cancelled turn never enters the productive chain (ADR-0021,
+    /// ADR-0034). Defaults to a private false flag for sessions built
+    /// outside a store (tests, `new`); the store attaches its own so
+    /// `close_session` and `ask` share one. Read via [`Self::is_closing`].
+    closing: Arc<AtomicBool>,
     /// The bound `.duck` path (ADR-0034). When `Some`, every terminal turn
     /// and source lifecycle event atomically rewrites the recipe at this path
     /// (temp + rename, whole-file). `None` until the user saves / opens a
@@ -455,6 +466,7 @@ impl Session {
             result_count_cap: DEFAULT_RESULT_COUNT_CAP,
             source_files: HashMap::new(),
             cancel,
+            closing: Arc::new(AtomicBool::new(false)),
             duck_path: None,
             session_name: None,
             persist_error: None,
@@ -470,6 +482,24 @@ impl Session {
     /// clone it to observe `is_in_flight` / drive `request` from another thread.
     pub fn cancel_token(&self) -> Arc<CancelToken> {
         Arc::clone(&self.cancel)
+    }
+
+    /// Attach the store-shared closing flag (ADR-0055). [`SessionStore::create`]
+    /// calls this so the flag it holds (and `close_session` sets) is the SAME
+    /// `Arc<AtomicBool>` [`Self::ask`] reads in its post-turn check. A session
+    /// built outside a store keeps its default private flag (always false) --
+    /// `is_closing` then never trips, which is correct for tests that never
+    /// close. Idempotent-ish: the prior flag is dropped (its only other holder
+    /// is the store, which keeps its own clone).
+    pub fn set_closing_flag(&mut self, closing: Arc<AtomicBool>) {
+        self.closing = closing;
+    }
+
+    /// Whether `close_session` has marked this session closing (ADR-0055). Read
+    /// by [`Self::ask`]'s post-turn check to discard an in-flight turn that
+    /// finished after close fired cancel.
+    pub fn is_closing(&self) -> bool {
+        self.closing.load(Ordering::SeqCst)
     }
 
     /// Request cancellation of the in-flight turn (ADR-0021). Sets the
@@ -1507,6 +1537,25 @@ impl Session {
             };
             self.turn_runner.run(&request, result_name, &mut deps)
         };
+        // ADR-0055 post-turn discard: if `close_session` marked this session
+        // closing while the turn was in flight (it also fired cancel, so the
+        // outcome is typically Cancelled, but a turn that squeaked through in
+        // the narrow window is discarded too), drop the outcome -- no thread
+        // append, no recipe persist. The cancelled turn must not enter the
+        // productive chain (ADR-0021) or the recipe (ADR-0034). NOTE: this
+        // skips `record_turn` only; `run` may already have materialized a
+        // `result_N` into the working set / admin connection (try_materialize
+        // runs before this check), but the session is being torn down so that
+        // in-memory state is dropped with it and never observed. Log the
+        // discard so an operator can tell a close-induced drop apart from a
+        // normal user cancel (the outcome alone reads as Cancelled either way).
+        if self.is_closing() {
+            log::info!(
+                target: "toptopduck::session",
+                "discarding in-flight turn: session closed during the turn (ADR-0055)"
+            );
+            return outcome;
+        }
         self.record_turn(question, outcome)
     }
 

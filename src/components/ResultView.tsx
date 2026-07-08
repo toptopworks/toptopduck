@@ -7,6 +7,8 @@ import type { ColumnSchema, VizSpec } from "../types";
 const DEFAULT_PAGE_SIZE = 100;
 
 interface ResultViewProps {
+  /** ADR-0056: the session this result belongs to -- readRows addresses it. */
+  sessionId: string;
   referenceName: string;
   assumption: string | null;
   /** The provider's optional viz spec for this result (ADR-0016/0033): null =
@@ -24,6 +26,7 @@ interface ResultViewProps {
 // `total` rides the page so a truncated view never looks complete (ADR-0030).
 // The assumption note (ADR-0009) renders as a correctable side note.
 export function ResultView({
+  sessionId,
   referenceName,
   assumption,
   viz,
@@ -49,7 +52,7 @@ export function ResultView({
       setLoading(true);
       setError(null);
       try {
-        const page = await readRows(referenceName, off, pageSize);
+        const page = await readRows(sessionId, referenceName, off, pageSize);
         if (seq !== seqRef.current) return; // superseded -- discard the stale page
         setColumns(page.columns);
         setRows(page.rows);
@@ -62,7 +65,7 @@ export function ResultView({
         if (seq === seqRef.current) setLoading(false);
       }
     },
-    [referenceName, pageSize],
+    [sessionId, referenceName, pageSize],
   );
 
   useEffect(() => {

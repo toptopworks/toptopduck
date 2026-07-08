@@ -62,6 +62,10 @@ log = "0.4"
 # never under-invalidates -- "宁可多失效不漏失效", issue #40). default-features
 # off: only the parser is needed, no backend.
 sqlparser = { version = "0.52", default-features = false }
+# Backend-generated session ids (ADR-0056): create_session mints a UUID v4 so
+# the id <-> resource binding is atomic (no "id issued, resource unbuilt"
+# window). v4 only -- no serde need; the id crosses IPC as a plain string.
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"
