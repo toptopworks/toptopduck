@@ -53,7 +53,9 @@ pub use session::{
     is_resuming, ActiveAbandoned, ActiveResolution, PendingConflict, ResumeError, ResumeEvent,
     Session, SourceIssue, SourceResolution,
 };
-pub use session_store::{SessionHandle, SessionStore, UNKNOWN_SESSION};
+pub use session_store::{
+    ClosingFlag, SessionError, SessionHandle, SessionId, SessionStore, UNKNOWN_SESSION,
+};
 
 use std::sync::Arc;
 use tauri::Manager;
