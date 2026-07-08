@@ -571,7 +571,7 @@ pub async fn open_duck(
 
 /// Read + clear the named session's most recent per-turn persistence failure,
 /// if any (ADR-0034/0035 honest signal). The frontend polls this after each
-/// turn / source event / resume: a non-blocking "未保存到磁盘" banner surfaces
+/// turn / source event / resume: a non-blocking unsaved-to-disk banner surfaces
 /// the disk-vs-memory drift so the user knows a save dropped (instead of
 /// relying on the next successful write to silently self-heal, which would mask
 /// the window where closing the app loses the unsaved turns). Returns `None`

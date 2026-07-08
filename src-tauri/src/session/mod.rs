@@ -353,8 +353,8 @@ pub struct Session {
     /// handle) and read by [`Self::ask`]'s post-turn check. When set, an
     /// in-flight turn that finishes (Cancelled or otherwise) is DISCARDED -- not
     /// appended to the thread, not persisted to the recipe -- so a closed
-    /// session's cancelled turn never enters the productive chain (ADR-0021
-    /// 作废 + ADR-0034). Defaults to a private false flag for sessions built
+    /// session's cancelled turn never enters the productive chain (ADR-0021,
+    /// ADR-0034). Defaults to a private false flag for sessions built
     /// outside a store (tests, `new`); the store attaches its own so
     /// `close_session` and `ask` share one. Read via [`Self::is_closing`].
     closing: Arc<AtomicBool>,
@@ -1541,7 +1541,7 @@ impl Session {
         // outcome is typically Cancelled, but a turn that squeaked through in
         // the narrow window is discarded too), drop the outcome ENTIRELY -- no
         // thread append, no recipe persist. The cancelled turn must not enter
-        // the productive chain (ADR-0021 作废) or the recipe (ADR-0034). The
+        // the productive chain (ADR-0021) or the recipe (ADR-0034). The
         // session is being torn down; its in-memory state is discarded with it.
         if self.is_closing() {
             return outcome;
