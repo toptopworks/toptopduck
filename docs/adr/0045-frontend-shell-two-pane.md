@@ -42,3 +42,4 @@ ADR-0008（Tauri）与 0016（React + Vega-Lite）定了框架与渲染管线，
 - **被 ADR-0048 限定交互**：澄清文本载荷（B 轮）与 `assumption` 可纠偏旁注的**交互**（应答/纠偏走下一条自然语言轮次、不开新原语）在 0048 定；其渲染位置仍归本 ADR shell + 0047 rail。见 ADR-0048。
 - **被 ADR-0049 改写前提**：「`styles.css` 的 `.layout` 须重写」升级为「`styles.css` 被 Tailwind utilities + shadcn 组件**取代**」——前端样式栈定为 shadcn/ui v4 + Tailwind v4 + Lucide。见 ADR-0049。
 - **被 ADR-0054 填边界遗漏**：本 ADR 只定两栏 shell **结构**（rail + workspace），未定义桌面窗口可变尺寸下的行为（rail 宽度策略 / 折叠 / 最小尺寸 / 缩放退化）；窗口尺寸策略（rail 固定宽 + 可折叠 + Tauri `minWidth` 兜底）与尾部 ellipsis 截断（连带闭合 0047 / 0050 截断 open item）在 ADR-0054 定。见 ADR-0054。
+- **被 ADR-0057 延伸**：workspace「结果」tab 的渲染落点定案——行服务端分页 + 列原生全量 + 数值类型右对齐，不引入虚拟化 / 跳页 / column cap。见 ADR-0057。

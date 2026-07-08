@@ -44,3 +44,4 @@
 - **延伸 ADR-0013**：LineageTracker 抽出仍延后评估——本 ADR 不动 WorkingSet 的 cascade 逻辑，未来 ADR-0013 软失效窗口 / GC 落地时再判。
 - **延伸 ADR-0035**：`OpenDuckGuard` / `RESUMING_COUNT` 物理移到 `session/resume.rs`，语义零改动，`is_resuming()` 读门不变。
 - **不延伸 ADR-0007**：provider 抽象仍故意浅，本 ADR 不加深（`UnwiredProvider` 默认实现不变）。
+- **被 ADR-0059 延伸（小）**：`TurnRunner::run()` 增 `on_phase: Box<dyn Fn(TurnPhase) + Send>` 注入参数——延续本 ADR materializer `Box<dyn>` 注入风格，callback 不硬编码副作用、测试传 no-op 保纯净；字面不违本 ADR（仍不读 history、不调 persist）。见 ADR-0059。

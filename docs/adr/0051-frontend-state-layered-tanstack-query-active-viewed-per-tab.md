@@ -67,6 +67,9 @@ ADR-0046 Consequences 明确写"单 Tauri webview 内 React 状态持有多个�
 - **被 ADR-0054 关联**：shell rail 折叠状态（0054）属本 ADR 客户端 UI 态范畴（`useState` / 轻量 hook），非服务端态、不进 Query。见 ADR-0054。
 - **被 ADR-0055 延伸**：本 ADR「关 tab `removeQueries`」补「in-flight mutation 处理」——关一个正有 in-flight ask 的 tab = fire cancel 后立即 removeQueries，in-flight promise resolve 时 cache 已移除（`setQueryData` 打空 cache 须无害化 / no-op）。见 ADR-0055。
 - **被 ADR-0056 延伸（落地前提）**：本 ADR「queryKey 按 sessionId 分片」的前端假设，其后端契约（所有会话作用域 IPC 加 sessionId 首位 + `create_session` / `close_session` + 会话间并发 / 会话内单飞行）在 ADR-0056 定；前端 queryKey 前缀 `['session', sessionId, ...]` 与后端 sessionId 寻址端到端对齐。见 ADR-0056。
+- **被 ADR-0057 延伸**：ResultView 渲染落点（行服务端分页 + 列原生全量 + 数值右对齐）与本 ADR per-tab hidden 保活兼容——原生 `<table>` 无 Vega resize 钩子需求，与 hidden 保活下 Vega `ResizeObserver`（本 ADR「hidden 保活下的 Vega 渲染」）同区域共存无碍。见 ADR-0057。
+- **被 ADR-0058 引用**：SessionPane 级 ErrorBoundary 契合本 ADR per-tab 隔离；降级重试 `invalidateQueries` 依赖本 ADR queryKey 分片；区域客户端 UI 态随 remount 丢弃、`viewedResult` 保留契合本 ADR active/Viewed 分离。见 ADR-0058。
+- **被 ADR-0059 闭合（Q5 子项）**：渐进反馈阶段（`Thinking` / `Querying`）走客户端 UI 态（`SessionPane` `useState`），闭合本 ADR Q5「流式通道」punt 的**执行反馈子项**——LLM token 流仍留 v2。见 ADR-0059。
 - **未决（留 0051 内或后续）**：
   - **Q5 流式通道**：v1 `ask` 是阻塞式 IPC（等 outcome，ADR-0009 / 0021），非流式；未来 LLM token 流 / SQL 执行进度若引入，走 Tauri event → `queryClient.setQueryData` 增量更新 thread，或在 query 之外加独立 event store——届时细化。
   - **Q6 recipe 同步 invalidate 时机**：换源级联失效（ADR-0025）/ source replacement 后哪些 query 要 invalidate、resume 重开时 cache 冷启策略，在实现期钉死具体规则。

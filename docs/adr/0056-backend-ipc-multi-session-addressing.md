@@ -39,4 +39,5 @@ ADR-0027 line 27 只陈述「应用层须管理多个独立内存 DuckDB 实例�
 - **依赖关系**：ADR-0055（关 tab × in-flight）的 `close_session` 是本契约命令族成员；ADR-0055 的关 tab 收尾以本 ADR 的 sessionId 寻址为前提。
 - **`open_duck` 在已有 tab 内 resume**：**复用同一 sessionId、实例内容被 recipe 替换**（tab ↔ sessionId 绑定恒定，仅 `create_session` / `close_session` 生灭 id）；不在 `open_duck` 时新建 session——新建 session 是前端 `+` 动作（`create_session`）的职责。
 - **延伸 ADR-0051**：前端 queryKey 统一前缀 `['session', sessionId, ...]`（0051 已定）与后端 sessionId 寻址端到端对齐；active / Viewed Result 分离（0051）在后端寻址层无额外影响（active 是后端真相、按 sessionId 寻址，Viewed Result 是前端 UI 态）。
+- **被 ADR-0059 延伸**：会话作用域 side-channel event（`turn-progress`）带 sessionId 寻址，是本 ADR「所有会话作用域 IPC 带 sessionId」契约在 Tauri event 通道上的延伸；`resume-progress`（ADR-0034）v1 不带 sessionId 是单会话遗留，多会话落地一并补。见 ADR-0059。
 - **留实现期**：`sessionId` 类型确认（UUID string）、Tauri `State` 具体结构、命令清单最终核对、`create_session` 是否在新建时即落一个空 recipe。

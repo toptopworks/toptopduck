@@ -43,5 +43,7 @@ ADR-0051 写了关 tab 的**前端侧**（`removeQueries` + 卸载 `<SessionPane
 - **延伸 ADR-0046**：关 tab 语义补全「in-flight turn 场景」——关 tab ≠ 等待，而是隐含 cancel + 后台丢弃。ADR-0046 待追加反向指针。
 - **延伸 ADR-0051**：关 tab 清理补「in-flight mutation 处理」——fire cancel 后立即 `removeQueries`，in-flight promise resolve 时 cache 已移除（`setQueryData` 打在空 cache 须无害处理 / no-op）。ADR-0051 待追加反向指针。
 - **延伸 ADR-0021**：软取消的 ≤120s 后台窗口在「关 tab」场景复用，明确不新增债。ADR-0021 待追加反向指针。
+- **被 ADR-0058 引用**：关 tab in-flight 场景的「前端 promise 孤儿」（`setQueryData` 打空 cache）仍归本 ADR + 0051 处理，不上抬到 ErrorBoundary（React ErrorBoundary 技术上不 catch async promise）。见 ADR-0058。
+- **被 ADR-0059 延伸**：关 tab in-flight 的 phase / listener 收尾与「立即卸前端 + 后台丢弃」一致——`turn-progress` listener 随 `SessionPane` 卸载 cleanup、phase 随卸载销毁，后台孤儿 event 无害，无需额外处理。见 ADR-0059。
 - **后端实现**：`close_session` 标 closing → in-flight ask post-check 发现 closing 跳过 materialize → DuckDB interrupt 释放后卸载 → 落 recipe（不含该 turn）。
 - **留实现期**：多个 tab 同时关闭的串行 / 并行收尾、closing 状态的并发安全细节、`setQueryData` 打空 cache 的无害化（TanStack Query 对已 remove 的 key setQueryData 默认 no-op，实现期验证）。

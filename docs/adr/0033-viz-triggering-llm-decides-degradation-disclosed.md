@@ -31,3 +31,4 @@ ADR-0009 契约 `viz?` 字段可选、ADR-0016 定 viz 格式（Vega-Lite + 白�
 - **校准 ADR-0016**：补 viz 触发（LLM 自决 + NL 覆盖 + 无按钮）与退化披露（emitted viz 渲染失败 → 明示「图表无法渲染，已显示表格」，不论是否显式要过）。0016 Consequences 已追加校准指针。
 - 实现侧：system prompt 引导保守默认（默认表、视觉意图才图）+ 白名单（0016）；前端渲染退化旁注（非阻断）；ADR-0010 历史视图渲染退化标注。
 - viz 退化不改变 0028 outcome 分类——SQL 有效、`result_N` 已物化 → 仍是 outcome A（结果轮），仅 viz 维度退化（presentation 层），不走 failure-outcome / void。
+- **被 ADR-0058 分层**：Vega 退化 try/catch（本 ADR Decision 2「退化须披露」的实现路径）归 L0、保留 `ResultView` 内部不丢 ErrorBoundary；ErrorBoundary（L2）只接 Vega 之外的 render throw。见 ADR-0058。

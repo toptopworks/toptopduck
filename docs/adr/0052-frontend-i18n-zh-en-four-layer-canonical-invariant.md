@@ -81,4 +81,5 @@ ADR-0049（样式栈）、0050（视觉系统主题）、0051（前端状态分�
 - **0050 Settings `Dialog` 增一个 locale `Select`**：与主题 toggle 同面，不开新 surface。
 - **UX 后果（须文档化）**：切 locale 仅向前生效——老轮次回复保持原语言、不重译；这是 ADR-0039 逐字原则的推论，非 bug。
 - **CONTEXT.md 不动**：i18n 不引入新领域术语——locale 是 0038 preference、非领域概念；四层边界涉及的 `result_N`/SQL/Recipe 全是已定义术语。
+- **被 ADR-0057 延伸（第②层语义精确化）**：本 ADR 第②层「数据表单元格保持原样」明确指**内容字节不变**；**对齐（布局属性）不在其列**——数值列右对齐只切 CSS 类、不改内容字节，与第②层相容。见 ADR-0057。
 - **未决（留实现期）**：catalog key 命名空间细则、`@formatjs/cli` 抽取的 CI 集成方式、Settings locale `Select` 的精确文案。
