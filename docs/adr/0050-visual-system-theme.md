@@ -58,4 +58,5 @@ ADR-0049 定了样式栈并把 primary 取值、明暗、密度、Vega 桥接、
 - **延伸 ADR-0016**：Vega-Lite 渲染的主题来源定为「运行时 CSS-var 桥接」；0016 的 schema 校验 / 退化路径不变。
 - 主题 `.css`（`@theme` light/dark token）+ `useTheme` hook + Vega 桥接 util 进 src；shadcn 组件按映射表 copy-in；`lucide-react` 字形按表用。
 - **Vega 桥接触发**：挂在 Q11 `useTheme` 主题变更事件；主题切换时图表重渲一闪（罕见事件，可接受）。
-- **未决（留实现期 / 视觉打磨）**：精确 spacing / `--radius` 值、B 澄清 / 拒绝子图标分流、自创品牌多系列色板（v2）、截断策略（头部 vs 尾部留字符）、卡片悬停态。
+- **未决（留实现期 / 视觉打磨）**：精确 spacing / `--radius` 值、B 澄清 / 拒绝子图标分流、自创品牌多系列色板（v2）、卡片悬停态。
+- **被 ADR-0054 闭合 open item**：原「未决」中的「截断策略（头部 vs 尾部留字符）」定为**尾部 ellipsis**（rail 固定宽 → 卡宽确定 → 保头部截尾部），已从「未决」移除。见 ADR-0054。

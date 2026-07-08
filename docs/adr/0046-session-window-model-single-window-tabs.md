@@ -38,4 +38,6 @@ ADR-0027 定了「多会话并行 + 每会话独立内存 DuckDB 实例 + 物理
 - **会话生命周期**：开 = 创建实例 + 载入 / resume recipe；关 tab = 落 recipe + 卸实例；重开 = resume。与 ADR-0035 文件级单写者 / 外部变更检测正交（0035 管同 .duck 多实例 / 外部编辑，本 ADR 管窗口内会话切换）。
 - **软上限 UX**：内存压力提示为顶栏非阻塞横幅 / badge，非硬限；阈值可调（0027）。
 - **被 ADR-0051 闭合**：「单 Tauri webview 内 React 状态持有多个会话」落地为 per-tab `<SessionPane key={sessionId}>` 组件自治 + queryKey 按 sessionId 分片 + 切 tab `hidden` 保活 + 关 tab `removeQueries`；active（LLM 作用于）与 Viewed Result（用户查看选择）显式分离。见 ADR-0051。
+- **被 ADR-0055 延伸**：本 ADR「关 tab = 落 recipe + 卸载（非销毁）」补全「in-flight turn 场景」——关一个正有 in-flight ask 的 tab = 隐含 cancel + 立即卸前端 + 后台丢弃 + recipe 不含 cancelled turn，不加确认。见 ADR-0055。
+- **被 ADR-0056 延伸（落地前提）**：本 ADR「单 Tauri webview 内 React 状态持有多个会话」的前端假设，其后端契约（所有会话作用域 IPC 加 sessionId 首位 + `create_session` / `close_session` + 会话间并发 / 会话内单飞行）在 ADR-0056 定。见 ADR-0056。
 - **未决（留后续）**：tab 拖拽重排、会话命名 UI 细节、「拖出成新窗口」高阶动作（v2）。

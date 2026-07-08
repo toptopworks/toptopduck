@@ -62,6 +62,11 @@ ADR-0046 Consequences 明确写"单 Tauri webview 内 React 状态持有多个�
 - **延伸 ADR-0045**：shell 重构（两栏 + workspace tabs）的前提状态架构就位；`App.tsx` 单列 → 顶栏 tabs + SessionPane（内含两栏）的重构路径明确。
 - **延伸 ADR-0010 / 0028**：active / Viewed Result 分离让"点历史结果重演"（0045 Why#3）只动前端 viewedResult、不动后端 active——守 0010 隐式链式对用户不可见。
 - **query 粒度**：working set / active / thread 各一个 per-session query；row pages 用 `useQuery(['session', sid, 'rows', referenceName, offset])` + `placeholderData: keepPreviousData` 分页；provider config 会话无关。
+- **真相源分工（精确化本 ADR「thread 是 turn 载荷单一真相」措辞）**：turn 载荷（viz / assumption / SQL）真相于 **thread**（`TurnRecord.outcome`，即本 ADR line「从 thread query 反查派生」的范围）；**dataset 运行态**（stale / columns / rows / privacy / fingerprint）真相于 **working set**（`DatasetDescriptor`，含自包含 `StaleAnchor` 因果快照）。`viewedResult` 瘦引用从两个 query 各取所需，**两源无重叠、无双真相**——避免实现者误读「一切从 thread 派生」而对 stale / schema 来源困惑、或在 viewedResult 重复持有造成双真相（`latestResult` 胖快照问题的变体）。
+- **hidden 保活下的 Vega 渲染（延伸 ADR-0016 / 0050）**：本 ADR「切 tab `display:none` 保活」在 React 状态层成立；workspace 的 Vega-Lite 图（0016）需补**渲染层钩子**——每个 Vega 容器挂 `ResizeObserver`，pane 从 hidden 切回 visible 触发 `view.resize()`（隐藏期窗口尺寸变 → 切回重算）；主题切换走**懒重建**（hidden pane 标 dirty、切回 visible 才重建 Vega config，0050 CSS-var 桥接），省 CPU 契合 ADR-0008 低内存动因。结论：hidden 保活在含 Vega 的 workspace 上成立，**不需退让到「切 tab 卸载 Vega view」**（Vega view 承载交互状态，卸载重挂损失连续性 + 重 parse spec 有成本）。
+- **被 ADR-0054 关联**：shell rail 折叠状态（0054）属本 ADR 客户端 UI 态范畴（`useState` / 轻量 hook），非服务端态、不进 Query。见 ADR-0054。
+- **被 ADR-0055 延伸**：本 ADR「关 tab `removeQueries`」补「in-flight mutation 处理」——关一个正有 in-flight ask 的 tab = fire cancel 后立即 removeQueries，in-flight promise resolve 时 cache 已移除（`setQueryData` 打空 cache 须无害化 / no-op）。见 ADR-0055。
+- **被 ADR-0056 延伸（落地前提）**：本 ADR「queryKey 按 sessionId 分片」的前端假设，其后端契约（所有会话作用域 IPC 加 sessionId 首位 + `create_session` / `close_session` + 会话间并发 / 会话内单飞行）在 ADR-0056 定；前端 queryKey 前缀 `['session', sessionId, ...]` 与后端 sessionId 寻址端到端对齐。见 ADR-0056。
 - **未决（留 0051 内或后续）**：
   - **Q5 流式通道**：v1 `ask` 是阻塞式 IPC（等 outcome，ADR-0009 / 0021），非流式；未来 LLM token 流 / SQL 执行进度若引入，走 Tauri event → `queryClient.setQueryData` 增量更新 thread，或在 query 之外加独立 event store——届时细化。
   - **Q6 recipe 同步 invalidate 时机**：换源级联失效（ADR-0025）/ source replacement 后哪些 query 要 invalidate、resume 重开时 cache 冷启策略，在实现期钉死具体规则。
