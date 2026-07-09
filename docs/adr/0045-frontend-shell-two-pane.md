@@ -47,3 +47,5 @@ ADR-0008（Tauri）与 0016（React + Vega-Lite）定了框架与渲染管线，
 - **被 ADR-0057 延伸**：workspace「结果」tab 的渲染落点定案——行服务端分页 + 列原生全量 + 数值类型右对齐，不引入虚拟化 / 跳页 / column cap。见 ADR-0057。
 - **被 ADR-0060 改写（导航载体）**：shell 经 0060 由两栏（本 ADR）扩为三栏（+ 左会话栏取代 0046 顶栏 tabs）。见 ADR-0060。
 - **QuestionBar 指示器改写（原「可下拉显式点名覆盖」→「只读显示 active + 点名走提问内」）**：指示器只读显示当前 active（ADR-0051 服务端真相）的显示名（ADR-0037）；取消下拉——显式点名走提问内（CONTEXT.md 本意，LLM 解析那一轮），轮内生效、非持久锁定。
+- **被 ADR-0062 精确化（QuestionBar 跨度）**：本 ADR「底 = QuestionBar（跨全宽）」在 0060 三栏化后读不通——定为「只跨 rail + workspace，会话栏独立通底」。见 ADR-0062 R1。
+- **被 ADR-0062 精确化（结果 tab 布局顺序）**：本 ADR「表 + Vega-Lite + assumption + 退化披露」枚举定为**布局顺序**「assumption → 图 → 表」（反转枚举、采 NL 分析心智），退化披露替换图位、分页 sticky pane 底。见 ADR-0062 R4。

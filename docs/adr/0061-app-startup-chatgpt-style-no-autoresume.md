@@ -55,3 +55,5 @@ ADR-0034（recipe 持久化 + eager resume）+ 0035（resume 完整性校验）+
 - **空状态（已决，并入本 ADR）**：per-region 空态——rail = placeholder 提示（**非 rail 第三物种**——0047「物种」= 恒可见数据条目，placeholder 有数据后消失）；workspace = hero 拖放区；QuestionBar = 禁用。启动欢迎屏与新建空会话态的 workspace/rail/QuestionBar 完全相同，仅左栏是否高亮当前会话之别。
 - **会话栏条目内容 + list_sessions 元数据**：见 ADR-0060（元数据字段为渲染条目服务）。
 - **resume 反馈 / 空状态 / 会话栏条目 open item 已闭合**：见上「resume 前端反馈（已决）」「空状态（已决）」；会话栏条目见 ADR-0060。
+- **被 ADR-0062 精确化（拖放落点二分）**：本 ADR 拖放路径补「有活跃会话 → 加源（0022 / 0040），无活跃会话（hero）→ createSession + 加源」。见 ADR-0062 R3。
+- **被 ADR-0062 补（resume 后 viewedResult 初始化）**：本 ADR resume 路径补「重放完成后前端 setViewedResult ← thread 末个 Materialized」。见 ADR-0062 R5。

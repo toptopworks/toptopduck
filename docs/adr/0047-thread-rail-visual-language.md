@@ -73,3 +73,4 @@ ADR-0045 定了 thread rail 为 shell 左栏、承载「轮次卡片 + 源事件
 - **stale chip 跳选源事件标记条的映射规则**：`StaleAnchor`（descriptor 内自包含因果快照：`reference_name` + `display_name` + `reason`）**无事件锚**；chip 跳选 = 「thread 中该 result 的 Turn **之后**、`reference_name` + `reason` 匹配的**最近一个** `SourceLifecycleEvent`」。因果方向保证时序（result 被某源事件失效，该事件必在其 Turn 之后）；「最近一个」消除同源多次生命周期的匹配歧义；**不加 `event_id`** 守 YAGNI（动 Rust `StaleAnchor` 契约 + recipe 序列化的不对称代价，与 ADR-0051「不加 turn id」同款论证），出口保留。v1 瑕疵：resume 后同源再次替换，「最近一个」会跳到新事件而非最初失效者（极边角、同类同源 `display_name` 多半相同），v2 加 `event_id` 出口。
 - **被 ADR-0054 闭合 open item**：原「未决」中的「截断策略（头部 vs 尾部留字符）」定为**尾部 ellipsis**（rail 固定宽 → 卡宽确定 → 保头部截尾部，呼应提问为身份句柄 ADR-0039），已从「未决」移除。见 ADR-0054。
 - **空态 placeholder 精确化**：「物种 = 恒可见数据条目类型」，placeholder 有数据后消失、不恒可见，**非 rail 第三物种**。
+- **被 ADR-0062 精确化（点 Materialized 的 pinned 旗）**：本 ADR「点 rail Materialized 卡 → setViewedResult」补「+ 若非末轮则 `pinnedToHistory=true`」，与 workspace 内容派生规则（0062 R2）配套。见 ADR-0062 R2。

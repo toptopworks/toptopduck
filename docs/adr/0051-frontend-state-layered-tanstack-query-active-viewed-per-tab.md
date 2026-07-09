@@ -75,3 +75,5 @@ ADR-0046 Consequences 明确写"单 Tauri webview 内 React 状态持有多个�
   - **Q6 recipe 同步 invalidate 时机**：换源级联失效（ADR-0025）/ source replacement 后哪些 query 要 invalidate、resume 重开时 cache 冷启策略，在实现期钉死具体规则。
   - tab 拖拽重排、会话命名 UI（继承 0046 未决）。
 - **被 ADR-0060 改写措辞**：「per-tab `<SessionPane>`」载体从顶栏 tabs → 左会话栏（0060），「tab」重映射为「左栏选中态 / 非活跃会话」，机制不变（hidden 保活 / removeQueries / in-flight cancel）；「tab 拖拽重排」随 tabs 取消作废、「会话命名 UI」由 0060 定（左栏弹菜单）。见 ADR-0060。
+- **被 ADR-0062 精确化（workspace 内容派生规则）**：本 ADR「非 Materialized 靠最新轮次自然渲染」含糊——定为派生(viewedResult, thread 末轮, 新增客户端布尔旗 `pinnedToHistory`)，闭合末轮 B/C/D 与点历史 Materialized 的冲突。见 ADR-0062 R2。
+- **被 ADR-0062 补（resume 初始化）**：本 ADR「产出即选中」只覆盖新产出；补「resume 成功 → viewedResult ← thread 末个 Materialized、`pinnedToHistory=false`」。见 ADR-0062 R5。
