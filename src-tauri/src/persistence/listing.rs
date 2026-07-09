@@ -36,8 +36,9 @@ pub struct SessionMetadata {
     /// to `open_duck` to resume.
     pub session_id: String,
     /// User-facing name: the recipe's `session_name` when the user named the
-    /// session, otherwise the first source's display label (ADR-0060 "默认名 =
-    /// 首源名"). Empty only when the session has no name AND no sources.
+    /// session, otherwise the first source's display label (ADR-0060: the
+    /// default name is the first source's name). Empty only when the session
+    /// has no name AND no sources.
     pub display_name: String,
     /// File modification time, milliseconds since the Unix epoch. The recipe
     /// deliberately stores no timestamps (ADR-0036), so the mtime comes from the
@@ -45,7 +46,7 @@ pub struct SessionMetadata {
     /// turn / source event, so it tracks the last real change.
     pub last_modified_at: i64,
     /// The working-set summary rendered as the sidebar entry's sub-line
-    /// (ADR-0060 "首源名 + 源数 + 轮数").
+    /// (ADR-0060: first source name + source count + turn count).
     pub source_summary: SourceSummary,
     /// The recipe format version (ADR-0036). Always the current version for a
     /// readable v1 file; surfaced so a future newer-made file can be honestly

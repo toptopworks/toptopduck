@@ -160,7 +160,7 @@ impl TurnRunner {
             }
             // ADR-0059: signal the discrete "thinking" wait right before the
             // provider call. attempt is 0-based; surface it 1-based so the UI
-            // reads "第 N 次" naturally and a blind retry is honestly visible.
+            // reads "attempt N" naturally and a blind retry is honestly visible.
             // Fired AFTER the cancel pre-check so a pre-cancelled turn emits no
             // phase at all.
             on_phase(TurnPhase::Thinking {
@@ -609,7 +609,7 @@ mod tests {
     /// with a 1-based attempt that rises across blind retries. A transient
     /// materialize failure (Runtime) consumes the budget and retries the SAME
     /// request, so the phases read Thinking{1}→Querying{1}→Thinking{2}→...,
-    /// letting the UI honestly surface "第 N 次" on a retry. The final attempt
+    /// letting the UI honestly surface "attempt N" on a retry. The final attempt
     /// (budget = 2 -> 3 attempts total) succeeds, so the last Querying is the
     /// one that materializes.
     #[test]
