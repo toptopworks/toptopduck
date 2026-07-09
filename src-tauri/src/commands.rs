@@ -518,10 +518,24 @@ pub fn record_recent_file(live: State<'_, LiveProviderConfig>, path: String) -> 
 /// zero new persistence. A path that is no longer a readable recipe is skipped
 /// (the listing never fabricates metadata). Thin wrapper over the pure
 /// [`list_session_metadata`] so the derivation stays black-box testable.
+///
+/// Runs the per-entry file reads off the async/UI thread (AC8): each recent
+/// entry pays a `read_duck` (file read + JSON parse) plus a `metadata` stat,
+/// so the whole pass runs in `spawn_blocking` like `read_rows` / `ingest_file`
+/// -- a cold start over slow or network-mounted storage must not freeze the
+/// main window while the sidebar list is being derived.
 #[tauri::command]
-pub fn list_sessions(live: State<'_, LiveProviderConfig>) -> Result<Vec<SessionMetadata>, String> {
-    let recent = live.load().recent_files;
-    Ok(list_session_metadata(&recent))
+pub async fn list_sessions(
+    live: State<'_, LiveProviderConfig>,
+) -> Result<Vec<SessionMetadata>, String> {
+    let live = live.inner().clone();
+    let list = tauri::async_runtime::spawn_blocking(move || {
+        let recent = live.load().recent_files;
+        list_session_metadata(&recent)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(list)
 }
 
 // --- Cross-session persistence (issue #48, ADR-0034/0036) -------------------

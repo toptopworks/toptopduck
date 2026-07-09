@@ -23,7 +23,7 @@ use std::time::UNIX_EPOCH;
 use serde::{Deserialize, Serialize};
 
 use crate::persistence::recipe::RecipeEntry;
-use crate::persistence::{read_duck, Recipe};
+use crate::persistence::{read_duck, LoadError, Recipe};
 
 /// One persisted session's sidebar metadata (ADR-0060/0061). Every field is
 /// derived -- nothing here is authored to disk separately. The frontend renders
@@ -89,9 +89,29 @@ pub fn list_session_metadata(paths: &[String]) -> Vec<SessionMetadata> {
 
 /// Derive one session's metadata from its `.duck` path. Returns `None` on any
 /// read / stat failure (the file is absent or not a readable v1 recipe) so the
-/// caller can skip it without a panic or a fabricated entry.
+/// caller can skip it without a panic or a fabricated entry. An `Io` failure
+/// (file moved or deleted) is dropped silently -- ADR-0017 honest-skip, the
+/// path is simply no longer a session. Any other [`LoadError`] (corrupt JSON,
+/// a newer app's `VersionMismatch`, a failed `Migration`) is a surprise: the
+/// entry was a session but no longer reads, so it is logged at WARN before
+/// being dropped -- the missing sidebar entry stays diagnosable instead of
+/// vanishing without a trace. The list never fabricates metadata either way.
 fn build_session_metadata(path: &str) -> Option<SessionMetadata> {
-    let recipe = read_duck(Path::new(path)).ok()?;
+    let recipe = match read_duck(Path::new(path)) {
+        Ok(r) => r,
+        // ADR-0017 honest-skip: a plain missing / moved file is no longer a
+        // session, so it is dropped quietly (the cold-start sidebar only lists
+        // what still exists on disk).
+        Err(LoadError::Io(_)) => return None,
+        // A readable-but-unexpected file (corrupt JSON, a newer app's format,
+        // a failed migration) is worth surfacing: the user just lost a sidebar
+        // entry they expected, and the typed error names why. The list still
+        // drops it (no fabricated metadata), but a WARN leaves a trail.
+        Err(e) => {
+            log::warn!("skipped recent_files entry {path}: {e}");
+            return None;
+        }
+    };
     let mtime = file_mtime_millis(path).unwrap_or(0);
     Some(SessionMetadata {
         session_id: path.to_string(),
