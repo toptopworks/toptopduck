@@ -270,6 +270,59 @@ export type ResumeEvent =
     };
   };
 
+// A `resume-progress` side-channel event addressed by sessionId (ADR-0059,
+// issue #76). Wraps a ResumeEvent with the addressing id so a multi-session
+// frontend filters the global Tauri event broadcast to the one SessionPane that
+// owns the resume. v1 emitted a bare ResumeEvent -- a single-session legacy.
+// Mirrors the Rust `ResumeProgress`. `session_id` is the runtime id (UUID
+// string) the open_duck command received.
+export interface ResumeProgress {
+  session_id: string;
+  event: ResumeEvent;
+}
+
+// One discrete turn-progress phase (ADR-0059). The ask call is blocking with
+// two main waits (LLM HTTP + SQL), neither with intrinsic continuous progress,
+// so the honest granularity is a discrete marker at each boundary (no fabricated
+// percentages, ADR-0017). `attempt` is 1-based and rises across blind retries.
+// Mirrors the Rust `TurnPhase` (serde externally-tagged, like ResumeEvent).
+export type TurnPhase =
+  | { Thinking: { attempt: number } }
+  | { Querying: { attempt: number } };
+
+// A `turn-progress` side-channel event addressed by sessionId (ADR-0059,
+// issue #76). Mirrors the Rust `TurnProgress`. The phase never enters the
+// TurnOutcome contract; it is observer feedback only.
+export interface TurnProgress {
+  session_id: string;
+  phase: TurnPhase;
+}
+
+// The working-set summary rendered as a sidebar entry's sub-line (ADR-0060:
+// first source name + source count + turn count). Mirrors the Rust
+// `SourceSummary`. All derived from the recipe -- no new persisted fields.
+export interface SourceSummary {
+  // The first source's display label, or null when the working set is empty.
+  first_source_name: string | null;
+  source_count: number;
+  // Turn entries only -- source lifecycle events are not turns (ADR-0040).
+  turn_count: number;
+}
+
+// One persisted session's sidebar metadata (ADR-0060/0061, issue #76). Mirrors
+// the Rust `SessionMetadata`. `session_id` is the `.duck` file path -- the
+// stable identity of a persisted session (the runtime UUID is not persisted);
+// pass it back to openDuck to resume. Every other field is derived from the
+// recipe + the file mtime (zero new persistence).
+export interface SessionMetadata {
+  session_id: string;
+  display_name: string;
+  // File mtime, milliseconds since the Unix epoch.
+  last_modified_at: number;
+  source_summary: SourceSummary;
+  format_version: number;
+}
+
 // --- App-level config (issue #53, ADR-0038) --------------------------------
 //
 // The second at-rest artifact (alongside .duck): preferences, defaults, window

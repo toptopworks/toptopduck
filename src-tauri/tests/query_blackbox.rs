@@ -13,7 +13,7 @@ use std::time::Duration;
 use toptopduck_lib::{
     CancelToken, ChartKind, DatasetPrivacy, DatasetRef, FakeProvider, LoadOutcome, ProviderError,
     ProviderReply, ProviderRequest, ResponsePayload, Session, TextKind, ThreadEntry, TurnOutcome,
-    TurnPayload, TurnRecord, VizSpec,
+    TurnPayload, TurnPhase, TurnRecord, VizSpec,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -1234,4 +1234,56 @@ fn a_real_long_duckdb_query_is_interruptible_via_cancel() {
     );
     let s = session.lock().unwrap();
     assert!(s.get("result_1").is_none()); // rolled back / never installed
+}
+
+// --- turn-progress phase production (ADR-0059, issue #76) ------------------
+//
+// ask_with_phase surfaces the discrete Thinking / Querying wait boundaries so
+// the command layer can emit the side-channel `turn-progress` event. The phase
+// never enters the TurnOutcome contract (ADR-0009 unchanged); it is pure
+// observer feedback. These tests pin the phase SEQUENCE the UI renders from.
+
+#[test]
+fn ask_with_phase_records_thinking_then_querying_on_a_result_turn() {
+    // ADR-0059: a result turn has two waits -- the provider call (Thinking) and
+    // the SQL execution (Querying). The callback receives both, in order, each
+    // carrying attempt = 1 (the first try). A retry path is covered separately
+    // at the TurnRunner unit seam (where a transient failure is injectable).
+    let mut session = session_with(&[("建结果", "SELECT 1 AS n")]);
+    let mut phases: Vec<TurnPhase> = Vec::new();
+    let outcome = session.ask_with_phase("建结果", |p| phases.push(p));
+    assert!(
+        matches!(outcome, TurnOutcome::Materialized { .. }),
+        "got {outcome:?}"
+    );
+    assert_eq!(
+        phases,
+        vec![
+            TurnPhase::Thinking { attempt: 1 },
+            TurnPhase::Querying { attempt: 1 },
+        ],
+        "a result turn emits Thinking then Querying, both at attempt 1"
+    );
+}
+
+#[test]
+fn ask_with_phase_records_only_thinking_on_a_textual_turn() {
+    // ADR-0059: a textual turn (clarify / refuse) has only the provider wait --
+    // no SQL runs, so Querying never fires. The callback receives a single
+    // Thinking marker.
+    let mut provider = FakeProvider::new();
+    provider = provider.scripted("澄清", reply_text(TextKind::Clarify, "哪个维度？"));
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+
+    let mut phases: Vec<TurnPhase> = Vec::new();
+    let outcome = session.ask_with_phase("澄清", |p| phases.push(p));
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "got {outcome:?}"
+    );
+    assert_eq!(
+        phases,
+        vec![TurnPhase::Thinking { attempt: 1 }],
+        "a textual turn emits Thinking only -- no query wait"
+    );
 }
