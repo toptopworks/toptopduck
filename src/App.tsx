@@ -37,13 +37,13 @@ import {
   takePersistError,
 } from "./api";
 import { loadErrorMessage } from "./loadErrorMessage";
+import { useTheme } from "./theme/useTheme";
 import type {
   AppConfig,
   DatasetDescriptor,
   GuidanceRequest,
   SheetGuidance,
   StaleAnchor,
-  Theme,
   ThreadEntry,
   VizSpec,
 } from "./types";
@@ -268,19 +268,13 @@ export default function App() {
     await setAppConfig(cfg);
   }, []);
 
-  /** Apply the theme to the document root (ADR-0050). "system" clears the
-   * attribute so the OS preference + CSS media query decide; light/dark set the
-   * data-theme attribute the stylesheet keys off. The actual color CSS is wired
-   * per ADR-0050; this slice persists + restores the choice. */
-  useEffect(() => {
-    const theme: Theme = appConfig?.theme ?? "system";
-    const root = document.documentElement;
-    if (theme === "system") {
-      delete root.dataset.theme;
-    } else {
-      root.dataset.theme = theme;
-    }
-  }, [appConfig?.theme]);
+  // Apply the theme to the document root (ADR-0050). useTheme resolves the
+  // three-state preference (system/light/dark) -- defaulting to system before
+  // app-config resolves -- toggles the .dark class the shadcn/Tailwind tokens
+  // key off, follows the OS preference in system mode, and dispatches a
+  // theme-change event the Vega bridge subscribes to. Called for its side
+  // effect; the persisted preference itself is read from app-config (ADR-0038).
+  useTheme(appConfig?.theme ?? "system");
 
   /** Restore the persisted window geometry ONCE on the first app-config load
    * (ADR-0038). Guarded: the Tauri window API is absent in jsdom, so every call

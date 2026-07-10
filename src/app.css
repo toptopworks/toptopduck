@@ -1,0 +1,119 @@
+/* Style-stack foundation (ADR-0049/0050, issue #77).
+ *
+ * Tailwind CSS v4, CSS-first: theme lives here in `@theme`, NOT in a
+ * tailwind.config.js. Loaded by Vite via `@tailwindcss/vite` (no PostCSS).
+ * The shadcn/ui v4 token model: a paired light/dark token set on :root/.dark,
+ * mapped into Tailwind color utilities through `@theme inline` so `bg-primary`
+ * / `text-foreground` etc. resolve to the live CSS var (and thus flip with the
+ * .dark class set by useTheme). The Vega theme bridge reads these same vars at
+ * runtime via getComputedStyle, so the chart palette is derived from one truth.
+ *
+ * Teal `#0d9488` is --primary (ADR-0050, carried from the A-round color in
+ * ADR-0047). Compact workbench density: --radius is set once here (6px vs
+ * shadcn's 10px default); precise spacing values are visual iteration, not
+ * architecture (ADR-0050 leaves them open), and land with the component
+ * migration slices.
+ */
+@import "tailwindcss";
+
+/* Dark mode is class-based (ADR-0050: <html>.dark). The default `dark:`
+ * variant keys off prefers-color-scheme; useTheme resolves the OS preference
+ * itself and toggles .dark, so override the variant to match the class. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* --- shadcn token set, light (ADR-0050) ---------------------------------- */
+:root {
+  --radius: 0.375rem; /* compact (6px); shadcn default is 0.625rem */
+
+  --background: #ffffff;
+  --foreground: #1a1a1a;
+  --card: #ffffff;
+  --card-foreground: #1a1a1a;
+  --popover: #ffffff;
+  --popover-foreground: #1a1a1a;
+  /* teal primary (ADR-0050). */
+  --primary: #0d9488;
+  --primary-foreground: #ffffff;
+  --secondary: #f1f5f4;
+  --secondary-foreground: #1a1a1a;
+  --muted: #f0f0f3;
+  --muted-foreground: #6b7280;
+  /* teal-tinted accent survives from the v0 active-source highlight. */
+  --accent: #e6f4f1;
+  --accent-foreground: #0d9488;
+  --destructive: #b00020;
+  --destructive-foreground: #ffffff;
+  --border: #e3e3e8;
+  --input: #e3e3e8;
+  --ring: #0d9488;
+}
+
+/* --- shadcn token set, dark (ADR-0050) ----------------------------------- */
+.dark {
+  --background: #0f1410;
+  --foreground: #e8eae8;
+  --card: #181b18;
+  --card-foreground: #e8eae8;
+  --popover: #181b18;
+  --popover-foreground: #e8eae8;
+  /* teal primary stays -- the brand color does not flip with mode. */
+  --primary: #0d9488;
+  --primary-foreground: #ffffff;
+  --secondary: #232723;
+  --secondary-foreground: #e8eae8;
+  --muted: #232723;
+  --muted-foreground: #9ca3af;
+  --accent: #143833;
+  --accent-foreground: #5eead4;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  --border: #2a2f2a;
+  --input: #2a2f2a;
+  --ring: #0d9488;
+}
+
+/* Map the shadcn tokens into Tailwind v4 color utilities. `inline` makes each
+ * utility reference the var directly, so a .dark token override recolors every
+ * utility at runtime without rebuilding the theme. */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* Radius scale derived from the single compact --radius token. */
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* Base element styling: the document rides on the token system, so the v0
+ * scaffold and future shadcn components share one background/foreground and a
+ * default border color. The legacy component rules in styles.css layer on top. */
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  body {
+    margin: 0;
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+}
