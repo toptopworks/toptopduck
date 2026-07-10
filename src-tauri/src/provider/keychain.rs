@@ -20,6 +20,8 @@
 
 use keyring::Entry;
 
+use super::prompt::ResponseLocale;
+
 /// Read-only provider configuration + key access. The provider depends on this
 /// abstraction so its unit tests inject fixed values ([`StaticConfig`]) instead
 /// of touching the OS keychain; production wires
@@ -34,6 +36,12 @@ pub trait ProviderConfigSource: Send {
     fn base_url(&self) -> String;
     /// The model id to request (ADR-0007: v1 default Sonnet-class, pinned).
     fn model(&self) -> String;
+    /// The resolved response locale (ADR-0052, issue #78). Drives ONLY the
+    /// locale directive appended to the system prompt -- never enters
+    /// [`super::ProviderRequest`] and never crosses IPC from the frontend. The
+    /// source resolves the "system" preference to a concrete locale itself
+    /// (reading the OS locale), so the provider stays free of that concern.
+    fn locale(&self) -> ResponseLocale;
 }
 
 /// Service/account coordinates for the two keychain entries. The provider-config
@@ -122,14 +130,16 @@ fn keychain_err(e: keyring::Error) -> String {
     format!("系统钥匙串访问失败：{e}")
 }
 
-/// Test double for [`ProviderConfigSource`]: fixed key + base URL + model, no OS
-/// access. Lets the real provider's HTTP/auth/parse path run against a mockito
-/// server without any keychain (the orchestrator integration test uses it too).
-/// Not used in production, where [`crate::provider::LiveProviderConfig`] is wired.
+/// Test double for [`ProviderConfigSource`]: fixed key + base URL + model +
+/// locale, no OS access. Lets the real provider's HTTP/auth/parse path run
+/// against a mockito server without any keychain (the orchestrator integration
+/// test uses it too). Not used in production, where
+/// [`crate::provider::LiveProviderConfig`] is wired.
 pub struct StaticConfig {
     pub key: Option<String>,
     pub base_url: String,
     pub model: String,
+    pub locale: ResponseLocale,
 }
 
 impl ProviderConfigSource for StaticConfig {
@@ -141,6 +151,9 @@ impl ProviderConfigSource for StaticConfig {
     }
     fn model(&self) -> String {
         self.model.clone()
+    }
+    fn locale(&self) -> ResponseLocale {
+        self.locale
     }
 }
 
@@ -155,10 +168,12 @@ mod tests {
             key: Some("sk-test".into()),
             base_url: "https://example.test".into(),
             model: "claude-test".into(),
+            locale: ResponseLocale::EnUS,
         };
         assert_eq!(cfg.api_key().as_deref(), Some("sk-test"));
         assert_eq!(cfg.base_url(), "https://example.test");
         assert_eq!(cfg.model(), "claude-test");
+        assert_eq!(cfg.locale(), ResponseLocale::EnUS);
     }
 
     #[test]
@@ -168,6 +183,7 @@ mod tests {
             key: None,
             base_url: DEFAULT_PROVIDER_BASE_URL.into(),
             model: "m".into(),
+            locale: ResponseLocale::EnUS,
         };
         assert!(cfg.api_key().is_none());
     }

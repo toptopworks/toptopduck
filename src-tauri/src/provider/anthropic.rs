@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{ChartKind, TextKind, VizSpec};
 use crate::provider::keychain::ProviderConfigSource;
-use crate::provider::prompt::{render_schema_context, CAPABILITY_BOUNDARY_PROMPT};
+use crate::provider::prompt::build_system_prompt;
 use crate::provider::{
     Provider, ProviderError, ProviderReply, ProviderRequest, ResponsePayload, TurnPayload,
 };
@@ -71,7 +71,12 @@ impl Provider for AnthropicProvider {
         let model = self.config.model();
         let url = format!("{base}/v1/messages", base = base_url.trim_end_matches('/'));
 
-        let system = String::from(CAPABILITY_BOUNDARY_PROMPT) + &render_schema_context(request);
+        // ADR-0052 (issue #78): assemble the system prompt via the shared
+        // build_system_prompt so the locale directive is always inserted between
+        // the canonical boundary prompt and the schema context. The locale is
+        // read from the config source (resolved in Rust, never in ProviderRequest
+        // / never pushed by the frontend).
+        let system = build_system_prompt(request, self.config.locale());
         let body = AnthropicRequest {
             model: &model,
             max_tokens: MAX_TOKENS,
@@ -376,15 +381,29 @@ fn truncate(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::provider::keychain::StaticConfig;
+    use crate::provider::prompt::ResponseLocale;
     use crate::provider::{ColumnRef, DatasetRef};
 
     /// Build a provider whose key/endpoint/model are fixed and point at a
-    /// mockito server URL (no OS keychain, no real network).
+    /// mockito server URL (no OS keychain, no real network). Locale defaults to
+    /// EnUS (the least-surprise fallback); tests that assert the locale
+    /// directive use `provider_at_locale`.
     fn provider_at(url: &str, key: Option<&str>) -> AnthropicProvider {
+        provider_at_locale(url, key, ResponseLocale::EnUS)
+    }
+
+    /// Build a provider with an explicit resolved locale (for the i18n
+    /// directive assertions -- ADR-0052).
+    fn provider_at_locale(
+        url: &str,
+        key: Option<&str>,
+        locale: ResponseLocale,
+    ) -> AnthropicProvider {
         AnthropicProvider::new(Box::new(StaticConfig {
             key: key.map(str::to_string),
             base_url: url.to_string(),
             model: "claude-sonnet-4-6".to_string(),
+            locale,
         }))
     }
 
@@ -621,6 +640,43 @@ mod tests {
         let p = provider_at(&server.url(), Some("sk-test"));
         p.generate(&sample_request("多少行")).expect("reply");
         _mock.assert(); // matched model + role + auth headers
+    }
+
+    #[test]
+    fn system_prompt_carries_locale_directive_and_canonical_boundary() {
+        // ADR-0052 (issue #78): the assembled system prompt must carry BOTH the
+        // canonical boundary (layer 4, untouched) AND the locale directive
+        // (layer 3). Match the body for the zh directive phrase + a canonical
+        // landmark; the default EnUS provider is also asserted to carry its own
+        // directive. This is the end-to-end proof the locale threads from the
+        // config source through build_system_prompt into the HTTP body.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/v1/messages")
+            .match_body(mockito::Matcher::Regex("简体中文".to_string()))
+            .match_body(mockito::Matcher::Regex("IN-SCOPE".to_string()))
+            .with_status(200)
+            .with_body(anthropic_body(
+                r#"{"type":"sql","sql":"SELECT 1","viz":null,"assumption":null}"#,
+            ))
+            .create();
+        let p = provider_at_locale(&server.url(), Some("sk-test"), ResponseLocale::ZhCN);
+        p.generate(&sample_request("画图")).expect("reply");
+        _mock.assert();
+
+        // The EnUS directive must also land when the resolved locale is EnUS.
+        let mut server_en = mockito::Server::new();
+        let _mock_en = server_en
+            .mock("POST", "/v1/messages")
+            .match_body(mockito::Matcher::Regex("U.S. English".to_string()))
+            .with_status(200)
+            .with_body(anthropic_body(
+                r#"{"type":"sql","sql":"SELECT 1","viz":null,"assumption":null}"#,
+            ))
+            .create();
+        let p_en = provider_at_locale(&server_en.url(), Some("sk-test"), ResponseLocale::EnUS);
+        p_en.generate(&sample_request("draw")).expect("reply");
+        _mock_en.assert();
     }
 
     #[test]

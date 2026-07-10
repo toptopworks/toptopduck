@@ -407,6 +407,7 @@ mod tests {
         assert!(!is_secret_name("base_url"));
         assert!(!is_secret_name("model"));
         assert!(!is_secret_name("theme"));
+        assert!(!is_secret_name("locale"));
     }
 
     #[test]

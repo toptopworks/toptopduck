@@ -12,8 +12,82 @@
 //! ADR-0023/0026/0011) into a text block appended to the system prompt. It is
 //! protocol-agnostic text -- the Anthropic-specific message shaping lives in
 //! [`super::anthropic`].
+//!
+//! i18n (ADR-0052, issue #78): the canonical boundary prompt + schema-context
+//! labels stay single-language canonical (layer 4 -- never translated). The
+//! ONLY locale-sensitive piece is [`response_locale_directive`], appended
+//! between them by [`build_system_prompt`]. The locale is resolved in Rust from
+//! the ADR-0038 preference (never crosses IPC from the frontend, never enters
+//! [`ProviderRequest`]).
 
 use super::{ColumnRef, DatasetRef, ProviderRequest};
+
+/// The resolved response locale (ADR-0052 layer 3). Two-state -- the third
+/// persistence state ("system") is resolved to one of these before reaching
+/// here, by [`crate::provider::live_config::LiveProviderConfig::locale`]. This
+/// type is internal to prompt assembly; it does not cross IPC as a preference
+/// and is not persisted (the persisted three-state preference is
+/// [`crate::app_config::LocalePreference`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseLocale {
+    ZhCN,
+    EnUS,
+}
+
+impl ResponseLocale {
+    /// The BCP-47 tag the Intl side also keys on (ADR-0052). Shared literal so
+    /// the directive text and any future Intl wiring cannot drift.
+    pub fn bcp47(self) -> &'static str {
+        match self {
+            ResponseLocale::ZhCN => "zh-CN",
+            ResponseLocale::EnUS => "en-US",
+        }
+    }
+}
+
+/// The locale-sensitive directive appended to the canonical boundary prompt
+/// (ADR-0052 layer 3 + layer 4 enforcement). This is the ONLY piece of the
+/// system prompt that varies by locale: the boundary prompt and schema-context
+/// labels stay canonical (single-language, layer 4). The directive tells the
+/// model (a) which language to write its prose in, and (b) that SQL + stable
+/// reference names like `result_1` must stay verbatim -- the layer-4 hard line
+/// re-expressed at the prompt level.
+pub fn response_locale_directive(locale: ResponseLocale) -> &'static str {
+    match locale {
+        ResponseLocale::ZhCN => "\n\n【回复语言】\n请使用简体中文回复用户。注意：生成的 SQL、数据集引用名（如 result_1）必须保持原样，一律不得翻译。\n",
+        ResponseLocale::EnUS => "\n\n【回复语言】\nRespond to the user in U.S. English. The SQL you generate and dataset reference names (e.g. result_1) must stay verbatim -- never translate them.\n",
+    }
+}
+
+/// Assemble the full system prompt (ADR-0052): canonical boundary prompt +
+/// locale directive + schema context. The boundary prompt and schema-context
+/// labels are locale-invariant (layer 4); only the directive carries the
+/// locale. Centralized so the assembly order has one source of truth and the
+/// locale directive can never be silently dropped by a call site.
+pub fn build_system_prompt(request: &ProviderRequest, locale: ResponseLocale) -> String {
+    let mut out = String::from(CAPABILITY_BOUNDARY_PROMPT);
+    out.push_str(response_locale_directive(locale));
+    out.push_str(&render_schema_context(request));
+    out
+}
+
+/// Map a raw OS locale tag (BCP-47 like `"zh-CN"` or POSIX like
+/// `"en_US.UTF-8"`) to a [`ResponseLocale`]. ADR-0052 resolution rules: any
+/// `zh*` tag -> ZhCN, any `en*` tag -> EnUS, everything else (or empty) ->
+/// EnUS fallback. Pure so the mapping is unit-testable independent of the OS
+/// read; the impure `sys_locale::get_locale()` call lives only at the
+/// [`crate::provider::live_config::LiveProviderConfig::locale`] call site.
+pub fn resolve_locale_from_tag(tag: &str) -> ResponseLocale {
+    let lower = tag.to_ascii_lowercase();
+    if lower.starts_with("zh") {
+        ResponseLocale::ZhCN
+    } else {
+        // en* and any unknown/empty tag both map to EnUS (ADR-0052 fallback), so
+        // the en branch collapses into the default -- the only fork that matters
+        // is zh vs not-zh.
+        ResponseLocale::EnUS
+    }
+}
 
 /// The v1 capability boundary + output contract, frozen as the provider's
 /// system prompt (ADR-0017/0009/0011). Written once here so the boundary and
@@ -272,5 +346,127 @@ mod tests {
 
         let empty = render_schema_context(&request(Vec::new(), None));
         assert!(empty.contains("没有已加载的数据集"));
+    }
+
+    // --- i18n locale directive (ADR-0052, issue #78) ------------------------
+    //
+    // The canonical boundary prompt + schema-context labels are layer 4 (never
+    // translated). The ONLY locale-sensitive addition is the directive, which
+    // both names the response language AND re-asserts the layer-4 hard line
+    // (SQL + result_N stay verbatim). These tests pin: canonical text is
+    // untouched, the directive carries the locale, and build_system_prompt
+    // orders the three pieces so the directive can never be silently dropped.
+
+    #[test]
+    fn response_locale_directive_names_language_and_protects_references() {
+        // Layer 3 (follow locale) + layer 4 (SQL/reference names verbatim):
+        // both halves must appear in each directive variant.
+        let zh = response_locale_directive(ResponseLocale::ZhCN);
+        assert!(zh.contains("简体中文"), "zh directive names the language");
+        assert!(
+            zh.contains("result_1"),
+            "zh directive pins the reference name"
+        );
+        assert!(zh.contains("不得翻译"), "zh directive forbids translation");
+
+        let en = response_locale_directive(ResponseLocale::EnUS);
+        assert!(en.contains("English"), "en directive names the language");
+        assert!(
+            en.contains("result_1"),
+            "en directive pins the reference name"
+        );
+        assert!(
+            en.contains("never translate"),
+            "en directive forbids translation"
+        );
+    }
+
+    #[test]
+    fn response_locale_directive_is_distinct_per_locale() {
+        // The two directives must differ -- a silent fallthrough to one branch
+        // would freeze the model on a single language regardless of preference.
+        assert_ne!(
+            response_locale_directive(ResponseLocale::ZhCN),
+            response_locale_directive(ResponseLocale::EnUS),
+        );
+    }
+
+    #[test]
+    fn build_system_prompt_keeps_canonical_unchanged_and_inserts_directive() {
+        // ADR-0052: the canonical boundary prompt is zero-edit; the directive
+        // is INSERTED between it and the schema context. Pin the order + that
+        // every canonical landmark still appears verbatim.
+        let req = request(vec![ds("people", r#""people".data"#)], Some("people"));
+        let prompt_zh = build_system_prompt(&req, ResponseLocale::ZhCN);
+
+        // Canonical boundary landmarks (layer 4 -- untouched).
+        assert!(prompt_zh.contains("IN-SCOPE"));
+        assert!(prompt_zh.contains("绝不冒充"));
+        // Locale directive present.
+        assert!(prompt_zh.contains("【回复语言】"));
+        assert!(prompt_zh.contains("简体中文"));
+        // Schema context present.
+        assert!(prompt_zh.contains("引用名 = people"));
+        assert!(prompt_zh.contains("active = people"));
+
+        // Order: boundary BEFORE directive BEFORE schema context. The schema
+        // context header is matched as the bracketed form `【数据上下文】` because
+        // the boundary prompt references the bare phrase `数据上下文` (no brackets)
+        // inside its own 【数据引用】 section -- a plain find() would hit that.
+        let boundary_pos = prompt_zh.find("绝不冒充").unwrap();
+        let directive_pos = prompt_zh.find("【回复语言】").unwrap();
+        let schema_pos = prompt_zh.find("【数据上下文】").unwrap();
+        assert!(boundary_pos < directive_pos, "boundary before directive");
+        assert!(
+            directive_pos < schema_pos,
+            "directive before schema context"
+        );
+    }
+
+    #[test]
+    fn build_system_prompt_differs_only_by_directive_across_locales() {
+        // Swapping the locale must change ONLY the directive span -- the
+        // canonical prompt + schema context are byte-identical either way.
+        let req = request(vec![ds("people", r#""people".data"#)], None);
+        let zh = build_system_prompt(&req, ResponseLocale::ZhCN);
+        let en = build_system_prompt(&req, ResponseLocale::EnUS);
+
+        let zh_dir = response_locale_directive(ResponseLocale::ZhCN);
+        let en_dir = response_locale_directive(ResponseLocale::EnUS);
+        // Strip the respective directives; the remainder must be identical.
+        let zh_rest = zh.replace(zh_dir, "");
+        let en_rest = en.replace(en_dir, "");
+        assert_eq!(zh_rest, en_rest, "only the directive differs by locale");
+    }
+
+    #[test]
+    fn response_locale_bcp47_tags_match_intl_conventions() {
+        // The BCP-47 tag is shared with the frontend IntlProvider locale, so it
+        // must match the canonical Intl convention (uppercase region subtag).
+        assert_eq!(ResponseLocale::ZhCN.bcp47(), "zh-CN");
+        assert_eq!(ResponseLocale::EnUS.bcp47(), "en-US");
+    }
+
+    #[test]
+    fn resolve_locale_from_tag_maps_zh_and_en_prefixes() {
+        // ADR-0052: zh* -> ZhCN, en* -> EnUS. BCP-47, POSIX, and bare language
+        // subtags all collapse by prefix after lowercasing -- region/codeset
+        // suffixes do not change the language family.
+        assert_eq!(resolve_locale_from_tag("zh-CN"), ResponseLocale::ZhCN);
+        assert_eq!(resolve_locale_from_tag("zh_TW"), ResponseLocale::ZhCN);
+        assert_eq!(resolve_locale_from_tag("zh"), ResponseLocale::ZhCN);
+        assert_eq!(resolve_locale_from_tag("en-US"), ResponseLocale::EnUS);
+        assert_eq!(resolve_locale_from_tag("en_GB.UTF-8"), ResponseLocale::EnUS);
+        assert_eq!(resolve_locale_from_tag("en"), ResponseLocale::EnUS);
+    }
+
+    #[test]
+    fn resolve_locale_from_tag_falls_back_to_en_us_for_unknown_or_empty() {
+        // ADR-0052: any unsupported OS locale (de-DE, ja-JP, ...) and a missing
+        // locale both fall back to EnUS -- the least-surprise default that never
+        // crashes a turn over an unrecognized locale string.
+        assert_eq!(resolve_locale_from_tag("de-DE"), ResponseLocale::EnUS);
+        assert_eq!(resolve_locale_from_tag("ja-JP"), ResponseLocale::EnUS);
+        assert_eq!(resolve_locale_from_tag(""), ResponseLocale::EnUS);
     }
 }

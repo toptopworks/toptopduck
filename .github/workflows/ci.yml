@@ -31,6 +31,12 @@ jobs:
       - name: Lint (ESLint)
         run: npm run lint -- --max-warnings 0
 
+      # i18n catalog guard (ADR-0052, issue #78): @formatjs/cli extract recovers
+      # the source message-id set; the check script asserts source == en-US == zh-CN
+      # key sets so a new <FormattedMessage> can never ship without both translations.
+      - name: i18n catalog alignment
+        run: npm run i18n:check
+
       # `npm run build` = tsc --noEmit && vite build — covers type-checking + bundle.
       - name: Type-check & build
         run: npm run build

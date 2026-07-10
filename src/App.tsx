@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { FormattedMessage, IntlProvider, useIntl } from "react-intl";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { LogicalPosition, LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
 import { ActiveSourceDeleteDialog } from "./components/ActiveSourceDeleteDialog";
@@ -37,6 +38,7 @@ import {
   takePersistError,
 } from "./api";
 import { loadErrorMessage } from "./loadErrorMessage";
+import { catalogFor, coerceLocalePreference, useLocale } from "./i18n";
 import { useTheme } from "./theme/useTheme";
 import type {
   AppConfig,
@@ -88,6 +90,64 @@ function safeMainWindow(): ReturnType<typeof getCurrentWindow> | null {
   } catch {
     return null;
   }
+}
+
+// Header action cluster (ADR-0052, issue #78). App sits above <IntlProvider>
+// so it cannot call useIntl(); this child renders inside the provider and owns
+// the translated buttons + key status. IDs are STATIC literals so @formatjs/cli
+// extract can statically resolve them (a variable `id` prop breaks extraction).
+// Kept local: only the App header uses it.
+function HeaderActions({
+  disabled,
+  hasKey,
+  onOpenDuck,
+  onSaveAs,
+  onOpenSettings,
+}: {
+  disabled: boolean;
+  hasKey: boolean;
+  onOpenDuck: () => void;
+  onSaveAs: () => void;
+  onOpenSettings: () => void;
+}) {
+  const intl = useIntl();
+  return (
+    <div className="header-actions">
+      <button
+        onClick={onOpenDuck}
+        disabled={disabled}
+        title={intl.formatMessage({
+          id: "header.openDuck.title",
+          defaultMessage: "Open a .duck to resume a prior analysis",
+        })}
+      >
+        <FormattedMessage id="header.openDuck" defaultMessage="Open .duck" />
+      </button>
+      <button
+        onClick={onSaveAs}
+        disabled={disabled}
+        title={intl.formatMessage({
+          id: "header.saveAs.title",
+          defaultMessage: "Save the current session as .duck (auto-saves each turn after)",
+        })}
+      >
+        <FormattedMessage id="header.saveAs" defaultMessage="Save as .duck" />
+      </button>
+      <span className={hasKey ? "key-ok" : "key-missing"}>
+        {hasKey ? (
+          <FormattedMessage id="header.keyOk" defaultMessage="LLM key configured" />
+        ) : (
+          <FormattedMessage
+            id="header.keyMissing"
+            defaultMessage="No LLM key configured — asking will fail"
+          />
+        )}
+      </span>
+      <button onClick={onOpenSettings}>
+        <FormattedMessage id="header.settings" defaultMessage="Settings" />
+      </button>
+    </div>
+  );
 }
 
 export default function App() {
@@ -276,6 +336,23 @@ export default function App() {
   // post-#77). Called for its side effect; the persisted preference itself is
   // read from app-config (ADR-0038).
   useTheme(appConfig?.theme ?? "system");
+
+  // Resolve the effective locale (ADR-0052, issue #78). Mirrors useTheme: the
+  // persisted three-state preference (system/zh-CN/en-US) is resolved to a
+  // concrete Intl locale, defaulting to "system" before app-config resolves.
+  // coerceLocalePreference guards the IPC boundary -- a corrupt persisted value
+  // degrades to "system" (then the OS language, then en-US) rather than crashing
+  // the hook. The Rust side resolves the SAME preference independently for the
+  // canonical-prompt locale directive; locale never crosses IPC.
+  const effectiveLocale = useLocale(coerceLocalePreference(appConfig?.locale));
+
+  // Keep <html lang> in sync with the effective locale for a11y (screen readers
+  // announce in the rendered language). No-op when document is absent (jsdom).
+  useEffect(() => {
+    if (typeof document !== "undefined") {
+      document.documentElement.lang = effectiveLocale;
+    }
+  }, [effectiveLocale]);
 
   /** Restore the persisted window geometry ONCE on the first app-config load
    * (ADR-0038). Guarded: the Tauri window API is absent in jsdom, so every call
@@ -789,153 +866,155 @@ export default function App() {
   const shown = datasets.find((d) => d.reference_name === selected) ?? null;
 
   return (
-    <main>
-      <header>
-        <h1>toptopduck</h1>
-        <DisclosureBanner />
-        <div className="header-actions">
-          <button
-            onClick={() => void handleOpenDuck()}
+    <IntlProvider
+      locale={effectiveLocale}
+      messages={catalogFor(effectiveLocale)}
+      defaultLocale="en-US"
+      onError={(err) => {
+        // ADR-0052: never crash over a missing/invalid message. The CI catalog
+        // alignment guards against missing keys in production builds; this
+        // surfaces ICU syntax errors and dev-only drift as a dev warning rather
+        // than react-intl's default handler (which is silent in prod).
+        if (import.meta.env.DEV) console.warn("[i18n]", err.message);
+      }}
+    >
+      <main>
+        <header>
+          <h1>toptopduck</h1>
+          <DisclosureBanner />
+          <HeaderActions
             disabled={loading || persistenceBusy || resumeStatus !== null}
-            title="打开 .duck 恢复此前的分析"
-          >
-            打开 .duck
-          </button>
-          <button
-            onClick={() => void handleSaveAs()}
-            disabled={loading || persistenceBusy || resumeStatus !== null}
-            title="把当前会话另存为 .duck（之后每轮自动保存）"
-          >
-            另存为 .duck
-          </button>
-          <span className={hasKey ? "key-ok" : "key-missing"}>
-            {hasKey ? "LLM key 已配置" : "未配置 LLM key——提问将失败"}
-          </span>
-          <button onClick={() => setSettingsOpen(true)}>设置</button>
-        </div>
-        {resumeStatus && (
-          <p className="resume-progress" role="status" aria-live="polite">
-            {resumeStatus}
+            hasKey={hasKey}
+            onOpenDuck={() => void handleOpenDuck()}
+            onSaveAs={() => void handleSaveAs()}
+            onOpenSettings={() => setSettingsOpen(true)}
+          />
+          {resumeStatus && (
+            <p className="resume-progress" role="status" aria-live="polite">
+              {resumeStatus}
+            </p>
+          )}
+          {persistError && (
+            <p className="persist-warning" role="status">
+              自动保存失败：{persistError}（内存中的最新更改未写入磁盘，关闭 app 前请重试保存）
+            </p>
+          )}
+          {appConfig && appConfig.recent_files.length > 0 && (
+            <nav className="recent-files" aria-label="最近文件">
+              <span className="muted">
+                <FormattedMessage id="header.recent" defaultMessage="Recent: " />
+              </span>
+              {appConfig.recent_files.map((p) => {
+                const base = p.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? p;
+                return (
+                  <button
+                    key={p}
+                    className="recent-file"
+                    title={p}
+                    disabled={loading || persistenceBusy || resumeStatus !== null}
+                    onClick={() => handleOpenRecent(p)}
+                  >
+                    {base}
+                  </button>
+                );
+              })}
+            </nav>
+          )}
+        </header>
+
+        <FileDropzone onIngest={handleIngest} loading={loading} />
+        {error && (
+          <p className="error">
+            {ERROR_PREFIX[error.kind]}{error.message}
           </p>
         )}
-        {persistError && (
-          <p className="persist-warning" role="status">
-            自动保存失败：{persistError}（内存中的最新更改未写入磁盘，关闭 app 前请重试保存）
-          </p>
-        )}
-        {appConfig && appConfig.recent_files.length > 0 && (
-          <nav className="recent-files" aria-label="最近文件">
-            <span className="muted">最近：</span>
-            {appConfig.recent_files.map((p) => {
-              const base = p.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? p;
-              return (
-                <button
-                  key={p}
-                  className="recent-file"
-                  title={p}
-                  disabled={loading || persistenceBusy || resumeStatus !== null}
-                  onClick={() => handleOpenRecent(p)}
-                >
-                  {base}
-                </button>
-              );
-            })}
-          </nav>
-        )}
-      </header>
 
-      <FileDropzone onIngest={handleIngest} loading={loading} />
-      {error && (
-        <p className="error">
-          {ERROR_PREFIX[error.kind]}{error.message}
-        </p>
-      )}
-
-      <QuestionBar onSubmit={handleAsk} onCancel={handleCancel} loading={loading} />
-      <Thread
-        entries={thread}
-        selectedResult={latestResult?.referenceName ?? null}
-        onSelectResult={handleSelectResult}
-        staleByReference={staleByReference}
-      />
-      {latestResult && (
-        <section className="panel">
-          <ResultView
-            sessionId={sessionId}
-            key={latestResult.referenceName}
-            referenceName={latestResult.referenceName}
-            assumption={latestResult.assumption}
-            viz={latestResult.viz}
-          />
-        </section>
-      )}
-
-      <div className="layout">
-        <section className="panel">
-          <h2>工作集</h2>
-          <WorkingSetList
-            datasets={datasets}
-            activeName={activeName}
-            onSelect={setSelected}
-            onRename={handleRename}
-            onReplace={handleReplace}
-            onDelete={handleDelete}
-            loading={loading}
-          />
-        </section>
-        <section className="panel">
-          {shown ? (
-            <DatasetDetail
-              dataset={shown}
-              loading={loading}
-              onPrivacyChange={handlePrivacyChange}
+        <QuestionBar onSubmit={handleAsk} onCancel={handleCancel} loading={loading} />
+        <Thread
+          entries={thread}
+          selectedResult={latestResult?.referenceName ?? null}
+          onSelectResult={handleSelectResult}
+          staleByReference={staleByReference}
+        />
+        {latestResult && (
+          <section className="panel">
+            <ResultView
+              sessionId={sessionId}
+              key={latestResult.referenceName}
+              referenceName={latestResult.referenceName}
+              assumption={latestResult.assumption}
+              viz={latestResult.viz}
             />
-          ) : (
-            <p className="muted">选择一个数据集查看其结构。</p>
-          )}
-        </section>
-      </div>
+          </section>
+        )}
 
-      {guidance && (
-        <GuidedLoadDialog
-          request={guidance.request}
-          loading={loading}
-          onSubmit={handleGuidedSubmit}
-          onCancel={() => setGuidance(null)}
-        />
-      )}
+        <div className="layout">
+          <section className="panel">
+            <h2>工作集</h2>
+            <WorkingSetList
+              datasets={datasets}
+              activeName={activeName}
+              onSelect={setSelected}
+              onRename={handleRename}
+              onReplace={handleReplace}
+              onDelete={handleDelete}
+              loading={loading}
+            />
+          </section>
+          <section className="panel">
+            {shown ? (
+              <DatasetDetail
+                dataset={shown}
+                loading={loading}
+                onPrivacyChange={handlePrivacyChange}
+              />
+            ) : (
+              <p className="muted">选择一个数据集查看其结构。</p>
+            )}
+          </section>
+        </div>
 
-      {pendingActiveDelete && (
-        <ActiveSourceDeleteDialog
-          target={pendingActiveDelete}
-          // AC5: every remaining dataset but the removed one. On the live path
-          // this dialog only opens in the no-result case (activeName resolves to
-          // a source), so these ARE the remaining sources. A stale view that
-          // opens it while a result exists is refused by the backend's
-          // The DatasetDescriptor carries no source/result flag, so the
-          // frontend cannot pre-filter result_N out of the candidate list
-          // without a round-trip -- the backend's set_active rejects a result
-          // name as InvalidContinueWith if the user picks one.
-          candidates={datasets.filter(
-            (d) => d.reference_name !== pendingActiveDelete.reference_name,
-          )}
-          onConfirm={(cw) => void handleConfirmActiveDelete(cw)}
-          onCancel={handleCancelActiveDelete}
-        />
-      )}
+        {guidance && (
+          <GuidedLoadDialog
+            request={guidance.request}
+            loading={loading}
+            onSubmit={handleGuidedSubmit}
+            onCancel={() => setGuidance(null)}
+          />
+        )}
 
-      {settingsOpen && appConfig && (
-        <SettingsDialog
-          appConfig={appConfig}
-          onCommitAppConfig={(cfg) => void commitAppConfig(cfg)}
-          // Closing the dialog also refreshes the key indicator, so a save or
-          // clear is reflected in the header status immediately.
-          onClose={() => {
-            setSettingsOpen(false);
-            void refreshKeyStatus();
-          }}
-        />
-      )}
-    </main>
+        {pendingActiveDelete && (
+          <ActiveSourceDeleteDialog
+            target={pendingActiveDelete}
+            // AC5: every remaining dataset but the removed one. On the live path
+            // this dialog only opens in the no-result case (activeName resolves to
+            // a source), so these ARE the remaining sources. A stale view that
+            // opens it while a result exists is refused by the backend's
+            // The DatasetDescriptor carries no source/result flag, so the
+            // frontend cannot pre-filter result_N out of the candidate list
+            // without a round-trip -- the backend's set_active rejects a result
+            // name as InvalidContinueWith if the user picks one.
+            candidates={datasets.filter(
+              (d) => d.reference_name !== pendingActiveDelete.reference_name,
+            )}
+            onConfirm={(cw) => void handleConfirmActiveDelete(cw)}
+            onCancel={handleCancelActiveDelete}
+          />
+        )}
+
+        {settingsOpen && appConfig && (
+          <SettingsDialog
+            appConfig={appConfig}
+            onCommitAppConfig={(cfg) => void commitAppConfig(cfg)}
+            // Closing the dialog also refreshes the key indicator, so a save or
+            // clear is reflected in the header status immediately.
+            onClose={() => {
+              setSettingsOpen(false);
+              void refreshKeyStatus();
+            }}
+          />
+        )}
+      </main>
+    </IntlProvider>
   );
 }
