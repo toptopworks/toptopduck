@@ -6,7 +6,6 @@
   "header.keyOk": "LLM key configured",
   "header.keyMissing": "No LLM key configured — asking will fail",
   "header.settings": "Settings",
-  "header.recent": "Recent: ",
 
   "settings.title": "App Settings",
   "settings.intro": "Preferences and defaults live in the system app-data directory (orthogonal to the shareable .duck); the API key lives only in this machine's OS keychain, read by the Rust core — the frontend and page never hold it, and it is never written to app-config.",

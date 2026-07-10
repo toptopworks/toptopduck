@@ -1,4 +1,4 @@
-import type { SourceLifecycleKind, StaleAnchor, ThreadEntry, TurnRecord, VizSpec } from "../types";
+import type { SourceLifecycleKind, StaleAnchor, ThreadEntry, TurnRecord } from "../types";
 import { staleBadgeText } from "../staleBadge";
 
 interface ThreadProps {
@@ -9,9 +9,10 @@ interface ThreadProps {
   /** The result reference currently shown in the result pane, so its thread
    * entry can be marked active. */
   selectedResult: string | null;
-  /** Click a result turn to show its rows in the result pane. Carries the
-   * turn's assumption so the side note is preserved across re-selections. */
-  onSelectResult: (referenceName: string, assumption: string | null, viz: VizSpec | null) => void;
+  /** Click a result turn to show its rows in the result pane. Carries only the
+   * reference name -- assumption/viz are derived from the thread by the caller
+   * (single source of truth, ADR-0051), not carried as a fat snapshot. */
+  onSelectResult: (referenceName: string) => void;
   /** Stale result_N anchors keyed by reference name (issue #40/#41,
    * ADR-0013): a Materialized turn whose result is now stale renders a
    * "因源已删除/已更新而失效" badge naming the invalidating source. The stale
@@ -107,7 +108,7 @@ function sourceLifecycleText(kind: SourceLifecycleKind): { marker: string; verb:
 interface TurnEntryProps {
   record: TurnRecord;
   selectedResult: string | null;
-  onSelectResult: (referenceName: string, assumption: string | null, viz: VizSpec | null) => void;
+  onSelectResult: (referenceName: string) => void;
   staleByReference: ReadonlyMap<string, StaleAnchor>;
 }
 
@@ -136,14 +137,14 @@ function TurnEntry({ record, selectedResult, onSelectResult, staleByReference }:
 interface TurnBodyProps {
   record: TurnRecord;
   selectedResult: string | null;
-  onSelectResult: (referenceName: string, assumption: string | null, viz: VizSpec | null) => void;
+  onSelectResult: (referenceName: string) => void;
   staleByReference: ReadonlyMap<string, StaleAnchor>;
 }
 
 function TurnBody({ record, selectedResult, onSelectResult, staleByReference }: TurnBodyProps) {
   switch (record.outcome.kind) {
     case "Materialized": {
-      const { dataset, assumption, viz } = record.outcome.data;
+      const { dataset, assumption } = record.outcome.data;
       const active = dataset.reference_name === selectedResult;
       // Issue #40/#41 / ADR-0013: if this result has since gone stale, render
       // the traceability badge naming the invalidating source (removed or
@@ -156,7 +157,7 @@ function TurnBody({ record, selectedResult, onSelectResult, staleByReference }: 
             type="button"
             className={`${active ? "result-link active" : "result-link"}${staleAnchor ? " stale" : ""}`}
             aria-current={active ? "true" : undefined}
-            onClick={() => onSelectResult(dataset.reference_name, assumption, viz)}
+            onClick={() => onSelectResult(dataset.reference_name)}
           >
             结果：{dataset.reference_name}
           </button>

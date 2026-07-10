@@ -80,3 +80,178 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 .privacy-cols td:last-child { width: 1%; white-space: nowrap; text-align: center; }
 .disclosure-summary { font-size: 0.9rem; background: #f4f8ff; border: 1px solid #d6e4ff; border-radius: 6px; padding: 0.5rem 0.7rem; margin: 0.5rem 0; }
 .privacy .muted { font-size: 0.82rem; line-height: 1.5; margin: 0.25rem 0 0; }
+
+/* =========================================================================
+ * Chat-style three-column shell (ADR-0045/0060/0062, issue #79).
+ * Replaces the v0 single-column `main { max-width: 1100px }` scaffold. The
+ * session sidebar is col 1 (full height, independent -- R1: QuestionBar does
+ * NOT span over it); the right block holds the thin top bar + the session
+ * pane (rail + workspace + a QuestionBar that spans rail + workspace only).
+ * ========================================================================= */
+.shell {
+  height: 100vh;
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  grid-template-rows: auto auto 1fr;
+  overflow: hidden;
+}
+.shell.sidebar-collapsed { grid-template-columns: 0 1fr; }
+.shell.sidebar-collapsed .session-sidebar { display: none; }
+.shell-init { padding: 2rem; max-width: none; }
+
+/* --- Col 1: session sidebar (ADR-0060 沉色 chrome) ----------------------- */
+.session-sidebar {
+  grid-column: 1;
+  grid-row: 1 / -1;
+  background: var(--muted);
+  border-right: 1px solid var(--border);
+  padding: 0.5rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.sidebar-title { margin: 0 0 0.5rem; font-size: 0.9rem; color: var(--muted-foreground); text-transform: uppercase; letter-spacing: 0.05em; }
+.session-list { list-style: none; margin: 0; padding: 0; flex: 1; }
+.session-entry { margin: 0.2rem 0; }
+.session-entry.active .session-name {
+  display: block; padding: 0.4rem 0.5rem; border-radius: var(--radius);
+  background: var(--primary); color: var(--primary-foreground); font-weight: 600;
+}
+.session-entry.recent .recent-session {
+  all: unset; cursor: pointer; display: block; width: 100%;
+  padding: 0.4rem 0.5rem; border-radius: var(--radius);
+  font-size: 0.88rem; color: var(--foreground);
+}
+.session-entry.recent .recent-session:hover { background: var(--accent); }
+.session-entry.recent .recent-session:disabled { opacity: 0.5; cursor: progress; }
+.sidebar-disclosure { margin-top: auto; font-size: 0.82rem; }
+.sidebar-disclosure summary { cursor: pointer; color: var(--muted-foreground); padding: 0.3rem 0; }
+.sidebar-disclosure .disclosure { margin-top: 0.3rem; font-size: 0.78rem; }
+
+/* --- Row 1 (cols 2+): thin top bar (ADR-0060 ~40px) --------------------- */
+.topbar {
+  grid-column: 2; grid-row: 1;
+  display: flex; align-items: center; gap: 0.75rem;
+  padding: 0 1rem; height: 40px; min-height: 40px;
+  border-bottom: 1px solid var(--border);
+  background: var(--background);
+}
+.sidebar-toggle {
+  padding: 0.15rem 0.5rem; cursor: pointer; font-size: 1rem; line-height: 1;
+  border: 1px solid var(--border); background: var(--card); border-radius: var(--radius);
+}
+.topbar-session-name { font-weight: 600; font-size: 0.95rem; }
+
+/* --- Row 2: resume progress strip (ADR-0034; absent unless resume runs) -- */
+.shell > .resume-progress { grid-column: 2; grid-row: 2; margin: 0; border-radius: 0; }
+.shell > .shell-error { grid-column: 2; grid-row: 2; margin: 0.4rem 1rem; }
+
+/* --- Row 3 (cols 2+): session pane host --------------------------------- */
+.session-pane-host { grid-column: 2; grid-row: 3; overflow: hidden; }
+
+/* --- Nested grid: rail + workspace + QuestionBar (ADR-0062 R1) ----------
+ * QuestionBar spans rail + workspace (grid-column 1 / -1); the session sidebar
+ * is NOT under this grid (it is the outer shell's col 1). */
+.session-pane {
+  height: 100%;
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  grid-template-rows: 1fr auto;
+}
+.session-rail {
+  grid-column: 1; grid-row: 1;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  background: var(--card);
+  padding: 0.5rem;
+}
+.session-rail .panel { border: none; padding: 0; background: transparent; }
+.rail-empty { font-size: 0.85rem; padding: 0.5rem; }
+
+.session-workspace {
+  grid-column: 2; grid-row: 1;
+  overflow-y: auto;
+  display: flex; flex-direction: column;
+}
+.workspace-tabs {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.4rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--background);
+}
+.workspace-tabs [role="tab"] {
+  padding: 0.3rem 0.8rem; cursor: pointer; font-size: 0.9rem;
+  border: none; background: none; border-bottom: 2px solid transparent;
+  color: var(--muted-foreground);
+}
+.workspace-tabs [role="tab"].active {
+  color: var(--primary); border-bottom-color: var(--primary); font-weight: 600;
+}
+.active-chip {
+  margin-left: auto; font-size: 0.8rem; color: var(--accent-foreground);
+  background: var(--accent); padding: 0.2rem 0.5rem; border-radius: var(--radius);
+}
+.workspace-body { flex: 1; overflow-y: auto; padding: 1rem; }
+.workspace-hero { display: flex; flex-direction: column; align-items: center; gap: 1rem; padding: 2rem; text-align: center; }
+
+/* Textual outcome card (ADR-0062 R2 lastTurnText in the workspace) */
+.textual-card { padding: 1rem; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-lg); }
+.textual-card h3 { margin: 0 0 0.5rem; }
+.textual-card .textual-body { margin: 0.25rem 0; line-height: 1.5; }
+.textual-card.clarify { border-left: 3px solid var(--primary); }
+.textual-card.refuse { border-left: 3px solid var(--muted-foreground); }
+.textual-card.failed { border-left: 3px solid var(--destructive); }
+.textual-card.cancelled { opacity: 0.6; }
+
+/* QuestionBar area (ADR-0062 R1: spans rail + workspace) */
+.session-questionbar {
+  grid-column: 1 / -1; grid-row: 2;
+  border-top: 1px solid var(--border);
+  background: var(--background);
+  padding: 0.5rem 1rem;
+}
+.session-questionbar .question-bar { display: flex; gap: 0.5rem; align-items: center; }
+.session-questionbar .question-bar input {
+  flex: 1; padding: 0.5rem 0.75rem; font-size: 1rem;
+  border: 1px solid var(--input); border-radius: var(--radius); background: var(--card); color: var(--foreground);
+}
+.session-questionbar .question-bar input:focus { outline: 2px solid var(--ring); outline-offset: -1px; }
+.session-questionbar .question-bar button {
+  padding: 0.5rem 1rem; font-size: 0.95rem; cursor: pointer;
+  border: 1px solid var(--primary); background: var(--primary); color: var(--primary-foreground); border-radius: var(--radius);
+}
+.session-questionbar .question-bar button:disabled { opacity: 0.5; cursor: progress; }
+.session-questionbar .question-bar button.cancel { background: var(--card); color: var(--foreground); border-color: var(--border); }
+
+/* Working-set tab reuses the legacy .layout grid */
+.working-set-layout { margin-top: 0; }
+
+/* --- Result rendering (ADR-0057/0062 R4) -------------------------------- */
+.result-view h2 { margin: 0 0 0.25rem; }
+.result-view .table-scroll { overflow-x: auto; }
+/* Numeric columns right-align by canonical_type (ADR-0057); NULL cells render
+   as muted whitespace (server NULL -> ""), never the literal "NULL". */
+table.result th.num, table.result td.num { text-align: right; }
+table.result td.cell-null { background: var(--muted); }
+/* Sticky pagination at the pane bottom (ADR-0062 R4). */
+.page-info.sticky {
+  position: sticky; bottom: 0;
+  background: var(--background);
+  border-top: 1px solid var(--border);
+  padding: 0.5rem 0; margin: 0;
+  display: flex; gap: 0.5rem; align-items: center;
+}
+.page-info.sticky button {
+  padding: 0.3rem 0.8rem; cursor: pointer; font-size: 0.88rem;
+  border: 1px solid var(--border); background: var(--card); border-radius: var(--radius);
+}
+.page-info.sticky button:disabled { opacity: 0.5; cursor: progress; }
+
+/* Disclosure banners (ADR-0057 large result / many columns) */
+.disclosure-banner {
+  background: #eef6ff; border: 1px solid #b6d4ff; border-radius: var(--radius);
+  padding: 0.4rem 0.8rem; font-size: 0.88rem; margin: 0.4rem 0;
+}
+.stale-disclosure { background: #fff4e5; border-color: #ffd9a0; }
+.dark .disclosure-banner { background: #14202b; border-color: #1e3a5a; color: var(--foreground); }
+.dark .stale-disclosure { background: #2b1d0e; border-color: #5a3d10; }

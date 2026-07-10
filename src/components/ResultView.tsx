@@ -1,10 +1,45 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import embed, { type VisualizationSpec } from "vega-embed";
 import { fmtError, readRows } from "../api";
 import { decodeViz } from "../viz";
-import type { ColumnSchema, VizSpec } from "../types";
+import { VegaChart } from "./VegaChart";
+import type { ColumnSchema, StaleAnchor, VizSpec } from "../types";
 
 const DEFAULT_PAGE_SIZE = 100;
+
+// Disclosure thresholds (ADR-0057: precise values are visual iteration, not
+// architecture). A result above either threshold renders an honest banner
+// rather than silently looking lightweight. Exported so tests can pin them.
+export const ROW_DISCLOSURE_THRESHOLD = 10_000;
+export const COLUMN_DISCLOSURE_THRESHOLD = 100;
+
+// DuckDB numeric canonical types (ADR-0057). A cell in one of these columns
+// aligns right; everything else aligns left. The set is the closed DuckDB
+// numeric family -- BOOLEAN / VARCHAR / TIMESTAMP / BLOB etc. stay left. A
+// DECIMAL type string may carry precision/scale ("DECIMAL(18,2)"), so the base
+// token before any "(" is matched.
+const NUMERIC_TYPES: ReadonlySet<string> = new Set([
+  "TINYINT",
+  "SMALLINT",
+  "INTEGER",
+  "BIGINT",
+  "HUGEINT",
+  "UTINYINT",
+  "USMALLINT",
+  "UINTEGER",
+  "UBIGINT",
+  "UHUGEINT",
+  "FLOAT",
+  "DOUBLE",
+  "REAL",
+  "DECIMAL",
+]);
+
+/** Is this canonical type numeric (right-aligned per ADR-0057)? Splits on the
+ * first "(" so parameterized types (DECIMAL(18,2)) match the base token. */
+function isNumericType(canonicalType: string): boolean {
+  const base = canonicalType.split("(", 1)[0].toUpperCase().trim();
+  return NUMERIC_TYPES.has(base);
+}
 
 interface ResultViewProps {
   /** ADR-0056: the session this result belongs to -- readRows addresses it. */
@@ -12,24 +47,35 @@ interface ResultViewProps {
   referenceName: string;
   assumption: string | null;
   /** The provider's optional viz spec for this result (ADR-0016/0033): null =
-   * a plain table turn; a spec the frontend renders via Vega-Embed, or degrades
+   * a plain table turn; a spec the frontend renders via VegaChart, or degrades
    * to the table with a disclosure when malformed or failing to render. */
   viz: VizSpec | null;
+  /** ADR-0047 stage-stale: when the viewed result has been invalidated by a
+   * source removal/replacement (issue #40/#41), the workspace shows the old
+   * rows PLUS this honest disclosure. null = the result is live. Derived by
+   * the caller from the working-set descriptor (runtime truth), NOT the thread. */
+  staleAnchor?: StaleAnchor | null;
   pageSize?: number;
 }
 
-// Windowed display of a materialized result (ADR-0024) with an optional viz
-// (ADR-0016/0033). The table rows always load (one bounded page at a time via
-// readRows), so a viz that renders successfully shows the chart, while a
-// malformed spec or a render failure degrades to the table instantly with an
-// honest disclosure (AC5 / ADR-0033 -- silent degradation is a silent lie).
-// `total` rides the page so a truncated view never looks complete (ADR-0030).
-// The assumption note (ADR-0009) renders as a correctable side note.
+// The workspace "result" pane (ADR-0045/0062 R4). Layout order is fixed:
+// assumption -> Vega chart -> table, all in one scroll; the table is ALWAYS
+// present (it is the evidence layer), the chart sits above it as the "answer".
+// An emitted viz that fails to decode/render REPLACES the chart slot with a
+// disclosure (ADR-0033) -- it is not a fourth stacked item. Pagination sticks
+// to the pane bottom so it stays reachable after scrolling past the chart.
+//
+// Rendering rules (ADR-0057): row-server pagination <=100/page, columns render
+// in full with horizontal scroll (no column cap, no virtualization), numeric
+// columns right-align by canonical_type, NULL cells (server NULL -> "") render
+// as muted whitespace (never the literal "NULL"), and large results / many
+// columns disclose honestly.
 export function ResultView({
   sessionId,
   referenceName,
   assumption,
   viz,
+  staleAnchor = null,
   pageSize = DEFAULT_PAGE_SIZE,
 }: ResultViewProps) {
   const [columns, setColumns] = useState<ColumnSchema[]>([]);
@@ -76,15 +122,11 @@ export function ResultView({
 
   // --- Viz (ADR-0016/0033) ------------------------------------------------
   // decodeViz is a pure pre-check (parse + whitelist mark). A spec that passes
-  // is handed to Vega-Embed; a spec that fails, OR a render failure from
-  // Vega-Embed, degrades to the table with a disclosure. memoized so the
-  // render-effect dependency stays stable across re-renders.
+  // is handed to VegaChart; a spec that fails degrades to a disclosure. A
+  // render failure reported by VegaChart degrades the same way. memoized so the
+  // chart-slot decision stays stable across re-renders.
   const decoded = useMemo(() => (viz ? decodeViz(viz) : null), [viz]);
-  const chartSpec: VisualizationSpec | null = decoded?.ok
-    ? (decoded.spec as VisualizationSpec)
-    : null;
   const [renderError, setRenderError] = useState<string | null>(null);
-  const chartRef = useRef<HTMLDivElement>(null);
 
   // A new result/viz resets the render-failure state so it gets a fresh try.
   useEffect(() => {
@@ -92,102 +134,139 @@ export function ResultView({
     setRenderError(null);
   }, [referenceName, viz]);
 
-  // Render the decoded Vega-Lite spec via Vega-Embed (ADR-0016). A render
-  // failure degrades to the table with a disclosure (ADR-0033); the returned
-  // finalize is invoked on cleanup so an unmounted/replaced chart frees its
-  // view.
-  useEffect(() => {
-    if (!chartSpec || !chartRef.current) return;
-    const node = chartRef.current;
-    let cancelled = false;
-    let finalize: (() => void) | undefined;
-    embed(node, chartSpec, { actions: false })
-      .then((result) => {
-        if (cancelled) result.finalize();
-        else finalize = result.finalize;
-      })
-      .catch(() => {
-        if (!cancelled) setRenderError("渲染出错");
-      });
-    return () => {
-      cancelled = true;
-      finalize?.();
-    };
-  }, [chartSpec]);
-
+  // The chart renders only when a spec decoded AND no render error has landed.
+  const showChart = decoded !== null && decoded.ok && renderError === null;
   // The degradation reason (null = not degraded): a decode failure explains the
-  // cause; a render failure is a generic engine error. The chart shows only
-  // when a spec decoded AND rendered without error.
-  const degradedReason = decoded !== null && !decoded.ok ? decoded.reason : renderError;
-  const showChart = chartSpec !== null && renderError === null;
+  // cause; a render failure is a generic engine error.
+  const degradedReason =
+    decoded !== null && !decoded.ok ? decoded.reason : renderError;
+
+  const numericFlags = useMemo(
+    () => columns.map((c) => isNumericType(c.canonical_type)),
+    [columns],
+  );
 
   const hasNext = offset + rows.length < total;
   const hasPrev = offset > 0;
   const shown = rows.length;
 
+  const showRowDisclosure = total > ROW_DISCLOSURE_THRESHOLD;
+  const showColumnDisclosure = columns.length > COLUMN_DISCLOSURE_THRESHOLD;
+
   return (
     <section className="result-view">
       <h2 id={headingId}>结果：{referenceName}</h2>
       <p className="meta">行数：{total}</p>
+
+      {staleAnchor && (
+        // ADR-0047 stage-stale / ADR-0041 honest wording: the rows below are
+        // real (they still load), but the result is no longer valid to build on
+        // -- the invalidating source was removed/replaced. Rerun the question
+        // against the new source to recompute.
+        <p className="viz-disclosure stale-disclosure" role="note">
+          此结果已失效（因源「{staleAnchor.display_name}」
+          {staleAnchor.reason === "Replaced" ? "已更新" : "已删除"}）— 重新提问以基于新源重算。
+        </p>
+      )}
+
       {assumption && <p className="assumption">假设：{assumption}</p>}
+
+      {showRowDisclosure && (
+        <p className="disclosure-banner" role="note">
+          此结果较大（{total} 行），分页显示中；想看特定部分可继续提问。
+        </p>
+      )}
+      {showColumnDisclosure && (
+        <p className="disclosure-banner" role="note">
+          此结果含 {columns.length} 列，可横向滚动查看全部。
+        </p>
+      )}
+
+      {/*
+        Chart slot (ADR-0062 R4): the chart, OR -- when a viz was emitted but
+        failed -- the degradation disclosure REPLACING this slot (not a fourth
+        stacked item). A null viz (plain table turn) renders neither.
+      */}
+      {showChart && decoded?.ok && (
+        <VegaChart spec={decoded.spec} onError={setRenderError} />
+      )}
       {degradedReason && (
         <p className="viz-disclosure" role="note">
           图表无法渲染，已显示表格。{degradedReason}
         </p>
       )}
-      {showChart && <div ref={chartRef} className="viz-chart" aria-label="图表" />}
+
       {error && <p className="error">{error}</p>}
-      {!showChart && (
-        <>
-          <div className="table-scroll">
-            <table className="result" aria-labelledby={headingId}>
-              <thead>
-                <tr>
-                  {columns.map((c) => (
-                    <th key={c.name}>{c.name}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {shown === 0 && !loading && (
-                  <tr>
-                    <td className="muted">（无数据行）</td>
-                  </tr>
-                )}
-                {/* key is the in-window index, not offset+i: rows are window-scoped,
-                    so a position-derived key would mis-reuse DOM when one page's last
-                    rows overlap the next page's first rows. */}
-                {rows.map((row, i) => (
-                  <tr key={i}>
-                    {row.map((cell, j) => (
-                      <td key={j}>{cell}</td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <p className="page-info">
-            <span aria-live="polite">
-              第 {total === 0 ? 0 : offset + 1}–{offset + shown} 行（共 {total} 行）
-            </span>
-            <button
-              type="button"
-              disabled={!hasPrev || loading}
-              onClick={() => loadPage(Math.max(0, offset - pageSize))}
-            >
-              上一页
-            </button>
-            <button
-              type="button"
-              disabled={!hasNext || loading}
-              onClick={() => loadPage(offset + pageSize)}
-            >
-              下一页
-            </button>
-          </p>
-        </>
-      )}
+
+      {/*
+        Table (ADR-0057): always present below the chart. Columns render in full
+        with horizontal scroll; numeric cells right-align; NULL cells (server
+        NULL -> "") render as muted whitespace, never the literal "NULL".
+      */}
+      <div className="table-scroll">
+        <table className="result" aria-labelledby={headingId}>
+          <thead>
+            <tr>
+              {columns.map((c) => (
+                <th key={c.name} className={isNumericType(c.canonical_type) ? "num" : undefined}>
+                  {c.name}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {shown === 0 && !loading && (
+              <tr>
+                <td className="muted">（无数据行）</td>
+              </tr>
+            )}
+            {/* key is the in-window index, not offset+i: rows are window-scoped,
+                so a position-derived key would mis-reuse DOM when one page's last
+                rows overlap the next page's first rows. */}
+            {rows.map((row, i) => (
+              <tr key={i}>
+                {row.map((cell, j) => {
+                  const numeric = numericFlags[j] ?? false;
+                  // Server CASTs NULL to "" (ADR-0024). Render muted whitespace
+                  // rather than the literal "NULL" (ADR-0057 honest display).
+                  if (cell === "") {
+                    return <td key={j} className="cell-null" />;
+                  }
+                  return (
+                    <td key={j} className={numeric ? "num" : undefined}>
+                      {cell}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/*
+        Pagination (ADR-0057/0062 R4): sticky at the pane bottom so it stays
+        reachable after scrolling past the chart. No jump-page (ADR-0057).
+      */}
+      <div className="page-info sticky">
+        <span aria-live="polite">
+          第 {total === 0 ? 0 : offset + 1}–{offset + shown} 行（共 {total} 行）
+        </span>
+        <button
+          type="button"
+          disabled={!hasPrev || loading}
+          onClick={() => loadPage(Math.max(0, offset - pageSize))}
+        >
+          上一页
+        </button>
+        <button
+          type="button"
+          disabled={!hasNext || loading}
+          onClick={() => loadPage(offset + pageSize)}
+        >
+          下一页
+        </button>
+      </div>
     </section>
   );
 }

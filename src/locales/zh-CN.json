@@ -6,7 +6,6 @@
   "header.keyOk": "LLM key 已配置",
   "header.keyMissing": "未配置 LLM key——提问将失败",
   "header.settings": "设置",
-  "header.recent": "最近：",
 
   "settings.title": "应用设置",
   "settings.intro": "偏好与默认参数存在系统 app-data 目录（与可分享的 .duck 正交）；API key 仅存在本机系统钥匙串，由 Rust 核心读取，前端与页面永不持有，也绝不写入 app-config。",
