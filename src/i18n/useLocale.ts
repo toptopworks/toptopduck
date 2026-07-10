@@ -9,8 +9,8 @@ import type { LocalePreference } from "../types";
 // directive; locale never crosses IPC from the frontend.
 //
 // No DOM side-effect + no window event here (unlike useTheme): IntlProvider
-// re-renders declaratively on the locale prop, and useFormatters re-creates its
-// formatters via useMemo on the locale. KISS -- no event is needed until a
+// re-renders declaratively on the locale prop, so any Intl.* formatting tied
+// to the locale follows the next render. KISS -- no event is needed until a
 // non-React consumer appears.
 
 /** The resolved two-state locale IntlProvider consumes. "system" is resolved to

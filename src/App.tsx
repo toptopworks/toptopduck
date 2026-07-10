@@ -866,7 +866,18 @@ export default function App() {
   const shown = datasets.find((d) => d.reference_name === selected) ?? null;
 
   return (
-    <IntlProvider locale={effectiveLocale} messages={catalogFor(effectiveLocale)}>
+    <IntlProvider
+      locale={effectiveLocale}
+      messages={catalogFor(effectiveLocale)}
+      defaultLocale="en-US"
+      onError={(err) => {
+        // ADR-0052: never crash over a missing/invalid message. The CI catalog
+        // alignment guards against missing keys in production builds; this
+        // surfaces ICU syntax errors and dev-only drift as a dev warning rather
+        // than react-intl's default handler (which is silent in prod).
+        if (import.meta.env.DEV) console.warn("[i18n]", err.message);
+      }}
+    >
       <main>
         <header>
           <h1>toptopduck</h1>
