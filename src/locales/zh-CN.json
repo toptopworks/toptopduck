@@ -36,5 +36,25 @@
   "settings.cancel": "取消",
   "settings.clearKey": "清除 key",
   "settings.save": "保存",
-  "settings.saving": "保存中…"
+  "settings.saving": "保存中…",
+
+  "thread.ariaLabel": "对话历史",
+  "thread.title": "对话",
+  "thread.source.added": "加载了「{name}」",
+  "thread.source.deleted": "删除了「{name}」",
+  "thread.source.replaced": "换源了「{name}」",
+  "thread.source.staleSuffix": " · 失效 {count}",
+  "thread.outcome.stale": "结果已失效",
+  "thread.outcome.materialized": "已出结果",
+  "thread.outcome.clarify": "需要澄清",
+  "thread.outcome.refused": "无法处理",
+  "thread.outcome.failed": "失败",
+  "thread.outcome.cancelled": "已取消",
+  "thread.staleChip.replaced": "源已更新",
+  "thread.staleChip.deleted": "上游已删除",
+  "thread.staleChip.aria": "因{reason}而失效，跳转到对应源事件",
+  "thread.activeChip.title": "提问点名「{name}」",
+  "thread.assumption": "假设：{text}",
+  "thread.resultLink": "结果：{name}",
+  "thread.failedReason": "失败：{reason}"
 }

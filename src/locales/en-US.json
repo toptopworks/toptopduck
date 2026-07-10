@@ -36,5 +36,25 @@
   "settings.cancel": "Cancel",
   "settings.clearKey": "Clear key",
   "settings.save": "Save",
-  "settings.saving": "Saving…"
+  "settings.saving": "Saving…",
+
+  "thread.ariaLabel": "Conversation history",
+  "thread.title": "Conversation",
+  "thread.source.added": "Loaded \"{name}\"",
+  "thread.source.deleted": "Deleted \"{name}\"",
+  "thread.source.replaced": "Replaced \"{name}\"",
+  "thread.source.staleSuffix": " · invalidated {count}",
+  "thread.outcome.stale": "Result stale",
+  "thread.outcome.materialized": "Result ready",
+  "thread.outcome.clarify": "Needs clarification",
+  "thread.outcome.refused": "Cannot fulfill",
+  "thread.outcome.failed": "Failed",
+  "thread.outcome.cancelled": "Cancelled",
+  "thread.staleChip.replaced": "Source updated",
+  "thread.staleChip.deleted": "Upstream deleted",
+  "thread.staleChip.aria": "Stale because {reason}, jump to the source event",
+  "thread.activeChip.title": "Question names \"{name}\"",
+  "thread.assumption": "Assumption: {text}",
+  "thread.resultLink": "Result: {name}",
+  "thread.failedReason": "Failed: {reason}"
 }

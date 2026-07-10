@@ -255,3 +255,108 @@ table.result td.cell-null { background: var(--muted); }
 .stale-disclosure { background: #fff4e5; border-color: #ffd9a0; }
 .dark .disclosure-banner { background: #14202b; border-color: #1e3a5a; color: var(--foreground); }
 .dark .stale-disclosure { background: #2b1d0e; border-color: #5a3d10; }
+
+/* =========================================================================
+ * Thread rail dual-species visual language (ADR-0047/0050, issue #80).
+ * Two visually distinct species share the rail: turn cards (outcome glyph +
+ * verbatim question) and source lifecycle markers (thin, full-width bars). The
+ * four TurnOutcome kinds are encoded by Lucide glyph + token color on
+ * data-outcome; stale Materialized turns ghost out (CircleOff + opacity); a
+ * causal chip on a ghost jumps to the matching source marker.
+ * ========================================================================= */
+.thread h2 { margin: 0 0 0.4rem; font-size: 0.82rem; color: var(--muted-foreground); text-transform: uppercase; letter-spacing: 0.05em; }
+.thread ol { list-style: none; margin: 0; padding: 0; }
+
+/* --- Turn cards ---------------------------------------------------------- */
+.thread .turn-entry { padding: 0; margin: 0; }
+.thread .turn-card { padding: 0.35rem 0; border-radius: var(--radius); }
+.thread .turn-head {
+  display: flex; align-items: center; gap: 0.4rem;
+  min-width: 0; /* allow the question to truncate within the flex row */
+}
+.thread .outcome-icon {
+  flex-shrink: 0; display: inline-flex; align-items: center;
+  width: 1.1rem; height: 1.1rem;
+}
+.thread .outcome-icon svg { width: 1rem; height: 1rem; }
+/* Outcome color encoding (ADR-0047/0050): A teal / B neutral / C red / D grey.
+   The glyph + color together encode the kind so it never reads as "success vs
+   error" -- B (honest refuse/clarify) MUST stay neutral, never warm (ADR-0017). */
+.thread .turn-entry[data-outcome="materialized"] .outcome-icon { color: var(--primary); }
+.thread .turn-entry[data-outcome="textual"] .outcome-icon { color: var(--muted-foreground); }
+.thread .turn-entry[data-outcome="failed"] .outcome-icon { color: var(--destructive); }
+.thread .turn-entry[data-outcome="cancelled"] .outcome-icon { color: var(--muted-foreground); }
+/* Failed/Cancelled are weakened but NOT collapsed (ADR-0028 Why 2): the recent
+   intent stays visible even when it produced nothing. */
+.thread .turn-entry[data-outcome="failed"] .turn-card,
+.thread .turn-entry[data-outcome="cancelled"] .turn-card { opacity: 0.6; }
+
+/* Verbatim question = identity handle (ADR-0039): single-line, tail-ellipsis
+   truncation keeps the head (ADR-0054) at a fixed rail width. */
+.thread .turn-question {
+  flex: 1; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 0.88rem; color: var(--foreground);
+}
+/* Conditional active chip (ADR-0047): only when the question named a dataset. */
+.thread .turn-active-chip {
+  flex-shrink: 0; font-size: 0.74rem;
+  color: var(--accent-foreground); background: var(--accent);
+  padding: 0.05rem 0.4rem; border-radius: var(--radius);
+  max-width: 8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.thread .turn-outcome { margin: 0.15rem 0 0 1.5rem; font-size: 0.82rem; line-height: 1.4; }
+.thread .result-link {
+  all: unset; cursor: pointer; display: inline-block;
+  color: var(--primary); padding: 0.05rem 0.35rem; border-radius: var(--radius);
+  border: 1px solid transparent;
+}
+.thread .result-link:hover { background: var(--accent); }
+.thread .result-link.active { font-weight: 600; border-color: var(--primary); }
+.thread .result-link.stale { color: var(--muted-foreground); border-style: dashed; }
+/* Stale causal chip (ADR-0041/0047): clickable, jumps to the source marker. */
+.thread .stale-chip {
+  all: unset; cursor: pointer; display: inline-block;
+  font-size: 0.74rem; margin-left: 0.3rem; padding: 0.05rem 0.4rem;
+  border-radius: var(--radius); border: 1px dashed var(--muted-foreground);
+  color: var(--muted-foreground);
+}
+.thread .stale-chip:hover { background: var(--muted); color: var(--foreground); }
+.thread .turn-outcome.textual .textual-kind {
+  display: inline-block; margin-right: 0.3rem; color: var(--muted-foreground);
+}
+.thread .turn-outcome.textual .textual-body { color: var(--foreground); }
+.thread .turn-outcome.failed .failed-reason { color: var(--destructive); }
+.thread .turn-outcome.cancelled { color: var(--muted-foreground); }
+.thread .assumption { display: block; font-size: 0.76rem; color: var(--muted-foreground); font-style: italic; }
+
+/* Stale Materialized ghost (ADR-0041/0047): reduced opacity, still visible +
+   occupying its slot. The CircleOff glyph (set in JS) reads as dead at a
+   glance, distinct from a fresh Materialized's solid Table2. */
+.thread .turn-card.stale-ghost { opacity: 0.5; }
+.thread .turn-card.stale-ghost .turn-question { text-decoration: line-through; text-decoration-style: dotted; }
+
+/* --- Source lifecycle markers (second species, ADR-0040/0047) -------------
+ * Thin, full-width, non-interactive; visually distinct from turn cards (no
+ * outcome glyph, no question, indented bar styling). */
+.thread .source-entry { margin: 0; padding: 0; }
+.thread .source-lifecycle {
+  display: flex; align-items: center; gap: 0.35rem;
+  margin: 0; padding: 0.2rem 0.4rem;
+  font-size: 0.76rem; color: var(--muted-foreground);
+  border-left: 2px solid var(--border);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: var(--muted);
+}
+.thread .source-lifecycle .source-icon svg { width: 0.85rem; height: 0.85rem; flex-shrink: 0; }
+.thread .source-lifecycle.added { border-left-color: var(--primary); }
+.thread .source-lifecycle.replaced { border-left-color: var(--accent-foreground); }
+.thread .source-lifecycle.deleted { border-left-color: var(--destructive); }
+.thread .source-lifecycle .source-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread .source-lifecycle .source-stale-count { color: var(--destructive); }
+/* Jump-select target highlight (ADR-0047 chip-trace): the source marker a stale
+   chip points at flashes the accent tint so the user finds the cause. */
+.thread .source-entry[data-highlighted="true"] .source-lifecycle {
+  background: var(--accent); box-shadow: 0 0 0 2px var(--primary);
+}

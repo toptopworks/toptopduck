@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { IntlProvider } from "react-intl";
+import type { ReactElement } from "react";
+import { catalogFor } from "../i18n";
 import { ActiveSourceDeleteDialog } from "../components/ActiveSourceDeleteDialog";
 import { DatasetDetail } from "../components/DatasetDetail";
 import { DisclosureBanner } from "../components/DisclosureBanner";
@@ -34,6 +37,17 @@ vi.mock("../api", async (importOriginal) => {
 vi.mock("vega-embed", () => ({ default: vi.fn() }));
 
 import { open } from "@tauri-apps/plugin-dialog";
+
+// Thread chrome routes through react-intl (ADR-0052). Renders the element inside
+// a zh-CN IntlProvider so the Chinese chrome assertions hold. Other component
+// tests keep the bare render (their chrome is still hardcoded).
+function renderThread(ui: ReactElement) {
+  return render(
+    <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+      {ui}
+    </IntlProvider>,
+  );
+}
 
 const mockDataset: DatasetDescriptor = {
   reference_name: "people",
@@ -908,7 +922,7 @@ describe("Thread", () => {
       },
       { question: "中途取消", outcome: { kind: "Cancelled" } },
     ];
-    render(
+    renderThread(
       <Thread
         entries={records.map(turnEntry)}
         selectedResult="result_1"
@@ -938,7 +952,7 @@ describe("Thread", () => {
 
   it("clicking a result turn selects it (reference name only, ADR-0051)", () => {
     const onSelectResult = vi.fn();
-    render(
+    renderThread(
       <Thread
         entries={[turnEntry(materializedRecord("result_2", "用了简单计数"))]}
         selectedResult={null}
@@ -952,7 +966,7 @@ describe("Thread", () => {
   });
 
   it("marks the selected result turn active", () => {
-    render(
+    renderThread(
       <Thread
         entries={[turnEntry(materializedRecord("result_1", null))]}
         selectedResult="result_1"
@@ -966,7 +980,7 @@ describe("Thread", () => {
   });
 
   it("renders nothing when the thread is empty", () => {
-    const { container } = render(
+    const { container } = renderThread(
       <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} />,
     );
     expect(container).toBeEmptyDOMElement();
@@ -984,7 +998,7 @@ describe("Thread", () => {
         data: { kind: "Deleted", reference_name: "people", display_name: "people" },
       },
     ];
-    render(
+    renderThread(
       <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
     );
     // Added + Deleted markers render with their verbs, distinct from turns.
@@ -1006,26 +1020,21 @@ describe("Thread", () => {
         data: { kind: "Replaced", reference_name: "people", display_name: "员工表" },
       },
     ];
-    render(<Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />);
+    renderThread(<Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />);
     expect(screen.getByText(/换源了「员工表」/)).toBeInTheDocument();
   });
 
-  it("renders a stale badge whose verb follows the anchor reason (issue #41 AC4)", () => {
-    // AC4: a stale result's badge says "已删除" when its source was deleted and
-    // "已更新" when its source was replaced -- same traceability anchor shape,
-    // two wording paths driven by StaleReason (Deleted vs Replaced).
+  it("ghosts a stale Materialized turn with CircleOff + a causal chip (issue #80, ADR-0041/0047)", () => {
+    // A result that went stale renders as a ghost: reduced opacity (CSS on
+    // .stale-ghost) + the outcome icon swapped to CircleOff, and a clickable
+    // causal chip replaces the old full-sentence badge. The chip's wording
+    // splits honestly by reason -- "源已更新" (Replaced: SQL still runs, v1 just
+    // does not recompute) vs "上游已删除" (Deleted: the reference name is gone).
     const entries: ThreadEntry[] = [turnEntry(materializedRecord("result_1", null))];
     const staleByReference = new Map([
-      [
-        "result_1",
-        {
-          reference_name: "people",
-          display_name: "员工表",
-          reason: "Replaced" as const,
-        },
-      ],
+      ["result_1", { reference_name: "people", display_name: "员工表", reason: "Replaced" as const }],
     ]);
-    render(
+    const { container } = renderThread(
       <Thread
         entries={entries}
         selectedResult={null}
@@ -1033,7 +1042,187 @@ describe("Thread", () => {
         staleByReference={staleByReference}
       />,
     );
-    expect(screen.getByText(/因「员工表」已更新而失效/)).toBeInTheDocument();
+    // Ghost marker: the turn card carries data-stale + the stale-ghost class.
+    const turnCard = container.querySelector(".turn-card");
+    expect(turnCard?.classList.contains("stale-ghost")).toBe(true);
+    expect(turnCard?.getAttribute("data-stale")).toBe("true");
+    // CircleOff is the stale glyph (aria-label "结果已失效"), not the fresh
+    // Materialized's Table2 ("已出结果").
+    expect(screen.getByRole("img", { name: "结果已失效" })).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "已出结果" })).not.toBeInTheDocument();
+    // Causal chip wording for a Replaced source.
+    expect(screen.getByRole("button", { name: /源已更新/ })).toBeInTheDocument();
+  });
+
+  it("the stale causal chip wording distinguishes delete vs replace (issue #80, ADR-0041)", () => {
+    // ADR-0041 honest split: a Deleted upstream -> "上游已删除" (truly gone,
+    // cannot recompute); a Replaced source -> "源已更新" (new backing exists,
+    // re-ask would recover). The wording signals recoverability.
+    const replacedAnchor = { reference_name: "people", display_name: "员工表", reason: "Replaced" as const };
+    const deletedAnchor = { reference_name: "people", display_name: "员工表", reason: "Deleted" as const };
+
+    const { unmount: unmountReplaced } = renderThread(
+      <Thread
+        entries={[turnEntry(materializedRecord("result_1", null))]}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        staleByReference={new Map([["result_1", replacedAnchor]])}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /源已更新/ })).toBeInTheDocument();
+    unmountReplaced();
+
+    renderThread(
+      <Thread
+        entries={[turnEntry(materializedRecord("result_1", null))]}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        staleByReference={new Map([["result_1", deletedAnchor]])}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /上游已删除/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /源已更新/ })).not.toBeInTheDocument();
+  });
+
+  it("clicking a stale causal chip jump-selects the nearest matching source event (issue #80, ADR-0047)", () => {
+    // The chip-trace rule (ADR-0047): click a stale chip -> highlight the
+    // SourceLifecycleEvent after this result's turn whose reference_name + kind
+    // match the anchor. No event_id is stored; the match is derived from the
+    // existing thread. Here result_1 (stale via Replaced on "people") jumps to
+    // the Replaced source event after it, not the earlier Added.
+    const entries: ThreadEntry[] = [
+      { entry: "Source", data: { kind: "Added", reference_name: "people", display_name: "员工表" } },
+      turnEntry(materializedRecord("result_1", null)),
+      { entry: "Source", data: { kind: "Replaced", reference_name: "people", display_name: "员工表" } },
+      { entry: "Source", data: { kind: "Deleted", reference_name: "orders", display_name: "订单表" } },
+    ];
+    const staleByReference = new Map([
+      ["result_1", { reference_name: "people", display_name: "员工表", reason: "Replaced" as const }],
+    ]);
+    const { container } = renderThread(
+      <Thread
+        entries={entries}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        staleByReference={staleByReference}
+      />,
+    );
+    // No source marker is highlighted before the click.
+    expect(container.querySelector(`.source-entry[data-highlighted="true"]`)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /源已更新/ }));
+    // The Replaced marker (after result_1) is now the highlighted jump target;
+    // the Added (before) and Deleted (orders, not people) are not.
+    const highlighted = container.querySelector(`.source-entry[data-highlighted="true"]`);
+    expect(highlighted?.getAttribute("data-source-kind")).toBe("replaced");
+  });
+
+  it("encodes the four outcomes by data-outcome + accessible icon label (issue #80, ADR-0047/0050)", () => {
+    // Black-box AC: assert visible DOM/aria, not pixels. Each outcome kind
+    // rides data-outcome on the <li> (the hue attribute hook) AND an aria-label
+    // on the outcome icon, so the four are distinguishable without color sight.
+    const records: TurnRecord[] = [
+      materializedRecord("result_1", null),
+      { question: "q", outcome: { kind: "Textual", data: { text_kind: "Clarify", body: "b", assumption: null } } },
+      { question: "q", outcome: { kind: "Failed", data: { reason: "boom" } } },
+      { question: "q", outcome: { kind: "Cancelled" } },
+    ];
+    const { container } = renderThread(
+      <Thread entries={records.map(turnEntry)} selectedResult={null} onSelectResult={() => {}} />,
+    );
+    const kinds = ["materialized", "textual", "failed", "cancelled"];
+    const outs = container.querySelectorAll(".turn-entry");
+    expect(outs).toHaveLength(4);
+    expect(Array.from(outs).map((li) => li.getAttribute("data-outcome"))).toEqual(kinds);
+    // Each outcome's glyph is announced via its icon aria-label.
+    expect(screen.getByRole("img", { name: "已出结果" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "需要澄清" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "失败" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "已取消" })).toBeInTheDocument();
+  });
+
+  it("keeps Failed and Cancelled visible but weakened, never collapsed (issue #80, ADR-0028)", () => {
+    // ADR-0028 Why 2: collapsing B/C/D would hide high-value "recent intent
+    // included a failure" context. v1 only weakens (CSS opacity on the card),
+    // so the question + reason/marker stay in the DOM and are queryable.
+    const records: TurnRecord[] = [
+      { question: "坏查询", outcome: { kind: "Failed", data: { reason: "bad column" } } },
+      { question: "中途取消", outcome: { kind: "Cancelled" } },
+    ];
+    const { container } = renderThread(
+      <Thread entries={records.map(turnEntry)} selectedResult={null} onSelectResult={() => {}} />,
+    );
+    // Both are present in the DOM (not collapsed away).
+    expect(screen.getByText("坏查询")).toBeInTheDocument();
+    expect(screen.getByText(/失败：bad column/)).toBeInTheDocument();
+    expect(screen.getByText("中途取消")).toBeInTheDocument();
+    expect(screen.getByText("已取消")).toBeInTheDocument();
+    // Both carry their outcome attribute (weakening is CSS opacity, asserted at
+    // the style layer, not duplicated here).
+    expect(container.querySelector(`.turn-entry[data-outcome="failed"]`)).not.toBeNull();
+    expect(container.querySelector(`.turn-entry[data-outcome="cancelled"]`)).not.toBeNull();
+  });
+
+  it("renders source markers as a distinct species with add/replace/delete glyphs + stale counts (issue #80)", () => {
+    // The three source lifecycle kinds render as thin markers (data-source-kind)
+    // distinct from turns; Replaced/Deleted disclose how many derivatives they
+    // invalidated ("失效 N"), derived by matching reference_name + kind against
+    // the stale map (no event_id, ADR-0047).
+    const entries: ThreadEntry[] = [
+      { entry: "Source", data: { kind: "Added", reference_name: "people", display_name: "员工表" } },
+      { entry: "Source", data: { kind: "Replaced", reference_name: "people", display_name: "员工表" } },
+      { entry: "Source", data: { kind: "Deleted", reference_name: "orders", display_name: "订单表" } },
+    ];
+    const staleByReference = new Map([
+      ["result_1", { reference_name: "people", display_name: "员工表", reason: "Replaced" as const }],
+      ["result_2", { reference_name: "people", display_name: "员工表", reason: "Replaced" as const }],
+      ["result_3", { reference_name: "orders", display_name: "订单表", reason: "Deleted" as const }],
+    ]);
+    const { container } = renderThread(
+      <Thread
+        entries={entries}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        staleByReference={staleByReference}
+      />,
+    );
+    // Three distinct markers by kind; Added carries no stale count (adding never
+    // invalidates), Replaced shows "失效 2" (two people-Replaced stale results),
+    // Deleted shows "失效 1".
+    const markers = container.querySelectorAll(".source-entry");
+    expect(Array.from(markers).map((li) => li.getAttribute("data-source-kind"))).toEqual([
+      "added",
+      "replaced",
+      "deleted",
+    ]);
+    expect(screen.getByText(/加载了「员工表」/)).toBeInTheDocument();
+    expect(screen.getByText(/失效 2/)).toBeInTheDocument();
+    expect(screen.getByText(/失效 1/)).toBeInTheDocument();
+  });
+
+  it("shows the active chip only when the question explicitly names a dataset (issue #80, ADR-0047)", () => {
+    // Most turns act implicitly on the prior step -> no chip; a question that
+    // names a working-set dataset ("在订单表上...") lights up ->订单表. Matching
+    // is on the display label first, then the reference name; stale datasets
+    // are excluded (they cannot be the target of a new question).
+    const labels = [
+      { referenceName: "people", displayName: "员工表" },
+      { referenceName: "orders", displayName: "订单表" },
+    ];
+    const records: TurnRecord[] = [
+      { question: "在订单表上统计总销售额", outcome: { kind: "Cancelled" } },
+      { question: "总共几行", outcome: { kind: "Cancelled" } },
+    ];
+    const { container } = renderThread(
+      <Thread
+        entries={records.map(turnEntry)}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        datasetLabels={labels}
+      />,
+    );
+    // The naming turn gets a chip; the implicit one does not.
+    expect(screen.getByText(/→订单表/)).toBeInTheDocument();
+    expect(container.querySelectorAll(".turn-active-chip")).toHaveLength(1);
   });
 });
 

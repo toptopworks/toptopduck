@@ -35,6 +35,12 @@ export function SessionPane({ sessionId }: SessionPaneProps) {
   const viewedDescriptor = viewedReference
     ? s.datasets.find((d) => d.reference_name === viewedReference) ?? null
     : null;
+  // Non-stale dataset labels for the rail's conditional active chip (ADR-0047):
+  // a turn's question lights up a chip only when it explicitly names a dataset.
+  // Stale datasets are excluded -- they cannot be the target of a new question.
+  const datasetLabels = s.datasets
+    .filter((d) => !d.stale)
+    .map((d) => ({ referenceName: d.reference_name, displayName: d.display_name }));
 
   return (
     <div className="session-pane">
@@ -45,6 +51,7 @@ export function SessionPane({ sessionId }: SessionPaneProps) {
           selectedResult={viewedReference}
           onSelectResult={s.handleSelectResult}
           staleByReference={s.staleByReference}
+          datasetLabels={datasetLabels}
         />
         {s.thread.length === 0 && (
           <p className="rail-empty muted">尚无对话。在下方提问或加载数据开始。</p>
