@@ -40,7 +40,7 @@ vi.mock("../api", async (importOriginal) => {
 });
 
 import App from "../App";
-import { askQuestion, readRows } from "../api";
+import { askQuestion, conversation, readRows } from "../api";
 
 function src(name: string): DatasetDescriptor {
   return {
@@ -166,5 +166,63 @@ describe("App three-column shell (issue #79 ACs)", () => {
     );
     // No ask / mutation IPC fired by the click -- active is untouched.
     expect(askQuestion).not.toHaveBeenCalled();
+  });
+
+  it("appends the new turn optimistically without a thread refetch (ADR-0051)", async () => {
+    // The thread cache is the single truth; on a successful ask the new turn is
+    // appended via setQueryData and the thread query is NEVER invalidated, so a
+    // stale/empty refetch cannot wipe the turn the user just produced. The new
+    // turn's question renders in the rail from the optimistic append, not from
+    // a refetch -- conversation is called exactly once (the initial load).
+    state.workingSet = [src("people")];
+    vi.mocked(askQuestion).mockResolvedValue({
+      kind: "Materialized",
+      data: { dataset: { ...src("result_1"), row_count: 1 }, viz: null, assumption: null },
+    });
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
+    );
+    expect(conversation).toHaveBeenCalledTimes(1); // initial load only
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "总共几行" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    // The new turn's question lands in the rail from the optimistic append.
+    await waitFor(() => expect(screen.getByText("总共几行")).toBeInTheDocument());
+    // No refetch: conversation was not called again (thread never invalidated).
+    expect(conversation).toHaveBeenCalledTimes(1);
+  });
+
+  it("pins to a history result so it overrides the last textual turn (ADR-0062 R2)", async () => {
+    // End-to-end pin chain: the last turn is a Clarify (workspace would show the
+    // textual card), but clicking an earlier Materialized result in the rail sets
+    // pinnedToHistory so the viewed result overrides the last-turn text. This is
+    // the full handleSelectResult -> deriveWorkspaceContent path the pure-function
+    // unit test alone cannot cover.
+    const r1 = src("result_1");
+    state.workingSet = [r1];
+    state.thread = [
+      materializedTurn("result_1"),
+      {
+        entry: "Turn",
+        data: {
+          question: "哪个名字",
+          outcome: {
+            kind: "Textual",
+            data: { text_kind: "Clarify", body: "请说明哪个名字", assumption: null },
+          },
+        },
+      },
+    ];
+    render(<App />);
+    // Last turn is Clarify -> workspace shows the textual card.
+    await waitFor(() => expect(document.querySelector(".textual-card")).toBeInTheDocument());
+    // Click result_1 in the rail -> pin -> workspace shows result_1's table.
+    fireEvent.click(screen.getByRole("button", { name: /结果：result_1/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /结果：result_1/ })).toBeInTheDocument(),
+    );
+    // The workspace textual card is gone (the rail still renders the turn text,
+    // but under a different class -- .turn-outcome, not .textual-card).
+    expect(document.querySelector(".textual-card")).not.toBeInTheDocument();
   });
 });

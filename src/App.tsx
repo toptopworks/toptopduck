@@ -280,7 +280,13 @@ export default function App() {
               y: pos.y,
               maximized,
             },
-          }).catch(() => {});
+          }).catch((e) => {
+            // Geometry persistence is advisory (ADR-0038), so a failure must
+            // not block the UI; but appConfigRef was updated optimistically, so
+            // a silent swallow leaves memory != disk. Warn in dev so the drift
+            // surfaces before a restart quietly reverts the geometry.
+            if (import.meta.env.DEV) console.warn("[geometry] persist failed", e);
+          });
         })
         .catch(() => {});
     };
@@ -380,6 +386,11 @@ export default function App() {
       const path = typeof selected === "string" ? selected : null;
       if (!path) return;
       await openDuckByPath(path);
+    } catch (e) {
+      // openDuckByPath can throw before its inner try (the onResumeProgress
+      // subscribe, the invalidate); surface it the same way handleSaveAs does
+      // rather than letting it escape as an unhandled rejection.
+      setShellError(fmtError(e));
     } finally {
       setPersistenceBusy(false);
     }

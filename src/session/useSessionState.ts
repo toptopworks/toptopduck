@@ -26,6 +26,7 @@ import {
 } from "./workspace";
 import type {
   DatasetDescriptor,
+  DatasetPrivacy,
   GuidanceRequest,
   SheetGuidance,
   StaleAnchor,
@@ -108,7 +109,7 @@ export interface UseSessionState {
   handleCancelActiveDelete: () => void;
   handlePrivacyChange: (
     referenceName: string,
-    privacy: import("../types").DatasetPrivacy,
+    privacy: DatasetPrivacy,
   ) => void;
   handleSelectResult: (referenceName: string) => void;
   clearError: () => void;
@@ -358,7 +359,7 @@ export function useSessionState(sessionId: string): UseSessionState {
   );
 
   const handlePrivacyChange = useCallback(
-    (referenceName: string, privacy: import("../types").DatasetPrivacy) => {
+    (referenceName: string, privacy: DatasetPrivacy) => {
       void runSimpleMutation("privacy", () =>
         setDatasetPrivacy(sessionId, referenceName, privacy),
       );
@@ -387,9 +388,10 @@ export function useSessionState(sessionId: string): UseSessionState {
         setError({ message: fmtError(e), kind: "replace" });
       } finally {
         setLoading(false);
+        void pollPersistError();
       }
     },
-    [sessionId, refreshServerState],
+    [sessionId, refreshServerState, pollPersistError],
   );
 
   const handleRemoveSource = useCallback(
@@ -435,10 +437,9 @@ export function useSessionState(sessionId: string): UseSessionState {
   // Click a result in the rail (ADR-0047 + ADR-0062 R2): moves ONLY viewedResult
   // (never the backend active). Pinning rules: a non-last Materialized pins so
   // the viewed result holds even if the last turn is a textual B/C/D; the last
-  // Materialized un-pins (it IS the current working position).
-  // The Thread component still passes (referenceName, assumption, viz); the
-  // assumption/viz args are ignored here -- they are derived from the thread
-  // (single source of truth, ADR-0051), not carried as a fat snapshot.
+  // Materialized un-pins (it IS the current working position). Thread passes
+  // only referenceName -- assumption/viz are derived from the thread (single
+  // source of truth, ADR-0051), not carried as a fat snapshot.
   const handleSelectResult = useCallback(
     (referenceName: string) => {
       setViewedResult({ referenceName });

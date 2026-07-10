@@ -109,18 +109,33 @@ export function VegaChart({ spec, onError }: VegaChartProps) {
   // flips (.dark class toggled by useTheme). The old view is finalized and a new
   // one embedded with the fresh palette. Subscribed once for the component's
   // life; spec/onError are read through refs so the listener never goes stale.
+  // An `unmounted` flag mirrors the spec effect's `cancelled` guard: a theme-
+  // triggered embed that resolves after unmount finalizes its orphan result
+  // instead of leaking, and a rejection after unmount skips the setter so React
+  // never sees a state update on a gone component.
   useEffect(() => {
-    return onThemeChange(() => {
+    let unmounted = false;
+    const unsubscribe = onThemeChange(() => {
       const node = containerRef.current;
       if (!node) return;
       const theme = buildVegaTheme();
       embed(node, specRef.current, { actions: false, config: vegaConfig(theme) })
         .then((result) => {
+          if (unmounted) {
+            result.finalize();
+            return;
+          }
           viewRef.current?.finalize();
           viewRef.current = result;
         })
-        .catch(() => onErrorRef.current("渲染出错"));
+        .catch(() => {
+          if (!unmounted) onErrorRef.current("渲染出错");
+        });
     });
+    return () => {
+      unmounted = true;
+      unsubscribe();
+    };
   }, []);
 
   // Resize-on-unhide (ADR-0051): when the pane comes back from display:none,

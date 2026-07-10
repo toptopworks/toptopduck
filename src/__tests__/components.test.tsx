@@ -8,9 +8,10 @@ import { PrivacyControls } from "../components/PrivacyControls";
 import { QuestionBar } from "../components/QuestionBar";
 import { ResultView } from "../components/ResultView";
 import { Thread } from "../components/Thread";
+import { VegaChart } from "../components/VegaChart";
 import { WorkingSetList } from "../components/WorkingSetList";
 import { readRows } from "../api";
-import embed from "vega-embed";
+import embed, { type VisualizationSpec } from "vega-embed";
 import type {
   DatasetDescriptor,
   DatasetPrivacy,
@@ -643,6 +644,49 @@ describe("ResultView", () => {
     fireEvent.click(screen.getByRole("button", { name: /上一页/ }));
     await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 0, 2));
   });
+
+  it("discards a late-arriving stale page when the result changes (seq race guard)", async () => {
+    // ResultView's seqRef: switching results starts a new loadPage(0) that
+    // supersedes the prior result's in-flight readRows. The stale response (for
+    // the old reference name) must be discarded -- its seq is no longer current.
+    // Without the guard, switching results then having the old page land late
+    // would yank the workspace back to the stale rows.
+    let resolveResult1: (page: Awaited<ReturnType<typeof readRows>>) => void = () => {};
+    vi.mocked(readRows).mockImplementation((_sid, ref) => {
+      if (ref === "result_1") {
+        return new Promise((resolve) => {
+          resolveResult1 = resolve;
+        });
+      }
+      return Promise.resolve({
+        columns: [{ name: "id", canonical_type: "BIGINT" }],
+        rows: [["99"]],
+        total: 1,
+        offset: 0,
+        limit: 100,
+      });
+    });
+    const { rerender } = render(
+      <ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />,
+    );
+    // result_1's page-0 is still pending; switch to result_2 (resolves fast).
+    rerender(
+      <ResultView sessionId="sess-1" referenceName="result_2" assumption={null} viz={null} />,
+    );
+    await waitFor(() => expect(screen.getByText("99")).toBeInTheDocument());
+    // Now result_1's stale page-0 lands -- it must be discarded, not rendered.
+    resolveResult1({
+      columns: [{ name: "id", canonical_type: "BIGINT" }],
+      rows: [["11"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    // Flush microtasks; result_2's "99" stays, result_1's "11" never shows.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByText("99")).toBeInTheDocument();
+    expect(screen.queryByText("11")).not.toBeInTheDocument();
+  });
 });
 
 describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
@@ -771,6 +815,50 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
   });
 });
 
+describe("VegaChart (ADR-0016/0033/0050)", () => {
+  // VegaChart owns the embed lifecycle: it renders one decoded spec, finalizes
+  // the prior view on re-embed/unmount (no canvas leak, ADR-0033), and forwards
+  // a render failure via onError so ResultView can degrade honestly. The
+  // ResultView viz tests above drive the same mock through ResultView; these
+  // cover VegaChart's own viewRef cleanup + onError path directly.
+  const barSpec = { mark: "bar" } as unknown as VisualizationSpec;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("embeds the spec and finalizes the view on unmount", async () => {
+    const finalize = vi.fn();
+    vi.mocked(embed).mockResolvedValue({ finalize } as unknown as Awaited<ReturnType<typeof embed>>);
+    const { unmount } = render(<VegaChart spec={barSpec} onError={() => {}} />);
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    unmount();
+    await waitFor(() => expect(finalize).toHaveBeenCalledTimes(1));
+  });
+
+  it("forwards a render failure via onError so the caller degrades", async () => {
+    vi.mocked(embed).mockRejectedValue(new Error("vega boom"));
+    const onError = vi.fn();
+    render(<VegaChart spec={barSpec} onError={onError} />);
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("渲染出错"));
+  });
+
+  it("finalizes the prior view when the spec changes (no leak across results)", async () => {
+    const finalizeA = vi.fn();
+    vi.mocked(embed).mockResolvedValue(
+      { finalize: finalizeA } as unknown as Awaited<ReturnType<typeof embed>>,
+    );
+    const { rerender } = render(<VegaChart spec={barSpec} onError={() => {}} />);
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    // A new spec identity re-runs the embed effect; the prior view is finalized
+    // (cancelled branch if A is still pending, or overwrite-finalize if resolved).
+    const lineSpec = { mark: "line" } as unknown as VisualizationSpec;
+    rerender(<VegaChart spec={lineSpec} onError={() => {}} />);
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(finalizeA).toHaveBeenCalled());
+  });
+});
+
 describe("Thread", () => {
   // A materialized record built from the shared mock descriptor (reference_name
   // overridden) -- the only outcome that needs a full dataset payload.
@@ -848,7 +936,7 @@ describe("Thread", () => {
     expect(screen.getByText("已取消")).toBeInTheDocument();
   });
 
-  it("clicking a result turn selects it with its assumption preserved", () => {
+  it("clicking a result turn selects it (reference name only, ADR-0051)", () => {
     const onSelectResult = vi.fn();
     render(
       <Thread
@@ -858,7 +946,9 @@ describe("Thread", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: /结果：result_2/ }));
-    expect(onSelectResult).toHaveBeenCalledWith("result_2", "用了简单计数", null);
+    // onSelectResult carries only referenceName -- assumption/viz are derived
+    // from the thread by the caller (ADR-0051), not passed through the callback.
+    expect(onSelectResult).toHaveBeenCalledWith("result_2");
   });
 
   it("marks the selected result turn active", () => {

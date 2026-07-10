@@ -10,10 +10,10 @@ import { Thread } from "../components/Thread";
 import { WorkingSetList } from "../components/WorkingSetList";
 import type {
   DatasetDescriptor,
+  DatasetPrivacy,
   ThreadEntry,
-  TurnRecord,
 } from "../types";
-import type { WorkspaceContent } from "./workspace";
+import type { NonMaterializedTurn, WorkspaceContent } from "./workspace";
 
 // The per-session pane (ADR-0051). One `<SessionPane key={sid} sessionId={sid} />`
 // owns ALL of a session's server state (via useSessionState -> TanStack Query)
@@ -205,8 +205,11 @@ function WorkspaceResult({
 
 // The textual outcome rendered full-width in the workspace (ADR-0062 R2
 // lastTurnText). Mirrors the rail's outcome encoding (ADR-0047) but at workspace
-// scale so a clarify/refuse/failed/cancelled is readable and actionable.
-function TextualOutcomeCard({ turn }: { turn: TurnRecord }) {
+// scale so a clarify/refuse/failed/cancelled is readable and actionable. The
+// turn is already narrowed to NonMaterializedTurn (workspace.ts), so Materialized
+// is excluded at the type level and the switch ends in `default: never` -- no
+// defensive `return null` for an unreachable case.
+function TextualOutcomeCard({ turn }: { turn: NonMaterializedTurn }) {
   switch (turn.outcome.kind) {
     case "Textual": {
       const { text_kind, body, assumption } = turn.outcome.data;
@@ -232,10 +235,6 @@ function TextualOutcomeCard({ turn }: { turn: TurnRecord }) {
           <h3>已取消</h3>
         </article>
       );
-    case "Materialized":
-      // A Materialized turn never reaches this card (workspaceContent routes it
-      // to ResultView). Defensive guard so the union stays exhaustive.
-      return null;
     default: {
       const unhandled: never = turn.outcome;
       throw new Error(`unhandled turn outcome: ${JSON.stringify(unhandled)}`);
@@ -264,7 +263,7 @@ function WorkspaceWorkingSet({
   onDelete: (referenceName: string) => void;
   onPrivacyChange: (
     referenceName: string,
-    privacy: import("../types").DatasetPrivacy,
+    privacy: DatasetPrivacy,
   ) => void;
 }) {
   // The 工作集 tab's own selection (which dataset's detail to show). Kept local

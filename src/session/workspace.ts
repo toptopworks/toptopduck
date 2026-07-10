@@ -14,6 +14,7 @@
 import type {
   StaleAnchor,
   ThreadEntry,
+  TurnOutcome,
   TurnRecord,
   VizSpec,
 } from "../types";
@@ -37,9 +38,19 @@ export function lastTurnEntry(thread: ThreadEntry[]): TurnRecord | null {
   return null;
 }
 
+/** The non-materialized outcome family (ADR-0028 B/C/D -- Textual / Failed /
+ * Cancelled): everything except Materialized. Narrowing TurnRecord onto this
+ * makes the "a Materialized never reaches the textual card" invariant a
+ * type-level guarantee, so the card's switch can end in `default: never`
+ * instead of a defensive `return null`. */
+export type NonMaterializedOutcome = Exclude<TurnOutcome, { kind: "Materialized" }>;
+export type NonMaterializedTurn = { question: string; outcome: NonMaterializedOutcome };
+
 /** Is this turn's outcome a non-materialized kind (ADR-0028 B/C/D -- Textual /
- * Failed / Cancelled)? These occupy a thread slot but produce no result_N. */
-export function isNonMaterialized(turn: TurnRecord): boolean {
+ * Failed / Cancelled)? These occupy a thread slot but produce no result_N. A
+ * type predicate so deriveWorkspaceContent carries the narrowed turn type into
+ * WorkspaceContent.lastTurnText, not the full TurnRecord. */
+export function isNonMaterialized(turn: TurnRecord): turn is NonMaterializedTurn {
   return turn.outcome.kind !== "Materialized";
 }
 
@@ -83,7 +94,7 @@ export function findMaterializedPayload(
  *  - `hero`: otherwise (no viewed result, and no non-materialized last turn) --
  *    the empty-state drop zone. */
 export type WorkspaceContent =
-  | { kind: "lastTurnText"; turn: TurnRecord }
+  | { kind: "lastTurnText"; turn: NonMaterializedTurn }
   | {
     kind: "result";
     referenceName: string;
