@@ -53,6 +53,7 @@
   "thread.staleChip.replaced": "源已更新",
   "thread.staleChip.deleted": "上游已删除",
   "thread.staleChip.aria": "因{reason}而失效，跳转到对应源事件",
+  "thread.staleChip.noTarget": "源事件已不在当前时间线中",
   "thread.activeChip.title": "提问点名「{name}」",
   "thread.assumption": "假设：{text}",
   "thread.resultLink": "结果：{name}",

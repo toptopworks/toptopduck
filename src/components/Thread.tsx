@@ -12,6 +12,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type {
+  DatasetDescriptor,
   SourceLifecycleEvent,
   SourceLifecycleKind,
   StaleAnchor,
@@ -21,13 +22,12 @@ import type {
   TurnRecord,
 } from "../types";
 
-// A compact label for the active-chip match (ADR-0047): the thread only needs
-// the names to detect when a question explicitly points at a dataset, so the
-// descriptor is narrowed at the call site rather than threaded through whole.
-export interface DatasetLabel {
-  referenceName: string;
-  displayName: string;
-}
+// A compact label slice for the active-chip match (ADR-0047): the thread only
+// needs the names to detect when a question explicitly points at a dataset, so
+// the descriptor is narrowed at the call site. Pick keeps the structural tie to
+// the single source of truth (DatasetDescriptor) rather than hand-mirroring
+// field names that would silently drift on a rename.
+export type DatasetLabel = Pick<DatasetDescriptor, "reference_name" | "display_name">;
 
 interface ThreadProps {
   /** The unified timeline (ADR-0040): turns interleaved with source lifecycle
@@ -89,6 +89,9 @@ export function Thread({
   const [highlightedSourceIdx, setHighlightedSourceIdx] = useState<number | null>(null);
   // One ref per source-event <li> so a chip jump can scrollIntoView the match.
   // The thread is append-only (ADR-0028/0040) so indices are stable positions.
+  // The cleanup nulls the slot so a future break of the append-only invariant
+  // (e.g. truncation/reorder) cannot leave a stale ref pointing at the wrong
+  // element -- the lookup would hit null instead of the wrong <li>.
   const sourceRefs = useRef<(HTMLLIElement | null)[]>([]);
 
   // Stale-derivative count per (reference_name, reason), so a Replaced/Deleted
@@ -104,35 +107,16 @@ export function Thread({
     return m;
   }, [staleByReference]);
 
-  // Click a stale causal chip (ADR-0047): jump-select the nearest matching
-  // SourceLifecycleEvent AFTER this result's turn. Causality guarantees the
-  // invalidating event follows the turn (the result existed, then the source
-  // changed); "nearest one" resolves same-source repeated lifecycles. No line
-  // is drawn, no event_id is stored -- the chip reuses the existing
-  // source-lifecycle derivation (ADR-0047).
-  const handleStaleChipJump = useCallback(
-    (turnIdx: number, anchor: StaleAnchor) => {
-      const targetKind = reasonToSourceKind(anchor.reason);
-      for (let i = turnIdx + 1; i < entries.length; i++) {
-        const e = entries[i];
-        if (
-          e.entry === "Source" &&
-          e.data.reference_name === anchor.reference_name &&
-          e.data.kind === targetKind
-        ) {
-          setHighlightedSourceIdx(i);
-          // Optional-call: jsdom does not implement scrollIntoView, so guard
-          // the method itself (a real browser scrolls; tests assert the
-          // data-highlighted attribute set on the line above instead).
-          sourceRefs.current[i]?.scrollIntoView?.({ behavior: "smooth", block: "center" });
-          return;
-        }
-      }
-      // No matching event after the turn -- the resume edge case noted in
-      // ADR-0047. No-op rather than a broken scroll to nothing.
-    },
-    [entries],
-  );
+  // Apply a chip jump (ADR-0047): highlight the matched source event and scroll
+  // it into view. Only ever called when findStaleSourceIdx already located a
+  // target (the chip is disabled otherwise), so targetIdx is a valid index.
+  const jumpToSource = useCallback((targetIdx: number) => {
+    setHighlightedSourceIdx(targetIdx);
+    // Optional-call: jsdom does not implement scrollIntoView, so guard the
+    // method itself (a real browser scrolls; tests assert the data-highlighted
+    // attribute set on the line above instead).
+    sourceRefs.current[targetIdx]?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+  }, []);
 
   if (entries.length === 0) return null;
   return (
@@ -153,6 +137,12 @@ export function Thread({
               entry.data.outcome.kind === "Materialized"
                 ? staleByReference.get(entry.data.outcome.data.dataset.reference_name)
                 : undefined;
+            // Resolve the chip's jump target up front (ADR-0047): the nearest
+            // matching SourceLifecycleEvent after this turn. null when no event
+            // follows (resume / stale-map inconsistency) -- the chip then
+            // renders disabled rather than promising a jump it cannot perform.
+            const jumpTargetIdx =
+              staleAnchor === undefined ? null : findStaleSourceIdx(entries, i, staleAnchor);
             return (
               <li
                 // The thread is append-only and never reordered (ADR-0028/0039/
@@ -170,8 +160,11 @@ export function Thread({
                   selectedResult={selectedResult}
                   onSelectResult={onSelectResult}
                   staleAnchor={staleAnchor}
+                  hasJumpTarget={jumpTargetIdx !== null}
+                  onStaleChipJump={
+                    jumpTargetIdx === null ? undefined : () => jumpToSource(jumpTargetIdx)
+                  }
                   mentionedDataset={findMentionedDataset(entry.data.question, datasetLabels)}
-                  onStaleChipJump={(anchor) => handleStaleChipJump(i, anchor)}
                 />
               </li>
             );
@@ -185,6 +178,9 @@ export function Thread({
               key={i}
               ref={(el) => {
                 sourceRefs.current[i] = el;
+                return () => {
+                  sourceRefs.current[i] = null;
+                };
               }}
               className="source-entry"
               data-source-kind={entry.data.kind.toLowerCase()}
@@ -309,12 +305,13 @@ function outcomeVisual(
       };
     case "Textual":
       return {
-        // ADR-0050 maps B to Lucide `MessageSquareQuestion`, but that glyph is
-        // absent in lucide-react@1.24.0; `MessageCircleQuestion` is the closest
-        // available (question-mark semantics preserved). Switch back if a later
-        // lucide version ships MessageSquareQuestion. B bundles Clarify + Refuse
-        // behind one neutral glyph (the split icon is deferred to visual
-        // polish); the label still names which sub-kind.
+        // ADR-0050 specifies `MessageSquareQuestion` for outcome B, but that
+        // glyph is not exported by the currently pinned lucide-react; using
+        // `MessageCircleQuestion` is a deliberate DEVIATION from ADR-0050
+        // (question-mark semantics preserved). Follow-up: restore
+        // MessageSquareQuestion once lucide ships it, OR amend ADR-0050 to make
+        // MessageCircleQuestion the canonical glyph. The label still names
+        // which sub-kind (Clarify vs Refuse) so the split is legible without it.
         Icon: MessageCircleQuestion,
         label:
           outcome.data.text_kind === "Clarify"
@@ -358,30 +355,38 @@ function findMentionedDataset(
   labels: ReadonlyArray<DatasetLabel>,
 ): DatasetLabel | null {
   for (const label of labels) {
-    if (question.includes(label.displayName)) return label;
+    if (question.includes(label.display_name)) return label;
   }
   for (const label of labels) {
-    if (question.includes(label.referenceName)) return label;
+    if (question.includes(label.reference_name)) return label;
   }
   return null;
 }
 
-// Maps a stale reason to the source lifecycle kind that invalidates a result
-// (ADR-0047 chip-trace mapping). A Replaced source invalidates via a Replaced
-// event; a Deleted source via a Deleted event. Added never invalidates
-// (ADR-0040), so it has no entry. Exhaustiveness guard so a future StaleReason
-// variant forces a branch here.
-function reasonToSourceKind(reason: StaleReason): SourceLifecycleKind {
-  switch (reason) {
-    case "Replaced":
-      return "Replaced";
-    case "Deleted":
-      return "Deleted";
-    default: {
-      const unhandled: never = reason;
-      throw new Error(`unhandled stale reason: ${JSON.stringify(unhandled)}`);
+// Locate the nearest SourceLifecycleEvent after a turn whose reference_name +
+// kind match a stale anchor (ADR-0047 chip-trace). Causality guarantees the
+// invalidating event follows the turn; "nearest one" resolves same-source
+// repeated lifecycles. No event_id is stored (ADR-0047 YAGNI) -- the match is
+// derived from the existing thread. StaleReason is now the invalidating subset
+// of SourceLifecycleKind (types.ts), so anchor.reason compares to entry.data.kind
+// directly with no conversion function. Returns null when no event follows
+// (resume / stale-map inconsistency); the caller renders the chip disabled then.
+function findStaleSourceIdx(
+  entries: ThreadEntry[],
+  turnIdx: number,
+  anchor: StaleAnchor,
+): number | null {
+  for (let i = turnIdx + 1; i < entries.length; i++) {
+    const e = entries[i];
+    if (
+      e.entry === "Source" &&
+      e.data.reference_name === anchor.reference_name &&
+      e.data.kind === anchor.reason
+    ) {
+      return i;
     }
   }
+  return null;
 }
 
 // Concise verb for the stale causal chip (ADR-0041 honest split, ADR-0052 i18n):
@@ -410,13 +415,63 @@ function staleChipVerb(intl: IntlShape, reason: StaleReason): string {
   }
 }
 
+// The clickable stale causal chip (ADR-0041/0047): a compact label that jumps
+// to the invalidating source event. Disabled (not hidden) when no matching event
+// follows the turn, so the chip never promises a jump it cannot perform -- the
+// title then explains why. Extracted so the verb is computed once and the
+// Materialized body reads cleanly. The wording splits honestly by reason:
+// Replaced = re-askable, Deleted = gone.
+function StaleChip({
+  reason,
+  hasJumpTarget,
+  onJump,
+}: {
+  reason: StaleReason;
+  hasJumpTarget: boolean;
+  onJump: (() => void) | undefined;
+}) {
+  const intl = useIntl();
+  const verb = staleChipVerb(intl, reason);
+  return (
+    <button
+      type="button"
+      className="stale-chip"
+      disabled={!hasJumpTarget}
+      aria-label={intl.formatMessage(
+        {
+          id: "thread.staleChip.aria",
+          defaultMessage: "Stale because {reason}, jump to the source event",
+        },
+        { reason: verb },
+      )}
+      title={
+        hasJumpTarget
+          ? undefined
+          : intl.formatMessage({
+              id: "thread.staleChip.noTarget",
+              defaultMessage: "Source event no longer in the timeline",
+            })
+      }
+      onClick={onJump}
+    >
+      {verb}
+    </button>
+  );
+}
+
 interface TurnCardProps {
   record: TurnRecord;
   selectedResult: string | null;
   onSelectResult: (referenceName: string) => void;
   staleAnchor: StaleAnchor | undefined;
+  /** Whether a matching source event follows this turn, i.e. the stale chip can
+   * actually perform its jump (ADR-0047). False on the resume / stale-map
+   * inconsistency edge case, which disables the chip instead of a silent no-op. */
+  hasJumpTarget: boolean;
+  /** Jump-to-source handler, bound to the pre-resolved target index. undefined
+   * when hasJumpTarget is false (the chip is disabled, so no handler is wired). */
+  onStaleChipJump: (() => void) | undefined;
   mentionedDataset: DatasetLabel | null;
-  onStaleChipJump: (anchor: StaleAnchor) => void;
 }
 
 // One turn rendered as a single-row head (ADR-0047): outcome glyph + verbatim
@@ -434,8 +489,9 @@ function TurnCard({
   selectedResult,
   onSelectResult,
   staleAnchor,
-  mentionedDataset,
+  hasJumpTarget,
   onStaleChipJump,
+  mentionedDataset,
 }: TurnCardProps) {
   const intl = useIntl();
   const isStale = !!staleAnchor;
@@ -457,10 +513,10 @@ function TurnCard({
             className="turn-active-chip"
             title={intl.formatMessage(
               { id: "thread.activeChip.title", defaultMessage: "Question names \"{name}\"" },
-              { name: mentionedDataset.displayName },
+              { name: mentionedDataset.display_name },
             )}
           >
-            →{mentionedDataset.displayName}
+            →{mentionedDataset.display_name}
           </span>
         )}
       </div>
@@ -469,6 +525,7 @@ function TurnCard({
         selectedResult={selectedResult}
         onSelectResult={onSelectResult}
         staleAnchor={staleAnchor}
+        hasJumpTarget={hasJumpTarget}
         onStaleChipJump={onStaleChipJump}
       />
     </div>
@@ -498,7 +555,8 @@ interface TurnBodyProps {
   selectedResult: string | null;
   onSelectResult: (referenceName: string) => void;
   staleAnchor: StaleAnchor | undefined;
-  onStaleChipJump: (anchor: StaleAnchor) => void;
+  hasJumpTarget: boolean;
+  onStaleChipJump: (() => void) | undefined;
 }
 
 function TurnBody({
@@ -506,9 +564,9 @@ function TurnBody({
   selectedResult,
   onSelectResult,
   staleAnchor,
+  hasJumpTarget,
   onStaleChipJump,
 }: TurnBodyProps) {
-  const intl = useIntl();
   switch (record.outcome.kind) {
     case "Materialized": {
       const { dataset, assumption } = record.outcome.data;
@@ -528,20 +586,11 @@ function TurnBody({
             />
           </button>
           {staleAnchor && (
-            <button
-              type="button"
-              className="stale-chip"
-              aria-label={intl.formatMessage(
-                {
-                  id: "thread.staleChip.aria",
-                  defaultMessage: "Stale because {reason}, jump to the source event",
-                },
-                { reason: staleChipVerb(intl, staleAnchor.reason) },
-              )}
-              onClick={() => onStaleChipJump(staleAnchor)}
-            >
-              {staleChipVerb(intl, staleAnchor.reason)}
-            </button>
+            <StaleChip
+              reason={staleAnchor.reason}
+              hasJumpTarget={hasJumpTarget}
+              onJump={onStaleChipJump}
+            />
           )}
           <AssumptionNote assumption={assumption} />
         </p>

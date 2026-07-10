@@ -1205,8 +1205,8 @@ describe("Thread", () => {
     // is on the display label first, then the reference name; stale datasets
     // are excluded (they cannot be the target of a new question).
     const labels = [
-      { referenceName: "people", displayName: "员工表" },
-      { referenceName: "orders", displayName: "订单表" },
+      { reference_name: "people", display_name: "员工表" },
+      { reference_name: "orders", display_name: "订单表" },
     ];
     const records: TurnRecord[] = [
       { question: "在订单表上统计总销售额", outcome: { kind: "Cancelled" } },
@@ -1223,6 +1223,76 @@ describe("Thread", () => {
     // The naming turn gets a chip; the implicit one does not.
     expect(screen.getByText(/→订单表/)).toBeInTheDocument();
     expect(container.querySelectorAll(".turn-active-chip")).toHaveLength(1);
+  });
+
+  it("falls back to the reference name when the display name is absent from the question (issue #80)", () => {
+    // findMentionedDataset tries the display label first, then the technical
+    // reference name, so a user who knows the id ("在 people 上") still lights
+    // up the chip. The chip label always uses the display name (what most users
+    // recognize), never the matched token.
+    const labels = [{ reference_name: "people", display_name: "员工表" }];
+    const records: TurnRecord[] = [
+      { question: "在 people 上统计总销售额", outcome: { kind: "Cancelled" } },
+    ];
+    renderThread(
+      <Thread
+        entries={records.map(turnEntry)}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        datasetLabels={labels}
+      />,
+    );
+    // Matched via reference name; chip label is still the display name.
+    expect(screen.getByText(/→员工表/)).toBeInTheDocument();
+  });
+
+  it("attributes the active chip to the dataset whose name the question contains (issue #80)", () => {
+    // ADR-0047 signal-vs-noise: lock the first-display-name-hit-wins rule so a
+    // future refactor (flipping display/reference order, reordering labels)
+    // cannot silently mis-attribute the chip to the wrong dataset.
+    const labels = [
+      { reference_name: "people", display_name: "员工表" },
+      { reference_name: "orders", display_name: "订单表" },
+    ];
+    const records: TurnRecord[] = [
+      { question: "在订单表上统计", outcome: { kind: "Cancelled" } },
+    ];
+    renderThread(
+      <Thread
+        entries={records.map(turnEntry)}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        datasetLabels={labels}
+      />,
+    );
+    expect(screen.getByText(/→订单表/)).toBeInTheDocument();
+    expect(screen.queryByText(/→员工表/)).not.toBeInTheDocument();
+  });
+
+  it("disables the stale causal chip when no matching source event follows the turn (issue #80, ADR-0047)", () => {
+    // ADR-0047 honest control: the causal chip is clickable only when a matching
+    // SourceLifecycleEvent actually follows this turn. When the stale map and the
+    // thread disagree (resume / the invalidating event was filtered out), the
+    // chip renders disabled with an explanatory title rather than silently
+    // no-op'ing a click. The verb still names the stale reason -- only the jump
+    // is withheld.
+    const entries: ThreadEntry[] = [turnEntry(materializedRecord("result_1", null))];
+    const staleByReference = new Map([
+      ["result_1", { reference_name: "people", display_name: "员工表", reason: "Replaced" as const }],
+    ]);
+    const { container } = renderThread(
+      <Thread
+        entries={entries}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        staleByReference={staleByReference}
+      />,
+    );
+    // The chip is present with its verb but disabled (no jump target after turn).
+    const chip = screen.getByRole("button", { name: /源已更新/ });
+    expect((chip as HTMLButtonElement).disabled).toBe(true);
+    // No source marker is highlighted.
+    expect(container.querySelector(`.source-entry[data-highlighted="true"]`)).toBeNull();
   });
 });
 

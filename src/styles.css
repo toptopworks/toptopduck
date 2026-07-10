@@ -323,6 +323,11 @@ table.result td.cell-null { background: var(--muted); }
   color: var(--muted-foreground);
 }
 .thread .stale-chip:hover { background: var(--muted); color: var(--foreground); }
+/* A disabled stale chip (no matching source event follows, ADR-0047): `all: unset`
+   strips the browser's native disabled dimming, so dim explicitly and suppress the
+   hover tint so it reads as inert, not clickable. */
+.thread .stale-chip:disabled { cursor: not-allowed; opacity: 0.55; }
+.thread .stale-chip:disabled:hover { background: transparent; color: var(--muted-foreground); }
 .thread .turn-outcome.textual .textual-kind {
   display: inline-block; margin-right: 0.3rem; color: var(--muted-foreground);
 }

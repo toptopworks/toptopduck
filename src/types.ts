@@ -64,10 +64,13 @@ export interface DatasetDescriptor {
 }
 
 // Which kind of source event invalidated a result_N (issue #40/#41, mirrors the
-// Rust StaleReason). The UI renders each variant distinctly in the stale badge
-// (issue #41 AC4): "Deleted" -> "已删除"; "Replaced" -> "已更新". Bare variant
-// string across IPC (like SourceLifecycleKind).
-export type StaleReason = "Deleted" | "Replaced";
+// Rust StaleReason). This is the invalidating subset of SourceLifecycleKind --
+// every lifecycle kind except Added (adding a source never invalidates a result,
+// ADR-0040) -- so the type is derived rather than re-listed: a future lifecycle
+// kind that can invalidate joins automatically, and only one that never
+// invalidates needs a fresh Exclude term. The UI renders each variant distinctly
+// in the stale badge (issue #41 AC4): "Deleted" -> "已删除"; "Replaced" -> "已更新".
+export type StaleReason = Exclude<SourceLifecycleKind, "Added">;
 
 // Why a result_N is stale and which source lifecycle event invalidated it
 // (issue #40/#41): a snapshot of the invalidating source event's identity -- the

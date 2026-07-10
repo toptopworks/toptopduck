@@ -38,9 +38,7 @@ export function SessionPane({ sessionId }: SessionPaneProps) {
   // Non-stale dataset labels for the rail's conditional active chip (ADR-0047):
   // a turn's question lights up a chip only when it explicitly names a dataset.
   // Stale datasets are excluded -- they cannot be the target of a new question.
-  const datasetLabels = s.datasets
-    .filter((d) => !d.stale)
-    .map((d) => ({ referenceName: d.reference_name, displayName: d.display_name }));
+  const datasetLabels = s.datasets.filter((d) => !d.stale);
 
   return (
     <div className="session-pane">

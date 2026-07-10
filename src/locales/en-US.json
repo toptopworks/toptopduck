@@ -53,6 +53,7 @@
   "thread.staleChip.replaced": "Source updated",
   "thread.staleChip.deleted": "Upstream deleted",
   "thread.staleChip.aria": "Stale because {reason}, jump to the source event",
+  "thread.staleChip.noTarget": "Source event no longer in the timeline",
   "thread.activeChip.title": "Question names \"{name}\"",
   "thread.assumption": "Assumption: {text}",
   "thread.resultLink": "Result: {name}",
