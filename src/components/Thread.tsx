@@ -1,5 +1,33 @@
-import type { SourceLifecycleKind, StaleAnchor, ThreadEntry, TurnRecord } from "../types";
-import { staleBadgeText } from "../staleBadge";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
+import {
+  Ban,
+  CircleOff,
+  MessageCircleQuestion,
+  Plus,
+  RefreshCw,
+  Table2,
+  Trash2,
+  TriangleAlert,
+  type LucideIcon,
+} from "lucide-react";
+import type {
+  DatasetDescriptor,
+  SourceLifecycleEvent,
+  SourceLifecycleKind,
+  StaleAnchor,
+  StaleReason,
+  ThreadEntry,
+  TurnOutcome,
+  TurnRecord,
+} from "../types";
+
+// A compact label slice for the active-chip match (ADR-0047): the thread only
+// needs the names to detect when a question explicitly points at a dataset, so
+// the descriptor is narrowed at the call site. Pick keeps the structural tie to
+// the single source of truth (DatasetDescriptor) rather than hand-mirroring
+// field names that would silently drift on a rename.
+export type DatasetLabel = Pick<DatasetDescriptor, "reference_name" | "display_name">;
 
 interface ThreadProps {
   /** The unified timeline (ADR-0040): turns interleaved with source lifecycle
@@ -14,90 +42,235 @@ interface ThreadProps {
    * (single source of truth, ADR-0051), not carried as a fat snapshot. */
   onSelectResult: (referenceName: string) => void;
   /** Stale result_N anchors keyed by reference name (issue #40/#41,
-   * ADR-0013): a Materialized turn whose result is now stale renders a
-   * "因源已删除/已更新而失效" badge naming the invalidating source. The stale
-   * flag lives on the live working-set descriptor (a TurnRecord's dataset
-   * snapshot is the at-materialization state, always fresh), so the caller
-   * derives this map from the current working set and passes it down -- the
-   * thread itself holds no state. Optional so call sites that don't exercise
-   * stale rendering (tests) can omit it; defaults to an empty map (no badges
-   * rendered). */
+   * ADR-0013): a Materialized turn whose result is now stale renders as a ghost
+   * (CircleOff + reduced opacity) plus a clickable causal chip that jumps to
+   * the invalidating source event. The stale flag lives on the live working-set
+   * descriptor (a TurnRecord's dataset snapshot is the at-materialization
+   * state, always fresh), so the caller derives this map from the current
+   * working set and passes it down -- the thread itself holds no state.
+   * Optional so call sites that don't exercise stale rendering (tests) can omit
+   * it; defaults to an empty map (no ghosts rendered). */
   staleByReference?: ReadonlyMap<string, StaleAnchor>;
+  /** Non-stale dataset labels used to detect when a turn's question explicitly
+   * names a working-set dataset (ADR-0047 conditional active chip). Most turns
+   * act implicitly on the prior step, so the chip is absent by default; it
+   * lights up only when the user typed a dataset name. Optional for tests that
+   * do not exercise the chip; defaults to empty (no chips rendered). */
+  datasetLabels?: ReadonlyArray<DatasetLabel>;
 }
 
-// The always-visible conversation thread (ADR-0028/0039/0040). Turns are listed
-// in order, labeled by the verbatim question; the four TurnOutcome variants
-// render distinctly (Materialized / Textual[Clarify,Refuse] / Failed /
-// Cancelled), and the optional assumption note (ADR-0009/0018) shows as a
-// correctable side note. A result turn is clickable to (re)show its rows, and a
-// now-stale result (issue #40/#41) carries an "因源已删除/已更新而失效" badge
-// while staying visible (soft invalidation, ADR-0013). Source lifecycle events
-// (Added/Deleted/Replaced) render as non-interactive markers -- they occupy a
-// timeline slot and are always visible but are NOT turns, so they never show a
-// question/outcome and never enter the LLM window.
-export function Thread({ entries, selectedResult, onSelectResult, staleByReference = new Map() }: ThreadProps) {
+// The always-visible conversation thread (ADR-0028/0039/0040/0047). The rail
+// hosts two visually distinct species: turn cards (single-line verbatim
+// question + outcome glyph/color) and source lifecycle markers (thin, full-
+// width, non-interactive). A Materialized result that has since gone stale
+// renders as a ghost (CircleOff + reduced opacity) whose causal chip jumps to
+// the invalidating source event (ADR-0041/0047). Source events are first-class
+// in the thread (always visible, occupy a slot) but are NOT turns -- they never
+// show a question/outcome and never enter the LLM window.
+//
+// i18n (ADR-0052): every layer-1 chrome string (headings, outcome/source
+// labels, stale chips, active-chip tooltip) routes through react-intl with a
+// STATIC literal id + defaultMessage so @formatjs/cli extract can resolve the
+// source id set for the CI alignment guard. Layer-4 content (the verbatim
+// question, reference names, display names, LLM failure reasons) passes through
+// untranslated via ICU placeholders; the assumption note's text is layer-3 LLM
+// content and is likewise passed through.
+export function Thread({
+  entries,
+  selectedResult,
+  onSelectResult,
+  staleByReference = new Map(),
+  datasetLabels = [],
+}: ThreadProps) {
+  const intl = useIntl();
+  // The source-event index currently highlighted by a stale-chip jump-select
+  // (ADR-0047 chip-trace). Persistent so the user sees which event a stale chip
+  // pointed at; a subsequent jump moves it. null when no chip has been clicked.
+  const [highlightedSourceIdx, setHighlightedSourceIdx] = useState<number | null>(null);
+  // One ref per source-event <li> so a chip jump can scrollIntoView the match.
+  // The thread is append-only (ADR-0028/0040) so indices are stable positions.
+  // The cleanup nulls the slot so a future break of the append-only invariant
+  // (e.g. truncation/reorder) cannot leave a stale ref pointing at the wrong
+  // element -- the lookup would hit null instead of the wrong <li>.
+  const sourceRefs = useRef<(HTMLLIElement | null)[]>([]);
+
+  // Stale-derivative count per (reference_name, reason), so a Replaced/Deleted
+  // source marker can show "失效 N" naming how many results that event killed.
+  // No event_id is added (ADR-0047 YAGNI); the count is attributed by matching
+  // reference_name + kind, exact for the common single-event case.
+  const staleCountsByKey = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const anchor of staleByReference.values()) {
+      const key = `${anchor.reference_name}:${anchor.reason}`;
+      m.set(key, (m.get(key) ?? 0) + 1);
+    }
+    return m;
+  }, [staleByReference]);
+
+  // Apply a chip jump (ADR-0047): highlight the matched source event and scroll
+  // it into view. Only ever called when findStaleSourceIdx already located a
+  // target (the chip is disabled otherwise), so targetIdx is a valid index.
+  const jumpToSource = useCallback((targetIdx: number) => {
+    setHighlightedSourceIdx(targetIdx);
+    // Optional-call: jsdom does not implement scrollIntoView, so guard the
+    // method itself (a real browser scrolls; tests assert the data-highlighted
+    // attribute set on the line above instead).
+    sourceRefs.current[targetIdx]?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+  }, []);
+
   if (entries.length === 0) return null;
   return (
-    <section className="panel thread" aria-label="对话历史">
-      <h2>对话</h2>
+    <section
+      className="panel thread"
+      aria-label={intl.formatMessage({
+        id: "thread.ariaLabel",
+        defaultMessage: "Conversation history",
+      })}
+    >
+      <h2>
+        <FormattedMessage id="thread.title" defaultMessage="Conversation" />
+      </h2>
       <ol>
-        {entries.map((entry, i) => (
-          // The thread is append-only and never reordered (ADR-0028/0039/0040),
-          // so the array index is a stable, unique key for each entry -- no
-          // separate id is needed (YAGNI: an id would ripple through the
-          // Rust/TS model + wire contract for no present benefit).
-          // TODO: if thread truncation/pagination or entry-local UI state
-          // (fold/copy/select) ever lands, switch to a stable monotonic id --
-          // index keys would mispatch DOM state across re-renders then.
-          <li key={i} className={entry.entry === "Turn" ? "turn" : "source-event"}>
-            {entry.entry === "Turn" ? (
-              <TurnEntry
-                record={entry.data}
-                selectedResult={selectedResult}
-                onSelectResult={onSelectResult}
-                staleByReference={staleByReference}
-              />
-            ) : (
-              <SourceEvent kind={entry.data.kind} displayName={entry.data.display_name} />
-            )}
-          </li>
-        ))}
+        {entries.map((entry, i) => {
+          if (entry.entry === "Turn") {
+            const staleAnchor =
+              entry.data.outcome.kind === "Materialized"
+                ? staleByReference.get(entry.data.outcome.data.dataset.reference_name)
+                : undefined;
+            // Resolve the chip's jump target up front (ADR-0047): the nearest
+            // matching SourceLifecycleEvent after this turn. null when no event
+            // follows (resume / stale-map inconsistency) -- the chip then
+            // renders disabled rather than promising a jump it cannot perform.
+            const jumpTargetIdx =
+              staleAnchor === undefined ? null : findStaleSourceIdx(entries, i, staleAnchor);
+            return (
+              <li
+                // The thread is append-only and never reordered (ADR-0028/0039/
+                // 0040), so the array index is a stable, unique key for each
+                // entry -- no separate id is needed (YAGNI: an id would ripple
+                // through the Rust/TS model + wire contract for no present
+                // benefit). Switch to a stable monotonic id if entry-local UI
+                // state (fold/copy) ever lands.
+                key={i}
+                className="turn-entry"
+                data-outcome={entry.data.outcome.kind.toLowerCase()}
+              >
+                <TurnCard
+                  record={entry.data}
+                  selectedResult={selectedResult}
+                  onSelectResult={onSelectResult}
+                  staleAnchor={staleAnchor}
+                  hasJumpTarget={jumpTargetIdx !== null}
+                  onStaleChipJump={
+                    jumpTargetIdx === null ? undefined : () => jumpToSource(jumpTargetIdx)
+                  }
+                  mentionedDataset={findMentionedDataset(entry.data.question, datasetLabels)}
+                />
+              </li>
+            );
+          }
+          const staleCount =
+            entry.data.kind === "Added"
+              ? 0
+              : staleCountsByKey.get(`${entry.data.reference_name}:${entry.data.kind}`) ?? 0;
+          return (
+            <li
+              key={i}
+              ref={(el) => {
+                sourceRefs.current[i] = el;
+                return () => {
+                  sourceRefs.current[i] = null;
+                };
+              }}
+              className="source-entry"
+              data-source-kind={entry.data.kind.toLowerCase()}
+              data-highlighted={highlightedSourceIdx === i ? "true" : undefined}
+            >
+              <SourceMarker event={entry.data} staleCount={staleCount} />
+            </li>
+          );
+        })}
       </ol>
     </section>
   );
 }
 
 // A source lifecycle event rendered as a non-interactive timeline marker
-// (ADR-0040): distinct from a turn (no question, no outcome). Added = "＋", a
-// source entered the working set; Deleted = "－", a source left it; Replaced =
-// "↻", a source's backing snapshot was swapped under the same reference name
-// (issue #41, ADR-0025). The display label is carried on the event so it still
-// names what was added/removed/replaced after the descriptor is gone.
-function SourceEvent({ kind, displayName }: { kind: SourceLifecycleKind; displayName: string }) {
-  const { marker, verb } = sourceLifecycleText(kind);
+// (ADR-0040/0047): distinct species from a turn (no question, no outcome icon).
+// Added = Plus (a source entered the working set); Deleted = Trash2 (a source
+// left it); Replaced = RefreshCw (a source's backing snapshot was swapped under
+// the same reference name, ADR-0025). A Replaced/Deleted marker names how many
+// derivatives it invalidated ("失效 N") when that count is non-zero. The marker
+// is thin and full-width so the two species read as visually distinct at a
+// glance. The display name is layer-4 canonical (ADR-0037) and passes through
+// the {name} ICU placeholder untranslated.
+function SourceMarker({
+  event,
+  staleCount,
+}: {
+  event: SourceLifecycleEvent;
+  staleCount: number;
+}) {
+  const intl = useIntl();
+  const { Icon, text } = sourceMarkerText(intl, event.kind, event.display_name);
   return (
-    <p className={`source-lifecycle ${kind.toLowerCase()}`}>
-      <span className="source-marker" aria-hidden="true">{marker}</span>
-      <span className="source-text">{verb}「{displayName}」</span>
+    <p className={`source-lifecycle ${event.kind.toLowerCase()}`}>
+      <Icon className="source-icon" aria-hidden="true" />
+      <span className="source-text">
+        {text}
+        {staleCount > 0 && (
+          <span className="source-stale-count">
+            <FormattedMessage
+              id="thread.source.staleSuffix"
+              defaultMessage=" · invalidated {count}"
+              values={{ count: staleCount }}
+            />
+          </span>
+        )}
+      </span>
     </p>
   );
 }
 
-// Exhaustiveness guard mirroring Rust's compile-time match on
-// `SourceLifecycleKind`: a future variant (e.g. Replaced, #41) must add a
-// branch here. `types.ts` is the hand-maintained mirror of the Rust enum, so
-// the TS compiler won't catch a missing branch without this `never` check
-// (consistent with the `TurnBody` guard below).
-function sourceLifecycleText(kind: SourceLifecycleKind): { marker: string; verb: string } {
+// Lucide glyph + i18n'd text per source lifecycle kind (ADR-0050 glyph mapping,
+// ADR-0052 i18n). The verb + display name ride one ICU message so the quoting
+// convention (zh 「」 vs en ") follows the locale. Exhaustiveness guard
+// mirroring Rust's compile-time match on `SourceLifecycleKind`: a future variant
+// must add a branch here. `types.ts` is the hand-maintained mirror of the Rust
+// enum, so the TS compiler won't catch a missing branch without this `never`
+// check.
+function sourceMarkerText(
+  intl: IntlShape,
+  kind: SourceLifecycleKind,
+  name: string,
+): { Icon: LucideIcon; text: string } {
   switch (kind) {
     case "Added":
-      return { marker: "＋", verb: "加载了" };
+      return {
+        Icon: Plus,
+        text: intl.formatMessage(
+          { id: "thread.source.added", defaultMessage: "Loaded \"{name}\"" },
+          { name },
+        ),
+      };
     case "Deleted":
-      return { marker: "－", verb: "删除了" };
+      return {
+        Icon: Trash2,
+        text: intl.formatMessage(
+          { id: "thread.source.deleted", defaultMessage: "Deleted \"{name}\"" },
+          { name },
+        ),
+      };
     case "Replaced":
-      // Mirrors the working-set list's ↻ replace glyph; "换源了" carries the
-      // PRD term (CONTEXT.md / ADR-0025), distinct from 加载了 (a new name).
-      return { marker: "↻", verb: "换源了" };
+      // "Replaced" carries the PRD term (CONTEXT.md / ADR-0025), distinct from
+      // Added (a new name) and Deleted (a name gone).
+      return {
+        Icon: RefreshCw,
+        text: intl.formatMessage(
+          { id: "thread.source.replaced", defaultMessage: "Replaced \"{name}\"" },
+          { name },
+        ),
+      };
     default: {
       const unhandled: never = kind;
       throw new Error(`unhandled source lifecycle kind: ${JSON.stringify(unhandled)}`);
@@ -105,32 +278,275 @@ function sourceLifecycleText(kind: SourceLifecycleKind): { marker: string; verb:
   }
 }
 
-interface TurnEntryProps {
+// A turn's outcome mapped to its Lucide glyph + accessible label (ADR-0047/0050
+// four-outcome visual language, ADR-0052 i18n). A stale Materialized turn swaps
+// Table2 for CircleOff (ghost). The label rides the icon's aria-label so the
+// outcome kind is conveyed to assistive tech and is queryable in tests without
+// relying on color alone.
+function outcomeVisual(
+  intl: IntlShape,
+  outcome: TurnOutcome,
+  stale: boolean,
+): { Icon: LucideIcon; label: string } {
+  if (stale && outcome.kind === "Materialized") {
+    return {
+      Icon: CircleOff,
+      label: intl.formatMessage({ id: "thread.outcome.stale", defaultMessage: "Result stale" }),
+    };
+  }
+  switch (outcome.kind) {
+    case "Materialized":
+      return {
+        Icon: Table2,
+        label: intl.formatMessage({
+          id: "thread.outcome.materialized",
+          defaultMessage: "Result ready",
+        }),
+      };
+    case "Textual":
+      return {
+        // ADR-0050 specifies `MessageSquareQuestion` for outcome B, but that
+        // glyph is not exported by the currently pinned lucide-react; using
+        // `MessageCircleQuestion` is a deliberate DEVIATION from ADR-0050
+        // (question-mark semantics preserved). Follow-up: restore
+        // MessageSquareQuestion once lucide ships it, OR amend ADR-0050 to make
+        // MessageCircleQuestion the canonical glyph. The label still names
+        // which sub-kind (Clarify vs Refuse) so the split is legible without it.
+        Icon: MessageCircleQuestion,
+        label:
+          outcome.data.text_kind === "Clarify"
+            ? intl.formatMessage({
+                id: "thread.outcome.clarify",
+                defaultMessage: "Needs clarification",
+              })
+            : intl.formatMessage({
+                id: "thread.outcome.refused",
+                defaultMessage: "Cannot fulfill",
+              }),
+      };
+    case "Failed":
+      return {
+        Icon: TriangleAlert,
+        label: intl.formatMessage({ id: "thread.outcome.failed", defaultMessage: "Failed" }),
+      };
+    case "Cancelled":
+      return {
+        Icon: Ban,
+        label: intl.formatMessage({
+          id: "thread.outcome.cancelled",
+          defaultMessage: "Cancelled",
+        }),
+      };
+    default: {
+      const unhandled: never = outcome;
+      throw new Error(`unhandled turn outcome: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+// Detect whether a turn's question explicitly names a working-set dataset
+// (ADR-0047 conditional active chip). Most turns act implicitly on the prior
+// step, so the chip is absent by default; it lights up only when the user typed
+// a dataset name ("在订单表上"), making the chip a signal rather than noise.
+// Matches on the display label (what the user sees/types) first, then the
+// reference name (for users who know the technical id); the first hit wins.
+function findMentionedDataset(
+  question: string,
+  labels: ReadonlyArray<DatasetLabel>,
+): DatasetLabel | null {
+  for (const label of labels) {
+    if (question.includes(label.display_name)) return label;
+  }
+  for (const label of labels) {
+    if (question.includes(label.reference_name)) return label;
+  }
+  return null;
+}
+
+// Locate the nearest SourceLifecycleEvent after a turn whose reference_name +
+// kind match a stale anchor (ADR-0047 chip-trace). Causality guarantees the
+// invalidating event follows the turn; "nearest one" resolves same-source
+// repeated lifecycles. No event_id is stored (ADR-0047 YAGNI) -- the match is
+// derived from the existing thread. StaleReason is now the invalidating subset
+// of SourceLifecycleKind (types.ts), so anchor.reason compares to entry.data.kind
+// directly with no conversion function. Returns null when no event follows
+// (resume / stale-map inconsistency); the caller renders the chip disabled then.
+function findStaleSourceIdx(
+  entries: ThreadEntry[],
+  turnIdx: number,
+  anchor: StaleAnchor,
+): number | null {
+  for (let i = turnIdx + 1; i < entries.length; i++) {
+    const e = entries[i];
+    if (
+      e.entry === "Source" &&
+      e.data.reference_name === anchor.reference_name &&
+      e.data.kind === anchor.reason
+    ) {
+      return i;
+    }
+  }
+  return null;
+}
+
+// Concise verb for the stale causal chip (ADR-0041 honest split, ADR-0052 i18n):
+// a Replaced source -> "Source updated" (the SQL still physically runs on the
+// new backing; v1 just does not recompute); a Deleted source -> "Upstream
+// deleted" (the reference name is gone, truly unavailable). The wording split
+// signals whether the user could re-ask to recover the result. Distinct from
+// staleBadgeText (the working-set list's full sentence) -- the chip is a
+// compact, clickable label.
+function staleChipVerb(intl: IntlShape, reason: StaleReason): string {
+  switch (reason) {
+    case "Replaced":
+      return intl.formatMessage({
+        id: "thread.staleChip.replaced",
+        defaultMessage: "Source updated",
+      });
+    case "Deleted":
+      return intl.formatMessage({
+        id: "thread.staleChip.deleted",
+        defaultMessage: "Upstream deleted",
+      });
+    default: {
+      const unhandled: never = reason;
+      throw new Error(`unhandled stale reason: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+// The clickable stale causal chip (ADR-0041/0047): a compact label that jumps
+// to the invalidating source event. Disabled (not hidden) when no matching event
+// follows the turn, so the chip never promises a jump it cannot perform -- the
+// title then explains why. Extracted so the verb is computed once and the
+// Materialized body reads cleanly. The wording splits honestly by reason:
+// Replaced = re-askable, Deleted = gone.
+function StaleChip({
+  reason,
+  hasJumpTarget,
+  onJump,
+}: {
+  reason: StaleReason;
+  hasJumpTarget: boolean;
+  onJump: (() => void) | undefined;
+}) {
+  const intl = useIntl();
+  const verb = staleChipVerb(intl, reason);
+  return (
+    <button
+      type="button"
+      className="stale-chip"
+      disabled={!hasJumpTarget}
+      aria-label={intl.formatMessage(
+        {
+          id: "thread.staleChip.aria",
+          defaultMessage: "Stale because {reason}, jump to the source event",
+        },
+        { reason: verb },
+      )}
+      title={
+        hasJumpTarget
+          ? undefined
+          : intl.formatMessage({
+              id: "thread.staleChip.noTarget",
+              defaultMessage: "Source event no longer in the timeline",
+            })
+      }
+      onClick={onJump}
+    >
+      {verb}
+    </button>
+  );
+}
+
+interface TurnCardProps {
   record: TurnRecord;
   selectedResult: string | null;
   onSelectResult: (referenceName: string) => void;
-  staleByReference: ReadonlyMap<string, StaleAnchor>;
+  staleAnchor: StaleAnchor | undefined;
+  /** Whether a matching source event follows this turn, i.e. the stale chip can
+   * actually perform its jump (ADR-0047). False on the resume / stale-map
+   * inconsistency edge case, which disables the chip instead of a silent no-op. */
+  hasJumpTarget: boolean;
+  /** Jump-to-source handler, bound to the pre-resolved target index. undefined
+   * when hasJumpTarget is false (the chip is disabled, so no handler is wired). */
+  onStaleChipJump: (() => void) | undefined;
+  mentionedDataset: DatasetLabel | null;
 }
 
-// The provider's optional assumption note (ADR-0009/0018), rendered as a
-// correctable side note on both Materialized and Textual turns. Extracted so
-// the rendering isn't duplicated across the two outcomes that carry it.
-function AssumptionNote({ assumption }: { assumption: string | null }) {
-  if (!assumption) return null;
-  return <span className="assumption">假设：{assumption}</span>;
-}
-
-function TurnEntry({ record, selectedResult, onSelectResult, staleByReference }: TurnEntryProps) {
+// One turn rendered as a single-row head (ADR-0047): outcome glyph + verbatim
+// question (tail-truncated, head kept per ADR-0054) + a conditional active chip
+// when the question named a dataset. The outcome body (result link / textual
+// body / failure reason / cancelled marker) renders beneath so the four kinds
+// stay distinguishable by text as well as by glyph/color (ADR-0028). A stale
+// Materialized turn becomes a ghost (CircleOff + reduced opacity) and gains a
+// clickable causal chip; Failed/Cancelled are weakened (opacity) but kept
+// visible -- never collapsed away (ADR-0028 Why 2). The verbatim question and
+// the chip's dataset display name are layer-4 content (ADR-0039/0037) and pass
+// through untranslated.
+function TurnCard({
+  record,
+  selectedResult,
+  onSelectResult,
+  staleAnchor,
+  hasJumpTarget,
+  onStaleChipJump,
+  mentionedDataset,
+}: TurnCardProps) {
+  const intl = useIntl();
+  const isStale = !!staleAnchor;
+  const { Icon, label } = outcomeVisual(intl, record.outcome, isStale);
   return (
-    <>
-      <p className="turn-question">{record.question}</p>
+    <div className={`turn-card${isStale ? " stale-ghost" : ""}`} data-stale={isStale ? "true" : undefined}>
+      <div className="turn-head">
+        <span className="outcome-icon" role="img" aria-label={label}>
+          <Icon aria-hidden="true" />
+        </span>
+        {/* The verbatim question is the identity handle (ADR-0039): single-line,
+            tail-ellipsis truncation keeps the head (where identity concentrates)
+            visible at a fixed rail width (ADR-0054). The full text rides title. */}
+        <span className="turn-question" title={record.question}>
+          {record.question}
+        </span>
+        {mentionedDataset && (
+          <span
+            className="turn-active-chip"
+            title={intl.formatMessage(
+              { id: "thread.activeChip.title", defaultMessage: "Question names \"{name}\"" },
+              { name: mentionedDataset.display_name },
+            )}
+          >
+            →{mentionedDataset.display_name}
+          </span>
+        )}
+      </div>
       <TurnBody
         record={record}
         selectedResult={selectedResult}
         onSelectResult={onSelectResult}
-        staleByReference={staleByReference}
+        staleAnchor={staleAnchor}
+        hasJumpTarget={hasJumpTarget}
+        onStaleChipJump={onStaleChipJump}
       />
-    </>
+    </div>
+  );
+}
+
+// The provider's optional assumption note (ADR-0009/0018), rendered as a
+// correctable side note on both Materialized and Textual turns. The assumption
+// text is layer-3 LLM content (ADR-0052) and passes through the {text}
+// placeholder untranslated; only the "Assumption:" prefix is chrome. Extracted
+// so the rendering isn't duplicated across the two outcomes that carry it.
+function AssumptionNote({ assumption }: { assumption: string | null }) {
+  const intl = useIntl();
+  if (!assumption) return null;
+  return (
+    <span className="assumption">
+      {intl.formatMessage(
+        { id: "thread.assumption", defaultMessage: "Assumption: {text}" },
+        { text: assumption },
+      )}
+    </span>
   );
 }
 
@@ -138,19 +554,23 @@ interface TurnBodyProps {
   record: TurnRecord;
   selectedResult: string | null;
   onSelectResult: (referenceName: string) => void;
-  staleByReference: ReadonlyMap<string, StaleAnchor>;
+  staleAnchor: StaleAnchor | undefined;
+  hasJumpTarget: boolean;
+  onStaleChipJump: (() => void) | undefined;
 }
 
-function TurnBody({ record, selectedResult, onSelectResult, staleByReference }: TurnBodyProps) {
+function TurnBody({
+  record,
+  selectedResult,
+  onSelectResult,
+  staleAnchor,
+  hasJumpTarget,
+  onStaleChipJump,
+}: TurnBodyProps) {
   switch (record.outcome.kind) {
     case "Materialized": {
       const { dataset, assumption } = record.outcome.data;
       const active = dataset.reference_name === selectedResult;
-      // Issue #40/#41 / ADR-0013: if this result has since gone stale, render
-      // the traceability badge naming the invalidating source (removed or
-      // re-uploaded). The result stays visible (soft invalidation) -- the
-      // badge is what tells the user it's no longer valid to build on.
-      const staleAnchor = staleByReference.get(dataset.reference_name);
       return (
         <p className="turn-outcome">
           <button
@@ -159,10 +579,18 @@ function TurnBody({ record, selectedResult, onSelectResult, staleByReference }: 
             aria-current={active ? "true" : undefined}
             onClick={() => onSelectResult(dataset.reference_name)}
           >
-            结果：{dataset.reference_name}
+            <FormattedMessage
+              id="thread.resultLink"
+              defaultMessage="Result: {name}"
+              values={{ name: dataset.reference_name }}
+            />
           </button>
           {staleAnchor && (
-            <span className="stale-badge">{staleBadgeText(staleAnchor)}</span>
+            <StaleChip
+              reason={staleAnchor.reason}
+              hasJumpTarget={hasJumpTarget}
+              onJump={onStaleChipJump}
+            />
           )}
           <AssumptionNote assumption={assumption} />
         </p>
@@ -173,7 +601,13 @@ function TurnBody({ record, selectedResult, onSelectResult, staleByReference }: 
       const isClarify = text_kind === "Clarify";
       return (
         <p className={`turn-outcome textual ${text_kind.toLowerCase()}`}>
-          <span className="textual-kind">{isClarify ? "需要澄清" : "无法处理"}</span>
+          <span className="textual-kind">
+            {isClarify ? (
+              <FormattedMessage id="thread.outcome.clarify" defaultMessage="Needs clarification" />
+            ) : (
+              <FormattedMessage id="thread.outcome.refused" defaultMessage="Cannot fulfill" />
+            )}
+          </span>
           <span className="textual-body">{body}</span>
           <AssumptionNote assumption={assumption} />
         </p>
@@ -182,11 +616,21 @@ function TurnBody({ record, selectedResult, onSelectResult, staleByReference }: 
     case "Failed":
       return (
         <p className="turn-outcome failed">
-          <span className="failed-reason">失败：{record.outcome.data.reason}</span>
+          <span className="failed-reason">
+            <FormattedMessage
+              id="thread.failedReason"
+              defaultMessage="Failed: {reason}"
+              values={{ reason: record.outcome.data.reason }}
+            />
+          </span>
         </p>
       );
     case "Cancelled":
-      return <p className="turn-outcome cancelled">已取消</p>;
+      return (
+        <p className="turn-outcome cancelled">
+          <FormattedMessage id="thread.outcome.cancelled" defaultMessage="Cancelled" />
+        </p>
+      );
     default: {
       // Exhaustiveness guard: a future TurnOutcome variant must add a case here,
       // mirroring Rust's compile-time match exhaustiveness. types.ts is the

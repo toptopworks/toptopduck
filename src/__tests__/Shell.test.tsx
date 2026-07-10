@@ -89,6 +89,11 @@ describe("App three-column shell (issue #79 ACs)", () => {
     state.workingSet = [];
     state.thread = [];
     vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    // App resolves the "system" locale preference from navigator.language; pin
+    // it to zh-CN so the Thread rail's i18n'd chrome (ADR-0052) renders in
+    // Chinese alongside the still-hardcoded chrome of the other components these
+    // assertions rely on. getAppConfig stays null (first-launch, no app-config).
+    vi.stubGlobal("navigator", { language: "zh-CN" });
   });
 
   it("renders the three-column grid + thin top bar (R1: session bar / rail / workspace)", async () => {
