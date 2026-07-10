@@ -616,7 +616,7 @@ pub async fn open_duck(
             cancel_token,
             provider,
             |ev: ResumeEvent| {
-                // ADR-0059 (issue #76): address the resume-progress event by
+                // ADR-0056 (issue #76): address the resume-progress event by
                 // sessionId so a multi-session frontend filters the global
                 // broadcast to the one SessionPane that owns the resume. v1
                 // emitted a bare ResumeEvent -- a single-session legacy.

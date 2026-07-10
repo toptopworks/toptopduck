@@ -269,7 +269,7 @@ pub struct PendingConflict {
 /// One progress event during resume (ADR-0034 visible progress). Fired per
 /// source verification and per replayed turn so the UI can render a
 /// deterministic progress bar.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResumeEvent {
     /// Verifying source `index` of `total` (post-rectify fingerprint check).
     Source {
@@ -294,7 +294,7 @@ pub enum ResumeEvent {
 /// is the runtime id the `open_duck` command received (a UUID string). The field
 /// is required -- resume progress without a session it belongs to is not
 /// addressable.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResumeProgress {
     pub session_id: String,
     pub event: ResumeEvent,
@@ -329,7 +329,7 @@ pub struct Session {
     /// Holds the provider and the materializer behind `Box<dyn ...>` (dyn, not
     /// generic) so this struct does not parameterize `commands.rs` / `lib.rs`.
     /// Built in [`Self::with_provider_and_cancel`]; `ask` is a facade over its
-    /// [`TurnRunner::run`].
+    /// [`TurnRunner::run_with_phase`].
     turn_runner: TurnRunner,
     /// The conversation thread (ADR-0028/0039/0040): a unified timeline of turns
     /// AND source lifecycle events, in order. The source of truth the frontend
@@ -1533,7 +1533,7 @@ impl Session {
         // is stable across retries -- ADR-0022), drive the orchestrator with the
         // shared session state borrowed via TurnDeps, then record the outcome.
         // The retry / cancel / error-routing that used to live inline here
-        // moved to [`TurnRunner::run`]; `record_turn` stays on the facade (the
+        // moved to [`TurnRunner::run_with_phase`]; `record_turn` stays on the facade (the
         // conversation timeline + persistence are session concerns, not turn
         // orchestration -- ADR-0053 Decision 2).
         self.ask_with_phase(question, |_| {})

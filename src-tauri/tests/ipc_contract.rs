@@ -434,3 +434,132 @@ fn session_error_display_strings_are_the_ipc_contract() {
     );
     assert_eq!(SessionError::Engine("detail".into()).to_string(), "detail");
 }
+
+// --- issue #76 progress + listing wire contracts (ADR-0056/0059/0060) -------
+//
+// Pin the JSON shape of the turn-progress / resume-progress side-channel
+// events and the list_sessions metadata so a serde attribute change fails
+// the build before src/types.ts can drift. Externally-tagged enums + flat
+// snake_case structs; the literals are the source of truth the frontend mirrors.
+
+#[test]
+fn turn_phase_serializes_externally_tagged_with_attempt() {
+    // ADR-0059 (issue #76): TurnPhase crosses IPC externally-tagged
+    // (`{"Thinking":{"attempt":1}}`), mirroring the sibling ResumeEvent shape.
+    // The frontend narrows on the variant discriminator; pin the tag + the
+    // 1-based attempt so a serde rename / tag-style change fails here.
+    use toptopduck_lib::TurnPhase;
+    assert_wire(
+        &TurnPhase::Thinking { attempt: 1 },
+        r#"{"Thinking":{"attempt":1}}"#,
+    );
+    assert_wire(
+        &TurnPhase::Querying { attempt: 2 },
+        r#"{"Querying":{"attempt":2}}"#,
+    );
+}
+
+#[test]
+fn turn_progress_wraps_phase_with_session_id() {
+    // ADR-0056/0059 (issue #76): a turn-progress event is { session_id, phase }
+    // -- the addressing id lets a multi-session frontend filter the global
+    // broadcast; phase keeps its own externally-tagged shape. Pin the wrapper
+    // so a field rename on either side is caught before types.ts drifts.
+    use toptopduck_lib::{TurnPhase, TurnProgress};
+    assert_wire(
+        &TurnProgress {
+            session_id: "s1".into(),
+            phase: TurnPhase::Thinking { attempt: 1 },
+        },
+        r#"{"session_id":"s1","phase":{"Thinking":{"attempt":1}}}"#,
+    );
+}
+
+#[test]
+fn resume_event_serializes_externally_tagged() {
+    // ADR-0034: ResumeEvent crosses IPC externally-tagged, one variant per
+    // source-verification / replay step. Pin both variants so the frontend's
+    // `in` narrowing on Source / Replay survives any serde attribute change.
+    use toptopduck_lib::ResumeEvent;
+    assert_wire(
+        &ResumeEvent::Source {
+            index: 1,
+            total: 2,
+            reference_name: "orders".into(),
+        },
+        r#"{"Source":{"index":1,"total":2,"reference_name":"orders"}}"#,
+    );
+    assert_wire(
+        &ResumeEvent::Replay {
+            index: 2,
+            total: 3,
+            reference_name: "result_1".into(),
+        },
+        r#"{"Replay":{"index":2,"total":3,"reference_name":"result_1"}}"#,
+    );
+}
+
+#[test]
+fn resume_progress_wraps_event_with_session_id() {
+    // ADR-0056/0059 (issue #76): a resume-progress event is { session_id, event
+    // } -- v1 emitted a bare ResumeEvent; multi-session lands the id. Pin the
+    // wrapper so the frontend's `{ event }` unwrap (src/App.tsx) stays in sync.
+    use toptopduck_lib::{ResumeEvent, ResumeProgress};
+    assert_wire(
+        &ResumeProgress {
+            session_id: "r1".into(),
+            event: ResumeEvent::Replay {
+                index: 1,
+                total: 2,
+                reference_name: "result_1".into(),
+            },
+        },
+        r#"{"session_id":"r1","event":{"Replay":{"index":1,"total":2,"reference_name":"result_1"}}}"#,
+    );
+}
+
+#[test]
+fn source_summary_serializes_flat_snake_case() {
+    // ADR-0060 (issue #76): SourceSummary is a flat snake_case object -- the
+    // sidebar sub-line. first_source_name is null when the working set is empty
+    // (ADR-0035), present otherwise. Pin the shape + the null branch.
+    use toptopduck_lib::SourceSummary;
+    assert_wire(
+        &SourceSummary {
+            first_source_name: Some("orders".into()),
+            source_count: 3,
+            turn_count: 5,
+        },
+        r#"{"first_source_name":"orders","source_count":3,"turn_count":5}"#,
+    );
+    assert_wire(
+        &SourceSummary {
+            first_source_name: None,
+            source_count: 0,
+            turn_count: 0,
+        },
+        r#"{"first_source_name":null,"source_count":0,"turn_count":0}"#,
+    );
+}
+
+#[test]
+fn session_metadata_serializes_flat_snake_case() {
+    // ADR-0060/0061 (issue #76): SessionMetadata is the flat snake_case sidebar
+    // entry. session_id is the .duck path (the stable identity). Pin the full
+    // field order so a rename / reorder is caught before types.ts drifts.
+    use toptopduck_lib::{SessionMetadata, SourceSummary};
+    assert_wire(
+        &SessionMetadata {
+            session_id: "/x/analysis.duck".into(),
+            display_name: "analysis".into(),
+            last_modified_at: 1_700_000_000_000,
+            source_summary: SourceSummary {
+                first_source_name: Some("orders".into()),
+                source_count: 1,
+                turn_count: 2,
+            },
+            format_version: 1,
+        },
+        r#"{"session_id":"/x/analysis.duck","display_name":"analysis","last_modified_at":1700000000000,"source_summary":{"first_source_name":"orders","source_count":1,"turn_count":2},"format_version":1}"#,
+    );
+}

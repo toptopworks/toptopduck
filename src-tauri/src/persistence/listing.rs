@@ -250,8 +250,26 @@ mod tests {
         assert_eq!(m.source_summary.turn_count, 2);
         // format_version is the current recipe version.
         assert_eq!(m.format_version, crate::persistence::RECIPE_FORMAT_VERSION);
-        // mtime is a plausible non-zero epoch millis (the file was just written).
-        assert!(m.last_modified_at > 0, "mtime should be non-zero");
+        // mtime is the file's actual modification time in epoch millis -- pin
+        // both the unit (millis, not micros/nanos) and the source (this .duck
+        // path) by comparing against an independent stat, so a unit or source
+        // bug cannot slip through as merely "non-zero".
+        let file_mtime = std::fs::metadata(&path)
+            .expect("stat recipe")
+            .modified()
+            .expect("modified");
+        let expected = file_mtime
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after epoch")
+            .as_millis() as i64;
+        let drift = (m.last_modified_at - expected).abs();
+        assert!(
+            drift < 5000,
+            "mtime {} drifted {}ms from the file's mtime {}",
+            m.last_modified_at,
+            drift,
+            expected
+        );
     }
 
     #[test]
