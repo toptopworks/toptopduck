@@ -8,7 +8,7 @@
 - **右 = workspace**：大块舞台，用 tabs 切换「结果 / Schema / 工作集」。当前或重选的中间结果在「结果」tab 全尺寸渲染（表 + Vega-Lite + assumption 旁注 + 退化披露，ADR-0016/0033/0010）。
 - **底 = QuestionBar**（跨全宽），带「作用于 result_N（隐式）」active 指示器，可下拉显式点名覆盖（CONTEXT.md「用户可显式点名覆盖」）。
 
-**工作集不做常驻第三栏**——它是 workspace 里的一个 tab。「当前表」的可见性靠 rail 卡片 active chip + QuestionBar 指示器两处轻量呈现。**中间结果不内联进 thread**（否决 notebook 式）。参照系：ChatGPT Codex agent 的「对话 rail + canvas」双栏。
+**工作集不做常驻第三栏**——它是 workspace 里的一个 tab。「当前表」的可见性靠 rail 卡片 active chip + QuestionBar 指示器两处轻量呈现。**中间结果不内联进 thread**（否决 notebook 式）。参照系：Chat 风格 codex agent（如 ChatGPT）的「对话 rail + canvas」双栏。
 
 ## Context
 
