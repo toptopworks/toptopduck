@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Monitor, Moon, Sun } from "lucide-react";
 import {
   clearApiKey,
   fmtError,
@@ -180,18 +181,25 @@ export function SettingsDialog({
             <section>
               <fieldset>
                 <legend>主题</legend>
-                {(["system", "light", "dark"] as const).map((t) => (
-                  <label key={t}>
-                    <input
-                      type="radio"
-                      name="theme"
-                      checked={theme === t}
-                      onChange={() => setTheme(t)}
-                      disabled={saving}
-                    />
-                    {t === "system" ? "跟随系统" : t === "light" ? "浅色" : "深色"}
-                  </label>
-                ))}
+                {(["system", "light", "dark"] as const).map((t) => {
+                  // Lucide glyphs: system=Monitor, light=Sun, dark=Moon (a
+                  // theme-radio UX choice; not in ADR-0050's glyph table).
+                  // Decorative -- the radio's accessible name is the text label.
+                  const Icon = t === "system" ? Monitor : t === "light" ? Sun : Moon;
+                  return (
+                    <label key={t}>
+                      <input
+                        type="radio"
+                        name="theme"
+                        checked={theme === t}
+                        onChange={() => setTheme(t)}
+                        disabled={saving}
+                      />
+                      <Icon size={16} aria-hidden />
+                      {t === "system" ? "跟随系统" : t === "light" ? "浅色" : "深色"}
+                    </label>
+                  );
+                })}
               </fieldset>
             </section>
 
