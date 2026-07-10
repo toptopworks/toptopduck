@@ -334,6 +334,13 @@ export interface SessionMetadata {
 // UI theme preference (ADR-0050). Crosses IPC as the bare lowercase variant.
 export type Theme = "system" | "light" | "dark";
 
+// UI response-locale preference (ADR-0052, issue #78). Three-state, mirroring
+// Theme: "system" defers to the OS language, "zh-CN" / "en-US" are explicit
+// overrides. Crosses IPC as the BCP-47-shaped string the IntlProvider keys on.
+// The Rust side resolves "system" independently (locale never crosses IPC from
+// the frontend) for the canonical-prompt locale directive.
+export type LocalePreference = "system" | "zh-CN" | "en-US";
+
 // Persisted window geometry, restored on launch so the app reopens where the
 // user left it. x/y are null until the first move is persisted.
 export interface WindowGeometry {
@@ -382,6 +389,7 @@ export interface Tunables {
 export interface AppConfig {
   format_version: number;
   theme: Theme;
+  locale: LocalePreference;
   window: WindowGeometry;
   engine: EngineDefaults;
   privacy: PrivacyDefaults;

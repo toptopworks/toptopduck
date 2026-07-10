@@ -8,6 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "lint": "eslint .",
     "format": "eslint . --fix",
+    "i18n:extract": "formatjs extract \"src/**/*.tsx\" \"src/**/*.ts\" --format simple --out-file src/locales/en-US.json",
+    "i18n:check": "node scripts/check-i18n.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest run"
@@ -20,6 +22,7 @@
     "lucide-react": "^1.24.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-intl": "^10.1.15",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4.3.2",
     "vega-embed": "^7.1.0",
@@ -27,6 +30,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@formatjs/cli": "^6.16.12",
     "@stylistic/eslint-plugin": "^5.10.0",
     "@tauri-apps/cli": "^2.0.0",
     "@testing-library/jest-dom": "^6.0.0",

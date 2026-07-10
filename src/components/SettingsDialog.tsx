@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { FormattedMessage, useIntl } from "react-intl";
 import { Monitor, Moon, Sun } from "lucide-react";
 import {
   clearApiKey,
@@ -6,14 +7,19 @@ import {
   getProviderConfig,
   setApiKey,
 } from "../api";
-import type { AppConfig, EngineDefaults, ProviderConfig, Theme } from "../types";
+import type { AppConfig, EngineDefaults, LocalePreference, ProviderConfig, Theme } from "../types";
 
 // App-level settings (issue #53, ADR-0038): edits the app-config document
-// (theme, engine defaults, endpoint baseURL/model) in one atomic write, plus
-// the API key which stays in the OS keychain (ADR-0029 -- never in app-config,
-// never returned across IPC). The key field clears after a save (the stored
-// status surfaces as a boolean); the endpoint + theme + engine fields retain
-// their values so the user can re-edit.
+// (theme, locale, engine defaults, endpoint baseURL/model) in one atomic write,
+// plus the API key which stays in the OS keychain (ADR-0029 -- never in
+// app-config, never returned across IPC). The key field clears after a save (the
+// stored status surfaces as a boolean); the endpoint + theme + locale + engine
+// fields retain their values so the user can re-edit.
+//
+// i18n (ADR-0052, issue #78): this dialog is the canonical showcase of layer-1
+// chrome translation. Every FormattedMessage carries an English defaultMessage
+// (the formatjs source-of-truth + dev fallback) so @formatjs/cli extract can
+// statically resolve the catalog key set for the CI alignment guard.
 export function SettingsDialog({
   appConfig,
   onCommitAppConfig,
@@ -29,9 +35,11 @@ export function SettingsDialog({
   // uses it to both unmount the dialog and refresh its key-status indicator.
   onClose: () => void;
 }) {
+  const intl = useIntl();
   // Local editable copies seeded from the app-config prop. A save commits them
   // as one atomic write; a cancel discards them.
   const [theme, setTheme] = useState<Theme>(appConfig.theme);
+  const [locale, setLocale] = useState<LocalePreference>(appConfig.locale);
   const [engine, setEngine] = useState<EngineDefaults>(appConfig.engine);
   const [provider, setProvider] = useState<ProviderConfig>(appConfig.provider);
 
@@ -45,7 +53,7 @@ export function SettingsDialog({
   const [error, setError] = useState<string | null>(null);
 
   // Load the key status on open (the only piece NOT in app-config). Endpoint /
-  // theme / engine are seeded from the prop, so no extra fetch is needed.
+  // theme / locale / engine are seeded from the prop, so no extra fetch is needed.
   useEffect(() => {
     let cancelled = false;
     getProviderConfig()
@@ -86,10 +94,11 @@ export function SettingsDialog({
         await setApiKey(trimmedKey);
         setHasKey(true);
       }
-      // One atomic app-config write carries theme + engine + endpoint together.
+      // One atomic app-config write carries theme + locale + engine + endpoint.
       await onCommitAppConfig({
         ...appConfig,
         theme,
+        locale,
         engine,
         provider,
       });
@@ -126,37 +135,65 @@ export function SettingsDialog({
         aria-modal="true"
         aria-labelledby="settings-title"
       >
-        <h2 id="settings-title">应用设置</h2>
+        <h2 id="settings-title">
+          <FormattedMessage id="settings.title" defaultMessage="App Settings" />
+        </h2>
         <p className="muted">
-          偏好与默认参数存在系统 app-data 目录（与可分享的 .duck 正交）；API key 仅存在本机系统钥匙串，由 Rust 核心读取，前端与页面永不持有，也绝不写入 app-config。
+          <FormattedMessage
+            id="settings.intro"
+            defaultMessage="Preferences and defaults live in the system app-data directory (orthogonal to the shareable .duck); the API key lives only in this machine's OS keychain, read by the Rust core — the frontend and page never hold it, and it is never written to app-config."
+          />
         </p>
 
         {loading ? (
-          <p className="muted">正在读取当前配置…</p>
+          <p className="muted">
+            <FormattedMessage id="settings.reading" defaultMessage="Reading current config…" />
+          </p>
         ) : (
           <>
             <section>
               <label>
-                Anthropic API key：
+                <FormattedMessage id="settings.apiKeyLabel" defaultMessage="Anthropic API key:" />{" "}
                 <input
                   type="password"
                   value={apiKey}
                   onChange={(e) => setApiKeyField(e.target.value)}
-                  placeholder={hasKey ? "已保存（留空则不修改）" : "粘贴你的 Anthropic API key"}
+                  placeholder={
+                    hasKey
+                      ? intl.formatMessage({
+                          id: "settings.apiKeyPlaceholderSet",
+                          defaultMessage: "Saved (leave blank to keep as-is)",
+                        })
+                      : intl.formatMessage({
+                          id: "settings.apiKeyPlaceholderUnset",
+                          defaultMessage: "Paste your Anthropic API key",
+                        })
+                  }
                   disabled={saving}
                   autoComplete="off"
                 />
               </label>
               <p className="muted">
-                {hasKey
-                  ? "当前已保存 key。留空保存即保持不变；可点击下方「清除 key」。"
-                  : "尚未配置 key——提问将返回「未配置」失败。"}
+                {hasKey ? (
+                  <FormattedMessage
+                    id="settings.apiKeyHintHas"
+                    defaultMessage="A key is currently saved. Leave blank on save to keep it unchanged; you can click &quot;Clear key&quot; below."
+                  />
+                ) : (
+                  <FormattedMessage
+                    id="settings.apiKeyHintMissing"
+                    defaultMessage='No key configured yet — asking will return a "not configured" failure.'
+                  />
+                )}
               </p>
             </section>
 
             <section>
               <label>
-                Endpoint base URL（可配，默认 Anthropic 直连）：
+                <FormattedMessage
+                  id="settings.baseUrlLabel"
+                  defaultMessage="Endpoint base URL (optional, Anthropic direct by default):"
+                />{" "}
                 <input
                   type="text"
                   value={provider.base_url}
@@ -165,7 +202,7 @@ export function SettingsDialog({
                 />
               </label>
               <label>
-                模型（默认 Sonnet 级）：
+                <FormattedMessage id="settings.modelLabel" defaultMessage="Model (Sonnet-class by default):" />{" "}
                 <input
                   type="text"
                   value={provider.model}
@@ -174,13 +211,18 @@ export function SettingsDialog({
                 />
               </label>
               <p className="muted">
-                若你使用自有 Anthropic 协议兼容网关，填在 base URL；载荷将经过该网关，其留存/训练政策由你自负。
+                <FormattedMessage
+                  id="settings.endpointHint"
+                  defaultMessage="If you use a self-hosted Anthropic-protocol-compatible gateway, put it in base URL; the payload goes through that gateway, and its retention/training policy is your responsibility."
+                />
               </p>
             </section>
 
             <section>
               <fieldset>
-                <legend>主题</legend>
+                <legend>
+                  <FormattedMessage id="settings.theme.legend" defaultMessage="Theme" />
+                </legend>
                 {(["system", "light", "dark"] as const).map((t) => {
                   // Lucide glyphs: system=Monitor, light=Sun, dark=Moon (a
                   // theme-radio UX choice; not in ADR-0050's glyph table).
@@ -196,18 +238,61 @@ export function SettingsDialog({
                         disabled={saving}
                       />
                       <Icon size={16} aria-hidden />
-                      {t === "system" ? "跟随系统" : t === "light" ? "浅色" : "深色"}
+                      {t === "system" ? (
+                        <FormattedMessage id="settings.theme.system" defaultMessage="Follow system" />
+                      ) : t === "light" ? (
+                        <FormattedMessage id="settings.theme.light" defaultMessage="Light" />
+                      ) : (
+                        <FormattedMessage id="settings.theme.dark" defaultMessage="Dark" />
+                      )}
                     </label>
                   );
                 })}
               </fieldset>
             </section>
 
+            {/* Locale radio (ADR-0052, issue #78). Three-state, mirrors the theme
+                toggle above -- system follows the OS language; zh-CN / en-US are
+                explicit overrides persisted to app-config (ADR-0038). */}
             <section>
               <fieldset>
-                <legend>引擎默认参数（ADR-0005）</legend>
+                <legend>
+                  <FormattedMessage id="settings.locale.legend" defaultMessage="Language" />
+                </legend>
+                {(["system", "zh-CN", "en-US"] as const).map((l) => (
+                  <label key={l}>
+                    <input
+                      type="radio"
+                      name="locale"
+                      checked={locale === l}
+                      onChange={() => setLocale(l)}
+                      disabled={saving}
+                    />
+                    {l === "system" ? (
+                      <FormattedMessage id="settings.locale.system" defaultMessage="Follow system" />
+                    ) : l === "zh-CN" ? (
+                      <FormattedMessage id="settings.locale.zhCN" defaultMessage="简体中文" />
+                    ) : (
+                      <FormattedMessage id="settings.locale.enUS" defaultMessage="English" />
+                    )}
+                  </label>
+                ))}
+              </fieldset>
+              <p className="muted">
+                <FormattedMessage
+                  id="settings.locale.hint"
+                  defaultMessage="Switching the language only affects new turns going forward; past turns keep the language they were generated in (ADR-0039 verbatim principle)."
+                />
+              </p>
+            </section>
+
+            <section>
+              <fieldset>
+                <legend>
+                  <FormattedMessage id="settings.engine.legend" defaultMessage="Engine defaults (ADR-0005)" />
+                </legend>
                 <label>
-                  内存上限：
+                  <FormattedMessage id="settings.engine.memoryLimit" defaultMessage="Memory limit:" />{" "}
                   <input
                     type="text"
                     value={engine.memory_limit}
@@ -217,7 +302,7 @@ export function SettingsDialog({
                   />
                 </label>
                 <label>
-                  线程数：
+                  <FormattedMessage id="settings.engine.threads" defaultMessage="Threads:" />{" "}
                   <input
                     type="number"
                     min={1}
@@ -228,7 +313,7 @@ export function SettingsDialog({
                   />
                 </label>
                 <label>
-                  结果行数上限：
+                  <FormattedMessage id="settings.engine.rowCap" defaultMessage="Result row cap:" />{" "}
                   <input
                     type="number"
                     min={1}
@@ -239,7 +324,10 @@ export function SettingsDialog({
                   />
                 </label>
                 <label>
-                  语句超时（毫秒）：
+                  <FormattedMessage
+                    id="settings.engine.statementTimeout"
+                    defaultMessage="Statement timeout (ms):"
+                  />{" "}
                   <input
                     type="number"
                     min={1}
@@ -254,7 +342,10 @@ export function SettingsDialog({
                 </label>
               </fieldset>
               <p className="muted">
-                本切片先持久化并跨启动恢复这些值；将其应用到 live DuckDB 引擎是后续切片。
+                <FormattedMessage
+                  id="settings.engine.hint"
+                  defaultMessage="This slice persists and restores these values across restarts; applying them to the live DuckDB engine is a follow-up slice."
+                />
               </p>
             </section>
           </>
@@ -264,15 +355,19 @@ export function SettingsDialog({
 
         <div className="dialog-actions">
           <button onClick={onClose} disabled={busy}>
-            取消
+            <FormattedMessage id="settings.cancel" defaultMessage="Cancel" />
           </button>
           {hasKey && (
             <button onClick={clearKey} disabled={busy}>
-              清除 key
+              <FormattedMessage id="settings.clearKey" defaultMessage="Clear key" />
             </button>
           )}
           <button onClick={save} disabled={busy}>
-            {saving ? "保存中…" : "保存"}
+            {saving ? (
+              <FormattedMessage id="settings.saving" defaultMessage="Saving…" />
+            ) : (
+              <FormattedMessage id="settings.save" defaultMessage="Save" />
+            )}
           </button>
         </div>
       </div>

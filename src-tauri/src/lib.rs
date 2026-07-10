@@ -45,7 +45,9 @@ pub use provider::anthropic::AnthropicProvider;
 pub use provider::fake::FakeProvider;
 pub use provider::keychain::{KeychainStore, ProviderConfigSource, StaticConfig};
 pub use provider::live_config::LiveProviderConfig;
-pub use provider::prompt::{render_schema_context, CAPABILITY_BOUNDARY_PROMPT};
+pub use provider::prompt::{
+    build_system_prompt, render_schema_context, ResponseLocale, CAPABILITY_BOUNDARY_PROMPT,
+};
 pub use provider::{
     ColumnRef, DatasetRef, Provider, ProviderError, ProviderReply, ProviderRequest,
     ResponsePayload, TurnPayload, UnwiredProvider,

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { AppConfig, Theme } from "../types";
 
 // Black-box theme tests (ADR-0050, issue #77 AC6). Drives the rendered shell
@@ -19,6 +19,9 @@ const { appConfigWith } = vi.hoisted(() => {
     return {
       format_version: 1,
       theme,
+      // Pin zh-CN so the Chinese chrome labels the assertions below depend on
+      // render regardless of the host navigator.language (theme test, not i18n).
+      locale: "zh-CN" as const,
       window: { width: 800, height: 600, x: null, y: null, maximized: false },
       engine: { memory_limit: "512MB", threads: 1, row_cap: 100, statement_timeout_ms: 30000 },
       privacy: { send_samples: true },
@@ -157,7 +160,10 @@ describe("App theme (ADR-0050 black-box)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
     await waitFor(() => expect(screen.getByText("主题")).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("radio", { name: "跟随系统" }));
+    // Scope to the theme fieldset: the locale fieldset ALSO has a "跟随系统"
+    // radio (ADR-0052), so an unscoped name query is ambiguous (issue #78).
+    const themeGroup = screen.getByRole("group", { name: "主题" });
+    fireEvent.click(within(themeGroup).getByRole("radio", { name: "跟随系统" }));
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() =>

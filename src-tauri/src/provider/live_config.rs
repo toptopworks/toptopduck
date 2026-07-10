@@ -20,9 +20,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::app_config::{self, AppConfig};
+use crate::app_config::{self, AppConfig, LocalePreference};
 use crate::model::ProviderConfig;
 use crate::provider::keychain::{KeychainStore, ProviderConfigSource};
+use crate::provider::prompt::{resolve_locale_from_tag, ResponseLocale};
 
 /// The combined live source: key from the OS keychain + `{base_url, model}` and
 /// every other preference from the app-config file. Clone is cheap (a stateless
@@ -184,12 +185,28 @@ impl ProviderConfigSource for LiveProviderConfig {
     fn model(&self) -> String {
         self.load().provider.model
     }
+    fn locale(&self) -> ResponseLocale {
+        // ADR-0052: resolve the persisted preference (ADR-0038) here in Rust --
+        // never enters ProviderRequest, never pushed by the frontend. An explicit
+        // ZhCN/EnUS override maps directly; "system" reads the OS locale fresh
+        // per turn (a user who switches their OS language sees the next turn
+        // follow it without an app restart). Fresh read each call matches the
+        // keychain/endpoint philosophy: no caching.
+        match self.load().locale {
+            LocalePreference::System => {
+                let tag = sys_locale::get_locale().unwrap_or_default();
+                resolve_locale_from_tag(&tag)
+            }
+            LocalePreference::ZhCN => ResponseLocale::ZhCN,
+            LocalePreference::EnUS => ResponseLocale::EnUS,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_config::{EngineDefaults, Theme};
+    use crate::app_config::{EngineDefaults, LocalePreference, Theme};
     use crate::model::{DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL};
 
     /// A LiveProviderConfig bound to a temp-dir config path (no real keychain
@@ -318,5 +335,37 @@ mod tests {
         let (_dir, live) = live();
         assert_eq!(live.base_url(), DEFAULT_PROVIDER_BASE_URL);
         assert_eq!(live.model(), DEFAULT_PROVIDER_MODEL);
+    }
+
+    #[test]
+    fn provider_source_resolves_explicit_locale_overrides() {
+        // ADR-0052: an explicit ZhCN/EnUS preference maps directly to the
+        // ResponseLocale the provider feeds the prompt directive. "system" is
+        // covered implicitly (it reads the OS locale, environment-dependent);
+        // the zh*/en*/fallback MAPPING is pinned in prompt::resolve_locale_from_tag.
+        let (_dir, live) = live();
+        let mut cfg = AppConfig::defaults();
+        cfg.locale = LocalePreference::ZhCN;
+        live.store(cfg).expect("store");
+        assert_eq!(live.locale(), ResponseLocale::ZhCN);
+
+        let mut cfg = AppConfig::defaults();
+        cfg.locale = LocalePreference::EnUS;
+        live.store(cfg).expect("store");
+        assert_eq!(live.locale(), ResponseLocale::EnUS);
+    }
+
+    #[test]
+    fn provider_source_default_locale_never_panics() {
+        // A fresh app-config (locale = System) must resolve without panicking
+        // even when the OS locale is absent (sys_locale returns None -> empty
+        // tag -> EnUS fallback). The exact result depends on the host, so only
+        // assert it lands in the two-variant set, not a specific value.
+        let (_dir, live) = live();
+        let resolved = live.locale();
+        assert!(matches!(
+            resolved,
+            ResponseLocale::ZhCN | ResponseLocale::EnUS
+        ));
     }
 }

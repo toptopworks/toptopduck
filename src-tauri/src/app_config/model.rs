@@ -39,6 +39,25 @@ const DEFAULT_RETRY_BUDGET: u32 = 2;
 /// new open unshifts and trims to this length.
 pub const RECENT_FILES_CAP: usize = 10;
 
+/// UI response-locale preference (ADR-0052, issue #78). Three-state, mirroring
+/// [`Theme`]: `System` defers to the OS locale at apply time, `ZhCN` / `EnUS`
+/// are explicit overrides. Crosses IPC as the BCP-47-shaped string the Intl
+/// side also keys on (`system` / `zh-CN` / `en-US`). The variant rename is
+/// explicit (not `rename_all`) because kebab-case would lowercase the region
+/// subtag (`zh-cn`), drifting from the Intl convention the frontend relies on.
+/// The default is `System` (follow the OS locale, the local-first zero-config
+/// default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum LocalePreference {
+    #[default]
+    #[serde(rename = "system")]
+    System,
+    #[serde(rename = "zh-CN")]
+    ZhCN,
+    #[serde(rename = "en-US")]
+    EnUS,
+}
+
 /// UI theme preference (ADR-0050). `System` defers to the OS setting at apply
 /// time. Crosses IPC as the bare lowercase variant name. The default is `System`
 /// (derived via the `#[default]` attribute on the variant).
@@ -214,6 +233,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub theme: Theme,
     #[serde(default)]
+    pub locale: LocalePreference,
+    #[serde(default)]
     pub window: WindowGeometry,
     #[serde(default)]
     pub engine: EngineDefaults,
@@ -239,6 +260,7 @@ impl AppConfig {
         Self {
             format_version: APP_CONFIG_FORMAT_VERSION,
             theme: Theme::default(),
+            locale: LocalePreference::default(),
             window: WindowGeometry::default(),
             engine: EngineDefaults::default(),
             privacy: PrivacyDefaults::default(),
@@ -386,6 +408,43 @@ mod tests {
         );
         assert_eq!(serde_json::to_string(&Theme::Light).unwrap(), r#""light""#);
         assert_eq!(serde_json::to_string(&Theme::Dark).unwrap(), r#""dark""#);
+    }
+
+    #[test]
+    fn locale_serializes_as_bcp47_shaped_string() {
+        // Crosses IPC as the BCP-47-shaped string the frontend IntlProvider
+        // keys on. The region subtag stays uppercase (NOT kebab-cased) so it
+        // matches the Intl convention exactly.
+        assert_eq!(
+            serde_json::to_string(&LocalePreference::System).unwrap(),
+            r#""system""#
+        );
+        assert_eq!(
+            serde_json::to_string(&LocalePreference::ZhCN).unwrap(),
+            r#""zh-CN""#
+        );
+        assert_eq!(
+            serde_json::to_string(&LocalePreference::EnUS).unwrap(),
+            r#""en-US""#
+        );
+    }
+
+    #[test]
+    fn locale_defaults_to_system_follow_os() {
+        // ADR-0052: the zero-config default follows the OS locale (local-first,
+        // no mandatory language pick on first launch).
+        assert_eq!(LocalePreference::default(), LocalePreference::System);
+    }
+
+    #[test]
+    fn locale_field_defaults_make_app_config_round_trip() {
+        // A persisted-defaults config must round-trip with locale=system when
+        // the field is absent (forward-compat: a pre-#78 file has no locale
+        // key; serde(default) fills system rather than rejecting the file).
+        let json = r#"{"format_version":1,"theme":"dark"}"#;
+        let cfg: AppConfig = serde_json::from_str(json).expect("partial deserialize");
+        assert_eq!(cfg.locale, LocalePreference::System);
+        assert_eq!(cfg.theme, Theme::Dark);
     }
 
     #[test]
