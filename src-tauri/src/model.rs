@@ -460,6 +460,43 @@ pub struct TurnRecord {
     pub outcome: TurnOutcome,
 }
 
+/// One discrete progress phase of an in-flight turn (ADR-0059). The ask call is
+/// blocking (ADR-0009) with two main waits -- the LLM HTTP call and the SQL
+/// execution -- and neither has an intrinsic continuous progress, so the only
+/// honest granularity is a discrete phase marker at each boundary (ADR-0017
+/// honest, no fabricated percentages). The attempt number is 1-based and rises
+/// across blind retries (ADR-0028 retry budget), so a user can tell a retry from
+/// the first try. This rides the side-channel `turn-progress` event; it does NOT
+/// enter the [`TurnOutcome`] contract payload (ADR-0009 unchanged).
+///
+/// Externally-tagged on the wire (`{"Thinking":{"attempt":1}}`) to mirror the
+/// sibling [`crate::ResumeEvent`] resume-progress event shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TurnPhase {
+    /// About to call the provider (the LLM "thinking" wait). Fired once per
+    /// attempt, after the loop-top cancel pre-check, right before
+    /// `provider.generate`.
+    Thinking { attempt: u32 },
+    /// About to execute + materialize the SQL the provider returned (the query
+    /// wait). Fired only on the SQL branch, after the post-provider cancel
+    /// pre-check, right before `try_materialize`. A textual / failed / cancelled
+    /// turn never fires Querying.
+    Querying { attempt: u32 },
+}
+
+/// One `turn-progress` side-channel event (ADR-0059, issue #76). Wraps a
+/// [`TurnPhase`] with the addressing `session_id` so a multi-session frontend
+/// filters the global Tauri event broadcast down to the one SessionPane that
+/// owns the turn (ADR-0056). `session_id` is the runtime id the `ask` command
+/// received (a UUID string), NOT the persisted-session id [`crate::SessionMetadata`]
+/// exposes. The field is required -- a phase without a session it belongs to is
+/// not addressable, so the type makes the missing-id state unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnProgress {
+    pub session_id: String,
+    pub phase: TurnPhase,
+}
+
 // --- Source lifecycle events (issue #38, ADR-0040) -------------------------
 //
 // A source lifecycle event is a user-driven mutation of the working set's

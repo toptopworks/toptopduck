@@ -41,7 +41,6 @@ import type {
   AppConfig,
   DatasetDescriptor,
   GuidanceRequest,
-  ResumeEvent,
   SheetGuidance,
   StaleAnchor,
   Theme,
@@ -709,14 +708,17 @@ export default function App() {
       // immediately on entry -- if we awaited openDuck first, the first event
       // would land with no listener attached (listen() is an async IPC round
       // trip). Resume status stays null until the listener is confirmed.
-      const unlisten = await onResumeProgress((ev: ResumeEvent) => {
-        if ("Source" in ev) {
+      const unlisten = await onResumeProgress(({ event }) => {
+        // issue #76: the event is now addressed by sessionId (ResumeProgress);
+        // this single-session shell reads the inner ResumeEvent directly. The
+        // multi-session shell (#75) filters on `.session_id` instead.
+        if ("Source" in event) {
           setResumeStatus(
-            `校验源 ${ev.Source.index}/${ev.Source.total}：${ev.Source.reference_name}`,
+            `校验源 ${event.Source.index}/${event.Source.total}：${event.Source.reference_name}`,
           );
-        } else if ("Replay" in ev) {
+        } else if ("Replay" in event) {
           setResumeStatus(
-            `重放 ${ev.Replay.index}/${ev.Replay.total}：${ev.Replay.reference_name}`,
+            `重放 ${event.Replay.index}/${event.Replay.total}：${event.Replay.reference_name}`,
           );
         }
       });

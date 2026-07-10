@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use crate::cancel::CancelToken;
 use crate::guardrail::ExecErrorKind;
-use crate::model::{TurnOutcome, EXECUTE_FAIL_PREFIX, RESOURCE_FAIL_PREFIX};
+use crate::model::{TurnOutcome, TurnPhase, EXECUTE_FAIL_PREFIX, RESOURCE_FAIL_PREFIX};
 use crate::provider::{Provider, ProviderError, ProviderReply, ProviderRequest};
 use crate::session::materializer::{Materializer, TurnDeps};
 
@@ -86,19 +86,25 @@ impl TurnRunner {
     /// Run one turn: drive the provider, route the reply, and on a SQL reply
     /// drive the materializer -- retrying transient failures up to the budget
     /// and short-circuiting permanent ones. Returns the terminal outcome; the
-    /// caller records it.
+    /// caller records it. `on_phase` receives a discrete [`TurnPhase`] marker at
+    /// each wait boundary (ADR-0059): `Thinking` before `provider.generate` and
+    /// `Querying` before `try_materialize`, each carrying the 1-based attempt
+    /// number so a blind retry is honestly distinguishable from the first try.
+    /// Pass a no-op callback to ignore the phase channel.
     ///
     /// Pure orchestration (ADR-0053): does not read `history` and does not
     /// call `persist_if_bound`. The retry / cancel / error-routing branches
     /// are exhaustive over a unit test with a fake materializer (Resource /
     /// StaleReference do not retry; budget exhaustion aggregates every
     /// failure's reason; cancel wins over a textual reply; NotWired does not
-    /// consume the budget).
-    pub(crate) fn run(
+    /// consume the budget). The phase callback is the only addition; tests that
+    /// ignore it pass a no-op and are otherwise unchanged.
+    pub(crate) fn run_with_phase(
         &mut self,
         request: &ProviderRequest,
         result_name: String,
         deps: &mut TurnDeps,
+        mut on_phase: impl FnMut(TurnPhase),
     ) -> TurnOutcome {
         // Single in-flight + cancellation (ADR-0021, issue #28): begin the turn
         // on the shared token (marks in-flight, clears any stale request from a
@@ -144,7 +150,7 @@ impl TurnRunner {
         // identical failures dedupe so a persistently-bad SQL isn't repeated
         // across attempts.
         let mut failures: Vec<String> = Vec::new();
-        for _attempt in 0..=TURN_RETRY_BUDGET {
+        for attempt in 0..=TURN_RETRY_BUDGET {
             // Cancel check at the loop top: a cancel that arrived before the
             // first attempt or during the prior attempt aborts immediately as
             // Cancelled (ADR-0021/0028 outcome D). No retry -- the user asked to
@@ -152,6 +158,14 @@ impl TurnRunner {
             if cancel.is_requested() {
                 return TurnOutcome::Cancelled;
             }
+            // ADR-0059: signal the discrete "thinking" wait right before the
+            // provider call. attempt is 0-based; surface it 1-based so the UI
+            // reads "attempt N" naturally and a blind retry is honestly visible.
+            // Fired AFTER the cancel pre-check so a pre-cancelled turn emits no
+            // phase at all.
+            on_phase(TurnPhase::Thinking {
+                attempt: attempt + 1,
+            });
             match self.provider.generate(request) {
                 // Textual branch (ADR-0017/0018): a valid non-result turn -- no
                 // retry, no result_N. The provider's text + assumption ride the
@@ -190,6 +204,13 @@ impl TurnRunner {
                     if cancel.is_requested() {
                         return TurnOutcome::Cancelled;
                     }
+                    // ADR-0059: signal the discrete "querying" wait right before
+                    // SQL execution + materialization. Same 1-based attempt as
+                    // the Thinking marker above. Only the SQL branch fires this
+                    // -- a textual / failed / cancelled turn has no query wait.
+                    on_phase(TurnPhase::Querying {
+                        attempt: attempt + 1,
+                    });
                     match self.materializer.try_materialize(
                         &sql,
                         &cancel,
@@ -377,7 +398,10 @@ mod tests {
         let mut ws = WorkingSet::default();
         let sources = HashMap::new();
         let mut deps = inert_deps(&conn, &mut ws, &sources);
-        let outcome = runner.run(&request("q"), "result_1".into(), &mut deps);
+        // No-op phase callback: the routing tests do not assert on turn-progress
+        // phases, so they ignore the channel (ADR-0059 -- a no-op keeps the
+        // phase observer optional).
+        let outcome = runner.run_with_phase(&request("q"), "result_1".into(), &mut deps, |_| {});
         (outcome, calls.load(Ordering::SeqCst))
     }
 
@@ -522,7 +546,7 @@ mod tests {
         let mut ws = WorkingSet::default();
         let sources = HashMap::new();
         let mut deps = inert_deps(&conn, &mut ws, &sources);
-        let outcome = runner.run(&request("q"), "result_1".into(), &mut deps);
+        let outcome = runner.run_with_phase(&request("q"), "result_1".into(), &mut deps, |_| {});
         assert!(matches!(outcome, TurnOutcome::Cancelled), "got {outcome:?}");
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -579,5 +603,57 @@ mod tests {
             privacy: DatasetPrivacy::default(),
             stale: None,
         }
+    }
+
+    /// ADR-0059 (issue #76): the phase callback fires at each wait boundary
+    /// with a 1-based attempt that rises across blind retries. A transient
+    /// materialize failure (Runtime) consumes the budget and retries the SAME
+    /// request, so the phases read Thinking{1}→Querying{1}→Thinking{2}→...,
+    /// letting the UI honestly surface "attempt N" on a retry. The final attempt
+    /// (budget = 2 -> 3 attempts total) succeeds, so the last Querying is the
+    /// one that materializes.
+    #[test]
+    fn run_with_phase_emits_rising_attempts_across_retries() {
+        let provider = FakeProvider::new().scripted("q", reply_sql("SELECT 1"));
+        // Two transient Runtime failures then success: attempts 1 and 2 fail
+        // (both still emit Thinking + Querying before failing), attempt 3
+        // succeeds.
+        let materializer = FakeMaterializer::new(vec![
+            Err(ExecError::new(ExecErrorKind::Runtime, "boom-1")),
+            Err(ExecError::new(ExecErrorKind::Runtime, "boom-2")),
+            Ok(fake_descriptor("result_1")),
+        ]);
+        let calls = materializer.calls_handle();
+        let mut runner = TurnRunner::new(
+            Box::new(provider),
+            Box::new(materializer),
+            Arc::new(CancelToken::new()),
+        );
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        let mut ws = WorkingSet::default();
+        let sources = HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &sources);
+
+        let mut phases: Vec<TurnPhase> = Vec::new();
+        let outcome = runner.run_with_phase(&request("q"), "result_1".into(), &mut deps, |p| {
+            phases.push(p)
+        });
+        assert!(
+            matches!(outcome, TurnOutcome::Materialized { .. }),
+            "got {outcome:?}"
+        );
+        assert_eq!(
+            phases,
+            vec![
+                TurnPhase::Thinking { attempt: 1 },
+                TurnPhase::Querying { attempt: 1 },
+                TurnPhase::Thinking { attempt: 2 },
+                TurnPhase::Querying { attempt: 2 },
+                TurnPhase::Thinking { attempt: 3 },
+                TurnPhase::Querying { attempt: 3 },
+            ],
+            "each attempt emits Thinking then Querying with a rising 1-based number"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "three attempts ran");
     }
 }

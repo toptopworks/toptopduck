@@ -37,9 +37,10 @@ pub use model::{
     LoadError, LoadOutcome, ProviderConfig, ProviderConfigView, RectifyProvenance,
     RemoveSourceError, RenameError, RowPage, SheetGuidance, SheetRectify, SourceLifecycleEvent,
     SourceLifecycleKind, StaleAnchor, StaleReason, TextKind, ThreadEntry, TurnError, TurnOutcome,
-    TurnRecord, VizSpec, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
+    TurnPhase, TurnProgress, TurnRecord, VizSpec, DEFAULT_PROVIDER_BASE_URL,
+    DEFAULT_PROVIDER_MODEL,
 };
-pub use persistence::RecipeError;
+pub use persistence::{RecipeError, SessionMetadata, SourceSummary};
 pub use provider::anthropic::AnthropicProvider;
 pub use provider::fake::FakeProvider;
 pub use provider::keychain::{KeychainStore, ProviderConfigSource, StaticConfig};
@@ -51,7 +52,7 @@ pub use provider::{
 };
 pub use session::{
     is_resuming, ActiveAbandoned, ActiveResolution, PendingConflict, ResumeError, ResumeEvent,
-    Session, SourceIssue, SourceResolution,
+    ResumeProgress, Session, SourceIssue, SourceResolution,
 };
 pub use session_store::{
     ClosingFlag, SessionError, SessionHandle, SessionId, SessionStore, UNKNOWN_SESSION,
@@ -151,6 +152,7 @@ pub fn run() {
             commands::get_app_config,
             commands::set_app_config,
             commands::record_recent_file,
+            commands::list_sessions,
             commands::save_as_duck,
             commands::open_duck,
             commands::take_persist_error,

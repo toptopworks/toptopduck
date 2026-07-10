@@ -28,7 +28,7 @@ use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
     RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, SourceLifecycleKind,
-    ThreadEntry, TurnError, TurnOutcome, TurnRecord,
+    ThreadEntry, TurnError, TurnOutcome, TurnPhase, TurnRecord,
 };
 use crate::persistence::recipe::{Recipe, RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef};
 use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
@@ -269,7 +269,7 @@ pub struct PendingConflict {
 /// One progress event during resume (ADR-0034 visible progress). Fired per
 /// source verification and per replayed turn so the UI can render a
 /// deterministic progress bar.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResumeEvent {
     /// Verifying source `index` of `total` (post-rectify fingerprint check).
     Source {
@@ -284,6 +284,20 @@ pub enum ResumeEvent {
         total: usize,
         reference_name: String,
     },
+}
+
+/// One `resume-progress` side-channel event (ADR-0034/0059, issue #76). Wraps a
+/// [`ResumeEvent`] with the addressing `session_id` so a multi-session frontend
+/// filters the global Tauri event broadcast down to the one SessionPane that
+/// owns the resume (ADR-0056/0059 -- v1 emitted a bare ResumeEvent, a
+/// single-session legacy; multi-session lands the sessionId here). `session_id`
+/// is the runtime id the `open_duck` command received (a UUID string). The field
+/// is required -- resume progress without a session it belongs to is not
+/// addressable.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResumeProgress {
+    pub session_id: String,
+    pub event: ResumeEvent,
 }
 
 /// SHA-256 of a `.duck` file's bytes (ADR-0035 Decision 3, issue #50). Used as the
@@ -315,7 +329,7 @@ pub struct Session {
     /// Holds the provider and the materializer behind `Box<dyn ...>` (dyn, not
     /// generic) so this struct does not parameterize `commands.rs` / `lib.rs`.
     /// Built in [`Self::with_provider_and_cancel`]; `ask` is a facade over its
-    /// [`TurnRunner::run`].
+    /// [`TurnRunner::run_with_phase`].
     turn_runner: TurnRunner,
     /// The conversation thread (ADR-0028/0039/0040): a unified timeline of turns
     /// AND source lifecycle events, in order. The source of truth the frontend
@@ -1519,14 +1533,29 @@ impl Session {
         // is stable across retries -- ADR-0022), drive the orchestrator with the
         // shared session state borrowed via TurnDeps, then record the outcome.
         // The retry / cancel / error-routing that used to live inline here
-        // moved to [`TurnRunner::run`]; `record_turn` stays on the facade (the
+        // moved to [`TurnRunner::run_with_phase`]; `record_turn` stays on the facade (the
         // conversation timeline + persistence are session concerns, not turn
         // orchestration -- ADR-0053 Decision 2).
+        self.ask_with_phase(question, |_| {})
+    }
+
+    /// Run one turn AND surface its discrete progress phases (ADR-0059). Same
+    /// semantics as [`Self::ask`]; the `on_phase` callback receives a
+    /// [`TurnPhase`] marker at each wait boundary (Thinking before the provider
+    /// call, Querying before SQL execution), carrying the 1-based attempt so a
+    /// blind retry is honestly visible. The command layer wraps this callback to
+    /// emit the side-channel `turn-progress` Tauri event addressed by sessionId
+    /// (ADR-0056/0059); the phase never enters the [`TurnOutcome`] contract.
+    pub fn ask_with_phase(
+        &mut self,
+        question: &str,
+        on_phase: impl FnMut(TurnPhase),
+    ) -> TurnOutcome {
         let turns = self.turns();
         let request = window::assemble(question, &self.working_set, &turns);
         let result_name = format!("result_{}", self.working_set.next_result_number());
-        // Disjoint field borrows: `run` takes `&mut self.turn_runner` while
-        // TurnDeps borrows `&self.conn` / `&self.source_files` /
+        // Disjoint field borrows: `run_with_phase` takes `&mut self.turn_runner`
+        // while TurnDeps borrows `&self.conn` / `&self.source_files` /
         // `&mut self.working_set` / `&self.temp_path` -- distinct Session
         // fields, so they coexist without widening to `&mut self`. The block
         // scope drops the deps borrow before `record_turn` takes its own
@@ -1540,7 +1569,8 @@ impl Session {
                 result_count_cap: self.result_count_cap,
                 temp_path: &self.temp_path,
             };
-            self.turn_runner.run(&request, result_name, &mut deps)
+            self.turn_runner
+                .run_with_phase(&request, result_name, &mut deps, on_phase)
         };
         // ADR-0055 post-turn discard: if `close_session` marked this session
         // closing while the turn was in flight (it also fired cancel, so the

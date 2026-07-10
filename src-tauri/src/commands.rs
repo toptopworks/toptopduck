@@ -20,10 +20,11 @@ use crate::app_config::AppConfig;
 use crate::cancel::CancelToken;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, LoadOutcome, ProviderConfig, ProviderConfigView, RowPage,
-    SheetGuidance, ThreadEntry, TurnOutcome,
+    SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
 };
+use crate::persistence::{list_session_metadata, SessionMetadata};
 use crate::provider::live_config::LiveProviderConfig;
-use crate::session::{ResumeEvent, Session};
+use crate::session::{ResumeEvent, ResumeProgress, Session};
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
 
 /// Reject a mutating command while THIS session is resuming (ADR-0053, made
@@ -306,6 +307,7 @@ pub fn remove_active_source(
 /// inside `Session::ask` (no thread append, no recipe persist).
 #[tauri::command]
 pub async fn ask(
+    app: tauri::AppHandle,
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     question: String,
@@ -315,9 +317,26 @@ pub async fn ask(
     reject_if_resuming(&handle)?;
     reject_if_in_flight(&handle)?;
     let handle = Arc::clone(&handle);
+    // ADR-0059: build the side-channel `turn-progress` emit callback here at the
+    // command boundary (the only layer allowed to hold a Tauri AppHandle,
+    // ADR-0029) and inject it into the turn via Session::ask_with_phase. Each
+    // discrete phase (Thinking / Querying) is emitted addressed by sessionId so
+    // a multi-session frontend filters the global broadcast to its own pane
+    // (ADR-0056/0059). Cloning AppHandle + the id string is cheap; the closure
+    // is FnMut (called once per phase boundary, fires across blind retries).
+    let app_for_cb = app.clone();
+    let sid = session_id.clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = handle.session_lock()?;
-        Ok::<TurnOutcome, String>(s.ask(&question))
+        Ok::<TurnOutcome, String>(s.ask_with_phase(&question, move |phase| {
+            let _ = app_for_cb.emit(
+                "turn-progress",
+                &TurnProgress {
+                    session_id: sid.clone(),
+                    phase,
+                },
+            );
+        }))
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -493,6 +512,32 @@ pub fn record_recent_file(live: State<'_, LiveProviderConfig>, path: String) -> 
     Ok(())
 }
 
+/// List every persisted `.duck` session's metadata for the cold-start left
+/// sidebar (ADR-0060/0061, issue #76). Reads the app-config `recent_files`
+/// paths and derives each entry's metadata from its recipe + file mtime --
+/// zero new persistence. A path that is no longer a readable recipe is skipped
+/// (the listing never fabricates metadata). Thin wrapper over the pure
+/// [`list_session_metadata`] so the derivation stays black-box testable.
+///
+/// Runs the per-entry file reads off the async/UI thread (AC8): each recent
+/// entry pays a `read_duck` (file read + JSON parse) plus a `metadata` stat,
+/// so the whole pass runs in `spawn_blocking` like `read_rows` / `ingest_file`
+/// -- a cold start over slow or network-mounted storage must not freeze the
+/// main window while the sidebar list is being derived.
+#[tauri::command]
+pub async fn list_sessions(
+    live: State<'_, LiveProviderConfig>,
+) -> Result<Vec<SessionMetadata>, String> {
+    let live = live.inner().clone();
+    let list = tauri::async_runtime::spawn_blocking(move || {
+        let recent = live.load().recent_files;
+        list_session_metadata(&recent)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(list)
+}
+
 // --- Cross-session persistence (issue #48, ADR-0034/0036) -------------------
 //
 // Save / open a `.duck` recipe document. Save binds the live session to a
@@ -564,13 +609,24 @@ pub async fn open_duck(
         live.inner().clone(),
     )));
     let app_for_cb = app.clone();
+    let sid = session_id.clone();
     let inner = tauri::async_runtime::spawn_blocking(move || {
         let mut new_session = Session::open_duck(
             &path,
             cancel_token,
             provider,
             |ev: ResumeEvent| {
-                let _ = app_for_cb.emit("resume-progress", &ev);
+                // ADR-0056 (issue #76): address the resume-progress event by
+                // sessionId so a multi-session frontend filters the global
+                // broadcast to the one SessionPane that owns the resume. v1
+                // emitted a bare ResumeEvent -- a single-session legacy.
+                let _ = app_for_cb.emit(
+                    "resume-progress",
+                    &ResumeProgress {
+                        session_id: sid.clone(),
+                        event: ev,
+                    },
+                );
             },
             // Issue #49 honest-degrade callbacks: the engine surfaces Missing
             // / Unreadable / Drift / ActiveAbandoned decisions to the caller.

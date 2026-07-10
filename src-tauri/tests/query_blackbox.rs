@@ -11,9 +11,10 @@ use std::thread;
 use std::time::Duration;
 
 use toptopduck_lib::{
-    CancelToken, ChartKind, DatasetPrivacy, DatasetRef, FakeProvider, LoadOutcome, ProviderError,
-    ProviderReply, ProviderRequest, ResponsePayload, Session, TextKind, ThreadEntry, TurnOutcome,
-    TurnPayload, TurnRecord, VizSpec,
+    ActiveResolution, CancelToken, ChartKind, DatasetPrivacy, DatasetRef, FakeProvider,
+    LoadOutcome, ProviderError, ProviderReply, ProviderRequest, ResponsePayload, ResumeEvent,
+    ResumeProgress, Session, SourceResolution, TextKind, ThreadEntry, TurnOutcome, TurnPayload,
+    TurnPhase, TurnProgress, TurnRecord, VizSpec,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -1234,4 +1235,165 @@ fn a_real_long_duckdb_query_is_interruptible_via_cancel() {
     );
     let s = session.lock().unwrap();
     assert!(s.get("result_1").is_none()); // rolled back / never installed
+}
+
+// --- turn-progress phase production (ADR-0059, issue #76) ------------------
+//
+// ask_with_phase surfaces the discrete Thinking / Querying wait boundaries so
+// the command layer can emit the side-channel `turn-progress` event. The phase
+// never enters the TurnOutcome contract (ADR-0009 unchanged); it is pure
+// observer feedback. These tests pin the phase SEQUENCE the UI renders from.
+
+#[test]
+fn ask_with_phase_records_thinking_then_querying_on_a_result_turn() {
+    // ADR-0059: a result turn has two waits -- the provider call (Thinking) and
+    // the SQL execution (Querying). The callback receives both, in order, each
+    // carrying attempt = 1 (the first try). A retry path is covered separately
+    // at the TurnRunner unit seam (where a transient failure is injectable).
+    let mut session = session_with(&[("建结果", "SELECT 1 AS n")]);
+    let mut phases: Vec<TurnPhase> = Vec::new();
+    let outcome = session.ask_with_phase("建结果", |p| phases.push(p));
+    assert!(
+        matches!(outcome, TurnOutcome::Materialized { .. }),
+        "got {outcome:?}"
+    );
+    assert_eq!(
+        phases,
+        vec![
+            TurnPhase::Thinking { attempt: 1 },
+            TurnPhase::Querying { attempt: 1 },
+        ],
+        "a result turn emits Thinking then Querying, both at attempt 1"
+    );
+}
+
+#[test]
+fn ask_with_phase_records_only_thinking_on_a_textual_turn() {
+    // ADR-0059: a textual turn (clarify / refuse) has only the provider wait --
+    // no SQL runs, so Querying never fires. The callback receives a single
+    // Thinking marker.
+    let mut provider = FakeProvider::new();
+    provider = provider.scripted("澄清", reply_text(TextKind::Clarify, "哪个维度？"));
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+
+    let mut phases: Vec<TurnPhase> = Vec::new();
+    let outcome = session.ask_with_phase("澄清", |p| phases.push(p));
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "got {outcome:?}"
+    );
+    assert_eq!(
+        phases,
+        vec![TurnPhase::Thinking { attempt: 1 }],
+        "a textual turn emits Thinking only -- no query wait"
+    );
+}
+
+// --- turn-progress / resume-progress session_id addressing (ADR-0056/0059,
+// issue #76) --------------------------------------------------------------
+//
+// Each progress event is addressed by a session_id so a multi-session frontend
+// filters the global Tauri broadcast down to the one SessionPane that owns the
+// turn / resume (ADR-0056). The command layer wraps each lib-phase / lib-event
+// with the ask's / open_duck's session_id before emitting; these seams drive
+// the SAME callback the command layer injects and assert one turn's / one
+// resume's whole event sequence is addressable by ONE id -- the precondition
+// for the frontend's sessionId filter. (The Tauri emit wrapping itself lives
+// in commands.rs and is not reachable without a Tauri runtime; the lib
+// callback + the wire types are what these tests pin.)
+
+#[test]
+fn turn_progress_events_for_one_turn_share_one_session_id() {
+    // AC #76 (ADR-0056/0059): a turn's whole phase sequence is addressable by
+    // the ask's single session_id. The command layer wraps each TurnPhase with
+    // that id; this seam drives the same callback and asserts every emitted
+    // event carries it, so a multi-session frontend can filter on sessionId.
+    const SID: &str = "turn-session-id";
+    let mut session = session_with(&[("建结果", "SELECT 1 AS n")]);
+    let mut addressed: Vec<TurnProgress> = Vec::new();
+    let outcome = session.ask_with_phase("建结果", |phase| {
+        addressed.push(TurnProgress {
+            session_id: SID.into(),
+            phase,
+        });
+    });
+    assert!(
+        matches!(outcome, TurnOutcome::Materialized { .. }),
+        "got {outcome:?}"
+    );
+    // A result turn emits at least Thinking + Querying.
+    assert!(addressed.len() >= 2, "got {addressed:?}");
+    assert!(
+        addressed.iter().all(|p| p.session_id == SID),
+        "every turn-progress event carries the ask's session_id: {addressed:?}"
+    );
+}
+
+#[test]
+fn resume_progress_events_carry_one_session_id_and_cover_the_resume_sequence() {
+    // AC #76 (ADR-0034/0056/0059): resume emits a resume-progress event per
+    // source verification + per replayed turn, and the whole sequence is
+    // addressable by the open_duck's single session_id. This seam also pins
+    // that resume ACTUALLY fires Source + Replay events (ADR-0034 visible
+    // progress) -- the resume on_progress emit path was previously untested at
+    // any layer. The command layer wraps each ResumeEvent with the session_id;
+    // here we drive the same callback and assert one id addresses every event.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("resumed.duck");
+
+    // Build + persist a real .duck: one source + one productive turn.
+    let cancel = Arc::new(CancelToken::new());
+    let provider = FakeProvider::new().scripted(
+        "建结果",
+        reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+    );
+    let mut session =
+        Session::with_provider_and_cancel(Box::new(provider), cancel).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    session.ask("建结果"); // result_1
+    session
+        .bind_duck(duck.clone(), "resumed".into())
+        .expect("bind");
+    // Drop the building session so the canonical-writer key (ADR-0035
+    // single-writer) releases before open_duck re-acquires it.
+    drop(session);
+
+    const SID: &str = "resume-session-id";
+    let mut addressed: Vec<ResumeProgress> = Vec::new();
+    let resumed = Session::open_duck(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(FakeProvider::new()),
+        |ev| {
+            addressed.push(ResumeProgress {
+                session_id: SID.into(),
+                event: ev,
+            })
+        },
+        |_| SourceResolution::Abort,
+        |_| ActiveResolution::Abort,
+    )
+    .expect("resume");
+
+    // Resume fires at least one Source + one Replay event (ADR-0034 visible
+    // progress) -- the emit path the frontend renders its progress bar from.
+    assert!(
+        addressed
+            .iter()
+            .any(|p| matches!(p.event, ResumeEvent::Source { .. })),
+        "resume emits a Source verification event: {addressed:?}"
+    );
+    assert!(
+        addressed
+            .iter()
+            .any(|p| matches!(p.event, ResumeEvent::Replay { .. })),
+        "resume emits a Replay progress event: {addressed:?}"
+    );
+    // Every event is addressable by the SAME session_id (frontend filter key).
+    assert!(
+        addressed.iter().all(|p| p.session_id == SID),
+        "every resume-progress event carries the resume's session_id: {addressed:?}"
+    );
+    // Sanity: the resumed session reconstructed the turn's result via replay.
+    assert!(resumed.get("result_1").is_some());
 }

@@ -15,11 +15,13 @@
 //!   tracks the canonical `.duck` paths currently open in this process.
 
 pub mod io;
+pub mod listing;
 pub mod migration;
 pub mod recipe;
 pub mod registry;
 
 pub use io::{read_duck, save_atomic, LoadError, SaveError};
+pub use listing::{list_session_metadata, SessionMetadata, SourceSummary};
 pub use migration::{migrate_to_current, MigrationError};
 pub use recipe::{
     ProductiveTurn, Recipe, RecipeEntry, RecipeError, RecipeOutcome, RecipeTurn, SourceRef,

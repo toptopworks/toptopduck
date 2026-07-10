@@ -8,11 +8,13 @@ import type {
   LoadOutcome,
   ProviderConfig,
   ProviderConfigView,
-  ResumeEvent,
+  ResumeProgress,
   RowPage,
+  SessionMetadata,
   SheetGuidance,
   ThreadEntry,
   TurnOutcome,
+  TurnProgress,
 } from "./types";
 
 // Multi-session addressing (ADR-0056): every session-scoped function takes
@@ -185,11 +187,31 @@ export async function openDuck(sessionId: string, path: string): Promise<void> {
   await invoke<void>("open_duck", { sessionId, path });
 }
 
-// Subscribe to resume-progress events (ADR-0034 visible progress).
+// Subscribe to resume-progress events (ADR-0034/0059 visible progress, issue
+// #76). Each event carries the addressing sessionId so a multi-session frontend
+// filters the global broadcast; a single-session shell reads `.event` directly.
 export async function onResumeProgress(
-  cb: (ev: ResumeEvent) => void,
+  cb: (ev: ResumeProgress) => void,
 ): Promise<UnlistenFn> {
-  return listen<ResumeEvent>("resume-progress", (e) => cb(e.payload));
+  return listen<ResumeProgress>("resume-progress", (e) => cb(e.payload));
+}
+
+// Subscribe to turn-progress events (ADR-0059 discrete phase feedback, issue
+// #76). Each event carries the addressing sessionId + a Thinking/Querying
+// phase (with the 1-based attempt). The phase never enters the TurnOutcome
+// contract; it is observer feedback only.
+export async function onTurnProgress(
+  cb: (ev: TurnProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<TurnProgress>("turn-progress", (e) => cb(e.payload));
+}
+
+// List every persisted .duck session's metadata for the cold-start sidebar
+// (ADR-0060/0061, issue #76). The backend reads recent_files and derives each
+// entry from its recipe + mtime (zero new persistence); unreadable paths are
+// skipped. session_id is the .duck path -- pass it back to openDuck to resume.
+export async function listSessions(): Promise<SessionMetadata[]> {
+  return invoke<SessionMetadata[]>("list_sessions");
 }
 
 // Read + clear the named session's most recent per-turn persistence failure
