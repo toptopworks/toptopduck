@@ -144,6 +144,7 @@ describe("App rename flow", () => {
     // display rename must not drop the current selection.
     state.workingSet = [guidedDataset];
     render(<App />);
+    fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
 
     // Mount refresh settles, then select the dataset to show its detail.
     await waitFor(() =>
@@ -181,6 +182,7 @@ describe("App rename flow", () => {
     // produced it, so a rename rejection is never misread as a load failure.
     state.workingSet = [guidedDataset];
     render(<App />);
+    fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
     );
@@ -212,6 +214,7 @@ describe("App privacy flow", () => {
     // "换源失败：", so a privacy rejection is never misattributed.
     state.workingSet = [guidedDataset];
     render(<App />);
+    fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
     );
@@ -257,20 +260,24 @@ describe("App ask flow", () => {
     });
     render(<App />);
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
     );
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "总共几行" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
     await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "总共几行"));
-    // the materialized result pane appears (ResultView heading)
-    await waitFor(() => expect(screen.getByText(/结果：result_1/)).toBeInTheDocument());
+    // the materialized result pane appears (ResultView heading). The thread
+    // rail also shows a result link with the same text, so target the heading
+    // role to assert the workspace ResultView specifically.
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /结果：result_1/ })).toBeInTheDocument(),
+    );
   });
 
   it("labels an ask failure distinctly from a load failure", async () => {
     vi.mocked(askQuestion).mockRejectedValueOnce("未配置有效的 LLM 提供方");
     render(<App />);
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
     );
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "x" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
@@ -286,7 +293,7 @@ describe("App ask flow", () => {
     // occupies a slot, but produces no result_N -- so no result pane opens.
     render(<App />);
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
     );
     // Mount refresh has settled; queue what the turn produces (asked after mount
     // so the mount's own conversation() call doesn't consume the once-mock).
@@ -309,9 +316,10 @@ describe("App ask flow", () => {
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "哪个名字" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
 
-    // The clarify body is visible in the thread...
+    // The clarify body is visible in the thread AND now also in the workspace
+    // textual card, so assert at least one match rather than a unique one.
     await waitFor(() =>
-      expect(screen.getByText("按产品名还是客户名汇总？")).toBeInTheDocument(),
+      expect(screen.getAllByText("按产品名还是客户名汇总？").length).toBeGreaterThan(0),
     );
     // ...and no result pane opens for a non-result outcome.
     expect(screen.queryByText(/结果：result/)).not.toBeInTheDocument();
@@ -333,6 +341,7 @@ describe("App delete-source flow (issue #38)", () => {
       state.workingSet = state.workingSet.filter((d) => d.reference_name !== ref);
     });
     render(<App />);
+    fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
     );
@@ -351,6 +360,7 @@ describe("App delete-source flow (issue #38)", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     vi.mocked(removeSource).mockRejectedValueOnce("工作集中存在中间结果，暂不支持删源");
     render(<App />);
+    fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
     );
@@ -394,6 +404,7 @@ describe("App delete-active-source flow (issue #39)", () => {
       vi.mocked(activeDataset).mockResolvedValue(guidedDataset); // focus moved to people
     });
     render(<App />);
+    fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^orders/ })).toBeInTheDocument(),
     );
@@ -424,6 +435,7 @@ describe("App delete-active-source flow (issue #39)", () => {
     // AC3: cancel leaves the working set untouched -- nothing crossed IPC while
     // the dialog was open, so there is nothing to undo.
     render(<App />);
+    fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^orders/ })).toBeInTheDocument(),
     );
@@ -450,6 +462,7 @@ describe("App delete-active-source flow (issue #39)", () => {
       vi.mocked(activeDataset).mockResolvedValue(null); // empty working set
     });
     render(<App />);
+    fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
     );

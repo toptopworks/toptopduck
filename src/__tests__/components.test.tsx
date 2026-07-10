@@ -662,9 +662,9 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     vi.mocked(readRows).mockResolvedValue(page);
   });
 
-  it("renders the chart via Vega-Embed and hides the table on success", async () => {
-    // AC1: a provider viz (whitelisted kind + Vega-Lite JSON) renders; the chart
-    // takes precedence over the table, and no degradation disclosure shows.
+  it("renders the chart above the table on success (ADR-0062 R4 layout)", async () => {
+    // AC1 + ADR-0062 R4: a provider viz renders AND the table stays visible
+    // below it (chart = answer, table = evidence); no degradation disclosure.
     vi.mocked(embed).mockResolvedValue(embedOk());
     const { container } = render(
       <ResultView
@@ -676,8 +676,8 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     );
     await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
     expect(container.querySelector(".viz-chart")).toBeInTheDocument();
-    // The table pagination is hidden while the chart shows.
-    expect(screen.queryByRole("button", { name: /下一页/ })).not.toBeInTheDocument();
+    // The table pagination is present below the chart (table is always shown).
+    expect(screen.getByRole("button", { name: /下一页/ })).toBeInTheDocument();
     expect(screen.queryByText(/图表无法渲染/)).not.toBeInTheDocument();
   });
 

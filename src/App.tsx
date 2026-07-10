@@ -1,89 +1,37 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { FormattedMessage, IntlProvider, useIntl } from "react-intl";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { LogicalPosition, LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
-import { ActiveSourceDeleteDialog } from "./components/ActiveSourceDeleteDialog";
-import { FileDropzone } from "./components/FileDropzone";
-import { WorkingSetList } from "./components/WorkingSetList";
-import { DatasetDetail } from "./components/DatasetDetail";
+import { SessionPane } from "./session/SessionPane";
 import { DisclosureBanner } from "./components/DisclosureBanner";
-import { GuidedLoadDialog } from "./components/GuidedLoadDialog";
-import { QuestionBar } from "./components/QuestionBar";
-import { ResultView } from "./components/ResultView";
 import { SettingsDialog } from "./components/SettingsDialog";
-import { Thread } from "./components/Thread";
+import { createQueryClient } from "./lib/queryClient";
+import { catalogFor, coerceLocalePreference, useLocale } from "./i18n";
+import { useTheme } from "./theme/useTheme";
 import {
-  activeDataset,
-  askQuestion,
-  cancelQuery,
-  conversation,
-  createSession,
   closeSession,
+  createSession,
   fmtError,
   getAppConfig,
   getProviderConfig,
-  ingestFile,
-  ingestFileGuided,
-  listWorkingSet,
   openDuck,
   onResumeProgress,
   recordRecentFile,
-  renameDataset,
-  removeSource,
-  removeActiveSource,
-  replaceSource,
   saveAsDuck,
   setAppConfig,
-  setDatasetPrivacy,
-  takePersistError,
 } from "./api";
-import { loadErrorMessage } from "./loadErrorMessage";
-import { catalogFor, coerceLocalePreference, useLocale } from "./i18n";
-import { useTheme } from "./theme/useTheme";
-import type {
-  AppConfig,
-  DatasetDescriptor,
-  GuidanceRequest,
-  SheetGuidance,
-  StaleAnchor,
-  ThreadEntry,
-  VizSpec,
-} from "./types";
+import type { AppConfig } from "./types";
 
-/** A surfaced error tagged by the operation that produced it, so the displayed
- * prefix matches the action (a rename rejection is never mislabelled a load
- * failure). The backend error crosses IPC as a plain string, so the kind is
- * reconstructed at the call site that knows the operation. */
-type AppError = {
-  message: string;
-  kind: "load" | "rename" | "replace" | "delete" | "privacy" | "ask";
-};
+// The Chat-style three-column shell (ADR-0045/0060/0062). App owns APP-level
+// state (session id, app-config, theme, locale, window geometry, save/open,
+// settings) and lays out the three columns; each open session renders a
+// <SessionPane> (ADR-0051) that owns its working-set / active / thread queries
+// + client UI state. Single-session this slice: the sidebar renders the one
+// active session (multi-session listing/switching is a later issue).
 
-/** Error prefix per operation kind -- exhaustive over AppError["kind"], so
- * TypeScript catches a missing entry when a new kind is added. */
-const ERROR_PREFIX: Record<AppError["kind"], string> = {
-  load: "加载失败：",
-  rename: "重命名失败：",
-  replace: "换源失败：",
-  delete: "删源失败：",
-  privacy: "隐私设置失败：",
-  ask: "提问失败：",
-};
-
-/** The most recent materialized turn result, shown in the result pane. */
-interface LatestResult {
-  referenceName: string;
-  assumption: string | null;
-  /** The turn's viz spec (ADR-0016/0033): null = plain table; a spec the
-   * ResultView renders or degrades to the table with a disclosure. Carried so a
-   * re-selected past result re-renders its chart too. */
-  viz: VizSpec | null;
-}
-
-/** Acquire the main window, or `null` when the Tauri bridge is absent (jsdom
- * tests). Every window-geometry call site is a no-op without it -- geometry
- * persistence is a convenience, never a correctness surface, so a missing
- * bridge must never crash the render. */
+/** Acquire the main window, or null when the Tauri bridge is absent (jsdom
+ * tests). Every window-geometry call site is a no-op without it. */
 function safeMainWindow(): ReturnType<typeof getCurrentWindow> | null {
   try {
     return getCurrentWindow();
@@ -92,11 +40,9 @@ function safeMainWindow(): ReturnType<typeof getCurrentWindow> | null {
   }
 }
 
-// Header action cluster (ADR-0052, issue #78). App sits above <IntlProvider>
-// so it cannot call useIntl(); this child renders inside the provider and owns
-// the translated buttons + key status. IDs are STATIC literals so @formatjs/cli
-// extract can statically resolve them (a variable `id` prop breaks extraction).
-// Kept local: only the App header uses it.
+// Header action cluster (ADR-0052 i18n). App sits above <IntlProvider> so it
+// cannot call useIntl(); this child renders inside the provider. IDs are STATIC
+// literals so @formatjs/cli extract can resolve them.
 function HeaderActions({
   disabled,
   hasKey,
@@ -150,129 +96,89 @@ function HeaderActions({
   );
 }
 
-export default function App() {
-  const [datasets, setDatasets] = useState<DatasetDescriptor[]>([]);
-  // Issue #40 stale-cascade: result_N whose upstream source was removed stay
-  // in the working set (visible, ADR-0013) but carry a stale anchor. Keyed by
-  // reference name so the Thread can badge stale results without each
-  // TurnRecord snapshot re-fetching current state. Rebuilt per render -- the
-  // working set is small and this dodges a useMemo for a trivial derivation.
-  const staleByReference = new Map<string, StaleAnchor>();
-  for (const d of datasets) if (d.stale) staleByReference.set(d.reference_name, d.stale);
-  const [activeName, setActiveName] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<AppError | null>(null);
-  // Pending guided load (ADR-0015): auto-tidy could not confidently rectify, so
-  // the explicit header/skip choices must be gathered before loading.
-  const [guidance, setGuidance] = useState<{ request: GuidanceRequest; path: string } | null>(
-    null,
+// The leftmost session sidebar (ADR-0060). Chat-style chrome (沉色 background,
+// distinct from the work area). Single-session this slice: shows the one active
+// session as a selected entry; "+ 新建会话" + the multi-session list land with
+// the multi-session issue. Recent .duck files render as clickable entries
+// (resume-on-click) so the persistence entry point survives the shell rewrite.
+function SessionSidebar({
+  sessionName,
+  recentFiles,
+  disabled,
+  onOpenRecent,
+}: {
+  sessionName: string;
+  recentFiles: string[];
+  disabled: boolean;
+  onOpenRecent: (path: string) => void;
+}) {
+  return (
+    <aside className="session-sidebar" aria-label="会话">
+      <h2 className="sidebar-title">会话</h2>
+      <ul className="session-list">
+        {/* The one active session, highlighted as the current selection. */}
+        <li className="session-entry active" aria-current="true">
+          <span className="session-name">{sessionName}</span>
+        </li>
+        {recentFiles.map((p) => {
+          const base = p.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? p;
+          return (
+            <li key={p} className="session-entry recent">
+              <button
+                type="button"
+                className="recent-session"
+                title={p}
+                disabled={disabled}
+                onClick={() => onOpenRecent(p)}
+              >
+                {base}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      <details className="sidebar-disclosure">
+        <summary className="muted">隐私披露</summary>
+        <DisclosureBanner />
+      </details>
+    </aside>
   );
-  const [latestResult, setLatestResult] = useState<LatestResult | null>(null);
-  // The always-visible conversation thread (ADR-0028/0039/0040): the unified
-  // timeline of turns AND source lifecycle events, in order. The session is the
-  // source of truth; this is refetched after each turn / source mutation so all
-  // entry kinds render.
-  const [thread, setThread] = useState<ThreadEntry[]>([]);
-  // LLM provider key status (issue #29, ADR-0029): whether an API key is
-  // stored. A boolean only -- the key itself never crosses to the frontend.
-  // When false, ask turns fail as not-wired until the user configures a key in
-  // the settings dialog; this indicator guides them there.
+}
+
+export default function App() {
+  // QueryClient (ADR-0051): lazy-init once per App mount so test renders never
+  // share cache.
+  const [queryClient] = useState(() => createQueryClient());
+
+  // --- Session lifecycle (ADR-0056) ----------------------------------------
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  // Bumped after a resume (open .duck) so <SessionPane> remounts and resets its
+  // client UI state (viewedResult re-initializes from the resumed thread,
+  // ADR-0062 R5). The query cache (keyed by sessionId) survives the remount.
+  const [sessionEpoch, setSessionEpoch] = useState(0);
+  const [sessionName, setSessionName] = useState<string>("新会话");
+  const sessionIdRef = useRef<string | null>(null);
+  const [shellError, setShellError] = useState<string | null>(null);
+
+  // --- App-level config (ADR-0038) ----------------------------------------
+  const [appConfig, setAppConfigState] = useState<AppConfig | null>(null);
+  const appConfigRef = useRef<AppConfig | null>(null);
+  const geometryRestoredRef = useRef(false);
+
+  // --- App-level UI state --------------------------------------------------
   const [hasKey, setHasKey] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  // Pending active-source delete (issue #39, ADR-0035): when the user removes
-  // the current focus source while other sources remain, this holds the target
-  // while the confirm dialog collects an explicit continuation. null = no
-  // dialog open. Nothing crosses IPC while this is set -- cancel is a true
-  // no-op (AC3).
-  const [pendingActiveDelete, setPendingActiveDelete] =
-    useState<DatasetDescriptor | null>(null);
-  // Resume progress (issue #48, ADR-0034 visible progress): the textual status
-  // line shown while Session::open_duck re-reads sources + re-executes the
-  // productive chain. null when no resume is running. Updates come from the
-  // backend `resume-progress` Tauri event.
   const [resumeStatus, setResumeStatus] = useState<string | null>(null);
-  // persistenceBusy (review H6): blocks both save/open buttons for the ENTIRE
-  // handler -- including the native dialog window -- not just the post-dialog
-  // invoke. Without it the buttons stay enabled while the OS dialog is open
-  // and a user can trigger both handlers concurrently; two invokes then race
-  // the session mutex and the resume-progress listener.
   const [persistenceBusy, setPersistenceBusy] = useState(false);
-  // persistError (review H4): the most recent per-turn save failure, shown as
-  // a non-blocking banner. The in-memory turn always advances, so without this
-  // signal the user has no way to learn the disk fell behind -- closing the
-  // app in that window loses the unsaved turns. Cleared by the next clean poll.
-  const [persistError, setPersistError] = useState<string | null>(null);
-  // App-level config (issue #53, ADR-0038): preferences, window geometry, recent
-  // files, and the no-key endpoint config. null until the first getAppConfig
-  // resolves. The theme + window geometry apply on load; the recent-files list
-  // renders in the header. A read failure honest-degrades server-side, so this
-  // always resolves to a usable AppConfig.
-  const [appConfig, setAppConfigState] = useState<AppConfig | null>(null);
-  // Latest AppConfig behind a ref so the debounced window-geometry persist
-  // writes the freshest values without depending on stale state in its closure.
-  const appConfigRef = useRef<AppConfig | null>(null);
-  // Avoid restoring window geometry more than once: the first time appConfig
-  // lands, apply the stored size/position; later loads (after a save) must NOT
-  // re-apply (would snap the user's just-resized window back).
-  const geometryRestoredRef = useRef(false);
-  // ADR-0056 multi-session addressing: the backend tracks sessions by id;
-  // this single-session shell mints ONE id on mount and threads it into every
-  // session-scoped call (the multi-tab UI lands in a later PRD). null only
-  // between mount and the createSession promise resolving -- the render gates
-  // on it so no session-scoped call runs before the id lands. The ref lets the
-  // useCallback handlers read the current id without re-creating on every set.
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const sessionIdRef = useRef<string | null>(null);
-
-  /** Poll the backend for the most recent per-turn persistence failure
-   * (review H4). Called at the end of every mutating handler so a dropped
-   * save surfaces here instead of relying on the next successful write to
-   * silently self-heal. Best-effort: an IPC failure here is swallowed rather
-   * than shown as a separate error (it must not mask the real operation). */
-  const pollPersistError = useCallback(async () => {
-    if (!sessionId) return;
-    try {
-      setPersistError(await takePersistError(sessionId));
-    } catch {
-      // swallow -- persist-status polling must not surface its own failure
-    }
-  }, [sessionId]);
-
-  const refresh = useCallback(async (sid: string) => {
-    setDatasets(await listWorkingSet(sid));
-    const act = await activeDataset(sid);
-    setActiveName(act?.reference_name ?? null);
-    setSelected((cur) => cur ?? act?.reference_name ?? null);
-    setThread(await conversation(sid));
-  }, []);
-
-  // Refresh the LLM key-configured indicator (issue #29). Called on mount and
-  // after the settings dialog closes (a save/clear changes the stored key). A
-  // failure is non-fatal -- the indicator just stays stale and an ask surfaces
-  // the real error, so it is swallowed rather than surfacing as a top-level
-  // app error.
-  const refreshKeyStatus = useCallback(async () => {
-    try {
-      setHasKey((await getProviderConfig()).has_key);
-    } catch {
-      // Keep the previous indicator; the ask path surfaces real failures.
-    }
-  }, []);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   // ADR-0056: mint the single session id once on mount. Lands before any
-  // session-scoped call runs (the sync effect below waits on sessionId). A
-  // create failure surfaces as a load error; the gated render keeps the UI in
-  // a loading state until the id resolves.
+  // session-scoped call runs (the gated render waits on sessionId).
   useEffect(() => {
     let cancelled = false;
     let createdId: string | null = null;
     createSession()
       .then((id) => {
-        // Unmounted mid-create: the backend session is now orphaned (no
-        // frontend holder). Close it so ADR-0055's tab<->id binding releases
-        // the DuckDB instance + .duck writer key. Fire-and-forget -- close is
-        // best-effort and never fatal.
         if (cancelled) {
           void closeSession(id);
           return;
@@ -283,82 +189,57 @@ export default function App() {
       })
       .catch((e) => {
         if (cancelled) return;
-        setError({ message: fmtError(e), kind: "load" });
+        setShellError(fmtError(e));
       });
     return () => {
       cancelled = true;
-      // Release the session we minted if we unmount with one live
-      // (ADR-0055 close-on-unmount). In the single-session shell App never
-      // unmounts before process exit, but React StrictMode / HMR / tests do,
-      // and without this the backend accumulates orphaned DuckDB instances.
       if (createdId) void closeSession(createdId);
     };
   }, []);
 
+  const refreshKeyStatus = useCallback(async () => {
+    try {
+      setHasKey((await getProviderConfig()).has_key);
+    } catch {
+      // keep the previous indicator; the ask path surfaces real failures.
+    }
+  }, []);
+
   useEffect(() => {
-    // Wait for the session id before issuing any session-scoped call. Mount-time
-    // sync from the Tauri backend (external system -> state): a legitimate
-    // one-shot fetch, not the avoidable cascade this rule targets.
     if (!sessionId) return;
+    // External system -> state: a legitimate one-shot fetch (the persisted
+    // config + the key indicator land once after the session opens).
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    void refresh(sessionId);
-    // refreshKeyStatus swallows its own errors, so no disable is needed here.
     void refreshKeyStatus();
-    // Load app-config (ADR-0038): theme + window geometry + recent files. Errors
-    // are swallowed server-side (honest-degrade), so a reject here is an IPC
-    // fault -- non-fatal, the app keeps defaults-equivalent null state.
     void getAppConfig()
       .then((cfg) => {
         appConfigRef.current = cfg;
-
         setAppConfigState(cfg);
       })
       .catch(() => {
-        // Keep null; theme defaults to "system" (no attribute), no recent files.
+        // Keep null; theme defaults to "system", no recent files.
       });
-  }, [sessionId, refresh, refreshKeyStatus]);
+  }, [sessionId, refreshKeyStatus]);
 
-  /** Push `cfg` into state + ref and persist it atomically. Centralizes the
-   * "mutate AppConfig" flow so every caller keeps state, ref, and disk aligned.
-   * A persist failure surfaces as a top-level error tagged "load" (the closest
-   * existing kind -- there is no dedicated "settings" kind yet). */
   const commitAppConfig = useCallback(async (cfg: AppConfig): Promise<void> => {
     appConfigRef.current = cfg;
     setAppConfigState(cfg);
     await setAppConfig(cfg);
   }, []);
 
-  // Apply the theme to the document root (ADR-0050). useTheme resolves the
-  // three-state preference (system/light/dark) -- defaulting to system before
-  // app-config resolves -- toggles the .dark class the shadcn/Tailwind tokens
-  // key off, follows the OS preference in system mode, and dispatches a
-  // theme-change event exposed for the Vega bridge's onThemeChange (wired
-  // post-#77). Called for its side effect; the persisted preference itself is
-  // read from app-config (ADR-0038).
+  // Theme (ADR-0050) + locale (ADR-0052): applied to <html>, follow the
+  // persisted three-state preference (defaulting to system before app-config
+  // resolves). The Vega bridge listens to the theme-change event these fire.
   useTheme(appConfig?.theme ?? "system");
-
-  // Resolve the effective locale (ADR-0052, issue #78). Mirrors useTheme: the
-  // persisted three-state preference (system/zh-CN/en-US) is resolved to a
-  // concrete Intl locale, defaulting to "system" before app-config resolves.
-  // coerceLocalePreference guards the IPC boundary -- a corrupt persisted value
-  // degrades to "system" (then the OS language, then en-US) rather than crashing
-  // the hook. The Rust side resolves the SAME preference independently for the
-  // canonical-prompt locale directive; locale never crosses IPC.
   const effectiveLocale = useLocale(coerceLocalePreference(appConfig?.locale));
 
-  // Keep <html lang> in sync with the effective locale for a11y (screen readers
-  // announce in the rendered language). No-op when document is absent (jsdom).
   useEffect(() => {
     if (typeof document !== "undefined") {
       document.documentElement.lang = effectiveLocale;
     }
   }, [effectiveLocale]);
 
-  /** Restore the persisted window geometry ONCE on the first app-config load
-   * (ADR-0038). Guarded: the Tauri window API is absent in jsdom, so every call
-   * is wrapped to no-op on failure rather than crash the render. Later loads
-   * (after a save) skip restore -- re-applying would snap a just-resized window
-   * back to the stored value. */
+  // Restore window geometry ONCE on the first app-config load (ADR-0038).
   useEffect(() => {
     if (!appConfig || geometryRestoredRef.current) return;
     const win = safeMainWindow();
@@ -379,11 +260,7 @@ export default function App() {
     }
   }, [appConfig]);
 
-  /** Persist window geometry on resize/move, debounced (ADR-0038). Each event
-   * reads the live size/position from the Tauri window and patches the latest
-   * AppConfig via read-modify-write. Guarded so a missing window API (jsdom) or
-   * an IPC fault never surfaces -- geometry persistence is a convenience, never
-   * a correctness surface. */
+  // Persist window geometry on resize/move, debounced (ADR-0038).
   useEffect(() => {
     const win = safeMainWindow();
     if (!win) return;
@@ -394,7 +271,7 @@ export default function App() {
         .then(([size, pos, maximized]) => {
           const base = appConfigRef.current;
           if (!base) return;
-          const next: AppConfig = {
+          void commitAppConfig({
             ...base,
             window: {
               width: size.width,
@@ -403,9 +280,7 @@ export default function App() {
               y: pos.y,
               maximized,
             },
-          };
-          // Fire-and-forget: a failure here must not loop or surface.
-          void commitAppConfig(next).catch(() => {});
+          }).catch(() => {});
         })
         .catch(() => {});
     };
@@ -422,8 +297,6 @@ export default function App() {
     };
   }, [commitAppConfig]);
 
-  /** Refresh the recent-files list from the backend after a save/open records a
-   * new path. Swallows errors -- the list is advisory. */
   const refreshRecentFiles = useCallback(async () => {
     try {
       const cfg = await getAppConfig();
@@ -434,304 +307,7 @@ export default function App() {
     }
   }, []);
 
-  /** Generic mutation hook for simple backend-then-refresh patterns (rename,
-   * privacy -- ADR-0037 / ADR-0011). Separates the operation error from a
-   * refresh error: a successful backend commit followed by a failed refresh
-   * surfaces a distinct message (config saved, display failed to sync), never
-   * mislabelling a succeeded operation as a failure. */
-  function useSimpleMutation<Args extends unknown[]>(
-    kind: AppError["kind"],
-    fn: (sessionId: string, ...args: Args) => Promise<unknown>,
-  ) {
-    return useCallback(
-      async (...args: Args) => {
-        if (!sessionId) return;
-        setLoading(true);
-        setError(null);
-        try {
-          await fn(sessionId, ...args);
-        } catch (e) {
-          setError({ message: fmtError(e), kind });
-          setLoading(false);
-          void pollPersistError();
-          return;
-        }
-        try {
-          await refresh(sessionId);
-        } catch (refreshErr) {
-          setError({
-            message: `${ERROR_PREFIX[kind].replace("失败：", "")}已保存，但刷新工作集失败：${fmtError(refreshErr)}`,
-            kind,
-          });
-        }
-        setLoading(false);
-        void pollPersistError();
-      },
-      // `sessionId` is in deps (not read via ref) so the hook recomputes when
-      // the session id lands; refresh + pollPersistError are stable useCallbacks.
-      // exhaustive-deps false-positives on this factory pattern (it misreads
-      // the useState value as a non-reactive outer-scope binding), so the deps
-      // are pinned here -- removing sessionId would freeze the closure at null.
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-      [kind, fn, sessionId, refresh, pollPersistError],
-    );
-  }
-
-  const handleIngest = useCallback(
-    async (path: string) => {
-      const sid = sessionIdRef.current;
-      if (!sid) return;
-      setLoading(true);
-      setError(null);
-      try {
-        const outcome = await ingestFile(sid, path);
-        if (outcome.kind === "Loaded") {
-          await refresh(sid);
-          setSelected(outcome.data.reference_name);
-        } else if (outcome.kind === "NeedsGuidance") {
-          setGuidance({ request: outcome.data, path });
-        } else {
-          setError({ message: loadErrorMessage(outcome.data), kind: "load" });
-        }
-      } catch (e) {
-        setError({ message: fmtError(e), kind: "load" });
-      } finally {
-        setLoading(false);
-        void pollPersistError();
-      }
-    },
-    [refresh, pollPersistError],
-  );
-
-  const handleGuidedSubmit = useCallback(
-    async (sheetGuidance: SheetGuidance[]) => {
-      if (!guidance) return;
-      const sid = sessionIdRef.current;
-      if (!sid) return;
-      const { path } = guidance;
-      setLoading(true);
-      setError(null);
-      try {
-        const outcome = await ingestFileGuided(sid, path, sheetGuidance);
-        if (outcome.kind === "Loaded") {
-          setGuidance(null);
-          await refresh(sid);
-          setSelected(outcome.data.reference_name);
-        } else if (outcome.kind === "Error") {
-          setError({ message: loadErrorMessage(outcome.data), kind: "load" });
-        } else {
-          // NeedsGuidance should not recur after an explicit header pick.
-          setError({
-            message: "仍无法规整此工作表，请调整表头选择后重试",
-            kind: "load",
-          });
-        }
-      } catch (e) {
-        setError({ message: fmtError(e), kind: "load" });
-      } finally {
-        setLoading(false);
-        void pollPersistError();
-      }
-    },
-    [guidance, refresh, pollPersistError],
-  );
-
-  const handleRename = useSimpleMutation("rename", renameDataset);
-
-  // Re-upload a file onto an existing dataset reference name (ADR-0042, issue
-  // #11): a fresh snapshot takes over the name. Distinct from handleIngest
-  // (add) -- the reference name to take over is explicit. The reference name is
-  // unchanged, so `selected` stays valid; refresh picks up the swapped
-  // descriptor. Errors are tagged "replace" so the prefix matches the action
-  // (never mislabelled a load failure).
-  const handleReplace = useCallback(
-    async (referenceName: string, path: string) => {
-      const sid = sessionIdRef.current;
-      if (!sid) return;
-      setLoading(true);
-      setError(null);
-      try {
-        const outcome = await replaceSource(sid, referenceName, path);
-        if (outcome.kind === "Loaded") {
-          await refresh(sid);
-          setSelected(outcome.data.reference_name);
-        } else if (outcome.kind === "NeedsGuidance") {
-          // Structured replace never yields NeedsGuidance; defensive guard.
-          setError({
-            message: "换源暂不支持需规整引导的文件，请改用结构化文件",
-            kind: "replace",
-          });
-        } else {
-          setError({ message: loadErrorMessage(outcome.data), kind: "replace" });
-        }
-      } catch (e) {
-        setError({ message: fmtError(e), kind: "replace" });
-      } finally {
-        setLoading(false);
-      }
-    },
-    [refresh],
-  );
-
-  // Apply a privacy config to a dataset (ADR-0011, issue #9 slice 5): the whole
-  // new config crosses IPC, the backend swaps it on the descriptor, and refresh
-  // picks up the updated working set (single source of truth). Tagged "privacy"
-  // so the error prefix matches the action (never mislabelled a load failure).
-  const handlePrivacyChange = useSimpleMutation("privacy", setDatasetPrivacy);
-
-  // Plain remove path (issue #38/#39, ADR-0040): the backend detaches the
-  // snapshot, deletes its file, drops the reference name, and appends a Deleted
-  // source lifecycle event. Used for non-active sources and for the LAST active
-  // source (AC4 -> empty working set). Tagged "delete" so the error prefix
-  // matches the action (an IsActive refusal is never mislabelled
-  // a load failure). The shared `loading` flag disables source management while
-  // the (synchronous, lock-held) removal runs and -- via the same flag set by
-  // handleAsk -- while a turn is in flight (ADR-0040 execution window).
-  const handleRemoveSource = useSimpleMutation("delete", removeSource);
-
-  // Issue #39 / ADR-0035: deleting the ACTIVE source while others remain would
-  // silently move the user's focus. Route those deletes through the confirm
-  // dialog (the user picks an explicit continuation in `pendingActiveDelete`);
-  // any non-active source, or the last active source, goes straight through the
-  // plain remove path. The frontend already knows active + remaining from
-  // list/active, so it branches without waiting for the backend's IsActive
-  // refusal -- but `removeSource` still refuses on the IPC boundary, so a
-  // direct call or a stale view cannot silently slip past.
-  const handleDelete = useCallback(
-    (referenceName: string) => {
-      if (referenceName === activeName && datasets.length > 1) {
-        const target = datasets.find((d) => d.reference_name === referenceName);
-        if (target) {
-          setPendingActiveDelete(target);
-          return;
-        }
-      }
-      void handleRemoveSource(referenceName);
-    },
-    [activeName, datasets, handleRemoveSource],
-  );
-
-  // AC2 (issue #39): the user picked a continuation -- delete the active source
-  // and repoint focus at it in one atomic IPC. Success closes the dialog; a
-  // refusal (stale view / IsActive) keeps it open so the error stays
-  // attached to the same action. Mirrors useSimpleMutation's two-error split
-  // (commit ok vs refresh failed) but is hand-written so it can clear the
-  // pending dialog state on a committed success.
-  const handleConfirmActiveDelete = useCallback(
-    async (continueWith: string) => {
-      const target = pendingActiveDelete;
-      if (!target) return;
-      const sid = sessionIdRef.current;
-      if (!sid) return;
-      setLoading(true);
-      setError(null);
-      try {
-        await removeActiveSource(sid, target.reference_name, continueWith);
-      } catch (e) {
-        setError({ message: fmtError(e), kind: "delete" });
-        setLoading(false);
-        return;
-      }
-      setPendingActiveDelete(null);
-      try {
-        await refresh(sid);
-      } catch (refreshErr) {
-        setError({
-          message: `删源已保存，但刷新工作集失败：${fmtError(refreshErr)}`,
-          kind: "delete",
-        });
-      }
-      setLoading(false);
-    },
-    [pendingActiveDelete, refresh],
-  );
-
-  // AC3 (issue #39): cancel leaves the working set untouched -- nothing crossed
-  // IPC while the dialog was open, so just drop the pending state.
-  const handleCancelActiveDelete = useCallback(() => {
-    setPendingActiveDelete(null);
-  }, []);
-
-  // Ask one question (PRD #1, issue #23): run one turn -> one ADR-0028 outcome.
-  // The retry loop is invisible (one question = one thread entry = one outcome).
-  // A result enters the working set + result pane; textual / failed / cancelled
-  // turns still appear in the thread (always visible) but touch no working set.
-  // Tagged "ask" so a failure prefix matches the action (never mislabelled a
-  // load failure).
-  const handleAsk = useCallback(
-    async (question: string) => {
-      const sid = sessionIdRef.current;
-      if (!sid) return;
-      setLoading(true);
-      setError(null);
-      try {
-        const outcome = await askQuestion(sid, question);
-        if (outcome.kind === "Materialized") {
-          const referenceName = outcome.data.dataset.reference_name;
-          // Select before refresh -- the user sees the result even when the
-          // working-set sync fails. A refresh failure is reported distinctly
-          // (never mislabel a successful turn as a failed ask).
-          setLatestResult({
-            referenceName,
-            assumption: outcome.data.assumption,
-            viz: outcome.data.viz,
-          });
-          setSelected(referenceName);
-          try {
-            await refresh(sid); // working set + thread
-          } catch (e) {
-            setError({ message: `结果已生成，但工作集刷新失败：${fmtError(e)}`, kind: "ask" });
-          }
-        } else {
-          // Textual / failed / cancelled: no working-set change, only the thread.
-          try {
-            setThread(await conversation(sid));
-          } catch (e) {
-            setError({ message: `对话刷新失败：${fmtError(e)}`, kind: "ask" });
-          }
-        }
-      } catch (e) {
-        setError({ message: fmtError(e), kind: "ask" });
-      } finally {
-        setLoading(false);
-        // Surface a per-turn save failure (review H4): the ask just wrote (or
-        // tried to write) the recipe, so this is the right poll point.
-        void pollPersistError();
-      }
-    },
-    [refresh, pollPersistError],
-  );
-
-  // Re-show a past result turn's rows in the result pane (ADR-0028 always-
-  // visible history: any result in the thread is re-openable). Preserves the
-  // turn's assumption side note and viz spec across re-selections.
-  const handleSelectResult = useCallback(
-    (referenceName: string, assumption: string | null, viz: VizSpec | null) => {
-      setLatestResult({ referenceName, assumption, viz });
-      setSelected(referenceName);
-    },
-    [],
-  );
-
-  // Cancel the in-flight turn (ADR-0021, issue #28). Fires the backend cancel
-  // token, which interrupts the running DuckDB query; the in-flight ask then
-  // resolves as a Cancelled outcome and handleAsk's finally clears loading.
-  // Best-effort: a cancel that fails to dispatch is surfaced but does not wedge
-  // the input -- the ask itself still resolves (Cancelled or otherwise) and
-  // clears loading on its own.
-  const handleCancel = useCallback(async () => {
-    const sid = sessionIdRef.current;
-    if (!sid) return;
-    try {
-      await cancelQuery(sid);
-    } catch (e) {
-      setError({ message: fmtError(e), kind: "ask" });
-    }
-  }, []);
-
-  // Save the live session to a .duck path (issue #48, ADR-0034). After this
-  // every terminal turn / source event atomically rewrites the recipe; the
-  // session name defaults to the file stem. A cancel (empty path) is a no-op.
+  // --- Save / Open .duck (ADR-0034/0036) ----------------------------------
   const handleSaveAs = useCallback(async () => {
     setPersistenceBusy(true);
     try {
@@ -741,48 +317,25 @@ export default function App() {
       if (!path) return;
       const stem =
         path.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? "session";
-      setLoading(true);
-      setError(null);
-      try {
-        const sid = sessionIdRef.current;
-        if (!sid) return;
-        await saveAsDuck(sid, path, stem);
-        // Record into the app-config recent-files list (issue #53). Fire-and-
-        // forget + refresh so the list renders the new entry; a failure is
-        // swallowed inside the backend (advisory).
-        void recordRecentFile(path).then(() => void refreshRecentFiles());
-        await refresh(sid);
-      } catch (e) {
-        setError({ message: fmtError(e), kind: "load" });
-      } finally {
-        setLoading(false);
-        void pollPersistError();
-      }
+      const sid = sessionIdRef.current;
+      if (!sid) return;
+      await saveAsDuck(sid, path, stem);
+      setSessionName(stem);
+      void recordRecentFile(path).then(() => void refreshRecentFiles());
+    } catch (e) {
+      setShellError(fmtError(e));
     } finally {
       setPersistenceBusy(false);
     }
-  }, [refresh, pollPersistError, refreshRecentFiles]);
+  }, [refreshRecentFiles]);
 
-  // Open a .duck and resume the session across the restart boundary
-  // (issue #48, ADR-0034). Resume runs off the UI thread; the resume-progress
-  // event drives the status line, and on completion the working set / thread
-  // / active are refreshed from the resumed backend session. A cancel (no file
-  // picked) is a no-op. The recent-files list (issue #53) reuses
-  // openDuckByPath for click-to-open without the OS dialog.
   const openDuckByPath = useCallback(
     async (path: string) => {
       const sid = sessionIdRef.current;
       if (!sid) return;
-      setLoading(true);
-      setError(null);
-      // Subscribe BEFORE openDuck so the first Source event is never missed
-      // (review H5). open_duck spawns a blocking task that emits progress
-      // immediately on entry -- if we awaited openDuck first, the first event
-      // would land with no listener attached (listen() is an async IPC round
-      // trip). Resume status stays null until the listener is confirmed.
+      // Subscribe BEFORE openDuck so the first Source event is never missed.
       const unlisten = await onResumeProgress(({ event }) => {
-        // issue #76: the event is now addressed by sessionId (ResumeProgress);
-        // this single-session shell reads the inner ResumeEvent directly. The
+        // Single-session shell reads the inner ResumeEvent directly; the
         // multi-session shell (#75) filters on `.session_id` instead.
         if ("Source" in event) {
           setResumeStatus(
@@ -797,22 +350,24 @@ export default function App() {
       setResumeStatus("正在打开…");
       try {
         await openDuck(sid, path);
-        // Record into the recent-files list (issue #53). Fire-and-forget +
-        // refresh; a failure is swallowed inside the backend (advisory).
         void recordRecentFile(path).then(() => void refreshRecentFiles());
+        const stem =
+          path.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? "session";
+        setSessionName(stem);
+        // Invalidate the session queries so they refetch the resumed state,
+        // then bump the epoch so <SessionPane> remounts and resets viewedResult
+        // from the resumed thread (ADR-0062 R5).
+        await queryClient.invalidateQueries({ queryKey: ["session", sid] });
+        setSessionEpoch((e) => e + 1);
         setResumeStatus(null);
-        setLatestResult(null);
-        await refresh(sid);
       } catch (e) {
-        setError({ message: fmtError(e), kind: "load" });
+        setShellError(fmtError(e));
         setResumeStatus(null);
       } finally {
         void unlisten();
-        setLoading(false);
-        void pollPersistError();
       }
     },
-    [refresh, pollPersistError, refreshRecentFiles],
+    [queryClient, refreshRecentFiles],
   );
 
   const handleOpenDuck = useCallback(async () => {
@@ -830,191 +385,91 @@ export default function App() {
     }
   }, [openDuckByPath]);
 
-  /** Open a recent file by its stored path (issue #53). Same resume flow as the
-   * OS-dialog open, minus the dialog. A path that fails to resume (moved /
-   * deleted) surfaces the normal open error; the entry stays in the list so the
-   * user can retry or ignore it. */
-  const handleOpenRecent = useCallback(
-    (path: string) => {
-      void openDuckByPath(path);
-    },
-    [openDuckByPath],
-  );
-
-  // ADR-0056: gate the UI until the session id lands -- no session-scoped call
-  // can run before it. Once set, every handler reads it via sessionIdRef and
-  // the render can treat it as a known string below.
-  if (!sessionId) {
-    // createSession failed -> surface the error instead of an endless
-    // "initializing" screen. The only error reachable in this gate is a
-    // createSession rejection (kind "load"); any other error is set after the
-    // id lands and never reaches here.
-    if (error) {
-      return (
-        <main>
-          <p>初始化会话失败：{error.message}</p>
-        </main>
-      );
-    }
-    return (
-      <main>
-        <p>正在初始化会话…</p>
-      </main>
-    );
-  }
-
-  const shown = datasets.find((d) => d.reference_name === selected) ?? null;
+  const headerDisabled = persistenceBusy || resumeStatus !== null;
 
   return (
-    <IntlProvider
-      locale={effectiveLocale}
-      messages={catalogFor(effectiveLocale)}
-      defaultLocale="en-US"
-      onError={(err) => {
-        // ADR-0052: never crash over a missing/invalid message. The CI catalog
-        // alignment guards against missing keys in production builds; this
-        // surfaces ICU syntax errors and dev-only drift as a dev warning rather
-        // than react-intl's default handler (which is silent in prod).
-        if (import.meta.env.DEV) console.warn("[i18n]", err.message);
-      }}
-    >
-      <main>
-        <header>
-          <h1>toptopduck</h1>
-          <DisclosureBanner />
-          <HeaderActions
-            disabled={loading || persistenceBusy || resumeStatus !== null}
-            hasKey={hasKey}
-            onOpenDuck={() => void handleOpenDuck()}
-            onSaveAs={() => void handleSaveAs()}
-            onOpenSettings={() => setSettingsOpen(true)}
-          />
-          {resumeStatus && (
-            <p className="resume-progress" role="status" aria-live="polite">
-              {resumeStatus}
-            </p>
-          )}
-          {persistError && (
-            <p className="persist-warning" role="status">
-              自动保存失败：{persistError}（内存中的最新更改未写入磁盘，关闭 app 前请重试保存）
-            </p>
-          )}
-          {appConfig && appConfig.recent_files.length > 0 && (
-            <nav className="recent-files" aria-label="最近文件">
-              <span className="muted">
-                <FormattedMessage id="header.recent" defaultMessage="Recent: " />
-              </span>
-              {appConfig.recent_files.map((p) => {
-                const base = p.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? p;
-                return (
-                  <button
-                    key={p}
-                    className="recent-file"
-                    title={p}
-                    disabled={loading || persistenceBusy || resumeStatus !== null}
-                    onClick={() => handleOpenRecent(p)}
-                  >
-                    {base}
-                  </button>
-                );
-              })}
-            </nav>
-          )}
-        </header>
-
-        <FileDropzone onIngest={handleIngest} loading={loading} />
-        {error && (
-          <p className="error">
-            {ERROR_PREFIX[error.kind]}{error.message}
-          </p>
-        )}
-
-        <QuestionBar onSubmit={handleAsk} onCancel={handleCancel} loading={loading} />
-        <Thread
-          entries={thread}
-          selectedResult={latestResult?.referenceName ?? null}
-          onSelectResult={handleSelectResult}
-          staleByReference={staleByReference}
-        />
-        {latestResult && (
-          <section className="panel">
-            <ResultView
-              sessionId={sessionId}
-              key={latestResult.referenceName}
-              referenceName={latestResult.referenceName}
-              assumption={latestResult.assumption}
-              viz={latestResult.viz}
-            />
-          </section>
-        )}
-
-        <div className="layout">
-          <section className="panel">
-            <h2>工作集</h2>
-            <WorkingSetList
-              datasets={datasets}
-              activeName={activeName}
-              onSelect={setSelected}
-              onRename={handleRename}
-              onReplace={handleReplace}
-              onDelete={handleDelete}
-              loading={loading}
-            />
-          </section>
-          <section className="panel">
-            {shown ? (
-              <DatasetDetail
-                dataset={shown}
-                loading={loading}
-                onPrivacyChange={handlePrivacyChange}
-              />
+    <QueryClientProvider client={queryClient}>
+      <IntlProvider
+        locale={effectiveLocale}
+        messages={catalogFor(effectiveLocale)}
+        defaultLocale="en-US"
+        onError={(err) => {
+          if (import.meta.env.DEV) console.warn("[i18n]", err.message);
+        }}
+      >
+        {!sessionId ? (
+          <main className="shell-init">
+            {shellError ? (
+              <p>初始化会话失败：{shellError}</p>
             ) : (
-              <p className="muted">选择一个数据集查看其结构。</p>
+              <p>正在初始化会话…</p>
             )}
-          </section>
-        </div>
+          </main>
+        ) : (
+          <div className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
+            {/* Col 1: session sidebar (ADR-0060) -- full height, independent
+                column (R1: QuestionBar does NOT span over it). */}
+            <SessionSidebar
+              sessionName={sessionName}
+              recentFiles={appConfig?.recent_files ?? []}
+              disabled={headerDisabled}
+              onOpenRecent={(p) => void openDuckByPath(p)}
+            />
 
-        {guidance && (
-          <GuidedLoadDialog
-            request={guidance.request}
-            loading={loading}
-            onSubmit={handleGuidedSubmit}
-            onCancel={() => setGuidance(null)}
-          />
-        )}
+            {/* Row 1 (cols 2+): thin top bar (ADR-0060/0062 R1). */}
+            <header className="topbar">
+              <button
+                type="button"
+                className="sidebar-toggle"
+                aria-label={sidebarCollapsed ? "展开会话栏" : "收起会话栏"}
+                aria-expanded={!sidebarCollapsed}
+                onClick={() => setSidebarCollapsed((c) => !c)}
+              >
+                {sidebarCollapsed ? "»" : "«"}
+              </button>
+              <span className="topbar-session-name">{sessionName}</span>
+              <HeaderActions
+                disabled={headerDisabled}
+                hasKey={hasKey}
+                onOpenDuck={() => void handleOpenDuck()}
+                onSaveAs={() => void handleSaveAs()}
+                onOpenSettings={() => setSettingsOpen(true)}
+              />
+            </header>
 
-        {pendingActiveDelete && (
-          <ActiveSourceDeleteDialog
-            target={pendingActiveDelete}
-            // AC5: every remaining dataset but the removed one. On the live path
-            // this dialog only opens in the no-result case (activeName resolves to
-            // a source), so these ARE the remaining sources. A stale view that
-            // opens it while a result exists is refused by the backend's
-            // The DatasetDescriptor carries no source/result flag, so the
-            // frontend cannot pre-filter result_N out of the candidate list
-            // without a round-trip -- the backend's set_active rejects a result
-            // name as InvalidContinueWith if the user picks one.
-            candidates={datasets.filter(
-              (d) => d.reference_name !== pendingActiveDelete.reference_name,
+            {/* Resume progress strip (ADR-0034). Absent unless a resume runs. */}
+            {resumeStatus && (
+              <p className="resume-progress" role="status" aria-live="polite">
+                {resumeStatus}
+              </p>
             )}
-            onConfirm={(cw) => void handleConfirmActiveDelete(cw)}
-            onCancel={handleCancelActiveDelete}
-          />
-        )}
 
-        {settingsOpen && appConfig && (
-          <SettingsDialog
-            appConfig={appConfig}
-            onCommitAppConfig={(cfg) => void commitAppConfig(cfg)}
-            // Closing the dialog also refreshes the key indicator, so a save or
-            // clear is reflected in the header status immediately.
-            onClose={() => {
-              setSettingsOpen(false);
-              void refreshKeyStatus();
-            }}
-          />
+            {/* Row 2 (cols 2+): the session pane host (rail + workspace +
+                QuestionBar). key bump on resume forces remount so viewedResult
+                re-initializes from the resumed thread (ADR-0062 R5). */}
+            <main className="session-pane-host">
+              <SessionPane key={`${sessionId}:${sessionEpoch}`} sessionId={sessionId} />
+            </main>
+
+            {shellError && (
+              <p className="error shell-error" role="alert">
+                {shellError}
+              </p>
+            )}
+
+            {settingsOpen && appConfig && (
+              <SettingsDialog
+                appConfig={appConfig}
+                onCommitAppConfig={(cfg) => void commitAppConfig(cfg)}
+                onClose={() => {
+                  setSettingsOpen(false);
+                  void refreshKeyStatus();
+                }}
+              />
+            )}
+          </div>
         )}
-      </main>
-    </IntlProvider>
+      </IntlProvider>
+    </QueryClientProvider>
   );
 }
