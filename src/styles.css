@@ -111,22 +111,95 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
   flex-direction: column;
 }
 .sidebar-title { margin: 0 0 0.5rem; font-size: 0.9rem; color: var(--muted-foreground); text-transform: uppercase; letter-spacing: 0.05em; }
-.session-list { list-style: none; margin: 0; padding: 0; flex: 1; }
-.session-entry { margin: 0.2rem 0; }
-.session-entry.active .session-name {
-  display: block; padding: 0.4rem 0.5rem; border-radius: var(--radius);
+.session-list { list-style: none; margin: 0; padding: 0; flex: 1; overflow-y: auto; }
+.sidebar-new-button {
+  width: 100%; margin-bottom: 0.5rem; padding: 0.45rem; cursor: pointer;
+  border: 1px solid var(--primary); background: var(--primary); color: var(--primary-foreground);
+  border-radius: var(--radius); font-size: 0.9rem;
+}
+.sidebar-new-button:disabled { opacity: 0.6; cursor: progress; }
+.sidebar-softcap {
+  font-size: 0.78rem; line-height: 1.4; margin: 0 0 0.4rem; padding: 0.35rem 0.5rem;
+  background: #fff4e5; border: 1px solid #ffd9a0; border-radius: var(--radius); color: #8a5200;
+}
+.sidebar-error { font-size: 0.8rem; margin: 0 0 0.4rem; }
+.session-empty { font-size: 0.85rem; padding: 0.5rem; }
+
+/* Chat-style time groups (ADR-0060). */
+.session-group { margin: 0.4rem 0 0.2rem; }
+.session-group-title {
+  margin: 0 0 0.2rem; padding: 0 0.3rem;
+  font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--muted-foreground);
+}
+.session-group-list { list-style: none; margin: 0; padding: 0; }
+
+/* One sidebar row: name+subline button + context-menu toggle. The active row
+ * fills its background (ADR-0060: 整条填充 selection signal); an open-but-not-
+ * active row gets a left accent. */
+.session-entry { position: relative; margin: 0.1rem 0; display: flex; align-items: stretch; }
+.session-entry-main {
+  all: unset; cursor: pointer; flex: 1; display: flex; flex-direction: column;
+  padding: 0.35rem 0.5rem; border-radius: var(--radius);
+  color: var(--foreground);
+}
+.session-entry-main:hover { background: var(--accent); }
+.session-entry-main:disabled { opacity: 0.5; cursor: progress; }
+.session-entry.active .session-entry-main {
   background: var(--primary); color: var(--primary-foreground); font-weight: 600;
 }
-.session-entry.recent .recent-session {
-  all: unset; cursor: pointer; display: block; width: 100%;
-  padding: 0.4rem 0.5rem; border-radius: var(--radius);
-  font-size: 0.88rem; color: var(--foreground);
+.session-entry.open:not(.active) .session-entry-main { box-shadow: inset 2px 0 var(--primary); }
+.session-name { font-size: 0.9rem; }
+.session-subline { font-size: 0.76rem; font-weight: 400; opacity: 0.85; }
+.session-entry-menu {
+  all: unset; cursor: pointer; padding: 0 0.4rem; font-size: 1rem; line-height: 1;
+  border-radius: var(--radius); color: var(--muted-foreground);
 }
-.session-entry.recent .recent-session:hover { background: var(--accent); }
-.session-entry.recent .recent-session:disabled { opacity: 0.5; cursor: progress; }
+.session-entry-menu:hover { background: var(--accent); color: var(--foreground); }
+.session-menu {
+  position: absolute; z-index: 5; right: 0.2rem; top: 100%;
+  min-width: 8rem; padding: 0.2rem;
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+.session-menu button {
+  all: unset; cursor: pointer; display: block; width: 100%; padding: 0.3rem 0.5rem;
+  border-radius: var(--radius); font-size: 0.85rem; color: var(--foreground);
+}
+.session-menu button:hover { background: var(--accent); }
+.session-menu button.danger { color: var(--destructive); }
+
 .sidebar-disclosure { margin-top: auto; font-size: 0.82rem; }
 .sidebar-disclosure summary { cursor: pointer; color: var(--muted-foreground); padding: 0.3rem 0; }
 .sidebar-disclosure .disclosure { margin-top: 0.3rem; font-size: 0.78rem; }
+
+/* --- Modal dialogs (delete confirm, rename) ----------------------------- */
+.dialog-overlay {
+  position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.4);
+}
+.dialog-card {
+  width: min(420px, 90vw); background: var(--card); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: 1.2rem; box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+}
+.dialog-card h3 { margin: 0 0 0.5rem; }
+.dialog-card p { margin: 0.25rem 0; line-height: 1.5; }
+.session-delete-path { font-size: 0.8rem; word-break: break-all; }
+.rename-session-input {
+  width: 100%; margin: 0.5rem 0; padding: 0.45rem;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--background);
+  color: var(--foreground); font-size: 0.95rem;
+}
+.dialog-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.8rem; }
+.dialog-actions button {
+  padding: 0.4rem 1rem; cursor: pointer; font-size: 0.9rem;
+  border: 1px solid var(--border); background: var(--card); color: var(--foreground);
+  border-radius: var(--radius);
+}
+.dialog-actions button.danger {
+  border-color: var(--destructive); background: var(--destructive); color: var(--primary-foreground);
+}
+.dialog-actions button:disabled { opacity: 0.5; cursor: progress; }
 
 /* --- Row 1 (cols 2+): thin top bar (ADR-0060 ~40px) --------------------- */
 .topbar {
@@ -146,8 +219,23 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 .shell > .resume-progress { grid-column: 2; grid-row: 2; margin: 0; border-radius: 0; }
 .shell > .shell-error { grid-column: 2; grid-row: 2; margin: 0.4rem 1rem; }
 
-/* --- Row 3 (cols 2+): session pane host --------------------------------- */
-.session-pane-host { grid-column: 2; grid-row: 3; overflow: hidden; }
+/* --- Row 3 (cols 2+): session pane host ---------------------------------
+ * The host is a positioning context for the keep-alive layer stack: every open
+ * session renders a .session-pane-layer absolutely filling it; non-active
+ * layers are display:none (mounted but not laid out -- ADR-0051 keep-alive, no
+ * refetch on switch). The cold-start hero is a plain child shown when no layer
+ * is active (ADR-0061). */
+.session-pane-host { grid-column: 2; grid-row: 3; overflow: hidden; position: relative; }
+.session-pane-layer { position: absolute; inset: 0; }
+.session-pane-layer.hidden { display: none; }
+.cold-start-hero { position: absolute; inset: 0; overflow-y: auto; justify-content: center; }
+.cold-start-title { margin: 0 0 0.5rem; font-size: 1.4rem; }
+.primary-cta {
+  padding: 0.6rem 1.4rem; font-size: 1rem; cursor: pointer;
+  border: 1px solid var(--primary); background: var(--primary); color: var(--primary-foreground);
+  border-radius: var(--radius);
+}
+.primary-cta:disabled { opacity: 0.6; cursor: progress; }
 
 /* --- Nested grid: rail + workspace + QuestionBar (ADR-0062 R1) ----------
  * QuestionBar spans rail + workspace (grid-column 1 / -1); the session sidebar

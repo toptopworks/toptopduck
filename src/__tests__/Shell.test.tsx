@@ -23,6 +23,8 @@ vi.mock("../api", async (importOriginal) => {
     ...actual,
     closeSession: vi.fn(async () => {}),
     createSession: vi.fn(async () => "sess-1"),
+    listSessions: vi.fn(async () => []),
+    renameSession: vi.fn(async () => ""),
     ingestFile: vi.fn(),
     listWorkingSet: vi.fn(async () => state.workingSet),
     activeDataset: vi.fn(async () => null),
@@ -40,7 +42,24 @@ vi.mock("../api", async (importOriginal) => {
 });
 
 import App from "../App";
-import { askQuestion, conversation, readRows } from "../api";
+import {
+  askQuestion,
+  closeSession,
+  conversation,
+  createSession,
+  readRows,
+  renameSession,
+} from "../api";
+
+// ADR-0061 cold start: <App/> renders no session on mount, so a session-internal
+// assertion first opens one via the sidebar "+ 新建会话" button (scoped by class
+// to disambiguate from the cold-start hero's same-label CTA).
+async function openSession(): Promise<void> {
+  fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
+  await waitFor(() =>
+    expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
+  );
+}
 
 function src(name: string): DatasetDescriptor {
   return {
@@ -98,9 +117,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
 
   it("renders the three-column grid + thin top bar (R1: session bar / rail / workspace)", async () => {
     render(<App />);
-    await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
-    );
+    await openSession();
     // Three columns + topbar + questionbar all render.
     expect(document.querySelector(".session-sidebar")).toBeInTheDocument();
     expect(document.querySelector(".session-rail")).toBeInTheDocument();
@@ -111,9 +128,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
 
   it("collapses the session sidebar via the top-bar toggle", async () => {
     render(<App />);
-    await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
-    );
+    await openSession();
     const shell = document.querySelector(".shell");
     expect(shell?.classList.contains("sidebar-collapsed")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "收起会话栏" }));
@@ -125,9 +140,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
 
   it("shows the hero empty state when no result is viewed (ADR-0062 R2 hero)", async () => {
     render(<App />);
-    await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
-    );
+    await openSession();
     // Hero drop zone is visible in the default 结果 tab.
     expect(screen.getByText(/拖入或选择一个数据文件开始分析/)).toBeInTheDocument();
   });
@@ -139,9 +152,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
       data: { dataset: { ...src("result_1"), row_count: 1 }, viz: null, assumption: null },
     });
     render(<App />);
-    await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
-    );
+    await openSession();
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "总共几行" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
     // The workspace ResultView heading appears (chart+table pane).
@@ -159,6 +170,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
     state.workingSet = [r1, r2];
     state.thread = [materializedTurn("result_1"), materializedTurn("result_2")];
     render(<App />);
+    await openSession();
     // R5 init: viewedResult <- last Materialized (result_2).
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: /结果：result_2/ })).toBeInTheDocument(),
@@ -185,9 +197,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
       data: { dataset: { ...src("result_1"), row_count: 1 }, viz: null, assumption: null },
     });
     render(<App />);
-    await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
-    );
+    await openSession();
     expect(conversation).toHaveBeenCalledTimes(1); // initial load only
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "总共几行" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
@@ -219,6 +229,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
       },
     ];
     render(<App />);
+    await openSession();
     // Last turn is Clarify -> workspace shows the textual card.
     await waitFor(() => expect(document.querySelector(".textual-card")).toBeInTheDocument());
     // Click result_1 in the rail -> pin -> workspace shows result_1's table.
@@ -229,5 +240,88 @@ describe("App three-column shell (issue #79 ACs)", () => {
     // The workspace textual card is gone (the rail still renders the turn text,
     // but under a different class -- .turn-outcome, not .textual-card).
     expect(document.querySelector(".textual-card")).not.toBeInTheDocument();
+  });
+});
+
+describe("App multi-session shell (issue #81 ACs)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("cold start shows the hero empty state and does not createSession (ADR-0061)", async () => {
+    // No auto-resume, no auto-create: the right side is the new-session hero,
+    // the question bar is absent, and createSession has not been called.
+    render(<App />);
+    expect(screen.getByText(/开始一次分析/)).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "提问" })).not.toBeInTheDocument();
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("keep-alive switch does not refetch an inactive session (ADR-0051)", async () => {
+    // Two sessions opened; each SessionPane fetches its thread once on mount.
+    // Switching active never remounts them (CSS hidden keep-alive), so the
+    // thread query is NOT re-issued -- conversation stays at one call per
+    // session.
+    vi.mocked(createSession)
+      .mockResolvedValueOnce("sess-1")
+      .mockResolvedValueOnce("sess-2");
+    render(<App />);
+    fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
+    );
+    fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(2));
+    expect(conversation).toHaveBeenCalledTimes(2); // one per session mount
+
+    // Switch back to the first session via its sidebar entry. Keep-alive: the
+    // inactive SessionPane was never unmounted, so no refetch.
+    const entries = document.querySelectorAll(".session-entry-main");
+    expect(entries.length).toBeGreaterThanOrEqual(2);
+    fireEvent.click(entries[0]);
+    expect(conversation).toHaveBeenCalledTimes(2); // unchanged -- no refetch
+  });
+
+  it("closes the active session: closeSession + drops it from the open set (ADR-0055)", async () => {
+    vi.mocked(createSession).mockResolvedValueOnce("sess-1");
+    render(<App />);
+    fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
+    );
+
+    // Open the context menu on the one open entry, then Close.
+    fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
+    fireEvent.click(screen.getByRole("menuitem", { name: "关闭" }));
+
+    await waitFor(() => expect(closeSession).toHaveBeenCalledWith("sess-1"));
+    // The session pane is gone -- the question bar is no longer in the document.
+    await waitFor(() =>
+      expect(screen.queryByRole("textbox", { name: "提问" })).not.toBeInTheDocument(),
+    );
+  });
+
+  it("renames the open session via the sidebar context menu (ADR-0060 single entry)", async () => {
+    vi.mocked(createSession).mockResolvedValueOnce("sess-1");
+    vi.mocked(renameSession).mockResolvedValue("季报");
+    render(<App />);
+    fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
+    );
+
+    fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
+    fireEvent.click(screen.getByRole("menuitem", { name: "重命名" }));
+    // Rename dialog: type a new name and save. The dialog input is class-scoped
+    // (the active session's question bar also exposes a textbox).
+    const input = document.querySelector(".rename-session-input") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "季报" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(renameSession).toHaveBeenCalledWith("sess-1", "季报"));
   });
 });
