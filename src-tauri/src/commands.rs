@@ -538,6 +538,78 @@ pub async fn list_sessions(
     Ok(list)
 }
 
+/// Delete a persisted `.duck` session file (ADR-0060, issue #81). The frontend
+/// closes the session FIRST when it is open (so no canonical-writer key is held
+/// and the in-memory instance is gone), then calls this. Removes the file and
+/// drops the path from recent_files so the next `list_sessions` no longer lists
+/// it. Irreversible -- the frontend gates it behind a strong confirm that names
+/// the .duck explicitly. A missing file is NOT an error: the outcome the user
+/// wants (the session is gone from the sidebar) already holds, and an idempotent
+/// delete tolerates a stray double-call.
+#[tauri::command]
+pub fn delete_session(live: State<'_, LiveProviderConfig>, path: String) -> Result<(), String> {
+    let trimmed = path.trim();
+    if !trimmed.is_empty() {
+        // Best-effort removal; a missing file is success (idempotent delete).
+        let _ = std::fs::remove_file(trimmed);
+    }
+    live.remove_recent_file(trimmed);
+    Ok(())
+}
+
+/// Rename the OPEN session bound to `session_id` (ADR-0060, issue #81). Sets the
+/// user-facing session_name and rewrites the bound `.duck` recipe header; the
+/// bound path is untouched, so recent_files / sidebar addressing stay stable.
+/// Rejects a blank name. For a never-saved (unbound) session the name is held in
+/// memory and carried by the next save-as. Delegates to [`Session::rename`].
+#[tauri::command]
+pub fn rename_session(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+    new_name: String,
+) -> Result<String, String> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    reject_if_resuming(&handle)?;
+    let mut s = handle.session_lock()?;
+    s.rename(&new_name)
+}
+
+/// Rename a CLOSED `.duck` recipe's session_name in place (ADR-0060, issue #81).
+/// For a session that is not currently open: read the recipe, rewrite the
+/// session_name header, atomic-save -- no DuckDB instance is built. The
+/// canonical-writer key doubles as the "is this path open in a running session"
+/// gate: a held key means an in-memory writer owns it, so a file-level rename
+/// here would race that writer and is refused (the frontend renames open
+/// sessions via `rename_session` by id). Runs the file IO off the async/UI
+/// thread (AC8), like `list_sessions`.
+#[tauri::command]
+pub async fn rename_persisted_session(path: String, new_name: String) -> Result<(), String> {
+    use crate::persistence::{canonicalize_duck, read_duck, release, save_atomic, try_acquire};
+    let path = PathBuf::from(path);
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let trimmed = new_name.trim();
+        if trimmed.is_empty() {
+            return Err("会话名不能为空".to_string());
+        }
+        let canonical = canonicalize_duck(&path).map_err(|e| e.to_string())?;
+        // Gate: try_acquire returns false when the canonical path is already
+        // held -- an open session owns it. Refuse rather than race its writer.
+        if !try_acquire(&canonical) {
+            return Err("该会话已打开，请在打开的会话中重命名".to_string());
+        }
+        let outcome = (|| -> Result<(), String> {
+            let mut recipe = read_duck(&path).map_err(|e| e.to_string())?;
+            recipe.session_name = trimmed.to_string();
+            save_atomic(&path, &recipe).map_err(|e| e.to_string())
+        })();
+        release(&canonical);
+        outcome
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // --- Cross-session persistence (issue #48, ADR-0034/0036) -------------------
 //
 // Save / open a `.duck` recipe document. Save binds the live session to a

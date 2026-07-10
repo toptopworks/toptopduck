@@ -171,6 +171,20 @@ impl LiveProviderConfig {
         // next open re-reads whatever is on disk and retries.
         self.store_inner(cfg).is_ok()
     }
+
+    /// Drop a `.duck` path from recent-files (issue #81 delete-session). Mirrors
+    /// [`Self::record_recent_file`]: read-modify-write under [`Self::write_lock`],
+    /// advisory (a failure is swallowed and reported as "no change").
+    pub fn remove_recent_file(&self, path: &str) -> bool {
+        let Ok(_guard) = self.write_lock.lock() else {
+            return false;
+        };
+        let mut cfg = self.load();
+        if !cfg.remove_recent_file(path) {
+            return false;
+        }
+        self.store_inner(cfg).is_ok()
+    }
 }
 
 impl ProviderConfigSource for LiveProviderConfig {

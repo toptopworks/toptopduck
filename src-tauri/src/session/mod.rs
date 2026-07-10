@@ -1503,6 +1503,29 @@ impl Session {
         self.working_set.rename_display(reference_name, new_display)
     }
 
+    /// Rename the session itself (ADR-0060, issue #81): set the user-facing
+    /// [`Self::session_name`] carried in the recipe header, then rewrite the
+    /// bound `.duck` so the new name survives resume. Display-only at the
+    /// session level -- the bound path is untouched, so every external reference
+    /// (recent_files, sidebar addressing, open_duck) stays valid; nothing else
+    /// is rewritten or propagated. Trims surrounding whitespace and rejects a
+    /// blank name. For a never-saved (unbound) session the name is still set in
+    /// memory so the next save-as carries it; [`Self::persist_if_bound`] is a
+    /// no-op when no `.duck` is bound. The persist is best-effort (like every
+    /// terminal turn): a write failure does not roll back the in-memory rename --
+    /// it surfaces via [`Self::take_persist_error`] and self-heals on the next
+    /// successful write. Returns the trimmed name that landed.
+    pub fn rename(&mut self, new_name: &str) -> Result<String, String> {
+        let trimmed = new_name.trim();
+        if trimmed.is_empty() {
+            return Err("会话名不能为空".to_string());
+        }
+        let name = trimmed.to_string();
+        self.session_name = Some(name.clone());
+        self.persist_if_bound();
+        Ok(name)
+    }
+
     /// Set a dataset's privacy controls (ADR-0011, issue #9 slice 5): per-
     /// dataset sample switch + per-column type-only marking. The config rides
     /// the descriptor in the working set, so it persists across UI resize /
