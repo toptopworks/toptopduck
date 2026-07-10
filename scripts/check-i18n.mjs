@@ -20,9 +20,13 @@ const en = JSON.parse(readFileSync(join(root, "src/locales/en-US.json"), "utf8")
 const zh = JSON.parse(readFileSync(join(root, "src/locales/zh-CN.json"), "utf8"));
 
 // Extract the source id set via @formatjs/cli. Writes to a temp file so the
-// repo stays clean; --format simple yields { id: defaultMessage }. shell: true is
-// required so Node can spawn npx.cmd on Windows (POSIX finds npx directly); the
-// args are all hardcoded literals so the shell-injection warning does not apply.
+// repo stays clean; --format simple yields { id: defaultMessage }. shell is
+// gated on win32: Windows needs it to spawn npx.cmd (Node rejects .cmd without
+// a shell since the 2024-04 security fix); POSIX must NOT use a shell, or a
+// globstar-off shell (the dash/sh default on CI Linux) pre-expands src/**/*.tsx
+// to depth-2 files only and silently drops src/App.tsx / src/main.tsx. With no
+// shell the literal glob reaches formatjs/cli for its own recursive match. The
+// args are hardcoded literals, so the Windows shell-injection note is moot.
 const tmp = mkdtempSync(join(tmpdir(), "toptopduck-i18n-"));
 const extractedPath = join(tmp, "extracted.json");
 let extracted;
@@ -39,7 +43,7 @@ try {
       "--out-file",
       extractedPath,
     ],
-    { cwd: root, stdio: "inherit", shell: true },
+    { cwd: root, stdio: "inherit", shell: process.platform === "win32" },
   );
   extracted = JSON.parse(readFileSync(extractedPath, "utf8"));
 } finally {
