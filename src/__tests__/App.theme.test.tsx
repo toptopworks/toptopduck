@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { AppConfig, Theme } from "../types";
 
 // Black-box theme tests (ADR-0050, issue #77 AC6). Drives the rendered shell
@@ -56,18 +56,32 @@ vi.mock("../api", async (importOriginal) => {
 import App from "../App";
 import { getAppConfig, setAppConfig } from "../api";
 
-// jsdom has no matchMedia; install a stub that reports a fixed OS preference so
-// the "system" mode test can script the OS dark case.
-function installMatchMedia(matches: boolean): void {
-  vi.stubGlobal("matchMedia", () => ({
+// jsdom has no matchMedia; install a controllable stub so tests can both fix
+// the initial OS preference AND dispatch a live change after mount. Mirrors the
+// useTheme.test.tsx stub (Set-backed listeners, matches synced before dispatch).
+function installMatchMedia(matches: boolean) {
+  const listeners = new Set<(e: MediaQueryListEvent) => void>();
+  const mql = {
     matches,
     media: "(prefers-color-scheme: dark)",
     onchange: null,
-    addEventListener: () => {},
-    removeEventListener: () => {},
+    addEventListener: (_type: string, listener: (e: MediaQueryListEvent) => void) => {
+      listeners.add(listener);
+    },
+    removeEventListener: (_type: string, listener: (e: MediaQueryListEvent) => void) => {
+      listeners.delete(listener);
+    },
     addListener: () => {},
     removeListener: () => {},
-  }));
+  };
+  vi.stubGlobal("matchMedia", () => mql);
+  return {
+    dispatch(nextMatches: boolean) {
+      mql.matches = nextMatches;
+      const event = { matches: nextMatches } as MediaQueryListEvent;
+      for (const l of listeners) l(event);
+    },
+  };
 }
 
 describe("App theme (ADR-0050 black-box)", () => {
@@ -154,6 +168,22 @@ describe("App theme (ADR-0050 black-box)", () => {
     // System + OS light resolves to light, so .dark clears.
     await waitFor(() =>
       expect(document.documentElement.classList.contains("dark")).toBe(false),
+    );
+  });
+
+  it("follows a live OS flip while in system mode after the shell settles", async () => {
+    const media = installMatchMedia(false); // OS light at mount
+    vi.mocked(getAppConfig).mockResolvedValue(appConfigWith("system"));
+    render(<App />);
+    // Shell settles on light (system + OS light).
+    await waitFor(() => expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument());
+    expect(document.documentElement.classList.contains("dark")).toBe(false);
+    // OS flips to dark after mount -- the shell must follow without a reload.
+    await act(async () => {
+      media.dispatch(true);
+    });
+    await waitFor(() =>
+      expect(document.documentElement.classList.contains("dark")).toBe(true),
     );
   });
 });

@@ -54,6 +54,16 @@ describe("buildVegaTheme (ADR-0050 Q12 Vega bridge)", () => {
     expect(cfg.domain).toBe("#e3e3e8");
     expect(cfg.grid).toBe("#f0f0f3");
   });
+
+  it("warns in dev when a token is unset on the live document (drift signal)", () => {
+    // The default reader hits getComputedStyle on the real (jsdom, token-empty)
+    // root, so every fallback triggers. A token rename/typo in app.css surfaces
+    // here as a dev warning rather than a silent wrong-palette chart.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    buildVegaTheme();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("--primary"));
+    warn.mockRestore();
+  });
 });
 
 describe("onThemeChange", () => {
@@ -74,5 +84,15 @@ describe("onThemeChange", () => {
       new CustomEvent(THEME_CHANGE_EVENT, { detail: { effective: "light" } }),
     );
     expect(cb).not.toHaveBeenCalled();
+  });
+
+  it("ignores a malformed theme-change event (no crash, no callback)", () => {
+    const cb = vi.fn();
+    const off = onThemeChange(cb);
+    // Foreign/malformed events with the same name but missing detail.effective.
+    window.dispatchEvent(new CustomEvent(THEME_CHANGE_EVENT, { detail: {} }));
+    window.dispatchEvent(new CustomEvent(THEME_CHANGE_EVENT));
+    expect(cb).not.toHaveBeenCalled();
+    off();
   });
 });

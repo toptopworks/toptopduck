@@ -272,8 +272,9 @@ export default function App() {
   // three-state preference (system/light/dark) -- defaulting to system before
   // app-config resolves -- toggles the .dark class the shadcn/Tailwind tokens
   // key off, follows the OS preference in system mode, and dispatches a
-  // theme-change event the Vega bridge subscribes to. Called for its side
-  // effect; the persisted preference itself is read from app-config (ADR-0038).
+  // theme-change event exposed for the Vega bridge's onThemeChange (wired
+  // post-#77). Called for its side effect; the persisted preference itself is
+  // read from app-config (ADR-0038).
   useTheme(appConfig?.theme ?? "system");
 
   /** Restore the persisted window geometry ONCE on the first app-config load

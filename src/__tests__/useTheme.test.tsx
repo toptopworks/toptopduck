@@ -122,4 +122,34 @@ describe("useTheme (ADR-0050 three-state)", () => {
     window.removeEventListener(THEME_CHANGE_EVENT, handler);
     expect(seen).toContain("dark");
   });
+
+  it("ignores OS flips while in an explicit (non-system) preference", () => {
+    const media = installMatchMedia(false); // OS light at mount
+    renderHook(() => useTheme("light"));
+    expect(document.documentElement.classList.contains("dark")).toBe(false);
+    // OS flips to dark -- explicit light must NOT follow it.
+    act(() => {
+      media.dispatch(true);
+    });
+    expect(document.documentElement.classList.contains("dark")).toBe(false);
+  });
+
+  it("drops the OS listener on unmount (no re-apply after unmount)", () => {
+    const media = installMatchMedia(false);
+    const seen: string[] = [];
+    const handler = (e: Event) => {
+      seen.push((e as CustomEvent<{ effective: string }>).detail.effective);
+    };
+    window.addEventListener(THEME_CHANGE_EVENT, handler);
+    const { unmount } = renderHook(() => useTheme("system"));
+    // Mount dispatches once for the initial effective (light).
+    expect(seen).toEqual(["light"]);
+    unmount();
+    act(() => {
+      media.dispatch(true); // OS flips after unmount
+    });
+    window.removeEventListener(THEME_CHANGE_EVENT, handler);
+    // No further event after unmount -- the matchMedia listener was cleaned up.
+    expect(seen).toEqual(["light"]);
+  });
 });

@@ -4,15 +4,19 @@ import type { Theme } from "../types";
 // Three-state theme module (ADR-0050). The hook resolves the persisted
 // preference to an effective appearance, applies it to <html> via the .dark
 // class (the shadcn/Tailwind dark tokens key off it), follows the OS preference
-// while in "system" mode, and announces each change so the Vega theme bridge
-// (./vega-theme.ts) can rebuild its derived config. Persistence itself lives in
-// app-config (ADR-0038); this hook only reads the resolved preference.
+// while in "system" mode, and announces each change as a window event exposed
+// for the Vega theme bridge (./vega-theme.ts onThemeChange) to rebuild its
+// derived config. The bridge is not wired yet (deferred past issue #77).
+// Persistence itself lives in app-config (ADR-0038); this hook only reads the
+// resolved preference.
 
 export type EffectiveTheme = "light" | "dark";
 
-/** Custom event the Vega bridge subscribes to. Dispatched on window whenever
- * the effective appearance changes (preference toggle or OS flip). */
-export const THEME_CHANGE_EVENT = "toptopduck:theme-change";
+/** The window event name the Vega bridge subscribes to (via onThemeChange in
+ * ./vega-theme.ts). Dispatched whenever the effective appearance changes
+ * (preference toggle or OS flip). Typed as a literal so a typo'd name at a
+ * dispatch or subscribe site is a compile error, not a silent no-op. */
+export const THEME_CHANGE_EVENT = "toptopduck:theme-change" as const;
 
 export interface ThemeChangeDetail {
   effective: EffectiveTheme;

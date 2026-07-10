@@ -182,7 +182,8 @@ export function SettingsDialog({
               <fieldset>
                 <legend>主题</legend>
                 {(["system", "light", "dark"] as const).map((t) => {
-                  // Lucide glyphs (ADR-0050): system=Monitor, light=Sun, dark=Moon.
+                  // Lucide glyphs: system=Monitor, light=Sun, dark=Moon (a
+                  // theme-radio UX choice; not in ADR-0050's glyph table).
                   // Decorative -- the radio's accessible name is the text label.
                   const Icon = t === "system" ? Monitor : t === "light" ? Sun : Moon;
                   return (
