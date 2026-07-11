@@ -59,7 +59,8 @@ ADR-0045（shell）/ 0051（状态分层）/ 0033（Vega 退化）/ 0015（load 
 - **前端实现**：新增 ErrorBoundary 组件（class component，`getDerivedStateFromError` + `componentDidCatch`）；分区包裹 ResultView / Thread / SessionPane；顶层包裹 App 根。降级卡组件（友好文案 + 重试按钮 + 可展开技术详情）。
 - **重试实现**：`key` bump（如 `key={retryCount}`）强制 remount + `queryClient.removeQueries({ queryKey: ['session', sid, <region>] })`（依赖 0051 落地）；用 remove 而非 invalidate，确保 remount 不会先用 stale 旧数据渲染而再次 throw。
 - **与 0033 关系**：Vega `useEffect` try/catch（`ResultView.tsx:109`）**保留不动**；ErrorBoundary 只接 ResultView 内 Vega 之外的 render throw。
-- **与 0051 关系**：SessionPane 级边界契合 per-tab 隔离；`invalidateQueries` 重试依赖 0051 queryKey 分片；viewedResult 保留契合 active/Viewed 分离。
+- **与 0051 关系**：SessionPane 级边界契合 per-tab 隔离；`removeQueries` 重试依赖 0051 queryKey 分片；viewedResult 保留契合 active/Viewed 分离。
+- **嵌套边界的 React 19 限制（已知缺口）**：session 边界是 thread/result 边界的 React 树祖先。React 19 + TanStack Query（useSyncExternalStore）真实 App 树中，Query 驱动的 re-render 阶段 throw 会被外层 session 边界先 catch（降级整个 session）而非内层 region 边界；首渲染 throw 不受影响（region 边界正常 catch）。根因未定位（隔离测试不可复现）。由此 granular partition（一块崩只降级该块）在首渲染 throw 可靠、Query-driven re-render throw 不保证；黑盒测试据此断言「降级卡可见 + 会话隔离 + 重试」而非「region 精确 catch」。恢复 Query-driven 场景 granular 的前提是在隔离测试复现并定位根因，或重构边界为 siblings 拓扑。
 - **与 0055 关系**：关 tab in-flight 场景的"前端 promise 孤儿"（`setQueryData` 打空 cache）仍归 0051/0055 处理，不上抬到 ErrorBoundary。
 - **重试上限留实现期**：精确重试次数、降级卡技术详情的 dev/prod 策略非架构。
 - **CONTEXT.md 不动**：降级分层是实现/可靠性决策，不引入新领域术语。
