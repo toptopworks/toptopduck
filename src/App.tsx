@@ -451,7 +451,18 @@ export default function App() {
         return;
       }
       setResumeStatus({ kind: "opening" });
-      const unlisten = await onResumeProgress(({ event }) => {
+      // ADR-0056 / issue #76: resume-progress is a global Tauri broadcast keyed
+      // by session_id. The listener registers BEFORE createSession mints the id,
+      // so targetSid starts null and is assigned the instant the id lands; every
+      // event is then filtered to the session THIS resume opened. An event for a
+      // different session (a concurrent resume path, or a stray broadcast) is
+      // dropped before it can move our status indicator. #83 R5: this filter is
+      // the multi-session seam -- without it a sibling resume's Source/Replay
+      // ticks would hijack this opener's progress strip.
+      let targetSid: string | null = null;
+      const unlisten = await onResumeProgress((ev) => {
+        if (ev.session_id !== targetSid) return;
+        const { event } = ev;
         if ("Source" in event) {
           setResumeStatus({
             kind: "source",
@@ -470,6 +481,7 @@ export default function App() {
       });
       try {
         const sid = await createSession();
+        targetSid = sid;
         await openDuck(sid, path);
         await queryClient.invalidateQueries({ queryKey: ["session", sid] });
         registerOpen({ sid, name, path, pendingIngestPath: null });
@@ -484,19 +496,18 @@ export default function App() {
     [openSessions, queryClient, registerOpen],
   );
 
-  // Close an open session (ADR-0055/0060): fire cancel + mark closing + drop
-  // the instance (closeSession), removeQueries its whole cache, drop it from
-  // the open set, and pick a new active if it was current. The .duck stays on
-  // disk and remains in the sidebar (re-openable). NOT delete.
+  // Close an open session (ADR-0055/0060). The user's view must disappear with
+  // ZERO wait even when a turn is in-flight: drop the cache + open-set entry +
+  // active id SYNCHRONOUSLY so <SessionPane> unmounts at once, THEN fire
+  // closeSession in the background. closeSession (cancel + mark closing + drop
+  // the handle) returns immediately on the backend too -- it does NOT wait for
+  // an in-flight ask; the ask's post-turn check sees closing and discards (no
+  // thread append, no recipe entry). The orphan ask promise resolves against an
+  // absent cache (TanStack setQueryData on a removed key is a no-op) and the
+  // turn-progress listener cleanup runs in the pane's unmount effect. The .duck
+  // stays on disk and remains in the sidebar (re-openable). NOT delete.
   const closeOpen = useCallback(
-    async (sid: string) => {
-      try {
-        await closeSession(sid);
-      } catch {
-        // Close is best-effort: cancel + discard handles any in-flight turn.
-        // A NotFound here just means the instance was already dropped; either
-        // way the cache + open-set entry are removed below.
-      }
+    (sid: string) => {
       queryClient.removeQueries({ queryKey: ["session", sid] });
       // Compute next inside the setOpenSessions updater (the source of truth
       // for the latest prev), then run the active-id decision as a SEPARATE
@@ -509,16 +520,21 @@ export default function App() {
         return next;
       });
       setActiveSessionId((cur) => (cur === sid ? next[0]?.sid ?? null : cur));
+      // Fire cancel + mark closing in the background (ADR-0055). The UI is
+      // already gone; this only reaches backend bookkeeping. Best-effort: a
+      // NotFound just means the instance was already dropped.
+      void closeSession(sid).catch(() => {});
     },
     [queryClient],
   );
 
   // Delete a persisted .duck (ADR-0060, irreversible). Close first if it is
-  // open (drops the instance + cache), then remove the file + drop from
-  // recent_files. After delete, fall back to the cold hero if it was active.
+  // open (drops the instance + cache synchronously, fires cancel in the
+  // background), then remove the file + drop from recent_files. After delete,
+  // fall back to the cold hero if it was active.
   const deletePersisted = useCallback(
     async (path: string, sid: string | null) => {
-      if (sid) await closeOpen(sid);
+      if (sid) closeOpen(sid);
       try {
         await deleteSession(path);
       } catch (e) {
