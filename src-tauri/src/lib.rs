@@ -130,6 +130,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::create_session,
             commands::close_session,
+            commands::close_session_and_wait_release,
             commands::ingest_file,
             commands::ingest_file_guided,
             commands::list_working_set,

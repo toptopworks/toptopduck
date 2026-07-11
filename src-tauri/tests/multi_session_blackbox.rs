@@ -261,6 +261,240 @@ fn close_with_inflight_ask_discards_turn_not_in_thread_or_recipe() {
     );
 }
 
+// --- close-and-wait-release variant (ADR-0063, issue #93) -------------------
+//
+// The delete path's close variant: detach (mark closing + fire cancel + remove
+// from the map) then block on the drop signal until Session::Drop releases the
+// canonical single-writer key. The pure close (ADR-0055) resolves the moment
+// the map entry is gone; the wait variant resolves only when the in-flight
+// ask's Arc clone has dropped. Tested at the store level (detach +
+// take_drop_signal + recv_timeout), mirroring the command's core logic without
+// the Tauri State/async plumbing.
+
+/// Bind a fresh session to a .duck path so it acquires the canonical single-
+/// writer key, then return the id. The key is held until the session drops.
+fn bound_session(store: &SessionStore, duck: &std::path::Path) -> SessionId {
+    let cancel = Arc::new(CancelToken::new());
+    let provider = FakeProvider::new().scripted("好查询", reply_sql("SELECT 1 AS n"));
+    let id = store.create(cancel, Box::new(provider)).expect("create");
+    let handle = store.get(&id).expect("handle");
+    let mut s = handle.session_lock().unwrap();
+    s.bind_duck(duck.to_path_buf(), "测试".into())
+        .expect("bind");
+    drop(s);
+    drop(handle);
+    id
+}
+
+#[test]
+fn close_wait_release_resolves_immediately_when_no_ask_in_flight() {
+    // ADR-0063 Decision 1: with no in-flight ask, dropping the detached handle
+    // is the last Arc -> Session::Drop fires at once -> the signal resolves
+    // immediately (no spurious wait). The canonical key is released by the
+    // time recv_timeout returns Ok.
+    let store = SessionStore::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("session.duck");
+    let id = bound_session(&store, &duck);
+
+    let canonical = toptopduck_lib::persistence::canonicalize_duck(&duck).expect("canonicalize");
+    // Sanity: the session holds the key while alive.
+    assert!(
+        !toptopduck_lib::persistence::try_acquire(&canonical),
+        "key held while session alive"
+    );
+
+    // detach + take the drop signal + release our handle clone. No ask is in
+    // flight, so refcount hits 0 here and Session::Drop runs synchronously.
+    let detached = store.detach(&id).expect("detach");
+    let rx = detached
+        .take_drop_signal()
+        .expect("lock ok")
+        .expect("signal present");
+    drop(detached);
+
+    // The signal resolves at once (Session::Drop already fired). A short
+    // timeout proves it did not block.
+    rx.recv_timeout(Duration::from_secs(2))
+        .expect("signal fires immediately when no ask in flight");
+
+    // The canonical key is now released -- delete_session's gate would succeed.
+    assert!(
+        toptopduck_lib::persistence::try_acquire(&canonical),
+        "canonical key released after the wait resolved"
+    );
+    toptopduck_lib::persistence::release(&canonical); // cleanup
+}
+
+#[test]
+fn close_wait_release_waits_for_inflight_ask_then_releases_canonical_key() {
+    // ADR-0063: the core fix for issue #93. With an in-flight ask, detach fires
+    // cancel but the ask thread's Arc clone keeps Session::Drop from running.
+    // The wait variant blocks on the drop signal; when the ask's post-cancel
+    // discard drops its clone, Session::Drop fires -> signal -> the wait
+    // resolves -> delete_session's single-writer gate now succeeds. Under pure
+    // close (prior behavior), delete would race the ask and hit the gate.
+    let store = SessionStore::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("session.duck");
+
+    let cancel = Arc::new(CancelToken::new());
+    let provider = FakeProvider::new()
+        .with_cancel(cancel.clone())
+        // A normal turn to bind the recipe + acquire the canonical key.
+        .scripted("好查询", reply_sql("SELECT 1 AS n"))
+        // The long, cancellable turn the close-wait will interrupt.
+        .scripted_blocking("慢查询", reply_sql("SELECT 1 AS n"));
+    let id = store
+        .create(cancel.clone(), Box::new(provider))
+        .expect("create");
+
+    // Bind + run the successful turn so the canonical key is held.
+    {
+        let handle = store.get(&id).expect("handle");
+        let mut s = handle.session_lock().unwrap();
+        s.bind_duck(duck.clone(), "测试".into()).expect("bind");
+        let outcome = s.ask("好查询");
+        assert!(
+            matches!(outcome, TurnOutcome::Materialized { .. }),
+            "prior turn materializes, got {outcome:?}"
+        );
+    }
+
+    // Spawn the long ask; the thread holds the ONLY handle clone once it moves.
+    let handle_for_ask = store.get(&id).expect("handle for ask");
+    let ask = thread::spawn(move || {
+        let mut s = handle_for_ask.session_lock().unwrap();
+        s.ask("慢查询")
+    });
+    await_in_flight(&cancel, Duration::from_secs(2));
+
+    let canonical = toptopduck_lib::persistence::canonicalize_duck(&duck).expect("canonicalize");
+
+    // detach: mark closing + fire cancel + remove from map. Returns a handle
+    // clone; take the signal receiver, then drop the clone. The ask thread's
+    // clone is the sole remaining Arc, so Session::Drop has NOT run yet.
+    let detached = store.detach(&id).expect("detach");
+    let rx = detached
+        .take_drop_signal()
+        .expect("lock ok")
+        .expect("signal present");
+    drop(detached);
+
+    // The wait resolves once the in-flight ask (cancel fired by detach) winds
+    // down and its Arc clone drops -> Session::Drop -> signal. If the wait
+    // variant resolved before Session::Drop (the bug), the canonical key would
+    // still be held at the assertion below.
+    // drop_signal sends unit (); the expect asserts the recv landed Ok (not
+    // Disconnected or Timeout) -- the payload itself carries no data.
+    rx.recv_timeout(Duration::from_secs(5))
+        .expect("signal fires after the in-flight ask wound down");
+
+    let outcome = ask.join().expect("ask thread");
+    assert!(
+        matches!(outcome, TurnOutcome::Cancelled),
+        "in-flight turn lands as Cancelled after detach fired cancel, got {outcome:?}"
+    );
+
+    assert!(
+        toptopduck_lib::persistence::try_acquire(&canonical),
+        "canonical key released after the wait resolved -- delete_session's gate succeeds"
+    );
+    toptopduck_lib::persistence::release(&canonical); // cleanup
+}
+
+#[test]
+fn close_wait_release_signal_does_not_fire_while_an_arc_clone_is_held() {
+    // ADR-0063 Decision 4: the wait variant blocks until the LAST Arc clone
+    // drops. A held clone (a long ask, or any leak) keeps Session::Drop from
+    // running, so the signal does NOT fire and recv_timeout times out. Once
+    // the clone drops, the signal fires on the next recv. This is the timeout
+    // contract (aligned to ADR-0021 REQUEST_TIMEOUT in the command) tested at
+    // the mechanism level with a short window.
+    let store = SessionStore::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("session.duck");
+    let id = bound_session(&store, &duck);
+
+    // Hold a clone that keeps the Session alive past detach (simulates an
+    // in-flight ask whose provider ignores cancel, or any Arc leak).
+    let held = store.get(&id).expect("held clone");
+
+    let detached = store.detach(&id).expect("detach");
+    let rx = detached
+        .take_drop_signal()
+        .expect("lock ok")
+        .expect("signal present");
+    drop(detached);
+
+    // No Session::Drop while `held` is alive -> the signal cannot fire.
+    let err = rx
+        .recv_timeout(Duration::from_millis(150))
+        .expect_err("must time out while a clone is held");
+    assert!(
+        matches!(err, mpsc::RecvTimeoutError::Timeout),
+        "expected Timeout, got {err:?}"
+    );
+
+    // Dropping the held clone -> refcount 0 -> Session::Drop -> signal fires.
+    // The receiver survives a prior recv_timeout (it borrows &self), so the
+    // next recv observes the now-buffered Ok.
+    drop(held);
+    rx.recv_timeout(Duration::from_secs(2))
+        .expect("signal fires once the held clone drops");
+}
+
+#[test]
+fn pure_close_does_not_release_canonical_key_while_ask_in_flight() {
+    // ADR-0055 vs ADR-0063 contrast (issue #93 root cause): the pure close
+    // removes the map entry and returns, but the canonical key stays held
+    // until the ask's Arc clone drops. A subsequent delete_session would hit
+    // the single-writer gate ("该会话已打开") -- the three-state inconsistency
+    // the wait variant closes. This test pins the gap so a regression to
+    // "close resolves == key released" is caught.
+    let store = SessionStore::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("session.duck");
+
+    let cancel = Arc::new(CancelToken::new());
+    let provider = FakeProvider::new()
+        .with_cancel(cancel.clone())
+        .scripted("好查询", reply_sql("SELECT 1 AS n"))
+        .scripted_blocking("慢查询", reply_sql("SELECT 1 AS n"));
+    let id = store
+        .create(cancel.clone(), Box::new(provider))
+        .expect("create");
+    {
+        let handle = store.get(&id).expect("handle");
+        let mut s = handle.session_lock().unwrap();
+        s.bind_duck(duck.clone(), "测试".into()).expect("bind");
+        let _ = s.ask("好查询");
+    }
+
+    let handle_for_ask = store.get(&id).expect("handle for ask");
+    let ask = thread::spawn(move || {
+        let mut s = handle_for_ask.session_lock().unwrap();
+        s.ask("慢查询")
+    });
+    await_in_flight(&cancel, Duration::from_secs(2));
+
+    let canonical = toptopduck_lib::persistence::canonicalize_duck(&duck).expect("canonicalize");
+
+    // Pure close resolves immediately (map entry gone), but the canonical key
+    // is STILL held by the in-flight ask's Arc clone.
+    store.close(&id).expect("close resolves immediately");
+    assert!(
+        !toptopduck_lib::persistence::try_acquire(&canonical),
+        "key STILL held right after pure close -- the gap the wait variant closes"
+    );
+
+    // Let the ask wind down (close fired cancel); once its clone drops, the
+    // key is released. (Cleanup so the gate state does not leak across tests.)
+    cancel.request();
+    let _ = ask.join();
+    toptopduck_lib::persistence::release(&canonical);
+}
+
 // --- concurrency model: store lock not held during a long turn (ADR-0056) ---
 
 #[test]

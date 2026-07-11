@@ -54,7 +54,9 @@ vi.mock("../api", async (importOriginal) => {
   return {
     ...actual,
     closeSession: vi.fn(async () => {}),
+    closeSessionAndWaitRelease: vi.fn(async () => {}),
     createSession: vi.fn(async () => "sess-1"),
+    deleteSession: vi.fn(async () => {}),
     listSessions: vi.fn(async () => []),
     renameSession: vi.fn(async () => ""),
     ingestFile: vi.fn(),
@@ -93,8 +95,10 @@ import {
   askQuestion,
   cancelQuery,
   closeSession,
+  closeSessionAndWaitRelease,
   conversation,
   createSession,
+  deleteSession,
   getAppConfig,
   ingestFile,
   listSessions,
@@ -833,6 +837,119 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
     // Drain the microtask queue so the rejected closeSession promise settles
     // through closeOpen's .catch -- the seam this test exists to guard.
     await waitFor(() => expect(closeSession).toHaveBeenCalledWith("sess-1"));
+  });
+});
+
+describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    // Defaults: each test overrides the IPC it needs. Reset implementations
+    // so a prior test's mockImplementation (e.g. a never-resolving wait) does
+    // not leak across describe boundaries.
+    vi.mocked(listSessions).mockResolvedValue([]);
+    vi.mocked(activeDataset).mockResolvedValue(null);
+    vi.mocked(listWorkingSet).mockResolvedValue([]);
+    vi.mocked(conversation).mockResolvedValue([]);
+    vi.mocked(closeSession).mockResolvedValue(undefined);
+    vi.mocked(closeSessionAndWaitRelease).mockResolvedValue(undefined);
+    vi.mocked(deleteSession).mockResolvedValue(undefined);
+    vi.mocked(openDuck).mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("delete of an open session calls closeSessionAndWaitRelease (not closeSession) then deleteSession (ADR-0063)", async () => {
+    // The delete path's close variant: the canonical single-writer key must be
+    // released (closeSessionAndWaitRelease blocks until Session::Drop) BEFORE
+    // delete_session's try_acquire gate fires. Pure closeSession is NOT used
+    // here -- it resolves before the key is free, the #93 race.
+    const path = "/x/persisted.duck";
+    vi.mocked(listSessions).mockResolvedValue([
+      {
+        session_id: path,
+        display_name: "季报",
+        last_modified_at: Date.now(),
+        source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+        format_version: 1,
+      },
+    ]);
+    vi.mocked(createSession).mockResolvedValue("sess-del");
+
+    render(<App />);
+    // Open the persisted session (createSession + openDuck).
+    await waitFor(() => expect(screen.getByText("季报")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("季报"));
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
+    );
+
+    // Trigger delete via the sidebar menu: open the menu, click 删除, confirm.
+    fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
+    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
+
+    // ADR-0063: the wait-release variant fires first; closeSession (pure) is
+    // NOT called on the delete path. deleteSession runs after the wait resolves.
+    await waitFor(() =>
+      expect(closeSessionAndWaitRelease).toHaveBeenCalledWith("sess-del"),
+    );
+    expect(closeSession).not.toHaveBeenCalled();
+    await waitFor(() => expect(deleteSession).toHaveBeenCalledWith(path));
+  });
+
+  it("delete keeps the pane mounted until closeSessionAndWaitRelease resolves (ADR-0063 Decision 2)", async () => {
+    // Delete is an explicit user intent -- it does NOT get pure close's
+    // zero-wait UI contract (ADR-0055). The pane stays mounted during the
+    // wait and only unmounts AFTER the canonical key is released. This keeps
+    // the timeout-retry UX self-consistent (entry survives, in-place retry).
+    const path = "/x/persisted.duck";
+    vi.mocked(listSessions).mockResolvedValue([
+      {
+        session_id: path,
+        display_name: "季报",
+        last_modified_at: Date.now(),
+        source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+        format_version: 1,
+      },
+    ]);
+    vi.mocked(createSession).mockResolvedValue("sess-del");
+    // Hold the wait-release pending so we can observe the pane STAYS mounted.
+    let resolveWait: () => void = () => {};
+    vi.mocked(closeSessionAndWaitRelease).mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveWait = resolve;
+        }),
+    );
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("季报")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("季报"));
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
+    );
+
+    fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
+    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
+
+    // The wait was called (delete started), but the pane is STILL mounted --
+    // UI teardown happens AFTER the wait resolves, not synchronously.
+    await waitFor(() =>
+      expect(closeSessionAndWaitRelease).toHaveBeenCalledWith("sess-del"),
+    );
+    expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument();
+    // deleteSession has NOT fired yet -- it waits on the close-wait variant.
+    expect(deleteSession).not.toHaveBeenCalled();
+
+    // Resolve the wait -> the pane unmounts -> deleteSession fires.
+    resolveWait();
+    await waitFor(() =>
+      expect(screen.queryByRole("textbox", { name: "提问" })).not.toBeInTheDocument(),
+    );
+    await waitFor(() => expect(deleteSession).toHaveBeenCalledWith(path));
   });
 });
 

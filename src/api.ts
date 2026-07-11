@@ -38,6 +38,18 @@ export async function closeSession(sessionId: string): Promise<void> {
   await invoke<void>("close_session", { sessionId });
 }
 
+// Close a session AND wait for the canonical single-writer key to be released
+// (ADR-0063). The delete path's variant: blocks (<=120s, aligned to ADR-0021
+// REQUEST_TIMEOUT) until the in-flight ask's Arc clone drops and Session::Drop
+// runs, so delete_session's try_acquire gate sees the key free. Resolves at
+// once when no ask is in flight. The plain closeSession (above) stays
+// fire-and-forget -- this is the delete-only wait variant.
+export async function closeSessionAndWaitRelease(
+  sessionId: string,
+): Promise<void> {
+  await invoke<void>("close_session_and_wait_release", { sessionId });
+}
+
 export async function ingestFile(sessionId: string, path: string): Promise<LoadOutcome> {
   return invoke<LoadOutcome>("ingest_file", { sessionId, path });
 }
