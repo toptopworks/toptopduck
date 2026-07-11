@@ -289,6 +289,10 @@ mod tests {
         cfg.provider.base_url = "https://gateway.example.test".into();
         cfg.provider.model = "claude-opus-4-8".into();
         cfg.record_recent_file("/tmp/analysis.duck");
+        // Issue #84: non-default shell prefs exercise the new field's full io
+        // round-trip (a default-equal shell would pass == trivially).
+        cfg.shell.sidebar_collapsed = true;
+        cfg.shell.rail_collapsed = true;
         cfg
     }
 

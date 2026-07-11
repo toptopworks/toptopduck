@@ -20,6 +20,8 @@
   "questionBar.phase.queryingRetry": "Querying (attempt {attempt})…",
   "questionBar.phase.thinking": "Thinking…",
   "questionBar.phase.thinkingRetry": "Thinking (attempt {attempt})…",
+  "rail.collapse": "Collapse conversation rail",
+  "rail.expand": "Expand conversation rail",
   "resume.opening": "Opening…",
   "resume.replay": "Replaying {index}/{total}: {name}",
   "resume.source": "Verifying source {index}/{total}: {name}",
