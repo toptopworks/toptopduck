@@ -7,6 +7,7 @@
   "header.keyOk": "LLM key 已配置",
   "header.keyMissing": "未配置 LLM key——提问将失败",
   "header.settings": "设置",
+  "header.softCap": "打开的会话较多——关闭一些以释放内存。",
 
   "session.defaultName": "新会话",
   "session.delete.title": "删除此会话？",
@@ -24,7 +25,6 @@
 
   "sidebar.ariaLabel": "会话",
   "sidebar.newSession": "新建会话",
-  "sidebar.softCap": "打开的会话较多——关闭一些以释放内存。",
   "sidebar.loadError": "无法加载已保存的会话。",
   "sidebar.empty": "还没有已保存的会话。",
   "sidebar.privacy": "隐私披露",

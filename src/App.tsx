@@ -152,6 +152,10 @@ export default function App() {
   const busy = persistenceBusy || resumeStatus !== null;
   const activeSession =
     openSessions.find((s) => s.sid === activeSessionId) ?? null;
+  // ADR-0060 soft cap: a non-blocking badge in the top bar (not the sidebar)
+  // signals memory pressure once the open keep-alive set reaches the cap; it
+  // never forces a close.
+  const atSoftCap = openSessions.length >= SOFT_CAP_OPEN_SESSIONS;
 
   // ADR-0061 cold start: load list_sessions on mount (and after a save/delete/
   // rename bumps sessionsEpoch). NOT createSession -- zero instances until the
@@ -502,7 +506,6 @@ export default function App() {
             sessions={sessions}
             openSessions={openSessions}
             activeSessionId={activeSessionId}
-            softCap={SOFT_CAP_OPEN_SESSIONS}
             disabled={busy}
             loadError={sessionsError}
             onNew={() => void openNew()}
@@ -533,6 +536,14 @@ export default function App() {
                 <FormattedMessage id="session.defaultName" defaultMessage="New session" />
               )}
             </span>
+            {atSoftCap && (
+              <span className="topbar-softcap" role="status">
+                <FormattedMessage
+                  id="header.softCap"
+                  defaultMessage="Many sessions open — close some to free memory."
+                />
+              </span>
+            )}
             <HeaderActions
               disabled={busy || !activeSession}
               hasKey={hasKey}

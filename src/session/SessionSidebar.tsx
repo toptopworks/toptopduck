@@ -35,7 +35,6 @@ interface SessionSidebarProps {
   sessions: SessionMetadata[];
   openSessions: OpenSession[];
   activeSessionId: string | null;
-  softCap: number;
   disabled: boolean;
   loadError: string | null;
   onNew: () => void;
@@ -55,7 +54,6 @@ export function SessionSidebar({
   sessions,
   openSessions,
   activeSessionId,
-  softCap,
   disabled,
   loadError,
   onNew,
@@ -81,8 +79,6 @@ export function SessionSidebar({
     activeSessionId,
     now,
   );
-  const atSoftCap = openSessions.length >= softCap;
-
   const displayName = (name: string): string =>
     name || intl.formatMessage({ id: "session.defaultName", defaultMessage: "New session" });
 
@@ -96,15 +92,6 @@ export function SessionSidebar({
       >
         <FormattedMessage id="sidebar.newSession" defaultMessage="New session" />
       </button>
-
-      {atSoftCap && (
-        <p className="sidebar-softcap" role="status">
-          <FormattedMessage
-            id="sidebar.softCap"
-            defaultMessage="Many sessions open — close some to free memory."
-          />
-        </p>
-      )}
 
       {loadError && (
         <p className="sidebar-error muted">

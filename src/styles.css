@@ -118,10 +118,6 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
   border-radius: var(--radius); font-size: 0.9rem;
 }
 .sidebar-new-button:disabled { opacity: 0.6; cursor: progress; }
-.sidebar-softcap {
-  font-size: 0.78rem; line-height: 1.4; margin: 0 0 0.4rem; padding: 0.35rem 0.5rem;
-  background: #fff4e5; border: 1px solid #ffd9a0; border-radius: var(--radius); color: #8a5200;
-}
 .sidebar-error { font-size: 0.8rem; margin: 0 0 0.4rem; }
 .session-empty { font-size: 0.85rem; padding: 0.5rem; }
 
@@ -214,6 +210,10 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
   border: 1px solid var(--border); background: var(--card); border-radius: var(--radius);
 }
 .topbar-session-name { font-weight: 600; font-size: 0.95rem; }
+.topbar-softcap {
+  font-size: 0.78rem; padding: 0.15rem 0.5rem;
+  background: #fff4e5; border: 1px solid #ffd9a0; border-radius: var(--radius); color: #8a5200;
+}
 
 /* --- Row 2: resume progress strip (ADR-0034; absent unless resume runs) -- */
 .shell > .resume-progress { grid-column: 2; grid-row: 2; margin: 0; border-radius: 0; }
