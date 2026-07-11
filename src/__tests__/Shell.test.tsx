@@ -809,4 +809,25 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
     });
     await waitFor(() => expect(screen.getByText(/开始一次分析/)).toBeInTheDocument());
   });
+
+  it("close still unmounts at once when closeSession rejects (ADR-0055 .catch seam, #83)", async () => {
+    vi.mocked(createSession).mockResolvedValueOnce("sess-1");
+    // closeSession REJECTS -- closeOpen's .catch must swallow it so it does
+    // NOT surface as an unhandled rejection. If someone drops the .catch (or
+    // re-adds an await on closeSession), this test fails on the reject path.
+    vi.mocked(closeSession).mockRejectedValueOnce(new Error("backend gone"));
+
+    render(<App />);
+    await openSession();
+    fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
+    fireEvent.click(screen.getByRole("menuitem", { name: "关闭" }));
+
+    // The pane unmounts synchronously even though closeSession rejects.
+    await waitFor(() =>
+      expect(screen.queryByRole("textbox", { name: "提问" })).not.toBeInTheDocument(),
+    );
+    // Drain the microtask queue so the rejected closeSession promise settles
+    // through closeOpen's .catch -- the seam this test exists to guard.
+    await waitFor(() => expect(closeSession).toHaveBeenCalledWith("sess-1"));
+  });
 });

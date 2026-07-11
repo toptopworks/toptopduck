@@ -507,7 +507,7 @@ export default function App() {
   // turn-progress listener cleanup runs in the pane's unmount effect. The .duck
   // stays on disk and remains in the sidebar (re-openable). NOT delete.
   const closeOpen = useCallback(
-    (sid: string) => {
+    (sid: string): Promise<void> => {
       queryClient.removeQueries({ queryKey: ["session", sid] });
       // Compute next inside the setOpenSessions updater (the source of truth
       // for the latest prev), then run the active-id decision as a SEPARATE
@@ -520,21 +520,28 @@ export default function App() {
         return next;
       });
       setActiveSessionId((cur) => (cur === sid ? next[0]?.sid ?? null : cur));
-      // Fire cancel + mark closing in the background (ADR-0055). The UI is
-      // already gone; this only reaches backend bookkeeping. Best-effort: a
-      // NotFound just means the instance was already dropped.
-      void closeSession(sid).catch(() => {});
+      // ADR-0055: the UI is already gone; cancel + mark closing only reaches
+      // backend bookkeeping. The promise is RETURNED, not awaited here -- the
+      // plain-close caller keeps fire-cancel-don't-wait (`void`), while
+      // deletePersisted awaits it so close is ordered BEFORE delete (delete
+      // rejects if the instance is still locked). Best-effort: NotFound is the
+      // expected idempotent path (already dropped); other failures log to
+      // devtools so IPC/panic stay observable. NOT a user toast -- pane is gone.
+      return closeSession(sid).catch((e) => {
+        console.warn("[closeSession] background close failed", fmtError(e));
+      });
     },
     [queryClient],
   );
 
   // Delete a persisted .duck (ADR-0060, irreversible). Close first if it is
-  // open (drops the instance + cache synchronously, fires cancel in the
-  // background), then remove the file + drop from recent_files. After delete,
-  // fall back to the cold hero if it was active.
+  // open: the UI unmounts synchronously inside closeOpen, but we AWAIT its
+  // backend cancel so deleteSession does not race with close (delete rejects
+  // if the instance is still locked). Then remove the file + drop from
+  // recent_files. After delete, fall back to the cold hero if it was active.
   const deletePersisted = useCallback(
     async (path: string, sid: string | null) => {
-      if (sid) closeOpen(sid);
+      if (sid) await closeOpen(sid);
       try {
         await deleteSession(path);
       } catch (e) {
