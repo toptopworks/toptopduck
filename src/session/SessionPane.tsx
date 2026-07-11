@@ -61,6 +61,10 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
   // a turn's question lights up a chip only when it explicitly names a dataset.
   // Stale datasets are excluded -- they cannot be the target of a new question.
   const datasetLabels = s.datasets.filter((d) => !d.stale);
+  // Hoisted so the ActiveSourceDeleteDialog filter callback reads it without a
+  // non-null assertion: TS narrows a const across the JSX guard + closure, but
+  // not a member access like s.pendingActiveDelete.
+  const pendingActiveDelete = s.pendingActiveDelete;
 
   return (
     <div className="session-pane">
@@ -184,11 +188,11 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
           onCancel={s.handleGuidedCancel}
         />
       )}
-      {s.pendingActiveDelete && (
+      {pendingActiveDelete && (
         <ActiveSourceDeleteDialog
-          target={s.pendingActiveDelete}
+          target={pendingActiveDelete}
           candidates={s.datasets.filter(
-            (d) => d.reference_name !== s.pendingActiveDelete!.reference_name,
+            (d) => d.reference_name !== pendingActiveDelete.reference_name,
           )}
           onConfirm={(cw) => s.handleConfirmActiveDelete(cw)}
           onCancel={s.handleCancelActiveDelete}

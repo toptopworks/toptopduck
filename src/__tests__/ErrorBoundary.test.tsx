@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { ErrorBoundary, DegradeCard } from "../components/ErrorBoundary";
 import { catalogFor } from "../i18n";
 
@@ -61,11 +61,23 @@ describe("ErrorBoundary (ADR-0058)", () => {
     expect(screen.getByRole("alert").dataset.region).toBe("region");
   });
 
-  it("retry: calls onReset (invalidate), remounts children (key bump), clears the error", () => {
+  it("retry: calls onReset, remounts children fresh (clearing client UI state), clears the error", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     let boom = true;
     const onReset = vi.fn();
-    const Child = vi.fn(() => <Boom boom={boom} label="a" />);
+    // Track real MOUNTS (not renders). A render throw unmounts the children
+    // (the fallback takes their place), so the post-retry mount count rising
+    // proves the children remounted fresh -- clearing local UI state like a
+    // pagination offset (ADR-0058 retry contract). Asserting a render-call
+    // count would be weaker: it fires on reconciliation too.
+    let mounts = 0;
+    function Child(): ReactNode {
+      useEffect(() => {
+        mounts++;
+      }, []);
+      if (boom) throw new Error("boom-a");
+      return <p data-testid="ok-a">a</p>;
+    }
     function App() {
       return (
         <ErrorBoundary name="region" onReset={onReset}>
@@ -74,18 +86,17 @@ describe("ErrorBoundary (ADR-0058)", () => {
       );
     }
     render(wrap(<App />));
-    // Initial render threw. onReset has NOT fired (no retry yet).
+    // Initial render threw before commit, so useEffect never ran: mounts is 0.
     expect(onReset).not.toHaveBeenCalled();
-    const callsBeforeRetry = Child.mock.calls.length;
+    expect(mounts).toBe(0);
 
     // Flip the boom flag off, then click retry.
     boom = false;
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
-    // onReset fires so the caller invalidates the region's server state.
+    // onReset fires so the caller drops the region's stale server state.
     expect(onReset).toHaveBeenCalledTimes(1);
-    // The children remounted fresh (key bump) -- Child is invoked again after
-    // the retry, on top of whatever React's throw-retry did before.
-    expect(Child.mock.calls.length).toBeGreaterThan(callsBeforeRetry);
+    // The retry cleared the error -> children mounted fresh (useEffect ran).
+    expect(mounts).toBe(1);
     expect(screen.getByTestId("ok-a")).toBeInTheDocument();
   });
 

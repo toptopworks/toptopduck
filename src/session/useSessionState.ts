@@ -300,10 +300,22 @@ export function useSessionState(
         // query is NOT invalidated -- invalidating would wipe the appended entry
         // against a stale/empty refetch. Only workingSet + active change (a new
         // result_N registered server-side + active may have moved).
-        await Promise.all([
-          queryClient.invalidateQueries({ queryKey: sessionKeys.workingSet(sessionId) }),
-          queryClient.invalidateQueries({ queryKey: sessionKeys.active(sessionId) }),
-        ]);
+        // Guarded so a refresh failure surfaces as a tagged error instead of
+        // skipping setLoading(false) below (which would lock QuestionBar
+        // forever). Mirrors refreshServerState's "saved but refresh failed"
+        // contract; thread stays un-invalidated to preserve the optimistic
+        // append.
+        try {
+          await Promise.all([
+            queryClient.invalidateQueries({ queryKey: sessionKeys.workingSet(sessionId) }),
+            queryClient.invalidateQueries({ queryKey: sessionKeys.active(sessionId) }),
+          ]);
+        } catch (refreshErr) {
+          setError({
+            message: `${ERROR_VERB.ask}已保存，但刷新工作集失败：${fmtError(refreshErr)}`,
+            kind: "ask",
+          });
+        }
       }
       // Textual / Failed / Cancelled: no working-set change; the optimistic
       // append is the thread state, nothing to invalidate.

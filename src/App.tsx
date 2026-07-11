@@ -615,13 +615,15 @@ export default function App() {
             shell-level render throw. Every session is already isolated by its
             own L2 session-body boundary (in SessionPane), so this boundary
             fires only for a chrome-level crash the partitions did not catch.
-            Retry invalidates the whole cache + key-bump-remounts the shell; the
-            extra Reload exit reloads the window (a Tauri desktop SPA has no URL
-            bar to refresh, ADR-0058 Context). */}
+            Retry removes the whole cache (drop, not invalidate -- a remounted
+            pane would otherwise re-render the stale throwing data via stale-
+            then-refetch, same rationale as the L2 partition) and remounts the
+            shell; the extra Reload exit reloads the window (a Tauri desktop SPA
+            has no URL bar to refresh, ADR-0058 Context). */}
         <ErrorBoundary
           name="shell"
           onReset={() => {
-            void queryClient.invalidateQueries();
+            void queryClient.removeQueries();
           }}
           fallback={(error, retry) => (
             <DegradeCard

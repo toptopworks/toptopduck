@@ -13,10 +13,11 @@ import { useIntl } from "react-intl";
 // Partitioning (ADR-0058 Decision 1): the shell wraps each crash-prone region
 // (Thread rail, ResultView workspace, one SessionPane body) in its own
 // <ErrorBoundary> so a render crash degrades ONLY that block; an L3 boundary
-// at the App root is the last-resort fallback. Each retry bumps an internal
-// key so the children remount with fresh state, and calls `onReset` so the
-// caller invalidates the region's server state (re-fetch fresh data instead
-// of re-throwing against stale).
+// at the App root is the last-resort fallback. Each retry calls `onReset` so
+// the caller drops the region's stale server state (re-fetch fresh instead of
+// re-throwing against stale), then clears the error so the children remount
+// fresh -- the render throw already unmounted them, so the clear-mount cycle
+// inherently resets any local UI state (pagination offset, etc.).
 //
 // The boundary is a class component because React still requires the
 // `getDerivedStateFromError` / `componentDidCatch` lifecycle, which has no
@@ -38,32 +39,32 @@ interface ErrorBoundaryProps {
 
 interface ErrorBoundaryState {
   error: Error | null;
-  /** Bumped on each retry so the children remount from scratch (clearing
-   *  client UI state like pagination offset) even when the error was cleared. */
-  retryKey: number;
 }
 
 export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
-  state: ErrorBoundaryState = { error: null, retryKey: 0 };
+  state: ErrorBoundaryState = { error: null };
 
   static getDerivedStateFromError(error: Error): Partial<ErrorBoundaryState> {
     return { error };
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
-    // Dev-only console trace -- the degrade card carries the message in prod
-    // via the expandable details (ADR-0058: honest, not hidden, not scary).
-    if (import.meta.env.DEV) {
-      console.error(`[ErrorBoundary:${this.props.name}]`, error, info.componentStack);
-    }
+    // Always log -- a render crash must never go dark silently. The degrade
+    // card carries the message in its expandable details (ADR-0058: honest,
+    // not hidden, not scary); this trace adds the component stack for dx and
+    // Tauri users opening devtools, and gives a future telemetry hook a seat.
+    console.error(`[ErrorBoundary:${this.props.name}]`, error, info.componentStack);
   }
 
   retry = (): void => {
-    // ADR-0058 Decision 2: invalidate the region's server state, then clear the
-    // error so the children remount fresh. onReset runs BEFORE the clear so a
-    // synchronous invalidate queues the refetch the remounted children read.
+    // ADR-0058 Decision 2: drop the region's stale server state, then clear
+    // the error so the children remount fresh. onReset runs BEFORE the clear
+    // so a synchronous cache drop queues the refetch the remounted children
+    // read. No key bump is needed: the render throw already unmounted the
+    // children (the fallback took their place), so clearing the error mounts
+    // them fresh and any local UI state is naturally reset.
     this.props.onReset?.();
-    this.setState((prev) => ({ error: null, retryKey: prev.retryKey + 1 }));
+    this.setState({ error: null });
   };
 
   render(): ReactNode {

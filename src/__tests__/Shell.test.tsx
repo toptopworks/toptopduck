@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { QueryClient } from "@tanstack/react-query";
 import type { DatasetDescriptor, RowPage, ThreadEntry, TurnOutcome, TurnProgress } from "../types";
 
 // Black-box shell tests (issue #79 ACs). Drives the rendered three-column App
@@ -560,6 +561,42 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
     // renders and the degrade card is gone.
     await waitFor(() => expect(screen.getByText("你好")).toBeInTheDocument());
     expect(document.querySelector(".degrade-card")).not.toBeInTheDocument();
+  });
+
+  it("retry removes the session cache slice (ADR-0058 removeQueries contract)", async () => {
+    // Locks the ADR-0058 decision that retry REMOVES (not invalidates) the
+    // session query cache: invalidate would leave stale data for the remounted
+    // children to re-render and re-throw against. A regression to invalidate
+    // (or a no-op) would still pass the existing retry test above (the mock
+    // returns fresh data either way), so this spy is the distinguishing guard.
+    const removeSpy = vi.spyOn(QueryClient.prototype, "removeQueries");
+    let threadData: ThreadEntry[] = [
+      {
+        entry: "Turn",
+        data: { question: "x", outcome: { kind: "Bogus" } },
+      } as unknown as ThreadEntry,
+    ];
+    vi.mocked(conversation).mockImplementation(async () => threadData);
+    render(<App />);
+    await openSession();
+    await waitFor(() =>
+      expect(document.querySelector(".degrade-card")).toBeInTheDocument(),
+    );
+    // Fix the data, then retry.
+    threadData = [
+      { entry: "Turn", data: { question: "你好", outcome: { kind: "Cancelled" } } },
+    ];
+    const conversationCallsBefore = vi.mocked(conversation).mock.calls.length;
+    removeSpy.mockClear(); // isolate retry's own removeQueries call
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    // The remounted pane reads the refetched (clean) data.
+    await waitFor(() => expect(screen.getByText("你好")).toBeInTheDocument());
+    // ADR-0058: retry called removeQueries (the cache was dropped, not left
+    // stale), and the drop drove a fresh conversation() refetch.
+    expect(removeSpy).toHaveBeenCalled();
+    expect(vi.mocked(conversation).mock.calls.length).toBeGreaterThan(
+      conversationCallsBefore,
+    );
   });
 
   it("one session crashing does not affect another open session (ADR-0058 session isolation)", async () => {
