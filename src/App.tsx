@@ -396,6 +396,39 @@ export default function App() {
     [registerOpen],
   );
 
+  // Single webview-level drop router (#81): Tauri's onDragDropEvent is a
+  // window-level signal with no hit-test, so exactly one listener (here, in the
+  // shell) routes each drop -- cold start mints a new session, otherwise the
+  // file lands on the ACTIVE session's ingest via the pendingIngestPath pipe
+  // (#81 A1). This replaces the per-SessionPane FileDropzone listeners, which
+  // stacked 1:1 with keep-alive panes and fired N ingests per single drop.
+  const onWebviewDrop = useCallback(
+    (path: string) => {
+      if (activeSessionId === null) {
+        void dropFile(path);
+        return;
+      }
+      setOpenSessions((prev) =>
+        prev.map((o) =>
+          o.sid === activeSessionId ? { ...o, pendingIngestPath: path } : o,
+        ),
+      );
+    },
+    [activeSessionId, dropFile],
+  );
+  useEffect(() => {
+    if (busy) return;
+    const app = getCurrentWebviewWindow();
+    const unlisten = app.onDragDropEvent((event) => {
+      if (event.payload.type === "drop" && event.payload.paths.length > 0) {
+        onWebviewDrop(event.payload.paths[0]);
+      }
+    });
+    return () => {
+      void unlisten.then((u) => u());
+    };
+  }, [busy, onWebviewDrop]);
+
   // Clear a consumed drop-on-cold-start path (#81 A1): once the SessionPane has
   // kicked off ingest, OpenSession.pendingIngestPath is dropped so a remount
   // cannot re-ingest.
@@ -627,11 +660,7 @@ export default function App() {
               No active session = the cold-start hero (ADR-0061). */}
           <main className="session-pane-host">
             {activeSessionId === null && (
-              <ColdStartHero
-                disabled={busy}
-                onNew={() => void openNew()}
-                onDropFile={(p) => void dropFile(p)}
-              />
+              <ColdStartHero disabled={busy} onNew={() => void openNew()} />
             )}
             {openSessions.map((s) => (
               <div
@@ -679,30 +708,13 @@ export default function App() {
 function ColdStartHero({
   disabled,
   onNew,
-  onDropFile,
 }: {
   disabled: boolean;
   onNew: () => void;
-  onDropFile: (path: string) => void;
 }) {
-  // Drop-to-create (ADR-0061, #81 A1): a webview-level drop while the cold hero
-  // is showing mints a new session with the file as its first source. Mirrors
-  // FileDropzone's listener -- the third caller would prompt extracting a shared
-  // hook, but until then the 5-line duplication stays. Ignored while busy so a
-  // create-in-flight cannot stack a second session.
-  useEffect(() => {
-    if (disabled) return;
-    const app = getCurrentWebviewWindow();
-    const unlisten = app.onDragDropEvent((event) => {
-      if (event.payload.type === "drop" && event.payload.paths.length > 0) {
-        onDropFile(event.payload.paths[0]);
-      }
-    });
-    return () => {
-      void unlisten.then((u) => u());
-    };
-  }, [disabled, onDropFile]);
-
+  // Drop-to-create (ADR-0061, #81 A1) is now routed by the single shell-level
+  // webview drop listener in App, which treats activeSessionId === null as the
+  // cold-start case. This component is pure UI.
   return (
     <div className="workspace-hero cold-start-hero">
       <h2 className="cold-start-title">
