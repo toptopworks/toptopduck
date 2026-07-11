@@ -23,6 +23,11 @@
   "coldStart.newSession": "新建会话",
   "coldStart.privacy": "隐私披露",
 
+  "errorBoundary.message": "此区域无法显示。",
+  "errorBoundary.retry": "重试",
+  "errorBoundary.reload": "重载",
+  "errorBoundary.details": "技术详情",
+
   "sidebar.ariaLabel": "会话",
   "sidebar.newSession": "新建会话",
   "sidebar.loadError": "无法加载已保存的会话。",

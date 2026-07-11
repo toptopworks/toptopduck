@@ -1,17 +1,31 @@
 import { useState } from "react";
+import type { TurnPhase } from "../types";
 
 interface QuestionBarProps {
   onSubmit: (question: string) => void;
   /** Fire while a turn is in flight (ADR-0021 cancel). Hidden when not loading. */
   onCancel: () => void;
   loading: boolean;
+  /** The in-flight turn's discrete phase (ADR-0059): when non-null and loading,
+   *  the bar shows "思考中（第 N 次）/ 查询中" so the user sees the turn moving
+   *  through its LLM + SQL waits instead of a blank spinner. null/absent when
+   *  no turn is running (the listener clears it on outcome, incl. Cancelled).
+   *  Optional so call sites / tests that don't exercise phase feedback omit it. */
+  phase?: TurnPhase | null;
 }
 
 // Natural-language question entry (PRD #1, issue #22). A blank or in-flight
 // submit is ignored client-side; the orchestrator runs one turn at a time
 // (ADR-0021 single in-flight). While a turn runs the input is disabled and a
 // 停止 button replaces the submit so the user can cancel the in-flight query.
-export function QuestionBar({ onSubmit, onCancel, loading }: QuestionBarProps) {
+// The discrete phase feedback (ADR-0059) renders alongside the stop button --
+// "思考中（第 N 次）/ 查询中" reflects the two honest boundaries (LLM HTTP +
+// SQL), not a fabricated percentage.
+//
+// NOTE: QuestionBar's chrome strings remain hard-coded zh (consistent with the
+// rest of this file). i18n'ing the bar is a follow-up; the phase strings ride
+// the same convention until then.
+export function QuestionBar({ onSubmit, onCancel, loading, phase = null }: QuestionBarProps) {
   const [value, setValue] = useState("");
 
   return (
@@ -20,6 +34,9 @@ export function QuestionBar({ onSubmit, onCancel, loading }: QuestionBarProps) {
       onSubmit={(e) => {
         e.preventDefault();
         const q = value.trim();
+        // ADR-0021 single in-flight: a second submit while a turn runs is
+        // ignored client-side (the input is also disabled, this is the
+        // belt-and-suspenders guard).
         if (!q || loading) return;
         onSubmit(q);
       }}
@@ -32,6 +49,15 @@ export function QuestionBar({ onSubmit, onCancel, loading }: QuestionBarProps) {
         aria-label="提问"
         disabled={loading}
       />
+      {loading && phase !== null && (
+        // ADR-0059 discrete phase feedback. The attempt number surfaces only
+        // on a blind retry (>1); the first attempt shows the bare verb (守
+        // 0017 -- honest, not fabricated, and the first attempt needs no
+        // "第 1 次" noise).
+        <span className="phase-indicator" role="status" aria-live="polite">
+          {phaseLabel(phase)}
+        </span>
+      )}
       {loading ? (
         // Cancel is the only actionable control while a turn runs: the input is
         // disabled (single in-flight, ADR-0021), so submit would be inert. The
@@ -47,4 +73,16 @@ export function QuestionBar({ onSubmit, onCancel, loading }: QuestionBarProps) {
       )}
     </form>
   );
+}
+
+// Discrete phase label (ADR-0059 + 0017 honesty): Thinking / Querying with the
+// 1-based attempt shown ONLY on a blind retry (> 1). The first attempt renders
+// the bare verb; "第 1 次" would be noise that implies a retry count.
+function phaseLabel(phase: TurnPhase): string {
+  if ("Thinking" in phase) {
+    const { attempt } = phase.Thinking;
+    return attempt > 1 ? `思考中（第 ${attempt} 次）…` : "思考中…";
+  }
+  const { attempt } = phase.Querying;
+  return attempt > 1 ? `查询中（第 ${attempt} 次）…` : "查询中…";
 }

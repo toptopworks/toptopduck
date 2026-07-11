@@ -35,6 +35,9 @@ vi.mock("../api", async (importOriginal) => {
     setDatasetPrivacy: vi.fn(),
     askQuestion: vi.fn(),
     conversation: vi.fn(async () => []),
+    // ADR-0059: the turn-progress listener mounts with every SessionPane.
+    // Stub it (no-op unlisten) so jsdom doesn't hit the real Tauri listen.
+    onTurnProgress: vi.fn(async () => () => {}),
     readRows: vi.fn(),
     getProviderConfig: vi.fn(async () => ({
       base_url: "https://api.anthropic.com",

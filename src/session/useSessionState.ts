@@ -9,6 +9,7 @@ import {
   ingestFile,
   ingestFileGuided,
   listWorkingSet,
+  onTurnProgress,
   removeActiveSource,
   removeSource,
   renameDataset,
@@ -31,6 +32,7 @@ import type {
   SheetGuidance,
   StaleAnchor,
   ThreadEntry,
+  TurnPhase,
 } from "../types";
 
 // Per-session state + actions (ADR-0051). The shell (<App>) creates the
@@ -92,6 +94,11 @@ export interface UseSessionState {
   viewedResult: ViewedResult | null;
   workspaceContent: WorkspaceContent;
   loading: boolean;
+  /** The in-flight turn's discrete phase (ADR-0059): Thinking/Querying with a
+   *  1-based attempt. null when no turn is running. Client UI state only --
+   *  never enters TanStack Query / the thread cache (ADR-0051 single truth:
+   *  the thread holds completed TurnRecords; phase is a transient hint). */
+  phase: TurnPhase | null;
   error: AppError | null;
   persistError: string | null;
   guidance: { request: GuidanceRequest; path: string } | null;
@@ -145,6 +152,12 @@ export function useSessionState(
   const [viewedResult, setViewedResult] = useState<ViewedResult | null>(null);
   const [pinnedToHistory, setPinnedToHistory] = useState(false);
   const [loading, setLoading] = useState(false);
+  // ADR-0059: the in-flight turn's discrete phase. Client UI state (NOT in
+  // TanStack Query) -- it is a transient "in-progress" hint, lifecycle-distinct
+  // from the completed TurnRecord thread cache (ADR-0051). Updated by the long
+  // listener below; cleared in handleAsk's finally on every outcome (incl.
+  // Cancelled).
+  const [phase, setPhase] = useState<TurnPhase | null>(null);
   const [error, setError] = useState<AppError | null>(null);
   const [guidance, setGuidance] = useState<{ request: GuidanceRequest; path: string } | null>(null);
   const [pendingActiveDelete, setPendingActiveDelete] =
@@ -170,6 +183,34 @@ export function useSessionState(
       }
     }
   }, [thread]);
+
+  // ADR-0059 C-4: a LONG-LIVED turn-progress listener -- mount listen once,
+  // unmount unlisten. Reused across ALL turns (NOT a per-turn listen, which
+  // would amplify a subscribe-before-ask race + cost one IPC per turn). The
+  // global Tauri broadcast is filtered to this pane's sessionId so a sibling
+  // pane's phase never leaks in. On unmount (close tab, ADR-0055) the cleanup
+  // unlistens + the phase state is destroyed; any orphan event from the
+  // in-flight turn has no listener and is harmlessly dropped.
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    void onTurnProgress((ev) => {
+      if (!active || ev.session_id !== sessionId) return;
+      setPhase(ev.phase);
+    }).then((un) => {
+      // If the effect already cleaned up before listen resolved, unlisten
+      // immediately so the orphan callback cannot fire setPhase post-unmount.
+      if (!active) {
+        un();
+        return;
+      }
+      unlisten = un;
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [sessionId]);
 
   // --- Derived: stale map (working-set runtime truth, ADR-0051) + workspace ---
   const staleByReference = useMemo(() => {
@@ -232,6 +273,12 @@ export function useSessionState(
         setLoading(false);
         void pollPersistError();
         return;
+      } finally {
+        // ADR-0059: clear phase on every ask end (incl. Cancelled outcome /
+        // IPC failure) -- the in-flight turn is done. Loading stays on through
+        // the post-outcome invalidation below; phase is a turn-lifecycle hint,
+        // not a UI-busy flag.
+        setPhase(null);
       }
       // Optimistic thread append (ADR-0051): the outcome object is the same
       // shape the backend recorded, so the appended entry matches the refetch.
@@ -484,6 +531,7 @@ export function useSessionState(
     viewedResult,
     workspaceContent,
     loading,
+    phase,
     error,
     persistError,
     guidance,
