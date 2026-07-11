@@ -63,7 +63,7 @@ describe("buildSidebarGroups", () => {
   it("merges an open binding into its persisted row (sid set) and marks active", () => {
     const persisted = [meta("/a.duck", "alpha", 0)];
     const open: OpenSession[] = [
-      { sid: "uuid-a", name: "alpha", path: "/a.duck", epoch: 0 },
+      { sid: "uuid-a", name: "alpha", path: "/a.duck", pendingIngestPath: null },
     ];
 
     const groups = buildSidebarGroups(persisted, open, "uuid-a", NOW);
@@ -78,7 +78,7 @@ describe("buildSidebarGroups", () => {
     // An unsaved new session has no path, so it is not in list_sessions; it
     // becomes a standalone entry stamped to `now`.
     const open: OpenSession[] = [
-      { sid: "uuid-new", name: "", path: null, epoch: 0 },
+      { sid: "uuid-new", name: "", path: null, pendingIngestPath: null },
     ];
 
     const groups = buildSidebarGroups([], open, "uuid-new", NOW);
@@ -99,7 +99,7 @@ describe("buildSidebarGroups", () => {
       meta("/b.duck", "beta", 0),
     ];
     const open: OpenSession[] = [
-      { sid: "uuid-b", name: "beta", path: "/b.duck", epoch: 0 },
+      { sid: "uuid-b", name: "beta", path: "/b.duck", pendingIngestPath: null },
     ];
 
     const groups = buildSidebarGroups(persisted, open, "uuid-b", NOW);

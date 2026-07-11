@@ -368,7 +368,7 @@ export default function App() {
       const sid = await createSession();
       // name starts empty; the display layer renders a localized "New session"
       // placeholder until the user saves-as or renames (data, not chrome).
-      registerOpen({ sid, name: "", path: null, epoch: 0 });
+      registerOpen({ sid, name: "", path: null, pendingIngestPath: null });
     } catch (e) {
       setShellError(fmtError(e));
     }
@@ -386,7 +386,7 @@ export default function App() {
       droppingRef.current = true;
       try {
         const sid = await createSession();
-        registerOpen({ sid, name: "", path: null, epoch: 0, pendingIngestPath: path });
+        registerOpen({ sid, name: "", path: null, pendingIngestPath: path });
       } catch (e) {
         setShellError(fmtError(e));
       } finally {
@@ -471,7 +471,7 @@ export default function App() {
         const sid = await createSession();
         await openDuck(sid, path);
         await queryClient.invalidateQueries({ queryKey: ["session", sid] });
-        registerOpen({ sid, name, path, epoch: 0 });
+        registerOpen({ sid, name, path, pendingIngestPath: null });
         setResumeStatus(null);
       } catch (e) {
         setShellError(fmtError(e));
@@ -492,14 +492,22 @@ export default function App() {
       try {
         await closeSession(sid);
       } catch {
-        // The instance may already be gone; proceed to drop the cache + entry.
+        // Close is best-effort: cancel + discard handles any in-flight turn.
+        // A NotFound here just means the instance was already dropped; either
+        // way the cache + open-set entry are removed below.
       }
       queryClient.removeQueries({ queryKey: ["session", sid] });
+      // Compute next inside the setOpenSessions updater (the source of truth
+      // for the latest prev), then run the active-id decision as a SEPARATE
+      // setState. Calling setActiveSessionId inside a state updater violates
+      // React's purity contract -- updaters may double-fire in StrictMode /
+      // concurrent mode, enqueueing the nested setter twice.
+      let next: OpenSession[] = [];
       setOpenSessions((prev) => {
-        const next = prev.filter((s) => s.sid !== sid);
-        setActiveSessionId((cur) => (cur === sid ? next[0]?.sid ?? null : cur));
+        next = prev.filter((s) => s.sid !== sid);
         return next;
       });
+      setActiveSessionId((cur) => (cur === sid ? next[0]?.sid ?? null : cur));
     },
     [queryClient],
   );
@@ -669,9 +677,9 @@ export default function App() {
                 aria-hidden={s.sid !== activeSessionId}
               >
                 <SessionPane
-                  key={`${s.sid}:${s.epoch}`}
+                  key={s.sid}
                   sessionId={s.sid}
-                  pendingIngestPath={s.pendingIngestPath ?? null}
+                  pendingIngestPath={s.pendingIngestPath}
                   onIngestConsumed={() => clearPendingIngest(s.sid)}
                 />
               </div>
