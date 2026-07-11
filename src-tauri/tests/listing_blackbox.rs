@@ -82,3 +82,32 @@ fn list_sessions_addresses_each_readable_duck_by_path_and_skips_the_rest() {
         assert_eq!(m.source_summary.turn_count, 1);
     }
 }
+
+#[test]
+fn closed_rename_rewrites_only_the_session_name_header() {
+    // Issue #81 rename_persisted_session contract: a NOT-currently-open .duck
+    // is renamed by reading its recipe, rewriting the session_name header, and
+    // atomic-saving -- the same read_duck + edit + save_atomic round-trip the
+    // Tauri command performs. Pinning it here keeps the closed-rename shape
+    // black-box testable without a Tauri State harness. list_session_metadata
+    // then reflects the new name (the sidebar's source of truth).
+    use toptopduck_lib::persistence::read_duck;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_recipe(dir.path(), "s.duck", "原名", "src_a");
+
+    // Round-trip rename: read, rewrite the header, atomic-save.
+    let mut recipe = read_duck(std::path::Path::new(&path)).expect("read");
+    assert_eq!(recipe.session_name, "原名");
+    recipe.session_name = "新名".to_string();
+    save_atomic(std::path::Path::new(&path), &recipe).expect("save");
+
+    // The list the sidebar consumes now carries the renamed display_name.
+    let list = list_session_metadata(std::slice::from_ref(&path));
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].display_name, "新名");
+    // The re-read recipe itself carries the new header (nothing else drifted).
+    assert_eq!(
+        read_duck(std::path::Path::new(&path)).unwrap().session_name,
+        "新名"
+    );
+}

@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { IntlProvider } from "react-intl";
+import type { ReactNode } from "react";
 import type { DatasetDescriptor } from "../types";
 
 // FileDropzone touches Tauri APIs that don't exist under jsdom; stub them first.
@@ -42,12 +45,12 @@ vi.mock("../api", async (importOriginal) => {
 });
 
 import { open } from "@tauri-apps/plugin-dialog";
-import App from "../App";
+import { SessionPane } from "../session/SessionPane";
+import { catalogFor } from "../i18n";
 import {
   activeDataset,
   askQuestion,
   conversation,
-  createSession,
   ingestFile,
   ingestFileGuided,
   listWorkingSet,
@@ -57,6 +60,28 @@ import {
   renameDataset,
   setDatasetPrivacy,
 } from "../api";
+
+// Issue #81 cold start (ADR-0061): <App/> no longer auto-creates a session on
+// mount, so these session-INTERNAL flows (guided load / rename / privacy / ask /
+// delete-source) are driven through <SessionPane> directly -- the unit that owns
+// them. The shell-level cold-start + multi-session behavior lives in
+// Shell.test.tsx. Each render gets a fresh QueryClient (ADR-0051: test renders
+// never share cache). zh-CN so the i18n'd chrome matches the assertions.
+function renderPane(): void {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrap = (children: ReactNode) => (
+    <QueryClientProvider client={queryClient}>
+      <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")} defaultLocale="en-US">
+        {children}
+      </IntlProvider>
+    </QueryClientProvider>
+  );
+  render(
+    wrap(
+      <SessionPane sessionId="sess-1" pendingIngestPath={null} onIngestConsumed={() => {}} />,
+    ),
+  );
+}
 
 const guidedDataset: DatasetDescriptor = {
   reference_name: "people",
@@ -105,7 +130,7 @@ describe("App guided-load flow", () => {
   });
 
   it("opens the guided dialog on NeedsGuidance, then closes it after a guided load", async () => {
-    render(<App />);
+    renderPane();
 
     // Mount-time refresh (empty working set) settles before the flow starts.
     await waitFor(() => expect(listWorkingSet).toHaveBeenCalled());
@@ -143,7 +168,7 @@ describe("App rename flow", () => {
     // One dataset loaded; selection keys off the stable reference name, so a
     // display rename must not drop the current selection.
     state.workingSet = [guidedDataset];
-    render(<App />);
+    renderPane();
     fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
 
     // Mount refresh settles, then select the dataset to show its detail.
@@ -181,7 +206,7 @@ describe("App rename flow", () => {
     // load-failure prefix -- the error context follows the operation that
     // produced it, so a rename rejection is never misread as a load failure.
     state.workingSet = [guidedDataset];
-    render(<App />);
+    renderPane();
     fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
@@ -213,7 +238,7 @@ describe("App privacy flow", () => {
     // "隐私设置失败：" prefix -- distinct from "加载失败：" / "重命名失败：" /
     // "换源失败：", so a privacy rejection is never misattributed.
     state.workingSet = [guidedDataset];
-    render(<App />);
+    renderPane();
     fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
@@ -258,7 +283,7 @@ describe("App ask flow", () => {
         assumption: null,
       },
     });
-    render(<App />);
+    renderPane();
     await waitFor(() =>
       expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
     );
@@ -275,7 +300,7 @@ describe("App ask flow", () => {
 
   it("labels an ask failure distinctly from a load failure", async () => {
     vi.mocked(askQuestion).mockRejectedValueOnce("未配置有效的 LLM 提供方");
-    render(<App />);
+    renderPane();
     await waitFor(() =>
       expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
     );
@@ -291,7 +316,7 @@ describe("App ask flow", () => {
   it("shows a textual outcome in the thread and opens no result pane (issue #23)", async () => {
     // ADR-0028: a non-result outcome is still always visible (in the thread),
     // occupies a slot, but produces no result_N -- so no result pane opens.
-    render(<App />);
+    renderPane();
     await waitFor(() =>
       expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
     );
@@ -340,7 +365,7 @@ describe("App delete-source flow (issue #38)", () => {
     vi.mocked(removeSource).mockImplementation(async (_sid, ref) => {
       state.workingSet = state.workingSet.filter((d) => d.reference_name !== ref);
     });
-    render(<App />);
+    renderPane();
     fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
@@ -359,7 +384,7 @@ describe("App delete-source flow (issue #38)", () => {
     // -- never mislabelled as another operation's failure.
     vi.spyOn(window, "confirm").mockReturnValue(true);
     vi.mocked(removeSource).mockRejectedValueOnce("工作集中存在中间结果，暂不支持删源");
-    render(<App />);
+    renderPane();
     fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
@@ -403,7 +428,7 @@ describe("App delete-active-source flow (issue #39)", () => {
       state.workingSet = state.workingSet.filter((d) => d.reference_name !== ref);
       vi.mocked(activeDataset).mockResolvedValue(guidedDataset); // focus moved to people
     });
-    render(<App />);
+    renderPane();
     fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^orders/ })).toBeInTheDocument(),
@@ -434,7 +459,7 @@ describe("App delete-active-source flow (issue #39)", () => {
   it("cancel in the continuation dialog is a no-op (AC3)", async () => {
     // AC3: cancel leaves the working set untouched -- nothing crossed IPC while
     // the dialog was open, so there is nothing to undo.
-    render(<App />);
+    renderPane();
     fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^orders/ })).toBeInTheDocument(),
@@ -461,7 +486,7 @@ describe("App delete-active-source flow (issue #39)", () => {
       state.workingSet = state.workingSet.filter((d) => d.reference_name !== ref);
       vi.mocked(activeDataset).mockResolvedValue(null); // empty working set
     });
-    render(<App />);
+    renderPane();
     fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
@@ -476,24 +501,5 @@ describe("App delete-active-source flow (issue #39)", () => {
     await waitFor(() =>
       expect(screen.getByText(/工作集为空/)).toBeInTheDocument(),
     );
-  });
-});
-
-describe("App session init failure", () => {
-  afterEach(() => vi.restoreAllMocks());
-
-  it("surfaces a createSession rejection instead of an endless loading screen", async () => {
-    // createSession is the mount-time critical path; a rejection (backend
-    // Session build failure) must surface as a visible error, not leave the UI
-    // stuck on "正在初始化会话…". The gated render shows the error once
-    // sessionId stays null and the load error lands.
-    vi.mocked(createSession).mockRejectedValueOnce("后端会话初始化失败");
-    render(<App />);
-    await waitFor(() =>
-      expect(screen.getByText(/初始化会话失败/)).toBeInTheDocument(),
-    );
-    expect(screen.getByText(/后端会话初始化失败/)).toBeInTheDocument();
-    // The loading placeholder is gone once the error lands.
-    expect(screen.queryByText(/正在初始化会话/)).not.toBeInTheDocument();
   });
 });

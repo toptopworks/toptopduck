@@ -214,6 +214,35 @@ export async function listSessions(): Promise<SessionMetadata[]> {
   return invoke<SessionMetadata[]>("list_sessions");
 }
 
+// Delete a persisted .duck file (ADR-0060, issue #81). The frontend closes the
+// session first when it is open, then calls this. The backend removes the file
+// + drops the path from recent_files; a missing file is idempotent success.
+// `path` is the .duck file path (the SessionMetadata.session_id from listSessions).
+export async function deleteSession(path: string): Promise<void> {
+  await invoke<void>("delete_session", { path });
+}
+
+// Rename the OPEN session bound to `sessionId` (ADR-0060, issue #81). Sets the
+// recipe header name and rewrites the bound .duck; the bound path is untouched.
+// For a never-saved session the name is held in memory until save-as.
+export async function renameSession(
+  sessionId: string,
+  newName: string,
+): Promise<string> {
+  return invoke<string>("rename_session", { sessionId, newName });
+}
+
+// Rename a CLOSED .duck recipe's session_name in place (ADR-0060, issue #81).
+// `path` is the .duck file path (SessionMetadata.session_id). The backend reads
+// the recipe, rewrites the header, atomic-saves -- no DuckDB instance is built.
+// Refuses a path currently held open (rename those via renameSession by id).
+export async function renamePersistedSession(
+  path: string,
+  newName: string,
+): Promise<void> {
+  await invoke<void>("rename_persisted_session", { path, newName });
+}
+
 // Read + clear the named session's most recent per-turn persistence failure
 // (ADR-0034/0035 honest signal).
 export async function takePersistError(sessionId: string): Promise<string | null> {

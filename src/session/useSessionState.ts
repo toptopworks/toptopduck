@@ -115,7 +115,11 @@ export interface UseSessionState {
   clearError: () => void;
 }
 
-export function useSessionState(sessionId: string): UseSessionState {
+export function useSessionState(
+  sessionId: string,
+  pendingIngestPath: string | null = null,
+  onIngestConsumed: () => void = () => {},
+): UseSessionState {
   const queryClient = useQueryClient();
 
   // --- Server state (TanStack Query, ADR-0051) -----------------------------
@@ -295,6 +299,23 @@ export function useSessionState(sessionId: string): UseSessionState {
     },
     [sessionId, refreshServerState, pollPersistError],
   );
+
+  // Consume a drop-on-cold-start file (ADR-0061, #81 A1). The shell mints the
+  // session on drop but defers the actual ingest to here -- handleIngest is the
+  // only path that can route a NeedsGuidance (xlsx) result into the guidance
+  // dialog this hook owns. Dedup by path so each distinct dropped file ingests
+  // exactly once while a repeat of the SAME path (a React StrictMode dev
+  // double-invoke, or a remount before the shell clears the prop) is a no-op.
+  // The shell clears the prop via onIngestConsumed once ingest kicks off.
+  const consumedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!pendingIngestPath) return;
+    if (consumedRef.current === pendingIngestPath) return;
+    consumedRef.current = pendingIngestPath;
+    const path = pendingIngestPath;
+    onIngestConsumed();
+    void handleIngest(path);
+  }, [pendingIngestPath, handleIngest, onIngestConsumed]);
 
   const handleGuidedSubmit = useCallback(
     async (sheetGuidance: SheetGuidance[]) => {

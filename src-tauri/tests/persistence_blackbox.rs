@@ -356,6 +356,31 @@ fn resume_emits_visible_progress_events() {
 }
 
 #[test]
+fn session_rename_persists_and_survives_resume() {
+    // Issue #81 ADR-0060: renaming the session sets the recipe header name and
+    // rewrites the bound .duck; after a restart the resumed session carries the
+    // new name. The bound path is untouched (recent_files / sidebar addressing
+    // stay stable), and a blank name is rejected.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let mut session = build_session(&duck);
+    assert_eq!(session.session_name(), Some("分析 A"));
+
+    // Blank / whitespace-only is rejected; the in-memory name is unchanged.
+    assert!(session.rename("   ").is_err());
+    assert_eq!(session.session_name(), Some("分析 A"));
+
+    // A real rename trims, lands in memory, and rewrites the bound .duck header.
+    assert_eq!(session.rename("  季报分析  ").unwrap(), "季报分析");
+    assert_eq!(session.session_name(), Some("季报分析"));
+    drop(session);
+
+    // The rename survived the restart boundary: resume reads the new header.
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
+    assert_eq!(resumed.session_name(), Some("季报分析"));
+}
+
+#[test]
 fn rename_survives_resume_and_references_still_resolve() {
     // AC: renaming a dataset before close -> save -> resume -> all references
     // (SQL FROM / active pointer / recipe chain) still resolve to the same

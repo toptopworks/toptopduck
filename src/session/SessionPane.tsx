@@ -23,10 +23,16 @@ import type { NonMaterializedTurn, WorkspaceContent } from "./workspace";
 
 interface SessionPaneProps {
   sessionId: string;
+  /** A drop-on-cold-start path to ingest once on mount (ADR-0061, #81 A1).
+   *  null for sessions opened by a non-drop action. */
+  pendingIngestPath: string | null;
+  /** Shell callback after the pending ingest is kicked off, so OpenSession is
+   *  cleared and a remount cannot re-ingest (#81 A1). */
+  onIngestConsumed: () => void;
 }
 
-export function SessionPane({ sessionId }: SessionPaneProps) {
-  const s = useSessionState(sessionId);
+export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: SessionPaneProps) {
+  const s = useSessionState(sessionId, pendingIngestPath, onIngestConsumed);
   // Workspace tab (ADR-0045: 工作集 is a workspace tab, not a persistent
   // column). 结果 = the derived chart+table stage; 工作集 = source management.
   const [tab, setTab] = useState<"result" | "workingSet">("result");

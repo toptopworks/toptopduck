@@ -293,6 +293,18 @@ impl AppConfig {
         true
     }
 
+    /// Drop a path from the recent-files list (issue #81 delete-session).
+    /// Returns whether the list changed (so the caller can skip a write when it
+    /// did not). Like [`Self::record_recent_file`], the list is advisory -- a
+    /// missing entry is a no-op success. The comparison is verbatim (the same
+    /// spelling under which it was recorded); a path synonym stays, matching
+    /// the record-side verbatim contract.
+    pub fn remove_recent_file(&mut self, path: &str) -> bool {
+        let before = self.recent_files.len();
+        self.recent_files.retain(|p| p != path);
+        before != self.recent_files.len()
+    }
+
     /// Normalize IPC-supplied fields in place so the stored config is always
     /// valid. Only the fields whose invalid value would break a downstream
     /// invariant are touched (the rest are persisted verbatim -- over-clamping
@@ -396,6 +408,26 @@ mod tests {
         assert!(!cfg.record_recent_file(""));
         assert!(!cfg.record_recent_file("   "));
         assert!(cfg.recent_files.is_empty());
+    }
+
+    #[test]
+    fn remove_recent_file_drops_only_the_named_path() {
+        // Issue #81 delete-session: the named path leaves the MRU list; siblings
+        // stay in order. A missing entry is a no-op (no spurious write).
+        let mut cfg = AppConfig::defaults();
+        cfg.record_recent_file("/a.duck");
+        cfg.record_recent_file("/b.duck");
+        cfg.record_recent_file("/c.duck");
+
+        assert!(cfg.remove_recent_file("/b.duck"));
+        assert_eq!(
+            cfg.recent_files,
+            vec!["/c.duck".to_string(), "/a.duck".into()]
+        );
+
+        // A path synonym or unknown entry changes nothing -> false (skip write).
+        assert!(!cfg.remove_recent_file("/b.duck"));
+        assert!(!cfg.remove_recent_file("/never.duck"));
     }
 
     #[test]
