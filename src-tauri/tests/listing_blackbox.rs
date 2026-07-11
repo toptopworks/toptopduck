@@ -106,5 +106,8 @@ fn closed_rename_rewrites_only_the_session_name_header() {
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].display_name, "新名");
     // The re-read recipe itself carries the new header (nothing else drifted).
-    assert_eq!(read_duck(std::path::Path::new(&path)).unwrap().session_name, "新名");
+    assert_eq!(
+        read_duck(std::path::Path::new(&path)).unwrap().session_name,
+        "新名"
+    );
 }
