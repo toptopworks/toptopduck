@@ -1,7 +1,9 @@
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useSessionState, errorPrefix } from "./useSessionState";
 import { ActiveSourceDeleteDialog } from "../components/ActiveSourceDeleteDialog";
 import { DatasetDetail } from "../components/DatasetDetail";
+import { ErrorBoundary } from "../components/ErrorBoundary";
 import { FileDropzone } from "../components/FileDropzone";
 import { GuidedLoadDialog } from "../components/GuidedLoadDialog";
 import { QuestionBar } from "../components/QuestionBar";
@@ -14,6 +16,7 @@ import type {
   ThreadEntry,
 } from "../types";
 import type { NonMaterializedTurn, WorkspaceContent } from "./workspace";
+import { sessionKeys } from "./queryKeys";
 
 // The per-session pane (ADR-0051). One `<SessionPane key={sid} sessionId={sid} />`
 // owns ALL of a session's server state (via useSessionState -> TanStack Query)
@@ -33,9 +36,22 @@ interface SessionPaneProps {
 
 export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: SessionPaneProps) {
   const s = useSessionState(sessionId, pendingIngestPath, onIngestConsumed);
+  const queryClient = useQueryClient();
   // Workspace tab (ADR-0045: 工作集 is a workspace tab, not a persistent
   // column). 结果 = the derived chart+table stage; 工作集 = source management.
   const [tab, setTab] = useState<"result" | "workingSet">("result");
+
+  // ADR-0058 L2 partition retry: each region's onReset REMOVES its slice of the
+  // session query cache so the key-bump remount re-fetches fresh data -- NOT the
+  // stale page that crashed it. invalidateQueries would leave the cache in place
+  // and let useQuery hand the remounted children the same throwing data via its
+  // stale-then-refetch render; removeQueries drops it so the remount mounts into
+  // a loading state and refetches clean. The session-body boundary and the
+  // granular Thread/ResultView boundaries all drop the whole session prefix:
+  // cheap (a few IPC) and avoids the re-throw.
+  const resetSessionCache = () => {
+    queryClient.removeQueries({ queryKey: sessionKeys.all(sessionId) });
+  };
 
   const viewedReference = s.viewedResult?.referenceName ?? null;
   const viewedDescriptor = viewedReference
@@ -45,24 +61,47 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
   // a turn's question lights up a chip only when it explicitly names a dataset.
   // Stale datasets are excluded -- they cannot be the target of a new question.
   const datasetLabels = s.datasets.filter((d) => !d.stale);
+  // Hoisted so the ActiveSourceDeleteDialog filter callback reads it without a
+  // non-null assertion: TS narrows a const across the JSX guard + closure, but
+  // not a member access like s.pendingActiveDelete.
+  const pendingActiveDelete = s.pendingActiveDelete;
 
   return (
     <div className="session-pane">
-      {/* --- Thread rail (ADR-0045/0047) ------------------------------------- */}
+      {/* ADR-0058 L2 partition boundaries: Thread rail and ResultView each get
+          their own ErrorBoundary so a render crash in one degrades only that
+          block (the QuestionBar -- a session-skeleton element, ADR-0062 R1 --
+          is a sibling and always survives). The session-level isolation
+          boundary lives one level up in <App> (wrapping each <SessionPane>) so
+          a render crash elsewhere in the pane degrades only THAT session.
+          KNOWN LIMITATION (React 19 + TanStack Query external store): in the
+          real App tree the per-session boundary is an ANCESTOR of these region
+          boundaries, so a Query-driven re-render throw inside Thread/ResultView
+          can be caught by the outer session boundary first (degrading the whole
+          pane) instead of the granular region boundary. First-render throws are
+          caught by the region boundary as expected; the cross-boundary case
+          surfaces only with external-store-driven updates and could not be
+          reproduced in isolation, so black-box tests assert "degrade card
+          visible + session isolated + retry" rather than "region boundary
+          catches precisely". See memory: react19-nested-errorboundary-outer-
+          catches. */}
+      {/* --- Thread rail (ADR-0045/0047) ---------------------------------- */}
       <section className="session-rail" aria-label="对话时间线">
-        <Thread
-          entries={s.thread}
-          selectedResult={viewedReference}
-          onSelectResult={s.handleSelectResult}
-          staleByReference={s.staleByReference}
-          datasetLabels={datasetLabels}
-        />
+        <ErrorBoundary name="thread" onReset={resetSessionCache}>
+          <Thread
+            entries={s.thread}
+            selectedResult={viewedReference}
+            onSelectResult={s.handleSelectResult}
+            staleByReference={s.staleByReference}
+            datasetLabels={datasetLabels}
+          />
+        </ErrorBoundary>
         {s.thread.length === 0 && (
           <p className="rail-empty muted">尚无对话。在下方提问或加载数据开始。</p>
         )}
       </section>
 
-      {/* --- Workspace (ADR-0045/0062 R2) ----------------------------------- */}
+      {/* --- Workspace (ADR-0045/0062 R2) -------------------------------- */}
       <section className="session-workspace" aria-label="工作区">
         <div className="workspace-tabs" role="tablist">
           <button
@@ -84,8 +123,8 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
             工作集
           </button>
           {/* active (server truth, ADR-0051/0060) shown read-only here so the
-              user sees what the next question targets by default. Naming it
-              here, not in QuestionBar, keeps QuestionBar presentational. */}
+                user sees what the next question targets by default. Naming it
+                here, not in QuestionBar, keeps QuestionBar presentational. */}
           {s.activeName && (
             <span className="active-chip" title="下一个提问默认作用于此表">
               作用于 {s.datasets.find((d) => d.reference_name === s.activeName)?.display_name ?? s.activeName}
@@ -113,6 +152,7 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
               onIngest={s.handleIngest}
               loading={s.loading}
               hasData={s.datasets.length > 0}
+              onResetRegion={resetSessionCache}
             />
           ) : (
             <WorkspaceWorkingSet
@@ -135,6 +175,7 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
           onSubmit={s.handleAsk}
           onCancel={s.handleCancel}
           loading={s.loading}
+          phase={s.phase}
         />
       </div>
 
@@ -147,11 +188,11 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
           onCancel={s.handleGuidedCancel}
         />
       )}
-      {s.pendingActiveDelete && (
+      {pendingActiveDelete && (
         <ActiveSourceDeleteDialog
-          target={s.pendingActiveDelete}
+          target={pendingActiveDelete}
           candidates={s.datasets.filter(
-            (d) => d.reference_name !== s.pendingActiveDelete!.reference_name,
+            (d) => d.reference_name !== pendingActiveDelete.reference_name,
           )}
           onConfirm={(cw) => s.handleConfirmActiveDelete(cw)}
           onCancel={s.handleCancelActiveDelete}
@@ -169,12 +210,17 @@ function WorkspaceResult({
   onIngest,
   loading,
   hasData,
+  onResetRegion,
 }: {
   content: WorkspaceContent;
   sessionId: string;
   onIngest: (path: string) => void;
   loading: boolean;
   hasData: boolean;
+  /** ADR-0058 L2 result-partition retry: remove the session slice so a
+   *  remounted ResultView re-fetches fresh rows instead of re-throwing against
+   *  the stale page that crashed it. */
+  onResetRegion: () => void;
 }) {
   switch (content.kind) {
     case "hero":
@@ -198,14 +244,19 @@ function WorkspaceResult({
       return <TextualOutcomeCard turn={content.turn} />;
     case "result":
       // The chart + table for the viewed Materialized result (ADR-0062 R4).
+      // ADR-0058 L2 result partition: a render crash inside ResultView (Vega's
+      // own try/catch stays internal per ADR-0033/0058 L0; this catches the
+      // rest) degrades only this block, not the Thread rail or QuestionBar.
       return (
-        <ResultView
-          sessionId={sessionId}
-          referenceName={content.referenceName}
-          assumption={content.assumption}
-          viz={content.viz}
-          staleAnchor={content.staleAnchor}
-        />
+        <ErrorBoundary name="result" onReset={onResetRegion}>
+          <ResultView
+            sessionId={sessionId}
+            referenceName={content.referenceName}
+            assumption={content.assumption}
+            viz={content.viz}
+            staleAnchor={content.staleAnchor}
+          />
+        </ErrorBoundary>
       );
     default: {
       const unhandled: never = content;

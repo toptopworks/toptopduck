@@ -7,6 +7,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { SessionPane } from "./session/SessionPane";
 import { SessionSidebar } from "./session/SessionSidebar";
 import { DisclosureBanner } from "./components/DisclosureBanner";
+import { DegradeCard, ErrorBoundary } from "./components/ErrorBoundary";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { createQueryClient } from "./lib/queryClient";
 import { catalogFor, coerceLocalePreference, useLocale } from "./i18n";
@@ -610,99 +611,138 @@ export default function App() {
           if (import.meta.env.DEV) console.warn("[i18n]", err.message);
         }}
       >
-        <div className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
-          {/* Col 1: session sidebar (ADR-0060) -- full height, independent
-              column (R1: QuestionBar does NOT span over it). */}
-          <SessionSidebar
-            sessions={sessions}
-            openSessions={openSessions}
-            activeSessionId={activeSessionId}
-            disabled={busy}
-            loadError={sessionsError}
-            onNew={() => void openNew()}
-            onActivate={(sid) => setActiveSessionId(sid)}
-            onOpenPersisted={(path, name) => void openPersisted(path, name)}
-            onClose={(sid) => void closeOpen(sid)}
-            onDelete={(path, sid) => void deletePersisted(path, sid)}
-            onRename={(sid, path, newName) => void renameEntry(sid, path, newName)}
-          />
-
-          {/* Row 1 (cols 2+): thin top bar (ADR-0060/0062 R1). The session name
-              is READ-ONLY (ADR-0060: naming goes through the sidebar menu, the
-              single entry point -- DRY). */}
-          <header className="topbar">
-            <SidebarToggle
-              collapsed={sidebarCollapsed}
-              onToggle={() => setSidebarCollapsed((c) => !c)}
-            />
-            <span className="topbar-session-name">
-              {activeSession?.name ? (
-                activeSession.name
-              ) : (
-                <FormattedMessage id="session.defaultName" defaultMessage="New session" />
-              )}
-            </span>
-            {atSoftCap && (
-              <span className="topbar-softcap" role="status">
-                <FormattedMessage
-                  id="header.softCap"
-                  defaultMessage="Many sessions open — close some to free memory."
-                />
-              </span>
-            )}
-            <HeaderActions
-              disabled={busy || !activeSession}
-              hasKey={hasKey}
-              onOpenDuck={() => void handleOpenDuck()}
-              onSaveAs={() => void handleSaveAs()}
-              onOpenSettings={() => setSettingsOpen(true)}
-            />
-          </header>
-
-          {/* Resume progress strip (ADR-0034). Absent unless an open/resume runs. */}
-          {resumeStatus && <ResumeProgress status={resumeStatus} />}
-
-          {/* Row 3 (cols 2+): the session pane host. Every open session renders
-              a keep-alive SessionPane; non-active panes are CSS `hidden` (mounted
-              but not laid out) so switching is instant + refetch-free (ADR-0051).
-              No active session = the cold-start hero (ADR-0061). */}
-          <main className="session-pane-host">
-            {activeSessionId === null && (
-              <ColdStartHero disabled={busy} onNew={() => void openNew()} />
-            )}
-            {openSessions.map((s) => (
-              <div
-                key={s.sid}
-                className={`session-pane-layer${s.sid === activeSessionId ? " active" : " hidden"}`}
-                aria-hidden={s.sid !== activeSessionId}
-              >
-                <SessionPane
-                  key={s.sid}
-                  sessionId={s.sid}
-                  pendingIngestPath={s.pendingIngestPath}
-                  onIngestConsumed={() => clearPendingIngest(s.sid)}
-                />
-              </div>
-            ))}
-          </main>
-
-          {shellError && (
-            <p className="error shell-error" role="alert">
-              {shellError}
-            </p>
-          )}
-
-          {settingsOpen && appConfig && (
-            <SettingsDialog
-              appConfig={appConfig}
-              onCommitAppConfig={(cfg) => void commitAppConfig(cfg)}
-              onClose={() => {
-                setSettingsOpen(false);
-                void refreshKeyStatus();
+        {/* ADR-0058 L3 top-level fallback: the last line of defense against a
+            shell-level render throw. Every session is already isolated by its
+            own L2 session-body boundary (in SessionPane), so this boundary
+            fires only for a chrome-level crash the partitions did not catch.
+            Retry removes the whole cache (drop, not invalidate -- a remounted
+            pane would otherwise re-render the stale throwing data via stale-
+            then-refetch, same rationale as the L2 partition) and remounts the
+            shell; the extra Reload exit reloads the window (a Tauri desktop SPA
+            has no URL bar to refresh, ADR-0058 Context). */}
+        <ErrorBoundary
+          name="shell"
+          onReset={() => {
+            void queryClient.removeQueries();
+          }}
+          fallback={(error, retry) => (
+            <DegradeCard
+              error={error}
+              onRetry={retry}
+              name="shell"
+              onReload={() => {
+                if (typeof window !== "undefined") window.location.reload();
               }}
             />
           )}
-        </div>
+        >
+          <div className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
+            {/* Col 1: session sidebar (ADR-0060) -- full height, independent
+              column (R1: QuestionBar does NOT span over it). */}
+            <SessionSidebar
+              sessions={sessions}
+              openSessions={openSessions}
+              activeSessionId={activeSessionId}
+              disabled={busy}
+              loadError={sessionsError}
+              onNew={() => void openNew()}
+              onActivate={(sid) => setActiveSessionId(sid)}
+              onOpenPersisted={(path, name) => void openPersisted(path, name)}
+              onClose={(sid) => void closeOpen(sid)}
+              onDelete={(path, sid) => void deletePersisted(path, sid)}
+              onRename={(sid, path, newName) => void renameEntry(sid, path, newName)}
+            />
+
+            {/* Row 1 (cols 2+): thin top bar (ADR-0060/0062 R1). The session name
+              is READ-ONLY (ADR-0060: naming goes through the sidebar menu, the
+              single entry point -- DRY). */}
+            <header className="topbar">
+              <SidebarToggle
+                collapsed={sidebarCollapsed}
+                onToggle={() => setSidebarCollapsed((c) => !c)}
+              />
+              <span className="topbar-session-name">
+                {activeSession?.name ? (
+                  activeSession.name
+                ) : (
+                  <FormattedMessage id="session.defaultName" defaultMessage="New session" />
+                )}
+              </span>
+              {atSoftCap && (
+                <span className="topbar-softcap" role="status">
+                  <FormattedMessage
+                    id="header.softCap"
+                    defaultMessage="Many sessions open — close some to free memory."
+                  />
+                </span>
+              )}
+              <HeaderActions
+                disabled={busy || !activeSession}
+                hasKey={hasKey}
+                onOpenDuck={() => void handleOpenDuck()}
+                onSaveAs={() => void handleSaveAs()}
+                onOpenSettings={() => setSettingsOpen(true)}
+              />
+            </header>
+
+            {/* Resume progress strip (ADR-0034). Absent unless an open/resume runs. */}
+            {resumeStatus && <ResumeProgress status={resumeStatus} />}
+
+            {/* Row 3 (cols 2+): the session pane host. Every open session renders
+              a keep-alive SessionPane; non-active panes are CSS `hidden` (mounted
+              but not laid out) so switching is instant + refetch-free (ADR-0051).
+              No active session = the cold-start hero (ADR-0061). */}
+            <main className="session-pane-host">
+              {activeSessionId === null && (
+                <ColdStartHero disabled={busy} onNew={() => void openNew()} />
+              )}
+              {openSessions.map((s) => (
+                <div
+                  key={s.sid}
+                  className={`session-pane-layer${s.sid === activeSessionId ? " active" : " hidden"}`}
+                  aria-hidden={s.sid !== activeSessionId}
+                >
+                  {/* ADR-0058 L2 session partition: per-session isolation. A
+                    render crash inside this SessionPane that the Thread /
+                    ResultView granular boundaries (inside SessionPane) do not
+                    catch degrades only THIS session's pane -- sibling panes
+                    stay alive. The key bump remounts the whole pane; onReset
+                    drops its cache so the remount re-fetches fresh. */}
+                  <ErrorBoundary
+                    name="session"
+                    onReset={() => {
+                      void queryClient.removeQueries({ queryKey: ["session", s.sid] });
+                    }}
+                  >
+                    <SessionPane
+                      key={s.sid}
+                      sessionId={s.sid}
+                      pendingIngestPath={s.pendingIngestPath}
+                      onIngestConsumed={() => clearPendingIngest(s.sid)}
+                    />
+                  </ErrorBoundary>
+                </div>
+              ))}
+            </main>
+
+            {shellError && (
+              <p className="error shell-error" role="alert">
+                {shellError}
+              </p>
+            )}
+
+            {settingsOpen && appConfig && (
+              <SettingsDialog
+                appConfig={appConfig}
+                onCommitAppConfig={(cfg) => void commitAppConfig(cfg)}
+                onClose={() => {
+                  setSettingsOpen(false);
+                  void refreshKeyStatus();
+                }}
+              />
+            )}
+          </div>
+        </ErrorBoundary>
       </IntlProvider>
     </QueryClientProvider>
   );

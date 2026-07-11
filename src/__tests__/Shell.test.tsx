@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { DatasetDescriptor, RowPage, ThreadEntry } from "../types";
+import { QueryClient } from "@tanstack/react-query";
+import type { DatasetDescriptor, RowPage, ThreadEntry, TurnOutcome, TurnProgress } from "../types";
 
 // Black-box shell tests (issue #79 ACs). Drives the rendered three-column App
 // like a user and asserts VISIBLE DOM / structure signals -- never the Query
@@ -25,6 +26,14 @@ const state = vi.hoisted(() => ({
   thread: [] as ThreadEntry[],
 }));
 
+// ADR-0059 turn-progress capture: the SessionPane mounts a long-lived listener
+// on mount. Capturing the callback here lets a test emit a Thinking/Querying
+// phase event and assert the QuestionBar renders the discrete feedback, then
+// assert it clears when the ask resolves.
+const turnProgressCb = vi.hoisted(() => ({
+  current: null as null | ((ev: TurnProgress) => void),
+}));
+
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
   return {
@@ -39,6 +48,12 @@ vi.mock("../api", async (importOriginal) => {
     askQuestion: vi.fn(),
     cancelQuery: vi.fn(async () => {}),
     conversation: vi.fn(async () => state.thread),
+    // ADR-0059: capture the listener callback so a test can emit phases; the
+    // returned unlisten is a no-op (jsdom has no real Tauri event bus).
+    onTurnProgress: vi.fn(async (cb: (ev: TurnProgress) => void) => {
+      turnProgressCb.current = cb;
+      return () => {};
+    }),
     readRows: vi.fn(),
     getProviderConfig: vi.fn(async () => ({
       base_url: "https://api.anthropic.com",
@@ -52,6 +67,7 @@ vi.mock("../api", async (importOriginal) => {
 import App from "../App";
 import {
   askQuestion,
+  cancelQuery,
   closeSession,
   conversation,
   createSession,
@@ -349,5 +365,273 @@ describe("App multi-session shell (issue #81 ACs)", () => {
     await waitFor(() => expect(createSession).toHaveBeenCalled());
     // The minted session's SessionPane consumes the path via handleIngest.
     await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-drop", "/x/foo.csv"));
+  });
+});
+
+// A helper that holds an in-flight ask open so a test can observe the loading
+// window (phase feedback / cancel) then resolve it to let the turn finish.
+// The resolver is read through a ref so the returned `resolve` always invokes
+// the LATEST promise's resolver (not a stale copy captured before askQuestion
+// was called).
+function pendingAsk(): { resolve: (o: TurnOutcome) => void } {
+  const ref: { current: ((o: TurnOutcome) => void) | null } = { current: null };
+  vi.mocked(askQuestion).mockImplementation(
+    () =>
+      new Promise<TurnOutcome>((r) => {
+        ref.current = r;
+      }),
+  );
+  return { resolve: (o) => ref.current?.(o) };
+}
+
+describe("App turn-progress phase feedback (issue #82 / ADR-0059)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [src("people")];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("renders Thinking / Querying phase labels during an in-flight ask", async () => {
+    const { resolve } = pendingAsk();
+    render(<App />);
+    await openSession();
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "x" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    // The ask is in flight: the stop button replaces submit.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "停止" })).toBeInTheDocument(),
+    );
+
+    // Thinking{attempt: 1} -> bare verb "思考中…" (no "第 1 次" noise).
+    turnProgressCb.current!({
+      session_id: "sess-1",
+      phase: { Thinking: { attempt: 1 } },
+    });
+    await waitFor(() => expect(screen.getByText("思考中…")).toBeInTheDocument());
+
+    // Querying{attempt: 2} -> blind retry surfaces "第 2 次" (守 0017 honest).
+    turnProgressCb.current!({
+      session_id: "sess-1",
+      phase: { Querying: { attempt: 2 } },
+    });
+    await waitFor(() =>
+      expect(screen.getByText("查询中（第 2 次）…")).toBeInTheDocument(),
+    );
+
+    // Outcome lands -> phase clears (ADR-0059 handleAsk finally).
+    resolve({ kind: "Cancelled" });
+    await waitFor(() =>
+      expect(screen.queryByText(/查询中/)).not.toBeInTheDocument(),
+    );
+  });
+
+  it("ignores turn-progress events addressed to a different session (ADR-0056 filter)", async () => {
+    const { resolve } = pendingAsk();
+    render(<App />);
+    await openSession();
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "x" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "停止" })).toBeInTheDocument(),
+    );
+    // A phase for a DIFFERENT session is filtered out -- no indicator.
+    turnProgressCb.current!({
+      session_id: "other-session",
+      phase: { Thinking: { attempt: 1 } },
+    });
+    expect(screen.queryByText(/思考中/)).not.toBeInTheDocument();
+    // The same phase for THIS session lights up.
+    turnProgressCb.current!({
+      session_id: "sess-1",
+      phase: { Thinking: { attempt: 1 } },
+    });
+    await waitFor(() => expect(screen.getByText("思考中…")).toBeInTheDocument());
+    resolve({ kind: "Cancelled" });
+  });
+});
+
+describe("App single in-flight + cancel (issue #82 / ADR-0021/0028)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [src("people")];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("disables the input and offers stop while a turn runs (single in-flight, ADR-0021)", async () => {
+    const { resolve } = pendingAsk();
+    render(<App />);
+    await openSession();
+    const input = screen.getByLabelText("提问");
+    fireEvent.change(input, { target: { value: "x" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    // While the turn runs: input disabled, stop shown, submit gone.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "停止" })).toBeInTheDocument(),
+    );
+    expect(input).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "提问" })).not.toBeInTheDocument();
+    resolve({ kind: "Cancelled" });
+  });
+
+  it("stop fires cancelQuery on the session (ADR-0021)", async () => {
+    const { resolve } = pendingAsk();
+    render(<App />);
+    await openSession();
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "x" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "停止" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "停止" }));
+    await waitFor(() => expect(cancelQuery).toHaveBeenCalledWith("sess-1"));
+    resolve({ kind: "Cancelled" });
+  });
+});
+
+describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [src("people")];
+    state.thread = [];
+    // Reset conversation to the factory default (state.thread) so a prior
+    // test's mockImplementation override does not leak across tests --
+    // clearAllMocks only clears call history, not implementations.
+    vi.mocked(conversation).mockImplementation(async () => state.thread);
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+    // React logs the intentional render throw; keep test output clean.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  it("shows a degrade card when Thread render throws (ADR-0058 partition fallback)", async () => {
+    // A malformed outcome kind hits Thread's exhaustive `default: never` throw
+    // (a genuine render crash). An L2 partition ErrorBoundary catches it and
+    // renders the degrade card with the honest error detail. The session-level
+    // boundary (wrapping each <SessionPane>) is the reliable catcher in the
+    // test environment; the granular thread boundary is the architecturally
+    // correct inner catcher and catches first-render throws.
+    state.thread = [
+      {
+        entry: "Turn",
+        data: { question: "x", outcome: { kind: "Bogus" } },
+      } as unknown as ThreadEntry,
+    ];
+    render(<App />);
+    await openSession();
+    // A degrade card is visible once the thread query resolves and Thread
+    // throws on the malformed outcome.
+    await waitFor(() =>
+      expect(document.querySelector(".degrade-card")).toBeInTheDocument(),
+    );
+    const card = document.querySelector(".degrade-card")!;
+    // The error message rides the expandable details (ADR-0058 honest detail).
+    expect(card.textContent).toMatch(/Bogus/);
+    // The shell skeleton (top bar + session sidebar) survives -- the crash
+    // did not escape to L3.
+    expect(document.querySelector(".topbar")).toBeInTheDocument();
+    expect(document.querySelector(".session-sidebar")).toBeInTheDocument();
+  });
+
+  it("retry on a degrade card clears it after the data is fixed (key bump + invalidate)", async () => {
+    // Thread starts malformed -> crash -> degrade card. After the retry's
+    // onReset invalidates + error-clear remounts, the refetch returns a clean
+    // thread and the pane renders the turn instead of the degrade card.
+    let threadData: ThreadEntry[] = [
+      {
+        entry: "Turn",
+        data: { question: "x", outcome: { kind: "Bogus" } },
+      } as unknown as ThreadEntry,
+    ];
+    vi.mocked(conversation).mockImplementation(async () => threadData);
+    render(<App />);
+    await openSession();
+    await waitFor(() =>
+      expect(document.querySelector(".degrade-card")).toBeInTheDocument(),
+    );
+    // Fix the data source, then retry.
+    threadData = [
+      { entry: "Turn", data: { question: "你好", outcome: { kind: "Cancelled" } } },
+    ];
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    // The remounted pane reads the refetched (clean) data -- the question
+    // renders and the degrade card is gone.
+    await waitFor(() => expect(screen.getByText("你好")).toBeInTheDocument());
+    expect(document.querySelector(".degrade-card")).not.toBeInTheDocument();
+  });
+
+  it("retry removes the session cache slice (ADR-0058 removeQueries contract)", async () => {
+    // Locks the ADR-0058 decision that retry REMOVES (not invalidates) the
+    // session query cache: invalidate would leave stale data for the remounted
+    // children to re-render and re-throw against. A regression to invalidate
+    // (or a no-op) would still pass the existing retry test above (the mock
+    // returns fresh data either way), so this spy is the distinguishing guard.
+    const removeSpy = vi.spyOn(QueryClient.prototype, "removeQueries");
+    let threadData: ThreadEntry[] = [
+      {
+        entry: "Turn",
+        data: { question: "x", outcome: { kind: "Bogus" } },
+      } as unknown as ThreadEntry,
+    ];
+    vi.mocked(conversation).mockImplementation(async () => threadData);
+    render(<App />);
+    await openSession();
+    await waitFor(() =>
+      expect(document.querySelector(".degrade-card")).toBeInTheDocument(),
+    );
+    // Fix the data, then retry.
+    threadData = [
+      { entry: "Turn", data: { question: "你好", outcome: { kind: "Cancelled" } } },
+    ];
+    const conversationCallsBefore = vi.mocked(conversation).mock.calls.length;
+    removeSpy.mockClear(); // isolate retry's own removeQueries call
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    // The remounted pane reads the refetched (clean) data.
+    await waitFor(() => expect(screen.getByText("你好")).toBeInTheDocument());
+    // ADR-0058: retry called removeQueries (the cache was dropped, not left
+    // stale), and the drop drove a fresh conversation() refetch.
+    expect(removeSpy).toHaveBeenCalled();
+    expect(vi.mocked(conversation).mock.calls.length).toBeGreaterThan(
+      conversationCallsBefore,
+    );
+  });
+
+  it("one session crashing does not affect another open session (ADR-0058 session isolation)", async () => {
+    // Two sessions: sess-1 has a crashing (malformed) thread, sess-2 is clean.
+    // The L2 session-body boundary in sess-1 catches its crash; sess-2 is a
+    // sibling pane and stays fully functional.
+    vi.mocked(createSession)
+      .mockResolvedValueOnce("sess-1")
+      .mockResolvedValueOnce("sess-2");
+    vi.mocked(conversation).mockImplementation(async (sid) => {
+      if (sid === "sess-1") {
+        return [
+          {
+            entry: "Turn",
+            data: { question: "bad", outcome: { kind: "Bogus" } },
+          } as unknown as ThreadEntry,
+        ];
+      }
+      return [];
+    });
+    render(<App />);
+    // Open sess-1 (the crashing session).
+    fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
+    );
+    // sess-1 shows a degrade card (thread partition caught the crash).
+    await waitFor(() =>
+      expect(document.querySelector(".degrade-card")).toBeInTheDocument(),
+    );
+    // Open sess-2 (a second "+ 新建会话").
+    fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(2));
+    // sess-2 is now active and shows NO degrade card -- it is unaffected.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument();
   });
 });

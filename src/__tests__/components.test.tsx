@@ -49,6 +49,20 @@ function renderThread(ui: ReactElement) {
   );
 }
 
+// QuestionBar reaches react-intl for the ADR-0059 phase strings (ADR-0052), so
+// its tests render inside a zh-CN IntlProvider like the Thread tests above. The
+// bar's placeholder / aria-label / button labels are still hard-coded zh (a
+// pre-existing follow-up); only the phase strings read the catalog, and these
+// tests do not exercise them, but the provider must still wrap the component
+// because useIntl() runs unconditionally at the top of QuestionBar.
+function renderQuestionBar(ui: ReactElement) {
+  return render(
+    <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+      {ui}
+    </IntlProvider>,
+  );
+}
+
 const mockDataset: DatasetDescriptor = {
   reference_name: "people",
   display_name: "people",
@@ -73,7 +87,7 @@ const defaultPrivacy: DatasetPrivacy = { send_samples: true, type_only_columns: 
 describe("QuestionBar (issue #28 single in-flight + cancel)", () => {
   it("submits the trimmed question and disables submit on empty", () => {
     const onSubmit = vi.fn();
-    render(<QuestionBar onSubmit={onSubmit} onCancel={() => {}} loading={false} />);
+    renderQuestionBar(<QuestionBar onSubmit={onSubmit} onCancel={() => {}} loading={false} />);
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "  几行  " } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
     expect(onSubmit).toHaveBeenCalledWith("几行");
@@ -85,7 +99,7 @@ describe("QuestionBar (issue #28 single in-flight + cancel)", () => {
     // Single in-flight: while a turn runs the input is disabled and the only
     // action is cancel -- the user cannot start a second concurrent turn.
     const onCancel = vi.fn();
-    render(<QuestionBar onSubmit={() => {}} onCancel={onCancel} loading={true} />);
+    renderQuestionBar(<QuestionBar onSubmit={() => {}} onCancel={onCancel} loading={true} />);
     expect(screen.getByLabelText("提问")).toBeDisabled();
     // Submit is replaced by the stop button; clicking it fires cancel.
     expect(screen.queryByRole("button", { name: "提问" })).not.toBeInTheDocument();
@@ -95,7 +109,7 @@ describe("QuestionBar (issue #28 single in-flight + cancel)", () => {
 
   it("does not submit when the value is blank", () => {
     const onSubmit = vi.fn();
-    render(<QuestionBar onSubmit={onSubmit} onCancel={() => {}} loading={false} />);
+    renderQuestionBar(<QuestionBar onSubmit={onSubmit} onCancel={() => {}} loading={false} />);
     // The submit button is disabled for a blank question, so a form submit (e.g.
     // via Enter on an empty input) cannot fire a turn.
     expect(screen.getByRole("button", { name: "提问" })).toBeDisabled();
