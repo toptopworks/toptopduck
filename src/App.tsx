@@ -146,6 +146,41 @@ function SidebarToggle({
   );
 }
 
+// Thread-rail collapse toggle (ADR-0054 level 2, issue #84). Mirrors
+// SidebarToggle: the button lives in this child so it can reach intl (App sits
+// above <IntlProvider>). Each intl.formatMessage branch is a STATIC literal so
+// @formatjs/cli extract resolves both ids. Disabled when no session is active:
+// the rail only exists inside a SessionPane, so on the cold-start hero the
+// toggle has no visible target (the persisted pref still applies once a session
+// opens). The single-angle glyph ‹› distinguishes it from the sidebar's «».
+function RailToggle({
+  collapsed,
+  disabled,
+  onToggle,
+}: {
+  collapsed: boolean;
+  disabled: boolean;
+  onToggle: () => void;
+}) {
+  const intl = useIntl();
+  return (
+    <button
+      type="button"
+      className="rail-toggle"
+      disabled={disabled}
+      aria-label={
+        collapsed
+          ? intl.formatMessage({ id: "rail.expand", defaultMessage: "Expand conversation rail" })
+          : intl.formatMessage({ id: "rail.collapse", defaultMessage: "Collapse conversation rail" })
+      }
+      aria-expanded={!collapsed}
+      onClick={onToggle}
+    >
+      {collapsed ? "›" : "‹"}
+    </button>
+  );
+}
+
 // Resume progress status (ADR-0034). A structured discriminated union, not a
 // pre-baked string: App sits above <IntlProvider> and cannot format messages
 // itself, so ResumeProgress (a child inside the provider) renders the union
@@ -212,7 +247,13 @@ export default function App() {
   // --- App-level UI state --------------------------------------------------
   const [hasKey, setHasKey] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // ADR-0054 shell collapse (issue #84): two independent manual levels --
+  // session sidebar (full hide + topbar call-out) and thread rail (workspace
+  // goes full-width). Both default expanded; both restore from app-config once
+  // on the first resolve (ADR-0038) and persist on every toggle.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [railCollapsed, setRailCollapsed] = useState(false);
+  const collapseRestoredRef = useRef(false);
 
   const busy = persistenceBusy || resumeStatus !== null;
   const activeSession =
@@ -280,6 +321,33 @@ export default function App() {
     await setAppConfig(cfg);
   }, []);
 
+  // Commit the two shell collapse prefs as one app-config write (ADR-0038/0054,
+  // issue #84). No-op before app-config resolves (appConfigRef null) -- the
+  // restore effect's one-shot then applies the persisted value on first load.
+  const commitShellPrefs = useCallback(
+    (next: { sidebar: boolean; rail: boolean }): void => {
+      const base = appConfigRef.current;
+      if (!base) return;
+      void commitAppConfig({
+        ...base,
+        shell: { sidebar_collapsed: next.sidebar, rail_collapsed: next.rail },
+      });
+    },
+    [commitAppConfig],
+  );
+
+  const toggleSidebarCollapse = useCallback(() => {
+    const next = !sidebarCollapsed;
+    setSidebarCollapsed(next);
+    commitShellPrefs({ sidebar: next, rail: railCollapsed });
+  }, [sidebarCollapsed, railCollapsed, commitShellPrefs]);
+
+  const toggleRailCollapse = useCallback(() => {
+    const next = !railCollapsed;
+    setRailCollapsed(next);
+    commitShellPrefs({ sidebar: sidebarCollapsed, rail: next });
+  }, [sidebarCollapsed, railCollapsed, commitShellPrefs]);
+
   // Theme (ADR-0050) + locale (ADR-0052): applied to <html>, follow the
   // persisted three-state preference (defaulting to system before app-config
   // resolves). The Vega bridge listens to the theme-change event these fire.
@@ -311,6 +379,17 @@ export default function App() {
         })
         .catch(() => {});
     }
+  }, [appConfig]);
+
+  // Restore shell collapse prefs ONCE on the first app-config load (ADR-0038 /
+  // 0054, issue #84). Mirrors geometryRestoredRef: a one-shot so a later
+  // app-config write (e.g. a toggle's own commit) does not re-clobber the
+  // user's in-session state with the persisted value.
+  useEffect(() => {
+    if (!appConfig || collapseRestoredRef.current) return;
+    collapseRestoredRef.current = true;
+    setSidebarCollapsed(appConfig.shell.sidebar_collapsed);
+    setRailCollapsed(appConfig.shell.rail_collapsed);
   }, [appConfig]);
 
   // Persist window geometry on resize/move, debounced (ADR-0038).
@@ -659,7 +738,9 @@ export default function App() {
             />
           )}
         >
-          <div className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
+          <div
+            className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${railCollapsed ? " rail-collapsed" : ""}`}
+          >
             {/* Col 1: session sidebar (ADR-0060) -- full height, independent
               column (R1: QuestionBar does NOT span over it). */}
             <SessionSidebar
@@ -682,7 +763,12 @@ export default function App() {
             <header className="topbar">
               <SidebarToggle
                 collapsed={sidebarCollapsed}
-                onToggle={() => setSidebarCollapsed((c) => !c)}
+                onToggle={toggleSidebarCollapse}
+              />
+              <RailToggle
+                collapsed={railCollapsed}
+                disabled={!activeSession}
+                onToggle={toggleRailCollapse}
               />
               <span className="topbar-session-name">
                 {activeSession?.name ? (

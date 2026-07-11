@@ -387,6 +387,16 @@ export interface Tunables {
   far_window: number;
 }
 
+// Shell collapse preferences (ADR-0054, issue #84). The two MANUAL collapse
+// levels that are UI state (not the third -- Tauri minWidth/minHeight, a native
+// window config not a preference): session sidebar + thread rail. Both default
+// expanded; both persist via app-config (ADR-0038) and stack independently.
+// Mirrors the Rust `ShellPrefs`.
+export interface ShellPrefs {
+  sidebar_collapsed: boolean;
+  rail_collapsed: boolean;
+}
+
 // The full app-config document. Lives in the OS app-data directory; all
 // non-secret, so it crosses IPC verbatim (no separate "view" type).
 export interface AppConfig {
@@ -401,4 +411,6 @@ export interface AppConfig {
   tunables: Tunables;
   // Recently-opened .duck paths, most-recent first. Capped server-side.
   recent_files: string[];
+  // Shell collapse preferences (ADR-0054, issue #84).
+  shell: ShellPrefs;
 }

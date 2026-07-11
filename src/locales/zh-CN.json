@@ -104,5 +104,7 @@
 
   "resume.opening": "正在打开…",
   "resume.source": "校验源 {index}/{total}：{name}",
-  "resume.replay": "重放 {index}/{total}：{name}"
+  "resume.replay": "重放 {index}/{total}：{name}",
+  "rail.collapse": "折叠对话栏",
+  "rail.expand": "展开对话栏"
 }

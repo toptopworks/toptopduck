@@ -97,6 +97,12 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 }
 .shell.sidebar-collapsed { grid-template-columns: 0 1fr; }
 .shell.sidebar-collapsed .session-sidebar { display: none; }
+/* ADR-0054 level 2 (issue #84): thread rail collapsed -> workspace goes full
+ * width. The QuestionBar still spans the (now single-column) pane via its
+ * grid-column: 1 / -1 rule. Stacks with sidebar-collapsed (both classes can
+ * apply at once). */
+.shell.rail-collapsed .session-pane { grid-template-columns: 1fr; }
+.shell.rail-collapsed .session-rail { display: none; }
 .shell-init { padding: 2rem; max-width: none; }
 
 /* --- Col 1: session sidebar (ADR-0060 沉色 chrome) ----------------------- */
@@ -136,6 +142,7 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 .session-entry { position: relative; margin: 0.1rem 0; display: flex; align-items: stretch; }
 .session-entry-main {
   all: unset; cursor: pointer; flex: 1; display: flex; flex-direction: column;
+  min-width: 0; /* allow the name span to truncate within the flex chain */
   padding: 0.35rem 0.5rem; border-radius: var(--radius);
   color: var(--foreground);
 }
@@ -145,7 +152,12 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
   background: var(--primary); color: var(--primary-foreground); font-weight: 600;
 }
 .session-entry.open:not(.active) .session-entry-main { box-shadow: inset 2px 0 var(--primary); }
-.session-name { font-size: 0.9rem; }
+/* Tail-ellipsis truncation (ADR-0054): the session name is the entry's identity
+ * handle; keep the head visible, tail off. */
+.session-name {
+  font-size: 0.9rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .session-subline { font-size: 0.76rem; font-weight: 400; opacity: 0.85; }
 .session-entry-menu {
   all: unset; cursor: pointer; padding: 0 0.4rem; font-size: 1rem; line-height: 1;
@@ -209,7 +221,22 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
   padding: 0.15rem 0.5rem; cursor: pointer; font-size: 1rem; line-height: 1;
   border: 1px solid var(--border); background: var(--card); border-radius: var(--radius);
 }
-.topbar-session-name { font-weight: 600; font-size: 0.95rem; }
+/* Rail collapse toggle (ADR-0054 level 2, issue #84) mirrors the sidebar
+ * toggle. Disabled on the cold-start hero (no rail to collapse). */
+.rail-toggle {
+  padding: 0.15rem 0.5rem; cursor: pointer; font-size: 1rem; line-height: 1;
+  border: 1px solid var(--border); background: var(--card); border-radius: var(--radius);
+}
+.rail-toggle:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Tail-ellipsis truncation (ADR-0054: keep the head -- the identity handle,
+ * ADR-0039). flex:1 + min-width:0 lets the span shrink within the topbar flex
+ * row so a long session name yields to the fixed header actions instead of
+ * pushing them off-screen. */
+.topbar-session-name {
+  flex: 1 1 auto; min-width: 0;
+  font-weight: 600; font-size: 0.95rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .topbar-softcap {
   font-size: 0.78rem; padding: 0.15rem 0.5rem;
   background: #fff4e5; border: 1px solid #ffd9a0; border-radius: var(--radius); color: #8a5200;

@@ -181,6 +181,25 @@ fn default_export_format() -> String {
     "csv".to_string()
 }
 
+/// Shell collapse preferences (ADR-0054, issue #84). The two manual collapse
+/// levels that are UI state (NOT the third -- Tauri minWidth/minHeight, which is
+/// a native window config, not a preference): the session sidebar (full hide +
+/// topbar call-out) and the thread rail (workspace goes full-width). Both
+/// default expanded; both persist across restarts via app-config (ADR-0038),
+/// alongside theme / locale / window geometry. The two stack -- a user may
+/// collapse either, both, or neither independently.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ShellPrefs {
+    /// Session sidebar collapsed (ADR-0054/0060). Fully hidden; the topbar
+    /// toggle calls it back out.
+    #[serde(default)]
+    pub sidebar_collapsed: bool,
+    /// Thread rail collapsed (ADR-0054). Workspace takes the full pane width;
+    /// the QuestionBar still spans it (ADR-0062 R1).
+    #[serde(default)]
+    pub rail_collapsed: bool,
+}
+
 /// Tunable defaults (ADR-0013/0023/0028). Persisted so a user's tuned values
 /// survive a restart. Applying them to the live orchestrator/window assembler is
 /// a follow-up slice; this artifact stores + round-trips them per issue #53 AC.
@@ -250,6 +269,11 @@ pub struct AppConfig {
     /// [`RECENT_FILES_CAP`]; the open/save path unshifts + dedupes + trims.
     #[serde(default)]
     pub recent_files: Vec<String>,
+    /// Shell collapse preferences (ADR-0054, issue #84). Forward-compat: a
+    /// pre-#84 file has no `shell` key, so serde(default) fills the expanded
+    /// defaults rather than rejecting the whole document.
+    #[serde(default)]
+    pub shell: ShellPrefs,
 }
 
 impl AppConfig {
@@ -268,6 +292,7 @@ impl AppConfig {
             export: ExportDefaults::default(),
             tunables: Tunables::default(),
             recent_files: Vec::new(),
+            shell: ShellPrefs::default(),
         }
     }
 
@@ -530,5 +555,54 @@ mod tests {
         low.format_version = 0; // impossibly low
         low.normalize();
         assert_eq!(low.format_version, APP_CONFIG_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn shell_prefs_default_expanded() {
+        // ADR-0054: both collapse levels default EXPANDED (false). The user
+        // opts into collapse; first launch and the honest-degrade target both
+        // surface the full three-column shell.
+        let shell = ShellPrefs::default();
+        assert!(!shell.sidebar_collapsed);
+        assert!(!shell.rail_collapsed);
+    }
+
+    #[test]
+    fn shell_prefs_round_trip_collapsed_states() {
+        // A user who collapsed both levels reopens with both collapsed.
+        let mut cfg = AppConfig::defaults();
+        cfg.shell.sidebar_collapsed = true;
+        cfg.shell.rail_collapsed = true;
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: AppConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.shell, cfg.shell);
+        assert!(back.shell.sidebar_collapsed);
+        assert!(back.shell.rail_collapsed);
+    }
+
+    #[test]
+    fn shell_field_defaults_when_absent_for_forward_compat() {
+        // A pre-#84 app-config file has NO `shell` key. serde(default) on the
+        // field + ShellPrefs::default must fill the expanded defaults rather
+        // than rejecting the whole document (forward-compat: the user's prior
+        // theme / locale / geometry survive an app upgrade).
+        let json = r#"{"format_version":1,"theme":"dark"}"#;
+        let cfg: AppConfig = serde_json::from_str(json).expect("partial deserialize");
+        assert_eq!(cfg.theme, Theme::Dark);
+        assert_eq!(cfg.shell, ShellPrefs::default());
+        assert!(!cfg.shell.sidebar_collapsed);
+        assert!(!cfg.shell.rail_collapsed);
+    }
+
+    #[test]
+    fn shell_prefs_partial_deserialize_fills_missing_collapse() {
+        // A partial `shell` object (one key present, the other absent) must fill
+        // the missing collapse from default, not reject. Each field carries its
+        // own #[serde(default)], so a future addition to ShellPrefs is also
+        // forward-compat at the field level.
+        let json = r#"{"format_version":1,"shell":{"sidebar_collapsed":true}}"#;
+        let cfg: AppConfig = serde_json::from_str(json).expect("partial shell deserialize");
+        assert!(cfg.shell.sidebar_collapsed);
+        assert!(!cfg.shell.rail_collapsed); // absent -> default false
     }
 }

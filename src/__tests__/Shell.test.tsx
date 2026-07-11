@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
 import type {
   DatasetDescriptor,
@@ -83,6 +83,7 @@ vi.mock("../api", async (importOriginal) => {
       has_key: true,
     })),
     getAppConfig: vi.fn(async () => null),
+    setAppConfig: vi.fn(async (cfg: AppConfig) => cfg),
   };
 });
 
@@ -94,13 +95,16 @@ import {
   closeSession,
   conversation,
   createSession,
+  getAppConfig,
   ingestFile,
   listSessions,
   listWorkingSet,
   openDuck,
   readRows,
   renameSession,
+  setAppConfig,
 } from "../api";
+import type { AppConfig } from "../types";
 
 // ADR-0061 cold start: <App/> renders no session on mount, so a session-internal
 // assertion first opens one via the sidebar "+ 新建会话" button (scoped by class
@@ -829,5 +833,150 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
     // Drain the microtask queue so the rejected closeSession promise settles
     // through closeOpen's .catch -- the seam this test exists to guard.
     await waitFor(() => expect(closeSession).toHaveBeenCalledWith("sess-1"));
+  });
+});
+
+// A minimal valid AppConfig for the #84 persistence tests (the shell prefs are
+// the only field under test; the rest are just-shape defaults).
+function baseAppConfig(shell: AppConfig["shell"]): AppConfig {
+  return {
+    format_version: 1,
+    theme: "system",
+    locale: "system",
+    window: { width: 800, height: 600, x: null, y: null, maximized: false },
+    engine: { memory_limit: "512MB", threads: 1, row_cap: 100, statement_timeout_ms: 30000 },
+    privacy: { send_samples: true },
+    provider: { base_url: "https://api.anthropic.com", model: "claude-sonnet-4-6" },
+    export: { last_dir: null, default_format: "csv" },
+    tunables: { retry_budget: 3, window_turns: 6, far_window: 12 },
+    recent_files: [],
+    shell,
+  };
+}
+
+describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.mocked(listSessions).mockResolvedValue([]);
+    vi.mocked(activeDataset).mockResolvedValue(null);
+    vi.mocked(listWorkingSet).mockResolvedValue([]);
+    // mockImplementation (not mockResolvedValue) so state.thread mutations
+    // within a test flow through to the rendered Thread (the truncation test
+    // sets a long-question turn after beforeEach runs).
+    vi.mocked(conversation).mockImplementation(async () => state.thread);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("collapses the thread rail via the top-bar rail toggle (ADR-0054 level 2)", async () => {
+    render(<App />);
+    await openSession();
+    const shell = document.querySelector(".shell");
+    expect(shell?.classList.contains("rail-collapsed")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "折叠对话栏" }));
+    expect(shell?.classList.contains("rail-collapsed")).toBe(true);
+    // Toggle back expands.
+    fireEvent.click(screen.getByRole("button", { name: "展开对话栏" }));
+    expect(shell?.classList.contains("rail-collapsed")).toBe(false);
+  });
+
+  it("sidebar and rail collapse stack independently (ADR-0054)", async () => {
+    // Both collapse levels are independent UI states; collapsing both at once
+    // must surface BOTH classes (the cold-start three-column shell retreats to
+    // sidebar-hidden + workspace-full-width).
+    render(<App />);
+    await openSession();
+    fireEvent.click(screen.getByRole("button", { name: "收起会话栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "折叠对话栏" }));
+    const shell = document.querySelector(".shell");
+    expect(shell?.classList.contains("sidebar-collapsed")).toBe(true);
+    expect(shell?.classList.contains("rail-collapsed")).toBe(true);
+    // Expanding the sidebar leaves the rail collapsed (independence).
+    fireEvent.click(screen.getByRole("button", { name: "展开会话栏" }));
+    expect(shell?.classList.contains("sidebar-collapsed")).toBe(false);
+    expect(shell?.classList.contains("rail-collapsed")).toBe(true);
+  });
+
+  it("restores persisted collapse prefs from app-config on mount (ADR-0038/0054)", async () => {
+    // A user who left both levels collapsed reopens to both collapsed -- the
+    // prefs ride app-config (ADR-0038), restored once on the first resolve.
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: true, rail_collapsed: true }),
+    );
+    render(<App />);
+    await waitFor(() => {
+      const shell = document.querySelector(".shell");
+      expect(shell?.classList.contains("sidebar-collapsed")).toBe(true);
+      expect(shell?.classList.contains("rail-collapsed")).toBe(true);
+    });
+  });
+
+  it("persists a sidebar collapse toggle into app-config (ADR-0038)", async () => {
+    // Toggling a collapse level commits the new shell prefs to app-config so
+    // the choice survives a restart (the toggle is not a transient UI flip).
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+    );
+    render(<App />);
+    // Wait for getAppConfig to resolve AND the mount effect's .then to set
+    // appConfigRef.current (commitShellPrefs is a no-op until the ref lands).
+    await waitFor(() => expect(getAppConfig).toHaveBeenCalled());
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    fireEvent.click(screen.getByRole("button", { name: "收起会话栏" }));
+    // setAppConfig receives a config whose shell reflects the toggle.
+    await waitFor(() =>
+      expect(setAppConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          shell: { sidebar_collapsed: true, rail_collapsed: false },
+        }),
+      ),
+    );
+  });
+
+  it("drops a file onto an active session as an added source (ADR-0062 R3)", async () => {
+    // The bisection's ACTIVE-session branch: with a session open, a drop adds
+    // the file to that session's working set (ADR-0022 source event) -- it does
+    // NOT mint a new session. createSession is called once (for openSession),
+    // never again for the drop.
+    vi.mocked(createSession).mockResolvedValueOnce("sess-1");
+    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("dropped") });
+    render(<App />);
+    await openSession();
+    // Simulate a webview drop while sess-1 is active.
+    dropEvent.handler!({ payload: { type: "drop", paths: ["/x/new.csv"] } });
+    await waitFor(() =>
+      expect(ingestFile).toHaveBeenCalledWith("sess-1", "/x/new.csv"),
+    );
+    // The drop did NOT mint a new session (only the openSession create fired).
+    expect(createSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the full verbatim question in title for head-preserving truncation (ADR-0054)", async () => {
+    // The rail truncates the verbatim question at a fixed width with a TAIL
+    // ellipsis (keeps the head -- the identity handle, ADR-0039). jsdom has no
+    // layout so the rendered glyph is not assertable; the contract is that the
+    // full text rides the span's title so hover recovers it and the head stays
+    // visible in the truncated view.
+    const longQuestion = "前".repeat(120);
+    state.thread = [
+      {
+        entry: "Turn",
+        data: { question: longQuestion, outcome: { kind: "Cancelled" } },
+      },
+    ];
+    render(<App />);
+    await openSession();
+    // The thread loads async (conversation IPC); wait for the turn card to
+    // render before asserting the truncation contract on its question span.
+    const q = await waitFor(() => {
+      const el = document.querySelector(".turn-question");
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    expect(q.getAttribute("title")).toBe(longQuestion);
   });
 });
