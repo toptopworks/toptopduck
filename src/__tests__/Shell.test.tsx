@@ -1,7 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
-import type { DatasetDescriptor, RowPage, ThreadEntry, TurnOutcome, TurnProgress } from "../types";
+import type {
+  DatasetDescriptor,
+  ResumeProgress,
+  RowPage,
+  ThreadEntry,
+  TurnOutcome,
+  TurnProgress,
+} from "../types";
 
 // Black-box shell tests (issue #79 ACs). Drives the rendered three-column App
 // like a user and asserts VISIBLE DOM / structure signals -- never the Query
@@ -34,6 +41,14 @@ const turnProgressCb = vi.hoisted(() => ({
   current: null as null | ((ev: TurnProgress) => void),
 }));
 
+// #83 R5: capture the resume-progress listener so a test can emit Source/Replay
+// events -- addressed to THIS session vs a stranger -- and assert the
+// multi-session filter (ADR-0056) discards the stranger before it can move the
+// opener's progress strip.
+const resumeProgressCb = vi.hoisted(() => ({
+  current: null as null | ((ev: ResumeProgress) => void),
+}));
+
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
   return {
@@ -54,6 +69,13 @@ vi.mock("../api", async (importOriginal) => {
       turnProgressCb.current = cb;
       return () => {};
     }),
+    // #83 R5: capture the resume-progress listener so a test can emit events
+    // addressed to a stranger vs this session (ADR-0056 multi-session filter).
+    openDuck: vi.fn(async () => {}),
+    onResumeProgress: vi.fn(async (cb: (ev: ResumeProgress) => void) => {
+      resumeProgressCb.current = cb;
+      return () => {};
+    }),
     readRows: vi.fn(),
     getProviderConfig: vi.fn(async () => ({
       base_url: "https://api.anthropic.com",
@@ -66,12 +88,16 @@ vi.mock("../api", async (importOriginal) => {
 
 import App from "../App";
 import {
+  activeDataset,
   askQuestion,
   cancelQuery,
   closeSession,
   conversation,
   createSession,
   ingestFile,
+  listSessions,
+  listWorkingSet,
+  openDuck,
   readRows,
   renameSession,
 } from "../api";
@@ -633,5 +659,175 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
     // sess-2 is now active and shows NO degrade card -- it is unaffected.
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument();
+  });
+});
+
+describe("App resume + close-in-flight seams (issue #83)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    // Defaults: each test overrides the IPC it needs. Reset implementations
+    // so a prior test's mockImplementation (e.g. closeSession never-resolve)
+    // does not leak across describe boundaries.
+    vi.mocked(listSessions).mockResolvedValue([]);
+    vi.mocked(activeDataset).mockResolvedValue(null);
+    vi.mocked(listWorkingSet).mockResolvedValue([]);
+    vi.mocked(conversation).mockResolvedValue([]);
+    vi.mocked(closeSession).mockResolvedValue(undefined);
+    vi.mocked(openDuck).mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("resume lands viewedResult on the last Materialized and shows the stale disclosure (ADR-0062 R5 / 0047)", async () => {
+    // A persisted session with two Materialized turns; result_2 is the last ->
+    // R5 points viewedResult at it on resume. result_2's source was replaced
+    // after materialization, so the workspace shows the old table + the
+    // stage-stale disclosure banner (ADR-0047 honest wording).
+    vi.mocked(listSessions).mockResolvedValue([
+      {
+        session_id: "/x/persisted.duck",
+        display_name: "季报",
+        last_modified_at: Date.now(),
+        source_summary: { first_source_name: "people", source_count: 1, turn_count: 2 },
+        format_version: 1,
+      },
+    ]);
+    const r1 = src("result_1");
+    const r2: DatasetDescriptor = {
+      ...src("result_2"),
+      stale: { reference_name: "result_2", display_name: "result_2", reason: "Replaced" },
+    };
+    vi.mocked(createSession).mockResolvedValue("sess-resume");
+    vi.mocked(openDuck).mockResolvedValue(undefined);
+    vi.mocked(listWorkingSet).mockResolvedValue([r1, r2]);
+    vi.mocked(activeDataset).mockResolvedValue(r2);
+    vi.mocked(conversation).mockResolvedValue([
+      materializedTurn("result_1"),
+      materializedTurn("result_2"),
+    ]);
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("季报")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("季报"));
+    // R5: viewedResult lands on the LAST Materialized (result_2), not result_1.
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /结果：result_2/ })).toBeInTheDocument(),
+    );
+    // ADR-0047 stage-stale: the workspace shows the old table + disclosure.
+    expect(screen.getByText(/此结果已失效/)).toBeInTheDocument();
+  });
+
+  it("filters resume-progress events by sessionId (ADR-0056 / #76, #83 R5)", async () => {
+    vi.mocked(listSessions).mockResolvedValue([
+      {
+        session_id: "/x/persisted.duck",
+        display_name: "季报",
+        last_modified_at: Date.now(),
+        source_summary: { first_source_name: "people", source_count: 1, turn_count: 1 },
+        format_version: 1,
+      },
+    ]);
+    // Hold openDuck pending so resumeStatus stays visible for assertions.
+    let resolveOpenDuck: () => void = () => {};
+    vi.mocked(openDuck).mockImplementation(
+      () => new Promise<void>((r) => { resolveOpenDuck = r; }),
+    );
+    vi.mocked(createSession).mockResolvedValue("sess-resume");
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("季报")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("季报"));
+    // openDuck is called AFTER `targetSid = sid`, so once it fires the filter
+    // is armed.
+    await waitFor(() =>
+      expect(openDuck).toHaveBeenCalledWith("sess-resume", "/x/persisted.duck"),
+    );
+
+    // Event for a DIFFERENT session: filtered -> status stays "正在打开…".
+    resumeProgressCb.current!({
+      session_id: "other-sid",
+      event: { Source: { index: 1, total: 2, reference_name: "X" } },
+    });
+    expect(screen.queryByText(/校验源/)).not.toBeInTheDocument();
+
+    // Event for THIS session: status updates to source.
+    resumeProgressCb.current!({
+      session_id: "sess-resume",
+      event: { Source: { index: 1, total: 2, reference_name: "people" } },
+    });
+    await waitFor(() => expect(screen.getByText(/校验源/)).toBeInTheDocument());
+
+    // Cleanup: let openDuck resolve and AWAIT openPersisted finishing (invalidate
+    // + registerOpen + setResumeStatus(null) + finally unlisten) so no orphan
+    // resume-progress listener leaks into the next test.
+    resolveOpenDuck();
+    await waitFor(() =>
+      expect(screen.queryByText(/正在打开/)).not.toBeInTheDocument(),
+    );
+  });
+
+  it("closing an in-flight session unmounts the pane at once + fires closeSession (ADR-0055)", async () => {
+    const { resolve } = pendingAsk();
+    vi.mocked(createSession).mockResolvedValueOnce("sess-1");
+    // closeSession NEVER resolves in this test -- proves the UI does NOT wait.
+    vi.mocked(closeSession).mockImplementation(() => new Promise<void>(() => {}));
+
+    render(<App />);
+    await openSession();
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "x" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "停止" })).toBeInTheDocument(),
+    );
+
+    // Close via the sidebar context menu WHILE the ask is in-flight.
+    fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
+    fireEvent.click(screen.getByRole("menuitem", { name: "关闭" }));
+
+    // ADR-0055: the pane unmounts IMMEDIATELY -- closeSession is still pending,
+    // yet the question bar is already gone (no await on the IPC).
+    await waitFor(() =>
+      expect(screen.queryByRole("textbox", { name: "提问" })).not.toBeInTheDocument(),
+    );
+    expect(closeSession).toHaveBeenCalledWith("sess-1");
+
+    // The orphan ask resolves after the pane is gone; the cold hero shows --
+    // no ghost turn renders. This test asserts only the FRONTEND contract: the
+    // session cache was removed before the orphan resolved, so its optimistic
+    // setQueryData cannot surface a turn. (In production the backend's
+    // post-check also discards the turn on closing -- ADR-0055 -- but that
+    // backend path is not exercised by this IPC mock.)
+    resolve({
+      kind: "Materialized",
+      data: {
+        dataset: { ...src("result_1"), row_count: 1 },
+        viz: null,
+        assumption: null,
+      },
+    });
+    await waitFor(() => expect(screen.getByText(/开始一次分析/)).toBeInTheDocument());
+  });
+
+  it("close still unmounts at once when closeSession rejects (ADR-0055 .catch seam, #83)", async () => {
+    vi.mocked(createSession).mockResolvedValueOnce("sess-1");
+    // closeSession REJECTS -- closeOpen's .catch must swallow it so it does
+    // NOT surface as an unhandled rejection. If someone drops the .catch (or
+    // re-adds an await on closeSession), this test fails on the reject path.
+    vi.mocked(closeSession).mockRejectedValueOnce(new Error("backend gone"));
+
+    render(<App />);
+    await openSession();
+    fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
+    fireEvent.click(screen.getByRole("menuitem", { name: "关闭" }));
+
+    // The pane unmounts synchronously even though closeSession rejects.
+    await waitFor(() =>
+      expect(screen.queryByRole("textbox", { name: "提问" })).not.toBeInTheDocument(),
+    );
+    // Drain the microtask queue so the rejected closeSession promise settles
+    // through closeOpen's .catch -- the seam this test exists to guard.
+    await waitFor(() => expect(closeSession).toHaveBeenCalledWith("sess-1"));
   });
 });
