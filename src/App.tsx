@@ -116,6 +116,70 @@ function HeaderActions({
   );
 }
 
+// Sidebar collapse toggle (ADR-0052 i18n). App sits above <IntlProvider> so the
+// button lives in this child component to reach intl. Each
+// intl.formatMessage branch is a STATIC literal so @formatjs/cli extract
+// resolves both ids (a template id would break the i18n:check CI gate).
+function SidebarToggle({
+  collapsed,
+  onToggle,
+}: {
+  collapsed: boolean;
+  onToggle: () => void;
+}) {
+  const intl = useIntl();
+  return (
+    <button
+      type="button"
+      className="sidebar-toggle"
+      aria-label={
+        collapsed
+          ? intl.formatMessage({ id: "sidebar.expand", defaultMessage: "Expand session bar" })
+          : intl.formatMessage({ id: "sidebar.collapse", defaultMessage: "Collapse session bar" })
+      }
+      aria-expanded={!collapsed}
+      onClick={onToggle}
+    >
+      {collapsed ? "»" : "«"}
+    </button>
+  );
+}
+
+// Resume progress status (ADR-0034). A structured discriminated union, not a
+// pre-baked string: App sits above <IntlProvider> and cannot format messages
+// itself, so ResumeProgress (a child inside the provider) renders the union
+// into the active locale. Each intl.formatMessage id is a STATIC literal so
+// @formatjs/cli extract resolves them.
+type ResumeStatus =
+  | { kind: "opening" }
+  | { kind: "source"; index: number; total: number; name: string }
+  | { kind: "replay"; index: number; total: number; name: string };
+
+function ResumeProgress({ status }: { status: ResumeStatus }) {
+  const intl = useIntl();
+  const text = (() => {
+    switch (status.kind) {
+      case "opening":
+        return intl.formatMessage({ id: "resume.opening", defaultMessage: "Opening…" });
+      case "source":
+        return intl.formatMessage(
+          { id: "resume.source", defaultMessage: "Verifying source {index}/{total}: {name}" },
+          { index: status.index, total: status.total, name: status.name },
+        );
+      case "replay":
+        return intl.formatMessage(
+          { id: "resume.replay", defaultMessage: "Replaying {index}/{total}: {name}" },
+          { index: status.index, total: status.total, name: status.name },
+        );
+    }
+  })();
+  return (
+    <p className="resume-progress" role="status" aria-live="polite">
+      {text}
+    </p>
+  );
+}
+
 export default function App() {
   // QueryClient (ADR-0051): lazy-init once per App mount so test renders never
   // share cache.
@@ -136,7 +200,7 @@ export default function App() {
   const [shellError, setShellError] = useState<string | null>(null);
   // Resume / open-busy indicator (ADR-0034). Resume blocks the open action; the
   // indicator shows globally while the clicked session is opening.
-  const [resumeStatus, setResumeStatus] = useState<string | null>(null);
+  const [resumeStatus, setResumeStatus] = useState<ResumeStatus | null>(null);
   const [persistenceBusy, setPersistenceBusy] = useState(false);
 
   // --- App-level config (ADR-0038) ----------------------------------------
@@ -352,16 +416,22 @@ export default function App() {
         setActiveSessionId(existing.sid);
         return;
       }
-      setResumeStatus("正在打开…");
+      setResumeStatus({ kind: "opening" });
       const unlisten = await onResumeProgress(({ event }) => {
         if ("Source" in event) {
-          setResumeStatus(
-            `校验源 ${event.Source.index}/${event.Source.total}：${event.Source.reference_name}`,
-          );
+          setResumeStatus({
+            kind: "source",
+            index: event.Source.index,
+            total: event.Source.total,
+            name: event.Source.reference_name,
+          });
         } else if ("Replay" in event) {
-          setResumeStatus(
-            `重放 ${event.Replay.index}/${event.Replay.total}：${event.Replay.reference_name}`,
-          );
+          setResumeStatus({
+            kind: "replay",
+            index: event.Replay.index,
+            total: event.Replay.total,
+            name: event.Replay.reference_name,
+          });
         }
       });
       try {
@@ -520,15 +590,10 @@ export default function App() {
               is READ-ONLY (ADR-0060: naming goes through the sidebar menu, the
               single entry point -- DRY). */}
           <header className="topbar">
-            <button
-              type="button"
-              className="sidebar-toggle"
-              aria-label={sidebarCollapsed ? "展开会话栏" : "收起会话栏"}
-              aria-expanded={!sidebarCollapsed}
-              onClick={() => setSidebarCollapsed((c) => !c)}
-            >
-              {sidebarCollapsed ? "»" : "«"}
-            </button>
+            <SidebarToggle
+              collapsed={sidebarCollapsed}
+              onToggle={() => setSidebarCollapsed((c) => !c)}
+            />
             <span className="topbar-session-name">
               {activeSession?.name ? (
                 activeSession.name
@@ -554,11 +619,7 @@ export default function App() {
           </header>
 
           {/* Resume progress strip (ADR-0034). Absent unless an open/resume runs. */}
-          {resumeStatus && (
-            <p className="resume-progress" role="status" aria-live="polite">
-              {resumeStatus}
-            </p>
-          )}
+          {resumeStatus && <ResumeProgress status={resumeStatus} />}
 
           {/* Row 3 (cols 2+): the session pane host. Every open session renders
               a keep-alive SessionPane; non-active panes are CSS `hidden` (mounted
