@@ -174,7 +174,9 @@ impl LiveProviderConfig {
 
     /// Drop a `.duck` path from recent-files (issue #81 delete-session). Mirrors
     /// [`Self::record_recent_file`]: read-modify-write under [`Self::write_lock`],
-    /// advisory (a failure is swallowed and reported as "no change").
+    /// advisory -- a write failure is logged and reported as "no change" so the
+    /// caller (`delete_session`) still surfaces the file deletion itself; the
+    /// recent-files list re-reads from disk on the next open and self-heals.
     pub fn remove_recent_file(&self, path: &str) -> bool {
         let Ok(_guard) = self.write_lock.lock() else {
             return false;
@@ -183,7 +185,16 @@ impl LiveProviderConfig {
         if !cfg.remove_recent_file(path) {
             return false;
         }
-        self.store_inner(cfg).is_ok()
+        match self.store_inner(cfg) {
+            Ok(_) => true,
+            Err(e) => {
+                log::warn!(
+                    "recent-files remove write failed for {path}; \
+                     list re-reads from disk on the next open: {e}"
+                );
+                false
+            }
+        }
     }
 }
 

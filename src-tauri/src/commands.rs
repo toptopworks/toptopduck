@@ -543,18 +543,65 @@ pub async fn list_sessions(
 /// and the in-memory instance is gone), then calls this. Removes the file and
 /// drops the path from recent_files so the next `list_sessions` no longer lists
 /// it. Irreversible -- the frontend gates it behind a strong confirm that names
-/// the .duck explicitly. A missing file is NOT an error: the outcome the user
-/// wants (the session is gone from the sidebar) already holds, and an idempotent
-/// delete tolerates a stray double-call.
+/// the .duck explicitly.
+///
+/// A missing file is NOT an error: the outcome the user wants (the session is
+/// gone from the sidebar) already holds, and an idempotent delete tolerates a
+/// stray double-call. Any OTHER removal failure (permission denied, path busy,
+/// an external file handle) IS surfaced -- swallowing it would betray the
+/// strong-confirm contract by silently leaving the file on disk, only for it to
+/// reappear in the sidebar on the next launch.
+///
+/// The canonical-writer gate mirrors `rename_persisted_session`: a held key
+/// means an open in-memory session owns this path, so a file-level delete would
+/// race its writer and is refused. The frontend closes first; this is the
+/// backend guard for a broken frontend contract (a second window, an IPC
+/// replay). Runs the file IO off the async/UI thread (AC8), like
+/// `rename_persisted_session` and `list_sessions`.
 #[tauri::command]
-pub fn delete_session(live: State<'_, LiveProviderConfig>, path: String) -> Result<(), String> {
-    let trimmed = path.trim();
-    if !trimmed.is_empty() {
-        // Best-effort removal; a missing file is success (idempotent delete).
-        let _ = std::fs::remove_file(trimmed);
-    }
-    live.remove_recent_file(trimmed);
-    Ok(())
+pub async fn delete_session(
+    live: State<'_, LiveProviderConfig>,
+    path: String,
+) -> Result<(), String> {
+    use crate::persistence::{canonicalize_duck, release, try_acquire};
+    let live = live.inner().clone();
+    let trimmed = path.trim().to_string();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        let path = PathBuf::from(&trimmed);
+        // Canonicalize for the single-writer gate. canonicalize_duck succeeds
+        // even when the file itself is gone (it canonicalizes the parent dir
+        // and rejoins the file name), so an Err here means the parent is gone
+        // too -- the file is definitely absent; treat as idempotent success.
+        let canonical = match canonicalize_duck(&path) {
+            Ok(c) => c,
+            Err(_) => {
+                live.remove_recent_file(&trimmed);
+                return Ok(());
+            }
+        };
+        // Gate: a held canonical key means an open session owns this path.
+        if !try_acquire(&canonical) {
+            return Err("该会话已打开，请先关闭再删除".to_string());
+        }
+        let outcome = match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("删除 .duck 失败：{e}")),
+        };
+        release(&canonical);
+        // Drop from recent_files only when the file is actually gone -- a
+        // failed remove leaves the .duck on disk, so recent_files must stay
+        // consistent with it (and the caller already received the error).
+        if outcome.is_ok() {
+            live.remove_recent_file(&trimmed);
+        }
+        outcome
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Rename the OPEN session bound to `session_id` (ADR-0060, issue #81). Sets the
