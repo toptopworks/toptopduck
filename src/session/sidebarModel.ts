@@ -27,7 +27,7 @@ export interface OpenSession {
   epoch: number;
 }
 
-/** A sidebar time-group (ADR-0060 Chat-style: 今天 / 昨天 / 前 7 天 / 更早). */
+/** A sidebar time-group (ADR-0060 Chat-style: Today / Yesterday / Previous 7 days / Older). */
 export type SidebarGroupKind = "today" | "yesterday" | "last7" | "older";
 
 /** A single merged sidebar entry (persisted, open, or both). */
@@ -49,7 +49,7 @@ export interface SidebarEntry {
   /** Productive turn count for the sub-line. */
   turnCount: number;
   /** last_modified_at, ms since epoch. A never-saved session has no mtime, so
-   *  the caller stamps it at creation to land under "今天" at the top. */
+   *  the caller stamps it at creation to land under "Today" at the top. */
   lastModifiedAt: number;
 }
 
@@ -69,7 +69,7 @@ function startOfCalendarDay(ms: number): number {
 
 /** The Calendar-day bucket an mtime falls into, relative to "now". Pure: the
  *  caller passes `now` so tests are deterministic. The buckets match the
- *  Chat-style grouping in ADR-0060 (今天 / 昨天 / 前 7 天 / 更早). Day boundaries
+ *  Chat-style grouping in ADR-0060 (Today / Yesterday / Previous 7 days / Older). Day boundaries
  *  are local calendar days (midnight rollover), not 24h windows. */
 export function timeGroupKind(lastModifiedAt: number, now: number): SidebarGroupKind {
   const today = startOfCalendarDay(now);
@@ -120,7 +120,7 @@ export function buildSidebarGroups(
   }
 
   // Open never-saved sessions: not in list_sessions, so render them as their own
-  // rows. They have no recipe mtime, so stamp `now` to land them under 今天 at
+  // rows. They have no recipe mtime, so stamp `now` to land them under Today at
   // the top until the first save-as binds a real path + mtime.
   for (const o of unsavedOpen) {
     entries.push({

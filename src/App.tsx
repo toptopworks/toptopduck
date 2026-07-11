@@ -39,7 +39,7 @@ import type { OpenSession } from "./session/sidebarModel";
 //
 // Cold start (ADR-0061): no createSession, no resume, no last_session_id. The
 // left sidebar loads list_sessions; the right shows a new-session hero empty
-// state until the user clicks a session (resume), drops a file, or hits "+ 新建".
+// state until the user clicks a session (resume), drops a file, or hits "+ New session".
 
 /** Soft cap on keep-alive sessions (ADR-0046, non-blocking memory-pressure
  *  badge). Reaching it surfaces a sidebar badge; it never forces a close. */
@@ -293,7 +293,7 @@ export default function App() {
     setActiveSessionId(entry.sid);
   }, []);
 
-  // "+ 新建会话" (ADR-0061): mint an empty session and enter its empty state.
+  // "+ New session" (ADR-0061): mint an empty session and enter its empty state.
   const openNew = useCallback(async () => {
     try {
       const sid = await createSession();

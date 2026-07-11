@@ -9,7 +9,7 @@ import {
 import { DisclosureBanner } from "../components/DisclosureBanner";
 import type { SessionMetadata } from "../types";
 
-// Group heading (ADR-0060 Chat-style 今天/昨天/前7天/更早). Each branch is a
+// Group heading (ADR-0060 Chat-style Today/Yesterday/Previous-7-days/Older). Each branch is a
 // STATIC-literal <FormattedMessage> call site so @formatjs/cli extract resolves
 // the id (a template-literal id would break the i18n:check CI gate).
 function GroupTitle({ kind }: { kind: SidebarGroupKind }) {

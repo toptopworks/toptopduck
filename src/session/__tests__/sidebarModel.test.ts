@@ -34,8 +34,8 @@ function meta(
 
 describe("timeGroupKind", () => {
   it("buckets by local calendar day, not a rolling 24h window", () => {
-    // 11:59pm "today" and 12:01am "today" are both 今天; just-before-midnight
-    // yesterday is 昨天.
+    // 11:59pm "today" and 12:01am "today" are both Today; just-before-midnight
+    // yesterday is Yesterday.
     expect(timeGroupKind(NOW, NOW)).toBe("today");
     expect(timeGroupKind(NOW - 2 * 3600_000, NOW)).toBe("today");
     expect(timeGroupKind(NOW - 26 * 3600_000, NOW)).toBe("yesterday");
@@ -74,7 +74,7 @@ describe("buildSidebarGroups", () => {
     expect(entry.path).toBe("/a.duck");
   });
 
-  it("renders a never-saved open session as its own row under 今天", () => {
+  it("renders a never-saved open session as its own row under Today", () => {
     // An unsaved new session has no path, so it is not in list_sessions; it
     // becomes a standalone entry stamped to `now`.
     const open: OpenSession[] = [
