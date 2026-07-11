@@ -25,6 +25,12 @@ export interface OpenSession {
   /** Remount counter bumped after a resume so SessionPane resets viewedResult
    *  from the resumed thread (ADR-0062 R5). */
   epoch: number;
+  /** A data-file path dropped on the cold-start hero (ADR-0061, #81 A1). The
+   *  SessionPane consumes it once on mount via handleIngest -- the only path
+   *  that can surface an xlsx NeedsGuidance result into the guidance dialog --
+   *  then clears it through onIngestConsumed. null once consumed or when the
+   *  session was opened by a non-drop action. */
+  pendingIngestPath?: string | null;
 }
 
 /** A sidebar time-group (ADR-0060 Chat-style: Today / Yesterday / Previous 7 days / Older). */

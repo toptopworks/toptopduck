@@ -3,6 +3,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { FormattedMessage, IntlProvider, useIntl } from "react-intl";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { LogicalPosition, LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { SessionPane } from "./session/SessionPane";
 import { SessionSidebar } from "./session/SessionSidebar";
 import { DisclosureBanner } from "./components/DisclosureBanner";
@@ -305,6 +306,37 @@ export default function App() {
     }
   }, [registerOpen]);
 
+  // Drop-to-create on the cold-start hero (ADR-0061, #81 A1): mint a session
+  // and hand the dropped path to the new SessionPane as pendingIngestPath. The
+  // pane consumes it via handleIngest (the only path that can surface an xlsx
+  // NeedsGuidance dialog); the shell never ingests directly. droppingRef guards
+  // a second drop landing while the first createSession is still in flight.
+  const droppingRef = useRef(false);
+  const dropFile = useCallback(
+    async (path: string) => {
+      if (droppingRef.current) return;
+      droppingRef.current = true;
+      try {
+        const sid = await createSession();
+        registerOpen({ sid, name: "", path: null, epoch: 0, pendingIngestPath: path });
+      } catch (e) {
+        setShellError(fmtError(e));
+      } finally {
+        droppingRef.current = false;
+      }
+    },
+    [registerOpen],
+  );
+
+  // Clear a consumed drop-on-cold-start path (#81 A1): once the SessionPane has
+  // kicked off ingest, OpenSession.pendingIngestPath is dropped so a remount
+  // cannot re-ingest.
+  const clearPendingIngest = useCallback((sid: string) => {
+    setOpenSessions((prev) =>
+      prev.map((o) => (o.sid === sid ? { ...o, pendingIngestPath: null } : o)),
+    );
+  }, []);
+
   // Resume a persisted .duck into a fresh runtime instance (ADR-0061/0034).
   // open_duck reuses the id (ADR-0056), so createSession mints it first, then
   // openDuck loads the recipe + replays the chain into that id. If the same
@@ -523,7 +555,11 @@ export default function App() {
               No active session = the cold-start hero (ADR-0061). */}
           <main className="session-pane-host">
             {activeSessionId === null && (
-              <ColdStartHero disabled={busy} onNew={() => void openNew()} />
+              <ColdStartHero
+                disabled={busy}
+                onNew={() => void openNew()}
+                onDropFile={(p) => void dropFile(p)}
+              />
             )}
             {openSessions.map((s) => (
               <div
@@ -531,7 +567,12 @@ export default function App() {
                 className={`session-pane-layer${s.sid === activeSessionId ? " active" : " hidden"}`}
                 aria-hidden={s.sid !== activeSessionId}
               >
-                <SessionPane key={`${s.sid}:${s.epoch}`} sessionId={s.sid} />
+                <SessionPane
+                  key={`${s.sid}:${s.epoch}`}
+                  sessionId={s.sid}
+                  pendingIngestPath={s.pendingIngestPath ?? null}
+                  onIngestConsumed={() => clearPendingIngest(s.sid)}
+                />
               </div>
             ))}
           </main>
@@ -566,10 +607,30 @@ export default function App() {
 function ColdStartHero({
   disabled,
   onNew,
+  onDropFile,
 }: {
   disabled: boolean;
   onNew: () => void;
+  onDropFile: (path: string) => void;
 }) {
+  // Drop-to-create (ADR-0061, #81 A1): a webview-level drop while the cold hero
+  // is showing mints a new session with the file as its first source. Mirrors
+  // FileDropzone's listener -- the third caller would prompt extracting a shared
+  // hook, but until then the 5-line duplication stays. Ignored while busy so a
+  // create-in-flight cannot stack a second session.
+  useEffect(() => {
+    if (disabled) return;
+    const app = getCurrentWebviewWindow();
+    const unlisten = app.onDragDropEvent((event) => {
+      if (event.payload.type === "drop" && event.payload.paths.length > 0) {
+        onDropFile(event.payload.paths[0]);
+      }
+    });
+    return () => {
+      void unlisten.then((u) => u());
+    };
+  }, [disabled, onDropFile]);
+
   return (
     <div className="workspace-hero cold-start-hero">
       <h2 className="cold-start-title">

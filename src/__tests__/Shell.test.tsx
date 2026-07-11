@@ -8,8 +8,16 @@ import type { DatasetDescriptor, RowPage, ThreadEntry } from "../types";
 // bridge) so the shell renders offline.
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
+const dropEvent = vi.hoisted(() => ({
+  handler: null as null | ((e: { payload: { type: string; paths: string[] } }) => void),
+}));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
-  getCurrentWebviewWindow: () => ({ onDragDropEvent: () => Promise.resolve(() => {}) }),
+  getCurrentWebviewWindow: () => ({
+    onDragDropEvent: (cb: (e: { payload: { type: string; paths: string[] } }) => void) => {
+      dropEvent.handler = cb;
+      return Promise.resolve(() => {});
+    },
+  }),
 }));
 
 const state = vi.hoisted(() => ({
@@ -47,6 +55,7 @@ import {
   closeSession,
   conversation,
   createSession,
+  ingestFile,
   readRows,
   renameSession,
 } from "../api";
@@ -323,5 +332,22 @@ describe("App multi-session shell (issue #81 ACs)", () => {
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() => expect(renameSession).toHaveBeenCalledWith("sess-1", "季报"));
+  });
+
+  // ADR-0061 drop-to-create (#81 A1): a file dropped on the cold-start hero
+  // mints a session and the new SessionPane ingests the path via handleIngest
+  // (the only path that can surface an xlsx NeedsGuidance result). Asserts the
+  // createSession + ingestFile wiring at the shell boundary.
+  it("drop on the cold hero mints a session and ingests the file (ADR-0061, #81 A1)", async () => {
+    vi.mocked(createSession).mockResolvedValueOnce("sess-drop");
+    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("dropped") });
+    render(<App />);
+    // Cold start: the hero is showing, no session yet.
+    await waitFor(() => expect(dropEvent.handler).not.toBeNull());
+    // Simulate a webview drop of one data file.
+    dropEvent.handler!({ payload: { type: "drop", paths: ["/x/foo.csv"] } });
+    await waitFor(() => expect(createSession).toHaveBeenCalled());
+    // The minted session's SessionPane consumes the path via handleIngest.
+    await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-drop", "/x/foo.csv"));
   });
 });

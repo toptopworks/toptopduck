@@ -76,7 +76,11 @@ function renderPane(): void {
       </IntlProvider>
     </QueryClientProvider>
   );
-  render(wrap(<SessionPane sessionId="sess-1" />));
+  render(
+    wrap(
+      <SessionPane sessionId="sess-1" pendingIngestPath={null} onIngestConsumed={() => {}} />,
+    ),
+  );
 }
 
 const guidedDataset: DatasetDescriptor = {
