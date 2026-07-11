@@ -937,6 +937,28 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     );
   });
 
+  it("persists a rail collapse toggle into app-config (ADR-0038)", async () => {
+    // Symmetric to the sidebar persist test above: the rail toggle is a SEPARATE
+    // callback (toggleRailCollapse) with its own dependency array, so its commit
+    // path needs its own guard. Unlike the sidebar toggle, the rail toggle is
+    // disabled until a session is active -- open one first. A regression that
+    // drops commitShellPrefs from toggleRailCollapse would leave the rail
+    // collapse a transient UI flip (lost on restart).
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+    );
+    render(<App />);
+    await openSession();
+    fireEvent.click(screen.getByRole("button", { name: "折叠对话栏" }));
+    await waitFor(() =>
+      expect(setAppConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          shell: { sidebar_collapsed: false, rail_collapsed: true },
+        }),
+      ),
+    );
+  });
+
   it("drops a file onto an active session as an added source (ADR-0062 R3)", async () => {
     // The bisection's ACTIVE-session branch: with a session open, a drop adds
     // the file to that session's working set (ADR-0022 source event) -- it does

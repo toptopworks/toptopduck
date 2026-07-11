@@ -331,6 +331,12 @@ export default function App() {
       void commitAppConfig({
         ...base,
         shell: { sidebar_collapsed: next.sidebar, rail_collapsed: next.rail },
+      }).catch((e) => {
+        // IPC write failed -- the UI already flipped optimistically (state is
+        // set before the commit), so the only consequence is the pref not
+        // surviving a restart. Mirror the geometry persist handler: log to
+        // devtools, not a user toast (the toggle's visible effect landed).
+        if (import.meta.env.DEV) console.warn("[shell] collapse persist failed", e);
       });
     },
     [commitAppConfig],
