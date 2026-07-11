@@ -41,13 +41,16 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
   // column). 结果 = the derived chart+table stage; 工作集 = source management.
   const [tab, setTab] = useState<"result" | "workingSet">("result");
 
-  // ADR-0058 L2 partition retry: each region's onReset invalidates its slice of
-  // the session query cache so the key-bump remount re-fetches fresh data. The
-  // session-body boundary invalidates the whole session prefix (a crash outside
-  // the Thread/ResultView granular boundaries is by definition uncategorized);
-  // the granular ones do the same -- cheap (a few IPC) and correct.
-  const invalidateSession = () => {
-    void queryClient.invalidateQueries({ queryKey: sessionKeys.all(sessionId) });
+  // ADR-0058 L2 partition retry: each region's onReset REMOVES its slice of the
+  // session query cache so the key-bump remount re-fetches fresh data -- NOT the
+  // stale page that crashed it. invalidateQueries would leave the cache in place
+  // and let useQuery hand the remounted children the same throwing data via its
+  // stale-then-refetch render; removeQueries drops it so the remount mounts into
+  // a loading state and refetches clean. The session-body boundary and the
+  // granular Thread/ResultView boundaries all drop the whole session prefix:
+  // cheap (a few IPC) and avoids the re-throw.
+  const resetSessionCache = () => {
+    queryClient.removeQueries({ queryKey: sessionKeys.all(sessionId) });
   };
 
   const viewedReference = s.viewedResult?.referenceName ?? null;
@@ -66,14 +69,21 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
           block (the QuestionBar -- a session-skeleton element, ADR-0062 R1 --
           is a sibling and always survives). The session-level isolation
           boundary lives one level up in <App> (wrapping each <SessionPane>) so
-          a render crash elsewhere in the pane degrades only THAT session --
-          the per-session partition and the region partitions are NOT nested,
-          which avoids the React 19 + external-store re-render case where an
-          outer class boundary catches ahead of an inner one during a Query-
-          driven update. */}
+          a render crash elsewhere in the pane degrades only THAT session.
+          KNOWN LIMITATION (React 19 + TanStack Query external store): in the
+          real App tree the per-session boundary is an ANCESTOR of these region
+          boundaries, so a Query-driven re-render throw inside Thread/ResultView
+          can be caught by the outer session boundary first (degrading the whole
+          pane) instead of the granular region boundary. First-render throws are
+          caught by the region boundary as expected; the cross-boundary case
+          surfaces only with external-store-driven updates and could not be
+          reproduced in isolation, so black-box tests assert "degrade card
+          visible + session isolated + retry" rather than "region boundary
+          catches precisely". See memory: react19-nested-errorboundary-outer-
+          catches. */}
       {/* --- Thread rail (ADR-0045/0047) ---------------------------------- */}
       <section className="session-rail" aria-label="对话时间线">
-        <ErrorBoundary name="thread" onReset={invalidateSession}>
+        <ErrorBoundary name="thread" onReset={resetSessionCache}>
           <Thread
             entries={s.thread}
             selectedResult={viewedReference}
@@ -138,7 +148,7 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
               onIngest={s.handleIngest}
               loading={s.loading}
               hasData={s.datasets.length > 0}
-              onResetRegion={invalidateSession}
+              onResetRegion={resetSessionCache}
             />
           ) : (
             <WorkspaceWorkingSet
@@ -203,7 +213,7 @@ function WorkspaceResult({
   onIngest: (path: string) => void;
   loading: boolean;
   hasData: boolean;
-  /** ADR-0058 L2 result-partition retry: invalidate the session slice so a
+  /** ADR-0058 L2 result-partition retry: remove the session slice so a
    *  remounted ResultView re-fetches fresh rows instead of re-throwing against
    *  the stale page that crashed it. */
   onResetRegion: () => void;

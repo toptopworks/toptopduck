@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useIntl, type IntlShape } from "react-intl";
 import type { TurnPhase } from "../types";
 
 interface QuestionBarProps {
@@ -7,9 +8,9 @@ interface QuestionBarProps {
   onCancel: () => void;
   loading: boolean;
   /** The in-flight turn's discrete phase (ADR-0059): when non-null and loading,
-   *  the bar shows "思考中（第 N 次）/ 查询中" so the user sees the turn moving
-   *  through its LLM + SQL waits instead of a blank spinner. null/absent when
-   *  no turn is running (the listener clears it on outcome, incl. Cancelled).
+   *  the bar shows "Thinking (attempt N) / Querying" so the user sees the turn
+   *  moving through its LLM + SQL waits instead of a blank spinner. null/absent
+   *  when no turn is running (the listener clears it on outcome, incl. Cancelled).
    *  Optional so call sites / tests that don't exercise phase feedback omit it. */
   phase?: TurnPhase | null;
 }
@@ -17,15 +18,18 @@ interface QuestionBarProps {
 // Natural-language question entry (PRD #1, issue #22). A blank or in-flight
 // submit is ignored client-side; the orchestrator runs one turn at a time
 // (ADR-0021 single in-flight). While a turn runs the input is disabled and a
-// 停止 button replaces the submit so the user can cancel the in-flight query.
+// stop button replaces the submit so the user can cancel the in-flight query.
 // The discrete phase feedback (ADR-0059) renders alongside the stop button --
-// "思考中（第 N 次）/ 查询中" reflects the two honest boundaries (LLM HTTP +
-// SQL), not a fabricated percentage.
+// "Thinking (attempt N) / Querying" reflects the two honest boundaries (LLM
+// HTTP + SQL), not a fabricated percentage. The phase strings are i18n'd via
+// react-intl (ADR-0052); see the catalog keys questionBar.phase.*.
 //
-// NOTE: QuestionBar's chrome strings remain hard-coded zh (consistent with the
-// rest of this file). i18n'ing the bar is a follow-up; the phase strings ride
-// the same convention until then.
+// NOTE: the phase strings ship through the react-intl catalog (ADR-0052)
+// because they are NEW ADR-0059 strings. The rest of this bar's chrome
+// (placeholder / aria-label / button labels) is still hard-coded zh -- a
+// pre-existing debt that predates this change; i18n'ing it is a follow-up.
 export function QuestionBar({ onSubmit, onCancel, loading, phase = null }: QuestionBarProps) {
+  const intl = useIntl();
   const [value, setValue] = useState("");
 
   return (
@@ -55,7 +59,7 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null }: Quest
         // 0017 -- honest, not fabricated, and the first attempt needs no
         // "第 1 次" noise).
         <span className="phase-indicator" role="status" aria-live="polite">
-          {phaseLabel(phase)}
+          {phaseLabel(phase, intl)}
         </span>
       )}
       {loading ? (
@@ -77,12 +81,24 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null }: Quest
 
 // Discrete phase label (ADR-0059 + 0017 honesty): Thinking / Querying with the
 // 1-based attempt shown ONLY on a blind retry (> 1). The first attempt renders
-// the bare verb; "第 1 次" would be noise that implies a retry count.
-function phaseLabel(phase: TurnPhase): string {
+// the bare verb; an "attempt 1" suffix would be noise that implies a retry
+// count. i18n'd via react-intl (ADR-0052); each formatMessage id is a static
+// literal at the call site so @formatjs/cli extract resolves them.
+function phaseLabel(phase: TurnPhase, intl: IntlShape): string {
   if ("Thinking" in phase) {
     const { attempt } = phase.Thinking;
-    return attempt > 1 ? `思考中（第 ${attempt} 次）…` : "思考中…";
+    return attempt > 1
+      ? intl.formatMessage(
+          { id: "questionBar.phase.thinkingRetry", defaultMessage: "Thinking (attempt {attempt})…" },
+          { attempt },
+        )
+      : intl.formatMessage({ id: "questionBar.phase.thinking", defaultMessage: "Thinking…" });
   }
   const { attempt } = phase.Querying;
-  return attempt > 1 ? `查询中（第 ${attempt} 次）…` : "查询中…";
+  return attempt > 1
+    ? intl.formatMessage(
+        { id: "questionBar.phase.queryingRetry", defaultMessage: "Querying (attempt {attempt})…" },
+        { attempt },
+      )
+    : intl.formatMessage({ id: "questionBar.phase.querying", defaultMessage: "Querying…" });
 }
