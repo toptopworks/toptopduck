@@ -87,6 +87,36 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // Log sink (issue #98, ADR-0029 invariant 2 / ADR-0038): route the
+        // `log` facade to the Tauri-recommended log directory (app_log_dir,
+        // e.g. %LOCALAPPDATA%/<identifier>/logs on Windows) so the existing
+        // log::warn! calls (app-config path fallback, create_dir_all failure,
+        // ingest type-inference degradation) become observable. Registered on
+        // the Builder -- not in setup -- because Tauri v2 only allows plugin
+        // registration before build (App has no plugin() method at runtime).
+        // LogDir is used instead of Folder+app_data_dir because app_data_dir
+        // requires an App handle the Builder chain does not have; app_log_dir
+        // is the Tauri-recommended location and is auto-created by the plugin.
+        // tauri-plugin-log is compatible with the `log` facade, so existing
+        // log::warn! call sites need zero changes -- the sink is transparent.
+        // LevelFilter dev=Debug / release=Info; max_file_size caps growth at
+        // ~5MB (default rotation discards on overflow -- issue #98: single
+        // file + size cap; a rotation strategy is deferred). The frontend
+        // @tauri-apps/plugin-log IPCs into the same sink (one file, one
+        // format: DATE[TARGET][LEVEL] MESSAGE, both ends).
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::LogDir { file_name: None },
+                ))
+                .level(if cfg!(debug_assertions) {
+                    log::LevelFilter::Debug
+                } else {
+                    log::LevelFilter::Info
+                })
+                .max_file_size(5_000_000)
+                .build(),
+        )
         .setup(move |app| {
             // ADR-0038: app-config lives in the OS app-data dir (e.g.
             // %APPDATA%/<identifier>/config.json), NOT in the working directory

@@ -1,5 +1,6 @@
 import { Component, Fragment, type ErrorInfo, type ReactNode } from "react";
 import { useIntl } from "react-intl";
+import { log } from "../lib/log";
 
 // Layered render-phase error boundaries (ADR-0058).
 //
@@ -53,7 +54,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     // card carries the message in its expandable details (ADR-0058: honest,
     // not hidden, not scary); this trace adds the component stack for dx and
     // Tauri users opening devtools, and gives a future telemetry hook a seat.
-    console.error(`[ErrorBoundary:${this.props.name}]`, error, info.componentStack);
+    log.error(`ErrorBoundary:${this.props.name}`, "render crash", error, info.componentStack);
   }
 
   retry = (): void => {
