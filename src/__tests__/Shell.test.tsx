@@ -257,6 +257,11 @@ describe("App three-column shell (issue #79 ACs)", () => {
     });
     render(<App />);
     await openSession();
+    // The thread query (useSessionState) fires conversation() in a post-open
+    // effect; wait for it to fire before asserting the count, so a slow CI
+    // runner that mounts the textbox before scheduling the effect does not
+    // read 0 calls. The assert below still pins "exactly once, no refetch".
+    await waitFor(() => expect(conversation).toHaveBeenCalled());
     expect(conversation).toHaveBeenCalledTimes(1); // initial load only
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "总共几行" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
