@@ -87,6 +87,50 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // Multi-target log sink (issue #98, ADR-0029 invariant 2). Routes the
+        // `log` facade to two destinations so the existing log::warn! calls
+        // (app-config path fallback, create_dir_all failure, ingest
+        // type-inference degradation) are observable, not silent:
+        //   - Stdout: the launching terminal (cargo tauri dev DX; a no-op
+        //     when a bundled app has no console -- the file target still
+        //     captures everything).
+        //   - LogDir: persistent file in app_log_dir (the Tauri-recommended
+        //     log directory, e.g. %LOCALAPPDATA%/<identifier>/logs on Windows,
+        //     ~/Library/Logs on macOS). Unconditional on all platforms -- this
+        //     app needs the file everywhere, unlike templates that gate LogDir
+        //     to one OS and rely on stdout+Webview elsewhere.
+        // A Webview target (Rust logs mirrored into the devtools console) is
+        // intentionally omitted: it requires the frontend to call
+        // @tauri-apps/plugin-log attachConsole(), and would duplicate the dev
+        // mirror in src/lib/log.ts. Add it as a deliberate follow-up if
+        // devtools visibility for Rust logs is ever needed.
+        // Registered on the Builder -- not in setup -- because Tauri v2 only
+        // allows plugin registration before build (App has no plugin()
+        // method at runtime), and app_data_dir requires an App handle the
+        // Builder chain lacks (app_log_dir is auto-created by the plugin).
+        // The sink is compatible with the `log` facade, so existing call sites
+        // need zero changes. LevelFilter dev=Debug / release=Info; max_file_size
+        // caps growth at ~5MB with the default RotationStrategy::KeepOne (the
+        // prior file is removed on overflow, so only the latest ~5MB window
+        // survives -- a richer rotation strategy is deferred per issue #98).
+        // The frontend @tauri-apps/plugin-log IPCs into the same sink (one
+        // file, one format: DATE[TARGET][LEVEL] MESSAGE, both ends).
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets(vec![
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: None,
+                    }),
+                ])
+                .level(if cfg!(debug_assertions) {
+                    log::LevelFilter::Debug
+                } else {
+                    log::LevelFilter::Info
+                })
+                .max_file_size(5_000_000)
+                .build(),
+        )
         .setup(move |app| {
             // ADR-0038: app-config lives in the OS app-data dir (e.g.
             // %APPDATA%/<identifier>/config.json), NOT in the working directory

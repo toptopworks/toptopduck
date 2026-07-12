@@ -1,4 +1,5 @@
 import { THEME_CHANGE_EVENT } from "./useTheme";
+import { log } from "../lib/log";
 import type { EffectiveTheme, ThemeChangeDetail } from "./useTheme";
 
 // Vega-Lite theme bridge (ADR-0050 Q12). The chart palette is derived at runtime
@@ -33,7 +34,7 @@ const documentVarReader: CssVarReader = (name) => {
     // (rename/typo, or the .dark class did not apply). Warn in dev so it
     // surfaces before a chart silently renders the fallback palette in the
     // wrong mode; production stays silent (the fallback handles it).
-    console.warn(`[vega-theme] CSS token ${name} is unset on :root; using fallback`);
+    log.warn("vega-theme", `CSS token ${name} is unset on :root; using fallback`);
   }
   return value;
 };

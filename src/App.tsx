@@ -9,6 +9,7 @@ import { SessionSidebar } from "./session/SessionSidebar";
 import { DisclosureBanner } from "./components/DisclosureBanner";
 import { DegradeCard, ErrorBoundary } from "./components/ErrorBoundary";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { log } from "./lib/log";
 import { createQueryClient } from "./lib/queryClient";
 import { catalogFor, coerceLocalePreference, useLocale } from "./i18n";
 import { useTheme } from "./theme/useTheme";
@@ -337,7 +338,7 @@ export default function App() {
         // set before the commit), so the only consequence is the pref not
         // surviving a restart. Mirror the geometry persist handler: log to
         // devtools, not a user toast (the toggle's visible effect landed).
-        if (import.meta.env.DEV) console.warn("[shell] collapse persist failed", e);
+        log.warn("shell", "collapse persist failed", e);
       });
     },
     [commitAppConfig],
@@ -420,7 +421,7 @@ export default function App() {
               maximized,
             },
           }).catch((e) => {
-            if (import.meta.env.DEV) console.warn("[geometry] persist failed", e);
+            log.warn("geometry", "persist failed", e);
           });
         })
         .catch(() => {});
@@ -623,7 +624,7 @@ export default function App() {
       // path (already dropped); other failures log to devtools so IPC/panic
       // stay observable. NOT a user toast -- pane is gone.
       return closeSession(sid).catch((e) => {
-        console.warn("[closeSession] background close failed", fmtError(e));
+        log.warn("closeSession", "background close failed", fmtError(e));
       });
     },
     [unmountOpen],
@@ -753,7 +754,7 @@ export default function App() {
         messages={catalogFor(effectiveLocale)}
         defaultLocale="en-US"
         onError={(err) => {
-          if (import.meta.env.DEV) console.warn("[i18n]", err.message);
+          log.warn("i18n", err.message);
         }}
       >
         {/* ADR-0058 L3 top-level fallback: the last line of defense against a

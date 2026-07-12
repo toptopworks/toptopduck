@@ -50,10 +50,23 @@ keyring = "3"
 # `log` facade for diagnostic warnings (silent type-inference degradation on
 # Excel error/undecodable-date cells, rollback failures). calamine already
 # pulls `log` in transitively; declaring it explicitly makes the call sites
-# intentional. No sink is wired yet -- the warnings go live once a sink
-# (tauri-plugin-log, or env_logger in tests) is installed; until then they are
-# no-ops, which still beats silent `let _ =` swallows.
+# intentional. The sink is tauri-plugin-log (issue #98): registered on the
+# lib.rs Builder chain, it routes these warnings to stdout + app_log_dir so
+# degradation is observable. The Builder runs only under the Tauri shell, so
+# under pure `cargo test` the `log` facade has no sink and these warnings are
+# dropped (add an env_logger dev-dep + init if test diagnostics are ever
+# needed).
 log = "0.4"
+# Unified log sink for both the Rust `log` facade and the frontend
+# `@tauri-apps/plugin-log` bindings (issue #98, ADR-0029 invariant 2 /
+# ADR-0038). Registered on the lib.rs Builder chain so the existing
+# log::warn! calls (app-config path fallback, create_dir_all failure, ingest
+# type-inference degradation) land in stdout + app_log_dir. The frontend
+# plugin-log IPCs into the same sink -- one file, one format
+# (DATE[TARGET][LEVEL] MESSAGE), both ends. Compatible with the `log`
+# facade, so existing log::warn! call sites need zero changes -- the sink is
+# transparent.
+tauri-plugin-log = "2"
 # `sqlparser` parses provider SQL to extract the FROM/JOIN reference-name set
 # for the stale-cascade provenance graph (issue #40, ADR-0013/0025/0040): each
 # materialized result_N records which working-set members its SQL named, so a
