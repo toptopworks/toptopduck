@@ -85,7 +85,49 @@ use tauri::Manager;
 /// across launches) rather than crashing.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut app_builder = tauri::Builder::default();
+
+    // Multi-instance guard (issue #100). single-instance MUST be the first
+    // registered plugin: when a second instance launches, this callback runs
+    // in the FIRST instance and focuses its main window instead of letting a
+    // second process start. Without it each instance owns an independent
+    // SessionStore (ADR-0056) and the two race on the app-config atomic write
+    // (ADR-0038). cfg(desktop) mirrors the Cargo.toml target guard -- mobile
+    // builds neither pull the plugin nor register it.
+    #[cfg(desktop)]
+    {
+        app_builder = app_builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_focus();
+                let _ = window.unminimize();
+            }
+        }));
+    }
+
+    // Window position/size/maximized persistence across launches (issue #100).
+    // Replaces the role the app-config WindowGeometry field (ADR-0038) was
+    // meant to fill -- whether that field retires is left for a follow-up.
+    // Only SIZE + POSITION + MAXIMIZED are persisted -- NOT the plugin's full
+    // default (StateFlags::all() also captures VISIBLE / DECORATIONS /
+    // FULLSCREEN, which this app does not manage: fullscreen is never toggled,
+    // decorations never change, and the main window must always show on launch
+    // so VISIBLE must not be restored from a hidden state). No denylist (the
+    // template's quick-pane denylist is an NSPanel is_maximized crash
+    // workaround that does not apply here -- we have no floating panel).
+    #[cfg(desktop)]
+    {
+        app_builder = app_builder.plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+                )
+                .build(),
+        );
+    }
+
+    app_builder
         .plugin(tauri_plugin_dialog::init())
         // Multi-target log sink (issue #98, ADR-0029 invariant 2). Routes the
         // `log` facade to two destinations so the existing log::warn! calls
