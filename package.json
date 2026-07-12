@@ -16,9 +16,10 @@
     "rust:fmt": "cd src-tauri && cargo fmt",
     "rust:fmt:check": "cd src-tauri && cargo fmt --check",
     "rust:clippy": "cd src-tauri && cargo clippy --all-targets -- -D warnings",
+    "rust:clippy:fix": "cd src-tauri && cargo clippy --fix --allow-dirty --all-targets",
     "rust:test": "cd src-tauri && cargo test",
     "check:all": "npm run build && npm run lint -- --max-warnings 0 && npm run i18n:check && npm test && npm run rust:fmt:check && npm run rust:clippy && npm run rust:test",
-    "fix:all": "npm run format && cd src-tauri && cargo fmt && cargo clippy --fix --allow-dirty",
+    "fix:all": "npm run format && npm run rust:fmt && npm run rust:clippy:fix && npm run rust:clippy",
     "knip": "knip",
     "jscpd": "jscpd"
   },
