@@ -11,3 +11,6 @@ src-tauri/gen/
 Thumbs.db
 .vscode/
 .idea/
+
+# Tool reports (issue #96)
+jscpd-report/
