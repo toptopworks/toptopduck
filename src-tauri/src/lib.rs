@@ -107,14 +107,22 @@ pub fn run() {
     // Window position/size/maximized persistence across launches (issue #100).
     // Replaces the role the app-config WindowGeometry field (ADR-0038) was
     // meant to fill -- whether that field retires is left for a follow-up.
-    // StateFlags::all() captures position + size + maximized; no denylist (the
+    // Only SIZE + POSITION + MAXIMIZED are persisted -- NOT the plugin's full
+    // default (StateFlags::all() also captures VISIBLE / DECORATIONS /
+    // FULLSCREEN, which this app does not manage: fullscreen is never toggled,
+    // decorations never change, and the main window must always show on launch
+    // so VISIBLE must not be restored from a hidden state). No denylist (the
     // template's quick-pane denylist is an NSPanel is_maximized crash
     // workaround that does not apply here -- we have no floating panel).
     #[cfg(desktop)]
     {
         app_builder = app_builder.plugin(
             tauri_plugin_window_state::Builder::new()
-                .with_state_flags(tauri_plugin_window_state::StateFlags::all())
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+                )
                 .build(),
         );
     }
