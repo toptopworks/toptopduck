@@ -310,9 +310,11 @@ impl SessionHandle {
         if let Ok(mut g) = self.drop_signal.lock() {
             *g = Some(rx);
         }
-        // A poisoned lock is logged by the poisoning site; here we silently
-        // leave the old (None) slot -- a later close-wait surfaces it as an
-        // error via take_drop_signal rather than panicking.
+        // A poisoned lock means a thread panicked while holding it; the rx
+        // is dropped here and the slot keeps its pre-call value (Some or
+        // None). A later close-wait surfaces the poison via take_drop_signal's
+        // Engine error rather than panicking here (Drop-adjacent code must
+        // not panic).
     }
 }
 

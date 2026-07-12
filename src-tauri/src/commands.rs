@@ -138,9 +138,9 @@ pub async fn close_session_and_wait_release(
     // channel stays open regardless of refcount changes. A None here means a
     // second close-wait raced us -- the frontend calls once, so this is a
     // defensive refusal.
-    let rx = detached.take_drop_signal()?.ok_or_else(|| {
-        "close-wait: drop signal already consumed (concurrent close-wait)".to_string()
-    })?;
+    let rx = detached
+        .take_drop_signal()?
+        .ok_or_else(|| "关闭会话冲突（并发关闭等待），请稍后重试".to_string())?;
     // Drop our handle reference. If no in-flight ask holds a clone, this is the
     // last Arc -> Session::Drop fires -> sender signals -> rx resolves at once.
     // If an ask is in flight, the signal fires when the ask's clone drops after
@@ -830,9 +830,13 @@ pub async fn open_duck(
         // key release), the receiver replaces the handle's stale slot. The OLD
         // session's sender (still in the pre-swap Session) fires into a closed
         // receiver once `*s = new_session` lands -- a harmless no-op. Ordering
-        // matters: install the new receiver on the handle BEFORE the swap so a
-        // concurrent close-wait (guarded by reject_if_resuming at the top of
-        // this command, but defensive here too) never observes a None slot.
+        // matters: install the new receiver on the handle BEFORE the swap so
+        // a concurrent close-wait never observes a None slot. close-wait does
+        // NOT call reject_if_resuming (close is terminal, not a mutating
+        // command -- the pure close variant does not either); the frontend's
+        // `busy` flag is the primary defense, and this ordering is the
+        // Rust-side backstop for races the frontend cannot see (a second
+        // window, an IPC replay).
         let (drop_tx, drop_rx) = std::sync::mpsc::channel();
         new_session.set_drop_signal(drop_tx);
         handle_for_task.set_drop_signal_rx(drop_rx);

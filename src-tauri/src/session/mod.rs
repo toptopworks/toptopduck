@@ -2132,8 +2132,11 @@ impl Drop for Session {
         // the canonical key has been released -- fired AFTER the release above so
         // the awaiter resolves precisely when the single-writer gate will succeed.
         // Single-waiter (oneshot via std mpsc); a closed receiver (waiter gone or
-        // timed out) makes send return Err, which is swallowed here. Drop takes
-        // the sender out first so a later field-drop does not double-fire.
+        // timed out) makes send return Err, which is swallowed here. `take()`
+        // moves the sender out so the field is `None` and the later struct
+        // field-drop is pure deallocation -- dropping an `mpsc::Sender` never
+        // calls `send` (send is a `&self` method), so there is no double-fire
+        // risk to guard against; `take` is ownership transfer, not a guard.
         if let Some(tx) = self.drop_signal.take() {
             let _ = tx.send(());
         }

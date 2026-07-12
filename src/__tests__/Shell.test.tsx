@@ -951,6 +951,51 @@ describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
     );
     await waitFor(() => expect(deleteSession).toHaveBeenCalledWith(path));
   });
+
+  it("delete unmounts the pane when closeSessionAndWaitRelease fails (ADR-0063 retry path, issue #93)", async () => {
+    // Close-wait failure (timeout, or the backend already detached): the pane
+    // MUST unmount so the entry falls back to the cold sidebar (sid=null). A
+    // retry then takes the pure deleteSession(path) path instead of re-calling
+    // closeSessionAndWaitRelease on a sid the backend no longer knows (which
+    // would NotFound-loop). Without the unmount, the pane is stuck on a dead
+    // sid with no recovery short of restarting the app.
+    const path = "/x/persisted.duck";
+    vi.mocked(listSessions).mockResolvedValue([
+      {
+        session_id: path,
+        display_name: "季报",
+        last_modified_at: Date.now(),
+        source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+        format_version: 1,
+      },
+    ]);
+    vi.mocked(createSession).mockResolvedValue("sess-del");
+    vi.mocked(closeSessionAndWaitRelease).mockRejectedValue(
+      new Error("关闭会话超时（in-flight ask 未在 120s 内收尾），请稍后重试"),
+    );
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("季报")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("季报"));
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
+    );
+
+    fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
+    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
+
+    // The wait-release variant fired and rejected -> the pane UNMOUNTS (the
+    // fix for the NotFound dead-loop) and deleteSession is NOT called (the
+    // delete aborted on the close-wait failure).
+    await waitFor(() =>
+      expect(closeSessionAndWaitRelease).toHaveBeenCalledWith("sess-del"),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("textbox", { name: "提问" })).not.toBeInTheDocument(),
+    );
+    expect(deleteSession).not.toHaveBeenCalled();
+  });
 });
 
 // A minimal valid AppConfig for the #84 persistence tests (the shell prefs are

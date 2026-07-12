@@ -495,6 +495,37 @@ fn pure_close_does_not_release_canonical_key_while_ask_in_flight() {
     toptopduck_lib::persistence::release(&canonical);
 }
 
+#[test]
+fn take_drop_signal_returns_none_on_second_take_concurrent_close_wait_defense() {
+    // ADR-0063: the drop-signal receiver is single-consumption. A second
+    // close-wait on the same id (a concurrent double-close, or a retry after
+    // the first detached the handle) finds the slot already empty.
+    // `take_drop_signal` returns `Ok(None)` (NOT `Err` -- the lock is
+    // healthy) so the command's `ok_or_else` surfaces the typed refusal.
+    // This pins the single-waiter guard so a regression to "second take
+    // re-arms a stale receiver" or "second take panics" is caught.
+    let store = SessionStore::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("session.duck");
+    let id = bound_session(&store, &duck);
+
+    let detached = store.detach(&id).expect("detach");
+    let first = detached
+        .take_drop_signal()
+        .expect("lock ok")
+        .expect("first take has the receiver");
+    // A second take on the SAME handle finds the slot empty (the receiver
+    // was moved out). This is the concurrent-close-wait defensive path.
+    let second = detached.take_drop_signal().expect("lock ok");
+    assert!(
+        second.is_none(),
+        "second take returns Ok(None) -- single-consumption guard"
+    );
+    // Cleanup: drop the first receiver so the channel closes cleanly.
+    drop(first);
+    drop(detached);
+}
+
 // --- concurrency model: store lock not held during a long turn (ADR-0056) ---
 
 #[test]

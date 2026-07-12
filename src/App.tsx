@@ -645,6 +645,14 @@ export default function App() {
           try {
             await closeSessionAndWaitRelease(sid);
           } catch (e) {
+            // Close-wait failed (timeout, or the backend already detached
+            // the session). Unmount the pane so the entry falls back to the
+            // cold sidebar (sid=null); a retry then takes the pure
+            // deleteSession(path) path -- if the canonical key is now free
+            // the gate succeeds, otherwise the user sees the real gate error.
+            // Without this, the pane stays mounted on a sid the backend no
+            // longer knows and every retry hits NotFound (dead loop).
+            unmountOpen(sid);
             setShellError(fmtError(e));
             return;
           }

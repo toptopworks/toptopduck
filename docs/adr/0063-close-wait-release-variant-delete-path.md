@@ -19,7 +19,7 @@
 
 ## Context
 
-PR #92（前端 close-in-flight + delete await closeOpen，commit `272127e`）把前端 `deletePersisted` 改为 `await closeOpen(sid)` 保证 close IPC 先于 delete IPC 发出。但后端 `close_session` 从 SessionStore map 移除 handle 即返回（ADR-0055），key 在 `Session::Drop` 释放（ADR-0035 Decision 3），Drop 只在最后一个 `Arc<SessionHandle>` drop 时发生；in-flight ask 在 spawn_blocking 里持 Arc clone 直到 post-check 发现 closing 后 discard。故 close resolve 时若 ask 在飞，key 尚未 release → `delete_session` 的 `try_acquire` gate 撞 → 误报「该会话已打开，请先关闭再删除」→ 前端 UI 条目已同步卸载 + `.duck` 实未删 + refreshSessions 后条目复现 —— 三态不一致。
+PR #92（前端 close-in-flight + delete await closeOpen）把前端 `deletePersisted` 改为 `await closeOpen(sid)` 保证 close IPC 先于 delete IPC 发出。但后端 `close_session` 从 SessionStore map 移除 handle 即返回（ADR-0055），key 在 `Session::Drop` 释放（ADR-0035 Decision 3），Drop 只在最后一个 `Arc<SessionHandle>` drop 时发生；in-flight ask 在 spawn_blocking 里持 Arc clone 直到 post-check 发现 closing 后 discard。故 close resolve 时若 ask 在飞，key 尚未 release → `delete_session` 的 `try_acquire` gate 撞 → 误报「该会话已打开，请先关闭再删除」→ 前端 UI 条目已同步卸载 + `.duck` 实未删 + refreshSessions 后条目复现 —— 三态不一致。
 
 三道重叠决策的交集缝隙：
 
@@ -47,8 +47,8 @@ PR #92（前端 close-in-flight + delete await closeOpen，commit `272127e`）�
 
 - **新增 close 等待变体 IPC**（ADR-0056 会话作用域命令族成员），delete 路径专用。
 - **前端 deletePersisted 改调等待变体**；closeOpen（Shell 纯关闭）仍调纯 close（fire-and-forget）。
-- **延伸 ADR-0055**：close 拆双变体；纯 close 的 fire-and-forget 语义不变。ADR-0055 待加反向指针。
-- **订正 ADR-0060**：「删打开会话先关闭」的「关闭」= 走等待变体（等 canonical key release），非同步假设。ADR-0060 待加反向指针。
+- **延伸 ADR-0055**：close 拆双变体；纯 close 的 fire-and-forget 语义不变。ADR-0055 已加反向指针。
+- **订正 ADR-0060**：「删打开会话先关闭」的「关闭」= 走等待变体（等 canonical key release），非同步假设。ADR-0060 已加反向指针。
 - **不改 ADR-0035**：single-writer key 在 `Session::Drop` 释放不变。
 - **依赖 ADR-0056**（后端 IPC 多会话寻址）：等待变体是 ADR-0056 会话作用域命令族成员，以 sessionId 寻址。
 - **留实现期**：等待信号具体实现（oneshot / Notify / JoinHandle）、超时上限精确值、多会话同时 delete 的串/并行收尾、`rename_persisted_session` 是否也需等待变体（同构 gate 问题，另议）。
