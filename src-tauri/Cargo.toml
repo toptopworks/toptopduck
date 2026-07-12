@@ -93,6 +93,16 @@ thiserror = "2"
 # resolve "system" identically to the webview's navigator.language in practice.
 sys-locale = "0.3"
 
+# Desktop-only Tauri plugins (issue #100, ADR-0008 cross-platform). Gated to
+# non-mobile targets to mirror lib.rs `#[cfg(desktop)]` -- these plugins have
+# no meaning (or no support) on Android/iOS. single-instance prevents a second
+# process from owning its own SessionStore (ADR-0056) and racing on the
+# app-config atomic write (ADR-0038); window-state persists the main window's
+# position/size/maximized across launches.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+
 [dev-dependencies]
 tempfile = "3"
 # Generates .xlsx fixtures (incl. formula cells with cached values) for the
