@@ -12,7 +12,15 @@
     "i18n:check": "node scripts/check-i18n.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "vitest run"
+    "test": "vitest run",
+    "rust:fmt": "cd src-tauri && cargo fmt",
+    "rust:fmt:check": "cd src-tauri && cargo fmt --check",
+    "rust:clippy": "cd src-tauri && cargo clippy --all-targets -- -D warnings",
+    "rust:test": "cd src-tauri && cargo test",
+    "check:all": "npm run build && npm run lint -- --max-warnings 0 && npm run i18n:check && npm test && npm run rust:fmt:check && npm run rust:clippy && npm run rust:test",
+    "fix:all": "npm run format && cd src-tauri && cargo fmt && cargo clippy --fix --allow-dirty",
+    "knip": "knip",
+    "jscpd": "jscpd"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.2",
@@ -43,7 +51,9 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.3",
     "globals": "^17.7.0",
+    "jscpd": "^5.0.0",
     "jsdom": "^29.0.0",
+    "knip": "^6.0.0",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.62.0",
     "vite": "^8.0.0",

@@ -1,0 +1,8 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": ["src/main.tsx", "vite.config.ts"],
+  "project": ["src/**/*.{ts,tsx}"],
+  "ignore": ["**/index.ts", "src/test-setup.ts"],
+  "ignoreDependencies": ["@tauri-apps/*", "@testing-library/*"],
+  "ignoreExportsUsedInFile": true
+}

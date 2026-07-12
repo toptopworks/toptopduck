@@ -94,3 +94,14 @@ mockito = "1"
 
 [profile.dev]
 incremental = true
+
+# Release binary optimization (issue #96): codegen-units=1 + lto trade build time
+# for smaller, better-optimized binaries; opt-level="s" favors size; strip drops
+# debug symbols. panic="abort" is intentionally NOT set here -- DuckDB is FFI and
+# Tauri command panics route through catch_unwind to IPC errors; abort would
+# promote a single-command panic to a full-process crash (deferred, separate PR).
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
