@@ -55,6 +55,15 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     // not hidden, not scary); this trace adds the component stack for dx and
     // Tauri users opening devtools, and gives a future telemetry hook a seat.
     log.error(`ErrorBoundary:${this.props.name}`, "render crash", error, info.componentStack);
+    // Observer of last resort: keep a console path that survives an IPC sink
+    // failure. log.error fire-and-forgets through plugin-log; if that IPC is
+    // dead -- the very failure mode that can accompany a render crash during
+    // webview/plugin init -- the record would be lost. In dev the wrapper's
+    // console mirror already covers this; in prod this is the safety net for
+    // anyone opening devtools on a crashed build.
+    if (import.meta.env.PROD) {
+      console.error(`[ErrorBoundary:${this.props.name}]`, error, info.componentStack);
+    }
   }
 
   retry = (): void => {
