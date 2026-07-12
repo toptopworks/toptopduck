@@ -25,7 +25,23 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all"
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "publisher": "toptopworks",
+    "category": "DeveloperTool",
+    "shortDescription": "Local-first AI data analysis desktop tool",
+    "longDescription": "Local-first AI data analysis desktop tool. Analyze CSV, Excel and Parquet files locally with DuckDB; no data leaves your machine.",
+    "copyright": "Copyright © 2026 toptopworks. All rights reserved.",
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "signingIdentity": "-"
+    }
   }
 }
