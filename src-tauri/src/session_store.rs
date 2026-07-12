@@ -214,6 +214,14 @@ pub struct SessionHandle {
     /// pre-resume session whose work `*s = new_session` would overwrite.
     /// Interior-mutable so it toggles through `&Arc<SessionHandle>`.
     resuming: AtomicBool,
+    /// ADR-0063: the receiver half of the close-and-wait-release drop signal.
+    /// The matching sender lives on the `Session`; its `Drop` fires it after
+    /// releasing the canonical key. The wait variant takes this out (consumed
+    /// once per close-wait) via [`Self::take_drop_signal`] before dropping its
+    /// handle clone, then blocks on `recv_timeout` until `Session::Drop` fires.
+    /// `Mutex` wraps the `!Sync` `mpsc::Receiver` so the handle stays `Sync`
+    /// (it lives behind an `Arc`).
+    drop_signal: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
 }
 
 impl SessionHandle {
@@ -282,6 +290,32 @@ impl SessionHandle {
     pub fn set_resuming(&self, value: bool) {
         self.resuming.store(value, Ordering::SeqCst);
     }
+
+    /// ADR-0063: take the drop-signal receiver out of the handle (consumed
+    /// once per close-and-wait-release). Returns `Ok(None)` if already taken
+    /// (a second close-wait on the same id -- the frontend calls once, so this
+    /// is a defensive guard), `Err` if the lock is poisoned.
+    pub fn take_drop_signal(&self) -> Result<Option<std::sync::mpsc::Receiver<()>>, SessionError> {
+        self.drop_signal
+            .lock()
+            .map(|mut g| g.take())
+            .map_err(|_| SessionError::Engine("drop signal lock poisoned".into()))
+    }
+
+    /// ADR-0063: install a fresh drop-signal receiver. Used by `open_duck` to
+    /// re-arm the signal on resume (the new session gets the matching sender via
+    /// [`crate::session::Session::set_drop_signal`]). See
+    /// [`SessionStore::create`] for the pair's initial construction.
+    pub fn set_drop_signal_rx(&self, rx: std::sync::mpsc::Receiver<()>) {
+        if let Ok(mut g) = self.drop_signal.lock() {
+            *g = Some(rx);
+        }
+        // A poisoned lock means a thread panicked while holding it; the rx
+        // is dropped here and the slot keeps its pre-call value (Some or
+        // None). A later close-wait surfaces the poison via take_drop_signal's
+        // Engine error rather than panicking here (Drop-adjacent code must
+        // not panic).
+    }
 }
 
 /// The multi-session map (ADR-0056). Managed once as Tauri state; every
@@ -323,11 +357,17 @@ impl SessionStore {
         let mut session = Session::with_provider_and_cancel(provider, Arc::clone(&cancel))
             .map_err(|e| SessionError::Engine(e.to_string()))?;
         session.set_closing_flag(closing.clone());
+        // ADR-0063: allocate the close-and-wait-release drop signal pair. The
+        // sender travels into the Session (fired from its Drop); the receiver
+        // stays on the handle for the wait variant to take.
+        let (drop_tx, drop_rx) = std::sync::mpsc::channel();
+        session.set_drop_signal(drop_tx);
         let handle = Arc::new(SessionHandle {
             session: Arc::new(Mutex::new(session)),
             cancel,
             closing,
             resuming: AtomicBool::new(false),
+            drop_signal: Mutex::new(Some(drop_rx)),
         });
         // Generate the id only after the resource exists; insert under the
         // write lock; return the id only after the insert lands.
@@ -365,34 +405,46 @@ impl SessionStore {
         map.get(session_id).cloned().ok_or(SessionError::NotFound)
     }
 
-    /// Close a session (ADR-0055): mark closing, fire cancel, and remove the
-    /// entry from the map. Returns immediately -- it does NOT wait for an
-    /// in-flight ask. Closing is set BEFORE the cancel fires and BEFORE the
-    /// map removal so every observable ordering is safe: an in-flight ask that
-    /// sees cancel (set after closing) is guaranteed to see closing at its
-    /// post-turn check and discard; a turn that finishes in the narrow window
-    /// before removal is discarded too (closing already set). New commands
-    /// after removal reject as unknown. The `Session` (DuckDB + canonical
-    /// writer key) drops when the last `Arc` is released -- immediately if no
-    /// ask is in flight, or when the in-flight ask's clone drops after its
-    /// post-check discard.
-    pub fn close(&self, session_id: &SessionId) -> Result<(), SessionError> {
+    /// Mark a session closing, fire cancel, and detach it from the map. Shared
+    /// core of [`Self::close`] (ADR-0055 fire-and-forget) and the
+    /// close-and-wait-release variant (ADR-0063, delete path). Closing is set
+    /// BEFORE the cancel fires and BEFORE the map removal so every observable
+    /// ordering is safe (an in-flight ask that sees cancel is guaranteed to see
+    /// closing at its post-turn check and discard). Returns the detached handle
+    /// so the wait variant can observe its Drop; the handle's `Arc` refcount
+    /// determines when `Session::Drop` (canonical key release) fires --
+    /// immediately if no ask is in flight, or when the in-flight ask's clone
+    /// drops after its post-check discard.
+    pub fn detach(&self, session_id: &SessionId) -> Result<Arc<SessionHandle>, SessionError> {
         // Read-lock the handle (still in the map) so closing/cancel reach the
         // in-flight ask before the entry is removed.
         let handle = self.get(session_id)?;
         handle.mark_closing();
         handle.fire_cancel();
         // Remove so subsequent lookups reject. `HashMap::remove` itself is
-        // idempotent, but `close` as a whole is NOT idempotent on a missing
-        // id: the `get` above returns NotFound before this line runs, so a
-        // second close of an already-closed id surfaces to the caller as
+        // idempotent, but close/detach as a whole is NOT idempotent on a
+        // missing id: the `get` above returns NotFound before this line runs,
+        // so a second close of an already-closed id surfaces to the caller as
         // NotFound (the frontend treats any close error on a tab it is
-        // discarding as success).
+        // discarding as success). The return of `remove` is intentionally
+        // ignored -- in the narrow race where two concurrent closes both pass
+        // `get` before either removes, the loser's `remove` yields None but
+        // both still succeed (preserving the original `close` semantics; the
+        // wait variant's `take_drop_signal` is the single-waiter guard).
         let mut map = self
             .sessions
             .write()
             .map_err(|_| SessionError::Engine("session store lock poisoned".into()))?;
         map.remove(session_id);
+        Ok(handle)
+    }
+
+    /// Close a session (ADR-0055): mark closing, fire cancel, and remove the
+    /// entry from the map. Returns immediately -- it does NOT wait for an
+    /// in-flight ask. Delegates to [`Self::detach`] and drops the returned
+    /// handle (the pure-close variant does not observe `Session::Drop`).
+    pub fn close(&self, session_id: &SessionId) -> Result<(), SessionError> {
+        self.detach(session_id)?;
         Ok(())
     }
 }

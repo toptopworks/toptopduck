@@ -13,6 +13,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tauri::{Emitter, State};
 
@@ -26,6 +27,13 @@ use crate::persistence::{list_session_metadata, SessionMetadata};
 use crate::provider::live_config::LiveProviderConfig;
 use crate::session::{ResumeEvent, ResumeProgress, Session};
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
+
+/// ADR-0063: the close-and-wait-release variant's wait ceiling. Aligned to
+/// ADR-0021's `REQUEST_TIMEOUT` (120s, the in-flight ask's longest possible
+/// tail -- an HTTP soft-cancel). On timeout, the delete path surfaces an error
+/// so the user can retry; the single-writer gate is NOT weakened (the canonical
+/// key stays the sole release point in `Session::Drop`).
+const CLOSE_WAIT_RELEASE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Reject a mutating command while THIS session is resuming (ADR-0053, made
 /// per-session by ADR-0056). `open_duck(session_id, ...)` rebuilds that one
@@ -103,6 +111,58 @@ pub fn close_session(
     let id = SessionId::parse(&session_id)?;
     store.close(&id)?;
     Ok(())
+}
+
+/// Close a session AND block until the canonical single-writer key is released
+/// (ADR-0063). The delete path's variant of close: `delete_session`'s
+/// `try_acquire` gate (ADR-0035) succeeds only once [`Session::Drop`] has run,
+/// so a delete that races an in-flight ask must wait for the ask's `Arc` clone
+/// to drop. The pure-close variant ([`close_session`]) stays fire-and-forget
+/// (ADR-0055) -- this command is the wait variant the delete path uses.
+///
+/// Resolves immediately when no ask is in flight (detach drops the last `Arc` ->
+/// `Session::Drop` fires before `recv_timeout` starts). Resolves when the
+/// in-flight ask's post-turn discard drops its clone. Times out at
+/// [`CLOSE_WAIT_RELEASE_TIMEOUT`] (120s) -> the caller surfaces an error so the
+/// user can retry; the single-writer gate is NOT bypassed.
+#[tauri::command]
+pub async fn close_session_and_wait_release(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+) -> Result<(), String> {
+    let id = SessionId::parse(&session_id)?;
+    // Detach: mark closing + fire cancel + remove from the map + return the
+    // handle. After this, no new commands can target the id (get -> NotFound).
+    let detached = store.detach(&id)?;
+    // Take the drop-signal receiver BEFORE releasing our handle clone so the
+    // channel stays open regardless of refcount changes. A None here means a
+    // second close-wait raced us -- the frontend calls once, so this is a
+    // defensive refusal.
+    let rx = detached
+        .take_drop_signal()?
+        .ok_or_else(|| "关闭会话冲突（并发关闭等待），请稍后重试".to_string())?;
+    // Drop our handle reference. If no in-flight ask holds a clone, this is the
+    // last Arc -> Session::Drop fires -> sender signals -> rx resolves at once.
+    // If an ask is in flight, the signal fires when the ask's clone drops after
+    // its post-turn discard (closing was set before cancel, so the discard is
+    // guaranteed).
+    drop(detached);
+    // Block on a worker thread (std mpsc::recv_timeout is blocking); the
+    // canonical key is released in Session::Drop on this same drop chain.
+    // Disconnected (without a prior Ok) means the sender was never armed -- a
+    // test Session outside any store -- treat as released (no key to wait on).
+    let waited = tauri::async_runtime::spawn_blocking(move || {
+        match rx.recv_timeout(CLOSE_WAIT_RELEASE_TIMEOUT) {
+            Ok(()) => Ok(()),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                Err("关闭会话超时（in-flight ask 未在 120s 内收尾），请稍后重试".to_string())
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(()),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    waited
 }
 
 /// Ingest a file into the named session. Runs the DuckDB copy-in off the
@@ -764,6 +824,22 @@ pub async fn open_duck(
         // token was already shared via cancel_token above. The flag is the
         // monotonic ClosingFlag, so this re-attach preserves once-closing.
         new_session.set_closing_flag(closing_flag);
+        // ADR-0063: re-arm the close-and-wait-release drop signal for the
+        // resumed session. Install a fresh (sender, receiver) pair: the sender
+        // goes into the NEW session (its Drop will fire it after the canonical
+        // key release), the receiver replaces the handle's stale slot. The OLD
+        // session's sender (still in the pre-swap Session) fires into a closed
+        // receiver once `*s = new_session` lands -- a harmless no-op. Ordering
+        // matters: install the new receiver on the handle BEFORE the swap so
+        // a concurrent close-wait never observes a None slot. close-wait does
+        // NOT call reject_if_resuming (close is terminal, not a mutating
+        // command -- the pure close variant does not either); the frontend's
+        // `busy` flag is the primary defense, and this ordering is the
+        // Rust-side backstop for races the frontend cannot see (a second
+        // window, an IPC replay).
+        let (drop_tx, drop_rx) = std::sync::mpsc::channel();
+        new_session.set_drop_signal(drop_tx);
+        handle_for_task.set_drop_signal_rx(drop_rx);
         let mut s = handle_for_task.session_lock()?;
         *s = new_session;
         Ok::<(), String>(())

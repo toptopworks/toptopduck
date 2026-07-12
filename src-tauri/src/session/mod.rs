@@ -416,6 +416,17 @@ pub struct Session {
     /// The auto-write is suspended while this is `Some` -- the engine never
     /// silently overwrites the externally-edited file.
     pending_conflict: Option<PendingConflict>,
+    /// ADR-0063: the sender half of the close-and-wait-release drop signal. The
+    /// matching receiver lives on the [`SessionHandle`](crate::session_store::SessionHandle);
+    /// the delete path awaits it after detaching the handle from the store map so
+    /// [`Self::Drop`] (the canonical key release point, ADR-0035 Decision 3) is
+    /// guaranteed to have run before `delete_session`'s single-writer gate fires.
+    /// Fired here in Drop -- AFTER the key release -- then the sender drops. `None`
+    /// for sessions built outside a store (tests, `new`); a store-attached session
+    /// has it set via [`Self::set_drop_signal`]. Single-waiter assumption (delete
+    /// path is the sole awaiter); a closed receiver (waiter timed out / gone) makes
+    /// `send` return Err, which Drop swallows (Drop must not panic).
+    drop_signal: Option<std::sync::mpsc::Sender<()>>,
 }
 
 impl Session {
@@ -491,6 +502,7 @@ impl Session {
             duck_canonical: None,
             last_written_hash: None,
             pending_conflict: None,
+            drop_signal: None,
         })
     }
 
@@ -512,6 +524,16 @@ impl Session {
     /// unset), so attaching it cannot weaken the once-closing invariant.
     pub fn set_closing_flag(&mut self, closing: ClosingFlag) {
         self.closing = closing;
+    }
+
+    /// Attach the close-and-wait-release drop signal (ADR-0063). The store
+    /// creates the `(sender, receiver)` pair, hands the sender here, and keeps
+    /// the receiver on the handle. On resume (`open_duck`), a FRESH pair is
+    /// installed on both ends so the resumed session's Drop reaches the handle's
+    /// current receiver (the old pair is orphaned -- the pre-replace session's
+    /// Drop fires the old sender into a closed receiver, a harmless no-op).
+    pub fn set_drop_signal(&mut self, tx: std::sync::mpsc::Sender<()>) {
+        self.drop_signal = Some(tx);
     }
 
     /// Whether `close_session` has marked this session closing (ADR-0055). Read
@@ -2105,6 +2127,18 @@ impl Drop for Session {
         // degraded mode a poison leaves behind.
         if let Some(canonical) = self.duck_canonical.take() {
             release(&canonical);
+        }
+        // ADR-0063: signal the close-and-wait-release awaiter (delete path) that
+        // the canonical key has been released -- fired AFTER the release above so
+        // the awaiter resolves precisely when the single-writer gate will succeed.
+        // Single-waiter (oneshot via std mpsc); a closed receiver (waiter gone or
+        // timed out) makes send return Err, which is swallowed here. `take()`
+        // moves the sender out so the field is `None` and the later struct
+        // field-drop is pure deallocation -- dropping an `mpsc::Sender` never
+        // calls `send` (send is a `&self` method), so there is no double-fire
+        // risk to guard against; `take` is ownership transfer, not a guard.
+        if let Some(tx) = self.drop_signal.take() {
+            let _ = tx.send(());
         }
     }
 }

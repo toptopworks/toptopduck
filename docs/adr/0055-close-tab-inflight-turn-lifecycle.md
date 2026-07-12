@@ -48,3 +48,4 @@ ADR-0051 写了关 tab 的**前端侧**（`removeQueries` + 卸载 `<SessionPane
 - **后端实现**：`close_session` 标 closing → in-flight ask post-check 发现 closing 跳过 materialize → DuckDB interrupt 释放后卸载 → 落 recipe（不含该 turn）。
 - **留实现期**：多个 tab 同时关闭的串行 / 并行收尾、closing 状态的并发安全细节、`setQueryData` 打空 cache 的无害化（TanStack Query 对已 remove 的 key setQueryData 默认 no-op，实现期验证）。
 - **被 ADR-0060 改写措辞**：「关 tab」→「关闭会话」（载体从顶栏 tabs → 左会话栏，0060），语义不变（隐含 cancel + 立即卸前端 + 后台丢弃 + recipe 不含 cancelled turn）；机制（fire cancel + removeQueries + 卸载）不变。见 ADR-0060。
+- **被 ADR-0063 延伸**：close 拆双变体——纯 close 的 fire-and-forget 语义不变（本 ADR 契约不退化），新增 delete 路径专用「等待 canonical key 释放」变体，闭合本 ADR 未讨论的 close 与 single-writer key 释放时序耦合。见 ADR-0063。

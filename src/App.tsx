@@ -14,6 +14,7 @@ import { catalogFor, coerceLocalePreference, useLocale } from "./i18n";
 import { useTheme } from "./theme/useTheme";
 import {
   closeSession,
+  closeSessionAndWaitRelease,
   createSession,
   deleteSession,
   fmtError,
@@ -581,61 +582,97 @@ export default function App() {
     [openSessions, queryClient, registerOpen],
   );
 
-  // Close an open session (ADR-0055/0060). The user's view must disappear with
-  // ZERO wait even when a turn is in-flight: drop the cache + open-set entry +
-  // active id SYNCHRONOUSLY so <SessionPane> unmounts at once, THEN fire
-  // closeSession in the background. closeSession (cancel + mark closing + drop
-  // the handle) returns immediately on the backend too -- it does NOT wait for
-  // an in-flight ask; the ask's post-turn check sees closing and discards (no
-  // thread append, no recipe entry). The orphan ask promise resolves against an
-  // absent cache (TanStack setQueryData on a removed key is a no-op) and the
-  // turn-progress listener cleanup runs in the pane's unmount effect. The .duck
-  // stays on disk and remains in the sidebar (re-openable). NOT delete.
-  const closeOpen = useCallback(
-    (sid: string): Promise<void> => {
+  // Synchronous UI teardown for an open session: drop the cache + open-set
+  // entry + active id. Shared by closeOpen (ADR-0055, runs BEFORE the
+  // background close fires) and deletePersisted (ADR-0063, runs AFTER the
+  // wait-release variant resolves). The active-id decision runs as a SEPARATE
+  // setState -- calling it inside a state updater violates React's purity
+  // contract (updaters may double-fire in StrictMode / concurrent mode,
+  // enqueueing the nested setter twice); `next` is computed inside the updater
+  // (the source of truth for the latest prev) and read out after.
+  const unmountOpen = useCallback(
+    (sid: string): void => {
       queryClient.removeQueries({ queryKey: ["session", sid] });
-      // Compute next inside the setOpenSessions updater (the source of truth
-      // for the latest prev), then run the active-id decision as a SEPARATE
-      // setState. Calling setActiveSessionId inside a state updater violates
-      // React's purity contract -- updaters may double-fire in StrictMode /
-      // concurrent mode, enqueueing the nested setter twice.
       let next: OpenSession[] = [];
       setOpenSessions((prev) => {
         next = prev.filter((s) => s.sid !== sid);
         return next;
       });
       setActiveSessionId((cur) => (cur === sid ? next[0]?.sid ?? null : cur));
-      // ADR-0055: the UI is already gone; cancel + mark closing only reaches
-      // backend bookkeeping. The promise is RETURNED, not awaited here -- the
-      // plain-close caller keeps fire-cancel-don't-wait (`void`), while
-      // deletePersisted awaits it so close is ordered BEFORE delete (delete
-      // rejects if the instance is still locked). Best-effort: NotFound is the
-      // expected idempotent path (already dropped); other failures log to
-      // devtools so IPC/panic stay observable. NOT a user toast -- pane is gone.
-      return closeSession(sid).catch((e) => {
-        console.warn("[closeSession] background close failed", fmtError(e));
-      });
     },
     [queryClient],
   );
 
-  // Delete a persisted .duck (ADR-0060, irreversible). Close first if it is
-  // open: the UI unmounts synchronously inside closeOpen, but we AWAIT its
-  // backend cancel so deleteSession does not race with close (delete rejects
-  // if the instance is still locked). Then remove the file + drop from
-  // recent_files. After delete, fall back to the cold hero if it was active.
+  // Close an open session (ADR-0055/0060). The user's view must disappear with
+  // ZERO wait even when a turn is in-flight: unmount the pane SYNCHRONOUSLY,
+  // THEN fire closeSession in the background. closeSession (cancel + mark
+  // closing + drop the handle) returns immediately on the backend too -- it
+  // does NOT wait for an in-flight ask; the ask's post-turn check sees closing
+  // and discards (no thread append, no recipe entry). The orphan ask promise
+  // resolves against an absent cache (TanStack setQueryData on a removed key
+  // is a no-op) and the turn-progress listener cleanup runs in the pane's
+  // unmount effect. The .duck stays on disk and remains in the sidebar
+  // (re-openable). NOT delete -- the delete path uses the wait-release variant
+  // (see deletePersisted), not this fire-and-forget close.
+  const closeOpen = useCallback(
+    (sid: string): Promise<void> => {
+      unmountOpen(sid);
+      // ADR-0055: the UI is already gone; cancel + mark closing only reaches
+      // backend bookkeeping. The promise is RETURNED, not awaited here --
+      // fire-cancel-don't-wait. Best-effort: NotFound is the expected idempotent
+      // path (already dropped); other failures log to devtools so IPC/panic
+      // stay observable. NOT a user toast -- pane is gone.
+      return closeSession(sid).catch((e) => {
+        console.warn("[closeSession] background close failed", fmtError(e));
+      });
+    },
+    [unmountOpen],
+  );
+
+  // Delete a persisted .duck (ADR-0060/0063, irreversible). If the session is
+  // open, close it via the WAIT-RELEASE variant: the UI pane STAYS mounted
+  // during the wait (delete is an explicit user intent -- it does NOT get
+  // close's zero-wait contract, ADR-0063 Decision 2), and only unmounts after
+  // the canonical single-writer key is released. This guarantees deleteSession's
+  // try_acquire gate sees the key free (no misleading "请先关闭" on an entry the
+  // user is already deleting). On wait timeout the entry survives so the user
+  // can retry. persistenceBusy gates the UI for the potentially long wait.
   const deletePersisted = useCallback(
     async (path: string, sid: string | null) => {
-      if (sid) await closeOpen(sid);
+      setPersistenceBusy(true);
       try {
-        await deleteSession(path);
-      } catch (e) {
-        setShellError(fmtError(e));
-        return;
+        if (sid) {
+          try {
+            await closeSessionAndWaitRelease(sid);
+          } catch (e) {
+            // Close-wait failed (timeout, or the backend already detached
+            // the session). Unmount the pane so the entry falls back to the
+            // cold sidebar (sid=null); a retry then takes the pure
+            // deleteSession(path) path -- if the canonical key is now free
+            // the gate succeeds, otherwise the user sees the real gate error.
+            // Without this, the pane stays mounted on a sid the backend no
+            // longer knows and every retry hits NotFound (dead loop).
+            unmountOpen(sid);
+            setShellError(fmtError(e));
+            return;
+          }
+          // The wait resolved -- canonical key is free, Session::Drop ran.
+          // NOW unmount the pane (ADR-0063: UI teardown after the wait, not
+          // before).
+          unmountOpen(sid);
+        }
+        try {
+          await deleteSession(path);
+        } catch (e) {
+          setShellError(fmtError(e));
+          return;
+        }
+        refreshSessions();
+      } finally {
+        setPersistenceBusy(false);
       }
-      refreshSessions();
     },
-    [closeOpen, refreshSessions],
+    [unmountOpen, refreshSessions],
   );
 
   // Rename a sidebar entry (ADR-0060, single entry point). An OPEN session
