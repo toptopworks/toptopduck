@@ -8,6 +8,26 @@ import {
 } from "./sidebarModel";
 import { DisclosureBanner } from "../components/DisclosureBanner";
 import type { SessionMetadata } from "../types";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { buttonVariants } from "@/components/ui/button-variants";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 
 // Group heading (ADR-0060 Chat-style Today/Yesterday/Previous-7-days/Older). Each branch is a
 // STATIC-literal <FormattedMessage> call site so @formatjs/cli extract resolves
@@ -267,7 +287,15 @@ function SidebarRow({
 
 // Strong-confirm delete dialog (ADR-0060, issue #81): deletion is irreversible,
 // so the dialog names the .duck explicitly and requires an explicit confirm.
-// Cancel is the safe escape and takes focus (autoFocus).
+// The shell is now a Radix AlertDialog (issue #105): role="alertdialog" +
+// focus-trap + scroll-lock come from the primitive. AlertDialog semantics
+// intentionally do NOT dismiss on ESC or overlay click -- the user must take an
+// explicit Cancel / Delete action, matching the prior hand-written overlay (no
+// overlay-click close). Cancel renders before Action so Radix auto-focuses it
+// (the safe escape), preserving the prior autoFocus behavior. The destructive
+// Action passes buttonVariants({ variant: "destructive" }); twMerge (in cn) lets
+// it override AlertDialogAction's built-in default variant, reusing the
+// destructive look without forking the copy-in component.
 function DeleteSessionDialog({
   name,
   path,
@@ -280,34 +308,47 @@ function DeleteSessionDialog({
   onConfirm: () => void;
 }) {
   return (
-    <div className="dialog-overlay" role="dialog" aria-modal="true">
-      <div className="dialog-card delete-session-dialog">
-        <h3>
-          <FormattedMessage id="session.delete.title" defaultMessage="Delete this session?" />
-        </h3>
-        <p>
-          <FormattedMessage
-            id="session.delete.body"
-            defaultMessage="“{name}” will be permanently deleted. This cannot be undone."
-            values={{ name }}
-          />
-        </p>
-        {path && <p className="muted session-delete-path">{path}</p>}
-        <div className="dialog-actions">
-          <button type="button" onClick={onCancel} autoFocus>
+    <AlertDialog defaultOpen>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            <FormattedMessage id="session.delete.title" defaultMessage="Delete this session?" />
+          </AlertDialogTitle>
+          <AlertDialogDescription>
+            <FormattedMessage
+              id="session.delete.body"
+              defaultMessage="“{name}” will be permanently deleted. This cannot be undone."
+              values={{ name }}
+            />
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        {path && <p className="text-muted-foreground text-xs break-all">{path}</p>}
+        <AlertDialogFooter>
+          <AlertDialogCancel onClick={onCancel}>
             <FormattedMessage id="session.delete.cancel" defaultMessage="Cancel" />
-          </button>
-          <button type="button" className="danger" onClick={onConfirm}>
+          </AlertDialogCancel>
+          <AlertDialogAction
+            className={buttonVariants({ variant: "destructive" })}
+            onClick={onConfirm}
+          >
             <FormattedMessage id="session.delete.confirm" defaultMessage="Delete permanently" />
-          </button>
-        </div>
-      </div>
-    </div>
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
 // Rename dialog (ADR-0060, single entry point). Pre-fills the current name (or
-// empty for a never-saved session); blank submit is refused (button disabled).
+// empty for a never-saved session); blank submit is refused (Save disabled).
+// The shell is now a Radix Dialog (issue #105): portal + focus-trap +
+// scroll-lock + ESC + overlay-click dismiss come from the primitive, replacing
+// the hand-written overlay div. showCloseButton={false} lets Radix auto-focus
+// the Input (preserving the prior input autoFocus); ESC / overlay-click route
+// to onCancel via onOpenChange. The Input + Label are copy-in primitives
+// (ADR-0050: standard surface uses shadcn primitives). aria-describedby={undefined}
+// opts out of a Description (the visible Label already names the field), which
+// also silences Radix's missing-description warning.
 function RenameSessionDialog({
   initialName,
   onCancel,
@@ -319,33 +360,43 @@ function RenameSessionDialog({
 }) {
   const [value, setValue] = useState(initialName);
   return (
-    <div className="dialog-overlay" role="dialog" aria-modal="true">
-      <form
-        className="dialog-card rename-session-dialog"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (value.trim()) onSubmit(value);
-        }}
-      >
-        <label className="muted">
-          <FormattedMessage id="session.rename.label" defaultMessage="Session name" />
-        </label>
-        <input
-          type="text"
-          className="rename-session-input"
-          value={value}
-          autoFocus
-          onChange={(e) => setValue(e.target.value)}
-        />
-        <div className="dialog-actions">
-          <button type="button" onClick={onCancel}>
-            <FormattedMessage id="session.rename.cancel" defaultMessage="Cancel" />
-          </button>
-          <button type="submit" disabled={!value.trim()}>
-            <FormattedMessage id="session.rename.save" defaultMessage="Save" />
-          </button>
-        </div>
-      </form>
-    </div>
+    <Dialog
+      open
+      onOpenChange={(o) => {
+        if (!o) onCancel();
+      }}
+    >
+      <DialogContent showCloseButton={false} aria-describedby={undefined}>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (value.trim()) onSubmit(value);
+          }}
+          className="grid gap-4"
+        >
+          <DialogTitle>
+            <FormattedMessage id="session.rename.title" defaultMessage="Rename session" />
+          </DialogTitle>
+          <div className="grid gap-2">
+            <Label htmlFor="rename-session-input">
+              <FormattedMessage id="session.rename.label" defaultMessage="Session name" />
+            </Label>
+            <Input
+              id="rename-session-input"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" type="button" onClick={onCancel}>
+              <FormattedMessage id="session.rename.cancel" defaultMessage="Cancel" />
+            </Button>
+            <Button type="submit" disabled={!value.trim()}>
+              <FormattedMessage id="session.rename.save" defaultMessage="Save" />
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }

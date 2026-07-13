@@ -33,6 +33,7 @@
   "session.rename.cancel": "Cancel",
   "session.rename.label": "Session name",
   "session.rename.save": "Save",
+  "session.rename.title": "Rename session",
   "settings.apiKeyHintHas": "A key is currently saved. Leave blank on save to keep it unchanged; you can click &quot;Clear key&quot; below.",
   "settings.apiKeyHintMissing": "No key configured yet — asking will return a \"not configured\" failure.",
   "settings.apiKeyLabel": "Anthropic API key:",

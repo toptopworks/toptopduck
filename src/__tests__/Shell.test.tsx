@@ -380,9 +380,9 @@ describe("App multi-session shell (issue #81 ACs)", () => {
 
     fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
     fireEvent.click(screen.getByRole("menuitem", { name: "重命名" }));
-    // Rename dialog: type a new name and save. The dialog input is class-scoped
-    // (the active session's question bar also exposes a textbox).
-    const input = document.querySelector(".rename-session-input") as HTMLInputElement;
+    // Rename dialog: the input is labelled "会话名" (Radix Label htmlFor),
+    // disambiguating it from the active session's question-bar textbox ("提问").
+    const input = screen.getByRole("textbox", { name: "会话名" });
     fireEvent.change(input, { target: { value: "季报" } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
