@@ -11,6 +11,7 @@ import { PrivacyControls } from "../components/PrivacyControls";
 import { QuestionBar } from "../components/QuestionBar";
 import { ResultView } from "../components/ResultView";
 import { Thread } from "../components/Thread";
+import { TooltipProvider } from "../components/ui/tooltip";
 import { VegaChart } from "../components/VegaChart";
 import { WorkingSetList } from "../components/WorkingSetList";
 import { readRows } from "../api";
@@ -40,11 +41,13 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 // Thread chrome routes through react-intl (ADR-0052). Renders the element inside
 // a zh-CN IntlProvider so the Chinese chrome assertions hold. Other component
-// tests keep the bare render (their chrome is still hardcoded).
+// tests keep the bare render (their chrome is still hardcoded). Wraps in
+// TooltipProvider too: the rail card truncation sites use Radix Tooltip
+// (ADR-0050/0054, issue #106), which needs the context App normally provides.
 function renderThread(ui: ReactElement) {
   return render(
     <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-      {ui}
+      <TooltipProvider>{ui}</TooltipProvider>
     </IntlProvider>,
   );
 }

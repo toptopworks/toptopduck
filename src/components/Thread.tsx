@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import {
   Ban,
@@ -11,6 +11,7 @@ import {
   TriangleAlert,
   type LucideIcon,
 } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type {
   DatasetDescriptor,
   SourceLifecycleEvent,
@@ -195,6 +196,33 @@ export function Thread({
   );
 }
 
+// Tail-ellipsis truncation (ADR-0054) hover-recovery layer (ADR-0050 Tooltip→
+// 卡片截断全文, issue #106). The truncated span is the Tooltip trigger; the
+// full text rides TooltipContent so a hover recovers what the fixed rail width
+// clipped. asChild keeps the trigger span a direct flex child (no wrapper node),
+// so the truncation layout in styles.css is undisturbed. Replaces the v0 native
+// title attribute (which carried the same full text but only as the browser's
+// slow, unstyled tooltip). max-w-xs caps the popover so a long question wraps
+// instead of stretching the rail-wide tooltip.
+function TruncatingTooltip({
+  text,
+  className,
+  children,
+}: {
+  text: string;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className={className}>{children}</span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-xs">{text}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 // A source lifecycle event rendered as a non-interactive timeline marker
 // (ADR-0040/0047): distinct species from a turn (no question, no outcome icon).
 // Added = Plus (a source entered the working set); Deleted = Trash2 (a source
@@ -216,7 +244,7 @@ function SourceMarker({
   return (
     <p className={`source-lifecycle ${event.kind.toLowerCase()}`}>
       <Icon className="source-icon" aria-hidden="true" />
-      <span className="source-text">
+      <TruncatingTooltip text={text} className="source-text">
         {text}
         {staleCount > 0 && (
           <span className="source-stale-count">
@@ -227,7 +255,7 @@ function SourceMarker({
             />
           </span>
         )}
-      </span>
+      </TruncatingTooltip>
     </p>
   );
 }
@@ -504,20 +532,18 @@ function TurnCard({
         </span>
         {/* The verbatim question is the identity handle (ADR-0039): single-line,
             tail-ellipsis truncation keeps the head (where identity concentrates)
-            visible at a fixed rail width (ADR-0054). The full text rides title. */}
-        <span className="turn-question" title={record.question}>
+            visible at a fixed rail width (ADR-0054). The full text rides the
+            Tooltip (ADR-0050, issue #106). */}
+        <TruncatingTooltip text={record.question} className="turn-question">
           {record.question}
-        </span>
+        </TruncatingTooltip>
         {mentionedDataset && (
-          <span
+          <TruncatingTooltip
+            text={`→${mentionedDataset.display_name}`}
             className="turn-active-chip"
-            title={intl.formatMessage(
-              { id: "thread.activeChip.title", defaultMessage: "Question names \"{name}\"" },
-              { name: mentionedDataset.display_name },
-            )}
           >
             →{mentionedDataset.display_name}
-          </span>
+          </TruncatingTooltip>
         )}
       </div>
       <TurnBody
