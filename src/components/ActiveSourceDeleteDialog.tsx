@@ -30,8 +30,10 @@ import {
 // ESC listener is gone. The candidate list keeps native radios (the issue scope
 // is the AlertDialog shell, not a form-control sweep; native radios keep
 // toBeChecked reliable in the tests). defaultOpen keeps this uncontrolled: the
-// parent mounts/unmounts via pendingActiveDelete, and AlertDialogAction/Cancel
-// own their close, so no onOpenChange double-routing is needed.
+// parent mounts/unmounts via pendingActiveDelete. AlertDialogCancel owns its
+// close (dismiss = cancel); AlertDialogAction preventDefault-defers close so
+// the parent's async remove decides unmount on success (a failure leaves it
+// open for retry), so no onOpenChange double-routing is needed.
 export function ActiveSourceDeleteDialog({
   target,
   candidates,
@@ -73,8 +75,15 @@ export function ActiveSourceDeleteDialog({
         <AlertDialogFooter>
           <AlertDialogCancel onClick={onCancel}>中止</AlertDialogCancel>
           <AlertDialogAction
-            onClick={() => {
-              if (selected) onConfirm(selected);
+            onClick={(e) => {
+              if (selected) {
+                // AlertDialogAction auto-closes on click (Radix
+                // composeEventHandlers). preventDefault defers close so the
+                // parent's async remove decides unmount -- a failure leaves
+                // the dialog open for retry (useSessionState contract).
+                e.preventDefault();
+                onConfirm(selected);
+              }
             }}
             disabled={!selected}
           >
