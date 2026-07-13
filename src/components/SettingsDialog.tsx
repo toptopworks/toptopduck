@@ -8,6 +8,18 @@ import {
   setApiKey,
 } from "../api";
 import type { AppConfig, EngineDefaults, LocalePreference, ProviderConfig, Theme } from "../types";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 
 // App-level settings (issue #53, ADR-0038): edits the app-config document
 // (theme, locale, engine defaults, endpoint baseURL/model) in one atomic write,
@@ -20,6 +32,14 @@ import type { AppConfig, EngineDefaults, LocalePreference, ProviderConfig, Theme
 // chrome translation. Every FormattedMessage carries an English defaultMessage
 // (the formatjs source-of-truth + dev fallback) so @formatjs/cli extract can
 // statically resolve the catalog key set for the CI alignment guard.
+//
+// The shell is now a Radix Dialog (issue #105): portal + focus-trap + scroll-
+// lock + ESC + overlay-click come from the primitive, replacing the hand-
+// written overlay div + window keydown listener. The form controls migrated to
+// shadcn copy-in primitives (Input / Label / RadioGroup / Button) per the issue;
+// every settings.* FormattedMessage id + defaultMessage is preserved verbatim so
+// the i18n catalogs stay aligned. The busy-guarded dismiss survives:
+// onEscapeKeyDown / onInteractOutside cancel the close mid-load/mid-save.
 export function SettingsDialog({
   appConfig,
   onCommitAppConfig,
@@ -72,17 +92,6 @@ export function SettingsDialog({
     };
   }, []);
 
-  // ESC closes (a11y); disabled during the initial load so a slow config read
-  // can't be interrupted before the fields are populated.
-  useEffect(() => {
-    if (loading || saving) return;
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [loading, saving, onClose]);
-
   async function save() {
     setSaving(true);
     setError(null);
@@ -128,33 +137,44 @@ export function SettingsDialog({
   const busy = loading || saving;
 
   return (
-    <div className="dialog-overlay">
-      <div
-        className="dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="settings-title"
+    <Dialog
+      open
+      onOpenChange={(o) => {
+        if (!o) onClose();
+      }}
+    >
+      <DialogContent
+        showCloseButton={false}
+        onEscapeKeyDown={(e) => {
+          if (busy) e.preventDefault();
+        }}
+        onInteractOutside={(e) => {
+          if (busy) e.preventDefault();
+        }}
+        className="max-h-[85vh] overflow-y-auto sm:max-w-xl"
       >
-        <h2 id="settings-title">
-          <FormattedMessage id="settings.title" defaultMessage="App Settings" />
-        </h2>
-        <p className="muted">
-          <FormattedMessage
-            id="settings.intro"
-            defaultMessage="Preferences and defaults live in the system app-data directory (orthogonal to the shareable .duck); the API key lives only in this machine's OS keychain, read by the Rust core — the frontend and page never hold it, and it is never written to app-config."
-          />
-        </p>
+        <DialogHeader>
+          <DialogTitle>
+            <FormattedMessage id="settings.title" defaultMessage="App Settings" />
+          </DialogTitle>
+          <DialogDescription>
+            <FormattedMessage
+              id="settings.intro"
+              defaultMessage="Preferences and defaults live in the system app-data directory (orthogonal to the shareable .duck); the API key lives only in this machine's OS keychain, read by the Rust core — the frontend and page never hold it, and it is never written to app-config."
+            />
+          </DialogDescription>
+        </DialogHeader>
 
         {loading ? (
-          <p className="muted">
+          <p className="text-muted-foreground">
             <FormattedMessage id="settings.reading" defaultMessage="Reading current config…" />
           </p>
         ) : (
-          <>
-            <section>
-              <label>
-                <FormattedMessage id="settings.apiKeyLabel" defaultMessage="Anthropic API key:" />{" "}
-                <input
+          <div className="grid gap-5">
+            <section className="grid gap-2">
+              <Label>
+                <FormattedMessage id="settings.apiKeyLabel" defaultMessage="Anthropic API key:" />
+                <Input
                   type="password"
                   value={apiKey}
                   onChange={(e) => setApiKeyField(e.target.value)}
@@ -172,8 +192,8 @@ export function SettingsDialog({
                   disabled={saving}
                   autoComplete="off"
                 />
-              </label>
-              <p className="muted">
+              </Label>
+              <p className="text-muted-foreground text-sm">
                 {hasKey ? (
                   <FormattedMessage
                     id="settings.apiKeyHintHas"
@@ -188,29 +208,29 @@ export function SettingsDialog({
               </p>
             </section>
 
-            <section>
-              <label>
+            <section className="grid gap-2">
+              <Label>
                 <FormattedMessage
                   id="settings.baseUrlLabel"
                   defaultMessage="Endpoint base URL (optional, Anthropic direct by default):"
-                />{" "}
-                <input
+                />
+                <Input
                   type="text"
                   value={provider.base_url}
                   onChange={(e) => setProvider({ ...provider, base_url: e.target.value })}
                   disabled={saving}
                 />
-              </label>
-              <label>
-                <FormattedMessage id="settings.modelLabel" defaultMessage="Model (Sonnet-class by default):" />{" "}
-                <input
+              </Label>
+              <Label>
+                <FormattedMessage id="settings.modelLabel" defaultMessage="Model (Sonnet-class by default):" />
+                <Input
                   type="text"
                   value={provider.model}
                   onChange={(e) => setProvider({ ...provider, model: e.target.value })}
                   disabled={saving}
                 />
-              </label>
-              <p className="muted">
+              </Label>
+              <p className="text-muted-foreground text-sm">
                 <FormattedMessage
                   id="settings.endpointHint"
                   defaultMessage="If you use a self-hosted Anthropic-protocol-compatible gateway, put it in base URL; the payload goes through that gateway, and its retention/training policy is your responsibility."
@@ -218,159 +238,159 @@ export function SettingsDialog({
               </p>
             </section>
 
-            <section>
-              <fieldset>
-                <legend>
-                  <FormattedMessage id="settings.theme.legend" defaultMessage="Theme" />
-                </legend>
+            <fieldset className="grid gap-2 border-0 p-0 m-0">
+              <legend className="text-sm font-medium">
+                <FormattedMessage id="settings.theme.legend" defaultMessage="Theme" />
+              </legend>
+              <RadioGroup
+                value={theme}
+                onValueChange={(v) => setTheme(v as Theme)}
+                disabled={saving}
+                className="gap-2"
+              >
                 {(["system", "light", "dark"] as const).map((t) => {
                   // Lucide glyphs: system=Monitor, light=Sun, dark=Moon (a
                   // theme-radio UX choice; not in ADR-0050's glyph table).
                   // Decorative -- the radio's accessible name is the text label.
                   const Icon = t === "system" ? Monitor : t === "light" ? Sun : Moon;
                   return (
-                    <label key={t}>
-                      <input
-                        type="radio"
-                        name="theme"
-                        checked={theme === t}
-                        onChange={() => setTheme(t)}
-                        disabled={saving}
-                      />
-                      <Icon size={16} aria-hidden />
-                      {t === "system" ? (
-                        <FormattedMessage id="settings.theme.system" defaultMessage="Follow system" />
-                      ) : t === "light" ? (
-                        <FormattedMessage id="settings.theme.light" defaultMessage="Light" />
-                      ) : (
-                        <FormattedMessage id="settings.theme.dark" defaultMessage="Dark" />
-                      )}
-                    </label>
+                    <div key={t} className="flex items-center gap-2">
+                      <RadioGroupItem id={`settings-theme-${t}`} value={t} />
+                      <Label htmlFor={`settings-theme-${t}`} className="font-normal">
+                        <Icon size={16} aria-hidden />
+                        {t === "system" ? (
+                          <FormattedMessage id="settings.theme.system" defaultMessage="Follow system" />
+                        ) : t === "light" ? (
+                          <FormattedMessage id="settings.theme.light" defaultMessage="Light" />
+                        ) : (
+                          <FormattedMessage id="settings.theme.dark" defaultMessage="Dark" />
+                        )}
+                      </Label>
+                    </div>
                   );
                 })}
-              </fieldset>
-            </section>
+              </RadioGroup>
+            </fieldset>
 
             {/* Locale radio (ADR-0052, issue #78). Three-state, mirrors the theme
                 toggle above -- system follows the OS language; zh-CN / en-US are
                 explicit overrides persisted to app-config (ADR-0038). */}
-            <section>
-              <fieldset>
-                <legend>
-                  <FormattedMessage id="settings.locale.legend" defaultMessage="Language" />
-                </legend>
+            <fieldset className="grid gap-2 border-0 p-0 m-0">
+              <legend className="text-sm font-medium">
+                <FormattedMessage id="settings.locale.legend" defaultMessage="Language" />
+              </legend>
+              <RadioGroup
+                value={locale}
+                onValueChange={(v) => setLocale(v as LocalePreference)}
+                disabled={saving}
+                className="gap-2"
+              >
                 {(["system", "zh-CN", "en-US"] as const).map((l) => (
-                  <label key={l}>
-                    <input
-                      type="radio"
-                      name="locale"
-                      checked={locale === l}
-                      onChange={() => setLocale(l)}
-                      disabled={saving}
-                    />
-                    {l === "system" ? (
-                      <FormattedMessage id="settings.locale.system" defaultMessage="Follow system" />
-                    ) : l === "zh-CN" ? (
-                      <FormattedMessage id="settings.locale.zhCN" defaultMessage="简体中文" />
-                    ) : (
-                      <FormattedMessage id="settings.locale.enUS" defaultMessage="English" />
-                    )}
-                  </label>
+                  <div key={l} className="flex items-center gap-2">
+                    <RadioGroupItem id={`settings-locale-${l}`} value={l} />
+                    <Label htmlFor={`settings-locale-${l}`} className="font-normal">
+                      {l === "system" ? (
+                        <FormattedMessage id="settings.locale.system" defaultMessage="Follow system" />
+                      ) : l === "zh-CN" ? (
+                        <FormattedMessage id="settings.locale.zhCN" defaultMessage="简体中文" />
+                      ) : (
+                        <FormattedMessage id="settings.locale.enUS" defaultMessage="English" />
+                      )}
+                    </Label>
+                  </div>
                 ))}
-              </fieldset>
-              <p className="muted">
+              </RadioGroup>
+              <p className="text-muted-foreground text-sm">
                 <FormattedMessage
                   id="settings.locale.hint"
                   defaultMessage="Switching the language only affects new turns going forward; past turns keep the language they were generated in (ADR-0039 verbatim principle)."
                 />
               </p>
-            </section>
+            </fieldset>
 
-            <section>
-              <fieldset>
-                <legend>
-                  <FormattedMessage id="settings.engine.legend" defaultMessage="Engine defaults (ADR-0005)" />
-                </legend>
-                <label>
-                  <FormattedMessage id="settings.engine.memoryLimit" defaultMessage="Memory limit:" />{" "}
-                  <input
-                    type="text"
-                    value={engine.memory_limit}
-                    onChange={(e) => setEngine({ ...engine, memory_limit: e.target.value })}
-                    disabled={saving}
-                    placeholder="512MB"
-                  />
-                </label>
-                <label>
-                  <FormattedMessage id="settings.engine.threads" defaultMessage="Threads:" />{" "}
-                  <input
-                    type="number"
-                    min={1}
-                    value={engine.threads}
-                    onChange={(e) =>
-                      setEngine({ ...engine, threads: Math.max(1, Number(e.target.value) || 1) })}
-                    disabled={saving}
-                  />
-                </label>
-                <label>
-                  <FormattedMessage id="settings.engine.rowCap" defaultMessage="Result row cap:" />{" "}
-                  <input
-                    type="number"
-                    min={1}
-                    value={engine.row_cap}
-                    onChange={(e) =>
-                      setEngine({ ...engine, row_cap: Math.max(1, Number(e.target.value) || 1) })}
-                    disabled={saving}
-                  />
-                </label>
-                <label>
-                  <FormattedMessage
-                    id="settings.engine.statementTimeout"
-                    defaultMessage="Statement timeout (ms):"
-                  />{" "}
-                  <input
-                    type="number"
-                    min={1}
-                    value={engine.statement_timeout_ms}
-                    onChange={(e) =>
-                      setEngine({
-                        ...engine,
-                        statement_timeout_ms: Math.max(1, Number(e.target.value) || 1),
-                      })}
-                    disabled={saving}
-                  />
-                </label>
-              </fieldset>
-              <p className="muted">
+            <section className="grid gap-2">
+              <span className="text-sm font-medium">
+                <FormattedMessage id="settings.engine.legend" defaultMessage="Engine defaults (ADR-0005)" />
+              </span>
+              <Label>
+                <FormattedMessage id="settings.engine.memoryLimit" defaultMessage="Memory limit:" />
+                <Input
+                  type="text"
+                  value={engine.memory_limit}
+                  onChange={(e) => setEngine({ ...engine, memory_limit: e.target.value })}
+                  disabled={saving}
+                  placeholder="512MB"
+                />
+              </Label>
+              <Label>
+                <FormattedMessage id="settings.engine.threads" defaultMessage="Threads:" />
+                <Input
+                  type="number"
+                  min={1}
+                  value={engine.threads}
+                  onChange={(e) =>
+                    setEngine({ ...engine, threads: Math.max(1, Number(e.target.value) || 1) })}
+                  disabled={saving}
+                />
+              </Label>
+              <Label>
+                <FormattedMessage id="settings.engine.rowCap" defaultMessage="Result row cap:" />
+                <Input
+                  type="number"
+                  min={1}
+                  value={engine.row_cap}
+                  onChange={(e) =>
+                    setEngine({ ...engine, row_cap: Math.max(1, Number(e.target.value) || 1) })}
+                  disabled={saving}
+                />
+              </Label>
+              <Label>
+                <FormattedMessage
+                  id="settings.engine.statementTimeout"
+                  defaultMessage="Statement timeout (ms):"
+                />
+                <Input
+                  type="number"
+                  min={1}
+                  value={engine.statement_timeout_ms}
+                  onChange={(e) =>
+                    setEngine({
+                      ...engine,
+                      statement_timeout_ms: Math.max(1, Number(e.target.value) || 1),
+                    })}
+                  disabled={saving}
+                />
+              </Label>
+              <p className="text-muted-foreground text-sm">
                 <FormattedMessage
                   id="settings.engine.hint"
                   defaultMessage="This slice persists and restores these values across restarts; applying them to the live DuckDB engine is a follow-up slice."
                 />
               </p>
             </section>
-          </>
+          </div>
         )}
 
-        {error && <p className="error">{error}</p>}
+        {error && <p className="text-destructive text-sm">{error}</p>}
 
-        <div className="dialog-actions">
-          <button onClick={onClose} disabled={busy}>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={busy}>
             <FormattedMessage id="settings.cancel" defaultMessage="Cancel" />
-          </button>
+          </Button>
           {hasKey && (
-            <button onClick={clearKey} disabled={busy}>
+            <Button variant="destructive" onClick={clearKey} disabled={busy}>
               <FormattedMessage id="settings.clearKey" defaultMessage="Clear key" />
-            </button>
+            </Button>
           )}
-          <button onClick={save} disabled={busy}>
+          <Button onClick={save} disabled={busy}>
             {saving ? (
               <FormattedMessage id="settings.saving" defaultMessage="Saving…" />
             ) : (
               <FormattedMessage id="settings.save" defaultMessage="Save" />
             )}
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

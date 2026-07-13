@@ -15,6 +15,12 @@
  * migration slices.
  */
 @import "tailwindcss";
+/* tw-animate-css (ADR-0049, issue #105): the animation utility layer shadcn
+ * copy-in components reference (data-[state=open]:animate-in / fade-in / zoom-in
+ * etc. for Dialog/AlertDialog enter+exit). Tailwind v4 successor to
+ * tailwindcss-animate; loaded before the token block so it composes with the
+ * @theme utilities below. */
+@import "tw-animate-css";
 
 /* Dark mode is class-based (ADR-0050: <html>.dark). The default `dark:`
  * variant keys off prefers-color-scheme; useTheme resolves the OS preference
