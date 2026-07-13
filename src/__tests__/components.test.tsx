@@ -9,7 +9,7 @@ import { DisclosureBanner } from "../components/DisclosureBanner";
 import { GuidedLoadDialog } from "../components/GuidedLoadDialog";
 import { PrivacyControls } from "../components/PrivacyControls";
 import { QuestionBar } from "../components/QuestionBar";
-import { ResultView } from "../components/ResultView";
+import { COLUMN_DISCLOSURE_THRESHOLD, ResultView, ROW_DISCLOSURE_THRESHOLD } from "../components/ResultView";
 import { Thread } from "../components/Thread";
 import { TooltipProvider } from "../components/ui/tooltip";
 import { VegaChart } from "../components/VegaChart";
@@ -165,11 +165,20 @@ describe("DisclosureBanner", () => {
     // The privacy disclosure migrated from a bespoke <aside role="note"> to a
     // shadcn Alert (default variant). role="note" overrides the Alert's
     // assertive "alert" default -- this is static reference info shown inside a
-    // collapsible <details>, not an announcement.
+    // collapsible <details>, not an announcement. getByRole asserts the a11y
+    // semantics (not a DOM-structure query), mirroring the viz-degradation test.
+    renderI18n(<DisclosureBanner />);
+    const alert = screen.getByRole("note");
+    expect(alert.getAttribute("data-slot")).toBe("alert");
+  });
+
+  it("resolves the <bold> rich-text tag to <strong> emphasis (ADR-0052, issue #108)", () => {
+    // Each privacy message carries <bold>...</bold> tags resolved via the
+    // values.bold renderer to <strong>. A regression that drops the renderer
+    // would leak the raw tag name or flatten the emphasis; getByText alone can't
+    // tell (it flattens text), so pin the <strong> count directly.
     const { container } = renderI18n(<DisclosureBanner />);
-    const alert = container.querySelector("[data-slot=\"alert\"]");
-    expect(alert).not.toBeNull();
-    expect(alert?.getAttribute("role")).toBe("note");
+    expect(container.querySelectorAll("strong").length).toBeGreaterThan(0);
   });
 });
 
@@ -747,6 +756,105 @@ describe("ResultView", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(screen.getByText("99")).toBeInTheDocument();
     expect(screen.queryByText("11")).not.toBeInTheDocument();
+  });
+
+  it("renders the large-result disclosure as a note Alert (ADR-0050/0057, issue #108)", async () => {
+    // ADR-0057: a result crossing the row threshold discloses honestly (not
+    // silent pagination). Migrated to a default info Alert (ADR-0050);
+    // role="note" is static reference, not announced. Pins the migration so a
+    // regression to the deleted .disclosure-banner class or a wrong variant is
+    // caught (columns stay small so many-columns stays off -> one note).
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "id", canonical_type: "BIGINT" }],
+      rows: [["1"]],
+      total: ROW_DISCLOSURE_THRESHOLD + 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    const alert = screen.getByRole("note");
+    expect(alert.getAttribute("data-slot")).toBe("alert");
+    expect(alert).toHaveTextContent(/此结果较大.*分页显示中/);
+  });
+
+  it("renders the many-column disclosure as a note Alert (ADR-0050/0057, issue #108)", async () => {
+    // ADR-0057: columns render in full with horizontal scroll (no cap); this
+    // banner tells the user to scroll. Same default info Alert + role="note" as
+    // the large-result hint. Columns just over the threshold keep it a single
+    // note (large-result stays off: total is 1).
+    const manyColumns = Array.from({ length: COLUMN_DISCLOSURE_THRESHOLD + 1 }, (_, i) => ({
+      name: `c${i}`,
+      canonical_type: "VARCHAR",
+    }));
+    vi.mocked(readRows).mockResolvedValue({
+      columns: manyColumns,
+      rows: [manyColumns.map(() => "x")],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    const alert = screen.getByRole("note");
+    expect(alert.getAttribute("data-slot")).toBe("alert");
+    expect(alert).toHaveTextContent(/可横向滚动查看全部/);
+  });
+
+  it("renders the stale-result disclosure as a warning status Alert (ADR-0050, issue #108)", async () => {
+    // ADR-0047 stage-stale: the result is no longer valid to build on (the
+    // invalidating source was replaced). Migrated to a warning Alert;
+    // role="status" is polite -- important, not an interrupting emergency. The
+    // verb splits via an ICU select on the anchor reason: Replaced -> 已更新.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "id", canonical_type: "BIGINT" }],
+      rows: [["1"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        assumption={null}
+        viz={null}
+        staleAnchor={{ reference_name: "people", display_name: "员工表", reason: "Replaced" as const }}
+      />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    const alert = screen.getByRole("status");
+    expect(alert.getAttribute("data-slot")).toBe("alert");
+    expect(alert).toHaveTextContent(/员工表/);
+    expect(alert).toHaveTextContent(/已更新/);
+  });
+
+  it("splits the stale verb by anchor reason: Deleted -> 已删除 (ADR-0041, issue #108)", async () => {
+    // The stale disclosure's ICU select has two branches: Replaced -> 已更新
+    // (new backing exists, re-ask recovers) and Deleted -> 已删除 (truly gone).
+    // The Replaced branch is covered above; this pins the Deleted / other branch
+    // so a regression that drops the other arm renders empty, and a future
+    // StaleReason kind still falls through honestly.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "id", canonical_type: "BIGINT" }],
+      rows: [["1"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        assumption={null}
+        viz={null}
+        staleAnchor={{ reference_name: "people", display_name: "员工表", reason: "Deleted" as const }}
+      />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    const alert = screen.getByRole("status");
+    expect(alert).toHaveTextContent(/已删除/);
+    expect(alert).not.toHaveTextContent(/已更新/);
   });
 });
 
