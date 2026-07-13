@@ -1148,8 +1148,9 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // The rail truncates the verbatim question at a fixed width with a TAIL
     // ellipsis (keeps the head -- the identity handle, ADR-0039). jsdom has no
     // layout so the rendered glyph is not assertable; the contract is that the
-    // full text rides a Radix Tooltip (ADR-0050 Tooltip→卡片截断全文) so a hover
-    // recovers it, replacing the v0 native title attribute.
+    // full text rides a Radix Tooltip (ADR-0050 maps Tooltip to card-truncation
+    // full-text recovery) so a hover recovers it, replacing the v0 native title
+    // attribute.
     const longQuestion = "前".repeat(120);
     state.thread = [
       {

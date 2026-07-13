@@ -4,9 +4,9 @@ import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 import { cn } from "@/lib/utils";
 
 // shadcn/ui v4 new-york copy-in (ADR-0049/0050, issue #106). The Tooltip is the
-// hover-recovery layer for tail-ellipsis card truncation (ADR-0050 Tooltip→
-// 卡片截断全文, ADR-0054 tail ellipsis): hovering a truncated span surfaces the
-// full text in TooltipContent. Token consumption is via var utilities
+// hover-recovery layer for tail-ellipsis card truncation (ADR-0050 maps Tooltip
+// to card-truncation full-text recovery, ADR-0054 tail ellipsis): hovering a
+// truncated span surfaces the full text in TooltipContent. Token consumption is via var utilities
 // (bg-primary / text-primary-foreground), so the tooltip rides the teal
 // --primary token and flips with the .dark class; enter/exit animations use
 // tw-animate-css utilities (loaded in app.css). Exports only components (no

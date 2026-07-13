@@ -1179,7 +1179,7 @@ describe("Thread", () => {
     expect(container.querySelector(`.turn-entry[data-outcome="cancelled"]`)).not.toBeNull();
   });
 
-  it("renders source markers as a distinct species with add/replace/delete glyphs + stale counts (issue #80)", () => {
+  it("renders source markers as a distinct species with add/replace/delete glyphs + stale counts (issue #80)", async () => {
     // The three source lifecycle kinds render as thin markers (data-source-kind)
     // distinct from turns; Replaced/Deleted disclose how many derivatives they
     // invalidated ("失效 N"), derived by matching reference_name + kind against
@@ -1214,9 +1214,24 @@ describe("Thread", () => {
     expect(screen.getByText(/加载了「员工表」/)).toBeInTheDocument();
     expect(screen.getByText(/失效 2/)).toBeInTheDocument();
     expect(screen.getByText(/失效 1/)).toBeInTheDocument();
+    // Hover recovery (ADR-0050, issue #106): a Replaced marker truncated by the
+    // fixed source-row width still discloses its name + stale count on hover. The
+    // tooltip text carries both the verbatim name and the "失效 N" suffix -- this
+    // is the PR's flagship fix (stale count in the source tooltip), so a regression
+    // to a name-only tooltip fails here. The native title is gone on every site.
+    const replacedSourceText = container.querySelector(
+      `.source-entry[data-source-kind="replaced"] .source-text`,
+    ) as HTMLElement;
+    expect(replacedSourceText.getAttribute("title")).toBeNull();
+    fireEvent.pointerMove(replacedSourceText);
+    await waitFor(() => {
+      const tip = screen.getByRole("tooltip");
+      expect(tip.textContent).toContain("员工表");
+      expect(tip.textContent).toContain("失效 2");
+    });
   });
 
-  it("shows the active chip only when the question explicitly names a dataset (issue #80, ADR-0047)", () => {
+  it("shows the active chip only when the question explicitly names a dataset (issue #80, ADR-0047)", async () => {
     // Most turns act implicitly on the prior step -> no chip; a question that
     // names a working-set dataset ("在订单表上...") lights up ->订单表. Matching
     // is on the display label first, then the reference name; stale datasets
@@ -1240,6 +1255,17 @@ describe("Thread", () => {
     // The naming turn gets a chip; the implicit one does not.
     expect(screen.getByText(/→订单表/)).toBeInTheDocument();
     expect(container.querySelectorAll(".turn-active-chip")).toHaveLength(1);
+    // Hover recovery (ADR-0050, issue #106): the chip's hover Tooltip carries the
+    // localized "提问点名「{name}」" label (ADR-0052), so the chip's meaning + full
+    // name survive the 8rem max-width truncation. Guards the native title -> Radix
+    // Tooltip migration: an orphaned i18n key, a lost {name} interpolation, or a
+    // fallback to the native title, fails here.
+    const chip = container.querySelector(".turn-active-chip") as HTMLElement;
+    expect(chip.getAttribute("title")).toBeNull();
+    fireEvent.pointerMove(chip);
+    await waitFor(() => {
+      expect(screen.getByRole("tooltip").textContent).toBe("提问点名「订单表」");
+    });
   });
 
   it("falls back to the reference name when the display name is absent from the question (issue #80)", () => {
