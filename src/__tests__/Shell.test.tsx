@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
 import type {
   DatasetDescriptor,
@@ -1178,5 +1178,39 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     await waitFor(() => {
       expect(screen.getByRole("tooltip").textContent).toBe(longQuestion);
     });
+  });
+});
+
+describe("App session soft-cap hint (ADR-0046/0050, issue #108)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("renders the soft-cap hint as a warning status Alert once open sessions hit the cap", async () => {
+    // ADR-0046: too many open sessions risk memory pressure. The hint migrated
+    // from a bespoke .topbar-softcap span to a warning Alert (ADR-0050);
+    // role="status" is polite. Opening >= SOFT_CAP_OPEN_SESSIONS (8) sessions
+    // lights it. within(topbar) scopes the role query: each open SessionPane's
+    // QuestionBar also carries a role="status" phase-indicator, so a global
+    // getByRole would match many; the soft-cap Alert is the only status inside
+    // the topbar.
+    let n = 0;
+    vi.mocked(createSession).mockImplementation(async () => `sess-${++n}`);
+    render(<App />);
+    for (let i = 0; i < 8; i++) {
+      fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
+      await waitFor(() =>
+        expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
+      );
+    }
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(8));
+    const topbar = document.querySelector(".topbar") as HTMLElement;
+    const alert = within(topbar).getByRole("status");
+    expect(alert.getAttribute("data-slot")).toBe("alert");
+    expect(alert).toHaveTextContent(/打开的会话较多/);
   });
 });

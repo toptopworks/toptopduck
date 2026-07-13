@@ -9,7 +9,7 @@ import { DisclosureBanner } from "../components/DisclosureBanner";
 import { GuidedLoadDialog } from "../components/GuidedLoadDialog";
 import { PrivacyControls } from "../components/PrivacyControls";
 import { QuestionBar } from "../components/QuestionBar";
-import { ResultView } from "../components/ResultView";
+import { COLUMN_DISCLOSURE_THRESHOLD, ResultView, ROW_DISCLOSURE_THRESHOLD } from "../components/ResultView";
 import { Thread } from "../components/Thread";
 import { TooltipProvider } from "../components/ui/tooltip";
 import { VegaChart } from "../components/VegaChart";
@@ -64,6 +64,23 @@ function renderQuestionBar(ui: ReactElement) {
       {ui}
     </IntlProvider>,
   );
+}
+
+// DisclosureBanner + ResultView route their disclosure chrome through react-intl
+// (ADR-0052, issue #108 -- the disclosure text moved to the catalog when the
+// bespoke <aside>/<p> banners became shadcn Alerts). withIntl wraps a node for
+// a rerender call (RTL's rerender replaces the whole tree, so it must re-provide
+// the provider); renderI18n is the render-time convenience. zh-CN keeps the
+// Chinese chrome assertions holding, mirroring renderThread/renderQuestionBar.
+function withIntl(ui: ReactElement) {
+  return (
+    <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+      {ui}
+    </IntlProvider>
+  );
+}
+function renderI18n(ui: ReactElement) {
+  return render(withIntl(ui));
 }
 
 const mockDataset: DatasetDescriptor = {
@@ -123,13 +140,13 @@ describe("QuestionBar (issue #28 single in-flight + cancel)", () => {
 
 describe("DisclosureBanner", () => {
   it("discloses the default-to-send payload and local-only guarantee", () => {
-    render(<DisclosureBanner />);
+    renderI18n(<DisclosureBanner />);
     expect(screen.getByText(/完整数据集永不离开本机/)).toBeInTheDocument();
     expect(screen.getByText(/首 3 行样本/)).toBeInTheDocument();
   });
 
   it("discloses Excel formula cells use cached snapshot values (issue #7 AC4)", () => {
-    const { container } = render(<DisclosureBanner />);
+    const { container } = renderI18n(<DisclosureBanner />);
     expect(container).toHaveTextContent(/Excel 工作簿按 sheet 分别加载为独立/);
     expect(container).toHaveTextContent(/隐藏的工作表会被跳过/);
     expect(container).toHaveTextContent(/公式单元格取加载时的缓存值（不重算）/);
@@ -139,9 +156,29 @@ describe("DisclosureBanner", () => {
   });
 
   it("discloses the per-dataset / per-column privacy control surface (issue #9)", () => {
-    const { container } = render(<DisclosureBanner />);
+    const { container } = renderI18n(<DisclosureBanner />);
     expect(container).toHaveTextContent(/按数据集关闭样本发送/);
     expect(container).toHaveTextContent(/按列标记「仅类型」/);
+  });
+
+  it("renders as a static note Alert (ADR-0050, issue #108)", () => {
+    // The privacy disclosure migrated from a bespoke <aside role="note"> to a
+    // shadcn Alert (default variant). role="note" overrides the Alert's
+    // assertive "alert" default -- this is static reference info shown inside a
+    // collapsible <details>, not an announcement. getByRole asserts the a11y
+    // semantics (not a DOM-structure query), mirroring the viz-degradation test.
+    renderI18n(<DisclosureBanner />);
+    const alert = screen.getByRole("note");
+    expect(alert.getAttribute("data-slot")).toBe("alert");
+  });
+
+  it("resolves the <bold> rich-text tag to <strong> emphasis (ADR-0052, issue #108)", () => {
+    // Each privacy message carries <bold>...</bold> tags resolved via the
+    // values.bold renderer to <strong>. A regression that drops the renderer
+    // would leak the raw tag name or flatten the emphasis; getByText alone can't
+    // tell (it flattens text), so pin the <strong> count directly.
+    const { container } = renderI18n(<DisclosureBanner />);
+    expect(container.querySelectorAll("strong").length).toBeGreaterThan(0);
   });
 });
 
@@ -606,7 +643,7 @@ describe("ResultView", () => {
       offset: 0,
       limit: 100,
     });
-    render(<ResultView sessionId="sess-1" referenceName="result_1" assumption="把 id 当作主键" viz={null} />);
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" assumption="把 id 当作主键" viz={null} />);
     await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 0, 100));
     expect(screen.getByText(/行数：1/)).toBeInTheDocument();
     expect(screen.getByText("n")).toBeInTheDocument(); // column header
@@ -624,7 +661,7 @@ describe("ResultView", () => {
       offset: 0,
       limit: 2,
     });
-    render(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} pageSize={2} />);
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} pageSize={2} />);
     await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 0, 2));
     expect(screen.getByText(/共 5 行/)).toBeInTheDocument(); // total disclosed
     fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
@@ -641,7 +678,7 @@ describe("ResultView", () => {
       offset: 0,
       limit: 100,
     });
-    render(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />);
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />);
     await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 0, 100));
     expect(screen.getByText(/行数：0/)).toBeInTheDocument();
     expect(screen.getByText(/（无数据行）/)).toBeInTheDocument();
@@ -670,7 +707,7 @@ describe("ResultView", () => {
         offset: 0,
         limit: 2,
       });
-    render(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} pageSize={2} />);
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} pageSize={2} />);
     await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 0, 2));
     fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
     await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 2, 2));
@@ -699,12 +736,12 @@ describe("ResultView", () => {
         limit: 100,
       });
     });
-    const { rerender } = render(
+    const { rerender } = renderI18n(
       <ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />,
     );
     // result_1's page-0 is still pending; switch to result_2 (resolves fast).
     rerender(
-      <ResultView sessionId="sess-1" referenceName="result_2" assumption={null} viz={null} />,
+      withIntl(<ResultView sessionId="sess-1" referenceName="result_2" assumption={null} viz={null} />),
     );
     await waitFor(() => expect(screen.getByText("99")).toBeInTheDocument());
     // Now result_1's stale page-0 lands -- it must be discarded, not rendered.
@@ -719,6 +756,105 @@ describe("ResultView", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(screen.getByText("99")).toBeInTheDocument();
     expect(screen.queryByText("11")).not.toBeInTheDocument();
+  });
+
+  it("renders the large-result disclosure as a note Alert (ADR-0050/0057, issue #108)", async () => {
+    // ADR-0057: a result crossing the row threshold discloses honestly (not
+    // silent pagination). Migrated to a default info Alert (ADR-0050);
+    // role="note" is static reference, not announced. Pins the migration so a
+    // regression to the deleted .disclosure-banner class or a wrong variant is
+    // caught (columns stay small so many-columns stays off -> one note).
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "id", canonical_type: "BIGINT" }],
+      rows: [["1"]],
+      total: ROW_DISCLOSURE_THRESHOLD + 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    const alert = screen.getByRole("note");
+    expect(alert.getAttribute("data-slot")).toBe("alert");
+    expect(alert).toHaveTextContent(/此结果较大.*分页显示中/);
+  });
+
+  it("renders the many-column disclosure as a note Alert (ADR-0050/0057, issue #108)", async () => {
+    // ADR-0057: columns render in full with horizontal scroll (no cap); this
+    // banner tells the user to scroll. Same default info Alert + role="note" as
+    // the large-result hint. Columns just over the threshold keep it a single
+    // note (large-result stays off: total is 1).
+    const manyColumns = Array.from({ length: COLUMN_DISCLOSURE_THRESHOLD + 1 }, (_, i) => ({
+      name: `c${i}`,
+      canonical_type: "VARCHAR",
+    }));
+    vi.mocked(readRows).mockResolvedValue({
+      columns: manyColumns,
+      rows: [manyColumns.map(() => "x")],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    const alert = screen.getByRole("note");
+    expect(alert.getAttribute("data-slot")).toBe("alert");
+    expect(alert).toHaveTextContent(/可横向滚动查看全部/);
+  });
+
+  it("renders the stale-result disclosure as a warning status Alert (ADR-0050, issue #108)", async () => {
+    // ADR-0047 stage-stale: the result is no longer valid to build on (the
+    // invalidating source was replaced). Migrated to a warning Alert;
+    // role="status" is polite -- important, not an interrupting emergency. The
+    // verb splits via an ICU select on the anchor reason: Replaced -> 已更新.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "id", canonical_type: "BIGINT" }],
+      rows: [["1"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        assumption={null}
+        viz={null}
+        staleAnchor={{ reference_name: "people", display_name: "员工表", reason: "Replaced" as const }}
+      />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    const alert = screen.getByRole("status");
+    expect(alert.getAttribute("data-slot")).toBe("alert");
+    expect(alert).toHaveTextContent(/员工表/);
+    expect(alert).toHaveTextContent(/已更新/);
+  });
+
+  it("splits the stale verb by anchor reason: Deleted -> 已删除 (ADR-0041, issue #108)", async () => {
+    // The stale disclosure's ICU select has two branches: Replaced -> 已更新
+    // (new backing exists, re-ask recovers) and Deleted -> 已删除 (truly gone).
+    // The Replaced branch is covered above; this pins the Deleted / other branch
+    // so a regression that drops the other arm renders empty, and a future
+    // StaleReason kind still falls through honestly.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "id", canonical_type: "BIGINT" }],
+      rows: [["1"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        assumption={null}
+        viz={null}
+        staleAnchor={{ reference_name: "people", display_name: "员工表", reason: "Deleted" as const }}
+      />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    const alert = screen.getByRole("status");
+    expect(alert).toHaveTextContent(/已删除/);
+    expect(alert).not.toHaveTextContent(/已更新/);
   });
 });
 
@@ -743,7 +879,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     // AC1 + ADR-0062 R4: a provider viz renders AND the table stays visible
     // below it (chart = answer, table = evidence); no degradation disclosure.
     vi.mocked(embed).mockResolvedValue(embedOk());
-    const { container } = render(
+    const { container } = renderI18n(
       <ResultView
         sessionId="sess-1"
         referenceName="result_1"
@@ -762,7 +898,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     // AC2/AC6: a malformed viz degrades to the table + an honest disclosure
     // (ADR-0033 -- silent degradation is a silent lie). Vega-Embed is never
     // called: decodeViz rejects before rendering.
-    const { container } = render(
+    const { container } = renderI18n(
       <ResultView
         sessionId="sess-1"
         referenceName="result_1"
@@ -780,7 +916,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
   it("degrades to the table with a disclosure for a non-whitelisted mark", async () => {
     // AC2/AC6: a spec that draws a chart v1 does not ship (a heatmap "rect")
     // degrades. Whitelist = bar/line/area/scatter/pie only.
-    render(
+    renderI18n(
       <ResultView
         sessionId="sess-1"
         referenceName="result_1"
@@ -798,7 +934,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     // AC5: a spec that decodes but fails to render degrades to the table with a
     // disclosure -- the underlying data is always shown, never lost.
     vi.mocked(embed).mockRejectedValue(new Error("vega render boom"));
-    render(
+    renderI18n(
       <ResultView
         sessionId="sess-1"
         referenceName="result_1"
@@ -816,7 +952,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
   it("renders a plain table with no disclosure when viz is null", async () => {
     // ADR-0033: a null viz is the default table turn -- NOT a degradation, so no
     // disclosure shows and Vega-Embed is never called.
-    render(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />);
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />);
     await waitFor(() => expect(readRows).toHaveBeenCalled());
     expect(embed).not.toHaveBeenCalled();
     expect(screen.queryByText(/图表无法渲染/)).not.toBeInTheDocument();
@@ -832,7 +968,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     vi.mocked(embed).mockResolvedValue(
       { finalize } as unknown as Awaited<ReturnType<typeof embed>>,
     );
-    const { unmount } = render(
+    const { unmount } = renderI18n(
       <ResultView
         sessionId="sess-1"
         referenceName="result_1"
@@ -845,6 +981,24 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     // finalize fires either synchronously in cleanup (if embed already resolved)
     // or on the resolved promise (if unmount raced it); waitFor covers both.
     await waitFor(() => expect(finalize).toHaveBeenCalledTimes(1));
+  });
+
+  it("renders the degradation as a warning status Alert (ADR-0050, issue #108)", async () => {
+    // The viz-degradation disclosure migrated to a warning Alert; role="status"
+    // is polite -- the table still shows, so it reads as a caution, not an
+    // interrupting emergency. Pins the disclosure surfaces move to Alert.
+    renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        assumption={null}
+        viz={{ kind: "bar", spec: "not-valid-json" }}
+      />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    const alert = screen.getByRole("status");
+    expect(alert.getAttribute("data-slot")).toBe("alert");
+    expect(alert).toHaveTextContent(/图表无法渲染，已显示表格/);
   });
 });
 
@@ -869,11 +1023,15 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
     await waitFor(() => expect(finalize).toHaveBeenCalledTimes(1));
   });
 
-  it("forwards a render failure via onError so the caller degrades", async () => {
+  it("forwards the render failure's message via onError so the caller degrades", async () => {
+    // ADR-0033: a Vega-Embed rejection routes to onError so ResultView degrades.
+    // The error's message is forwarded (not a bare "渲染出错") so the disclosure
+    // carries the actual cause; the full error is also log.warn'd for diagnostics
+    // (was silently discarded -- silent-failure finding on PR #115).
     vi.mocked(embed).mockRejectedValue(new Error("vega boom"));
     const onError = vi.fn();
     render(<VegaChart spec={barSpec} onError={onError} />);
-    await waitFor(() => expect(onError).toHaveBeenCalledWith("渲染出错"));
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("vega boom"));
   });
 
   it("finalizes the prior view when the spec changes (no leak across results)", async () => {

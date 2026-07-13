@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { FormattedMessage } from "react-intl";
 import { fmtError, readRows } from "../api";
 import { decodeViz } from "../viz";
+import { Alert, AlertDescription } from "./ui/alert";
 import { VegaChart } from "./VegaChart";
 import type { ColumnSchema, StaleAnchor, VizSpec } from "../types";
 
@@ -162,24 +164,48 @@ export function ResultView({
         // ADR-0047 stage-stale / ADR-0041 honest wording: the rows below are
         // real (they still load), but the result is no longer valid to build on
         // -- the invalidating source was removed/replaced. Rerun the question
-        // against the new source to recompute.
-        <p className="viz-disclosure stale-disclosure" role="note">
-          此结果已失效（因源「{staleAnchor.display_name}」
-          {staleAnchor.reason === "Replaced" ? "已更新" : "已删除"}）— 重新提问以基于新源重算。
-        </p>
+        // against the new source to recompute. A warning Alert (ADR-0050);
+        // role="status" is polite -- important, not an interrupting emergency.
+        // The verb splits honestly via an ICU select on the anchor reason.
+        <Alert variant="warning" role="status" className="my-2">
+          <AlertDescription>
+            <FormattedMessage
+              id="disclosure.result.stale"
+              defaultMessage="This result is stale (source {name} was {reason, select, Replaced {updated} other {deleted}}) — ask again to recompute against the new source."
+              values={{ name: staleAnchor.display_name, reason: staleAnchor.reason }}
+            />
+          </AlertDescription>
+        </Alert>
       )}
 
       {assumption && <p className="assumption">假设：{assumption}</p>}
 
       {showRowDisclosure && (
-        <p className="disclosure-banner" role="note">
-          此结果较大（{total} 行），分页显示中；想看特定部分可继续提问。
-        </p>
+        // ADR-0057 large-result disclosure: an honest banner (not silent
+        // pagination) when a result crosses the row threshold. Info Alert
+        // (ADR-0050); role="note" is static reference, not announced.
+        <Alert role="note" className="my-2">
+          <AlertDescription>
+            <FormattedMessage
+              id="disclosure.result.largeRows"
+              defaultMessage="This result is large ({count} rows) and is paginated; ask a follow-up to focus on part of it."
+              values={{ count: total }}
+            />
+          </AlertDescription>
+        </Alert>
       )}
       {showColumnDisclosure && (
-        <p className="disclosure-banner" role="note">
-          此结果含 {columns.length} 列，可横向滚动查看全部。
-        </p>
+        // ADR-0057 many-columns disclosure: columns render in full with
+        // horizontal scroll (no cap); this banner tells the user to scroll.
+        <Alert role="note" className="my-2">
+          <AlertDescription>
+            <FormattedMessage
+              id="disclosure.result.manyColumns"
+              defaultMessage="This result has {count} columns; scroll horizontally to see them all."
+              values={{ count: columns.length }}
+            />
+          </AlertDescription>
+        </Alert>
       )}
 
       {/*
@@ -191,9 +217,20 @@ export function ResultView({
         <VegaChart spec={decoded.spec} onError={setRenderError} />
       )}
       {degradedReason && (
-        <p className="viz-disclosure" role="note">
-          图表无法渲染，已显示表格。{degradedReason}
-        </p>
+        // ADR-0033: an emitted viz that failed to decode/render REPLACES the
+        // chart slot with this honest disclosure (not a fourth stacked item).
+        // Warning Alert (ADR-0050), role="status"; the table still shows, so it
+        // reads as a caution, not a fatal error. {reason} is the decode/render
+        // failure detail (sourced from decodeViz / Vega-Embed).
+        <Alert variant="warning" role="status" className="my-2">
+          <AlertDescription>
+            <FormattedMessage
+              id="disclosure.result.vizDegraded"
+              defaultMessage="The chart could not render; the table is shown instead. {reason}"
+              values={{ reason: degradedReason }}
+            />
+          </AlertDescription>
+        </Alert>
       )}
 
       {error && <p className="error">{error}</p>}
@@ -227,8 +264,8 @@ export function ResultView({
               <tr key={i}>
                 {row.map((cell, j) => {
                   const numeric = numericFlags[j] ?? false;
-                  // Server CASTs NULL to "" (ADR-0024). Render muted whitespace
-                  // rather than the literal "NULL" (ADR-0057 honest display).
+                  // NULL handling (ADR-0057): server CASTs NULL to "", rendered
+                  // as muted whitespace, never the literal "NULL" (honest display).
                   if (cell === "") {
                     return <td key={j} className="cell-null" />;
                   }
