@@ -1144,12 +1144,13 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     expect(createSession).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps the full verbatim question in title for head-preserving truncation (ADR-0054)", async () => {
+  it("recovers the full verbatim question via hover Tooltip (ADR-0050/0054, #106)", async () => {
     // The rail truncates the verbatim question at a fixed width with a TAIL
     // ellipsis (keeps the head -- the identity handle, ADR-0039). jsdom has no
     // layout so the rendered glyph is not assertable; the contract is that the
-    // full text rides the span's title so hover recovers it and the head stays
-    // visible in the truncated view.
+    // full text rides a Radix Tooltip (ADR-0050 maps Tooltip to card-truncation
+    // full-text recovery) so a hover recovers it, replacing the v0 native title
+    // attribute.
     const longQuestion = "前".repeat(120);
     state.thread = [
       {
@@ -1166,6 +1167,16 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
       expect(el).not.toBeNull();
       return el as HTMLElement;
     });
-    expect(q.getAttribute("title")).toBe(longQuestion);
+    // The native title is gone (replaced by the Radix Tooltip); moving the
+    // pointer over the truncated span opens the tooltip. Radix renders the
+    // content into a portal and also mirrors it once in a visually-hidden
+    // role="tooltip" node (the trigger's aria-describedby target, a single
+    // unmirrored text copy), so getByRole("tooltip") carries the full verbatim
+    // text exactly once.
+    expect(q.getAttribute("title")).toBeNull();
+    fireEvent.pointerMove(q);
+    await waitFor(() => {
+      expect(screen.getByRole("tooltip").textContent).toBe(longQuestion);
+    });
   });
 });

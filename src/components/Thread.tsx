@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import {
   Ban,
@@ -11,6 +11,7 @@ import {
   TriangleAlert,
   type LucideIcon,
 } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type {
   DatasetDescriptor,
   SourceLifecycleEvent,
@@ -195,6 +196,38 @@ export function Thread({
   );
 }
 
+// Tail-ellipsis truncation (ADR-0054) hover-recovery layer (ADR-0050 maps
+// Tooltip to card-truncation full-text recovery, issue #106). The truncated span
+// is the Tooltip trigger; the full text rides TooltipContent so a hover recovers
+// what the fixed rail width clipped. asChild keeps the trigger span a direct
+// flex child (no wrapper node), so the truncation layout in styles.css is
+// undisturbed. Replaces the v0 native title attribute (which carried the same
+// full text but only as the browser's slow, unstyled tooltip). max-w-xs caps the
+// popover so a long question wraps instead of stretching the rail-wide tooltip.
+// `text` is ReactNode so a source marker can append its i18n'd stale suffix
+// alongside the verbatim name. Keyboard recovery is a non-goal: the trigger span
+// carries no tabIndex, matching the v0 native title (which keyboard users could
+// not surface either); the verbatim text also lives in the persisted session for
+// non-pointer access.
+function TruncatingTooltip({
+  text,
+  className,
+  children,
+}: {
+  text: ReactNode;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className={className}>{children}</span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-xs">{text}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 // A source lifecycle event rendered as a non-interactive timeline marker
 // (ADR-0040/0047): distinct species from a turn (no question, no outcome icon).
 // Added = Plus (a source entered the working set); Deleted = Trash2 (a source
@@ -213,21 +246,28 @@ function SourceMarker({
 }) {
   const intl = useIntl();
   const { Icon, text } = sourceMarkerText(intl, event.kind, event.display_name);
+  // The stale suffix (ADR-0047 invalidation disclosure) is i18n'd (ADR-0052)
+  // and rides both the visible marker and the hover Tooltip, so a marker
+  // truncated by the fixed source-row width still discloses the count on hover.
+  // Declared once so the visible copy and the tooltip copy cannot drift apart.
+  const staleSuffix =
+    staleCount > 0 ? (
+      <FormattedMessage
+        id="thread.source.staleSuffix"
+        defaultMessage=" · invalidated {count}"
+        values={{ count: staleCount }}
+      />
+    ) : null;
   return (
     <p className={`source-lifecycle ${event.kind.toLowerCase()}`}>
       <Icon className="source-icon" aria-hidden="true" />
-      <span className="source-text">
+      <TruncatingTooltip
+        text={staleSuffix ? <>{text}{staleSuffix}</> : text}
+        className="source-text"
+      >
         {text}
-        {staleCount > 0 && (
-          <span className="source-stale-count">
-            <FormattedMessage
-              id="thread.source.staleSuffix"
-              defaultMessage=" · invalidated {count}"
-              values={{ count: staleCount }}
-            />
-          </span>
-        )}
-      </span>
+        {staleSuffix && <span className="source-stale-count">{staleSuffix}</span>}
+      </TruncatingTooltip>
     </p>
   );
 }
@@ -504,20 +544,33 @@ function TurnCard({
         </span>
         {/* The verbatim question is the identity handle (ADR-0039): single-line,
             tail-ellipsis truncation keeps the head (where identity concentrates)
-            visible at a fixed rail width (ADR-0054). The full text rides title. */}
-        <span className="turn-question" title={record.question}>
+            visible at a fixed rail width (ADR-0054). The full text rides the
+            Tooltip (ADR-0050, issue #106). */}
+        <TruncatingTooltip text={record.question} className="turn-question">
           {record.question}
-        </span>
+        </TruncatingTooltip>
+        {/* The active chip (ADR-0047) flags a turn that explicitly named a
+            dataset. Unlike the question/source tooltips (truncation recovery),
+            its hover carries a localized explanatory label -- the v0 native
+            title's "Question names {name}" -- so the chip's meaning survives
+            both truncation (max-width 8rem) and non-English locales (ADR-0052).
+            The full name rides the {name} placeholder, so the hover also
+            recovers a truncated chip verbatim. */}
         {mentionedDataset && (
-          <span
-            className="turn-active-chip"
-            title={intl.formatMessage(
-              { id: "thread.activeChip.title", defaultMessage: "Question names \"{name}\"" },
-              { name: mentionedDataset.display_name },
-            )}
-          >
-            →{mentionedDataset.display_name}
-          </span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="turn-active-chip">
+                →{mentionedDataset.display_name}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-xs">
+              <FormattedMessage
+                id="thread.activeChip.title"
+                defaultMessage={`Question names "{name}"`}
+                values={{ name: mentionedDataset.display_name }}
+              />
+            </TooltipContent>
+          </Tooltip>
         )}
       </div>
       <TurnBody
