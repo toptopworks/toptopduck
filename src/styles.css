@@ -181,34 +181,6 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 .sidebar-disclosure summary { cursor: pointer; color: var(--muted-foreground); padding: 0.3rem 0; }
 .sidebar-disclosure .disclosure { margin-top: 0.3rem; font-size: 0.78rem; }
 
-/* --- Modal dialogs (delete confirm, rename) ----------------------------- */
-.dialog-overlay {
-  position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center;
-  background: rgba(0,0,0,0.4);
-}
-.dialog-card {
-  width: min(420px, 90vw); background: var(--card); border: 1px solid var(--border);
-  border-radius: var(--radius-lg); padding: 1.2rem; box-shadow: 0 4px 20px rgba(0,0,0,0.2);
-}
-.dialog-card h3 { margin: 0 0 0.5rem; }
-.dialog-card p { margin: 0.25rem 0; line-height: 1.5; }
-.session-delete-path { font-size: 0.8rem; word-break: break-all; }
-.rename-session-input {
-  width: 100%; margin: 0.5rem 0; padding: 0.45rem;
-  border: 1px solid var(--border); border-radius: var(--radius); background: var(--background);
-  color: var(--foreground); font-size: 0.95rem;
-}
-.dialog-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.8rem; }
-.dialog-actions button {
-  padding: 0.4rem 1rem; cursor: pointer; font-size: 0.9rem;
-  border: 1px solid var(--border); background: var(--card); color: var(--foreground);
-  border-radius: var(--radius);
-}
-.dialog-actions button.danger {
-  border-color: var(--destructive); background: var(--destructive); color: var(--primary-foreground);
-}
-.dialog-actions button:disabled { opacity: 0.5; cursor: progress; }
-
 /* --- Row 1 (cols 2+): thin top bar (ADR-0060 ~40px) --------------------- */
 .topbar {
   grid-column: 2; grid-row: 1;

@@ -33,6 +33,7 @@
   "session.rename.cancel": "取消",
   "session.rename.label": "会话名",
   "session.rename.save": "保存",
+  "session.rename.title": "重命名会话",
   "settings.apiKeyHintHas": "当前已保存 key。留空保存即保持不变；可点击下方「清除 key」。",
   "settings.apiKeyHintMissing": "尚未配置 key——提问将返回「未配置」失败。",
   "settings.apiKeyLabel": "Anthropic API key：",

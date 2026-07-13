@@ -1,5 +1,15 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { DatasetDescriptor } from "../types";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 // Issue #39 / ADR-0035 confirm dialog: shown when the user removes the ACTIVE
 // source while OTHER sources remain. Removing the active source would silently
@@ -12,6 +22,18 @@ import type { DatasetDescriptor } from "../types";
 // case (the user already chose to delete; picking a continuation is the path of
 // least resistance, and they can re-pick any other). A Cancel is a no-op --
 // nothing crosses IPC and the working set stays put (AC3).
+//
+// The shell is now a Radix AlertDialog (issue #105): role="alertdialog" +
+// focus-trap + scroll-lock come from the primitive. AlertDialog semantics
+// (destructive confirm) intentionally do NOT dismiss on ESC or overlay click --
+// the user must take an explicit 中止 / 继续 action, so the hand-written window
+// ESC listener is gone. The candidate list keeps native radios (the issue scope
+// is the AlertDialog shell, not a form-control sweep; native radios keep
+// toBeChecked reliable in the tests). defaultOpen keeps this uncontrolled: the
+// parent mounts/unmounts via pendingActiveDelete. AlertDialogCancel owns its
+// close (dismiss = cancel); AlertDialogAction preventDefault-defers close so
+// the parent's async remove decides unmount on success (a failure leaves it
+// open for retry), so no onOpenChange double-routing is needed.
 export function ActiveSourceDeleteDialog({
   target,
   candidates,
@@ -25,27 +47,15 @@ export function ActiveSourceDeleteDialog({
 }) {
   const [selected, setSelected] = useState(candidates[0]?.reference_name ?? "");
 
-  // ESC = cancel (a11y, mirrors GuidedLoadDialog).
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onCancel();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
-
   return (
-    <div className="dialog-overlay">
-      <div
-        className="dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="active-delete-title"
-      >
-        <h2 id="active-delete-title">删除焦点源「{target.display_name}」</h2>
-        <p className="muted">
-          此源是当前焦点表。删除后请在剩余源中选一个继续分析（或中止，工作集保持不变）。
-        </p>
+    <AlertDialog defaultOpen>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>删除焦点源「{target.display_name}」</AlertDialogTitle>
+          <AlertDialogDescription>
+            此源是当前焦点表。删除后请在剩余源中选一个继续分析（或中止，工作集保持不变）。
+          </AlertDialogDescription>
+        </AlertDialogHeader>
         <ul className="dialog-list">
           {candidates.map((d) => (
             <li key={d.reference_name}>
@@ -62,21 +72,25 @@ export function ActiveSourceDeleteDialog({
             </li>
           ))}
         </ul>
-        <div className="dialog-actions">
-          <button type="button" onClick={onCancel}>
-            中止
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              if (selected) onConfirm(selected);
+        <AlertDialogFooter>
+          <AlertDialogCancel onClick={onCancel}>中止</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={(e) => {
+              if (selected) {
+                // AlertDialogAction auto-closes on click (Radix
+                // composeEventHandlers). preventDefault defers close so the
+                // parent's async remove decides unmount -- a failure leaves
+                // the dialog open for retry (useSessionState contract).
+                e.preventDefault();
+                onConfirm(selected);
+              }
             }}
             disabled={!selected}
           >
             继续
-          </button>
-        </div>
-      </div>
-    </div>
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }

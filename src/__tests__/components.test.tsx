@@ -1377,7 +1377,12 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
     expect(onConfirm).not.toHaveBeenCalled();
   });
 
-  it("Escape closes the dialog via cancel (a11y, mirrors GuidedLoadDialog)", () => {
+  it("Escape does not close the dialog (AlertDialog semantics, issue #105)", () => {
+    // Migrated to Radix AlertDialog: destructive-confirm semantics intentionally
+    // block ESC + overlay dismiss -- the user must take an explicit 中止 / 继续
+    // action. The hand-written window ESC listener is gone; ESC on the content
+    // is inert, so onCancel never fires (mirroring the original "no accidental
+    // dismiss" intent of the confirm, now enforced by the primitive).
     const onCancel = vi.fn();
     render(
       <ActiveSourceDeleteDialog
@@ -1387,7 +1392,7 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
         onCancel={onCancel}
       />,
     );
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(onCancel).toHaveBeenCalledOnce();
+    fireEvent.keyDown(screen.getByRole("alertdialog"), { key: "Escape" });
+    expect(onCancel).not.toHaveBeenCalled();
   });
 });
