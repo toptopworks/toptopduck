@@ -11,6 +11,7 @@ import {
   TriangleAlert,
   type LucideIcon,
 } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type {
   DatasetDescriptor,
@@ -434,7 +435,7 @@ function findStaleSourceIdx(
 // new backing; v1 just does not recompute); a Deleted source -> "Upstream
 // deleted" (the reference name is gone, truly unavailable). The wording split
 // signals whether the user could re-ask to recover the result. Distinct from
-// staleBadgeText (the working-set list's full sentence) -- the chip is a
+// staleRowText (the working-set list's full sentence) -- the chip is a
 // compact, clickable label.
 function staleChipVerb(intl: IntlShape, reason: StaleReason): string {
   switch (reason) {
@@ -472,30 +473,36 @@ function StaleChip({
 }) {
   const intl = useIntl();
   const verb = staleChipVerb(intl, reason);
+  // Badge secondary = muted-neutral (ADR-0050 stale semantic); asChild merges
+  // the variant onto the <button> so the chip stays a real focusable / clickable
+  // control with a disabled state. The stale-chip class now carries layout +
+  // the disabled dim only; the variant owns the color so the chip rides the
+  // --secondary token and flips with .dark.
   return (
-    <button
-      type="button"
-      className="stale-chip"
-      disabled={!hasJumpTarget}
-      aria-label={intl.formatMessage(
-        {
-          id: "thread.staleChip.aria",
-          defaultMessage: "Stale because {reason}, jump to the source event",
-        },
-        { reason: verb },
-      )}
-      title={
-        hasJumpTarget
-          ? undefined
-          : intl.formatMessage({
-              id: "thread.staleChip.noTarget",
-              defaultMessage: "Source event no longer in the timeline",
-            })
-      }
-      onClick={onJump}
-    >
-      {verb}
-    </button>
+    <Badge variant="secondary" asChild className="stale-chip">
+      <button
+        type="button"
+        disabled={!hasJumpTarget}
+        aria-label={intl.formatMessage(
+          {
+            id: "thread.staleChip.aria",
+            defaultMessage: "Stale because {reason}, jump to the source event",
+          },
+          { reason: verb },
+        )}
+        title={
+          hasJumpTarget
+            ? undefined
+            : intl.formatMessage({
+                id: "thread.staleChip.noTarget",
+                defaultMessage: "Source event no longer in the timeline",
+              })
+        }
+        onClick={onJump}
+      >
+        {verb}
+      </button>
+    </Badge>
   );
 }
 
@@ -559,9 +566,13 @@ function TurnCard({
         {mentionedDataset && (
           <Tooltip>
             <TooltipTrigger asChild>
-              <span className="turn-active-chip">
+              {/* Badge default = teal --primary (ADR-0050 active semantic); the
+                  turn-active-chip class now carries layout only (flex-shrink,
+                  8rem tail-ellipsis + the test selector), the variant owns the
+                  color so the chip recolors with .dark alongside the token. */}
+              <Badge variant="default" className="turn-active-chip">
                 →{mentionedDataset.display_name}
-              </span>
+              </Badge>
             </TooltipTrigger>
             <TooltipContent className="max-w-xs">
               <FormattedMessage

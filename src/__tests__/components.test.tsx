@@ -514,7 +514,9 @@ describe("WorkingSetList", () => {
   it("renders a stale badge whose verb follows the anchor reason (issue #41 AC4)", () => {
     // AC4: a stale result row carries a badge naming the invalidating source,
     // with "已删除" for a Deleted anchor and "已更新" for a Replaced anchor
-    // (single-sourced via staleBadgeText, shared with the Thread badge).
+    // (wording sourced from WorkingSetList's local staleRowText helper; Thread's
+    // chip uses its own i18n staleChipVerb, so the two surfaces no longer share
+    // a helper -- issue #107 retired staleBadge.ts when the badge became a Badge).
     const stale: DatasetDescriptor = {
       ...mockDataset,
       reference_name: "result_1",

@@ -274,9 +274,11 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 .workspace-tabs [role="tab"].active {
   color: var(--primary); border-bottom-color: var(--primary); font-weight: 600;
 }
+/* active-chip is now a Badge variant="default" (teal --primary, ADR-0050); this
+   class carries layout only -- pushing the chip to the row's right edge. The
+   variant owns color/bg/padding/radius so the chip rides the token system. */
 .active-chip {
-  margin-left: auto; font-size: 0.8rem; color: var(--accent-foreground);
-  background: var(--accent); padding: 0.2rem 0.5rem; border-radius: var(--radius);
+  margin-left: auto;
 }
 .workspace-body { flex: 1; overflow-y: auto; padding: 1rem; }
 .workspace-hero { display: flex; flex-direction: column; align-items: center; gap: 1rem; padding: 2rem; text-align: center; }
@@ -423,11 +425,13 @@ table.result td.cell-null { background: var(--muted); }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-size: 0.88rem; color: var(--foreground);
 }
-/* Conditional active chip (ADR-0047): only when the question named a dataset. */
+/* Conditional active chip (ADR-0047): only when the question named a dataset.
+   Now a Badge variant="default" (teal --primary, ADR-0050); this class carries
+   layout only -- flex-shrink keeps it from squeezing the question, and the 8rem
+   tail-ellipsis (ADR-0054) drives the hover-Tooltip truncation recovery (#106).
+   The variant owns color/bg/padding/radius. */
 .thread .turn-active-chip {
-  flex-shrink: 0; font-size: 0.74rem;
-  color: var(--accent-foreground); background: var(--accent);
-  padding: 0.05rem 0.4rem; border-radius: var(--radius);
+  flex-shrink: 0;
   max-width: 8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
@@ -440,19 +444,20 @@ table.result td.cell-null { background: var(--muted); }
 .thread .result-link:hover { background: var(--accent); }
 .thread .result-link.active { font-weight: 600; border-color: var(--primary); }
 .thread .result-link.stale { color: var(--muted-foreground); border-style: dashed; }
-/* Stale causal chip (ADR-0041/0047): clickable, jumps to the source marker. */
+/* Stale causal chip (ADR-0041/0047): clickable, jumps to the source marker.
+   Now a Badge variant="secondary" (muted-neutral --secondary, ADR-0050 stale
+   semantic) wrapping a <button> via asChild. This class carries layout + the
+   disabled dim only; the variant owns color/bg/border. `all: unset` is retired --
+   the Badge variant classes override the native button chrome the same way
+   Button.tsx does. The Badge variant's hover tint is `[a&]:hover`-gated (anchor-
+   only, shadcn default), so the interactive <button> needs its own hover signal
+   -- a muted bg lift (ADR-0050 stale = muted) gated on :not(:disabled) so the
+   inert chip never promises a hover it cannot perform. */
 .thread .stale-chip {
-  all: unset; cursor: pointer; display: inline-block;
-  font-size: 0.74rem; margin-left: 0.3rem; padding: 0.05rem 0.4rem;
-  border-radius: var(--radius); border: 1px dashed var(--muted-foreground);
-  color: var(--muted-foreground);
+  margin-left: 0.3rem; cursor: pointer;
 }
-.thread .stale-chip:hover { background: var(--muted); color: var(--foreground); }
-/* A disabled stale chip (no matching source event follows, ADR-0047): `all: unset`
-   strips the browser's native disabled dimming, so dim explicitly and suppress the
-   hover tint so it reads as inert, not clickable. */
+.thread .stale-chip:not(:disabled):hover { background: var(--muted); }
 .thread .stale-chip:disabled { cursor: not-allowed; opacity: 0.55; }
-.thread .stale-chip:disabled:hover { background: transparent; color: var(--muted-foreground); }
 .thread .turn-outcome.textual .textual-kind {
   display: inline-block; margin-right: 0.3rem; color: var(--muted-foreground);
 }
