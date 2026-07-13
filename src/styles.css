@@ -2,11 +2,12 @@
  * app.css (ADR-0049/0050) via var(--…), so this scaffold flips with the .dark
  * class set by useTheme. These rules are replaced component-by-component as the
  * Chat-style shell lands in later slices. The disclosure banners (privacy /
- * stale / viz-degradation / soft-cap) moved to shadcn Alert variants in issue
- * #108 -- their bespoke blue/amber tints retired (the amber became the --warning
- * token in app.css; the info ones collapsed to Alert's bg-card default). The
- * .persist-warning / .resume-progress / .topbar-softcap tints below are still
- * bespoke (no owner migrated yet) and retire with their components. */
+ * stale / viz-degradation / large-result / many-columns / session-count
+ * soft-cap) moved to shadcn Alert variants in issue #108 -- their bespoke
+ * blue/amber tints retired (the amber became the --warning token in app.css;
+ * the info ones collapsed to Alert's bg-card default). The .persist-warning /
+ * .resume-progress tints below are still bespoke (no owner migrated yet) and
+ * retire with their components. */
 * { box-sizing: border-box; }
 main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
 header h1 { margin: 0 0 0.5rem; }
@@ -201,11 +202,6 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
   font-weight: 600; font-size: 0.95rem;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.topbar-softcap {
-  font-size: 0.78rem; padding: 0.15rem 0.5rem;
-  background: #fff4e5; border: 1px solid #ffd9a0; border-radius: var(--radius); color: #8a5200;
-}
-
 /* --- Row 2: resume progress strip (ADR-0034; absent unless resume runs) -- */
 .shell > .resume-progress { grid-column: 2; grid-row: 2; margin: 0; border-radius: 0; }
 .shell > .shell-error { grid-column: 2; grid-row: 2; margin: 0.4rem 1rem; }

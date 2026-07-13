@@ -9,6 +9,7 @@ import { SessionSidebar } from "./session/SessionSidebar";
 import { DisclosureBanner } from "./components/DisclosureBanner";
 import { DegradeCard, ErrorBoundary } from "./components/ErrorBoundary";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { Alert } from "./components/ui/alert";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { log } from "./lib/log";
 import { createQueryClient } from "./lib/queryClient";
@@ -829,12 +830,25 @@ export default function App() {
                   )}
                 </span>
                 {atSoftCap && (
-                  <span className="topbar-softcap" role="status">
+                  // Session-count soft-cap hint (ADR-0046): too many open
+                  // sessions risk memory pressure. A warning Alert (ADR-0050,
+                  // issue #108) -- role="status" is polite, matching the
+                  // stale/viz-degradation warnings in ResultView. The topbar is
+                  // a compact flex row, so className shrinks the Alert's default
+                  // w-full block chrome to an inline chip (cn tailwind-merge
+                  // reshapes the base, cf. DisclosureBanner's AlertDescription
+                  // override); the variant still supplies the --warning token so
+                  // this recolors with .dark like every other warning surface.
+                  <Alert
+                    variant="warning"
+                    role="status"
+                    className="w-auto inline-flex items-center gap-1.5 px-2 py-0.5 text-xs"
+                  >
                     <FormattedMessage
                       id="header.softCap"
                       defaultMessage="Many sessions open — close some to free memory."
                     />
-                  </span>
+                  </Alert>
                 )}
                 <HeaderActions
                   disabled={busy || !activeSession}

@@ -8,14 +8,16 @@ import { cva } from "class-variance-authority";
 //
 // The variants ride the app.css token system via var-based utilities, so an
 // alert recolors with the .dark class. ADR-0050 maps Alert to the disclosure
-// surfaces: stale result / viz degradation (ADR-0033) / soft-cap hints
-// (ADR-0057) + the privacy disclosure (issue #108):
+// surfaces: stale result / viz degradation (ADR-0033) / large-result &
+// many-columns hints (ADR-0057) / session-count soft-cap (ADR-0046) + the
+// privacy disclosure (issue #108):
 // - default (bg-card, the shadcn info surface) carries the informational
-//   disclosures (privacy, large-result / many-columns soft-cap);
+//   disclosures (privacy, ADR-0057 large-result / many-columns hints);
 // - warning (text-/bg-/border-warning, amber) carries the cautionary
-//   disclosures (a stale result, a viz that failed to render) -- the bespoke
-//   amber tint the legacy styles.css owned is promoted to a --warning token so
-//   the variant consumes a token rather than a hardcoded hex;
+//   disclosures (a stale result, a viz that failed to render, the ADR-0046
+//   session-count soft-cap) -- the bespoke amber tint the legacy styles.css
+//   owned is promoted to a --warning token so the variant consumes a token
+//   rather than a hardcoded hex;
 // - destructive is the standard shadcn destructive variant, reserved for a
 //   future destructive disclosure surface (parallels Badge's reserved slot).
 
