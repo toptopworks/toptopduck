@@ -1,6 +1,33 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import type { DatasetDescriptor } from "../types";
-import { staleBadgeText } from "../staleBadge";
+import { Badge } from "./ui/badge";
+import type { DatasetDescriptor, StaleAnchor, StaleReason } from "../types";
+
+// The verb for a stale row, parameterized by why the result went stale (issue
+// #41 AC4): a Deleted upstream source -> "已删除"; a Replaced source (re-uploaded
+// under the same reference name, ADR-0025) -> "已更新". Exhaustive switch mirrors
+// the Rust `match` so a future StaleReason variant forces a branch here.
+// Inlined from the former staleBadge.ts (issue #107): the text helper had this
+// single consumer once Thread grew its own i18n staleChipVerb, so the module was
+// retired in favor of Badge-driven rendering with the wording kept local.
+function staleRowVerb(reason: StaleReason): string {
+  switch (reason) {
+    case "Deleted":
+      return "已删除";
+    case "Replaced":
+      return "已更新";
+    default: {
+      const unhandled: never = reason;
+      throw new Error(`unhandled stale reason: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+// Full stale-row text naming the source that invalidated the result. The reason
+// distinguishes "因源已删除而失效" (source removed, issue #40) from "因源已更新
+// 而失效" (source re-uploaded, issue #41 ADR-0025).
+function staleRowText(anchor: StaleAnchor): string {
+  return `因「${anchor.display_name}」${staleRowVerb(anchor.reason)}而失效`;
+}
 
 export function WorkingSetList({
   datasets,
@@ -96,7 +123,9 @@ export function WorkingSetList({
             <small> {d.row_count} 行</small>
           </button>
           {d.stale && (
-            <span className="stale-badge">{staleBadgeText(d.stale)}</span>
+            <Badge variant="secondary" className="stale-badge">
+              {staleRowText(d.stale)}
+            </Badge>
           )}
           <button
             type="button"

@@ -9,6 +9,7 @@ import { GuidedLoadDialog } from "../components/GuidedLoadDialog";
 import { QuestionBar } from "../components/QuestionBar";
 import { ResultView } from "../components/ResultView";
 import { Thread } from "../components/Thread";
+import { Badge } from "../components/ui/badge";
 import { WorkingSetList } from "../components/WorkingSetList";
 import type {
   DatasetDescriptor,
@@ -126,9 +127,9 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
                 user sees what the next question targets by default. Naming it
                 here, not in QuestionBar, keeps QuestionBar presentational. */}
           {s.activeName && (
-            <span className="active-chip" title="下一个提问默认作用于此表">
+            <Badge variant="default" className="active-chip" title="下一个提问默认作用于此表">
               作用于 {s.datasets.find((d) => d.reference_name === s.activeName)?.display_name ?? s.activeName}
-            </span>
+            </Badge>
           )}
         </div>
 
