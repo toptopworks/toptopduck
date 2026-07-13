@@ -1023,11 +1023,15 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
     await waitFor(() => expect(finalize).toHaveBeenCalledTimes(1));
   });
 
-  it("forwards a render failure via onError so the caller degrades", async () => {
+  it("forwards the render failure's message via onError so the caller degrades", async () => {
+    // ADR-0033: a Vega-Embed rejection routes to onError so ResultView degrades.
+    // The error's message is forwarded (not a bare "渲染出错") so the disclosure
+    // carries the actual cause; the full error is also log.warn'd for diagnostics
+    // (was silently discarded -- silent-failure finding on PR #115).
     vi.mocked(embed).mockRejectedValue(new Error("vega boom"));
     const onError = vi.fn();
     render(<VegaChart spec={barSpec} onError={onError} />);
-    await waitFor(() => expect(onError).toHaveBeenCalledWith("渲染出错"));
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("vega boom"));
   });
 
   it("finalizes the prior view when the spec changes (no leak across results)", async () => {

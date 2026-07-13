@@ -1,6 +1,8 @@
 import { useEffect, useRef } from "react";
 import embed, { type VisualizationSpec } from "vega-embed";
 import type { Result } from "vega-embed";
+
+import { log } from "../lib/log";
 import {
   buildVegaTheme,
   onThemeChange,
@@ -95,8 +97,14 @@ export function VegaChart({ spec, onError }: VegaChartProps) {
         viewRef.current?.finalize();
         viewRef.current = result;
       })
-      .catch(() => {
-        if (!cancelled) onErrorRef.current("渲染出错");
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        // Log the full error for diagnostics (ADR-0029): a bare "渲染出错"
+        // discarded the cause, leaving ops unable to tell a bad spec from a
+        // canvas/WebGL failure. Forward err.message so the degrade disclosure
+        // (ADR-0033) carries the actual cause; non-Error rejections fall back.
+        log.warn("viz", "vega-embed render failed", err);
+        onErrorRef.current(err instanceof Error && err.message ? err.message : "渲染出错");
       });
     return () => {
       cancelled = true;
@@ -128,8 +136,10 @@ export function VegaChart({ spec, onError }: VegaChartProps) {
           viewRef.current?.finalize();
           viewRef.current = result;
         })
-        .catch(() => {
-          if (!unmounted) onErrorRef.current("渲染出错");
+        .catch((err: unknown) => {
+          if (unmounted) return;
+          log.warn("viz", "vega-embed theme re-embed failed", err);
+          onErrorRef.current(err instanceof Error && err.message ? err.message : "渲染出错");
         });
     });
     return () => {

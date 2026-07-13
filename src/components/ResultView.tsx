@@ -264,8 +264,8 @@ export function ResultView({
               <tr key={i}>
                 {row.map((cell, j) => {
                   const numeric = numericFlags[j] ?? false;
-                  // Server CASTs NULL to "" (ADR-0024). Render muted whitespace
-                  // rather than the literal "NULL" (ADR-0057 honest display).
+                  // NULL handling (ADR-0057): server CASTs NULL to "", rendered
+                  // as muted whitespace, never the literal "NULL" (honest display).
                   if (cell === "") {
                     return <td key={j} className="cell-null" />;
                   }
