@@ -203,13 +203,14 @@ export function Thread({
 // so the truncation layout in styles.css is undisturbed. Replaces the v0 native
 // title attribute (which carried the same full text but only as the browser's
 // slow, unstyled tooltip). max-w-xs caps the popover so a long question wraps
-// instead of stretching the rail-wide tooltip.
+// instead of stretching the rail-wide tooltip. `text` is ReactNode so a source
+// marker can append its i18n'd stale suffix alongside the verbatim name.
 function TruncatingTooltip({
   text,
   className,
   children,
 }: {
-  text: string;
+  text: ReactNode;
   className?: string;
   children: ReactNode;
 }) {
@@ -241,20 +242,27 @@ function SourceMarker({
 }) {
   const intl = useIntl();
   const { Icon, text } = sourceMarkerText(intl, event.kind, event.display_name);
+  // The stale suffix (ADR-0047 invalidation disclosure) is i18n'd (ADR-0052)
+  // and rides both the visible marker and the hover Tooltip, so a marker
+  // truncated by the fixed source-row width still discloses the count on hover.
+  // Declared once so the visible copy and the tooltip copy cannot drift apart.
+  const staleSuffix =
+    staleCount > 0 ? (
+      <FormattedMessage
+        id="thread.source.staleSuffix"
+        defaultMessage=" · invalidated {count}"
+        values={{ count: staleCount }}
+      />
+    ) : null;
   return (
     <p className={`source-lifecycle ${event.kind.toLowerCase()}`}>
       <Icon className="source-icon" aria-hidden="true" />
-      <TruncatingTooltip text={text} className="source-text">
+      <TruncatingTooltip
+        text={staleSuffix ? <>{text}{staleSuffix}</> : text}
+        className="source-text"
+      >
         {text}
-        {staleCount > 0 && (
-          <span className="source-stale-count">
-            <FormattedMessage
-              id="thread.source.staleSuffix"
-              defaultMessage=" · invalidated {count}"
-              values={{ count: staleCount }}
-            />
-          </span>
-        )}
+        {staleSuffix && <span className="source-stale-count">{staleSuffix}</span>}
       </TruncatingTooltip>
     </p>
   );
@@ -537,13 +545,28 @@ function TurnCard({
         <TruncatingTooltip text={record.question} className="turn-question">
           {record.question}
         </TruncatingTooltip>
+        {/* The active chip (ADR-0047) flags a turn that explicitly named a
+            dataset. Unlike the question/source tooltips (truncation recovery),
+            its hover carries a localized explanatory label -- the v0 native
+            title's "Question names {name}" -- so the chip's meaning survives
+            both truncation (max-width 8rem) and non-English locales (ADR-0052).
+            The full name rides the {name} placeholder, so the hover also
+            recovers a truncated chip verbatim. */}
         {mentionedDataset && (
-          <TruncatingTooltip
-            text={`→${mentionedDataset.display_name}`}
-            className="turn-active-chip"
-          >
-            →{mentionedDataset.display_name}
-          </TruncatingTooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="turn-active-chip">
+                →{mentionedDataset.display_name}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-xs">
+              <FormattedMessage
+                id="thread.activeChip.title"
+                defaultMessage={`Question names "{name}"`}
+                values={{ name: mentionedDataset.display_name }}
+              />
+            </TooltipContent>
+          </Tooltip>
         )}
       </div>
       <TurnBody

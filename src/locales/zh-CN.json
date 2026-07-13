@@ -80,6 +80,7 @@
   "sidebar.newSession": "新建会话",
   "sidebar.privacy": "隐私披露",
   "sidebar.turns": "{count, plural, =0 {尚无轮次} other {# 轮}}",
+  "thread.activeChip.title": "提问点名「{name}」",
   "thread.ariaLabel": "对话历史",
   "thread.assumption": "假设：{text}",
   "thread.failedReason": "失败：{reason}",
