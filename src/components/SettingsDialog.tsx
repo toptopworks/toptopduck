@@ -308,10 +308,10 @@ export function SettingsDialog({
               </p>
             </fieldset>
 
-            <section className="grid gap-2">
-              <span className="text-sm font-medium">
+            <fieldset className="grid gap-2 border-0 p-0 m-0">
+              <legend className="text-sm font-medium">
                 <FormattedMessage id="settings.engine.legend" defaultMessage="Engine defaults (ADR-0005)" />
-              </span>
+              </legend>
               <Label>
                 <FormattedMessage id="settings.engine.memoryLimit" defaultMessage="Memory limit:" />
                 <Input
@@ -367,7 +367,7 @@ export function SettingsDialog({
                   defaultMessage="This slice persists and restores these values across restarts; applying them to the live DuckDB engine is a follow-up slice."
                 />
               </p>
-            </section>
+            </fieldset>
           </div>
         )}
 
