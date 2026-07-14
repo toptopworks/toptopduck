@@ -10,15 +10,66 @@ export interface ColumnSchema {
 // "data")]`), the same shape the rest of the wire contract uses. Session-scoped
 // commands reject with this structured value (NOT a bare string), so the
 // frontend narrows on `kind` and renders a locale message instead of string-
-// matching backend Chinese. `Engine` is the catch-all for internal failures and
-// carries a free-text detail under `data` (technical, never an API key per
-// ADR-0029).
+// matching backend Chinese. `Resume` wraps the typed `ResumeError` (issue #120):
+// the `open_duck` command's resume failure rides here, recursed by
+// the frontend; `Engine` is the catch-all for internal failures and carries a
+// free-text detail under `data` (technical, never an API key per ADR-0029).
 export type SessionError =
   | { kind: "InvalidId" }
   | { kind: "NotFound" }
   | { kind: "Resuming" }
   | { kind: "InFlight" }
+  | { kind: "Resume"; data: ResumeError }
   | { kind: "Engine"; data: string };
+
+// Why a forward migration step failed (issue #120). Rides DuckLoadError::
+// Migration inside ResumeError::Load. Mirrors the Rust `MigrationError` (serde
+// adjacently-tagged). `Field` carries the missing/ill-typed field detail;
+// `NoTransform` names a gap in the migration chain (no registered step for the
+// source version).
+export type MigrationError =
+  | { kind: "NoTransform"; data: { from: number; supported: number } }
+  | { kind: "Field"; data: string };
+
+// The .duck load error (persistence::io::LoadError, issue #120) -- DISTINCT
+// from the ingest `LoadError` above. Nests MigrationError. Crosses IPC inside
+// ResumeError::Load (the open_duck reject); the frontend recurses
+// ResumeError::Load.data.kind to render the version-mismatch "please upgrade"
+// hint or the io/parse/migration detail.
+export type DuckLoadError =
+  | { kind: "Io"; data: string }
+  | { kind: "Parse"; data: string }
+  | { kind: "VersionMismatch"; data: { found: number; supported: number } }
+  | { kind: "Migration"; data: MigrationError };
+
+// Why a resume failed (issue #120). The `open_duck` command wraps this in
+// `SessionError::Resume`. Mirrors
+// the Rust `ResumeError` (serde adjacently-tagged). `Load` recurses into
+// DuckLoadError; `AlreadyOpen` carries the canonical .duck path (PathBuf ->
+// string). Command-boundary internal failures (mutex poison / join panic) stay
+// on `SessionError::Engine` -- they are not resume-domain, so they do not ride
+// this enum.
+export type ResumeError =
+  | { kind: "Load"; data: DuckLoadError }
+  | {
+    kind: "SourceMissing";
+    data: { reference_name: string; path: string; detail: string };
+  }
+  | { kind: "Replay"; data: { reference_name: string; detail: string } }
+  | { kind: "ActiveMissing"; data: string }
+  | { kind: "Cancelled" }
+  | { kind: "Aborted" }
+  | { kind: "AlreadyOpen"; data: string };
+
+// Why a save failed (issue #120). Returned by `take_persist_error` as
+// `SaveError | null` (a value, not a reject). Mirrors the Rust `SaveError`
+// (serde adjacently-tagged). `AlreadyOpen` carries the canonical .duck path;
+// the Serialize/Io/Rename data strings ride the technical-details fold.
+export type SaveError =
+  | { kind: "Serialize"; data: string }
+  | { kind: "Io"; data: string }
+  | { kind: "Rename"; data: string }
+  | { kind: "AlreadyOpen"; data: string };
 
 // Per-dataset privacy controls (ADR-0011, issue #9 slice 5): mirror of the Rust
 // `DatasetPrivacy`. The config rides the descriptor (single source of truth),

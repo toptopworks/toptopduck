@@ -1,5 +1,7 @@
 import { useState } from "react";
+import { useIntl, FormattedMessage } from "react-intl";
 import { useQueryClient } from "@tanstack/react-query";
+import { fmtError, errorDetail } from "../api";
 import { useSessionState, errorPrefix } from "./useSessionState";
 import { ActiveSourceDeleteDialog } from "../components/ActiveSourceDeleteDialog";
 import { DatasetDetail } from "../components/DatasetDetail";
@@ -38,6 +40,8 @@ interface SessionPaneProps {
 
 export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: SessionPaneProps) {
   const s = useSessionState(sessionId, pendingIngestPath, onIngestConsumed);
+  const intl = useIntl();
+  const persistDetail = s.persistError ? errorDetail(s.persistError) : null;
   const queryClient = useQueryClient();
   // Workspace tab (ADR-0045: 工作集 is a workspace tab, not a persistent
   // column). 结果 = the derived chart+table stage; 工作集 = source management.
@@ -142,9 +146,26 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
             />
           )}
           {s.persistError && (
-            <p className="persist-warning" role="status">
-              自动保存失败：{s.persistError}（内存中的最新更改未写入磁盘，关闭 app 前请重试保存）
-            </p>
+            <div className="persist-warning" role="status">
+              <p className="error-message">
+                <FormattedMessage
+                  id="error.persist.banner"
+                  defaultMessage="Auto-save failed: {reason} (the latest in-memory changes were not written to disk; retry the save before closing the app.)"
+                  values={{ reason: fmtError(s.persistError, intl) }}
+                />
+              </p>
+              {persistDetail && (
+                <details className="error-details">
+                  <summary className="muted">
+                    <FormattedMessage
+                      id="errorBoundary.details"
+                      defaultMessage="Technical details"
+                    />
+                  </summary>
+                  <pre className="error-stack">{persistDetail}</pre>
+                </details>
+              )}
+            </div>
           )}
 
           {tab === "result" ? (

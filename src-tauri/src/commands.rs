@@ -26,7 +26,7 @@ use crate::model::{
     DatasetDescriptor, DatasetPrivacy, LoadOutcome, ProviderConfig, ProviderConfigView, RowPage,
     SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
 };
-use crate::persistence::{list_session_metadata, SessionMetadata};
+use crate::persistence::{list_session_metadata, SaveError, SessionMetadata};
 use crate::provider::live_config::LiveProviderConfig;
 use crate::session::{ResumeEvent, ResumeProgress, Session};
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
@@ -769,6 +769,9 @@ pub async fn open_duck(
     session_id: String,
     path: String,
 ) -> Result<(), SessionError> {
+    // Addressing failures (invalid id / unknown session / resuming) stay typed
+    // as SessionError variants; the resume-domain failure rides SessionError::
+    // Resume (issue #120) -- both stay serde-structured across IPC.
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
@@ -822,7 +825,7 @@ pub async fn open_duck(
             |_| crate::SourceResolution::Abort,
             |_| crate::ActiveResolution::Abort,
         )
-        .map_err(|e| SessionError::Engine(e.to_string()))?;
+        .map_err(SessionError::Resume)?;
         // Re-attach the handle's closing flag so a close_session after resume
         // still discards in-flight turns on this session (ADR-0055). The cancel
         // token was already shared via cancel_token above. The flag is the
@@ -862,13 +865,16 @@ pub async fn open_duck(
 /// turn / source event / resume: a non-blocking unsaved-to-disk banner surfaces
 /// the disk-vs-memory drift so the user knows a save dropped (instead of
 /// relying on the next successful write to silently self-heal, which would mask
-/// the window where closing the app loses the unsaved turns). Returns `None`
-/// after a clean save or after a prior read cleared the failure.
+/// the window where closing the app loses the unsaved turns). Returns the typed
+/// [`SaveError`] (issue #120) so the frontend narrows on `kind` and renders a
+/// locale message; `None` after a clean save or after a prior read cleared the
+/// failure. The outer [`SessionError`] is the addressing failure (invalid id /
+/// unknown session / lock poison) -- distinct from the persist error itself.
 #[tauri::command]
 pub fn take_persist_error(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
-) -> Result<Option<String>, SessionError> {
+) -> Result<Option<SaveError>, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     let mut s = handle.session_lock()?;

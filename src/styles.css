@@ -47,6 +47,20 @@ header h1 { margin: 0 0 0.5rem; }
    so it reads as a warning, distinct from the red fatal .error. */
 .resume-progress { background: #eef6ff; border: 1px solid #b6d4ff; border-radius: 6px; padding: 0.4rem 0.8rem; font-size: 0.88rem; margin: 0.4rem 0; }
 .persist-warning { background: #fff4e5; border: 1px solid #ffd9a0; border-radius: 6px; padding: 0.5rem 0.8rem; font-size: 0.9rem; margin: 0.4rem 0; color: #8a5200; }
+/* The persist banner reuses the ErrorBanner's .error-* class names but sits
+   under .persist-warning (amber), not .error (red). Scope matching rules here
+   so the technical-details fold renders with the same monospace / scroll /
+   wrap constraints as the fatal-error fold (H2). */
+.persist-warning .error-message { margin: 0; }
+.persist-warning .error-details { margin-top: 0.5rem; }
+.persist-warning .error-details summary { cursor: pointer; font-size: 0.82rem; }
+.persist-warning .error-stack {
+  margin: 0.4rem 0 0; padding: 0.5rem;
+  background: var(--muted); border-radius: var(--radius);
+  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
+  font-size: 0.8rem; white-space: pre-wrap; word-break: break-word;
+  max-height: 12rem; overflow-y: auto;
+}
 
 /* Viz (ADR-0016/0033): the chart container bounds a Vega-Embed render so a wide
    spec scrolls instead of bursting the panel. The degraded-viz disclosure moved

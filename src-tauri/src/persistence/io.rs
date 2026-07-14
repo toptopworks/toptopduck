@@ -32,7 +32,16 @@ const TMP_SUFFIX: &str = ".tmp";
 /// is best-effort cleaned up on a rename failure. `AlreadyOpen` is the
 /// ADR-0035 Decision 3 single-writer refusal -- the canonical path is already held
 /// by another Session in this process, so the save never touches the file.
-#[derive(Debug)]
+///
+/// Crosses IPC serde-structured (issue #120): `#[serde(tag = "kind", content =
+/// "data")]`, the adjacently-tagged shape the rest of the wire contract uses.
+/// Returned by the `take_persist_error` command as `Option<SaveError>` so the
+/// frontend narrows on `kind` and renders a locale message; the `data` strings
+/// (io/serde/rename detail, the AlreadyOpen path) ride the technical-details
+/// fold. ADR-0029: the save path never touches the API key, so the detail is
+/// safe to surface. The hand-written `Display` below stays Rust-log-only.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "data")]
 pub enum SaveError {
     Serialize(String),
     Io(String),
@@ -62,7 +71,16 @@ impl std::error::Error for SaveError {}
 /// a file made by a newer app must not be silently mis-parsed. `Migration`
 /// preserves the typed [`MigrationError`] so a failing transform names its
 /// field/gap instead of flattening to a string at this boundary.
-#[derive(Debug)]
+///
+/// Crosses IPC serde-structured (issue #120): `#[serde(tag = "kind", content =
+/// "data")]`, the adjacently-tagged shape the rest of the wire contract uses.
+/// Nests inside `ResumeError::Load` (the `open_duck` command's typed reject),
+/// so the frontend recurses `ResumeError::Load.data.kind` to render the
+/// version-mismatch "please upgrade" hint or the io/parse/migration detail.
+/// Distinct from [`crate::model::LoadError`] (the ingest error). The
+/// hand-written `Display` below stays Rust-log-only.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "data")]
 pub enum LoadError {
     Io(String),
     Parse(String),
