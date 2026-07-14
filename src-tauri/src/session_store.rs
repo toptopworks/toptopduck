@@ -93,16 +93,20 @@ impl fmt::Display for SessionId {
     }
 }
 
-/// Typed session-scoped command errors (issue #73). Replaces the
-/// bare `Err(String)` the store and reject guards used to return: the distinct
-/// failure modes (malformed id, unknown session, resuming, in-flight, engine)
-/// were merged into one string, so the frontend could not programmatically
-/// tell a typo from a resume-in-progress. The enum keeps the distinction
-/// typed; commands still surface it to IPC as a [`Display`](std::fmt::Display)
-/// string via [`From<SessionError> for String`] (the frontend contract is
-/// unchanged -- it string-matches on the same Chinese wording), but the
-/// Rust-side boundary can now match on the variant.
+/// Typed session-scoped command errors (issue #73; typed IPC boundary,
+/// issue #119). Replaces the bare `Err(String)` the store and reject guards
+/// used to return: the distinct failure modes (malformed id, unknown session,
+/// resuming, in-flight, engine) were merged into one string, so the frontend
+/// could not programmatically tell a typo from a resume-in-progress. The enum
+/// keeps the distinction typed, and the session-scoped commands return it
+/// across IPC as a serde-structured value -- `#[serde(tag = "kind", content =
+/// "data")]`, the same adjacently-tagged shape the rest of the wire contract
+/// uses -- so the frontend narrows on `kind` and renders a locale message
+/// (the Chinese wording no longer crosses IPC). The thiserror `#[error(...)]`
+/// attributes remain for Rust-side `Display` / logging only; they are NOT the
+/// IPC contract.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize)]
+#[serde(tag = "kind", content = "data")]
 pub enum SessionError {
     /// The session id was not a valid UUID. Distinct from
     /// [`Self::NotFound`] so a malformed id (typo, truncation, a value that was
@@ -126,19 +130,6 @@ pub enum SessionError {
     /// states above. Carries the underlying detail string.
     #[error("{0}")]
     Engine(String),
-}
-
-/// Map a typed session error to the IPC error string at the command boundary
-/// (issue #73). Every `#[tauri::command]` returns `Result<T, String>`; this
-/// impl lets `store.get(id)?`, `SessionId::parse(s)?`, and the reject guards
-/// propagate with `?` directly, while the IPC facade still emits the Display
-/// string the frontend has always rendered. Keeping the conversion here (not
-/// at each call site) means the wording lives in one place: the thiserror
-/// `#[error(...)]` attributes on [`SessionError`].
-impl From<SessionError> for String {
-    fn from(e: SessionError) -> Self {
-        e.to_string()
-    }
 }
 
 /// ADR-0055 monotonic closing flag: once `close_session` marks a
@@ -517,48 +508,36 @@ mod tests {
         assert_eq!(SessionError::NotFound.to_string(), UNKNOWN_SESSION);
     }
 
-    /// The five session-error variants are distinct (review M8): each Display
-    /// string differs, so a Rust match (or a future typed frontend) can tell
-    /// them apart.
+    /// The five session-error variants carry distinct `kind` tags over IPC
+    /// (issue #119): the frontend narrows on `kind` to pick a locale message,
+    /// so two variants must never share a tag. Verified via the serde shape --
+    /// `#[serde(tag = "kind", content = "data")]` -- rather than the Display
+    /// string (Display is now Rust-log-only, not the IPC contract). `Engine`
+    /// additionally carries its detail under `data`.
     #[test]
-    fn session_error_variants_have_distinct_display_strings() {
+    fn session_error_variants_have_distinct_kinds() {
         let variants = [
-            SessionError::InvalidId.to_string(),
-            SessionError::NotFound.to_string(),
-            SessionError::Resuming.to_string(),
-            SessionError::InFlight.to_string(),
-            SessionError::Engine("boom".into()).to_string(),
+            serde_json::to_value(SessionError::InvalidId).unwrap(),
+            serde_json::to_value(SessionError::NotFound).unwrap(),
+            serde_json::to_value(SessionError::Resuming).unwrap(),
+            serde_json::to_value(SessionError::InFlight).unwrap(),
+            serde_json::to_value(SessionError::Engine("boom".into())).unwrap(),
         ];
-        let unique: std::collections::HashSet<&str> = variants.iter().map(|s| s.as_str()).collect();
-        assert_eq!(unique.len(), variants.len(), "all variant strings differ");
-        assert_eq!(SessionError::Engine("boom".into()).to_string(), "boom");
-    }
-
-    /// `From<SessionError> for String` yields the Display string for EVERY
-    /// variant, so the command boundary's `?` propagates the exact wording
-    /// the frontend string-matches. Each variant is asserted against its
-    /// canonical string (mirroring `ipc_contract::session_error_display_*`);
-    /// `Engine` carries a free-text payload whose Display is the payload.
-    #[test]
-    fn from_session_error_for_string_is_the_display_string() {
-        let cases: [(SessionError, &str); 4] = [
-            (SessionError::InvalidId, "会话 id 格式错误"),
-            (SessionError::NotFound, UNKNOWN_SESSION),
-            (SessionError::Resuming, "正在恢复会话，请稍候再操作"),
-            (
-                SessionError::InFlight,
-                "该会话有查询进行中，请先取消或等待完成",
-            ),
-        ];
-        for (variant, expected) in cases {
-            let s: String = variant.into();
-            assert_eq!(
-                s, expected,
-                "From<SessionError> for String must equal Display"
-            );
-        }
-        let s: String = SessionError::Engine("boom".into()).into();
-        assert_eq!(s, "boom", "Engine Display is the payload as-is");
+        let kinds: Vec<&str> = variants
+            .iter()
+            .map(|v| v["kind"].as_str().expect("kind tag present"))
+            .collect();
+        let unique: std::collections::HashSet<&str> = kinds.iter().copied().collect();
+        assert_eq!(unique.len(), variants.len(), "all variant kinds differ");
+        // Engine carries its detail string under `data` (the only variant with
+        // content); the four guard variants serialize to a bare `kind`.
+        let engine = &variants[4];
+        assert_eq!(engine["kind"], "Engine");
+        assert_eq!(engine["data"], "boom");
+        assert!(
+            variants[0]["data"].is_null(),
+            "InvalidId carries no data (bare kind)"
+        );
     }
 
     /// `ClosingFlag` is monotonic: `set` flips false -> true, and a
