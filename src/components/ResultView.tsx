@@ -3,6 +3,7 @@ import { FormattedMessage } from "react-intl";
 import { fmtError, readRows } from "../api";
 import { decodeViz } from "../viz";
 import { Alert, AlertDescription } from "./ui/alert";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 import { VegaChart } from "./VegaChart";
 import type { ColumnSchema, StaleAnchor, VizSpec } from "../types";
 
@@ -240,46 +241,44 @@ export function ResultView({
         with horizontal scroll; numeric cells right-align; NULL cells (server
         NULL -> "") render as muted whitespace, never the literal "NULL".
       */}
-      <div className="table-scroll">
-        <table className="result" aria-labelledby={headingId}>
-          <thead>
-            <tr>
-              {columns.map((c) => (
-                <th key={c.name} className={isNumericType(c.canonical_type) ? "num" : undefined}>
-                  {c.name}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {shown === 0 && !loading && (
-              <tr>
-                <td className="muted">（无数据行）</td>
-              </tr>
-            )}
-            {/* key is the in-window index, not offset+i: rows are window-scoped,
-                so a position-derived key would mis-reuse DOM when one page's last
-                rows overlap the next page's first rows. */}
-            {rows.map((row, i) => (
-              <tr key={i}>
-                {row.map((cell, j) => {
-                  const numeric = numericFlags[j] ?? false;
-                  // NULL handling (ADR-0057): server CASTs NULL to "", rendered
-                  // as muted whitespace, never the literal "NULL" (honest display).
-                  if (cell === "") {
-                    return <td key={j} className="cell-null" />;
-                  }
-                  return (
-                    <td key={j} className={numeric ? "num" : undefined}>
-                      {cell}
-                    </td>
-                  );
-                })}
-              </tr>
+      <Table className="result" aria-labelledby={headingId}>
+        <TableHeader>
+          <TableRow>
+            {columns.map((c) => (
+              <TableHead key={c.name} className={isNumericType(c.canonical_type) ? "num" : undefined}>
+                {c.name}
+              </TableHead>
             ))}
-          </tbody>
-        </table>
-      </div>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {shown === 0 && !loading && (
+            <TableRow>
+              <TableCell className="muted">（无数据行）</TableCell>
+            </TableRow>
+          )}
+          {/* key is the in-window index, not offset+i: rows are window-scoped,
+              so a position-derived key would mis-reuse DOM when one page's last
+              rows overlap the next page's first rows. */}
+          {rows.map((row, i) => (
+            <TableRow key={i}>
+              {row.map((cell, j) => {
+                const numeric = numericFlags[j] ?? false;
+                // NULL handling (ADR-0057): server CASTs NULL to "", rendered
+                // as muted whitespace, never the literal "NULL" (honest display).
+                if (cell === "") {
+                  return <TableCell key={j} className="cell-null" />;
+                }
+                return (
+                  <TableCell key={j} className={numeric ? "num" : undefined}>
+                    {cell}
+                  </TableCell>
+                );
+              })}
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
 
       {/*
         Pagination (ADR-0057/0062 R4): sticky at the pane bottom so it stays
