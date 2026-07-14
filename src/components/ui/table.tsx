@@ -3,14 +3,19 @@ import { type ComponentProps } from "react";
 import { cn } from "@/lib/utils";
 
 // shadcn/ui v4 new-york copy-in (ADR-0049/0050, issue #109): a presentational
-// styled HTML table primitive set (no Radix primitive). Table wraps the
-// <table> in an overflow-x-auto container -- this is the horizontal-scroll
-// surface ADR-0057 requires (columns render in full, no virtualization, no
-// column cap), replacing the hand-written .table-scroll wrapper. TableRow
-// carries a token-based hover highlight (hover:bg-muted/50) + row border; the
-// legacy global th/td rules in styles.css are unlayered and layer ON TOP, so
-// they keep the grid border + compact padding while these primitives add the
-// hover surface. Callers keep their existing class hooks (.schema / .sample /
+// styled HTML table primitive set. Table wraps the <table> in an overflow-x-auto
+// container -- the horizontal-scroll surface that meets ADR-0057's full-column
+// rendering (no virtualization, no column cap), replacing the hand-written
+// .table-scroll wrapper. TableRow carries a token-based hover highlight
+// (hover:bg-muted/50) + row border; the legacy global th/td rules in styles.css
+// are unlayered and layer ON TOP of Tailwind's @layer utilities, so they keep
+// the grid border + compact padding while these primitives add the hover
+// surface. The p-2/px-2 padding utilities on TableHead/TableCell are shadcn
+// copy-in defaults, intentionally shadowed by those global rules for the current
+// consumers. Invariance: this layering holds only while styles.css keeps its
+// th/td rules unlayered -- migrating them into @layer base flips priority and
+// the padding utilities below start winning; re-verify density before that
+// migration. Callers keep their existing class hooks (.schema / .sample /
 // .result, .num numeric-align, .cell-null) -- passed through className, they
 // land on the real <table>/<th>/<td> the primitives render, so the ADR-0057
 // numeric right-align and NULL muted-cell rules still apply verbatim.
