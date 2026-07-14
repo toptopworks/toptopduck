@@ -66,8 +66,8 @@ const MAX_READ_ROWS: u64 = 10_000;
 /// Crosses IPC serde-structured (issue #120): `#[serde(tag = "kind", content =
 /// "data")]`, the adjacently-tagged shape the rest of the wire contract uses
 /// (the same as [`crate::session_store::SessionError`]). The `open_duck`
-/// command wraps this in [`SessionError::Resume`] (no longer flattened to
-/// `SessionError::Engine(string)`), so the frontend recurses `Resume.data.kind`
+/// command wraps this in [`SessionError::Resume`], so the frontend recurses
+/// `Resume.data.kind`
 /// and renders a locale message; the `Load` variant recurses into the nested
 /// [`LoadError`](crate::persistence::io::LoadError) for the version-mismatch /
 /// io / parse / migration detail. Command-boundary internal failures (mutex

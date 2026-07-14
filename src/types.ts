@@ -10,9 +10,9 @@ export interface ColumnSchema {
 // "data")]`), the same shape the rest of the wire contract uses. Session-scoped
 // commands reject with this structured value (NOT a bare string), so the
 // frontend narrows on `kind` and renders a locale message instead of string-
-// matching backend Chinese. `Resume` wraps the typed `ResumeError` (issue #120
-// Option B -- the `open_duck` command's resume failure rides here, recursed by
-// the frontend); `Engine` is the catch-all for internal failures and carries a
+// matching backend Chinese. `Resume` wraps the typed `ResumeError` (issue #120):
+// the `open_duck` command's resume failure rides here, recursed by
+// the frontend; `Engine` is the catch-all for internal failures and carries a
 // free-text detail under `data` (technical, never an API key per ADR-0029).
 export type SessionError =
   | { kind: "InvalidId" }
@@ -43,7 +43,7 @@ export type DuckLoadError =
   | { kind: "Migration"; data: MigrationError };
 
 // Why a resume failed (issue #120). The `open_duck` command wraps this in
-// `SessionError::Resume` (no longer flattened to SessionError::Engine). Mirrors
+// `SessionError::Resume`. Mirrors
 // the Rust `ResumeError` (serde adjacently-tagged). `Load` recurses into
 // DuckLoadError; `AlreadyOpen` carries the canonical .duck path (PathBuf ->
 // string). Command-boundary internal failures (mutex poison / join panic) stay

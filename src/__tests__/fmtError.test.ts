@@ -34,8 +34,8 @@ const intl = createIntl({
 });
 
 // Wrap a ResumeError as the open_duck reject shape: SessionError::Resume
-// (issue #120 Option B). open_duck no longer rejects with a bare ResumeError --
-// it wraps it in SessionError::Resume, so the frontend recurses Resume.data.
+// (issue #120). open_duck rejects with its ResumeError wrapped in
+// SessionError::Resume, so the frontend recurses Resume.data.
 function resume(err: ResumeError): SessionError {
   return { kind: "Resume", data: err };
 }
@@ -142,6 +142,18 @@ describe("fmtError — SaveError", () => {
       expect(fmtError(err, intl)).toBe(expected);
     }
   });
+
+  it("does not leak the Serialize/Io/Rename detail into the rendered message (ADR-0029)", () => {
+    expect(fmtError({ kind: "Serialize", data: "sk-ant-secret" }, intl)).toBe(
+      "Failed to serialize the .duck file",
+    );
+    expect(fmtError({ kind: "Io", data: "sk-ant-secret" }, intl)).toBe(
+      "Failed to write the .duck temp file",
+    );
+    expect(fmtError({ kind: "Rename", data: "sk-ant-secret" }, intl)).toBe(
+      "Failed to replace the .duck file",
+    );
+  });
 });
 
 describe("fmtError — fallback", () => {
@@ -187,6 +199,15 @@ describe("errorDetail", () => {
         resume({ kind: "Load", data: { kind: "Migration", data: { kind: "Field", data: "missing x" } } }),
       ),
     ).toBe("missing x");
+    // NoTransform composes a version-gap string on the frontend side.
+    expect(
+      errorDetail(
+        resume({
+          kind: "Load",
+          data: { kind: "Migration", data: { kind: "NoTransform", data: { from: 0, supported: 1 } } },
+        }),
+      ),
+    ).toBe("format_version=0 (supported: 1)");
     expect(
       errorDetail(
         resume({

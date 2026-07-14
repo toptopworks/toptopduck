@@ -228,9 +228,11 @@ function isDuckLoadError(e: unknown): e is DuckLoadError {
 }
 
 // Narrow an unknown IPC reject to a ResumeError (issue #120). The `open_duck`
-// command rejects with this typed value. Load recurses into isDuckLoadError;
-// the struct variants verify their field shapes; AlreadyOpen / ActiveMissing /
-// Engine carry a string under data; Cancelled / Aborted are unit.
+// command wraps its ResumeError in SessionError::Resume, so this guard is
+// reached via isSessionError's Resume branch. Load recurses into
+// isDuckLoadError; SourceMissing / Replay verify their struct fields;
+// AlreadyOpen / ActiveMissing carry a string under data; Cancelled / Aborted
+// are unit.
 function isResumeError(e: unknown): e is ResumeError {
   if (typeof e !== "object" || e === null) return false;
   const kind = (e as { kind?: unknown }).kind;
@@ -315,6 +317,10 @@ function formatDuckLoadError(e: DuckLoadError, intl: IntlShape): string {
         id: "error.duck.migration",
         defaultMessage: "Failed to migrate the .duck file to the current format",
       });
+    default: {
+      const unhandled: never = e;
+      throw new Error(`unhandled DuckLoadError kind: ${JSON.stringify(unhandled)}`);
+    }
   }
 }
 
@@ -360,6 +366,10 @@ function formatResumeError(e: ResumeError, intl: IntlShape): string {
         id: "error.duck.alreadyOpen",
         defaultMessage: "This .duck is already open in this process",
       });
+    default: {
+      const unhandled: never = e;
+      throw new Error(`unhandled ResumeError kind: ${JSON.stringify(unhandled)}`);
+    }
   }
 }
 
@@ -387,6 +397,10 @@ function formatSaveError(e: SaveError, intl: IntlShape): string {
         id: "error.duck.alreadyOpen",
         defaultMessage: "This .duck is already open in this process",
       });
+    default: {
+      const unhandled: never = e;
+      throw new Error(`unhandled SaveError kind: ${JSON.stringify(unhandled)}`);
+    }
   }
 }
 
@@ -432,6 +446,11 @@ export function fmtError(e: unknown, intl: IntlShape): string {
         return formatResumeError(e.data, intl);
     }
   }
+  // Invariant: the top-level reject kind sets are disjoint (SessionError kinds
+  // and SaveError kinds share none), so checking isSessionError before
+  // isSaveError is unambiguous. If a future command rejects a bare DuckLoadError
+  // (its `Io` collides with SaveError::Io), add an isDuckLoadError branch here
+  // before isSaveError.
   if (isSaveError(e)) {
     return formatSaveError(e, intl);
   }
@@ -485,6 +504,10 @@ function resumeErrorDetail(e: ResumeError): string | null {
     case "Cancelled":
     case "Aborted":
       return null;
+    default: {
+      const unhandled: never = e;
+      throw new Error(`unhandled ResumeError kind: ${JSON.stringify(unhandled)}`);
+    }
   }
 }
 
@@ -501,6 +524,10 @@ function duckLoadErrorDetail(e: DuckLoadError): string | null {
       return null;
     case "Migration":
       return migrationErrorDetail(e.data);
+    default: {
+      const unhandled: never = e;
+      throw new Error(`unhandled DuckLoadError kind: ${JSON.stringify(unhandled)}`);
+    }
   }
 }
 
@@ -510,6 +537,10 @@ function migrationErrorDetail(e: MigrationError): string | null {
       return `format_version=${e.data.from} (supported: ${e.data.supported})`;
     case "Field":
       return e.data;
+    default: {
+      const unhandled: never = e;
+      throw new Error(`unhandled MigrationError kind: ${JSON.stringify(unhandled)}`);
+    }
   }
 }
 

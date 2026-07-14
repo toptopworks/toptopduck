@@ -41,6 +41,7 @@ interface SessionPaneProps {
 export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: SessionPaneProps) {
   const s = useSessionState(sessionId, pendingIngestPath, onIngestConsumed);
   const intl = useIntl();
+  const persistDetail = s.persistError ? errorDetail(s.persistError) : null;
   const queryClient = useQueryClient();
   // Workspace tab (ADR-0045: 工作集 is a workspace tab, not a persistent
   // column). 结果 = the derived chart+table stage; 工作集 = source management.
@@ -153,7 +154,7 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
                   values={{ reason: fmtError(s.persistError, intl) }}
                 />
               </p>
-              {errorDetail(s.persistError) && (
+              {persistDetail && (
                 <details className="error-details">
                   <summary className="muted">
                     <FormattedMessage
@@ -161,7 +162,7 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
                       defaultMessage="Technical details"
                     />
                   </summary>
-                  <pre className="error-stack">{errorDetail(s.persistError)}</pre>
+                  <pre className="error-stack">{persistDetail}</pre>
                 </details>
               )}
             </div>

@@ -423,10 +423,9 @@ mod tests {
         // the `Value` and panicking (ADR-0034 honest parse).
         let arr = serde_json::json!([1, 2, 3]);
         let err = migrate_to_current(arr, 0).unwrap_err();
-        // Lock the typed variant (issue #120): MigrationError now crosses IPC
-        // serde-structured, so the pub-API contract is "returns Field" -- the
-        // Chinese Display wording is Rust-log-only and no longer the thing to
-        // pin here. The transform-internal tests above still assert wording.
+        // Lock the typed variant (issue #120): the pub-API contract is
+        // "returns Field". The Display wording is Rust-log-only; the
+        // transform-internal tests above still assert it.
         assert!(
             matches!(&err, MigrationError::Field(_)),
             "expected Field error for the non-object root, got {err:?}",

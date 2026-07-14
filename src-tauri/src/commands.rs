@@ -771,7 +771,7 @@ pub async fn open_duck(
 ) -> Result<(), SessionError> {
     // Addressing failures (invalid id / unknown session / resuming) stay typed
     // as SessionError variants; the resume-domain failure rides SessionError::
-    // Resume (issue #120 Option B) -- neither is flattened to a string.
+    // Resume (issue #120) -- both stay serde-structured across IPC.
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
