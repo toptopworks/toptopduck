@@ -431,6 +431,15 @@ fn session_error_serializes_as_adjacently_tagged_kind_data() {
         &SessionError::Engine("boom".into()),
         r#"{"kind":"Engine","data":"boom"}"#,
     );
+    // Resume wraps the typed ResumeError (issue #120 Option B): the inner enum
+    // keeps its own kind/data shape, so the frontend recurses uniformly. The
+    // resume failure no longer flattens to Engine(string).
+    use std::path::PathBuf;
+    use toptopduck_lib::ResumeError;
+    assert_wire(
+        &SessionError::Resume(ResumeError::AlreadyOpen(PathBuf::from("/x/a.duck"))),
+        r#"{"kind":"Resume","data":{"kind":"AlreadyOpen","data":"/x/a.duck"}}"#,
+    );
 }
 
 // --- issue #120 resume / persistence error wire contracts -------------------
@@ -554,12 +563,6 @@ fn resume_error_serializes_adjacently_tagged() {
     assert_wire(
         &ResumeError::AlreadyOpen(PathBuf::from("/x/a.duck")),
         r#"{"kind":"AlreadyOpen","data":"/x/a.duck"}"#,
-    );
-    // Engine is the command-boundary catch-all (mutex poison / join panic),
-    // mirroring SessionError::Engine -- the detail rides data.
-    assert_wire(
-        &ResumeError::Engine("join error".into()),
-        r#"{"kind":"Engine","data":"join error"}"#,
     );
 }
 

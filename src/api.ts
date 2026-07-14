@@ -168,6 +168,8 @@ function isSessionError(e: unknown): e is SessionError {
     case "Resuming":
     case "InFlight":
       return true;
+    case "Resume":
+      return isResumeError((e as { data?: unknown }).data);
     case "Engine":
       return typeof (e as { data?: unknown }).data === "string";
     default:
@@ -256,7 +258,6 @@ function isResumeError(e: unknown): e is ResumeError {
     }
     case "ActiveMissing":
     case "AlreadyOpen":
-    case "Engine":
       return typeof (e as { data?: unknown }).data === "string";
     case "Cancelled":
     case "Aborted":
@@ -359,11 +360,6 @@ function formatResumeError(e: ResumeError, intl: IntlShape): string {
         id: "error.duck.alreadyOpen",
         defaultMessage: "This .duck is already open in this process",
       });
-    case "Engine":
-      return intl.formatMessage({
-        id: "error.resume.engine",
-        defaultMessage: "Internal error",
-      });
   }
 }
 
@@ -432,10 +428,9 @@ export function fmtError(e: unknown, intl: IntlShape): string {
           id: "error.session.engine",
           defaultMessage: "Internal error",
         });
+      case "Resume":
+        return formatResumeError(e.data, intl);
     }
-  }
-  if (isResumeError(e)) {
-    return formatResumeError(e, intl);
   }
   if (isSaveError(e)) {
     return formatSaveError(e, intl);
@@ -462,23 +457,9 @@ export function fmtError(e: unknown, intl: IntlShape): string {
 // save paths are keychain-free) -- so the raw detail is safe to surface.
 export function errorDetail(e: unknown): string | null {
   if (isSessionError(e)) {
-    return e.kind === "Engine" ? e.data : null;
-  }
-  if (isResumeError(e)) {
-    switch (e.kind) {
-      case "Load":
-        return duckLoadErrorDetail(e.data);
-      case "SourceMissing":
-      case "Replay":
-        return e.data.detail;
-      case "AlreadyOpen":
-      case "Engine":
-        return e.data;
-      case "ActiveMissing":
-      case "Cancelled":
-      case "Aborted":
-        return null;
-    }
+    if (e.kind === "Engine") return e.data;
+    if (e.kind === "Resume") return resumeErrorDetail(e.data);
+    return null;
   }
   if (isSaveError(e)) {
     // Every SaveError variant carries a string under data (the detail or the
@@ -486,6 +467,25 @@ export function errorDetail(e: unknown): string | null {
     return e.data;
   }
   return null;
+}
+
+// Detail for a nested ResumeError (issue #120), reached via SessionError::
+// Resume. SourceMissing / Replay carry their detail; AlreadyOpen carries the
+// canonical path; the rest are self-contained (the message already names them).
+function resumeErrorDetail(e: ResumeError): string | null {
+  switch (e.kind) {
+    case "Load":
+      return duckLoadErrorDetail(e.data);
+    case "SourceMissing":
+    case "Replay":
+      return e.data.detail;
+    case "AlreadyOpen":
+      return e.data;
+    case "ActiveMissing":
+    case "Cancelled":
+    case "Aborted":
+      return null;
+  }
 }
 
 // Detail for a nested DuckLoadError (issue #120). VersionMismatch's versions

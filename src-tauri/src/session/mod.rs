@@ -66,15 +66,14 @@ const MAX_READ_ROWS: u64 = 10_000;
 /// Crosses IPC serde-structured (issue #120): `#[serde(tag = "kind", content =
 /// "data")]`, the adjacently-tagged shape the rest of the wire contract uses
 /// (the same as [`crate::session_store::SessionError`]). The `open_duck`
-/// command rejects with this typed value (no longer flattened to
-/// `SessionError::Engine(string)`), so the frontend narrows on `kind` and
-/// renders a locale message; the `Load` variant recurses into the nested
+/// command wraps this in [`SessionError::Resume`] (no longer flattened to
+/// `SessionError::Engine(string)`), so the frontend recurses `Resume.data.kind`
+/// and renders a locale message; the `Load` variant recurses into the nested
 /// [`LoadError`](crate::persistence::io::LoadError) for the version-mismatch /
-/// io / parse / migration detail. `Engine` is the catch-all for command-
-/// boundary internal failures (mutex poison, join panic) that are not one of
-/// the named resume-domain failures -- mirroring `SessionError::Engine`. The
-/// hand-written `Display` below stays Rust-log-only; it is NOT the IPC
-/// contract.
+/// io / parse / migration detail. Command-boundary internal failures (mutex
+/// poison, join panic) stay on `SessionError::Engine` -- they are NOT resume-
+/// domain, so they do not ride this enum. The hand-written `Display` below
+/// stays Rust-log-only; it is NOT the IPC contract.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum ResumeError {
@@ -130,14 +129,6 @@ pub enum ResumeError {
     /// caller surfaces this as "already open" -- the user closes one window
     /// or uses the existing session rather than silently racing two writers.
     AlreadyOpen(PathBuf),
-    /// Command-boundary internal failure (mutex poison, join panic) that is
-    /// not one of the named resume-domain failures above -- mirrors
-    /// [`SessionError::Engine`](crate::session_store::SessionError::Engine).
-    /// Carries the underlying detail string. The `open_duck` command maps a
-    /// `session_lock` poison or a `spawn_blocking` join error here so its
-    /// typed `Result<(), ResumeError>` return stays uniform; ADR-0029 holds --
-    /// the detail never carries an API key (the resume path is keychain-free).
-    Engine(String),
 }
 
 impl std::fmt::Display for ResumeError {
@@ -159,7 +150,6 @@ impl std::fmt::Display for ResumeError {
             Self::AlreadyOpen(p) => {
                 write!(f, "该 .duck 已在本进程打开，不能重复打开：{}", p.display())
             }
-            Self::Engine(d) => write!(f, "{d}"),
         }
     }
 }

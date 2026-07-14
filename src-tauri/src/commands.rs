@@ -28,7 +28,7 @@ use crate::model::{
 };
 use crate::persistence::{list_session_metadata, SaveError, SessionMetadata};
 use crate::provider::live_config::LiveProviderConfig;
-use crate::session::{ResumeError, ResumeEvent, ResumeProgress, Session};
+use crate::session::{ResumeEvent, ResumeProgress, Session};
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
 
 /// ADR-0063: the close-and-wait-release variant's wait ceiling. Aligned to
@@ -69,19 +69,6 @@ fn reject_if_in_flight(handle: &SessionHandle) -> Result<(), SessionError> {
         return Err(SessionError::InFlight);
     }
     Ok(())
-}
-
-/// Fold a session-addressing [`SessionError`] (invalid id / unknown session /
-/// resuming / lock poison) into [`ResumeError::Engine`] so `open_duck`'s typed
-/// `Result<(), ResumeError>` return stays uniform (issue #120). The addressing
-/// failures (invalid id / unknown session / resuming) are practically
-/// unreachable here -- the session id is freshly minted by `create_session` in
-/// the same frontend flow -- so the Engine catch-all loses no user-facing
-/// distinction on the normal path; a rare race surfaces the SessionError
-/// Display string as the Engine detail. Scoped to this command boundary rather
-/// than a public `From` impl so the lossy conversion is not invited elsewhere.
-fn into_resume_engine(e: SessionError) -> ResumeError {
-    ResumeError::Engine(e.to_string())
 }
 
 /// Create a new session (ADR-0056): the backend builds an independent in-memory
@@ -781,15 +768,13 @@ pub async fn open_duck(
     live: State<'_, LiveProviderConfig>,
     session_id: String,
     path: String,
-) -> Result<(), ResumeError> {
-    // Addressing failures (invalid id / unknown session / resuming) fold into
-    // ResumeError::Engine -- they are practically unreachable here (the id is
-    // freshly minted by create_session in the same flow), so the typed resume
-    // failures cross IPC directly instead of flattening through Engine (issue
-    // #120).
-    let id = SessionId::parse(&session_id).map_err(into_resume_engine)?;
-    let handle = store.get(&id).map_err(into_resume_engine)?;
-    reject_if_resuming(&handle).map_err(into_resume_engine)?;
+) -> Result<(), SessionError> {
+    // Addressing failures (invalid id / unknown session / resuming) stay typed
+    // as SessionError variants; the resume-domain failure rides SessionError::
+    // Resume (issue #120 Option B) -- neither is flattened to a string.
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    reject_if_resuming(&handle)?;
     handle.set_resuming(true);
     let path = PathBuf::from(path);
     // Pull the handle's shared tokens out via accessors (the fields
@@ -839,11 +824,12 @@ pub async fn open_duck(
             // surfaces to the user as "resume stopped" rather than a guess.
             |_| crate::SourceResolution::Abort,
             |_| crate::ActiveResolution::Abort,
-        )?; // ResumeError propagates typed (issue #120) -- no string flattening.
-            // Re-attach the handle's closing flag so a close_session after resume
-            // still discards in-flight turns on this session (ADR-0055). The cancel
-            // token was already shared via cancel_token above. The flag is the
-            // monotonic ClosingFlag, so this re-attach preserves once-closing.
+        )
+        .map_err(SessionError::Resume)?;
+        // Re-attach the handle's closing flag so a close_session after resume
+        // still discards in-flight turns on this session (ADR-0055). The cancel
+        // token was already shared via cancel_token above. The flag is the
+        // monotonic ClosingFlag, so this re-attach preserves once-closing.
         new_session.set_closing_flag(closing_flag);
         // ADR-0063: re-arm the close-and-wait-release drop signal for the
         // resumed session. Install a fresh (sender, receiver) pair: the sender
@@ -861,16 +847,16 @@ pub async fn open_duck(
         let (drop_tx, drop_rx) = std::sync::mpsc::channel();
         new_session.set_drop_signal(drop_tx);
         handle_for_task.set_drop_signal_rx(drop_rx);
-        let mut s = handle_for_task.session_lock().map_err(into_resume_engine)?;
+        let mut s = handle_for_task.session_lock()?;
         *s = new_session;
-        Ok::<(), ResumeError>(())
+        Ok::<(), SessionError>(())
     })
     .await;
     // Clear the per-session resume flag on EVERY exit (success, resume error,
     // join panic) before propagating -- a stuck flag would reject every later
     // mutating command on this session (ADR-0053).
     handle.set_resuming(false);
-    inner.map_err(|e| ResumeError::Engine(e.to_string()))??;
+    inner.map_err(|e| SessionError::Engine(e.to_string()))??;
     Ok(())
 }
 

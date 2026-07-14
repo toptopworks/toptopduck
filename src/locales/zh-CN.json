@@ -19,7 +19,6 @@
   "error.resume.aborted": "已中止恢复",
   "error.resume.activeMissing": "会话焦点指向未注册的源「{name}」",
   "error.resume.cancelled": "已取消恢复",
-  "error.resume.engine": "内部错误",
   "error.resume.replay": "重放「{name}」失败",
   "error.resume.sourceMissing": "源「{name}」找不到",
   "error.save.io": "写 .duck 临时文件失败",

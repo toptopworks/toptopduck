@@ -125,6 +125,16 @@ pub enum SessionError {
     /// (ADR-0021 single-flight, per session via ADR-0056).
     #[error("该会话有查询进行中，请先取消或等待完成")]
     InFlight,
+    /// A resume failed (issue #120): the `open_duck` command wraps
+    /// [`Session::open_duck`](crate::session::Session::open_duck)'s typed
+    /// [`ResumeError`](crate::session::ResumeError) here instead of flattening
+    /// it to [`Self::Engine`] (string), so the frontend recurses
+    /// `Resume.data.kind` and renders the resume-domain locale message. The
+    /// addressing failures (invalid id / unknown session / resuming) stay
+    /// typed as the variants above; only the resume-domain failure rides this
+    /// variant.
+    #[error("{0}")]
+    Resume(crate::session::ResumeError),
     /// An engine / internal failure (mutex poison, join error, etc.) -- the
     /// catch-all for failures that are not one of the addressing / guard
     /// states above. Carries the underlying detail string.

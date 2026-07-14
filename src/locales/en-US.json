@@ -19,7 +19,6 @@
   "error.resume.aborted": "Resume aborted",
   "error.resume.activeMissing": "The session focus points to an unregistered source \"{name}\"",
   "error.resume.cancelled": "Resume cancelled",
-  "error.resume.engine": "Internal error",
   "error.resume.replay": "Failed to replay \"{name}\"",
   "error.resume.sourceMissing": "Source \"{name}\" not found",
   "error.save.io": "Failed to write the .duck temp file",

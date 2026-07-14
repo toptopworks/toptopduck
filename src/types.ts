@@ -10,14 +10,16 @@ export interface ColumnSchema {
 // "data")]`), the same shape the rest of the wire contract uses. Session-scoped
 // commands reject with this structured value (NOT a bare string), so the
 // frontend narrows on `kind` and renders a locale message instead of string-
-// matching backend Chinese. `Engine` is the catch-all for internal failures and
-// carries a free-text detail under `data` (technical, never an API key per
-// ADR-0029).
+// matching backend Chinese. `Resume` wraps the typed `ResumeError` (issue #120
+// Option B -- the `open_duck` command's resume failure rides here, recursed by
+// the frontend); `Engine` is the catch-all for internal failures and carries a
+// free-text detail under `data` (technical, never an API key per ADR-0029).
 export type SessionError =
   | { kind: "InvalidId" }
   | { kind: "NotFound" }
   | { kind: "Resuming" }
   | { kind: "InFlight" }
+  | { kind: "Resume"; data: ResumeError }
   | { kind: "Engine"; data: string };
 
 // Why a forward migration step failed (issue #120). Rides DuckLoadError::
@@ -40,11 +42,13 @@ export type DuckLoadError =
   | { kind: "VersionMismatch"; data: { found: number; supported: number } }
   | { kind: "Migration"; data: MigrationError };
 
-// Why a resume failed (issue #120). The `open_duck` command rejects with this
-// typed value (no longer flattened to SessionError::Engine). Mirrors the Rust
-// `ResumeError` (serde adjacently-tagged). `Load` recurses into DuckLoadError;
-// `Engine` is the command-boundary catch-all (mutex poison / join panic);
-// `AlreadyOpen` carries the canonical .duck path (PathBuf -> string).
+// Why a resume failed (issue #120). The `open_duck` command wraps this in
+// `SessionError::Resume` (no longer flattened to SessionError::Engine). Mirrors
+// the Rust `ResumeError` (serde adjacently-tagged). `Load` recurses into
+// DuckLoadError; `AlreadyOpen` carries the canonical .duck path (PathBuf ->
+// string). Command-boundary internal failures (mutex poison / join panic) stay
+// on `SessionError::Engine` -- they are not resume-domain, so they do not ride
+// this enum.
 export type ResumeError =
   | { kind: "Load"; data: DuckLoadError }
   | {
@@ -55,8 +59,7 @@ export type ResumeError =
   | { kind: "ActiveMissing"; data: string }
   | { kind: "Cancelled" }
   | { kind: "Aborted" }
-  | { kind: "AlreadyOpen"; data: string }
-  | { kind: "Engine"; data: string };
+  | { kind: "AlreadyOpen"; data: string };
 
 // Why a save failed (issue #120). Returned by `take_persist_error` as
 // `SaveError | null` (a value, not a reject). Mirrors the Rust `SaveError`
