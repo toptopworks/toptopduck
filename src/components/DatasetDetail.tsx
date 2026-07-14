@@ -1,5 +1,6 @@
 import type { DatasetDescriptor, DatasetPrivacy } from "../types";
 import { PrivacyControls } from "./PrivacyControls";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 
 interface DatasetDetailProps {
   dataset: DatasetDescriptor;
@@ -20,45 +21,45 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
       </p>
 
       <h3>列与推断类型</h3>
-      <table className="schema">
-        <thead>
-          <tr>
-            <th>列</th>
-            <th>DuckDB 类型</th>
-          </tr>
-        </thead>
-        <tbody>
+      <Table className="schema">
+        <TableHeader>
+          <TableRow>
+            <TableHead>列</TableHead>
+            <TableHead>DuckDB 类型</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {dataset.columns.map((c) => (
-            <tr key={c.name}>
-              <td>{c.name}</td>
-              <td><code>{c.canonical_type}</code></td>
-            </tr>
+            <TableRow key={c.name}>
+              <TableCell>{c.name}</TableCell>
+              <TableCell><code>{c.canonical_type}</code></TableCell>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
 
       <h3>加载时冻结的首 3 行样本</h3>
       {dataset.sample.length === 0 ? (
         <p className="muted">（无数据行）</p>
       ) : (
-        <table className="sample">
-          <thead>
-            <tr>
+        <Table className="sample">
+          <TableHeader>
+            <TableRow>
               {dataset.columns.map((c) => (
-                <th key={c.name}>{c.name}</th>
+                <TableHead key={c.name}>{c.name}</TableHead>
               ))}
-            </tr>
-          </thead>
-          <tbody>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {dataset.sample.map((row, i) => (
-              <tr key={i}>
+              <TableRow key={i}>
                 {row.map((cell, j) => (
-                  <td key={j}>{cell}</td>
+                  <TableCell key={j}>{cell}</TableCell>
                 ))}
-              </tr>
+              </TableRow>
             ))}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
       )}
 
       {onPrivacyChange && (

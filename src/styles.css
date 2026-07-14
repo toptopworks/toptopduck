@@ -343,7 +343,6 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 
 /* --- Result rendering (ADR-0057/0062 R4) -------------------------------- */
 .result-view h2 { margin: 0 0 0.25rem; }
-.result-view .table-scroll { overflow-x: auto; }
 /* Numeric columns right-align by canonical_type (ADR-0057); NULL cells render
    as muted whitespace (server NULL -> ""), never the literal "NULL". */
 table.result th.num, table.result td.num { text-align: right; }

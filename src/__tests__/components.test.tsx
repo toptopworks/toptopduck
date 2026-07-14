@@ -684,6 +684,60 @@ describe("ResultView", () => {
     expect(screen.getByText(/（无数据行）/)).toBeInTheDocument();
   });
 
+  it("renders a NULL cell as muted whitespace, never the literal \"NULL\" (ADR-0057)", async () => {
+    // ADR-0057: the server CASTs NULL to "" so a NULL cell renders as a muted
+    // empty cell (td.cell-null), never the literal string "NULL". Pins the NULL
+    // branch ResultView touches -- a regression would leak the literal or drop
+    // the cell class that drives the muted background.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [
+        { name: "id", canonical_type: "BIGINT" },
+        { name: "opt", canonical_type: "VARCHAR" },
+      ],
+      rows: [["1", ""]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    const { container } = renderI18n(
+      <ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    // The empty-string cell carries the cell-null class (muted bg via CSS); the
+    // populated cell does not.
+    expect(container.querySelectorAll("td.cell-null")).toHaveLength(1);
+    // The literal "NULL" never appears in the rendered output.
+    expect(screen.queryByText("NULL")).not.toBeInTheDocument();
+    // The non-NULL cell value still renders.
+    expect(screen.getByText("1")).toBeInTheDocument();
+  });
+
+  it("applies the .num class to a numeric column header + cell (ADR-0057)", async () => {
+    // ADR-0057: numeric canonical types right-align. The alignment is a CSS rule
+    // (table.result th.num/td.num { text-align: right }) -- not assertable in
+    // jsdom (no layout engine), so this pins the className contract at the
+    // component boundary: the class survives the Table primitive's cn() merge
+    // and lands on the real <th>/<td> the primitive renders.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [
+        { name: "id", canonical_type: "BIGINT" },
+        { name: "label", canonical_type: "VARCHAR" },
+      ],
+      rows: [["7", "x"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    const { container } = renderI18n(
+      <ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    // The BIGINT column carries .num on both its header and its cell; the
+    // VARCHAR column carries neither.
+    expect(container.querySelectorAll("th.num")).toHaveLength(1);
+    expect(container.querySelectorAll("td.num")).toHaveLength(1);
+  });
+
   it("paginates backward via the previous button", async () => {
     vi.mocked(readRows)
       .mockResolvedValueOnce({
