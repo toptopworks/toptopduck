@@ -296,7 +296,10 @@ function SidebarRow({
 // Action passes buttonVariants({ variant: "destructive" }); twMerge (in cn) lets
 // it override AlertDialogAction's built-in default variant, reusing the
 // destructive look without forking the copy-in component.
-function DeleteSessionDialog({
+// Exported for component-level testing (issue #111); the dialog is rendered only
+// by SessionSidebar in production, but the destructive-semantics + routing
+// contract is verified in isolation.
+export function DeleteSessionDialog({
   name,
   path,
   onCancel,
@@ -349,7 +352,10 @@ function DeleteSessionDialog({
 // (ADR-0050: standard surface uses shadcn primitives). aria-describedby={undefined}
 // opts out of a Description (the visible Label already names the field), which
 // also silences Radix's missing-description warning.
-function RenameSessionDialog({
+// Exported for component-level testing (issue #111); rendered only by
+// SessionSidebar in production, but the onOpenChange-to-onCancel bridge + blank
+// guard are verified in isolation.
+export function RenameSessionDialog({
   initialName,
   onCancel,
   onSubmit,

@@ -10,16 +10,19 @@ import { GuidedLoadDialog } from "../components/GuidedLoadDialog";
 import { PrivacyControls } from "../components/PrivacyControls";
 import { QuestionBar } from "../components/QuestionBar";
 import { COLUMN_DISCLOSURE_THRESHOLD, ResultView, ROW_DISCLOSURE_THRESHOLD } from "../components/ResultView";
+import { SettingsDialog } from "../components/SettingsDialog";
 import { Thread } from "../components/Thread";
 import { TooltipProvider } from "../components/ui/tooltip";
 import { VegaChart } from "../components/VegaChart";
 import { WorkingSetList } from "../components/WorkingSetList";
-import { readRows } from "../api";
+import { getProviderConfig, readRows, setApiKey } from "../api";
 import embed, { type VisualizationSpec } from "vega-embed";
 import type {
+  AppConfig,
   DatasetDescriptor,
   DatasetPrivacy,
   GuidanceRequest,
+  ProviderConfigView,
   ThreadEntry,
   TurnRecord,
 } from "../types";
@@ -29,7 +32,14 @@ import type {
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
-  return { ...actual, readRows: vi.fn() };
+  // readRows: ResultView pagination. getProviderConfig/setApiKey: SettingsDialog's
+  // keychain surface (mocked so the dialog never reaches Tauri).
+  return {
+    ...actual,
+    readRows: vi.fn(),
+    getProviderConfig: vi.fn(),
+    setApiKey: vi.fn(),
+  };
 });
 // Vega-Embed needs a real canvas; jsdom has none, so the render itself is
 // mocked. ResultView still drives the real decodeViz + the embed call/catch
@@ -81,6 +91,20 @@ function withIntl(ui: ReactElement) {
 }
 function renderI18n(ui: ReactElement) {
   return render(withIntl(ui));
+}
+
+// SettingsDialog routes its chrome through react-intl (ADR-0052). Rendered inside
+// an empty-catalog English IntlProvider so FormattedMessage / useIntl fall back to
+// the defaultMessage -- the canonical English source (ADR-0052) -- and assertions
+// anchor on stable English strings without coupling to the zh-CN catalog.
+// onError silences the expected missing-message warnings (the ids intentionally
+// resolve via defaultMessage, not the empty catalog).
+function renderSettings(ui: ReactElement) {
+  return render(
+    <IntlProvider locale="en" messages={{}} onError={() => {}}>
+      {ui}
+    </IntlProvider>,
+  );
 }
 
 const mockDataset: DatasetDescriptor = {
@@ -625,6 +649,51 @@ describe("GuidedLoadDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: /取消/ }));
     expect(onCancel).toHaveBeenCalledOnce();
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("Escape dismisses via the onOpenChange→onCancel bridge, not onSubmit (issue #111)", async () => {
+    // The Radix Dialog routes ESC through onOpenChange(false), which this dialog
+    // bridges to onCancel. The prior cancel test only exercised the button; this
+    // pins the ESC→onCancel path and that it never reaches onSubmit.
+    const onCancel = vi.fn();
+    const onSubmit = vi.fn();
+    render(
+      <GuidedLoadDialog
+        request={request}
+        loading={false}
+        onSubmit={onSubmit}
+        onCancel={onCancel}
+      />,
+    );
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("prevents ESC + overlay dismiss while loading (ingest cannot be interrupted, issue #111)", async () => {
+    // onEscapeKeyDown / onInteractOutside call preventDefault mid-load so a
+    // pending ingest isn't aborted by an accidental ESC or overlay click --
+    // mirroring the cancel / submit buttons' loading-disabled state.
+    const onCancel = vi.fn();
+    render(
+      <GuidedLoadDialog
+        request={request}
+        loading={true}
+        onSubmit={() => {}}
+        onCancel={onCancel}
+      />,
+    );
+    // ESC while loading is swallowed by the guard.
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    expect(onCancel).not.toHaveBeenCalled();
+    // Radix attaches its pointerdown listener on a setTimeout(0) after mount.
+    await new Promise((r) => setTimeout(r, 0));
+    fireEvent.pointerDown(document.body, { button: 0 });
+    fireEvent.pointerUp(document.body, { button: 0 });
+    fireEvent.click(document.body);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(onCancel).not.toHaveBeenCalled();
   });
 });
 
@@ -1637,5 +1706,180 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
     );
     fireEvent.keyDown(screen.getByRole("alertdialog"), { key: "Escape" });
     expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("overlay-click does not close the dialog or fire callbacks (AlertDialog, issue #111)", async () => {
+    // Radix AlertDialog prevents onPointerDownOutside / onInteractOutside, so a
+    // pointer-down on the overlay (outside the content) leaves the dialog open
+    // and fires neither callback -- the user must take an explicit 中止 / 继续
+    // action. Pins the overlay-dismiss path the prior ESC test did not cover.
+    const onConfirm = vi.fn();
+    const onCancel = vi.fn();
+    render(
+      <ActiveSourceDeleteDialog
+        target={target}
+        candidates={candidates}
+        onConfirm={onConfirm}
+        onCancel={onCancel}
+      />,
+    );
+    // Radix attaches its pointerdown listener on a setTimeout(0) after mount;
+    // flush it before the pointer events so the outside-click is observed.
+    await new Promise((r) => setTimeout(r, 0));
+    fireEvent.pointerDown(document.body, { button: 0 });
+    fireEvent.pointerUp(document.body, { button: 0 });
+    fireEvent.click(document.body);
+    await new Promise((r) => setTimeout(r, 0));
+    // AlertDialog semantics: the destructive confirm stays put; no accidental
+    // confirm or cancel.
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("Action click fires onConfirm but keeps the dialog mounted (preventDefault retry, H-1)", () => {
+    // H-1 regression guard (issue #111): AlertDialogAction auto-closes on click,
+    // but the handler calls e.preventDefault() to defer close so the parent's
+    // async remove decides unmount. A failure leaves the dialog open for retry --
+    // verified by onConfirm firing AND the alertdialog still being in the DOM.
+    const onConfirm = vi.fn();
+    render(
+      <ActiveSourceDeleteDialog
+        target={target}
+        candidates={candidates}
+        onConfirm={onConfirm}
+        onCancel={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    expect(onConfirm).toHaveBeenCalledWith("people");
+    // preventDefault deferred the auto-close: the dialog is still mounted.
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+  });
+});
+
+describe("SettingsDialog (issue #111)", () => {
+  // A complete app-config fixture; only theme/locale are exercised, the rest
+  // round-trips verbatim (the dialog commits the whole document atomically).
+  const baseConfig: AppConfig = {
+    format_version: 1,
+    theme: "system",
+    locale: "system",
+    window: { width: 800, height: 600, x: null, y: null, maximized: false },
+    engine: { memory_limit: "512MB", threads: 2, row_cap: 1000, statement_timeout_ms: 30000 },
+    privacy: { send_samples: true },
+    provider: { base_url: "https://api.anthropic.com", model: "claude-sonnet" },
+    export: { last_dir: null, default_format: "csv" },
+    tunables: { retry_budget: 3, window_turns: 10, far_window: 30 },
+    recent_files: [],
+    shell: { sidebar_collapsed: false, rail_collapsed: false },
+  };
+  const providerView: ProviderConfigView = {
+    base_url: "https://api.anthropic.com",
+    model: "claude-sonnet",
+    has_key: false,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getProviderConfig).mockResolvedValue(providerView);
+  });
+
+  it("commits the chosen theme + locale RadioGroup values on save", async () => {
+    // onValueChange wires each RadioGroup to local state; a save commits them in
+    // one atomic app-config write. The rest of the config round-trips unchanged.
+    const onCommitAppConfig = vi.fn().mockResolvedValue(undefined);
+    renderSettings(
+      <SettingsDialog
+        appConfig={baseConfig}
+        onCommitAppConfig={onCommitAppConfig}
+        onClose={() => {}}
+      />,
+    );
+    // Wait for loading to finish (the form renders once getProviderConfig resolves).
+    await screen.findByLabelText(/Anthropic API key/);
+    // Switch theme to dark + locale to English via the RadioGroups.
+    fireEvent.click(screen.getByRole("radio", { name: "Dark" }));
+    fireEvent.click(screen.getByRole("radio", { name: "English" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalledTimes(1));
+    const committed = onCommitAppConfig.mock.calls[0][0];
+    expect(committed.theme).toBe("dark");
+    expect(committed.locale).toBe("en-US");
+    expect(committed.engine).toEqual(baseConfig.engine);
+    expect(committed.provider).toEqual(baseConfig.provider);
+  });
+
+  it("does not forward an empty apiKey to setApiKey (leave-as-is contract)", async () => {
+    // ADR-0029/0038: an empty key field means "leave the stored key as-is". Save
+    // still commits the app-config but never calls setApiKey (the key stays in
+    // the OS keychain untouched).
+    vi.mocked(setApiKey).mockResolvedValue(undefined);
+    const onCommitAppConfig = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+    renderSettings(
+      <SettingsDialog
+        appConfig={baseConfig}
+        onCommitAppConfig={onCommitAppConfig}
+        onClose={onClose}
+      />,
+    );
+    await screen.findByLabelText(/Anthropic API key/);
+    // apiKey field is intentionally left empty.
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalled());
+    expect(vi.mocked(setApiKey)).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("prevents ESC dismiss while saving (atomic-write guard)", async () => {
+    // busy = loading || saving. A never-resolving onCommitAppConfig keeps saving
+    // true; onEscapeKeyDown then preventDefault's so a mid-save ESC cannot close
+    // the dialog (the atomic app-config write would otherwise be torn).
+    const onCommitAppConfig = vi
+      .fn()
+      .mockImplementation(() => new Promise<void>(() => {}));
+    const onClose = vi.fn();
+    renderSettings(
+      <SettingsDialog
+        appConfig={baseConfig}
+        onCommitAppConfig={onCommitAppConfig}
+        onClose={onClose}
+      />,
+    );
+    await screen.findByLabelText(/Anthropic API key/);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    // Confirm the saving state is active before asserting the guard.
+    await screen.findByText(/Saving/);
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("prevents overlay-click dismiss while saving (atomic-write guard)", async () => {
+    // Same busy guard via onInteractOutside: an overlay click mid-save is
+    // swallowed so the write is not interrupted.
+    const onCommitAppConfig = vi
+      .fn()
+      .mockImplementation(() => new Promise<void>(() => {}));
+    const onClose = vi.fn();
+    renderSettings(
+      <SettingsDialog
+        appConfig={baseConfig}
+        onCommitAppConfig={onCommitAppConfig}
+        onClose={onClose}
+      />,
+    );
+    await screen.findByLabelText(/Anthropic API key/);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText(/Saving/);
+    await new Promise((r) => setTimeout(r, 0));
+    fireEvent.pointerDown(document.body, { button: 0 });
+    fireEvent.pointerUp(document.body, { button: 0 });
+    fireEvent.click(document.body);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 });
