@@ -20,6 +20,54 @@ export type SessionError =
   | { kind: "InFlight" }
   | { kind: "Engine"; data: string };
 
+// Why a forward migration step failed (issue #120). Rides DuckLoadError::
+// Migration inside ResumeError::Load. Mirrors the Rust `MigrationError` (serde
+// adjacently-tagged). `Field` carries the missing/ill-typed field detail;
+// `NoTransform` names a gap in the migration chain (no registered step for the
+// source version).
+export type MigrationError =
+  | { kind: "NoTransform"; data: { from: number; supported: number } }
+  | { kind: "Field"; data: string };
+
+// The .duck load error (persistence::io::LoadError, issue #120) -- DISTINCT
+// from the ingest `LoadError` above. Nests MigrationError. Crosses IPC inside
+// ResumeError::Load (the open_duck reject); the frontend recurses
+// ResumeError::Load.data.kind to render the version-mismatch "please upgrade"
+// hint or the io/parse/migration detail.
+export type DuckLoadError =
+  | { kind: "Io"; data: string }
+  | { kind: "Parse"; data: string }
+  | { kind: "VersionMismatch"; data: { found: number; supported: number } }
+  | { kind: "Migration"; data: MigrationError };
+
+// Why a resume failed (issue #120). The `open_duck` command rejects with this
+// typed value (no longer flattened to SessionError::Engine). Mirrors the Rust
+// `ResumeError` (serde adjacently-tagged). `Load` recurses into DuckLoadError;
+// `Engine` is the command-boundary catch-all (mutex poison / join panic);
+// `AlreadyOpen` carries the canonical .duck path (PathBuf -> string).
+export type ResumeError =
+  | { kind: "Load"; data: DuckLoadError }
+  | {
+    kind: "SourceMissing";
+    data: { reference_name: string; path: string; detail: string };
+  }
+  | { kind: "Replay"; data: { reference_name: string; detail: string } }
+  | { kind: "ActiveMissing"; data: string }
+  | { kind: "Cancelled" }
+  | { kind: "Aborted" }
+  | { kind: "AlreadyOpen"; data: string }
+  | { kind: "Engine"; data: string };
+
+// Why a save failed (issue #120). Returned by `take_persist_error` as
+// `SaveError | null` (a value, not a reject). Mirrors the Rust `SaveError`
+// (serde adjacently-tagged). `AlreadyOpen` carries the canonical .duck path;
+// the Serialize/Io/Rename data strings ride the technical-details fold.
+export type SaveError =
+  | { kind: "Serialize"; data: string }
+  | { kind: "Io"; data: string }
+  | { kind: "Rename"; data: string }
+  | { kind: "AlreadyOpen"; data: string };
+
 // Per-dataset privacy controls (ADR-0011, issue #9 slice 5): mirror of the Rust
 // `DatasetPrivacy`. The config rides the descriptor (single source of truth),
 // persists in the working set, and is readable by the (future, PRD #1) window

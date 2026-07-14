@@ -6,7 +6,7 @@ import {
   askQuestion,
   cancelQuery,
   conversation,
-  engineDetail,
+  errorDetail,
   fmtError,
   ingestFile,
   ingestFileGuided,
@@ -31,6 +31,7 @@ import type {
   DatasetDescriptor,
   DatasetPrivacy,
   GuidanceRequest,
+  SaveError,
   SheetGuidance,
   StaleAnchor,
   ThreadEntry,
@@ -50,10 +51,11 @@ import type {
 export interface AppError {
   message: string;
   kind: AppErrorKind;
-  /** Technical detail from a typed SessionError::Engine reject (issue #119),
-   *  rendered collapsed under the error banner. null for every other kind and
-   *  any non-SessionError reject, so the fold is omitted. ADR-0029: the Rust
-   *  side is audited to keep secrets out of Engine payloads. */
+  /** Technical detail from a typed error reject (SessionError / ResumeError /
+   *  SaveError, issues #119/#120), rendered collapsed under the error banner.
+   *  null when the rendered message is already self-contained, so the fold is
+   *  omitted. ADR-0029: the Rust side is audited to keep secrets out of these
+   *  payloads (the resume / save paths are keychain-free). */
   detail?: string | null;
 }
 export type AppErrorKind =
@@ -84,10 +86,10 @@ export function errorPrefix(kind: AppErrorKind): string {
 }
 
 /** Build an AppError from an IPC reject: the locale message via fmtError plus
- * the Engine technical detail (issue #119) for the collapsed fold. Non-Engine
- * / non-SessionError rejects yield detail: null so the fold is omitted. */
+ * the technical detail (issues #119/#120) for the collapsed fold. null when
+ * the message is self-contained, so the fold is omitted. */
 function appErrorFrom(e: unknown, intl: IntlShape, kind: AppErrorKind): AppError {
-  return { message: fmtError(e, intl), kind, detail: engineDetail(e) };
+  return { message: fmtError(e, intl), kind, detail: errorDetail(e) };
 }
 
 // Module-level empty constants so `query.data ?? EMPTY` keeps a stable reference
@@ -114,7 +116,10 @@ export interface UseSessionState {
    *  the thread holds completed TurnRecords; phase is a transient hint). */
   phase: TurnPhase | null;
   error: AppError | null;
-  persistError: string | null;
+  /** The most recent per-turn save failure as a typed SaveError (issue #120),
+   *  rendered via the locale catalog in the session pane's persist-warning
+   *  banner. null after a clean save or once read. */
+  persistError: SaveError | null;
   guidance: { request: GuidanceRequest; path: string } | null;
   pendingActiveDelete: DatasetDescriptor | null;
   // Actions.
@@ -177,7 +182,7 @@ export function useSessionState(
   const [guidance, setGuidance] = useState<{ request: GuidanceRequest; path: string } | null>(null);
   const [pendingActiveDelete, setPendingActiveDelete] =
     useState<DatasetDescriptor | null>(null);
-  const [persistError, setPersistError] = useState<string | null>(null);
+  const [persistError, setPersistError] = useState<SaveError | null>(null);
 
   // R5 (ADR-0062): the first time the thread resolves WITH content, point
   // viewedResult at its last Materialized turn (resume lands on the prior
@@ -263,7 +268,7 @@ export function useSessionState(
         setError({
           message: `${ERROR_VERB[kind]}已保存，但刷新工作集失败：${fmtError(refreshErr, intl)}`,
           kind,
-          detail: engineDetail(refreshErr),
+          detail: errorDetail(refreshErr),
         });
       }
     },
@@ -330,7 +335,7 @@ export function useSessionState(
           setError({
             message: `${ERROR_VERB.ask}已保存，但刷新工作集失败：${fmtError(refreshErr, intl)}`,
             kind: "ask",
-            detail: engineDetail(refreshErr),
+            detail: errorDetail(refreshErr),
           });
         }
       }

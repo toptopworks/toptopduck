@@ -62,7 +62,21 @@ const MAX_READ_ROWS: u64 = 10_000;
 /// drift / active-abandoned decisions land via [`SourceIssue`] /
 /// [`ActiveAbandoned`] callbacks; this enum covers the non-interactive
 /// failures (corrupt recipe, path-traversal refusal, user cancel / abort).
-#[derive(Debug)]
+///
+/// Crosses IPC serde-structured (issue #120): `#[serde(tag = "kind", content =
+/// "data")]`, the adjacently-tagged shape the rest of the wire contract uses
+/// (the same as [`crate::session_store::SessionError`]). The `open_duck`
+/// command rejects with this typed value (no longer flattened to
+/// `SessionError::Engine(string)`), so the frontend narrows on `kind` and
+/// renders a locale message; the `Load` variant recurses into the nested
+/// [`LoadError`](crate::persistence::io::LoadError) for the version-mismatch /
+/// io / parse / migration detail. `Engine` is the catch-all for command-
+/// boundary internal failures (mutex poison, join panic) that are not one of
+/// the named resume-domain failures -- mirroring `SessionError::Engine`. The
+/// hand-written `Display` below stays Rust-log-only; it is NOT the IPC
+/// contract.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "data")]
 pub enum ResumeError {
     /// Reading or parsing the .duck failed (ADR-0036 version / parse / IO).
     Load(crate::persistence::io::LoadError),
@@ -116,6 +130,14 @@ pub enum ResumeError {
     /// caller surfaces this as "already open" -- the user closes one window
     /// or uses the existing session rather than silently racing two writers.
     AlreadyOpen(PathBuf),
+    /// Command-boundary internal failure (mutex poison, join panic) that is
+    /// not one of the named resume-domain failures above -- mirrors
+    /// [`SessionError::Engine`](crate::session_store::SessionError::Engine).
+    /// Carries the underlying detail string. The `open_duck` command maps a
+    /// `session_lock` poison or a `spawn_blocking` join error here so its
+    /// typed `Result<(), ResumeError>` return stays uniform; ADR-0029 holds --
+    /// the detail never carries an API key (the resume path is keychain-free).
+    Engine(String),
 }
 
 impl std::fmt::Display for ResumeError {
@@ -137,6 +159,7 @@ impl std::fmt::Display for ResumeError {
             Self::AlreadyOpen(p) => {
                 write!(f, "该 .duck 已在本进程打开，不能重复打开：{}", p.display())
             }
+            Self::Engine(d) => write!(f, "{d}"),
         }
     }
 }
@@ -387,13 +410,14 @@ pub struct Session {
     /// falls back to an empty name).
     session_name: Option<String>,
     /// The most recent per-turn atomic-write failure (ADR-0034). Set by
-    /// [`Self::persist_if_bound`] when a save fails; cleared by
+    /// [`Self::persist_if_bound`] when a save fails (the typed [`SaveError`],
+    /// captured verbatim -- issue #120); cleared by
     /// [`Self::take_persist_error`]. The in-memory turn always advances
     /// regardless (the user's work stays live); this field lets the UI
     /// surface the disk-vs-memory drift instead of silently relying on the
     /// next successful write to self-heal (ADR-0035 honest signal -- a
     /// dropped save is a correctness gap, not just a log line).
-    persist_error: Option<String>,
+    persist_error: Option<SaveError>,
     /// The canonical form of [`Self::duck_path`] (ADR-0035 Decision 3, issue #50):
     /// the registry key under which this session holds the file. Every
     /// spelling of the same on-disk file collapses to one canonical path, so
@@ -1887,7 +1911,10 @@ impl Session {
             log::error!(target: "toptopduck::session", "自动保存 .duck 失败：{e}");
             // Stash the latest failure (overwrites a prior unread one -- the
             // most recent is the most actionable). Cleared by take_persist_error.
-            self.persist_error = Some(e.to_string());
+            // Captured as the typed SaveError (issue #120) so the frontend
+            // narrows on `kind` and renders a locale message; the underlying
+            // io/serde/rename detail or the AlreadyOpen path rides the fold.
+            self.persist_error = Some(e);
             return;
         }
         // Successful write -- refresh the baseline so the NEXT write's check
@@ -1904,8 +1931,10 @@ impl Session {
     /// any. The command layer exposes this so the frontend can show a
     /// non-blocking banner after each turn / source event / resume. The
     /// failure is cleared on read so a turn that subsequently saves
-    /// successfully does not re-surface the stale error.
-    pub fn take_persist_error(&mut self) -> Option<String> {
+    /// successfully does not re-surface the stale error. Returns the typed
+    /// [`SaveError`] (issue #120) so the frontend narrows on `kind` and
+    /// renders a locale message instead of matching a backend Display string.
+    pub fn take_persist_error(&mut self) -> Option<SaveError> {
         self.persist_error.take()
     }
 

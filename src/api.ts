@@ -6,11 +6,15 @@ import type {
   AppConfig,
   DatasetDescriptor,
   DatasetPrivacy,
+  DuckLoadError,
   LoadOutcome,
+  MigrationError,
   ProviderConfig,
   ProviderConfigView,
+  ResumeError,
   ResumeProgress,
   RowPage,
+  SaveError,
   SessionError,
   SessionMetadata,
   SheetGuidance,
@@ -171,10 +175,229 @@ function isSessionError(e: unknown): e is SessionError {
   }
 }
 
+// Narrow an unknown value to a MigrationError (issue #120). Rides
+// DuckLoadError::Migration inside ResumeError::Load. Same L1 defensive shape
+// as isSessionError: a variant's `data` is verified before the guard promises
+// it, so fmtError / errorDetail never read an unverified field.
+function isMigrationError(e: unknown): e is MigrationError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "NoTransform": {
+      const d = (e as { data?: unknown }).data;
+      return (
+        typeof d === "object" &&
+        d !== null &&
+        typeof (d as { from?: unknown }).from === "number" &&
+        typeof (d as { supported?: unknown }).supported === "number"
+      );
+    }
+    case "Field":
+      return typeof (e as { data?: unknown }).data === "string";
+    default:
+      return false;
+  }
+}
+
+// Narrow an unknown value to a DuckLoadError -- the .duck load error
+// (persistence::io::LoadError), distinct from the ingest model::LoadError
+// (issue #120). Migration recurses into isMigrationError.
+function isDuckLoadError(e: unknown): e is DuckLoadError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "Io":
+    case "Parse":
+      return typeof (e as { data?: unknown }).data === "string";
+    case "VersionMismatch": {
+      const d = (e as { data?: unknown }).data;
+      return (
+        typeof d === "object" &&
+        d !== null &&
+        typeof (d as { found?: unknown }).found === "number" &&
+        typeof (d as { supported?: unknown }).supported === "number"
+      );
+    }
+    case "Migration":
+      return isMigrationError((e as { data?: unknown }).data);
+    default:
+      return false;
+  }
+}
+
+// Narrow an unknown IPC reject to a ResumeError (issue #120). The `open_duck`
+// command rejects with this typed value. Load recurses into isDuckLoadError;
+// the struct variants verify their field shapes; AlreadyOpen / ActiveMissing /
+// Engine carry a string under data; Cancelled / Aborted are unit.
+function isResumeError(e: unknown): e is ResumeError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "Load":
+      return isDuckLoadError((e as { data?: unknown }).data);
+    case "SourceMissing": {
+      const d = (e as { data?: unknown }).data;
+      return (
+        typeof d === "object" &&
+        d !== null &&
+        typeof (d as { reference_name?: unknown }).reference_name === "string" &&
+        typeof (d as { path?: unknown }).path === "string" &&
+        typeof (d as { detail?: unknown }).detail === "string"
+      );
+    }
+    case "Replay": {
+      const d = (e as { data?: unknown }).data;
+      return (
+        typeof d === "object" &&
+        d !== null &&
+        typeof (d as { reference_name?: unknown }).reference_name === "string" &&
+        typeof (d as { detail?: unknown }).detail === "string"
+      );
+    }
+    case "ActiveMissing":
+    case "AlreadyOpen":
+    case "Engine":
+      return typeof (e as { data?: unknown }).data === "string";
+    case "Cancelled":
+    case "Aborted":
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Narrow an unknown value to a SaveError (issue #120). Returned by
+// take_persist_error as `SaveError | null` (a value, not a reject). Every
+// variant carries a string under data (the io/serde/rename detail, or the
+// AlreadyOpen canonical path).
+function isSaveError(e: unknown): e is SaveError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "Serialize":
+    case "Io":
+    case "Rename":
+    case "AlreadyOpen":
+      return typeof (e as { data?: unknown }).data === "string";
+    default:
+      return false;
+  }
+}
+
+// Format a DuckLoadError through the locale catalog (issue #120). The
+// version-mismatch "please upgrade" hint interpolates the found / supported
+// versions into the message; the io / parse / migration messages are generic
+// and the underlying detail rides the technical-details fold via errorDetail.
+function formatDuckLoadError(e: DuckLoadError, intl: IntlShape): string {
+  switch (e.kind) {
+    case "Io":
+      return intl.formatMessage({
+        id: "error.duck.loadIo",
+        defaultMessage: "Failed to read the .duck file",
+      });
+    case "Parse":
+      return intl.formatMessage({
+        id: "error.duck.loadParse",
+        defaultMessage: "Failed to parse the .duck file",
+      });
+    case "VersionMismatch":
+      return intl.formatMessage(
+        {
+          id: "error.duck.versionMismatch",
+          defaultMessage:
+            "This .duck was made by a newer app (format_version={found}); the current app supports only {supported}. Please upgrade the app, then reopen it.",
+        },
+        { found: e.data.found, supported: e.data.supported },
+      );
+    case "Migration":
+      return intl.formatMessage({
+        id: "error.duck.migration",
+        defaultMessage: "Failed to migrate the .duck file to the current format",
+      });
+  }
+}
+
+// Format a ResumeError through the locale catalog (issue #120). Load recurses
+// into formatDuckLoadError; SourceMissing / Replay / ActiveMissing interpolate
+// the reference name; AlreadyOpen shares the merged `error.duck.alreadyOpen`
+// id with SaveError::AlreadyOpen (DRY -- the single-writer invariant is one
+// message, not two).
+function formatResumeError(e: ResumeError, intl: IntlShape): string {
+  switch (e.kind) {
+    case "Load":
+      return formatDuckLoadError(e.data, intl);
+    case "SourceMissing":
+      return intl.formatMessage(
+        { id: "error.resume.sourceMissing", defaultMessage: "Source \"{name}\" not found" },
+        { name: e.data.reference_name },
+      );
+    case "Replay":
+      return intl.formatMessage(
+        { id: "error.resume.replay", defaultMessage: "Failed to replay \"{name}\"" },
+        { name: e.data.reference_name },
+      );
+    case "ActiveMissing":
+      return intl.formatMessage(
+        {
+          id: "error.resume.activeMissing",
+          defaultMessage: "The session focus points to an unregistered source \"{name}\"",
+        },
+        { name: e.data },
+      );
+    case "Cancelled":
+      return intl.formatMessage({
+        id: "error.resume.cancelled",
+        defaultMessage: "Resume cancelled",
+      });
+    case "Aborted":
+      return intl.formatMessage({
+        id: "error.resume.aborted",
+        defaultMessage: "Resume aborted",
+      });
+    case "AlreadyOpen":
+      return intl.formatMessage({
+        id: "error.duck.alreadyOpen",
+        defaultMessage: "This .duck is already open in this process",
+      });
+    case "Engine":
+      return intl.formatMessage({
+        id: "error.resume.engine",
+        defaultMessage: "Internal error",
+      });
+  }
+}
+
+// Format a SaveError through the locale catalog (issue #120). AlreadyOpen
+// shares the merged `error.duck.alreadyOpen` id with ResumeError::AlreadyOpen.
+function formatSaveError(e: SaveError, intl: IntlShape): string {
+  switch (e.kind) {
+    case "Serialize":
+      return intl.formatMessage({
+        id: "error.save.serialize",
+        defaultMessage: "Failed to serialize the .duck file",
+      });
+    case "Io":
+      return intl.formatMessage({
+        id: "error.save.io",
+        defaultMessage: "Failed to write the .duck temp file",
+      });
+    case "Rename":
+      return intl.formatMessage({
+        id: "error.save.rename",
+        defaultMessage: "Failed to replace the .duck file",
+      });
+    case "AlreadyOpen":
+      return intl.formatMessage({
+        id: "error.duck.alreadyOpen",
+        defaultMessage: "This .duck is already open in this process",
+      });
+  }
+}
+
 // Format an unknown error (a Tauri IPC reject, a JS Error, or a structured
-// object) into a readable string. A structured SessionError -- the typed IPC
-// payload a session-scoped command rejects with (issue #119) -- is narrowed to
-// its `kind` and rendered through the locale catalog, so the backend Chinese
+// object) into a readable string. A structured typed error -- SessionError
+// (issue #119), ResumeError / SaveError (issue #120) -- is narrowed to its
+// `kind` and rendered through the locale catalog, so the backend Chinese
 // wording no longer crosses IPC. Each `formatMessage` call site carries a
 // literal id + defaultMessage so @formatjs extract recovers it for the catalog
 // guard (an id hidden behind a lookup map would be invisible to the extract).
@@ -211,6 +434,12 @@ export function fmtError(e: unknown, intl: IntlShape): string {
         });
     }
   }
+  if (isResumeError(e)) {
+    return formatResumeError(e, intl);
+  }
+  if (isSaveError(e)) {
+    return formatSaveError(e, intl);
+  }
   if (e instanceof Error) return e.message;
   if (typeof e === "string") return e;
   // Opaque object: stringify best-effort. A cyclic reject would throw, so fall
@@ -222,31 +451,79 @@ export function fmtError(e: unknown, intl: IntlShape): string {
   }
 }
 
-// Extract the Engine.data technical detail from a typed SessionError reject, for
-// display in a collapsed "Technical details" fold (issue #119). Returns null
-// for every other kind and any non-SessionError reject, so the caller renders
-// the fold only when there is something to show. fmtError still keeps this
-// detail OUT of the primary message; ADR-0029 is enforced upstream -- the Rust
-// side is audited to keep secrets out of Engine payloads -- so the raw detail
-// is safe to surface in the fold. `isSessionError` already guarantees Engine's
-// `data` is a string, so no redundant runtime check is needed here.
-export function engineDetail(e: unknown): string | null {
-  if (isSessionError(e) && e.kind === "Engine") {
+// Extract the technical detail for the collapsed "Technical details" fold
+// (issue #119 / #120). Returns the underlying string from a typed error's
+// `data` -- SessionError::Engine, ResumeError::Engine / SourceMissing / Replay
+// / AlreadyOpen, the nested DuckLoadError io/parse/migration detail, or a
+// SaveError's io/serde/rename detail / AlreadyOpen path -- and null for every
+// variant whose message is already self-contained (so the fold is omitted).
+// fmtError keeps this detail OUT of the primary message; ADR-0029 holds -- the
+// Rust side is audited to keep secrets out of these payloads (the resume /
+// save paths are keychain-free) -- so the raw detail is safe to surface.
+export function errorDetail(e: unknown): string | null {
+  if (isSessionError(e)) {
+    return e.kind === "Engine" ? e.data : null;
+  }
+  if (isResumeError(e)) {
+    switch (e.kind) {
+      case "Load":
+        return duckLoadErrorDetail(e.data);
+      case "SourceMissing":
+      case "Replay":
+        return e.data.detail;
+      case "AlreadyOpen":
+      case "Engine":
+        return e.data;
+      case "ActiveMissing":
+      case "Cancelled":
+      case "Aborted":
+        return null;
+    }
+  }
+  if (isSaveError(e)) {
+    // Every SaveError variant carries a string under data (the detail or the
+    // AlreadyOpen path) -- all useful in the fold.
     return e.data;
   }
   return null;
 }
 
-// Describe an IPC reject for an error banner: the locale message via fmtError
-// plus the Engine technical detail (issue #119). Shared by the shell and the
-// result view so both surface the collapsed fold the session pane already does
-// -- a close-wait timeout reject carries its actionable "retry shortly" hint in
-// the detail, which must not vanish at the shell layer (review H1/M2).
+// Detail for a nested DuckLoadError (issue #120). VersionMismatch's versions
+// are already in the message, so it carries no fold detail; the migration
+// branch recurses into the MigrationError (Field detail or the NoTransform
+// version gap).
+function duckLoadErrorDetail(e: DuckLoadError): string | null {
+  switch (e.kind) {
+    case "Io":
+    case "Parse":
+      return e.data;
+    case "VersionMismatch":
+      return null;
+    case "Migration":
+      return migrationErrorDetail(e.data);
+  }
+}
+
+function migrationErrorDetail(e: MigrationError): string | null {
+  switch (e.kind) {
+    case "NoTransform":
+      return `format_version=${e.data.from} (supported: ${e.data.supported})`;
+    case "Field":
+      return e.data;
+  }
+}
+
+// Describe an IPC reject (or a take_persist_error returned value) for an error
+// banner: the locale message via fmtError plus the technical detail (issue
+// #119 / #120). Shared by the shell, the result view, and the session pane's
+// persist-warning banner so all surface the collapsed fold consistently -- a
+// close-wait timeout / resume / save reject carries its actionable hint in the
+// detail, which must not vanish at any layer (review H1/M2).
 export function describeReject(
   e: unknown,
   intl: IntlShape,
 ): { message: string; detail: string | null } {
-  return { message: fmtError(e, intl), detail: engineDetail(e) };
+  return { message: fmtError(e, intl), detail: errorDetail(e) };
 }
 
 // --- LLM provider key + config (issue #29, ADR-0007/0019/0029) -------------
@@ -351,9 +628,11 @@ export async function renamePersistedSession(
 }
 
 // Read + clear the named session's most recent per-turn persistence failure
-// (ADR-0034/0035 honest signal).
-export async function takePersistError(sessionId: string): Promise<string | null> {
-  return invoke<string | null>("take_persist_error", { sessionId });
+// (ADR-0034/0035 honest signal). Returns the typed SaveError (issue #120) so
+// the banner renders the failure kind via the locale catalog instead of
+// matching a backend Display string; null after a clean save.
+export async function takePersistError(sessionId: string): Promise<SaveError | null> {
+  return invoke<SaveError | null>("take_persist_error", { sessionId });
 }
 
 // --- App-level config (issue #53, ADR-0038) --------------------------------

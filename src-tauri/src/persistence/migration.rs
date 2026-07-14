@@ -37,7 +37,15 @@ use crate::persistence::recipe::RECIPE_FORMAT_VERSION;
 /// below-current version, so the chain's first step is always registered. It
 /// exists as the contract guard for when v2 ships -- a forgotten `v1_to_v2`
 /// registration must surface as an honest error, not a silent mis-migrate.
-#[derive(Debug)]
+///
+/// Crosses IPC serde-structured (issue #120): `#[serde(tag = "kind", content =
+/// "data")]`, the adjacently-tagged shape the rest of the wire contract uses
+/// (the same as [`crate::session_store::SessionError`]). `Field(String)` needs
+/// the adjacent `content = "data"` slot -- an internally-tagged `#[serde(tag =
+/// "kind")]` cannot carry a bare-string newtype variant. The hand-written
+/// `Display` below stays Rust-log-only; it is NOT the IPC contract.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "data")]
 pub enum MigrationError {
     /// The migration chain has a gap at `from` (no transform registered for
     /// that source version). `supported` is the current app version.
@@ -415,9 +423,13 @@ mod tests {
         // the `Value` and panicking (ADR-0034 honest parse).
         let arr = serde_json::json!([1, 2, 3]);
         let err = migrate_to_current(arr, 0).unwrap_err();
+        // Lock the typed variant (issue #120): MigrationError now crosses IPC
+        // serde-structured, so the pub-API contract is "returns Field" -- the
+        // Chinese Display wording is Rust-log-only and no longer the thing to
+        // pin here. The transform-internal tests above still assert wording.
         assert!(
-            matches!(&err, MigrationError::Field(msg) if msg.contains("对象")),
-            "expected Field error naming the non-object root, got {err:?}",
+            matches!(&err, MigrationError::Field(_)),
+            "expected Field error for the non-object root, got {err:?}",
         );
     }
 }

@@ -40,7 +40,10 @@ pub use model::{
     TurnPhase, TurnProgress, TurnRecord, VizSpec, DEFAULT_PROVIDER_BASE_URL,
     DEFAULT_PROVIDER_MODEL,
 };
-pub use persistence::{RecipeError, SessionMetadata, SourceSummary};
+pub use persistence::{
+    LoadError as DuckLoadError, MigrationError, RecipeError, SaveError, SessionMetadata,
+    SourceSummary,
+};
 pub use provider::anthropic::AnthropicProvider;
 pub use provider::fake::FakeProvider;
 pub use provider::keychain::{KeychainStore, ProviderConfigSource, StaticConfig};

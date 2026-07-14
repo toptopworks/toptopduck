@@ -433,6 +433,136 @@ fn session_error_serializes_as_adjacently_tagged_kind_data() {
     );
 }
 
+// --- issue #120 resume / persistence error wire contracts -------------------
+//
+// Pin the JSON shape of the four typed error enums that cross the Rust<->
+// frontend boundary as command rejects / return values: ResumeError (the
+// `open_duck` reject), SaveError (the `take_persist_error` returned value),
+// and the nested DuckLoadError + MigrationError (which ride inside
+// ResumeError::Load). All adjacently-tagged (`#[serde(tag="kind", content =
+// "data")]`), the same shape the rest of the wire contract uses, so the
+// frontend narrows on `kind` at every depth. src/types.ts mirrors the shapes
+// asserted here -- if one side changes, the other must follow.
+
+#[test]
+fn migration_error_serializes_adjacently_tagged() {
+    // MigrationError rides LoadError::Migration inside ResumeError::Load. The
+    // Field newtype needs the adjacent `content = "data"` slot (an internally-
+    // tagged enum cannot carry a bare-string newtype variant).
+    use toptopduck_lib::MigrationError;
+    assert_wire(
+        &MigrationError::NoTransform {
+            from: 1,
+            supported: 2,
+        },
+        r#"{"kind":"NoTransform","data":{"from":1,"supported":2}}"#,
+    );
+    assert_wire(
+        &MigrationError::Field("missing x".into()),
+        r#"{"kind":"Field","data":"missing x"}"#,
+    );
+}
+
+#[test]
+fn duck_load_error_serializes_adjacently_tagged() {
+    // The .duck load error (persistence::io::LoadError) -- distinct from the
+    // ingest model::LoadError. Nests MigrationError under data; the inner enum
+    // keeps its own kind/data shape so the frontend recurses uniformly.
+    use toptopduck_lib::{DuckLoadError, MigrationError};
+    assert_wire(
+        &DuckLoadError::Io("io-fail".into()),
+        r#"{"kind":"Io","data":"io-fail"}"#,
+    );
+    assert_wire(
+        &DuckLoadError::Parse("parse-fail".into()),
+        r#"{"kind":"Parse","data":"parse-fail"}"#,
+    );
+    assert_wire(
+        &DuckLoadError::VersionMismatch {
+            found: 3,
+            supported: 1,
+        },
+        r#"{"kind":"VersionMismatch","data":{"found":3,"supported":1}}"#,
+    );
+    assert_wire(
+        &DuckLoadError::Migration(MigrationError::Field("bad".into())),
+        r#"{"kind":"Migration","data":{"kind":"Field","data":"bad"}}"#,
+    );
+}
+
+#[test]
+fn save_error_serializes_adjacently_tagged() {
+    // SaveError is the take_persist_error returned value (Option<SaveError>).
+    // AlreadyOpen carries the canonical .duck path (PathBuf -> a JSON string)
+    // so the UI can name exactly which file is double-open.
+    use std::path::PathBuf;
+    use toptopduck_lib::SaveError;
+    assert_wire(
+        &SaveError::Serialize("ser-fail".into()),
+        r#"{"kind":"Serialize","data":"ser-fail"}"#,
+    );
+    assert_wire(
+        &SaveError::Io("io-fail".into()),
+        r#"{"kind":"Io","data":"io-fail"}"#,
+    );
+    assert_wire(
+        &SaveError::Rename("rename-fail".into()),
+        r#"{"kind":"Rename","data":"rename-fail"}"#,
+    );
+    assert_wire(
+        &SaveError::AlreadyOpen(PathBuf::from("/x/a.duck")),
+        r#"{"kind":"AlreadyOpen","data":"/x/a.duck"}"#,
+    );
+}
+
+#[test]
+fn resume_error_serializes_adjacently_tagged() {
+    // ResumeError is the open_duck command's typed reject (no longer flattened
+    // to SessionError::Engine(string)). Load recurses into DuckLoadError.
+    use std::path::PathBuf;
+    use toptopduck_lib::{DuckLoadError, ResumeError};
+    assert_wire(
+        &ResumeError::Load(DuckLoadError::VersionMismatch {
+            found: 3,
+            supported: 1,
+        }),
+        r#"{"kind":"Load","data":{"kind":"VersionMismatch","data":{"found":3,"supported":1}}}"#,
+    );
+    assert_wire(
+        &ResumeError::SourceMissing {
+            reference_name: "people".into(),
+            path: "/x".into(),
+            detail: "d".into(),
+        },
+        r#"{"kind":"SourceMissing","data":{"reference_name":"people","path":"/x","detail":"d"}}"#,
+    );
+    assert_wire(
+        &ResumeError::Replay {
+            reference_name: "result_1".into(),
+            detail: "d".into(),
+        },
+        r#"{"kind":"Replay","data":{"reference_name":"result_1","detail":"d"}}"#,
+    );
+    assert_wire(
+        &ResumeError::ActiveMissing("ghost".into()),
+        r#"{"kind":"ActiveMissing","data":"ghost"}"#,
+    );
+    // Unit variants omit data.
+    assert_wire(&ResumeError::Cancelled, r#"{"kind":"Cancelled"}"#);
+    assert_wire(&ResumeError::Aborted, r#"{"kind":"Aborted"}"#);
+    // AlreadyOpen carries the canonical path (PathBuf -> JSON string).
+    assert_wire(
+        &ResumeError::AlreadyOpen(PathBuf::from("/x/a.duck")),
+        r#"{"kind":"AlreadyOpen","data":"/x/a.duck"}"#,
+    );
+    // Engine is the command-boundary catch-all (mutex poison / join panic),
+    // mirroring SessionError::Engine -- the detail rides data.
+    assert_wire(
+        &ResumeError::Engine("join error".into()),
+        r#"{"kind":"Engine","data":"join error"}"#,
+    );
+}
+
 // --- issue #76 progress + listing wire contracts (ADR-0056/0059/0060) -------
 //
 // Pin the JSON shape of the turn-progress / resume-progress side-channel
