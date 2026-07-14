@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useIntl, type IntlShape } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   activeDataset,
   askQuestion,
   cancelQuery,
   conversation,
+  engineDetail,
   fmtError,
   ingestFile,
   ingestFileGuided,
@@ -48,6 +50,11 @@ import type {
 export interface AppError {
   message: string;
   kind: AppErrorKind;
+  /** Technical detail from a typed SessionError::Engine reject (issue #119),
+   *  rendered collapsed under the error banner. null for every other kind and
+   *  any non-SessionError reject, so the fold is omitted. ADR-0029: the Rust
+   *  side is audited to keep secrets out of Engine payloads. */
+  detail?: string | null;
 }
 export type AppErrorKind =
   | "load"
@@ -74,6 +81,13 @@ export const ERROR_VERB: Record<AppErrorKind, string> = {
  * and the prefix can never drift apart. */
 export function errorPrefix(kind: AppErrorKind): string {
   return `${ERROR_VERB[kind]}失败：`;
+}
+
+/** Build an AppError from an IPC reject: the locale message via fmtError plus
+ * the Engine technical detail (issue #119) for the collapsed fold. Non-Engine
+ * / non-SessionError rejects yield detail: null so the fold is omitted. */
+function appErrorFrom(e: unknown, intl: IntlShape, kind: AppErrorKind): AppError {
+  return { message: fmtError(e, intl), kind, detail: engineDetail(e) };
 }
 
 // Module-level empty constants so `query.data ?? EMPTY` keeps a stable reference
@@ -128,6 +142,7 @@ export function useSessionState(
   onIngestConsumed: () => void = () => {},
 ): UseSessionState {
   const queryClient = useQueryClient();
+  const intl = useIntl();
 
   // --- Server state (TanStack Query, ADR-0051) -----------------------------
   const workingSetQuery = useQuery({
@@ -246,12 +261,13 @@ export function useSessionState(
         ]);
       } catch (refreshErr) {
         setError({
-          message: `${ERROR_VERB[kind]}已保存，但刷新工作集失败：${fmtError(refreshErr)}`,
+          message: `${ERROR_VERB[kind]}已保存，但刷新工作集失败：${fmtError(refreshErr, intl)}`,
           kind,
+          detail: engineDetail(refreshErr),
         });
       }
     },
-    [queryClient, sessionId],
+    [queryClient, sessionId, intl],
   );
 
   // --- Actions -------------------------------------------------------------
@@ -269,7 +285,7 @@ export function useSessionState(
       try {
         outcome = await askQuestion(sessionId, question);
       } catch (e) {
-        setError({ message: fmtError(e), kind: "ask" });
+        setError(appErrorFrom(e, intl, "ask"));
         setLoading(false);
         void pollPersistError();
         return;
@@ -312,8 +328,9 @@ export function useSessionState(
           ]);
         } catch (refreshErr) {
           setError({
-            message: `${ERROR_VERB.ask}已保存，但刷新工作集失败：${fmtError(refreshErr)}`,
+            message: `${ERROR_VERB.ask}已保存，但刷新工作集失败：${fmtError(refreshErr, intl)}`,
             kind: "ask",
+            detail: engineDetail(refreshErr),
           });
         }
       }
@@ -322,16 +339,16 @@ export function useSessionState(
       setLoading(false);
       void pollPersistError();
     },
-    [sessionId, queryClient, pollPersistError],
+    [sessionId, queryClient, pollPersistError, intl],
   );
 
   const handleCancel = useCallback(async () => {
     try {
       await cancelQuery(sessionId);
     } catch (e) {
-      setError({ message: fmtError(e), kind: "ask" });
+      setError(appErrorFrom(e, intl, "ask"));
     }
-  }, [sessionId]);
+  }, [sessionId, intl]);
 
   const handleIngest = useCallback(
     async (path: string) => {
@@ -350,13 +367,13 @@ export function useSessionState(
           setError({ message: loadErrorMessage(result.data), kind: "load" });
         }
       } catch (e) {
-        setError({ message: fmtError(e), kind: "load" });
+        setError(appErrorFrom(e, intl, "load"));
       } finally {
         setLoading(false);
         void pollPersistError();
       }
     },
-    [sessionId, refreshServerState, pollPersistError],
+    [sessionId, refreshServerState, pollPersistError, intl],
   );
 
   // Consume a drop-on-cold-start file (ADR-0061, #81 A1). The shell mints the
@@ -399,13 +416,13 @@ export function useSessionState(
           });
         }
       } catch (e) {
-        setError({ message: fmtError(e), kind: "load" });
+        setError(appErrorFrom(e, intl, "load"));
       } finally {
         setLoading(false);
         void pollPersistError();
       }
     },
-    [guidance, sessionId, refreshServerState, pollPersistError],
+    [guidance, sessionId, refreshServerState, pollPersistError, intl],
   );
 
   const handleGuidedCancel = useCallback(() => setGuidance(null), []);
@@ -419,7 +436,7 @@ export function useSessionState(
       try {
         await fn();
       } catch (e) {
-        setError({ message: fmtError(e), kind });
+        setError(appErrorFrom(e, intl, kind));
         setLoading(false);
         void pollPersistError();
         return;
@@ -428,7 +445,7 @@ export function useSessionState(
       setLoading(false);
       void pollPersistError();
     },
-    [refreshServerState, pollPersistError],
+    [refreshServerState, pollPersistError, intl],
   );
 
   const handleRename = useCallback(
@@ -465,13 +482,13 @@ export function useSessionState(
           setError({ message: loadErrorMessage(result.data), kind: "replace" });
         }
       } catch (e) {
-        setError({ message: fmtError(e), kind: "replace" });
+        setError(appErrorFrom(e, intl, "replace"));
       } finally {
         setLoading(false);
         void pollPersistError();
       }
     },
-    [sessionId, refreshServerState, pollPersistError],
+    [sessionId, refreshServerState, pollPersistError, intl],
   );
 
   const handleRemoveSource = useCallback(

@@ -6,10 +6,13 @@
 //! [`SessionError::NotFound`] -- issue #73), looks up the target
 //! handle, and runs against it. The store lock is held only for the brief
 //! lookup; long turns run against a cloned `Arc<SessionHandle>` with no store
-//! lock held (ADR-0056 concurrency model). All command functions return
-//! `Result<T, String>` for IPC (the frontend string-matches the error); the
-//! typed [`SessionError`] is mapped to that string via `From<SessionError> for
-//! String` so `?` propagates the exact wording.
+//! lock held (ADR-0056 concurrency model). Session-scoped commands return
+//! `Result<T, SessionError>` for IPC (issue #119): [`SessionError`] is
+//! serde-structured (`#[serde(tag = "kind", content = "data")]`) so the
+//! frontend narrows on `kind` and renders a locale message -- the Chinese
+//! wording no longer crosses IPC. Session-AGNOSTIC commands (api key /
+//! provider / app config / recent file / session listing) still return
+//! `Result<T, String>` (their failures are not the typed session-error shape).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -81,7 +84,7 @@ fn reject_if_in_flight(handle: &SessionHandle) -> Result<(), SessionError> {
 pub fn create_session(
     store: State<'_, Arc<SessionStore>>,
     live: State<'_, LiveProviderConfig>,
-) -> Result<String, String> {
+) -> Result<String, SessionError> {
     let cancel = Arc::new(CancelToken::new());
     // The real LLM provider (ADR-0007): reads the API key from the OS keychain
     // and the endpoint config from app-config (ADR-0038) via the shared
@@ -107,7 +110,7 @@ pub fn create_session(
 pub fn close_session(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
-) -> Result<(), String> {
+) -> Result<(), SessionError> {
     let id = SessionId::parse(&session_id)?;
     store.close(&id)?;
     Ok(())
@@ -129,7 +132,7 @@ pub fn close_session(
 pub async fn close_session_and_wait_release(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
-) -> Result<(), String> {
+) -> Result<(), SessionError> {
     let id = SessionId::parse(&session_id)?;
     // Detach: mark closing + fire cancel + remove from the map + return the
     // handle. After this, no new commands can target the id (get -> NotFound).
@@ -140,7 +143,7 @@ pub async fn close_session_and_wait_release(
     // defensive refusal.
     let rx = detached
         .take_drop_signal()?
-        .ok_or_else(|| "关闭会话冲突（并发关闭等待），请稍后重试".to_string())?;
+        .ok_or_else(|| SessionError::Engine("关闭会话冲突（并发关闭等待），请稍后重试".into()))?;
     // Drop our handle reference. If no in-flight ask holds a clone, this is the
     // last Arc -> Session::Drop fires -> sender signals -> rx resolves at once.
     // If an ask is in flight, the signal fires when the ask's clone drops after
@@ -154,14 +157,14 @@ pub async fn close_session_and_wait_release(
     let waited = tauri::async_runtime::spawn_blocking(move || {
         match rx.recv_timeout(CLOSE_WAIT_RELEASE_TIMEOUT) {
             Ok(()) => Ok(()),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                Err("关闭会话超时（in-flight ask 未在 120s 内收尾），请稍后重试".to_string())
-            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(SessionError::Engine(
+                "关闭会话超时（in-flight ask 未在 120s 内收尾），请稍后重试".into(),
+            )),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(()),
         }
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| SessionError::Engine(e.to_string()))?;
     waited
 }
 
@@ -173,17 +176,17 @@ pub async fn ingest_file(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     path: String,
-) -> Result<LoadOutcome, String> {
+) -> Result<LoadOutcome, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
     let handle = Arc::clone(&handle);
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = handle.session_lock()?;
-        Ok::<LoadOutcome, String>(s.ingest(Path::new(&path)))
+        Ok::<LoadOutcome, SessionError>(s.ingest(Path::new(&path)))
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|e| SessionError::Engine(e.to_string()))??;
     Ok(outcome)
 }
 
@@ -197,17 +200,17 @@ pub async fn ingest_file_guided(
     session_id: String,
     path: String,
     guidance: Vec<SheetGuidance>,
-) -> Result<LoadOutcome, String> {
+) -> Result<LoadOutcome, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
     let handle = Arc::clone(&handle);
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = handle.session_lock()?;
-        Ok::<LoadOutcome, String>(s.ingest_guided(Path::new(&path), &guidance))
+        Ok::<LoadOutcome, SessionError>(s.ingest_guided(Path::new(&path), &guidance))
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|e| SessionError::Engine(e.to_string()))??;
     Ok(outcome)
 }
 
@@ -215,7 +218,7 @@ pub async fn ingest_file_guided(
 pub fn list_working_set(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
-) -> Result<Vec<DatasetDescriptor>, String> {
+) -> Result<Vec<DatasetDescriptor>, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     let s = handle.session_lock()?;
@@ -226,7 +229,7 @@ pub fn list_working_set(
 pub fn active_dataset(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
-) -> Result<Option<DatasetDescriptor>, String> {
+) -> Result<Option<DatasetDescriptor>, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     let s = handle.session_lock()?;
@@ -238,7 +241,7 @@ pub fn get_dataset(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     reference_name: String,
-) -> Result<Option<DatasetDescriptor>, String> {
+) -> Result<Option<DatasetDescriptor>, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     let s = handle.session_lock()?;
@@ -255,13 +258,13 @@ pub fn rename_dataset(
     session_id: String,
     reference_name: String,
     new_display: String,
-) -> Result<DatasetDescriptor, String> {
+) -> Result<DatasetDescriptor, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
     let mut s = handle.session_lock()?;
     s.rename_display(&reference_name, &new_display)
-        .map_err(|e| e.to_string())
+        .map_err(|e| SessionError::Engine(e.to_string()))
 }
 
 /// Re-upload a file onto an existing dataset's reference name (ADR-0042, issue
@@ -274,17 +277,17 @@ pub async fn replace_source(
     session_id: String,
     reference_name: String,
     path: String,
-) -> Result<LoadOutcome, String> {
+) -> Result<LoadOutcome, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
     let handle = Arc::clone(&handle);
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = handle.session_lock()?;
-        Ok::<LoadOutcome, String>(s.replace_source(&reference_name, Path::new(&path)))
+        Ok::<LoadOutcome, SessionError>(s.replace_source(&reference_name, Path::new(&path)))
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|e| SessionError::Engine(e.to_string()))??;
     Ok(outcome)
 }
 
@@ -297,13 +300,13 @@ pub fn set_dataset_privacy(
     session_id: String,
     reference_name: String,
     privacy: DatasetPrivacy,
-) -> Result<DatasetDescriptor, String> {
+) -> Result<DatasetDescriptor, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
     let mut s = handle.session_lock()?;
     s.set_privacy(&reference_name, privacy)
-        .ok_or_else(|| format!("找不到引用名为「{reference_name}」的数据集"))
+        .ok_or_else(|| SessionError::Engine(format!("找不到引用名为「{reference_name}」的数据集")))
 }
 
 /// Remove a source Dataset from the working set (issue #38/#39, ADR-0040).
@@ -323,12 +326,13 @@ pub fn remove_source(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     reference_name: String,
-) -> Result<(), String> {
+) -> Result<(), SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
     let mut s = handle.session_lock()?;
-    s.remove_source(&reference_name).map_err(|e| e.to_string())
+    s.remove_source(&reference_name)
+        .map_err(|e| SessionError::Engine(e.to_string()))
 }
 
 /// Remove the ACTIVE source and repoint focus at an explicit continuation
@@ -347,13 +351,13 @@ pub fn remove_active_source(
     session_id: String,
     reference_name: String,
     continue_with: String,
-) -> Result<(), String> {
+) -> Result<(), SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
     let mut s = handle.session_lock()?;
     s.remove_active_source(&reference_name, &continue_with)
-        .map_err(|e| e.to_string())
+        .map_err(|e| SessionError::Engine(e.to_string()))
 }
 
 /// Ask one question (PRD #1) against the named session: run one turn and
@@ -371,7 +375,7 @@ pub async fn ask(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     question: String,
-) -> Result<TurnOutcome, String> {
+) -> Result<TurnOutcome, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
@@ -388,7 +392,7 @@ pub async fn ask(
     let sid = session_id.clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = handle.session_lock()?;
-        Ok::<TurnOutcome, String>(s.ask_with_phase(&question, move |phase| {
+        Ok::<TurnOutcome, SessionError>(s.ask_with_phase(&question, move |phase| {
             let _ = app_for_cb.emit(
                 "turn-progress",
                 &TurnProgress {
@@ -399,7 +403,7 @@ pub async fn ask(
         }))
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|e| SessionError::Engine(e.to_string()))??;
     Ok(outcome)
 }
 
@@ -412,7 +416,7 @@ pub async fn ask(
 /// resets before it starts). Always succeeds once the session is known: cancel
 /// is a best-effort signal, not a transaction.
 #[tauri::command]
-pub fn cancel(store: State<'_, Arc<SessionStore>>, session_id: String) -> Result<(), String> {
+pub fn cancel(store: State<'_, Arc<SessionStore>>, session_id: String) -> Result<(), SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     handle.fire_cancel();
@@ -429,7 +433,7 @@ pub fn cancel(store: State<'_, Arc<SessionStore>>, session_id: String) -> Result
 pub fn conversation(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
-) -> Result<Vec<ThreadEntry>, String> {
+) -> Result<Vec<ThreadEntry>, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     let s = handle.session_lock()?;
@@ -448,17 +452,17 @@ pub async fn read_rows(
     reference_name: String,
     offset: u64,
     limit: u64,
-) -> Result<RowPage, String> {
+) -> Result<RowPage, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     let handle = Arc::clone(&handle);
     tauri::async_runtime::spawn_blocking(move || {
         let s = handle.session_lock()?;
         s.read_rows(&reference_name, offset, limit)
-            .map_err(|e| e.to_string())
+            .map_err(|e| SessionError::Engine(e.to_string()))
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| SessionError::Engine(e.to_string()))?
 }
 
 // --- LLM provider key + endpoint config (issue #29/#53, ADR-0007/0019/0029/0038) ---
@@ -674,12 +678,12 @@ pub fn rename_session(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     new_name: String,
-) -> Result<String, String> {
+) -> Result<String, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
     let mut s = handle.session_lock()?;
-    s.rename(&new_name)
+    s.rename(&new_name).map_err(SessionError::Engine)
 }
 
 /// Rename a CLOSED `.duck` recipe's session_name in place (ADR-0060, issue #81).
@@ -738,13 +742,13 @@ pub fn save_as_duck(
     session_id: String,
     path: String,
     session_name: String,
-) -> Result<(), String> {
+) -> Result<(), SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
     let mut s = handle.session_lock()?;
     s.bind_duck(PathBuf::from(path), session_name)
-        .map_err(|e| e.to_string())
+        .map_err(|e| SessionError::Engine(e.to_string()))
 }
 
 /// Open a `.duck` and resume the named session across the restart boundary
@@ -764,7 +768,7 @@ pub async fn open_duck(
     live: State<'_, LiveProviderConfig>,
     session_id: String,
     path: String,
-) -> Result<(), String> {
+) -> Result<(), SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
@@ -818,7 +822,7 @@ pub async fn open_duck(
             |_| crate::SourceResolution::Abort,
             |_| crate::ActiveResolution::Abort,
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| SessionError::Engine(e.to_string()))?;
         // Re-attach the handle's closing flag so a close_session after resume
         // still discards in-flight turns on this session (ADR-0055). The cancel
         // token was already shared via cancel_token above. The flag is the
@@ -842,14 +846,14 @@ pub async fn open_duck(
         handle_for_task.set_drop_signal_rx(drop_rx);
         let mut s = handle_for_task.session_lock()?;
         *s = new_session;
-        Ok::<(), String>(())
+        Ok::<(), SessionError>(())
     })
     .await;
     // Clear the per-session resume flag on EVERY exit (success, resume error,
     // join panic) before propagating -- a stuck flag would reject every later
     // mutating command on this session (ADR-0053).
     handle.set_resuming(false);
-    inner.map_err(|e| e.to_string())??;
+    inner.map_err(|e| SessionError::Engine(e.to_string()))??;
     Ok(())
 }
 
@@ -864,7 +868,7 @@ pub async fn open_duck(
 pub fn take_persist_error(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     let mut s = handle.session_lock()?;
@@ -884,7 +888,7 @@ pub fn take_persist_error(
 pub fn take_pending_conflict(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
-) -> Result<Option<crate::PendingConflict>, String> {
+) -> Result<Option<crate::PendingConflict>, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     let mut s = handle.session_lock()?;

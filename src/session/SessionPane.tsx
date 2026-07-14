@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useSessionState, errorPrefix } from "./useSessionState";
 import { ActiveSourceDeleteDialog } from "../components/ActiveSourceDeleteDialog";
 import { DatasetDetail } from "../components/DatasetDetail";
+import { ErrorBanner } from "../components/ErrorBanner";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { FileDropzone } from "../components/FileDropzone";
 import { GuidedLoadDialog } from "../components/GuidedLoadDialog";
@@ -135,10 +136,10 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
 
         <div className="workspace-body">
           {s.error && (
-            <p className="error" role="alert">
-              {errorPrefix(s.error.kind)}
-              {s.error.message}
-            </p>
+            <ErrorBanner
+              message={`${errorPrefix(s.error.kind)}${s.error.message}`}
+              detail={s.error.detail}
+            />
           )}
           {s.persistError && (
             <p className="persist-warning" role="status">

@@ -413,26 +413,24 @@ fn thread_entry_source_wraps_a_source_event_under_data() {
 }
 
 #[test]
-fn session_error_display_strings_are_the_ipc_contract() {
-    // SessionError crosses IPC only as its Display string (commands.rs maps it
-    // to the command's `Result<_, String>` via `From<SessionError> for String`,
-    // so the frontend string-matches these exact Chinese wordings). Issue #73
-    // review M8: pin the wording here -- the designated IPC-contract seam -- so
-    // a change is caught before the frontend's hand-mirrored error handling
-    // drifts. `NotFound` is also asserted to equal the UNKNOWN_SESSION constant
-    // the frontend has always matched on.
-    use toptopduck_lib::{SessionError, UNKNOWN_SESSION};
-    assert_eq!(SessionError::NotFound.to_string(), UNKNOWN_SESSION);
-    assert_eq!(SessionError::InvalidId.to_string(), "会话 id 格式错误");
-    assert_eq!(
-        SessionError::Resuming.to_string(),
-        "正在恢复会话，请稍候再操作",
+fn session_error_serializes_as_adjacently_tagged_kind_data() {
+    // SessionError crosses IPC as a serde-structured value (issue #119):
+    // `#[serde(tag = "kind", content = "data")]`, the same adjacently-tagged
+    // shape the rest of the wire contract uses, so the frontend narrows on
+    // `kind` and renders a locale message. The four guard variants are unit --
+    // `{"kind":"X"}` with no `data`; Engine carries its detail string under
+    // `data`. The thiserror `#[error(...)]` Display strings are Rust-log-only,
+    // NOT the IPC contract (commands no longer map through Display; the Display
+    // wording is pinned separately in the session_store unit tests).
+    use toptopduck_lib::SessionError;
+    assert_wire(&SessionError::InvalidId, r#"{"kind":"InvalidId"}"#);
+    assert_wire(&SessionError::NotFound, r#"{"kind":"NotFound"}"#);
+    assert_wire(&SessionError::Resuming, r#"{"kind":"Resuming"}"#);
+    assert_wire(&SessionError::InFlight, r#"{"kind":"InFlight"}"#);
+    assert_wire(
+        &SessionError::Engine("boom".into()),
+        r#"{"kind":"Engine","data":"boom"}"#,
     );
-    assert_eq!(
-        SessionError::InFlight.to_string(),
-        "该会话有查询进行中，请先取消或等待完成",
-    );
-    assert_eq!(SessionError::Engine("detail".into()).to_string(), "detail");
 }
 
 // --- issue #76 progress + listing wire contracts (ADR-0056/0059/0060) -------

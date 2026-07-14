@@ -30,6 +30,16 @@ header h1 { margin: 0 0 0.5rem; }
 .dropzone button:disabled { opacity: 0.6; cursor: progress; }
 
 .error { color: var(--destructive); background: #fde7e9; padding: 0.5rem 0.8rem; border-radius: var(--radius); }
+.error .error-message { margin: 0; }
+.error .error-details { margin-top: 0.5rem; }
+.error .error-details summary { cursor: pointer; font-size: 0.82rem; }
+.error .error-stack {
+  margin: 0.4rem 0 0; padding: 0.5rem;
+  background: var(--muted); border-radius: var(--radius);
+  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
+  font-size: 0.8rem; white-space: pre-wrap; word-break: break-word;
+  max-height: 12rem; overflow-y: auto;
+}
 
 /* Resume progress (ADR-0034 visible progress) + persist-failure banner
    (review H4). resume-progress is a transient info line; persist-warning is

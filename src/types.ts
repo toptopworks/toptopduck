@@ -5,6 +5,21 @@ export interface ColumnSchema {
   canonical_type: string;
 }
 
+// Typed session-scoped command errors (issue #119). Mirrors the Rust
+// `SessionError` -- serde adjacently-tagged (`#[serde(tag = "kind", content =
+// "data")]`), the same shape the rest of the wire contract uses. Session-scoped
+// commands reject with this structured value (NOT a bare string), so the
+// frontend narrows on `kind` and renders a locale message instead of string-
+// matching backend Chinese. `Engine` is the catch-all for internal failures and
+// carries a free-text detail under `data` (technical, never an API key per
+// ADR-0029).
+export type SessionError =
+  | { kind: "InvalidId" }
+  | { kind: "NotFound" }
+  | { kind: "Resuming" }
+  | { kind: "InFlight" }
+  | { kind: "Engine"; data: string };
+
 // Per-dataset privacy controls (ADR-0011, issue #9 slice 5): mirror of the Rust
 // `DatasetPrivacy`. The config rides the descriptor (single source of truth),
 // persists in the working set, and is readable by the (future, PRD #1) window
