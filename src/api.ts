@@ -209,6 +209,20 @@ export function fmtError(e: unknown, intl: IntlShape): string {
   return JSON.stringify(e);
 }
 
+// Extract the Engine.data technical detail from a typed SessionError reject, for
+// display in a collapsed "Technical details" fold (issue #119). Returns null
+// for every other kind and any non-SessionError reject, so the caller renders
+// the fold only when there is something to show. fmtError still keeps this
+// detail OUT of the primary message; ADR-0029 is enforced upstream -- the Rust
+// side is audited to keep secrets out of Engine payloads -- so the raw detail
+// is safe to surface in the fold.
+export function engineDetail(e: unknown): string | null {
+  if (isSessionError(e) && e.kind === "Engine" && typeof e.data === "string") {
+    return e.data;
+  }
+  return null;
+}
+
 // --- LLM provider key + config (issue #29, ADR-0007/0019/0029) -------------
 //
 // Session-AGNOSTIC (ADR-0056): no sessionId. The API key crosses IPC exactly

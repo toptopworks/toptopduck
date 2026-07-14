@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { FormattedMessage } from "react-intl";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSessionState, errorPrefix } from "./useSessionState";
 import { ActiveSourceDeleteDialog } from "../components/ActiveSourceDeleteDialog";
@@ -135,10 +136,23 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
 
         <div className="workspace-body">
           {s.error && (
-            <p className="error" role="alert">
-              {errorPrefix(s.error.kind)}
-              {s.error.message}
-            </p>
+            <div className="error" role="alert">
+              <p className="error-message">
+                {errorPrefix(s.error.kind)}
+                {s.error.message}
+              </p>
+              {s.error.detail && (
+                <details className="error-details">
+                  <summary className="muted">
+                    <FormattedMessage
+                      id="errorBoundary.details"
+                      defaultMessage="Technical details"
+                    />
+                  </summary>
+                  <pre className="error-stack">{s.error.detail}</pre>
+                </details>
+              )}
+            </div>
           )}
           {s.persistError && (
             <p className="persist-warning" role="status">

@@ -1,7 +1,7 @@
 import { createIntl } from "react-intl";
 import { describe, expect, it } from "vitest";
 
-import { fmtError } from "../api";
+import { engineDetail, fmtError } from "../api";
 import type { SessionError } from "../types";
 
 // An IntlShape carrying the five SessionError message ids (mirroring the locale
@@ -57,5 +57,25 @@ describe("fmtError", () => {
     // user still sees something, instead of rendering a missing-message id.
     expect(fmtError({ kind: "Unknown" }, intl)).toBe("{\"kind\":\"Unknown\"}");
     expect(fmtError({ kind: 42 }, intl)).toBe("{\"kind\":42}");
+  });
+});
+
+describe("engineDetail", () => {
+  it("extracts Engine.data as the technical detail for the collapsed fold", () => {
+    expect(engineDetail({ kind: "Engine", data: "session lock poisoned" })).toBe(
+      "session lock poisoned",
+    );
+  });
+
+  it("returns null for non-Engine SessionError kinds", () => {
+    expect(engineDetail({ kind: "NotFound" })).toBeNull();
+    expect(engineDetail({ kind: "InvalidId" })).toBeNull();
+    expect(engineDetail({ kind: "InFlight" })).toBeNull();
+  });
+
+  it("returns null for non-SessionError rejects", () => {
+    expect(engineDetail(new Error("boom"))).toBeNull();
+    expect(engineDetail("plain string reject")).toBeNull();
+    expect(engineDetail({ weird: "shape" })).toBeNull();
   });
 });
