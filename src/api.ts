@@ -151,17 +151,24 @@ export async function readRows(
 // Narrow an unknown IPC reject to a SessionError (issue #119). A session-
 // scoped command rejects with the adjacently-tagged `{ kind, data? }` shape;
 // anything else (a raw string, a JS Error, an opaque object) is left to
-// fmtError's fallback path.
+// fmtError's fallback path. The Engine variant additionally requires its
+// `data` to be a string: a malformed `{ kind: "Engine" }` (missing/non-string
+// data) is NOT treated as a SessionError, so the guard never narrows `e` to a
+// shape whose `data` it has not actually verified (review L1).
 function isSessionError(e: unknown): e is SessionError {
   if (typeof e !== "object" || e === null) return false;
   const kind = (e as { kind?: unknown }).kind;
-  return (
-    kind === "InvalidId" ||
-    kind === "NotFound" ||
-    kind === "Resuming" ||
-    kind === "InFlight" ||
-    kind === "Engine"
-  );
+  switch (kind) {
+    case "InvalidId":
+    case "NotFound":
+    case "Resuming":
+    case "InFlight":
+      return true;
+    case "Engine":
+      return typeof (e as { data?: unknown }).data === "string";
+    default:
+      return false;
+  }
 }
 
 // Format an unknown error (a Tauri IPC reject, a JS Error, or a structured
@@ -206,7 +213,13 @@ export function fmtError(e: unknown, intl: IntlShape): string {
   }
   if (e instanceof Error) return e.message;
   if (typeof e === "string") return e;
-  return JSON.stringify(e);
+  // Opaque object: stringify best-effort. A cyclic reject would throw, so fall
+  // back to String() rather than crash the error renderer itself (review L2).
+  try {
+    return JSON.stringify(e);
+  } catch {
+    return String(e);
+  }
 }
 
 // Extract the Engine.data technical detail from a typed SessionError reject, for
@@ -215,12 +228,25 @@ export function fmtError(e: unknown, intl: IntlShape): string {
 // the fold only when there is something to show. fmtError still keeps this
 // detail OUT of the primary message; ADR-0029 is enforced upstream -- the Rust
 // side is audited to keep secrets out of Engine payloads -- so the raw detail
-// is safe to surface in the fold.
+// is safe to surface in the fold. `isSessionError` already guarantees Engine's
+// `data` is a string, so no redundant runtime check is needed here.
 export function engineDetail(e: unknown): string | null {
-  if (isSessionError(e) && e.kind === "Engine" && typeof e.data === "string") {
+  if (isSessionError(e) && e.kind === "Engine") {
     return e.data;
   }
   return null;
+}
+
+// Describe an IPC reject for an error banner: the locale message via fmtError
+// plus the Engine technical detail (issue #119). Shared by the shell and the
+// result view so both surface the collapsed fold the session pane already does
+// -- a close-wait timeout reject carries its actionable "retry shortly" hint in
+// the detail, which must not vanish at the shell layer (review H1/M2).
+export function describeReject(
+  e: unknown,
+  intl: IntlShape,
+): { message: string; detail: string | null } {
+  return { message: fmtError(e, intl), detail: engineDetail(e) };
 }
 
 // --- LLM provider key + config (issue #29, ADR-0007/0019/0029) -------------

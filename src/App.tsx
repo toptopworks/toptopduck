@@ -7,6 +7,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { SessionPane } from "./session/SessionPane";
 import { SessionSidebar } from "./session/SessionSidebar";
 import { DisclosureBanner } from "./components/DisclosureBanner";
+import { ErrorBanner } from "./components/ErrorBanner";
 import { DegradeCard, ErrorBoundary } from "./components/ErrorBoundary";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { Alert } from "./components/ui/alert";
@@ -20,6 +21,7 @@ import {
   closeSessionAndWaitRelease,
   createSession,
   deleteSession,
+  describeReject,
   fmtError,
   getAppConfig,
   getProviderConfig,
@@ -237,7 +239,13 @@ export default function App() {
   const [sessionsEpoch, setSessionsEpoch] = useState(0);
   const [sessions, setSessions] = useState<SessionMetadata[]>([]);
   const [sessionsError, setSessionsError] = useState<string | null>(null);
-  const [shellError, setShellError] = useState<string | null>(null);
+  // Shell-level IPC reject (issue #119): the locale message plus the Engine
+  // technical detail, so the shell surfaces the collapsed fold the same way the
+  // session pane does -- a close-wait timeout/conflict reject carries an
+  // actionable "retry shortly" hint in the detail that must not vanish here.
+  const [shellError, setShellError] = useState<
+    { message: string; detail: string | null } | null
+  >(null);
   // Resume / open-busy indicator (ADR-0034). Resume blocks the open action; the
   // indicator shows globally while the clicked session is opening.
   const [resumeStatus, setResumeStatus] = useState<ResumeStatus | null>(null);
@@ -471,7 +479,7 @@ export default function App() {
       // placeholder until the user saves-as or renames (data, not chrome).
       registerOpen({ sid, name: "", path: null, pendingIngestPath: null });
     } catch (e) {
-      setShellError(fmtError(e, intl));
+      setShellError(describeReject(e, intl));
     }
   }, [intl, registerOpen]);
 
@@ -489,7 +497,7 @@ export default function App() {
         const sid = await createSession();
         registerOpen({ sid, name: "", path: null, pendingIngestPath: path });
       } catch (e) {
-        setShellError(fmtError(e, intl));
+        setShellError(describeReject(e, intl));
       } finally {
         droppingRef.current = false;
       }
@@ -587,7 +595,7 @@ export default function App() {
         registerOpen({ sid, name, path, pendingIngestPath: null });
         setResumeStatus(null);
       } catch (e) {
-        setShellError(fmtError(e, intl));
+        setShellError(describeReject(e, intl));
         setResumeStatus(null);
       } finally {
         void unlisten();
@@ -667,7 +675,7 @@ export default function App() {
             // Without this, the pane stays mounted on a sid the backend no
             // longer knows and every retry hits NotFound (dead loop).
             unmountOpen(sid);
-            setShellError(fmtError(e, intl));
+            setShellError(describeReject(e, intl));
             return;
           }
           // The wait resolved -- canonical key is free, Session::Drop ran.
@@ -678,7 +686,7 @@ export default function App() {
         try {
           await deleteSession(path);
         } catch (e) {
-          setShellError(fmtError(e, intl));
+          setShellError(describeReject(e, intl));
           return;
         }
         refreshSessions();
@@ -706,7 +714,7 @@ export default function App() {
           await renamePersistedSession(path, trimmed);
         }
       } catch (e) {
-        setShellError(fmtError(e, intl));
+        setShellError(describeReject(e, intl));
         return;
       }
       refreshSessions();
@@ -734,7 +742,7 @@ export default function App() {
       );
       void recordRecentFile(path).then(() => void refreshSessions());
     } catch (e) {
-      setShellError(fmtError(e, intl));
+      setShellError(describeReject(e, intl));
     } finally {
       setPersistenceBusy(false);
     }
@@ -754,7 +762,7 @@ export default function App() {
       await openPersisted(path, stem);
       void recordRecentFile(path).then(() => void refreshSessions());
     } catch (e) {
-      setShellError(fmtError(e, intl));
+      setShellError(describeReject(e, intl));
     } finally {
       setPersistenceBusy(false);
     }
@@ -911,9 +919,11 @@ export default function App() {
               </main>
 
               {shellError && (
-                <p className="error shell-error" role="alert">
-                  {shellError}
-                </p>
+                <ErrorBanner
+                  className="shell-error"
+                  message={shellError.message}
+                  detail={shellError.detail}
+                />
               )}
 
               {settingsOpen && appConfig && (

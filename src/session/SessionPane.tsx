@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { FormattedMessage } from "react-intl";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSessionState, errorPrefix } from "./useSessionState";
 import { ActiveSourceDeleteDialog } from "../components/ActiveSourceDeleteDialog";
 import { DatasetDetail } from "../components/DatasetDetail";
+import { ErrorBanner } from "../components/ErrorBanner";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { FileDropzone } from "../components/FileDropzone";
 import { GuidedLoadDialog } from "../components/GuidedLoadDialog";
@@ -136,23 +136,10 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
 
         <div className="workspace-body">
           {s.error && (
-            <div className="error" role="alert">
-              <p className="error-message">
-                {errorPrefix(s.error.kind)}
-                {s.error.message}
-              </p>
-              {s.error.detail && (
-                <details className="error-details">
-                  <summary className="muted">
-                    <FormattedMessage
-                      id="errorBoundary.details"
-                      defaultMessage="Technical details"
-                    />
-                  </summary>
-                  <pre className="error-stack">{s.error.detail}</pre>
-                </details>
-              )}
-            </div>
+            <ErrorBanner
+              message={`${errorPrefix(s.error.kind)}${s.error.message}`}
+              detail={s.error.detail}
+            />
           )}
           {s.persistError && (
             <p className="persist-warning" role="status">

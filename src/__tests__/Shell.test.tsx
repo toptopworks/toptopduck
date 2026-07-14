@@ -975,9 +975,13 @@ describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
       },
     ]);
     vi.mocked(createSession).mockResolvedValue("sess-del");
-    vi.mocked(closeSessionAndWaitRelease).mockRejectedValue(
-      new Error("关闭会话超时（in-flight ask 未在 120s 内收尾），请稍后重试"),
-    );
+    // Real IPC shape (issue #119): a typed SessionError reject, not a JS Error.
+    // The close-wait timeout detail rides Engine.data; the shell must surface
+    // it in the collapsed fold (review H1), not drop it for "Internal error".
+    vi.mocked(closeSessionAndWaitRelease).mockRejectedValue({
+      kind: "Engine",
+      data: "关闭会话超时（in-flight ask 未在 120s 内收尾），请稍后重试",
+    });
 
     render(<App />);
     await waitFor(() => expect(screen.getByText("季报")).toBeInTheDocument());
@@ -1000,6 +1004,14 @@ describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
       expect(screen.queryByRole("textbox", { name: "提问" })).not.toBeInTheDocument(),
     );
     expect(deleteSession).not.toHaveBeenCalled();
+
+    // Review H1: the shell surfaces the Engine detail in a collapsed fold
+    // (mirroring the session pane), so the actionable "retry shortly" hint is
+    // not lost when a close-wait reject lands at the shell layer. Previously
+    // the shell rendered only the bare locale message and the detail vanished.
+    const shellFold = document.querySelector(".shell-error .error-details");
+    expect(shellFold).not.toBeNull();
+    expect(shellFold?.textContent).toContain("关闭会话超时");
   });
 });
 

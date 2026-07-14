@@ -58,6 +58,15 @@ describe("fmtError", () => {
     expect(fmtError({ kind: "Unknown" }, intl)).toBe("{\"kind\":\"Unknown\"}");
     expect(fmtError({ kind: 42 }, intl)).toBe("{\"kind\":42}");
   });
+
+  it("does not treat an Engine payload with non-string data as a SessionError (guard L1)", () => {
+    // isSessionError requires Engine.data to be a string: a malformed Engine
+    // reject (no data, or non-string data) is NOT narrowed to a SessionError,
+    // so the guard never promises a `data: string` it has not verified. It
+    // falls through to the opaque-object stringification.
+    expect(fmtError({ kind: "Engine" }, intl)).toBe("{\"kind\":\"Engine\"}");
+    expect(fmtError({ kind: "Engine", data: 42 }, intl)).toBe("{\"kind\":\"Engine\",\"data\":42}");
+  });
 });
 
 describe("engineDetail", () => {
@@ -77,5 +86,12 @@ describe("engineDetail", () => {
     expect(engineDetail(new Error("boom"))).toBeNull();
     expect(engineDetail("plain string reject")).toBeNull();
     expect(engineDetail({ weird: "shape" })).toBeNull();
+  });
+
+  it("returns null for an Engine payload with non-string data (guard L1)", () => {
+    // isSessionError rejects Engine variants whose data is not a string, so
+    // engineDetail never reads an unverified data field.
+    expect(engineDetail({ kind: "Engine" })).toBeNull();
+    expect(engineDetail({ kind: "Engine", data: 42 })).toBeNull();
   });
 });
