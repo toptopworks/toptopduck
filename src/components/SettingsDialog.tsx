@@ -82,7 +82,7 @@ export function SettingsDialog({
         setHasKey(cfg.has_key);
       })
       .catch((e) => {
-        if (!cancelled) setError(fmtError(e));
+        if (!cancelled) setError(fmtError(e, intl));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -90,7 +90,7 @@ export function SettingsDialog({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [intl]);
 
   async function save() {
     setSaving(true);
@@ -114,7 +114,7 @@ export function SettingsDialog({
       setApiKeyField(""); // never retain the key in component state after save
       onClose();
     } catch (e) {
-      setError(fmtError(e));
+      setError(fmtError(e, intl));
     } finally {
       setSaving(false);
     }
@@ -128,7 +128,7 @@ export function SettingsDialog({
       setHasKey(false);
       onClose();
     } catch (e) {
-      setError(fmtError(e));
+      setError(fmtError(e, intl));
     } finally {
       setSaving(false);
     }

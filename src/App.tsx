@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { FormattedMessage, IntlProvider, useIntl } from "react-intl";
+import { createIntl, FormattedMessage, IntlProvider, useIntl } from "react-intl";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { LogicalPosition, LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -248,6 +248,17 @@ export default function App() {
   const appConfigRef = useRef<AppConfig | null>(null);
   const geometryRestoredRef = useRef(false);
 
+  // Locale (ADR-0052): resolved once from the persisted three-state preference
+  // (defaulting to system before app-config resolves). App sits ABOVE the
+  // <IntlProvider> rendered below for the subtree, so useIntl() is unavailable
+  // here -- a standalone IntlShape is built from the same catalog so fmtError
+  // can localize SessionError rejects at the shell layer (issue #119).
+  const effectiveLocale = useLocale(coerceLocalePreference(appConfig?.locale));
+  const intl = useMemo(
+    () => createIntl({ locale: effectiveLocale, messages: catalogFor(effectiveLocale) }),
+    [effectiveLocale],
+  );
+
   // --- App-level UI state --------------------------------------------------
   const [hasKey, setHasKey] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -280,12 +291,12 @@ export default function App() {
       })
       .catch((e) => {
         if (cancelled) return;
-        setSessionsError(fmtError(e));
+        setSessionsError(fmtError(e, intl));
       });
     return () => {
       cancelled = true;
     };
-  }, [sessionsEpoch]);
+  }, [intl, sessionsEpoch]);
 
   const refreshSessions = useCallback(() => setSessionsEpoch((e) => e + 1), []);
 
@@ -358,11 +369,11 @@ export default function App() {
     commitShellPrefs({ sidebar: sidebarCollapsed, rail: next });
   }, [sidebarCollapsed, railCollapsed, commitShellPrefs]);
 
-  // Theme (ADR-0050) + locale (ADR-0052): applied to <html>, follow the
-  // persisted three-state preference (defaulting to system before app-config
-  // resolves). The Vega bridge listens to the theme-change event these fire.
+  // Theme (ADR-0050): applied to <html>, follows the persisted three-state
+  // preference (defaulting to system before app-config resolves). The Vega
+  // bridge listens to the theme-change event this fires. effectiveLocale is
+  // resolved earlier (where the shell's IntlShape is built, above).
   useTheme(appConfig?.theme ?? "system");
-  const effectiveLocale = useLocale(coerceLocalePreference(appConfig?.locale));
 
   useEffect(() => {
     if (typeof document !== "undefined") {
@@ -460,9 +471,9 @@ export default function App() {
       // placeholder until the user saves-as or renames (data, not chrome).
       registerOpen({ sid, name: "", path: null, pendingIngestPath: null });
     } catch (e) {
-      setShellError(fmtError(e));
+      setShellError(fmtError(e, intl));
     }
-  }, [registerOpen]);
+  }, [intl, registerOpen]);
 
   // Drop-to-create on the cold-start hero (ADR-0061, #81 A1): mint a session
   // and hand the dropped path to the new SessionPane as pendingIngestPath. The
@@ -478,12 +489,12 @@ export default function App() {
         const sid = await createSession();
         registerOpen({ sid, name: "", path: null, pendingIngestPath: path });
       } catch (e) {
-        setShellError(fmtError(e));
+        setShellError(fmtError(e, intl));
       } finally {
         droppingRef.current = false;
       }
     },
-    [registerOpen],
+    [intl, registerOpen],
   );
 
   // Single webview-level drop router (#81): Tauri's onDragDropEvent is a
@@ -576,13 +587,13 @@ export default function App() {
         registerOpen({ sid, name, path, pendingIngestPath: null });
         setResumeStatus(null);
       } catch (e) {
-        setShellError(fmtError(e));
+        setShellError(fmtError(e, intl));
         setResumeStatus(null);
       } finally {
         void unlisten();
       }
     },
-    [openSessions, queryClient, registerOpen],
+    [intl, openSessions, queryClient, registerOpen],
   );
 
   // Synchronous UI teardown for an open session: drop the cache + open-set
@@ -626,10 +637,10 @@ export default function App() {
       // path (already dropped); other failures log to devtools so IPC/panic
       // stay observable. NOT a user toast -- pane is gone.
       return closeSession(sid).catch((e) => {
-        log.warn("closeSession", "background close failed", fmtError(e));
+        log.warn("closeSession", "background close failed", fmtError(e, intl));
       });
     },
-    [unmountOpen],
+    [intl, unmountOpen],
   );
 
   // Delete a persisted .duck (ADR-0060/0063, irreversible). If the session is
@@ -656,7 +667,7 @@ export default function App() {
             // Without this, the pane stays mounted on a sid the backend no
             // longer knows and every retry hits NotFound (dead loop).
             unmountOpen(sid);
-            setShellError(fmtError(e));
+            setShellError(fmtError(e, intl));
             return;
           }
           // The wait resolved -- canonical key is free, Session::Drop ran.
@@ -667,7 +678,7 @@ export default function App() {
         try {
           await deleteSession(path);
         } catch (e) {
-          setShellError(fmtError(e));
+          setShellError(fmtError(e, intl));
           return;
         }
         refreshSessions();
@@ -675,7 +686,7 @@ export default function App() {
         setPersistenceBusy(false);
       }
     },
-    [unmountOpen, refreshSessions],
+    [intl, unmountOpen, refreshSessions],
   );
 
   // Rename a sidebar entry (ADR-0060, single entry point). An OPEN session
@@ -695,12 +706,12 @@ export default function App() {
           await renamePersistedSession(path, trimmed);
         }
       } catch (e) {
-        setShellError(fmtError(e));
+        setShellError(fmtError(e, intl));
         return;
       }
       refreshSessions();
     },
-    [refreshSessions],
+    [intl, refreshSessions],
   );
 
   // --- Save / Open .duck (ADR-0034/0036) ----------------------------------
@@ -723,11 +734,11 @@ export default function App() {
       );
       void recordRecentFile(path).then(() => void refreshSessions());
     } catch (e) {
-      setShellError(fmtError(e));
+      setShellError(fmtError(e, intl));
     } finally {
       setPersistenceBusy(false);
     }
-  }, [activeSession, refreshSessions]);
+  }, [intl, activeSession, refreshSessions]);
 
   const handleOpenDuck = useCallback(async () => {
     setPersistenceBusy(true);
@@ -743,11 +754,11 @@ export default function App() {
       await openPersisted(path, stem);
       void recordRecentFile(path).then(() => void refreshSessions());
     } catch (e) {
-      setShellError(fmtError(e));
+      setShellError(fmtError(e, intl));
     } finally {
       setPersistenceBusy(false);
     }
-  }, [openPersisted, refreshSessions]);
+  }, [intl, openPersisted, refreshSessions]);
 
   return (
     <QueryClientProvider client={queryClient}>

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import type { IntlShape } from "react-intl";
 import type {
   AppConfig,
   DatasetDescriptor,
@@ -10,6 +11,7 @@ import type {
   ProviderConfigView,
   ResumeProgress,
   RowPage,
+  SessionError,
   SessionMetadata,
   SheetGuidance,
   ThreadEntry,
@@ -146,9 +148,62 @@ export async function readRows(
   return invoke<RowPage>("read_rows", { sessionId, referenceName, offset, limit });
 }
 
+// Narrow an unknown IPC reject to a SessionError (issue #119). A session-
+// scoped command rejects with the adjacently-tagged `{ kind, data? }` shape;
+// anything else (a raw string, a JS Error, an opaque object) is left to
+// fmtError's fallback path.
+function isSessionError(e: unknown): e is SessionError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  return (
+    kind === "InvalidId" ||
+    kind === "NotFound" ||
+    kind === "Resuming" ||
+    kind === "InFlight" ||
+    kind === "Engine"
+  );
+}
+
 // Format an unknown error (a Tauri IPC reject, a JS Error, or a structured
-// object) into a readable string.
-export function fmtError(e: unknown): string {
+// object) into a readable string. A structured SessionError -- the typed IPC
+// payload a session-scoped command rejects with (issue #119) -- is narrowed to
+// its `kind` and rendered through the locale catalog, so the backend Chinese
+// wording no longer crosses IPC. Each `formatMessage` call site carries a
+// literal id + defaultMessage so @formatjs extract recovers it for the catalog
+// guard (an id hidden behind a lookup map would be invisible to the extract).
+// Anything else (a raw string reject, a JS Error, an opaque object) falls back
+// to the prior best-effort stringification.
+export function fmtError(e: unknown, intl: IntlShape): string {
+  if (isSessionError(e)) {
+    switch (e.kind) {
+      case "InvalidId":
+        return intl.formatMessage({
+          id: "error.session.invalidId",
+          defaultMessage: "Invalid session id",
+        });
+      case "NotFound":
+        return intl.formatMessage({
+          id: "error.session.notFound",
+          defaultMessage: "Session not found or closed",
+        });
+      case "Resuming":
+        return intl.formatMessage({
+          id: "error.session.resuming",
+          defaultMessage: "Session is resuming, please try again shortly",
+        });
+      case "InFlight":
+        return intl.formatMessage({
+          id: "error.session.inFlight",
+          defaultMessage:
+            "A query is already running on this session; cancel it or wait for it to finish",
+        });
+      case "Engine":
+        return intl.formatMessage({
+          id: "error.session.engine",
+          defaultMessage: "Internal error",
+        });
+    }
+  }
   if (e instanceof Error) return e.message;
   if (typeof e === "string") return e;
   return JSON.stringify(e);

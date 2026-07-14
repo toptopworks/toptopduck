@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useIntl } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   activeDataset,
@@ -128,6 +129,7 @@ export function useSessionState(
   onIngestConsumed: () => void = () => {},
 ): UseSessionState {
   const queryClient = useQueryClient();
+  const intl = useIntl();
 
   // --- Server state (TanStack Query, ADR-0051) -----------------------------
   const workingSetQuery = useQuery({
@@ -246,12 +248,12 @@ export function useSessionState(
         ]);
       } catch (refreshErr) {
         setError({
-          message: `${ERROR_VERB[kind]}已保存，但刷新工作集失败：${fmtError(refreshErr)}`,
+          message: `${ERROR_VERB[kind]}已保存，但刷新工作集失败：${fmtError(refreshErr, intl)}`,
           kind,
         });
       }
     },
-    [queryClient, sessionId],
+    [queryClient, sessionId, intl],
   );
 
   // --- Actions -------------------------------------------------------------
@@ -269,7 +271,7 @@ export function useSessionState(
       try {
         outcome = await askQuestion(sessionId, question);
       } catch (e) {
-        setError({ message: fmtError(e), kind: "ask" });
+        setError({ message: fmtError(e, intl), kind: "ask" });
         setLoading(false);
         void pollPersistError();
         return;
@@ -312,7 +314,7 @@ export function useSessionState(
           ]);
         } catch (refreshErr) {
           setError({
-            message: `${ERROR_VERB.ask}已保存，但刷新工作集失败：${fmtError(refreshErr)}`,
+            message: `${ERROR_VERB.ask}已保存，但刷新工作集失败：${fmtError(refreshErr, intl)}`,
             kind: "ask",
           });
         }
@@ -322,16 +324,16 @@ export function useSessionState(
       setLoading(false);
       void pollPersistError();
     },
-    [sessionId, queryClient, pollPersistError],
+    [sessionId, queryClient, pollPersistError, intl],
   );
 
   const handleCancel = useCallback(async () => {
     try {
       await cancelQuery(sessionId);
     } catch (e) {
-      setError({ message: fmtError(e), kind: "ask" });
+      setError({ message: fmtError(e, intl), kind: "ask" });
     }
-  }, [sessionId]);
+  }, [sessionId, intl]);
 
   const handleIngest = useCallback(
     async (path: string) => {
@@ -350,13 +352,13 @@ export function useSessionState(
           setError({ message: loadErrorMessage(result.data), kind: "load" });
         }
       } catch (e) {
-        setError({ message: fmtError(e), kind: "load" });
+        setError({ message: fmtError(e, intl), kind: "load" });
       } finally {
         setLoading(false);
         void pollPersistError();
       }
     },
-    [sessionId, refreshServerState, pollPersistError],
+    [sessionId, refreshServerState, pollPersistError, intl],
   );
 
   // Consume a drop-on-cold-start file (ADR-0061, #81 A1). The shell mints the
@@ -399,13 +401,13 @@ export function useSessionState(
           });
         }
       } catch (e) {
-        setError({ message: fmtError(e), kind: "load" });
+        setError({ message: fmtError(e, intl), kind: "load" });
       } finally {
         setLoading(false);
         void pollPersistError();
       }
     },
-    [guidance, sessionId, refreshServerState, pollPersistError],
+    [guidance, sessionId, refreshServerState, pollPersistError, intl],
   );
 
   const handleGuidedCancel = useCallback(() => setGuidance(null), []);
@@ -419,7 +421,7 @@ export function useSessionState(
       try {
         await fn();
       } catch (e) {
-        setError({ message: fmtError(e), kind });
+        setError({ message: fmtError(e, intl), kind });
         setLoading(false);
         void pollPersistError();
         return;
@@ -428,7 +430,7 @@ export function useSessionState(
       setLoading(false);
       void pollPersistError();
     },
-    [refreshServerState, pollPersistError],
+    [refreshServerState, pollPersistError, intl],
   );
 
   const handleRename = useCallback(
@@ -465,13 +467,13 @@ export function useSessionState(
           setError({ message: loadErrorMessage(result.data), kind: "replace" });
         }
       } catch (e) {
-        setError({ message: fmtError(e), kind: "replace" });
+        setError({ message: fmtError(e, intl), kind: "replace" });
       } finally {
         setLoading(false);
         void pollPersistError();
       }
     },
-    [sessionId, refreshServerState, pollPersistError],
+    [sessionId, refreshServerState, pollPersistError, intl],
   );
 
   const handleRemoveSource = useCallback(

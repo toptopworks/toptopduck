@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { FormattedMessage } from "react-intl";
+import { FormattedMessage, useIntl } from "react-intl";
 import { fmtError, readRows } from "../api";
 import { decodeViz } from "../viz";
 import { Alert, AlertDescription } from "./ui/alert";
@@ -95,6 +95,7 @@ export function ResultView({
   // id is no longer current, so a late-arriving page (or its error) can never
   // overwrite the page the user navigated to next.
   const seqRef = useRef(0);
+  const intl = useIntl();
   const loadPage = useCallback(
     async (off: number) => {
       const seq = (seqRef.current += 1);
@@ -109,12 +110,12 @@ export function ResultView({
         setOffset(off);
       } catch (e) {
         if (seq !== seqRef.current) return;
-        setError(fmtError(e));
+        setError(fmtError(e, intl));
       } finally {
         if (seq === seqRef.current) setLoading(false);
       }
     },
-    [sessionId, referenceName, pageSize],
+    [intl, sessionId, referenceName, pageSize],
   );
 
   useEffect(() => {
