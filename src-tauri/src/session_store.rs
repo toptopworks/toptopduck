@@ -105,7 +105,7 @@ impl fmt::Display for SessionId {
 /// (the Chinese wording no longer crosses IPC). The thiserror `#[error(...)]`
 /// attributes remain for Rust-side `Display` / logging only; they are NOT the
 /// IPC contract.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum SessionError {
     /// The session id was not a valid UUID. Distinct from
