@@ -293,6 +293,23 @@ pub async fn replace_source(
     Ok(outcome)
 }
 
+/// Map a working-set privacy outcome to the typed IPC result (issue #127).
+/// [`Session::set_privacy`] returns `None` for an unknown reference name; this
+/// maps that `None` to [`SessionError::RemoveSource`](
+/// [`RemoveSourceError::NotFound`]) so the frontend renders the shared
+/// `error.dataset.notFound` locale message instead of a free-text Engine
+/// string. Extracted from the command so the unit test exercises the real
+/// mapping path, not an inlined copy (the command's `State` arg blocks a
+/// direct call).
+fn privacy_update_to_result(
+    outcome: Option<DatasetDescriptor>,
+    reference_name: &str,
+) -> Result<DatasetDescriptor, SessionError> {
+    outcome.ok_or_else(|| {
+        SessionError::RemoveSource(RemoveSourceError::NotFound(reference_name.to_string()))
+    })
+}
+
 /// Set a dataset's privacy controls. See [`Session::set_privacy`]
 /// -- this is the Tauri/IPC command boundary wrapper. Rejects an unknown
 /// reference name as a typed [`RemoveSourceError::NotFound`] (issue #127),
@@ -310,9 +327,7 @@ pub fn set_dataset_privacy(
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
     let mut s = handle.session_lock()?;
-    s.set_privacy(&reference_name, privacy)
-        .ok_or_else(|| RemoveSourceError::NotFound(reference_name.to_string()))
-        .map_err(SessionError::RemoveSource)
+    privacy_update_to_result(s.set_privacy(&reference_name, privacy), &reference_name)
 }
 
 /// Remove a source Dataset from the working set (issue #38/#39, ADR-0040).
@@ -1021,12 +1036,11 @@ mod tests {
         // Working-set layer: an unregistered reference name yields None.
         let outcome = s.set_privacy("nope", DatasetPrivacy::default());
         assert!(outcome.is_none());
-        // Command boundary mapping: None -> typed NotFound -> RemoveSource,
-        // reusing the source-management domain error (issue #127).
-        let err = outcome
-            .ok_or_else(|| RemoveSourceError::NotFound("nope".into()))
-            .map_err(SessionError::RemoveSource)
-            .unwrap_err();
+        // Command-boundary mapping via the shared helper: None -> typed
+        // NotFound -> RemoveSource (issue #127). Calls the real production
+        // path -- a regression to a free-text Engine string here fails the
+        // assertion (the command's State arg blocks a direct call).
+        let err = privacy_update_to_result(outcome, "nope").unwrap_err();
         assert_eq!(
             err,
             SessionError::RemoveSource(RemoveSourceError::NotFound("nope".into())),
