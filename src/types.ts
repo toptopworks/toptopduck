@@ -252,6 +252,18 @@ export interface VizSpec {
   spec: string;
 }
 
+// Why a turn failed (ADR-0028 outcome C, issue #125). Mirrors the Rust
+// TurnFailure (serde adjacently-tagged, nested under TurnOutcome::Failed.data).
+// The frontend narrows on `kind` to render a locale message -- the backend no
+// longer crosses a free-text reason. Execute / Resource carry a technical
+// `detail` for the collapsed fold (audited to carry no API key, ADR-0029);
+// StaleReference carries the dead reference name for the locale template.
+export type TurnFailure =
+  | { kind: "Execute"; data: { detail: string } }
+  | { kind: "Resource"; data: { detail: string } }
+  | { kind: "NotWired" }
+  | { kind: "StaleReference"; data: { reference_name: string } };
+
 // One turn outcome (ADR-0028). Mirrors the Rust TurnOutcome (serde adjacently-
 // tagged: kind + data). The four kinds are exhaustive: a turn always produces
 // exactly one, regardless of whether it materialized a result. Only Materialized
@@ -284,7 +296,7 @@ export type TurnOutcome =
       assumption: string | null;
     };
   }
-  | { kind: "Failed"; data: { reason: string } }
+  | { kind: "Failed"; data: TurnFailure }
   | { kind: "Cancelled" };
 
 // One conversation-thread entry (ADR-0028/0039): the verbatim user question

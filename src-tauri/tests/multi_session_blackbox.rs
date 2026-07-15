@@ -172,7 +172,7 @@ fn two_sessions_are_physically_isolated() {
         let mut s = handle_b2.session_lock().unwrap();
         let outcome = s.ask("引用A的表");
         assert!(
-            matches!(outcome, TurnOutcome::Failed { .. }),
+            matches!(outcome, TurnOutcome::Failed(_)),
             "B referencing A's table must fail (isolated DuckDB), got {outcome:?}"
         );
     }

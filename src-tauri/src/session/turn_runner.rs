@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use crate::cancel::CancelToken;
 use crate::guardrail::ExecErrorKind;
-use crate::model::{TurnOutcome, TurnPhase, EXECUTE_FAIL_PREFIX, RESOURCE_FAIL_PREFIX};
+use crate::model::{TurnFailure, TurnOutcome, TurnPhase};
 use crate::provider::{Provider, ProviderError, ProviderReply, ProviderRequest};
 use crate::session::materializer::{Materializer, TurnDeps};
 
@@ -235,23 +235,21 @@ impl TurnRunner {
                             match exec_err.kind {
                                 // Resource cap: abort now -- retrying cannot help.
                                 ExecErrorKind::Resource => {
-                                    return TurnOutcome::Failed {
-                                        reason: format!(
-                                            "{}{}",
-                                            RESOURCE_FAIL_PREFIX, exec_err.detail
-                                        ),
-                                    };
+                                    return TurnOutcome::Failed(TurnFailure::Resource {
+                                        detail: exec_err.detail,
+                                    });
                                 }
                                 // Stale reference (issue #40, ADR-0013 invariant
                                 // 2): refuse without retry -- the same SQL would
                                 // reference the same stale result, so retrying
-                                // only burns budget. Honest Failed turn naming
-                                // the dead reference (the pre-check already wrote
-                                // a full Chinese reason into exec_err.detail).
+                                // only burns budget. Honest Failed turn carrying
+                                // the dead reference name (exec_err.detail is the
+                                // bare reference name; the "stale" wording lives
+                                // in the frontend locale, interpolated from it).
                                 ExecErrorKind::StaleReference => {
-                                    return TurnOutcome::Failed {
-                                        reason: exec_err.detail.clone(),
-                                    };
+                                    return TurnOutcome::Failed(TurnFailure::StaleReference {
+                                        reference_name: exec_err.detail,
+                                    });
                                 }
                                 // Guard-checked above: try_materialize only emits
                                 // Cancelled when is_requested() is true, which the
@@ -265,11 +263,14 @@ impl TurnRunner {
                                      try_materialize only emits it when is_requested() \
                                      is true"
                                 ),
-                                // Schema/runtime: feed the budget and retry.
-                                _ => push_failure(
-                                    &mut failures,
-                                    format!("{}{}", EXECUTE_FAIL_PREFIX, exec_err.detail),
-                                ),
+                                // Schema/runtime (and Resource): feed the budget
+                                // and retry. The raw engine detail rides the
+                                // technical fold on budget exhaustion. It is
+                                // engine-emitted verbatim and not guaranteed
+                                // English; ADR-0029 audits it to carry no API
+                                // key, so it stays out of the user-facing locale
+                                // message.
+                                _ => push_failure(&mut failures, exec_err.detail),
                             }
                         }
                     }
@@ -278,34 +279,29 @@ impl TurnRunner {
                 // cannot help, so the turn fails immediately without consuming
                 // the budget.
                 Err(ProviderError::NotWired) => {
-                    return TurnOutcome::Failed {
-                        reason: ProviderError::NotWired.to_string(),
-                    };
+                    return TurnOutcome::Failed(TurnFailure::NotWired);
                 }
                 // A contract violation / transient call failure -- consume the
                 // budget and retry with the SAME request (blind retry). The real
                 // client's error re-feed lands in #29; the scripted fake's queue
                 // advances per call.
                 Err(ProviderError::Unavailable(detail)) => {
-                    push_failure(
-                        &mut failures,
-                        ProviderError::Unavailable(detail).to_string(),
-                    );
+                    push_failure(&mut failures, format!("provider call failed: {detail}"));
                 }
             }
         }
-        // Budget exhausted: surface the accumulated failures honestly as a failed
-        // turn. The "重试预算耗尽" prefix distinguishes this from a permanent
-        // NotWired failure (which never consumes the budget, ADR-0028), so the
-        // two failure paths read distinctly to the user.
+        // Budget exhausted: surface the accumulated failures honestly as a typed
+        // Execute failure. The "budget exhausted" framing is the locale message
+        // (error.turn.execute); the aggregated per-attempt details ride the
+        // technical fold. The kind distinguishes this from a permanent NotWired
+        // failure (which never consumes the budget, ADR-0028) -- the frontend
+        // renders each TurnFailure kind via its own locale message.
         let detail = if failures.is_empty() {
-            "未知错误".to_string()
+            "unknown error".to_string()
         } else {
-            failures.join("；")
+            failures.join("; ")
         };
-        TurnOutcome::Failed {
-            reason: format!("重试预算耗尽：{detail}"),
-        }
+        TurnOutcome::Failed(TurnFailure::Execute { detail })
     }
 }
 
@@ -415,12 +411,11 @@ mod tests {
         let materializer =
             FakeMaterializer::new(vec![Err(ExecError::new(ExecErrorKind::Resource, "cap"))]);
         let (outcome, calls) = run_with(provider, materializer);
-        let reason = match outcome {
-            TurnOutcome::Failed { reason } => reason,
-            other => panic!("expected Failed, got {other:?}"),
+        let detail = match outcome {
+            TurnOutcome::Failed(TurnFailure::Resource { detail }) => detail,
+            other => panic!("expected Resource Failed, got {other:?}"),
         };
-        assert!(reason.contains(RESOURCE_FAIL_PREFIX), "got {reason:?}");
-        assert!(reason.contains("cap"), "got {reason:?}");
+        assert_eq!(detail, "cap");
         assert_eq!(calls, 1, "Resource must not retry");
     }
 
@@ -428,24 +423,20 @@ mod tests {
     fn stale_reference_failure_is_not_retried() {
         // ADR-0013 invariant 2 / issue #40: a SQL referencing a stale result_N
         // is refused without retry -- the same SQL references the same stale
-        // result on a retry. One materialize call, Failed outcome naming the
-        // dead reference (the pre-check's verbatim Chinese reason rides the
-        // detail, not the resource prefix).
+        // result on a retry. One materialize call, Failed outcome carrying the
+        // dead reference name (the "stale" wording lives in the frontend
+        // locale, interpolated from the name -- issue #125).
         let provider = FakeProvider::new().scripted("q", reply_sql("SELECT * FROM result_1"));
         let materializer = FakeMaterializer::new(vec![Err(ExecError::new(
             ExecErrorKind::StaleReference,
-            "引用了已失效的 result_1",
+            "result_1",
         ))]);
         let (outcome, calls) = run_with(provider, materializer);
-        let reason = match outcome {
-            TurnOutcome::Failed { reason } => reason,
-            other => panic!("expected Failed, got {other:?}"),
+        let reference_name = match outcome {
+            TurnOutcome::Failed(TurnFailure::StaleReference { reference_name }) => reference_name,
+            other => panic!("expected StaleReference Failed, got {other:?}"),
         };
-        assert!(reason.contains("已失效"), "got {reason:?}");
-        assert!(
-            !reason.contains(RESOURCE_FAIL_PREFIX),
-            "stale-ref must not read as a resource cap: {reason:?}"
-        );
+        assert_eq!(reference_name, "result_1");
         assert_eq!(calls, 1, "StaleReference must not retry");
     }
 
@@ -465,15 +456,13 @@ mod tests {
             Err(ExecError::new(ExecErrorKind::Runtime, "third")),
         ]);
         let (outcome, calls) = run_with(provider, materializer);
-        let reason = match outcome {
-            TurnOutcome::Failed { reason } => reason,
-            other => panic!("expected Failed, got {other:?}"),
+        let detail = match outcome {
+            TurnOutcome::Failed(TurnFailure::Execute { detail }) => detail,
+            other => panic!("expected Execute Failed, got {other:?}"),
         };
-        assert!(reason.contains("重试预算耗尽"), "got {reason:?}");
-        assert!(reason.contains(EXECUTE_FAIL_PREFIX), "got {reason:?}");
-        assert!(reason.contains("first"), "got {reason:?}");
-        assert!(reason.contains("second"), "got {reason:?}");
-        assert!(reason.contains("third"), "got {reason:?}");
+        assert!(detail.contains("first"), "got {detail:?}");
+        assert!(detail.contains("second"), "got {detail:?}");
+        assert!(detail.contains("third"), "got {detail:?}");
         assert_eq!(
             calls,
             (TURN_RETRY_BUDGET as usize) + 1,
@@ -490,16 +479,15 @@ mod tests {
         let materializer =
             FakeMaterializer::new(vec![Err(ExecError::new(ExecErrorKind::Runtime, "same"))]);
         let (outcome, calls) = run_with(provider, materializer);
-        let reason = match outcome {
-            TurnOutcome::Failed { reason } => reason,
-            other => panic!("expected Failed, got {other:?}"),
+        let detail = match outcome {
+            TurnOutcome::Failed(TurnFailure::Execute { detail }) => detail,
+            other => panic!("expected Execute Failed, got {other:?}"),
         };
-        assert!(reason.contains("重试预算耗尽"), "got {reason:?}");
-        // Exactly one occurrence of the detail (no "same；same；same").
+        // Exactly one occurrence of the detail (no "same; same; same").
         assert_eq!(
-            reason.matches("same").count(),
+            detail.matches("same").count(),
             1,
-            "consecutive duplicates must dedupe: {reason:?}"
+            "consecutive duplicates must dedupe: {detail:?}"
         );
         assert_eq!(calls, (TURN_RETRY_BUDGET as usize) + 1);
     }
@@ -570,18 +558,10 @@ mod tests {
         );
         let materializer = FakeMaterializer::new(vec![Ok(fake_descriptor("result_1"))]);
         let (outcome, calls) = run_with(provider, materializer);
-        let reason = match outcome {
-            TurnOutcome::Failed { reason } => reason,
-            other => panic!("expected Failed, got {other:?}"),
-        };
-        assert!(
-            reason.contains("未配置"),
-            "NotWired reason must surface to the user: {reason:?}"
-        );
-        assert!(
-            !reason.contains("重试预算耗尽"),
-            "NotWired must not read as budget exhaustion: {reason:?}"
-        );
+        match outcome {
+            TurnOutcome::Failed(TurnFailure::NotWired) => {}
+            other => panic!("expected NotWired Failed, got {other:?}"),
+        }
         assert_eq!(calls, 0, "NotWired must not reach the materializer");
     }
 

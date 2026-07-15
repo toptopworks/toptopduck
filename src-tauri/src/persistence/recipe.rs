@@ -20,12 +20,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{
     RectifyProvenance, SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, TextKind,
+    TurnFailure,
 };
 
-/// v1 recipe format version (ADR-0036). Opening routes on this value: equal
-/// -> normal; lower -> forward-migrate; higher -> honest refuse. v1 is the
-/// only version today, so the open path pins it exactly. Future versions bump
-/// this and add a migration transform.
+/// Recipe format version (ADR-0036). Opening routes on this value: equal
+/// -> normal; lower -> forward-migrate; higher -> honest refuse. v1's
+/// `RecipeOutcome::Failed` carries the typed [`TurnFailure`] (issue #125) so
+/// the failure kind survives save/resume and renders via the frontend locale.
+/// The app is unreleased, so widening the Failed shape in place under v1 needs
+/// no migration transform; a future released shape change would bump this and
+/// add one.
 pub const RECIPE_FORMAT_VERSION: u32 = 1;
 
 /// One source Dataset's portable reference (ADR-0034/0036/0042). Paths use
@@ -143,9 +147,11 @@ pub enum RecipeOutcome {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assumption: Option<String>,
     },
-    /// Outcome C -- a failed turn (ADR-0028). Statically rendered; the reason
-    /// is shown verbatim, the turn is NOT re-executed.
-    Failed { reason: String },
+    /// Outcome C -- a failed turn (ADR-0028). Statically rendered via the typed
+    /// [`TurnFailure`] kind (issue #125); the turn is NOT re-executed. The kind
+    /// round-trips so a resumed failure renders with the same locale message it
+    /// had live, not a flattened backend string.
+    Failed(TurnFailure),
     /// Outcome D -- a cancelled turn (ADR-0021/0028). Statically rendered.
     Cancelled,
 }

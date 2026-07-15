@@ -388,6 +388,67 @@ pub struct VizSpec {
     pub spec: String,
 }
 
+/// Why a turn failed (ADR-0028 outcome C). Replaces the former free-text
+/// `reason: String`: the failure kind crosses IPC as this serde struct, nested
+/// under [`TurnOutcome::Failed`], and the frontend narrows on `kind` to render a
+/// locale message -- so the hand-written `Display` below is Rust-log-only and
+/// feeds the LLM window payload (a text consumer), NOT the frontend IPC
+/// contract (issue #125, ADR-0052 locale switching). Mirrored by `TurnFailure`
+/// in src/types.ts and reused by [`crate::persistence::recipe::RecipeOutcome::Failed`]
+/// so the kind survives save/resume -- a resumed failure renders with the same
+/// locale message it had live, not a flattened string.
+///
+/// `detail` (Execute / Resource) is a technical, engine-level explanation that
+/// rides the frontend's collapsed "Technical details" fold, never the primary
+/// message (ADR-0029: the detail is a DuckDB / engine string, audited to carry
+/// no API key). `StaleReference` carries the dead reference name so the locale
+/// template can name it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data")]
+pub enum TurnFailure {
+    /// The retry budget exhausted on retriable schema/runtime errors, or a
+    /// transient provider call failure recurred past the budget (ADR-0028).
+    /// `detail` aggregates the distinct per-attempt failures (consecutive
+    /// duplicates deduped) so the user sees the full picture, not just the last
+    /// attempt. Rides the technical fold.
+    Execute { detail: String },
+    /// An engine-level resource cap aborted the turn (ADR-0005 L3): memory
+    /// ceiling, result-row ceiling, or a blocked filesystem function. NOT
+    /// retried -- the same SQL hits the same wall. `detail` is the engine's cap
+    /// explanation (technical); rides the fold.
+    Resource { detail: String },
+    /// No LLM provider is wired (ADR-0029 invariant 3): no API key is stored,
+    /// the stored key was rejected (HTTP 401/403, ADR-0044), or -- in test/dev
+    /// -- no provider at all. Permanent for the turn; the user must configure a
+    /// key. Carries no data -- the locale message is self-contained.
+    NotWired,
+    /// The provider SQL referenced a stale result_N (ADR-0013 invariant 2,
+    /// issue #40). NOT retried -- the same SQL would reference the same stale
+    /// result. `reference_name` is the dead reference, interpolated into the
+    /// locale template ("result_1 is stale").
+    StaleReference { reference_name: String },
+}
+
+impl std::fmt::Display for TurnFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        // Rust-log-only (issue #125): the IPC contract is the serde struct
+        // above and the authoritative user wording lives in the frontend locale
+        // catalog. These English identifiers feed the Rust log and the LLM
+        // window payload (provider::ResponsePayload::Failed, a text consumer),
+        // never the frontend render path -- so they never cross the Tauri IPC
+        // to the webview.
+        match self {
+            Self::Execute { detail } => write!(f, "turn failed (budget exhausted): {detail}"),
+            Self::Resource { detail } => write!(f, "turn aborted by resource cap: {detail}"),
+            Self::NotWired => write!(f, "turn failed: no LLM provider wired"),
+            Self::StaleReference { reference_name } => {
+                write!(f, "turn failed: stale reference {reference_name}")
+            }
+        }
+    }
+}
+impl std::error::Error for TurnFailure {}
+
 /// One turn outcome (ADR-0028): one exhaustive four-way classification. A turn
 /// always produces exactly one, regardless of whether it materialized a result
 /// -- "no result" is itself a typed outcome, never a silent gap. The four kinds
@@ -437,10 +498,12 @@ pub enum TurnOutcome {
         assumption: Option<String>,
     },
     /// Outcome C -- a failed turn: the single retry budget (malformed contract
-    /// violation + schema/runtime error, ADR-0028) is exhausted. Carries an
-    /// honest, user-facing reason. Occupies a thread slot but does NOT advance
-    /// result_N.
-    Failed { reason: String },
+    /// violation + schema/runtime error, ADR-0028) is exhausted, OR a non-
+    /// retriable cause (resource cap / not-wired / stale reference) aborted it.
+    /// Carries the typed [`TurnFailure`] kind so the frontend renders a locale
+    /// message by kind, never a backend Display string (issue #125). Occupies a
+    /// thread slot but does NOT advance result_N.
+    Failed(TurnFailure),
     /// Outcome D -- a cancelled turn (placeholder): abort via user cancel /
     /// resource cap / statement timeout (ADR-0021). The cancel mechanism lands
     /// in #28; this variant exists now so the four-way classification is
@@ -617,20 +680,6 @@ impl std::fmt::Display for RemoveSourceError {
 }
 impl std::error::Error for RemoveSourceError {}
 
-/// Prefix for the DuckDB execution-failure reason that crosses IPC as a Display
-/// string -- a turn's materialize failure (`session::ask`) surfaces as
-/// [`TurnOutcome::Failed`], whose reason the frontend string-matches; pinned by
-/// tests/ipc_contract. `TurnError::Execute`'s Rust-log-only Display reuses this
-/// prefix for log consistency but is NOT itself the IPC contract (issue #121).
-pub(crate) const EXECUTE_FAIL_PREFIX: &str = "执行查询失败：";
-
-/// Prefix for a turn aborted by an engine-level resource cap (ADR-0005 L3):
-/// memory ceiling, result-row ceiling, or a blocked filesystem function.
-/// Distinct from [`EXECUTE_FAIL_PREFIX`] (a retried schema/runtime error that
-/// exhausted the budget) so a cap-hit reads clearly as a limit, not a bug, and
-/// so the frontend can render it separately. String-matched by the frontend.
-pub(crate) const RESOURCE_FAIL_PREFIX: &str = "资源上限：";
-
 /// Why a row read failed. A turn no longer fails across this type -- turn
 /// failures are [`TurnOutcome::Failed`] (ADR-0028), so a turn always produces an
 /// outcome. This type remains only for [`crate::session::Session::read_rows`]: a
@@ -651,14 +700,14 @@ pub enum TurnError {
 
 impl std::fmt::Display for TurnError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        // Rust-log-only (issue #121): the IPC contract is the serde struct above
-        // and the authoritative user wording lives in the frontend locale
-        // catalog. UnknownDataset is an English log identifier; Execute reuses
-        // EXECUTE_FAIL_PREFIX (shared with the wire-pinned TurnOutcome::Failed
-        // reason, pinned separately) so it keeps the contract's wording.
+        // Rust-log-only (issue #121/#125): the IPC contract is the serde struct
+        // above and the authoritative user wording lives in the frontend locale
+        // catalog. Both variants are English log identifiers; Execute no longer
+        // shares a Chinese prefix with TurnOutcome::Failed -- that outcome now
+        // carries a typed TurnFailure whose wording also lives in the catalog.
         match self {
             Self::UnknownDataset(name) => write!(f, "unknown dataset: {name}"),
-            Self::Execute(detail) => write!(f, "{EXECUTE_FAIL_PREFIX}{detail}"),
+            Self::Execute(detail) => write!(f, "row read failed: {detail}"),
         }
     }
 }

@@ -336,14 +336,17 @@ fn turn_outcome_textual_carries_kind_body_and_assumption() {
 }
 
 #[test]
-fn turn_outcome_failed_carries_reason_under_data() {
-    // Outcome C (ADR-0028): a failed turn nests its honest reason under data.
-    use toptopduck_lib::TurnOutcome;
+fn turn_outcome_failed_nests_typed_failure_under_data() {
+    // Outcome C (ADR-0028, issue #125): a failed turn nests the typed
+    // TurnFailure under data -- itself adjacently-tagged (kind/data), so the
+    // frontend narrows on the failure kind to render a locale message, never a
+    // backend Display string.
+    use toptopduck_lib::{TurnFailure, TurnOutcome};
     assert_wire(
-        &TurnOutcome::Failed {
-            reason: "bad column".into(),
-        },
-        r#"{"kind":"Failed","data":{"reason":"bad column"}}"#,
+        &TurnOutcome::Failed(TurnFailure::Execute {
+            detail: "bad column".into(),
+        }),
+        r#"{"kind":"Failed","data":{"kind":"Execute","data":{"detail":"bad column"}}}"#,
     );
 }
 
@@ -360,13 +363,13 @@ fn turn_record_pairs_question_and_outcome() {
     // A thread entry (ADR-0028/0039): a flat { question, outcome } object where
     // outcome keeps its own adjacent tag. This is the Turn shape a ThreadEntry
     // wraps (see thread_entry_* below for the conversation() wire shape).
-    use toptopduck_lib::{TurnOutcome, TurnRecord};
+    use toptopduck_lib::{TurnFailure, TurnOutcome, TurnRecord};
     assert_wire(
         &TurnRecord {
             question: "总行数？".into(),
-            outcome: TurnOutcome::Failed { reason: "x".into() },
+            outcome: TurnOutcome::Failed(TurnFailure::NotWired),
         },
-        r#"{"question":"总行数？","outcome":{"kind":"Failed","data":{"reason":"x"}}}"#,
+        r#"{"question":"总行数？","outcome":{"kind":"Failed","data":{"kind":"NotWired"}}}"#,
     );
 }
 
@@ -437,13 +440,15 @@ fn thread_entry_turn_wraps_a_turn_record_under_data() {
     // ADR-0040: the unified timeline entry. Adjacently-tagged on `entry`:
     // a Turn wraps the full TurnRecord (which keeps its own {question,outcome}
     // shape) under `data`. This is what conversation() returns for turns.
-    use toptopduck_lib::{ThreadEntry, TurnOutcome, TurnRecord};
+    use toptopduck_lib::{ThreadEntry, TurnFailure, TurnOutcome, TurnRecord};
     assert_wire(
         &ThreadEntry::Turn(TurnRecord {
             question: "总行数？".into(),
-            outcome: TurnOutcome::Failed { reason: "x".into() },
+            outcome: TurnOutcome::Failed(TurnFailure::StaleReference {
+                reference_name: "result_1".into(),
+            }),
         }),
-        r#"{"entry":"Turn","data":{"question":"总行数？","outcome":{"kind":"Failed","data":{"reason":"x"}}}}"#,
+        r#"{"entry":"Turn","data":{"question":"总行数？","outcome":{"kind":"Failed","data":{"kind":"StaleReference","data":{"reference_name":"result_1"}}}}}"#,
     );
 }
 

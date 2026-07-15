@@ -12,7 +12,8 @@ use std::thread;
 use std::time::Duration;
 
 use toptopduck_lib::{
-    AnthropicProvider, CancelToken, LoadOutcome, ResponseLocale, Session, StaticConfig, TurnOutcome,
+    AnthropicProvider, CancelToken, LoadOutcome, ResponseLocale, Session, StaticConfig,
+    TurnFailure, TurnOutcome,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -92,13 +93,8 @@ fn real_provider_missing_key_yields_failed_turn() {
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     let outcome = session.ask("anything");
     match outcome {
-        TurnOutcome::Failed { reason } => {
-            assert!(
-                reason.contains("API key"),
-                "reason guides to key config: {reason}"
-            );
-        }
-        other => panic!("expected Failed, got {other:?}"),
+        TurnOutcome::Failed(TurnFailure::NotWired) => {}
+        other => panic!("expected NotWired Failed, got {other:?}"),
     }
 }
 

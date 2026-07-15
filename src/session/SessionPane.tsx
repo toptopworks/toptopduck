@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useIntl, FormattedMessage } from "react-intl";
 import { useQueryClient } from "@tanstack/react-query";
-import { fmtError, errorDetail } from "../api";
+import { fmtError, errorDetail, formatTurnFailure, turnFailureDetail } from "../api";
 import { useSessionState, errorPrefix } from "./useSessionState";
 import { ActiveSourceDeleteDialog } from "../components/ActiveSourceDeleteDialog";
 import { DatasetDetail } from "../components/DatasetDetail";
@@ -295,29 +295,62 @@ function WorkspaceResult({
 // is excluded at the type level and the switch ends in `default: never` -- no
 // defensive `return null` for an unreachable case.
 function TextualOutcomeCard({ turn }: { turn: NonMaterializedTurn }) {
+  const intl = useIntl();
   switch (turn.outcome.kind) {
     case "Textual": {
       const { text_kind, body, assumption } = turn.outcome.data;
       const isClarify = text_kind === "Clarify";
       return (
         <article className={`textual-card ${text_kind.toLowerCase()}`}>
-          <h3>{isClarify ? "需要澄清" : "无法处理"}</h3>
+          <h3>
+            {isClarify ? (
+              <FormattedMessage id="thread.outcome.clarify" defaultMessage="Needs clarification" />
+            ) : (
+              <FormattedMessage id="thread.outcome.refused" defaultMessage="Cannot fulfill" />
+            )}
+          </h3>
           <p className="textual-body">{body}</p>
-          {assumption && <p className="assumption">假设：{assumption}</p>}
+          {assumption && (
+            <p className="assumption">
+              <FormattedMessage
+                id="thread.assumption"
+                defaultMessage="Assumption: {text}"
+                values={{ text: assumption }}
+              />
+            </p>
+          )}
         </article>
       );
     }
-    case "Failed":
+    case "Failed": {
+      // Outcome C (issue #125): render by TurnFailure kind via the locale
+      // catalog (no backend Display string crosses IPC); Execute / Resource
+      // carry a technical detail under the collapsed fold.
+      const failure = turn.outcome.data;
+      const detail = turnFailureDetail(failure);
       return (
         <article className="textual-card failed">
-          <h3>提问失败</h3>
-          <p className="textual-body">{turn.outcome.data.reason}</p>
+          <h3>
+            <FormattedMessage id="thread.outcome.failed" defaultMessage="Failed" />
+          </h3>
+          <p className="textual-body">{formatTurnFailure(failure, intl)}</p>
+          {detail && (
+            <details className="error-details">
+              <summary className="muted">
+                <FormattedMessage id="errorBoundary.details" defaultMessage="Technical details" />
+              </summary>
+              <pre className="error-stack">{detail}</pre>
+            </details>
+          )}
         </article>
       );
+    }
     case "Cancelled":
       return (
         <article className="textual-card cancelled">
-          <h3>已取消</h3>
+          <h3>
+            <FormattedMessage id="thread.outcome.cancelled" defaultMessage="Cancelled" />
+          </h3>
         </article>
       );
     default: {

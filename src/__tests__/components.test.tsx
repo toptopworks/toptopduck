@@ -1218,7 +1218,7 @@ describe("Thread", () => {
       },
       {
         question: "坏查询",
-        outcome: { kind: "Failed", data: { reason: "执行查询失败：bad column" } },
+        outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } },
       },
       { question: "中途取消", outcome: { kind: "Cancelled" } },
     ];
@@ -1245,8 +1245,9 @@ describe("Thread", () => {
     expect(screen.getByText("按产品名还是客户名？")).toBeInTheDocument();
     expect(screen.getByText("无法处理")).toBeInTheDocument();
     expect(screen.getByText("预测不在 v1 能力范围内")).toBeInTheDocument();
-    // Failed renders the honest reason; cancelled renders the marker.
-    expect(screen.getByText(/失败：执行查询失败：bad column/)).toBeInTheDocument();
+    // Failed renders the typed Execute message via the locale catalog (the
+    // engine detail rides the collapsed fold); cancelled renders the marker.
+    expect(screen.getByText("执行查询失败")).toBeInTheDocument();
     expect(screen.getByText("已取消")).toBeInTheDocument();
   });
 
@@ -1423,7 +1424,7 @@ describe("Thread", () => {
     const records: TurnRecord[] = [
       materializedRecord("result_1", null),
       { question: "q", outcome: { kind: "Textual", data: { text_kind: "Clarify", body: "b", assumption: null } } },
-      { question: "q", outcome: { kind: "Failed", data: { reason: "boom" } } },
+      { question: "q", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "boom" } } } },
       { question: "q", outcome: { kind: "Cancelled" } },
     ];
     const { container } = renderThread(
@@ -1445,7 +1446,7 @@ describe("Thread", () => {
     // included a failure" context. v1 only weakens (CSS opacity on the card),
     // so the question + reason/marker stay in the DOM and are queryable.
     const records: TurnRecord[] = [
-      { question: "坏查询", outcome: { kind: "Failed", data: { reason: "bad column" } } },
+      { question: "坏查询", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } } },
       { question: "中途取消", outcome: { kind: "Cancelled" } },
     ];
     const { container } = renderThread(
@@ -1453,7 +1454,7 @@ describe("Thread", () => {
     );
     // Both are present in the DOM (not collapsed away).
     expect(screen.getByText("坏查询")).toBeInTheDocument();
-    expect(screen.getByText(/失败：bad column/)).toBeInTheDocument();
+    expect(screen.getByText("执行查询失败")).toBeInTheDocument();
     expect(screen.getByText("中途取消")).toBeInTheDocument();
     expect(screen.getByText("已取消")).toBeInTheDocument();
     // Both carry their outcome attribute (weakening is CSS opacity, asserted at

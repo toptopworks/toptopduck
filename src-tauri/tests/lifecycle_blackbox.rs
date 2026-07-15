@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use rust_xlsxwriter::Workbook;
 use toptopduck_lib::{
     FakeProvider, LoadOutcome, ProviderReply, RemoveSourceError, Session, SheetGuidance,
-    SheetRectify, SourceLifecycleKind, StaleReason, ThreadEntry, TurnOutcome,
+    SheetRectify, SourceLifecycleKind, StaleReason, ThreadEntry, TurnFailure, TurnOutcome,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -668,13 +668,13 @@ fn new_question_referencing_stale_result_is_rejected() {
 
     let outcome = session.ask("again"); // SQL FROM result_1 -> refused
     match outcome {
-        TurnOutcome::Failed { reason } => {
-            assert!(
-                reason.contains("result_1") && reason.contains("失效"),
-                "refusal names the stale reference: {reason}"
+        TurnOutcome::Failed(TurnFailure::StaleReference { reference_name }) => {
+            assert_eq!(
+                reference_name, "result_1",
+                "refusal names the stale reference"
             );
         }
-        other => panic!("expected Failed for stale reference, got {other:?}"),
+        other => panic!("expected StaleReference Failed, got {other:?}"),
     }
 }
 
