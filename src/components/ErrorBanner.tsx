@@ -6,7 +6,7 @@
 // consistently -- previously only the session pane rendered the fold, so a
 // close-wait timeout reject lost its actionable "retry shortly" hint at the
 // shell layer.
-import { FormattedMessage } from "react-intl";
+import { TechnicalDetailsFold } from "./TechnicalDetailsFold";
 
 export interface ErrorBannerProps {
   message: string;
@@ -24,14 +24,7 @@ export function ErrorBanner({ message, detail, className }: ErrorBannerProps) {
   return (
     <div className={`error${className ? ` ${className}` : ""}`} role="alert">
       <p className="error-message">{message}</p>
-      {detail && (
-        <details className="error-details">
-          <summary className="muted">
-            <FormattedMessage id="errorBoundary.details" defaultMessage="Technical details" />
-          </summary>
-          <pre className="error-stack">{detail}</pre>
-        </details>
-      )}
+      <TechnicalDetailsFold detail={detail} />
     </div>
   );
 }

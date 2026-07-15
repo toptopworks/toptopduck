@@ -263,8 +263,8 @@ impl TurnRunner {
                                      try_materialize only emits it when is_requested() \
                                      is true"
                                 ),
-                                // Schema/runtime (and Resource): feed the budget
-                                // and retry. The raw engine detail rides the
+                                // Schema/runtime: feed the budget and retry.
+                                // The raw engine detail rides the
                                 // technical fold on budget exhaustion. It is
                                 // engine-emitted verbatim and not guaranteed
                                 // English; ADR-0029 audits it to carry no API

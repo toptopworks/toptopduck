@@ -11,6 +11,7 @@ import { FileDropzone } from "../components/FileDropzone";
 import { GuidedLoadDialog } from "../components/GuidedLoadDialog";
 import { QuestionBar } from "../components/QuestionBar";
 import { ResultView } from "../components/ResultView";
+import { TechnicalDetailsFold } from "../components/TechnicalDetailsFold";
 import { Thread } from "../components/Thread";
 import { Badge } from "../components/ui/badge";
 import { WorkingSetList } from "../components/WorkingSetList";
@@ -154,17 +155,7 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
                   values={{ reason: fmtError(s.persistError, intl) }}
                 />
               </p>
-              {persistDetail && (
-                <details className="error-details">
-                  <summary className="muted">
-                    <FormattedMessage
-                      id="errorBoundary.details"
-                      defaultMessage="Technical details"
-                    />
-                  </summary>
-                  <pre className="error-stack">{persistDetail}</pre>
-                </details>
-              )}
+              <TechnicalDetailsFold detail={persistDetail} />
             </div>
           )}
 
@@ -334,14 +325,7 @@ function TextualOutcomeCard({ turn }: { turn: NonMaterializedTurn }) {
             <FormattedMessage id="thread.outcome.failed" defaultMessage="Failed" />
           </h3>
           <p className="textual-body">{formatTurnFailure(failure, intl)}</p>
-          {detail && (
-            <details className="error-details">
-              <summary className="muted">
-                <FormattedMessage id="errorBoundary.details" defaultMessage="Technical details" />
-              </summary>
-              <pre className="error-stack">{detail}</pre>
-            </details>
-          )}
+          <TechnicalDetailsFold detail={detail} />
         </article>
       );
     }

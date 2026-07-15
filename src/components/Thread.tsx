@@ -24,6 +24,7 @@ import type {
   TurnRecord,
 } from "../types";
 import { formatTurnFailure, turnFailureDetail } from "../api";
+import { TechnicalDetailsFold } from "./TechnicalDetailsFold";
 
 // A compact label slice for the active-chip match (ADR-0047): the thread only
 // needs the names to detect when a question explicitly points at a dataset, so
@@ -686,17 +687,11 @@ function TurnBody({
       const failure = record.outcome.data;
       const detail = turnFailureDetail(failure);
       return (
-        <p className="turn-outcome failed">
+        <div className="turn-outcome failed">
+          {/* <div>, not <p>: a <p> cannot legally contain the <details> fold. */}
           <span className="failed-reason">{formatTurnFailure(failure, intl)}</span>
-          {detail && (
-            <details className="error-details">
-              <summary className="muted">
-                <FormattedMessage id="errorBoundary.details" defaultMessage="Technical details" />
-              </summary>
-              <pre className="error-stack">{detail}</pre>
-            </details>
-          )}
-        </p>
+          <TechnicalDetailsFold detail={detail} />
+        </div>
       );
     }
     case "Cancelled":

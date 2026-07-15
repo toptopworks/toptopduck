@@ -305,6 +305,36 @@ describe("App three-column shell (issue #79 ACs)", () => {
     // but under a different class -- .turn-outcome, not .textual-card).
     expect(document.querySelector(".textual-card")).not.toBeInTheDocument();
   });
+
+  it("renders a failed turn's typed failure via the locale catalog (issue #125)", async () => {
+    // The workspace's TextualOutcomeCard renders a Failed turn by TurnFailure
+    // kind through the locale catalog (no backend Display string crosses IPC);
+    // the engine detail rides the collapsed TechnicalDetailsFold.
+    state.workingSet = [src("result_1")];
+    state.thread = [
+      {
+        entry: "Turn",
+        data: {
+          question: "坏查询",
+          outcome: {
+            kind: "Failed",
+            data: { kind: "Execute", data: { detail: "no_such_col" } },
+          },
+        },
+      },
+    ];
+    render(<App />);
+    await openSession();
+    // The workspace shows the Failed textual card (distinct from the Thread
+    // rail's .turn-outcome.failed). Scope the message assertions to the card:
+    // the rail renders the same Execute locale message under a different class.
+    await waitFor(() =>
+      expect(document.querySelector(".textual-card.failed")).toBeInTheDocument(),
+    );
+    const card = document.querySelector(".textual-card.failed") as HTMLElement;
+    expect(within(card).getByText("执行查询失败")).toBeInTheDocument(); // error.turn.execute
+    expect(within(card).getByText("no_such_col")).toBeInTheDocument(); // fold detail
+  });
 });
 
 describe("App multi-session shell (issue #81 ACs)", () => {

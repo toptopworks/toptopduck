@@ -2309,15 +2309,16 @@ mod tests {
         session.temp_path = file.path().to_path_buf();
 
         // The derive failure exhausts the retry budget and surfaces as a typed
-        // Execute failure; the engine error rides the detail (the wording is
-        // locale-driven now, so the test locks the kind + non-empty detail).
+        // Execute failure; the engine error rides the detail. Lock the kind and
+        // that the aggregate carries the real engine failure -- never the
+        // "unknown error" placeholder an empty failure list would produce.
         let detail = match session.ask("建表") {
             TurnOutcome::Failed(TurnFailure::Execute { detail }) => detail,
             other => panic!("expected Execute failure after derive failure, got {other:?}"),
         };
         assert!(
-            !detail.is_empty(),
-            "Execute detail carries the execution-step failure: {detail:?}"
+            !detail.is_empty() && detail != "unknown error",
+            "Execute detail must carry the real aggregated engine failure: {detail:?}"
         );
 
         // result_1 was rolled back on every attempt: it is no longer a table in
