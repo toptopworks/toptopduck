@@ -11,6 +11,8 @@ import type {
   MigrationError,
   ProviderConfig,
   ProviderConfigView,
+  RemoveSourceError,
+  RenameError,
   ResumeError,
   ResumeProgress,
   RowPage,
@@ -19,6 +21,7 @@ import type {
   SessionMetadata,
   SheetGuidance,
   ThreadEntry,
+  TurnError,
   TurnOutcome,
   TurnProgress,
 } from "./types";
@@ -81,7 +84,7 @@ export async function activeDataset(sessionId: string): Promise<DatasetDescripto
 // Rename a dataset's display label (ADR-0037, issue #8): display-only -- the
 // reference name is untouched, so SQL / recipe / active references stay valid.
 // Rejects an unknown reference or a label already shown by another dataset; the
-// backend surfaces that as an error string (no typed RenameError crosses IPC).
+// backend rejects with the typed `SessionError::RenameDataset` (issue #121).
 export async function renameDataset(
   sessionId: string,
   referenceName: string,
@@ -170,6 +173,20 @@ function isSessionError(e: unknown): e is SessionError {
       return true;
     case "Resume":
       return isResumeError((e as { data?: unknown }).data);
+    case "RemoveSource":
+      return isRemoveSourceError((e as { data?: unknown }).data);
+    case "RenameDataset":
+      return isRenameError((e as { data?: unknown }).data);
+    case "RenameSession": {
+      const d = (e as { data?: unknown }).data;
+      return (
+        typeof d === "object" &&
+        d !== null &&
+        (d as { kind?: unknown }).kind === "EmptyName"
+      );
+    }
+    case "Turn":
+      return isTurnError((e as { data?: unknown }).data);
     case "Engine":
       return typeof (e as { data?: unknown }).data === "string";
     default:
@@ -281,6 +298,65 @@ function isSaveError(e: unknown): e is SaveError {
     case "Io":
     case "Rename":
     case "AlreadyOpen":
+      return typeof (e as { data?: unknown }).data === "string";
+    default:
+      return false;
+  }
+}
+
+// Narrow an unknown value to a RemoveSourceError (issue #121). Reached via
+// isSessionError's RemoveSource branch (remove_source / remove_active_source
+// rejects). IsActive carries a struct; the newtype variants carry a string.
+// Same L1 defensive shape as the other guards: a variant's data is verified
+// before the guard promises it.
+function isRemoveSourceError(e: unknown): e is RemoveSourceError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "NotFound":
+    case "NotActive":
+    case "InvalidContinueWith":
+      return typeof (e as { data?: unknown }).data === "string";
+    case "IsActive": {
+      const d = (e as { data?: unknown }).data;
+      return (
+        typeof d === "object" &&
+        d !== null &&
+        typeof (d as { reference_name?: unknown }).reference_name === "string" &&
+        typeof (d as { display_name?: unknown }).display_name === "string"
+      );
+    }
+    default:
+      return false;
+  }
+}
+
+// Narrow an unknown value to a RenameError (issue #121) -- the dataset display-
+// label rename error. Reached via isSessionError's RenameDataset branch.
+// NotFound / DisplayTaken carry a string; InvalidLabel is a unit variant.
+function isRenameError(e: unknown): e is RenameError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "NotFound":
+    case "DisplayTaken":
+      return typeof (e as { data?: unknown }).data === "string";
+    case "InvalidLabel":
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Narrow an unknown value to a TurnError (issue #121) -- the read_rows error.
+// Reached via isSessionError's Turn branch. Both variants carry a string under
+// data (the reference name / the engine detail).
+function isTurnError(e: unknown): e is TurnError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "UnknownDataset":
+    case "Execute":
       return typeof (e as { data?: unknown }).data === "string";
     default:
       return false;
@@ -404,6 +480,113 @@ function formatSaveError(e: SaveError, intl: IntlShape): string {
   }
 }
 
+// Format a RemoveSourceError through the locale catalog (issue #121). NotFound
+// shares the merged `error.dataset.notFound` id with RenameError::NotFound and
+// TurnError::UnknownDataset (DRY -- one "dataset not found" message, not three
+// copies of the backend string). IsActive interpolates the display name; the
+// other variants name the reference.
+function formatRemoveSourceError(e: RemoveSourceError, intl: IntlShape): string {
+  switch (e.kind) {
+    case "NotFound":
+      return intl.formatMessage(
+        {
+          id: "error.dataset.notFound",
+          defaultMessage: "No dataset found with reference name \"{name}\"",
+        },
+        { name: e.data },
+      );
+    case "IsActive":
+      return intl.formatMessage(
+        {
+          id: "error.dataset.removeActive",
+          defaultMessage:
+            "\"{name}\" is the current focus table; pick a continuation from the remaining sources first (or cancel)",
+        },
+        { name: e.data.display_name },
+      );
+    case "NotActive":
+      return intl.formatMessage(
+        {
+          id: "error.dataset.notActive",
+          defaultMessage:
+            "\"{name}\" is not the current focus source; use plain delete or refresh the working set and retry",
+        },
+        { name: e.data },
+      );
+    case "InvalidContinueWith":
+      return intl.formatMessage(
+        {
+          id: "error.dataset.invalidContinueWith",
+          defaultMessage:
+            "\"{name}\" is not among the remaining sources; cannot use it as the continuation (refresh the working set and re-pick)",
+        },
+        { name: e.data },
+      );
+    default: {
+      const unhandled: never = e;
+      throw new Error(`unhandled RemoveSourceError kind: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+// Format a RenameError (dataset display-label rename) through the locale
+// catalog (issue #121). NotFound shares the merged `error.dataset.notFound` id.
+function formatRenameDatasetError(e: RenameError, intl: IntlShape): string {
+  switch (e.kind) {
+    case "NotFound":
+      return intl.formatMessage(
+        {
+          id: "error.dataset.notFound",
+          defaultMessage: "No dataset found with reference name \"{name}\"",
+        },
+        { name: e.data },
+      );
+    case "DisplayTaken":
+      return intl.formatMessage(
+        {
+          id: "error.dataset.displayTaken",
+          defaultMessage: "Display label \"{label}\" is already used by another dataset; pick a different one",
+        },
+        { label: e.data },
+      );
+    case "InvalidLabel":
+      return intl.formatMessage({
+        id: "error.dataset.invalidLabel",
+        defaultMessage: "Display label must not be empty or whitespace-only",
+      });
+    default: {
+      const unhandled: never = e;
+      throw new Error(`unhandled RenameError kind: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+// Format a TurnError (read_rows failure) through the locale catalog (issue
+// #121). UnknownDataset shares the merged `error.dataset.notFound` id; Execute
+// renders a generic message and the engine detail rides the technical-details
+// fold (the detail is a DuckDB read error, never an API key per ADR-0029).
+function formatTurnError(e: TurnError, intl: IntlShape): string {
+  switch (e.kind) {
+    case "UnknownDataset":
+      return intl.formatMessage(
+        {
+          id: "error.dataset.notFound",
+          defaultMessage: "No dataset found with reference name \"{name}\"",
+        },
+        { name: e.data },
+      );
+    case "Execute":
+      return intl.formatMessage({
+        id: "error.turn.execute",
+        defaultMessage: "Failed to execute the query",
+      });
+    default: {
+      const unhandled: never = e;
+      throw new Error(`unhandled TurnError kind: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
 // Format an unknown error (a Tauri IPC reject, a JS Error, or a structured
 // object) into a readable string. A structured typed error -- SessionError
 // (issue #119), ResumeError / SaveError (issue #120) -- is narrowed to its
@@ -444,6 +627,24 @@ export function fmtError(e: unknown, intl: IntlShape): string {
         });
       case "Resume":
         return formatResumeError(e.data, intl);
+      case "RemoveSource":
+        return formatRemoveSourceError(e.data, intl);
+      case "RenameDataset":
+        return formatRenameDatasetError(e.data, intl);
+      case "RenameSession":
+        return intl.formatMessage({
+          id: "error.session.renameEmpty",
+          defaultMessage: "Session name must not be empty",
+        });
+      case "Turn":
+        return formatTurnError(e.data, intl);
+      default: {
+        // Exhaustiveness guard (issue #121): a future SessionError variant must
+        // trip the compiler here, not silently fall through to the opaque JSON
+        // fallback below. Mirrors the `never` guards in the sub-formatters.
+        const unhandled: never = e;
+        throw new Error(`unhandled SessionError kind: ${JSON.stringify(unhandled)}`);
+      }
     }
   }
   // Invariant: the top-level reject kind sets are disjoint (SessionError kinds
@@ -478,6 +679,7 @@ export function errorDetail(e: unknown): string | null {
   if (isSessionError(e)) {
     if (e.kind === "Engine") return e.data;
     if (e.kind === "Resume") return resumeErrorDetail(e.data);
+    if (e.kind === "Turn") return turnErrorDetail(e.data);
     return null;
   }
   if (isSaveError(e)) {
@@ -507,6 +709,22 @@ function resumeErrorDetail(e: ResumeError): string | null {
     default: {
       const unhandled: never = e;
       throw new Error(`unhandled ResumeError kind: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+// Detail for a nested TurnError (issue #121), reached via SessionError::Turn.
+// Execute carries the engine detail for the fold; UnknownDataset's name is
+// already in the message, so it carries no fold detail.
+function turnErrorDetail(e: TurnError): string | null {
+  switch (e.kind) {
+    case "Execute":
+      return e.data;
+    case "UnknownDataset":
+      return null;
+    default: {
+      const unhandled: never = e;
+      throw new Error(`unhandled TurnError kind: ${JSON.stringify(unhandled)}`);
     }
   }
 }

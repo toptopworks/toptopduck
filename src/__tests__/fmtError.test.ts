@@ -10,6 +10,15 @@ import type { ResumeError, SaveError, SessionError } from "../types";
 const intl = createIntl({
   locale: "en",
   messages: {
+    "error.dataset.displayTaken": "Display label \"{label}\" is already used by another dataset; pick a different one",
+    "error.dataset.invalidContinueWith":
+      "\"{name}\" is not among the remaining sources; cannot use it as the continuation (refresh the working set and re-pick)",
+    "error.dataset.invalidLabel": "Display label must not be empty or whitespace-only",
+    "error.dataset.notActive":
+      "\"{name}\" is not the current focus source; use plain delete or refresh the working set and retry",
+    "error.dataset.notFound": "No dataset found with reference name \"{name}\"",
+    "error.dataset.removeActive":
+      "\"{name}\" is the current focus table; pick a continuation from the remaining sources first (or cancel)",
     "error.duck.alreadyOpen": "This .duck is already open in this process",
     "error.duck.loadIo": "Failed to read the .duck file",
     "error.duck.loadParse": "Failed to parse the .duck file",
@@ -29,7 +38,9 @@ const intl = createIntl({
       "A query is already running on this session; cancel it or wait for it to finish",
     "error.session.invalidId": "Invalid session id",
     "error.session.notFound": "Session not found or closed",
+    "error.session.renameEmpty": "Session name must not be empty",
     "error.session.resuming": "Session is resuming, please try again shortly",
+    "error.turn.execute": "Failed to execute the query",
   },
 });
 
@@ -124,6 +135,74 @@ describe("fmtError — SessionError::Resume (open_duck reject)", () => {
         intl,
       ),
     ).toBe("Source \"p\" not found");
+  });
+});
+
+describe("fmtError — SessionError source-management kinds (issue #121)", () => {
+  it("renders RemoveSource kinds via the locale catalog", () => {
+    // remove_source / remove_active_source wrap RemoveSourceError in
+    // SessionError::RemoveSource. NotFound shares the merged notFound id with
+    // RenameError::NotFound and TurnError::UnknownDataset.
+    const cases: Array<[SessionError, string]> = [
+      [
+        { kind: "RemoveSource", data: { kind: "NotFound", data: "people" } },
+        "No dataset found with reference name \"people\"",
+      ],
+      [
+        {
+          kind: "RemoveSource",
+          data: { kind: "IsActive", data: { reference_name: "people", display_name: "员工表" } },
+        },
+        "\"员工表\" is the current focus table; pick a continuation from the remaining sources first (or cancel)",
+      ],
+      [
+        { kind: "RemoveSource", data: { kind: "NotActive", data: "people" } },
+        "\"people\" is not the current focus source; use plain delete or refresh the working set and retry",
+      ],
+      [
+        { kind: "RemoveSource", data: { kind: "InvalidContinueWith", data: "ghost" } },
+        "\"ghost\" is not among the remaining sources; cannot use it as the continuation (refresh the working set and re-pick)",
+      ],
+    ];
+    for (const [err, expected] of cases) {
+      expect(fmtError(err, intl)).toBe(expected);
+    }
+  });
+
+  it("renders RenameDataset kinds via the locale catalog", () => {
+    const cases: Array<[SessionError, string]> = [
+      [
+        { kind: "RenameDataset", data: { kind: "NotFound", data: "people" } },
+        "No dataset found with reference name \"people\"",
+      ],
+      [
+        { kind: "RenameDataset", data: { kind: "DisplayTaken", data: "员工表" } },
+        "Display label \"员工表\" is already used by another dataset; pick a different one",
+      ],
+      [{ kind: "RenameDataset", data: { kind: "InvalidLabel" } }, "Display label must not be empty or whitespace-only"],
+    ];
+    for (const [err, expected] of cases) {
+      expect(fmtError(err, intl)).toBe(expected);
+    }
+  });
+
+  it("renders RenameSession and Turn kinds via the locale catalog", () => {
+    expect(fmtError({ kind: "RenameSession", data: { kind: "EmptyName" } }, intl)).toBe(
+      "Session name must not be empty",
+    );
+    expect(
+      fmtError({ kind: "Turn", data: { kind: "UnknownDataset", data: "result_1" } }, intl),
+    ).toBe("No dataset found with reference name \"result_1\"");
+    // Execute renders a generic message; the engine detail rides the fold.
+    expect(fmtError({ kind: "Turn", data: { kind: "Execute", data: "bad column" } }, intl)).toBe(
+      "Failed to execute the query",
+    );
+  });
+
+  it("does not leak the Turn::Execute detail into the rendered message (ADR-0029)", () => {
+    expect(fmtError({ kind: "Turn", data: { kind: "Execute", data: "sk-ant-secret" } }, intl)).toBe(
+      "Failed to execute the query",
+    );
   });
 });
 
@@ -230,6 +309,25 @@ describe("errorDetail", () => {
     expect(errorDetail({ kind: "Io", data: "io-fail" })).toBe("io-fail");
     expect(errorDetail({ kind: "Rename", data: "rename-fail" })).toBe("rename-fail");
     expect(errorDetail({ kind: "AlreadyOpen", data: "/x/a.duck" })).toBe("/x/a.duck");
+  });
+
+  it("extracts SessionError::Turn::Execute detail and nulls UnknownDataset (issue #121)", () => {
+    expect(errorDetail({ kind: "Turn", data: { kind: "Execute", data: "bad column" } })).toBe(
+      "bad column",
+    );
+    expect(
+      errorDetail({ kind: "Turn", data: { kind: "UnknownDataset", data: "result_1" } }),
+    ).toBeNull();
+  });
+
+  it("returns null for self-contained source-management SessionError kinds (issue #121)", () => {
+    expect(
+      errorDetail({ kind: "RemoveSource", data: { kind: "NotFound", data: "people" } }),
+    ).toBeNull();
+    expect(
+      errorDetail({ kind: "RenameDataset", data: { kind: "DisplayTaken", data: "x" } }),
+    ).toBeNull();
+    expect(errorDetail({ kind: "RenameSession", data: { kind: "EmptyName" } })).toBeNull();
   });
 
   it("returns null for non-Engine SessionError kinds", () => {

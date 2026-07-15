@@ -216,9 +216,10 @@ describe("App rename flow", () => {
     );
 
     vi.spyOn(window, "prompt").mockReturnValue("员工表");
-    vi.mocked(renameDataset).mockRejectedValueOnce(
-      "显示名「员工表」已被其他数据集使用",
-    );
+    vi.mocked(renameDataset).mockRejectedValueOnce({
+      kind: "RenameDataset",
+      data: { kind: "DisplayTaken", data: "员工表" },
+    });
     fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
 
     await waitFor(() =>
@@ -383,10 +384,13 @@ describe("App delete-source flow (issue #38)", () => {
   });
 
   it("labels a delete failure distinctly from load/rename/replace/ask failures", async () => {
-    // A HasDerivatives / IsActive refusal surfaces under the "删源失败：" prefix
-    // -- never mislabelled as another operation's failure.
+    // A typed RemoveSource refusal (issue #121) surfaces under the "删源失败："
+    // prefix -- never mislabelled as another operation's failure.
     vi.spyOn(window, "confirm").mockReturnValue(true);
-    vi.mocked(removeSource).mockRejectedValueOnce("工作集中存在中间结果，暂不支持删源");
+    vi.mocked(removeSource).mockRejectedValueOnce({
+      kind: "RemoveSource",
+      data: { kind: "NotFound", data: "people" },
+    });
     renderPane();
     fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
@@ -394,7 +398,7 @@ describe("App delete-source flow (issue #38)", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /删除/ }));
     await waitFor(() =>
-      expect(screen.getByText(/删源失败：工作集中存在中间结果/)).toBeInTheDocument(),
+      expect(screen.getByText(/删源失败：找不到引用名为「people」的数据集/)).toBeInTheDocument(),
     );
     // No other operation's prefix is used.
     expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
@@ -504,5 +508,34 @@ describe("App delete-active-source flow (issue #39)", () => {
     await waitFor(() =>
       expect(screen.getByText(/工作集为空/)).toBeInTheDocument(),
     );
+  });
+
+  it("labels an active-source delete refusal under the 删源失败 prefix (issue #121)", async () => {
+    // remove_active_source rejects with a typed RemoveSourceError. NotActive /
+    // InvalidContinueWith are unique to this path (plain removeSource cannot
+    // produce them); the refusal surfaces under the same "删源失败：" prefix as
+    // removeSource, never mislabelled as another operation's failure.
+    vi.mocked(removeActiveSource).mockRejectedValueOnce({
+      kind: "RemoveSource",
+      data: { kind: "InvalidContinueWith", data: "ghost" },
+    });
+    renderPane();
+    fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^orders/ })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /删除 orders/ }));
+    await waitFor(() => expect(screen.getByText(/删除焦点源/)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    await waitFor(() =>
+      expect(removeActiveSource).toHaveBeenCalledWith("sess-1", "orders", "people"),
+    );
+    // The typed refusal renders under the delete prefix with the locale message;
+    // the dialog stays open for retry (closed inside fn, after the await).
+    await waitFor(() =>
+      expect(screen.getByText(/删源失败：「ghost」不是剩余可用源之一/)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/重命名失败/)).not.toBeInTheDocument();
   });
 });

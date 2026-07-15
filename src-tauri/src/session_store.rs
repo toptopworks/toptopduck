@@ -135,6 +135,25 @@ pub enum SessionError {
     /// variant.
     #[error("{0}")]
     Resume(crate::session::ResumeError),
+    /// A source removal was refused (issue #121): `remove_source` /
+    /// `remove_active_source` wrap the typed
+    /// [`RemoveSourceError`](crate::model::RemoveSourceError) here instead of
+    /// flattening it to [`Self::Engine`] (string), so the frontend recurses
+    /// `RemoveSource.data.kind` and renders the source-domain locale message.
+    #[error("{0}")]
+    RemoveSource(crate::model::RemoveSourceError),
+    /// A dataset display-label rename was refused (issue #121): `rename_dataset`
+    /// wraps the typed [`RenameError`](crate::model::RenameError) here.
+    #[error("{0}")]
+    RenameDataset(crate::model::RenameError),
+    /// A session rename was refused (issue #121): `rename_session` wraps the
+    /// typed [`RenameSessionError`](crate::session::RenameSessionError) here.
+    #[error("{0}")]
+    RenameSession(crate::session::RenameSessionError),
+    /// A row read failed (issue #121): `read_rows` wraps the typed
+    /// [`TurnError`](crate::model::TurnError) here.
+    #[error("{0}")]
+    Turn(crate::model::TurnError),
     /// An engine / internal failure (mutex poison, join error, etc.) -- the
     /// catch-all for failures that are not one of the addressing / guard
     /// states above. Carries the underlying detail string.

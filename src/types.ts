@@ -10,17 +10,57 @@ export interface ColumnSchema {
 // "data")]`), the same shape the rest of the wire contract uses. Session-scoped
 // commands reject with this structured value (NOT a bare string), so the
 // frontend narrows on `kind` and renders a locale message instead of string-
-// matching backend Chinese. `Resume` wraps the typed `ResumeError` (issue #120):
-// the `open_duck` command's resume failure rides here, recursed by
-// the frontend; `Engine` is the catch-all for internal failures and carries a
-// free-text detail under `data` (technical, never an API key per ADR-0029).
+// matching backend Chinese. `Resume` wraps the typed `ResumeError` (issue #120);
+// `RemoveSource` / `RenameDataset` / `RenameSession` / `Turn` wrap their typed
+// source-management sub-errors (issue #121), recursed by the frontend the same
+// way; `Engine` is the catch-all for internal failures and carries a free-text
+// detail under `data` (technical, never an API key per ADR-0029).
 export type SessionError =
   | { kind: "InvalidId" }
   | { kind: "NotFound" }
   | { kind: "Resuming" }
   | { kind: "InFlight" }
   | { kind: "Resume"; data: ResumeError }
+  | { kind: "RemoveSource"; data: RemoveSourceError }
+  | { kind: "RenameDataset"; data: RenameError }
+  | { kind: "RenameSession"; data: RenameSessionError }
+  | { kind: "Turn"; data: TurnError }
   | { kind: "Engine"; data: string };
+
+// Why a source removal was rejected (issues #38/#39/#40, ADR-0040). Mirrors the
+// Rust `RemoveSourceError` (serde adjacently-tagged, issue #121). Rides
+// SessionError::RemoveSource from `remove_source` / `remove_active_source`;
+// NotFound / NotActive / InvalidContinueWith carry the reference name under
+// data, IsActive carries both reference + display name.
+export type RemoveSourceError =
+  | { kind: "NotFound"; data: string }
+  | { kind: "IsActive"; data: { reference_name: string; display_name: string } }
+  | { kind: "NotActive"; data: string }
+  | { kind: "InvalidContinueWith"; data: string };
+
+// Why a dataset display-label rename was rejected (ADR-0037). Mirrors the Rust
+// `RenameError` (serde adjacently-tagged, issue #121). Rides
+// SessionError::RenameDataset from `rename_dataset`; NotFound / DisplayTaken
+// carry the name/label under data, InvalidLabel is a unit variant.
+export type RenameError =
+  | { kind: "NotFound"; data: string }
+  | { kind: "DisplayTaken"; data: string }
+  | { kind: "InvalidLabel" };
+
+// Why a session rename was rejected (ADR-0060, issue #81). Mirrors the Rust
+// `RenameSessionError` (serde adjacently-tagged, issue #121). Rides
+// SessionError::RenameSession from `rename_session`. The single refusal is a
+// blank name; a persist write failure rides take_persist_error instead.
+export type RenameSessionError = { kind: "EmptyName" };
+
+// Why a row read failed (read_rows). Mirrors the Rust `TurnError` (serde
+// adjacently-tagged, issue #121). Rides SessionError::Turn; UnknownDataset
+// carries the reference name, Execute carries the engine detail (technical,
+// never an API key per ADR-0029). Turn failures are TurnOutcome::Failed
+// (ADR-0028), NOT this type.
+export type TurnError =
+  | { kind: "UnknownDataset"; data: string }
+  | { kind: "Execute"; data: string };
 
 // Why a forward migration step failed (issue #120). Rides DuckLoadError::
 // Migration inside ResumeError::Load. Mirrors the Rust `MigrationError` (serde
