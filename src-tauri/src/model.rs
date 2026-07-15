@@ -323,14 +323,13 @@ pub enum RenameError {
 
 impl std::fmt::Display for RenameError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        // Rust-log-only (issue #121): the IPC contract is the serde struct and
-        // the user wording lives in the frontend locale catalog.
+        // Rust-log-only (issue #121): the IPC contract is the serde struct above
+        // and the user wording lives in the frontend locale catalog, so these
+        // English identifiers never reach the UI.
         match self {
-            Self::NotFound(name) => write!(f, "找不到引用名为「{name}」的数据集"),
-            Self::DisplayTaken(label) => {
-                write!(f, "显示名「{label}」已被其他数据集使用，请换一个")
-            }
-            Self::InvalidLabel => write!(f, "显示名不能为空或仅含空白"),
+            Self::NotFound(name) => write!(f, "dataset not found: {name}"),
+            Self::DisplayTaken(label) => write!(f, "display label already taken: {label}"),
+            Self::InvalidLabel => write!(f, "invalid display label (empty or whitespace)"),
         }
     }
 }
@@ -598,34 +597,31 @@ pub enum RemoveSourceError {
 
 impl std::fmt::Display for RemoveSourceError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        // Rust-log-only (issue #121): the IPC contract is the serde struct and
-        // the user wording lives in the frontend locale catalog.
+        // Rust-log-only (issue #121): the IPC contract is the serde struct above
+        // and the user wording lives in the frontend locale catalog, so these
+        // English identifiers never reach the UI.
         match self {
-            Self::NotFound(name) => write!(f, "找不到引用名为「{name}」的数据集"),
-            Self::IsActive { display_name, .. } => write!(
-                f,
-                "「{display_name}」是当前焦点表，请先在剩余源中选一个继续\
-                 （或中止操作）"
-            ),
-            Self::NotActive(name) => write!(
-                f,
-                "「{name}」不是当前焦点源，无法按删焦点源流程处理\
-                 （请改用普通删除或刷新工作集后重试）"
-            ),
-            Self::InvalidContinueWith(name) => write!(
-                f,
-                "「{name}」不是剩余可用源之一，无法作为删除后的继续焦点\
-                 （请刷新工作集后重选）"
-            ),
+            Self::NotFound(name) => write!(f, "dataset not found: {name}"),
+            Self::IsActive { display_name, .. } => {
+                write!(
+                    f,
+                    "source is the active focus: {display_name}; pick a continuation first"
+                )
+            }
+            Self::NotActive(name) => write!(f, "source not the active focus: {name}"),
+            Self::InvalidContinueWith(name) => {
+                write!(f, "invalid continuation: {name} is not a remaining source")
+            }
         }
     }
 }
 impl std::error::Error for RemoveSourceError {}
 
-/// Prefix for every DuckDB execution-failure message that crosses IPC as a
-/// Display string -- a turn's materialize failure (`session::ask`) and a row
-/// read's [`TurnError::Execute`] surface the same engine error, so the literal
-/// lives once here. String-matched by the frontend; pinned by tests/ipc_contract.
+/// Prefix for the DuckDB execution-failure reason that crosses IPC as a Display
+/// string -- a turn's materialize failure (`session::ask`) surfaces as
+/// [`TurnOutcome::Failed`], whose reason the frontend string-matches; pinned by
+/// tests/ipc_contract. `TurnError::Execute`'s Rust-log-only Display reuses this
+/// prefix for log consistency but is NOT itself the IPC contract (issue #121).
 pub(crate) const EXECUTE_FAIL_PREFIX: &str = "执行查询失败：";
 
 /// Prefix for a turn aborted by an engine-level resource cap (ADR-0005 L3):
@@ -655,12 +651,13 @@ pub enum TurnError {
 
 impl std::fmt::Display for TurnError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        // Rust-log-only (issue #121): the IPC contract is the serde struct and
-        // the user wording lives in the frontend locale catalog. Execute shares
-        // EXECUTE_FAIL_PREFIX with the turn-outcome Failed reason (which IS the
-        // contract for TurnOutcome::Failed, pinned separately).
+        // Rust-log-only (issue #121): the IPC contract is the serde struct above
+        // and the authoritative user wording lives in the frontend locale
+        // catalog. UnknownDataset is an English log identifier; Execute reuses
+        // EXECUTE_FAIL_PREFIX (shared with the wire-pinned TurnOutcome::Failed
+        // reason, pinned separately) so it keeps the contract's wording.
         match self {
-            Self::UnknownDataset(name) => write!(f, "找不到引用名为「{name}」的数据集"),
+            Self::UnknownDataset(name) => write!(f, "unknown dataset: {name}"),
             Self::Execute(detail) => write!(f, "{EXECUTE_FAIL_PREFIX}{detail}"),
         }
     }

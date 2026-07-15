@@ -509,4 +509,33 @@ describe("App delete-active-source flow (issue #39)", () => {
       expect(screen.getByText(/工作集为空/)).toBeInTheDocument(),
     );
   });
+
+  it("labels an active-source delete refusal under the 删源失败 prefix (issue #121)", async () => {
+    // remove_active_source rejects with a typed RemoveSourceError. NotActive /
+    // InvalidContinueWith are unique to this path (plain removeSource cannot
+    // produce them); the refusal surfaces under the same "删源失败：" prefix as
+    // removeSource, never mislabelled as another operation's failure.
+    vi.mocked(removeActiveSource).mockRejectedValueOnce({
+      kind: "RemoveSource",
+      data: { kind: "InvalidContinueWith", data: "ghost" },
+    });
+    renderPane();
+    fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^orders/ })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /删除 orders/ }));
+    await waitFor(() => expect(screen.getByText(/删除焦点源/)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    await waitFor(() =>
+      expect(removeActiveSource).toHaveBeenCalledWith("sess-1", "orders", "people"),
+    );
+    // The typed refusal renders under the delete prefix with the locale message;
+    // the dialog stays open for retry (closed inside fn, after the await).
+    await waitFor(() =>
+      expect(screen.getByText(/删源失败：「ghost」不是剩余可用源之一/)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/重命名失败/)).not.toBeInTheDocument();
+  });
 });

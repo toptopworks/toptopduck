@@ -638,6 +638,13 @@ export function fmtError(e: unknown, intl: IntlShape): string {
         });
       case "Turn":
         return formatTurnError(e.data, intl);
+      default: {
+        // Exhaustiveness guard (issue #121): a future SessionError variant must
+        // trip the compiler here, not silently fall through to the opaque JSON
+        // fallback below. Mirrors the `never` guards in the sub-formatters.
+        const unhandled: never = e;
+        throw new Error(`unhandled SessionError kind: ${JSON.stringify(unhandled)}`);
+      }
     }
   }
   // Invariant: the top-level reject kind sets are disjoint (SessionError kinds
