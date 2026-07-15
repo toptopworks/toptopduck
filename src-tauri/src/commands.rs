@@ -23,8 +23,8 @@ use tauri::{Emitter, State};
 use crate::app_config::AppConfig;
 use crate::cancel::CancelToken;
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, LoadOutcome, ProviderConfig, ProviderConfigView, RowPage,
-    SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
+    DatasetDescriptor, DatasetPrivacy, LoadOutcome, ProviderConfig, ProviderConfigView,
+    RemoveSourceError, RowPage, SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
 };
 use crate::persistence::{list_session_metadata, SaveError, SessionMetadata};
 use crate::provider::live_config::LiveProviderConfig;
@@ -141,9 +141,11 @@ pub async fn close_session_and_wait_release(
     // channel stays open regardless of refcount changes. A None here means a
     // second close-wait raced us -- the frontend calls once, so this is a
     // defensive refusal.
-    let rx = detached
-        .take_drop_signal()?
-        .ok_or_else(|| SessionError::Engine("关闭会话冲突（并发关闭等待），请稍后重试".into()))?;
+    let rx = detached.take_drop_signal()?.ok_or_else(|| {
+        SessionError::Engine(
+            "close-wait conflict (concurrent close-and-wait-release); retry shortly".into(),
+        )
+    })?;
     // Drop our handle reference. If no in-flight ask holds a clone, this is the
     // last Arc -> Session::Drop fires -> sender signals -> rx resolves at once.
     // If an ask is in flight, the signal fires when the ask's clone drops after
@@ -158,7 +160,7 @@ pub async fn close_session_and_wait_release(
         match rx.recv_timeout(CLOSE_WAIT_RELEASE_TIMEOUT) {
             Ok(()) => Ok(()),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(SessionError::Engine(
-                "关闭会话超时（in-flight ask 未在 120s 内收尾），请稍后重试".into(),
+                "close-wait timed out (in-flight ask unfinished after 120s); retry shortly".into(),
             )),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(()),
         }
@@ -291,9 +293,29 @@ pub async fn replace_source(
     Ok(outcome)
 }
 
+/// Map a working-set privacy outcome to the typed IPC result (issue #127).
+/// [`Session::set_privacy`] returns `None` for an unknown reference name; this
+/// maps that `None` to [`SessionError::RemoveSource`](
+/// [`RemoveSourceError::NotFound`]) so the frontend renders the shared
+/// `error.dataset.notFound` locale message instead of a free-text Engine
+/// string. Extracted from the command so the unit test exercises the real
+/// mapping path, not an inlined copy (the command's `State` arg blocks a
+/// direct call).
+fn privacy_update_to_result(
+    outcome: Option<DatasetDescriptor>,
+    reference_name: &str,
+) -> Result<DatasetDescriptor, SessionError> {
+    outcome.ok_or_else(|| {
+        SessionError::RemoveSource(RemoveSourceError::NotFound(reference_name.to_string()))
+    })
+}
+
 /// Set a dataset's privacy controls. See [`Session::set_privacy`]
 /// -- this is the Tauri/IPC command boundary wrapper. Rejects an unknown
-/// reference name with an error string.
+/// reference name as a typed [`RemoveSourceError::NotFound`] (issue #127),
+/// reusing the source-management domain error so the frontend renders the
+/// shared `error.dataset.notFound` locale message instead of a free-text
+/// Engine string.
 #[tauri::command]
 pub fn set_dataset_privacy(
     store: State<'_, Arc<SessionStore>>,
@@ -305,8 +327,7 @@ pub fn set_dataset_privacy(
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
     let mut s = handle.session_lock()?;
-    s.set_privacy(&reference_name, privacy)
-        .ok_or_else(|| SessionError::Engine(format!("找不到引用名为「{reference_name}」的数据集")))
+    privacy_update_to_result(s.set_privacy(&reference_name, privacy), &reference_name)
 }
 
 /// Remove a source Dataset from the working set (issue #38/#39, ADR-0040).
@@ -994,5 +1015,35 @@ mod tests {
         let err = SessionId::parse("not-a-uuid").expect_err("malformed id rejects");
         assert_eq!(err, SessionError::InvalidId);
         assert_ne!(err, SessionError::NotFound);
+    }
+
+    /// set_dataset_privacy rejects an unknown reference name as the typed
+    /// RemoveSourceError::NotFound (issue #127), not a free-text Engine
+    /// string. The working-set layer returns None for an unknown name; the
+    /// command boundary maps that None to the typed variant so the frontend
+    /// renders the shared `error.dataset.notFound` locale message.
+    #[test]
+    fn set_privacy_unknown_reference_maps_to_typed_remove_source_error() {
+        let store = SessionStore::new();
+        let id = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+            )
+            .expect("create session");
+        let handle = store.get(&id).expect("handle");
+        let mut s = handle.session_lock().expect("lock");
+        // Working-set layer: an unregistered reference name yields None.
+        let outcome = s.set_privacy("nope", DatasetPrivacy::default());
+        assert!(outcome.is_none());
+        // Command-boundary mapping via the shared helper: None -> typed
+        // NotFound -> RemoveSource (issue #127). Calls the real production
+        // path -- a regression to a free-text Engine string here fails the
+        // assertion (the command's State arg blocks a direct call).
+        let err = privacy_update_to_result(outcome, "nope").unwrap_err();
+        assert_eq!(
+            err,
+            SessionError::RemoveSource(RemoveSourceError::NotFound("nope".into())),
+        );
     }
 }

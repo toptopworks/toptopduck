@@ -1010,7 +1010,7 @@ describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
     // it in the collapsed fold (review H1), not drop it for "Internal error".
     vi.mocked(closeSessionAndWaitRelease).mockRejectedValue({
       kind: "Engine",
-      data: "关闭会话超时（in-flight ask 未在 120s 内收尾），请稍后重试",
+      data: "close-wait timed out (in-flight ask unfinished after 120s); retry shortly",
     });
 
     render(<App />);
@@ -1041,7 +1041,7 @@ describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
     // the shell rendered only the bare locale message and the detail vanished.
     const shellFold = document.querySelector(".shell-error .error-details");
     expect(shellFold).not.toBeNull();
-    expect(shellFold?.textContent).toContain("关闭会话超时");
+    expect(shellFold?.textContent).toContain("close-wait timed out");
   });
 });
 

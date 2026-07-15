@@ -211,7 +211,7 @@ impl WorkingSet {
     /// Set a dataset's privacy controls. See [`crate::session::Session::set_privacy`]
     /// -- this is the storage-layer implementation. Returns the updated
     /// descriptor, or `None` when the reference name isn't registered (the
-    /// command maps that to an error string).
+    /// command maps that to a typed `RemoveSourceError::NotFound`, issue #127).
     pub fn set_privacy(
         &mut self,
         reference_name: &str,
