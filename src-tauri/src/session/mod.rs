@@ -1805,9 +1805,7 @@ impl Session {
                             body: body.clone(),
                             assumption: assumption.clone(),
                         },
-                        TurnOutcome::Failed { reason } => RecipeOutcome::Failed {
-                            reason: reason.clone(),
-                        },
+                        TurnOutcome::Failed(failure) => RecipeOutcome::Failed(failure.clone()),
                         TurnOutcome::Cancelled => RecipeOutcome::Cancelled,
                     };
                     Some(RecipeEntry::Turn(RecipeTurn {
@@ -2198,7 +2196,7 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::Session;
-    use crate::model::TurnOutcome;
+    use crate::model::{TurnFailure, TurnOutcome};
     use crate::provider::fake::FakeProvider;
     use crate::provider::ProviderReply;
     use tempfile::NamedTempFile;
@@ -2310,15 +2308,17 @@ mod tests {
         let file = NamedTempFile::new().expect("temp file");
         session.temp_path = file.path().to_path_buf();
 
-        // The derive failure exhausts the retry budget and surfaces as a failed
-        // turn whose reason carries the execution-step failure.
-        let reason = match session.ask("建表") {
-            TurnOutcome::Failed { reason } => reason,
-            other => panic!("expected Failed after derive failure, got {other:?}"),
+        // The derive failure exhausts the retry budget and surfaces as a typed
+        // Execute failure; the engine error rides the detail. Lock the kind and
+        // that the aggregate carries the real engine failure -- never the
+        // "unknown error" placeholder an empty failure list would produce.
+        let detail = match session.ask("建表") {
+            TurnOutcome::Failed(TurnFailure::Execute { detail }) => detail,
+            other => panic!("expected Execute failure after derive failure, got {other:?}"),
         };
         assert!(
-            reason.contains("执行查询失败"),
-            "derive failure reason should carry the execution prefix, got {reason:?}"
+            !detail.is_empty() && detail != "unknown error",
+            "Execute detail must carry the real aggregated engine failure: {detail:?}"
         );
 
         // result_1 was rolled back on every attempt: it is no longer a table in

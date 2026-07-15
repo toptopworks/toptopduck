@@ -107,9 +107,12 @@ impl Materializer for RealMaterializer {
         // as-is so a delete never under-cascades ("宁可多失效不漏失效").
         let deps_analysis = provenance::analyze(sql, deps.working_set);
         if let Some(stale_ref) = deps_analysis.stale_ref.as_ref() {
+            // The detail carries the bare dead reference name; the "stale"
+            // wording lives in the frontend locale (TurnFailure::StaleReference,
+            // issue #125), interpolated from this name -- no Chinese crosses IPC.
             return Err(ExecError::new(
                 ExecErrorKind::StaleReference,
-                format!("引用了已失效的 {stale_ref}（因源已删除而失效，不能在新查询中引用）"),
+                stale_ref.clone(),
             ));
         }
 

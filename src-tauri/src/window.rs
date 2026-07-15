@@ -254,7 +254,7 @@ fn type_only_set(cols: &[String]) -> HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DatasetPrivacy, RectifyProvenance, TextKind, TurnOutcome};
+    use crate::model::{DatasetPrivacy, RectifyProvenance, TextKind, TurnFailure, TurnOutcome};
 
     /// Build column schemas from (name, type) pairs.
     fn cols(specs: &[(&str, &str)]) -> Vec<ColumnSchema> {
@@ -541,9 +541,9 @@ mod tests {
     fn failed_turn(question: &str) -> TurnRecord {
         TurnRecord {
             question: question.to_string(),
-            outcome: TurnOutcome::Failed {
-                reason: "重试预算耗尽".into(),
-            },
+            outcome: TurnOutcome::Failed(TurnFailure::Execute {
+                detail: "budget exhausted".into(),
+            }),
         }
     }
 

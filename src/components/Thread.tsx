@@ -23,6 +23,8 @@ import type {
   TurnOutcome,
   TurnRecord,
 } from "../types";
+import { formatTurnFailure, turnFailureDetail } from "../api";
+import { TechnicalDetailsFold } from "./TechnicalDetailsFold";
 
 // A compact label slice for the active-chip match (ADR-0047): the thread only
 // needs the names to detect when a question explicitly points at a dataset, so
@@ -631,6 +633,7 @@ function TurnBody({
   hasJumpTarget,
   onStaleChipJump,
 }: TurnBodyProps) {
+  const intl = useIntl();
   switch (record.outcome.kind) {
     case "Materialized": {
       const { dataset, assumption } = record.outcome.data;
@@ -677,18 +680,20 @@ function TurnBody({
         </p>
       );
     }
-    case "Failed":
+    case "Failed": {
+      // Outcome C (issue #125): render by TurnFailure kind via the locale
+      // catalog (no backend Display string crosses IPC). Execute / Resource
+      // carry a technical detail under the collapsed fold.
+      const failure = record.outcome.data;
+      const detail = turnFailureDetail(failure);
       return (
-        <p className="turn-outcome failed">
-          <span className="failed-reason">
-            <FormattedMessage
-              id="thread.failedReason"
-              defaultMessage="Failed: {reason}"
-              values={{ reason: record.outcome.data.reason }}
-            />
-          </span>
-        </p>
+        <div className="turn-outcome failed">
+          {/* <div>, not <p>: a <p> cannot legally contain the <details> fold. */}
+          <span className="failed-reason">{formatTurnFailure(failure, intl)}</span>
+          <TechnicalDetailsFold detail={detail} />
+        </div>
       );
+    }
     case "Cancelled":
       return (
         <p className="turn-outcome cancelled">

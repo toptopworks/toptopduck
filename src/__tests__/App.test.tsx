@@ -404,7 +404,9 @@ describe("App delete-source flow (issue #38)", () => {
     expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
     expect(screen.queryByText(/重命名失败/)).not.toBeInTheDocument();
     expect(screen.queryByText(/换源失败/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/提问失败/)).not.toBeInTheDocument();
+    // A RemoveSource reject is a command reject, not a turn outcome, so the
+    // ask-turn Failed card (.textual-card.failed, issue #125) must not render.
+    expect(document.querySelector(".textual-card.failed")).not.toBeInTheDocument();
   });
 });
 

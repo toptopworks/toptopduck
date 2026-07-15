@@ -22,6 +22,7 @@ import type {
   SheetGuidance,
   ThreadEntry,
   TurnError,
+  TurnFailure,
   TurnOutcome,
   TurnProgress,
 } from "./types";
@@ -773,6 +774,65 @@ export function describeReject(
   intl: IntlShape,
 ): { message: string; detail: string | null } {
   return { message: fmtError(e, intl), detail: errorDetail(e) };
+}
+
+// Format a TurnFailure (TurnOutcome::Failed.data, issue #125) through the
+// locale catalog. Execute shares the merged `error.turn.execute` id with
+// SessionError::Turn::Execute (DRY -- one "query failed" message, not two);
+// Resource / NotWired / StaleReference each have their own id, and
+// StaleReference interpolates the dead reference name. Each formatMessage call
+// carries a literal id + defaultMessage so @formatjs extract recovers it.
+export function formatTurnFailure(failure: TurnFailure, intl: IntlShape): string {
+  switch (failure.kind) {
+    case "Execute":
+      return intl.formatMessage({
+        id: "error.turn.execute",
+        defaultMessage: "Failed to execute the query",
+      });
+    case "Resource":
+      return intl.formatMessage({
+        id: "error.turn.resource",
+        defaultMessage: "A resource limit was reached",
+      });
+    case "NotWired":
+      return intl.formatMessage({
+        id: "error.turn.notWired",
+        defaultMessage: "No LLM provider is configured",
+      });
+    case "StaleReference":
+      return intl.formatMessage(
+        {
+          id: "error.turn.stale",
+          defaultMessage: "References a stale result \"{name}\"",
+        },
+        { name: failure.data.reference_name },
+      );
+    default: {
+      // Exhaustiveness guard: a future TurnFailure kind trips the compiler
+      // here, mirroring the Rust match and the `never` guards in fmtError.
+      const unhandled: never = failure;
+      throw new Error(`unhandled TurnFailure kind: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+// Extract the technical detail for the collapsed "Technical details" fold from
+// a TurnFailure (issue #125). Execute / Resource carry the engine detail
+// (audited to hold no API key, ADR-0029); NotWired / StaleReference are
+// self-contained (the message already names them) -> no fold.
+export function turnFailureDetail(failure: TurnFailure): string | null {
+  switch (failure.kind) {
+    case "Execute":
+    case "Resource":
+      return failure.data.detail;
+    case "NotWired":
+    case "StaleReference":
+      return null;
+    default: {
+      const unhandled: never = failure;
+      throw new Error(`unhandled TurnFailure kind: ${JSON.stringify(unhandled)}`);
+    }
+  }
 }
 
 // --- LLM provider key + config (issue #29, ADR-0007/0019/0029) -------------

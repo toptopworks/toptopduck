@@ -726,7 +726,7 @@ fn resume_reports_drift_without_silently_replaying() {
     // honest presentation, not a silent gap.
     let result_1_failed = resumed.conversation().iter().any(|e| match e {
         ThreadEntry::Turn(t) => {
-            t.question == "多少人" && matches!(&t.outcome, TurnOutcome::Failed { .. })
+            t.question == "多少人" && matches!(&t.outcome, TurnOutcome::Failed(_))
         }
         _ => false,
     });
@@ -1049,7 +1049,7 @@ fn resume_replay_failure_marks_turn_failed_and_preserves_prior_results() {
     for (i, entry) in resumed.conversation().iter().enumerate() {
         if let ThreadEntry::Turn(t) = entry {
             if t.question == "多少单" {
-                found_failed = matches!(&t.outcome, TurnOutcome::Failed { .. });
+                found_failed = matches!(&t.outcome, TurnOutcome::Failed(_));
                 idx = i;
                 break;
             }
@@ -2502,7 +2502,7 @@ fn resume_renders_a_broken_sql_turn_as_failed_and_preserves_prior_results() {
     );
     let broke_failed = resumed.conversation().iter().any(|e| match e {
         ThreadEntry::Turn(t) => {
-            t.question == "broken" && matches!(&t.outcome, TurnOutcome::Failed { .. })
+            t.question == "broken" && matches!(&t.outcome, TurnOutcome::Failed(_))
         }
         _ => false,
     });

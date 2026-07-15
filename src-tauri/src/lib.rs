@@ -36,8 +36,8 @@ pub use model::{
     ChartKind, ColumnSchema, DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet,
     LoadError, LoadOutcome, ProviderConfig, ProviderConfigView, RectifyProvenance,
     RemoveSourceError, RenameError, RowPage, SheetGuidance, SheetRectify, SourceLifecycleEvent,
-    SourceLifecycleKind, StaleAnchor, StaleReason, TextKind, ThreadEntry, TurnError, TurnOutcome,
-    TurnPhase, TurnProgress, TurnRecord, VizSpec, DEFAULT_PROVIDER_BASE_URL,
+    SourceLifecycleKind, StaleAnchor, StaleReason, TextKind, ThreadEntry, TurnError, TurnFailure,
+    TurnOutcome, TurnPhase, TurnProgress, TurnRecord, VizSpec, DEFAULT_PROVIDER_BASE_URL,
     DEFAULT_PROVIDER_MODEL,
 };
 pub use persistence::{

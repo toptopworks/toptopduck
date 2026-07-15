@@ -132,8 +132,12 @@ impl From<&crate::model::TurnOutcome> for ResponsePayload {
                 body: body.clone(),
                 assumption: assumption.clone(),
             },
-            TurnOutcome::Failed { reason } => ResponsePayload::Failed {
-                reason: reason.clone(),
+            // The LLM window is a text consumer: it wants a readable failure
+            // reason, not a locale key. TurnFailure's English-log Display feeds
+            // it (issue #125); the authoritative user wording still lives in the
+            // frontend catalog, never crossing the Tauri IPC.
+            TurnOutcome::Failed(failure) => ResponsePayload::Failed {
+                reason: failure.to_string(),
             },
             TurnOutcome::Cancelled => ResponsePayload::Cancelled,
         }

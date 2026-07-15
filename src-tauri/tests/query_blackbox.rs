@@ -13,8 +13,8 @@ use std::time::Duration;
 use toptopduck_lib::{
     ActiveResolution, CancelToken, ChartKind, DatasetPrivacy, DatasetRef, FakeProvider,
     LoadOutcome, ProviderError, ProviderReply, ProviderRequest, ResponsePayload, ResumeEvent,
-    ResumeProgress, Session, SourceResolution, TextKind, ThreadEntry, TurnOutcome, TurnPayload,
-    TurnPhase, TurnProgress, TurnRecord, VizSpec,
+    ResumeProgress, Session, SourceResolution, TextKind, ThreadEntry, TurnFailure, TurnOutcome,
+    TurnPayload, TurnPhase, TurnProgress, TurnRecord, VizSpec,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -76,10 +76,10 @@ fn materialized(outcome: TurnOutcome) -> (String, u64, Vec<(String, String)>) {
     }
 }
 
-/// Unpack a Failed outcome's reason, panicking on any other outcome.
-fn failed_reason(outcome: TurnOutcome) -> String {
+/// Unpack a Failed outcome's typed failure, panicking on any other outcome.
+fn failed_failure(outcome: TurnOutcome) -> TurnFailure {
     match outcome {
-        TurnOutcome::Failed { reason } => reason,
+        TurnOutcome::Failed(failure) => failure,
         other => panic!("expected Failed, got {other:?}"),
     }
 }
@@ -519,12 +519,14 @@ fn budget_exhaustion_keeps_each_distinct_failure() {
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
 
-    let reason = failed_reason(session.ask("又错又抖"));
+    let detail = match failed_failure(session.ask("又错又抖")) {
+        TurnFailure::Execute { detail } => detail,
+        other => panic!("expected Execute, got {other:?}"),
+    };
     // The SQL error survives -- not overwritten by the later Unavailable.
-    assert!(reason.contains("执行查询失败"), "got {reason:?}");
-    // The transient failure is also present, distinct from the SQL error.
-    assert!(reason.contains("LLM 提供方调用失败"), "got {reason:?}");
-    assert!(reason.contains("重试预算耗尽"), "got {reason:?}");
+    assert!(detail.contains("no_such_col"), "got {detail:?}");
+    // The transient provider failure is also present, distinct from the SQL error.
+    assert!(detail.contains("provider call failed"), "got {detail:?}");
     assert!(session.get("result_1").is_none());
 }
 
@@ -703,10 +705,10 @@ fn all_mutating_statements_against_the_source_are_rejected() {
     for sql in mutating {
         let mut session = session_with(&[("改源", sql)]);
         load_source(&mut session, &fixture("people.csv"));
-        let reason = failed_reason(session.ask("改源"));
+        let reason = failed_failure(session.ask("改源"));
         assert!(
-            reason.contains("执行查询失败"),
-            "sql={sql} reason={reason:?}"
+            matches!(reason, TurnFailure::Execute { .. }),
+            "sql={sql} failure={reason:?}"
         );
         // Source content survives every attempt -- nothing was mutated.
         assert_eq!(
@@ -734,10 +736,10 @@ fn filesystem_statements_are_rejected_by_the_wrapping() {
     for sql in stmts {
         let mut session = session_with(&[("fs", sql)]);
         load_source(&mut session, &fixture("people.csv"));
-        let reason = failed_reason(session.ask("fs"));
+        let reason = failed_failure(session.ask("fs"));
         assert!(
-            reason.contains("执行查询失败"),
-            "sql={sql} reason={reason:?}"
+            matches!(reason, TurnFailure::Execute { .. }),
+            "sql={sql} failure={reason:?}"
         );
     }
 }
@@ -761,10 +763,11 @@ fn a_query_over_the_row_cap_aborts_with_a_resource_error_without_retrying() {
     session.set_result_row_cap(3); // small cap for a deterministic hit
     load_source(&mut session, &fixture("people.csv"));
 
-    let reason = failed_reason(session.ask("大查询"));
-    assert!(reason.contains("资源上限"), "got {reason:?}");
-    // The resource path did NOT burn the budget (distinct from a schema retry).
-    assert!(!reason.contains("重试预算耗尽"), "got {reason:?}");
+    let failure = failed_failure(session.ask("大查询"));
+    assert!(
+        matches!(failure, TurnFailure::Resource { .. }),
+        "got {failure:?}"
+    );
     assert!(session.get("result_1").is_none()); // over-cap result rolled back
 }
 
@@ -811,13 +814,11 @@ fn a_read_function_into_arbitrary_disk_aborts_with_a_resource_error_without_retr
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
 
-    let reason = failed_reason(session.ask("leak"));
+    let failure = failed_failure(session.ask("leak"));
     assert!(
-        reason.contains("资源上限"),
-        "read_* should be blocked as a resource error, got {reason:?}"
+        matches!(failure, TurnFailure::Resource { .. }),
+        "read_* should be blocked as a resource error, got {failure:?}"
     );
-    // The resource path did NOT burn the budget (distinct from a schema retry).
-    assert!(!reason.contains("重试预算耗尽"), "got {reason:?}");
     // Nothing materialized: the over-disk read never produced a result.
     assert!(session.get("result_1").is_none());
 }

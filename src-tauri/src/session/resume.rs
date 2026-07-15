@@ -28,8 +28,8 @@ use super::materializer::{Materializer, TurnDeps};
 use super::{ActiveAbandoned, ActiveResolution, ResumeError, ResumeEvent};
 use crate::cancel::CancelToken;
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, RectifyProvenance, ThreadEntry, TurnOutcome, TurnRecord,
-    EXECUTE_FAIL_PREFIX,
+    DatasetDescriptor, DatasetPrivacy, RectifyProvenance, ThreadEntry, TurnFailure, TurnOutcome,
+    TurnRecord,
 };
 use crate::persistence::recipe::{Recipe, RecipeEntry, RecipeOutcome};
 use crate::persistence::registry::{release, try_acquire};
@@ -166,7 +166,7 @@ pub(crate) enum ResolvedActive {
 #[derive(Debug)]
 pub(crate) struct ReplayBreak {
     reference_name: String,
-    reason: String,
+    failure: TurnFailure,
 }
 
 /// Resume phase 2/3/4 orchestrator (ADR-0053 Decision 3, issue #66). Borrows
@@ -353,7 +353,7 @@ impl<'a> Resumer<'a> {
                     // by rebuild_timeline (truncate at this reference name).
                     return Ok(Some(ReplayBreak {
                         reference_name: turn.reference_name.clone(),
-                        reason: format!("{}{}", EXECUTE_FAIL_PREFIX, e.detail),
+                        failure: TurnFailure::Execute { detail: e.detail },
                     }));
                 }
             }
@@ -441,9 +441,7 @@ impl<'a> Resumer<'a> {
                             if let Some(b) =
                                 break_at.filter(|b| b.reference_name == *reference_name)
                             {
-                                TurnOutcome::Failed {
-                                    reason: b.reason.clone(),
-                                }
+                                TurnOutcome::Failed(b.failure.clone())
                             } else {
                                 // Live turns: re-materialized by replay. Stale
                                 // turns: a placeholder was registered in the
@@ -478,9 +476,7 @@ impl<'a> Resumer<'a> {
                             body: body.clone(),
                             assumption: assumption.clone(),
                         },
-                        RecipeOutcome::Failed { reason } => TurnOutcome::Failed {
-                            reason: reason.clone(),
-                        },
+                        RecipeOutcome::Failed(failure) => TurnOutcome::Failed(failure.clone()),
                         RecipeOutcome::Cancelled => TurnOutcome::Cancelled,
                     };
                     Ok(ThreadEntry::Turn(TurnRecord {
@@ -888,12 +884,14 @@ mod tests {
             .unwrap()
             .expect("expected a break at result_3");
         assert_eq!(brk.reference_name, "result_3");
-        assert!(
-            brk.reason.contains(EXECUTE_FAIL_PREFIX),
-            "got {}",
-            brk.reason
-        );
-        assert!(brk.reason.contains("结果行数"), "got {}", brk.reason);
+        // The replay break presents as an Execute failure (the turn's SQL failed
+        // to re-materialize), carrying the engine error in the detail.
+        match &brk.failure {
+            TurnFailure::Execute { detail } => {
+                assert!(detail.contains("结果行数"), "got {detail}");
+            }
+            other => panic!("expected Execute break, got {other:?}"),
+        }
         // K-1 results preserved; result_3 (the failure) not registered.
         assert!(ws.get("result_1").is_some());
         assert!(ws.get("result_2").is_some());
@@ -978,7 +976,9 @@ mod tests {
         let resumer = Resumer::new(&cancel, &mut fake, &recipe);
         let brk = ReplayBreak {
             reference_name: "result_2".into(),
-            reason: format!("{}resource cap", EXECUTE_FAIL_PREFIX),
+            failure: TurnFailure::Execute {
+                detail: "resource cap".into(),
+            },
         };
         let timeline = resumer.rebuild_timeline(&mut ws, Some(&brk)).unwrap();
         // Truncated at result_2: [result_1, result_2] (result_3 dropped).
@@ -995,10 +995,8 @@ mod tests {
             panic!("expected Turn, got {:?}", timeline[1])
         };
         match &t2.outcome {
-            TurnOutcome::Failed { reason } => {
-                assert!(reason.contains(EXECUTE_FAIL_PREFIX), "got {reason}");
-            }
-            other => panic!("expected Failed at break turn, got {other:?}"),
+            TurnOutcome::Failed(TurnFailure::Execute { .. }) => {}
+            other => panic!("expected Execute Failed at break turn, got {other:?}"),
         }
     }
 
@@ -1053,7 +1051,9 @@ mod tests {
         // "result_99" is absent from recipe.history -> invariant violation.
         let brk = ReplayBreak {
             reference_name: "result_99".into(),
-            reason: format!("{}resource cap", EXECUTE_FAIL_PREFIX),
+            failure: TurnFailure::Execute {
+                detail: "resource cap".into(),
+            },
         };
         let err = resumer.rebuild_timeline(&mut ws, Some(&brk)).unwrap_err();
         match err {
