@@ -264,7 +264,7 @@ pub fn rename_dataset(
     reject_if_resuming(&handle)?;
     let mut s = handle.session_lock()?;
     s.rename_display(&reference_name, &new_display)
-        .map_err(|e| SessionError::Engine(e.to_string()))
+        .map_err(SessionError::RenameDataset)
 }
 
 /// Re-upload a file onto an existing dataset's reference name (ADR-0042, issue
@@ -332,7 +332,7 @@ pub fn remove_source(
     reject_if_resuming(&handle)?;
     let mut s = handle.session_lock()?;
     s.remove_source(&reference_name)
-        .map_err(|e| SessionError::Engine(e.to_string()))
+        .map_err(SessionError::RemoveSource)
 }
 
 /// Remove the ACTIVE source and repoint focus at an explicit continuation
@@ -342,9 +342,9 @@ pub fn remove_source(
 /// to it, drops the removed source, and appends a `Deleted` event. Same
 /// `HasDerivatives` guard as `remove_source` (-> #40). Refuses with
 /// `NotActive`/`InvalidContinueWith` when the view raced a concurrent mutation
-/// (the working set is left untouched in those cases). Surfaces all refusals as
-/// a plain error string -- no typed `RemoveSourceError` crosses IPC (same shape
-/// as rename / replace / remove_source).
+/// (the working set is left untouched in those cases). Refusals cross IPC as the
+/// typed `SessionError::RemoveSource(RemoveSourceError)` (issue #121), so the
+/// frontend narrows on `kind` and renders a locale message.
 #[tauri::command]
 pub fn remove_active_source(
     store: State<'_, Arc<SessionStore>>,
@@ -357,7 +357,7 @@ pub fn remove_active_source(
     reject_if_resuming(&handle)?;
     let mut s = handle.session_lock()?;
     s.remove_active_source(&reference_name, &continue_with)
-        .map_err(|e| SessionError::Engine(e.to_string()))
+        .map_err(SessionError::RemoveSource)
 }
 
 /// Ask one question (PRD #1) against the named session: run one turn and
@@ -443,8 +443,9 @@ pub fn conversation(
 /// Read one page of a dataset's rows from the named session (ADR-0024 windowed
 /// display). Runs off the async/UI thread (AC8) like `ask`: a large OFFSET is
 /// an O(offset) scan, so holding the session lock on the IPC path would block
-/// every other command on that session. Rejects an unknown session, an unknown
-/// reference name, or an engine error with an error string.
+/// every other command on that session. Rejects an unknown session as a typed
+/// `SessionError`; an unknown reference name / engine error crosses IPC as the
+/// typed `SessionError::Turn(TurnError)` (issue #121).
 #[tauri::command]
 pub async fn read_rows(
     store: State<'_, Arc<SessionStore>>,
@@ -459,7 +460,7 @@ pub async fn read_rows(
     tauri::async_runtime::spawn_blocking(move || {
         let s = handle.session_lock()?;
         s.read_rows(&reference_name, offset, limit)
-            .map_err(|e| SessionError::Engine(e.to_string()))
+            .map_err(SessionError::Turn)
     })
     .await
     .map_err(|e| SessionError::Engine(e.to_string()))?
@@ -683,7 +684,7 @@ pub fn rename_session(
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
     let mut s = handle.session_lock()?;
-    s.rename(&new_name).map_err(SessionError::Engine)
+    s.rename(&new_name).map_err(SessionError::RenameSession)
 }
 
 /// Rename a CLOSED `.duck` recipe's session_name in place (ADR-0060, issue #81).

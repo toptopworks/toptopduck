@@ -155,11 +155,44 @@ impl std::fmt::Display for ResumeError {
 }
 impl std::error::Error for ResumeError {}
 
+/// Why a session rename was rejected (ADR-0060, issue #81). The single refusal
+/// is a blank name; a persist write failure does NOT surface here -- it rides
+/// [`Session::take_persist_error`] (best-effort persist, self-heals on the next
+/// write). Crosses IPC as this serde struct, wrapped in
+/// [`SessionError::RenameSession`](crate::session_store::SessionError) (issue
+/// #121); the frontend narrows on `kind` and renders a locale message. The
+/// `Display` is Rust-log-only -- NOT the IPC contract.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "data")]
+pub enum RenameSessionError {
+    /// The trimmed name was empty / whitespace-only. A session name must be
+    /// visible, so blanks are rejected; the user must supply a non-blank name.
+    EmptyName,
+}
+
+impl std::fmt::Display for RenameSessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::EmptyName => write!(f, "session name must not be empty"),
+        }
+    }
+}
+impl std::error::Error for RenameSessionError {}
+
 /// Per-source integrity issue surfaced during resume (ADR-0035 honest degrade,
 /// issue #49). Passed to the caller's [`Session::open_duck`] `on_source_issue`
 /// callback so the UI (or test) can drive the re-link / abort / rebuild
 /// decision -- the engine NEVER silently picks. Each variant names the source
 /// + the path/fingerprint context the decision needs.
+///
+/// C1 (issue #121): `SourceIssue` does NOT yet cross IPC as a typed value --
+/// `open_duck`'s `on_source_issue` callback always aborts today (no re-link
+/// UI), so it produces no user-facing wording. When #49 lands the re-link /
+/// rebuild dialogs this enum will follow the same typed-IPC pattern as the
+/// source-management errors (`#[serde(tag = "kind", content = "data")]` + a
+/// `types.ts` mirror + locale messages), and the `Unreadable.reason` field --
+/// today a Rust-log-only ingest `LoadError` display string -- will be replaced
+/// by the typed `LoadError`.
 #[derive(Debug, Clone)]
 pub enum SourceIssue {
     /// The recorded path no longer exists (deleted / moved / renamed). The
@@ -1551,10 +1584,10 @@ impl Session {
     /// terminal turn): a write failure does not roll back the in-memory rename --
     /// it surfaces via [`Self::take_persist_error`] and self-heals on the next
     /// successful write. Returns the trimmed name that landed.
-    pub fn rename(&mut self, new_name: &str) -> Result<String, String> {
+    pub fn rename(&mut self, new_name: &str) -> Result<String, RenameSessionError> {
         let trimmed = new_name.trim();
         if trimmed.is_empty() {
-            return Err("会话名不能为空".to_string());
+            return Err(RenameSessionError::EmptyName);
         }
         let name = trimmed.to_string();
         self.session_name = Some(name.clone());

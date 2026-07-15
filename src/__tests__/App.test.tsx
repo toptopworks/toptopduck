@@ -216,9 +216,10 @@ describe("App rename flow", () => {
     );
 
     vi.spyOn(window, "prompt").mockReturnValue("员工表");
-    vi.mocked(renameDataset).mockRejectedValueOnce(
-      "显示名「员工表」已被其他数据集使用",
-    );
+    vi.mocked(renameDataset).mockRejectedValueOnce({
+      kind: "RenameDataset",
+      data: { kind: "DisplayTaken", data: "员工表" },
+    });
     fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
 
     await waitFor(() =>
@@ -383,10 +384,13 @@ describe("App delete-source flow (issue #38)", () => {
   });
 
   it("labels a delete failure distinctly from load/rename/replace/ask failures", async () => {
-    // A HasDerivatives / IsActive refusal surfaces under the "删源失败：" prefix
-    // -- never mislabelled as another operation's failure.
+    // A typed RemoveSource refusal (issue #121) surfaces under the "删源失败："
+    // prefix -- never mislabelled as another operation's failure.
     vi.spyOn(window, "confirm").mockReturnValue(true);
-    vi.mocked(removeSource).mockRejectedValueOnce("工作集中存在中间结果，暂不支持删源");
+    vi.mocked(removeSource).mockRejectedValueOnce({
+      kind: "RemoveSource",
+      data: { kind: "NotFound", data: "people" },
+    });
     renderPane();
     fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
@@ -394,7 +398,7 @@ describe("App delete-source flow (issue #38)", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /删除/ }));
     await waitFor(() =>
-      expect(screen.getByText(/删源失败：工作集中存在中间结果/)).toBeInTheDocument(),
+      expect(screen.getByText(/删源失败：找不到引用名为「people」的数据集/)).toBeInTheDocument(),
     );
     // No other operation's prefix is used.
     expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();

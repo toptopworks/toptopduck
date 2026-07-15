@@ -241,7 +241,11 @@ pub struct SheetGuidance {
 }
 
 /// Why an ingest failed. Surfaced to the UI; a failed load leaves the working
-/// set unchanged (a bad file never pollutes the session -- PRD AC7).
+/// set unchanged (a bad file never pollutes the session -- PRD AC7). Crosses IPC
+/// inside `LoadOutcome::Error` as this serde struct; the frontend renders each
+/// kind through the locale catalog (issue #121), so the hand-written `Display`
+/// below is Rust-log-only -- it is NOT the IPC contract and carries no user
+/// wording (the Chinese lives once, in the locale files).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum LoadError {
@@ -266,22 +270,17 @@ pub enum LoadError {
 
 impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        // Rust-log-only (issue #121): the IPC contract is the serde struct above
+        // and the user wording lives in the frontend locale catalog, so these
+        // English identifiers never reach the UI.
         match self {
             Self::UnsupportedFormat { requested } => {
-                write!(
-                    f,
-                    "不支持的格式：{requested}（支持 .csv / .parquet / .json / .xlsx）"
-                )
+                write!(f, "unsupported format: {requested}")
             }
-            Self::LegacyExcel => {
-                write!(
-                    f,
-                    "不支持 .xls 格式（仅支持 .xlsx），请在 Excel 中另存为 .xlsx 后重试"
-                )
-            }
-            Self::Parse { detail } => write!(f, "无法解析文件：{detail}"),
-            Self::Io { detail } => write!(f, "读取文件失败：{detail}"),
-            Self::Other { detail } => write!(f, "加载失败：{detail}"),
+            Self::LegacyExcel => write!(f, "legacy .xls not supported (re-save as .xlsx)"),
+            Self::Parse { detail } => write!(f, "parse failed: {detail}"),
+            Self::Io { detail } => write!(f, "read failed: {detail}"),
+            Self::Other { detail } => write!(f, "load failed: {detail}"),
         }
     }
 }
@@ -303,10 +302,12 @@ pub enum LoadOutcome {
 /// Why a display-label rename was rejected (ADR-0037). A rename only ever touches
 /// the display name -- never the reference name -- so a rejection leaves the
 /// working set and every existing reference (SQL FROM, recipe chain, active
-/// pointer) unchanged. Does NOT cross the IPC boundary as a typed value: the
-/// rename command surfaces it to the UI as a plain error string, so (unlike
-/// [`LoadError`]) it carries no serde wire contract and no `types.ts` mirror.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// pointer) unchanged. Crosses IPC as this serde struct, wrapped in
+/// [`SessionError::RenameDataset`](crate::session_store::SessionError) (issue
+/// #121); the frontend narrows on `kind` and renders a locale message, so the
+/// hand-written `Display` below is Rust-log-only -- NOT the IPC contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data")]
 pub enum RenameError {
     /// No dataset carries the given reference name.
     NotFound(String),
@@ -322,6 +323,8 @@ pub enum RenameError {
 
 impl std::fmt::Display for RenameError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        // Rust-log-only (issue #121): the IPC contract is the serde struct and
+        // the user wording lives in the frontend locale catalog.
         match self {
             Self::NotFound(name) => write!(f, "找不到引用名为「{name}」的数据集"),
             Self::DisplayTaken(label) => {
@@ -561,10 +564,12 @@ pub enum ThreadEntry {
 /// selection lands in #39). Dependent results no longer block removal -- #40
 /// transitively marks them stale (ADR-0013/0040), so a delete always cascades
 /// instead of refusing.
-/// Does NOT cross IPC as a typed value: the remove command surfaces it as a
-/// plain error string (the same shape rename / replace use), so (unlike
-/// [`LoadError`]) it carries no serde wire contract and no types.ts mirror.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Crosses IPC as this serde struct, wrapped in
+/// [`SessionError::RemoveSource`](crate::session_store::SessionError) (issue
+/// #121); the frontend narrows on `kind` and renders a locale message, so the
+/// hand-written `Display` below is Rust-log-only -- NOT the IPC contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data")]
 pub enum RemoveSourceError {
     /// No dataset carries the given reference name.
     NotFound(String),
@@ -593,6 +598,8 @@ pub enum RemoveSourceError {
 
 impl std::fmt::Display for RemoveSourceError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        // Rust-log-only (issue #121): the IPC contract is the serde struct and
+        // the user wording lives in the frontend locale catalog.
         match self {
             Self::NotFound(name) => write!(f, "找不到引用名为「{name}」的数据集"),
             Self::IsActive { display_name, .. } => write!(
@@ -631,9 +638,12 @@ pub(crate) const RESOURCE_FAIL_PREFIX: &str = "资源上限：";
 /// Why a row read failed. A turn no longer fails across this type -- turn
 /// failures are [`TurnOutcome::Failed`] (ADR-0028), so a turn always produces an
 /// outcome. This type remains only for [`crate::session::Session::read_rows`]: a
-/// row read is not a turn, and its failures cross IPC as the Display strings
-/// below.
-#[derive(Debug, Clone, PartialEq)]
+/// row read is not a turn, and its failures cross IPC as this serde struct,
+/// wrapped in [`SessionError::Turn`](crate::session_store::SessionError) (issue
+/// #121); the frontend narrows on `kind` and renders a locale message. The
+/// hand-written `Display` below is Rust-log-only -- NOT the IPC contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data")]
 pub enum TurnError {
     /// A row read targeted a reference name that is not in the working set.
     UnknownDataset(String),
@@ -645,6 +655,10 @@ pub enum TurnError {
 
 impl std::fmt::Display for TurnError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        // Rust-log-only (issue #121): the IPC contract is the serde struct and
+        // the user wording lives in the frontend locale catalog. Execute shares
+        // EXECUTE_FAIL_PREFIX with the turn-outcome Failed reason (which IS the
+        // contract for TurnOutcome::Failed, pinned separately).
         match self {
             Self::UnknownDataset(name) => write!(f, "找不到引用名为「{name}」的数据集"),
             Self::Execute(detail) => write!(f, "{EXECUTE_FAIL_PREFIX}{detail}"),

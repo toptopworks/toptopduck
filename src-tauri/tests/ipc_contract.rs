@@ -241,21 +241,72 @@ fn chart_kind_serializes_as_a_lowercase_variant_string() {
 }
 
 #[test]
-fn turn_error_display_strings_are_the_ipc_contract() {
-    // TurnError crosses IPC only as its Display string (commands.rs maps it with
-    // to_string); the frontend string-matches these. Pin the exact wording so a
-    // change is caught here, not as a silent UI regression. Turn failures are no
-    // longer TurnError (they are TurnOutcome::Failed, ADR-0028); this type now
-    // carries only the read_rows errors (UnknownDataset, Execute).
+fn turn_error_serializes_adjacently_tagged() {
+    // TurnError crosses IPC as a serde struct wrapped in SessionError::Turn
+    // (issue #121), no longer as its Display string. The hand-written Display is
+    // Rust-log-only. Turn failures are TurnOutcome::Failed (ADR-0028); this type
+    // now carries only the read_rows errors (UnknownDataset, Execute).
     use toptopduck_lib::TurnError;
-    assert_eq!(
-        TurnError::Execute("detail".into()).to_string(),
-        "执行查询失败：detail",
+    assert_wire(
+        &TurnError::Execute("detail".into()),
+        r#"{"kind":"Execute","data":"detail"}"#,
     );
-    assert_eq!(
-        TurnError::UnknownDataset("result_1".into()).to_string(),
-        "找不到引用名为「result_1」的数据集",
+    assert_wire(
+        &TurnError::UnknownDataset("result_1".into()),
+        r#"{"kind":"UnknownDataset","data":"result_1"}"#,
     );
+}
+
+#[test]
+fn remove_source_error_serializes_adjacently_tagged() {
+    // RemoveSourceError crosses IPC wrapped in SessionError::RemoveSource (issue
+    // #121). NotFound / NotActive / InvalidContinueWith are newtype variants
+    // (string under data); IsActive is a struct variant.
+    use toptopduck_lib::RemoveSourceError;
+    assert_wire(
+        &RemoveSourceError::NotFound("people".into()),
+        r#"{"kind":"NotFound","data":"people"}"#,
+    );
+    assert_wire(
+        &RemoveSourceError::IsActive {
+            reference_name: "people".into(),
+            display_name: "员工表".into(),
+        },
+        r#"{"kind":"IsActive","data":{"reference_name":"people","display_name":"员工表"}}"#,
+    );
+    assert_wire(
+        &RemoveSourceError::NotActive("people".into()),
+        r#"{"kind":"NotActive","data":"people"}"#,
+    );
+    assert_wire(
+        &RemoveSourceError::InvalidContinueWith("ghost".into()),
+        r#"{"kind":"InvalidContinueWith","data":"ghost"}"#,
+    );
+}
+
+#[test]
+fn rename_error_serializes_adjacently_tagged() {
+    // RenameError (dataset display-label rename, ADR-0037) crosses IPC wrapped
+    // in SessionError::RenameDataset (issue #121). NotFound / DisplayTaken are
+    // newtype variants; InvalidLabel is a unit variant (no data).
+    use toptopduck_lib::RenameError;
+    assert_wire(
+        &RenameError::NotFound("people".into()),
+        r#"{"kind":"NotFound","data":"people"}"#,
+    );
+    assert_wire(
+        &RenameError::DisplayTaken("员工表".into()),
+        r#"{"kind":"DisplayTaken","data":"员工表"}"#,
+    );
+    assert_wire(&RenameError::InvalidLabel, r#"{"kind":"InvalidLabel"}"#);
+}
+
+#[test]
+fn rename_session_error_serializes_adjacently_tagged() {
+    // RenameSessionError (session rename, ADR-0060) crosses IPC wrapped in
+    // SessionError::RenameSession (issue #121). EmptyName is a unit variant.
+    use toptopduck_lib::RenameSessionError;
+    assert_wire(&RenameSessionError::EmptyName, r#"{"kind":"EmptyName"}"#);
 }
 
 #[test]
@@ -439,6 +490,26 @@ fn session_error_serializes_as_adjacently_tagged_kind_data() {
     assert_wire(
         &SessionError::Resume(ResumeError::AlreadyOpen(PathBuf::from("/x/a.duck"))),
         r#"{"kind":"Resume","data":{"kind":"AlreadyOpen","data":"/x/a.duck"}}"#,
+    );
+    // Issue #121: source-management domain errors wrap their typed sub-enums the
+    // same way Resume wraps ResumeError -- the frontend recurses `<variant>.
+    // data.kind` uniformly. Each inner enum keeps its own kind/data shape.
+    use toptopduck_lib::{RemoveSourceError, RenameError, RenameSessionError, TurnError};
+    assert_wire(
+        &SessionError::RemoveSource(RemoveSourceError::NotFound("people".into())),
+        r#"{"kind":"RemoveSource","data":{"kind":"NotFound","data":"people"}}"#,
+    );
+    assert_wire(
+        &SessionError::RenameDataset(RenameError::DisplayTaken("员工表".into())),
+        r#"{"kind":"RenameDataset","data":{"kind":"DisplayTaken","data":"员工表"}}"#,
+    );
+    assert_wire(
+        &SessionError::RenameSession(RenameSessionError::EmptyName),
+        r#"{"kind":"RenameSession","data":{"kind":"EmptyName"}}"#,
+    );
+    assert_wire(
+        &SessionError::Turn(TurnError::Execute("detail".into())),
+        r#"{"kind":"Turn","data":{"kind":"Execute","data":"detail"}}"#,
     );
 }
 

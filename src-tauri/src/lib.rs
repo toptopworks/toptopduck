@@ -54,8 +54,8 @@ pub use provider::{
     ResponsePayload, TurnPayload, UnwiredProvider,
 };
 pub use session::{
-    is_resuming, ActiveAbandoned, ActiveResolution, PendingConflict, ResumeError, ResumeEvent,
-    ResumeProgress, Session, SourceIssue, SourceResolution,
+    is_resuming, ActiveAbandoned, ActiveResolution, PendingConflict, RenameSessionError,
+    ResumeError, ResumeEvent, ResumeProgress, Session, SourceIssue, SourceResolution,
 };
 pub use session_store::{
     ClosingFlag, SessionError, SessionHandle, SessionId, SessionStore, UNKNOWN_SESSION,
