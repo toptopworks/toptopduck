@@ -572,9 +572,9 @@ describe("WorkingSetList", () => {
   it("renders a stale badge whose verb follows the anchor reason (issue #41 AC4)", () => {
     // AC4: a stale result row carries a badge naming the invalidating source,
     // with "已删除" for a Deleted anchor and "已更新" for a Replaced anchor
-    // (wording sourced from WorkingSetList's local staleRowText helper; Thread's
-    // chip uses its own i18n staleChipVerb, so the two surfaces no longer share
-    // a helper -- issue #107 retired staleBadge.ts when the badge became a Badge).
+    // (wording sourced from the workingSet.staleRow ICU select message; Thread's
+    // chip uses its own i18n staleChipVerb, so the two surfaces do not share
+    // wording -- issue #107 retired staleBadge.ts when the badge became a Badge).
     const stale: DatasetDescriptor = {
       ...mockDataset,
       reference_name: "result_1",
@@ -594,6 +594,40 @@ describe("WorkingSetList", () => {
       />,
     );
     expect(screen.getByText(/因「员工表」已删除而失效/)).toBeInTheDocument();
+  });
+
+  it("renders the row-count plural 'one' branch via the en defaultMessage (ADR-0052)", () => {
+    // The zh-CN catalog collapses workingSet.rowCount to "{count} 行", so the
+    // en {count, plural, ...} branches are reachable only via defaultMessage.
+    // An empty English provider (the renderSettings pattern) routes FormattedMessage
+    // to the canonical defaultMessage so the plural stays covered. The negative
+    // assertion guards against a one/other swap or a stray "rows" in the one arm.
+    render(
+      <IntlProvider locale="en" messages={{}} onError={() => {}}>
+        <WorkingSetList
+          datasets={[{ ...mockDataset, row_count: 1 }]}
+          activeName={null}
+          onSelect={() => {}}
+          onRename={() => {}}
+        />
+      </IntlProvider>,
+    );
+    expect(screen.getByRole("button", { name: /1 row/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /1 rows/ })).not.toBeInTheDocument();
+  });
+
+  it("renders the row-count plural 'other' branch via the en defaultMessage (ADR-0052)", () => {
+    render(
+      <IntlProvider locale="en" messages={{}} onError={() => {}}>
+        <WorkingSetList
+          datasets={[{ ...mockDataset, row_count: 5 }]}
+          activeName={null}
+          onSelect={() => {}}
+          onRename={() => {}}
+        />
+      </IntlProvider>,
+    );
+    expect(screen.getByRole("button", { name: /5 rows/ })).toBeInTheDocument();
   });
 });
 

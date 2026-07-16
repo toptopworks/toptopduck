@@ -437,8 +437,8 @@ function findStaleSourceIdx(
 // new backing; v1 just does not recompute); a Deleted source -> "Upstream
 // deleted" (the reference name is gone, truly unavailable). The wording split
 // signals whether the user could re-ask to recover the result. Distinct from
-// staleRowText (the working-set list's full sentence) -- the chip is a
-// compact, clickable label.
+// the working-set list's workingSet.staleRow ICU message (a full sentence) --
+// the chip is a compact, clickable label.
 function staleChipVerb(intl: IntlShape, reason: StaleReason): string {
   switch (reason) {
     case "Replaced":
