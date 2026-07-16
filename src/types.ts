@@ -221,6 +221,7 @@ export type LoadError =
   | { kind: "UnsupportedFormat"; data: { requested: string } }
   | { kind: "Parse"; data: { detail: string } }
   | { kind: "Io"; data: { detail: string } }
+  | { kind: "UnknownDataset"; data: { reference_name: string } }
   | { kind: "Other"; data: { detail: string } };
 
 export interface GuidanceSheet {

@@ -88,6 +88,12 @@ fn load_error_struct_variants_carry_payload_in_data() {
         },
         r#"{"kind":"Other","data":{"detail":"other"}}"#,
     );
+    assert_wire(
+        &LoadError::UnknownDataset {
+            reference_name: "people".into(),
+        },
+        r#"{"kind":"UnknownDataset","data":{"reference_name":"people"}}"#,
+    );
 }
 
 /// Minimal descriptor fixture: the wire-format test pins the *envelope* shape
