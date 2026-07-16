@@ -2,13 +2,14 @@
 //! (issue #128).
 //!
 //! Every error enum here crosses the Rust<->frontend IPC boundary
-//! adjacently-tagged (`#[serde(tag = "kind", content = "data")]`), and the
-//! frontend renders each variant's `kind` through a locale-catalog id. This
-//! test serializes one instance of EVERY variant of EVERY error enum to recover
-//! the wire `kind` from the compiler truth (zero parse drift -- no ast-grep /
-//! tree-sitter guesswork), and pins the resulting `{enum: [kinds]}` map to a
-//! golden JSON file the frontend vitest guard consumes
-//! (`src/__tests__/i18n-error-variants.test.ts`).
+//! adjacently-tagged (`#[serde(tag = "kind", content = "data")]`) with no
+//! `rename_all` -- a future rename would surface in tests/ipc_contract.rs's
+//! per-variant wire-shape pin -- and the frontend renders each variant's
+//! `kind` through a locale-catalog id. This test serializes one instance of
+//! EVERY variant of EVERY error enum to recover the wire `kind` from the
+//! compiler truth (zero parse drift -- no ast-grep / tree-sitter guesswork),
+//! and pins the resulting `{enum: [kinds]}` map to a golden JSON file the
+//! frontend vitest guard consumes (see the cross-section comment in that test).
 //!
 //! Adding a Rust variant forces this test to construct it (compile error until
 //! you do) and regenerates the golden file; the frontend test then demands a
@@ -197,7 +198,13 @@ fn error_variant_kinds_match_golden() {
         .join("tests")
         .join("error_variant_kinds.json");
 
-    if std::env::var_os("UPDATE_ERROR_VARIANT_KINDS").is_some() {
+    // Require the literal value "1" rather than mere presence, so an empty or
+    // `=0` value can't trip the regen branch and silently overwrite a real
+    // drift -- the early return below would otherwise mark the test as passing.
+    if std::env::var("UPDATE_ERROR_VARIANT_KINDS")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
         fs::write(&golden_path, &actual).expect("write golden file");
         eprintln!("wrote {}", golden_path.display());
         return;

@@ -30,11 +30,16 @@ import snapshot from "../../src-tauri/tests/error_variant_kinds.json";
 // The cross-boundary contract: for each (enum, kind) the catalog id the frontend
 // renders it through (see the format* switches in api.ts), or null when the
 // variant delegates to a sub-enum and carries no direct message (e.g.
-// SessionError::Resume recurses into ResumeError). This is the hand-maintained
-// mirror of those switches; the @formatjs/cli extract constraint (an id MUST be
+// SessionError::Resume recurses into ResumeError). This map is hand-maintained
+// against those switches; the @formatjs/cli extract constraint (an id MUST be
 // a literal at each intl.formatMessage call site) forbids centralizing the ids
-// in a shared map consumed by the formatters, so this duplication is structural,
-// not accidental -- it exists precisely to be cross-checked against Rust here.
+// in a shared map the formatters consume, so the duplication is structural --
+// it exists to be cross-checked against Rust here. NOTE: this test guards the
+// map <-> Rust and map <-> en-US legs only; the map <-> api.ts-switch leg is
+// maintained by hand and backstopped indirectly -- a switch's id is also a
+// formatjs extract, so check-i18n.mjs (extract == en-US) flags a catalog id the
+// switch stops using, and the TS `never` guard flags a missing case once
+// types.ts mirrors the variant.
 const CATALOG_IDS: Readonly<Record<string, Readonly<Record<string, string | null>>>> = {
   TurnFailure: {
     Execute: "error.turn.execute",
@@ -113,7 +118,7 @@ describe("cross-boundary error variant <-> i18n catalog (issue #128)", () => {
     // Catches a Rust variant added/removed/renamed without updating the
     // contract map (and thus without a catalog id / format* case).
     for (const [enumName, kinds] of Object.entries(snapshot)) {
-      const contractKinds = Object.keys(CATALOG_IDS[enumName] ?? {}).sort();
+      const contractKinds = Object.keys(CATALOG_IDS[enumName]).sort();
       expect(contractKinds, `${enumName} kinds`).toEqual([...kinds].sort());
     }
   });
