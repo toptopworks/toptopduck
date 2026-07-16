@@ -1890,7 +1890,7 @@ fn resume_prefers_relative_when_both_paths_stored_and_match_fingerprint() {
 /// current app surfaces an honest refusal at the open_duck seam -- never a
 /// silent mis-parse, never a partial session. The error reaches the caller
 /// as `ResumeError::Load(LoadError::VersionMismatch)`, whose Display carries
-/// the "请升级 app" prompt (ADR-0036 / ADR-0017 capability boundary at the
+/// the "please upgrade" prompt (ADR-0036 / ADR-0017 capability boundary at the
 /// format layer). The unit test on `read_duck` covers the io layer; this
 /// pins the full open_duck seam (read -> ResumeError::Load -> UI message).
 #[test]
@@ -1922,7 +1922,7 @@ fn open_duck_refuses_a_higher_format_version_with_upgrade_prompt() {
     }
     let msg = err.to_string();
     assert!(
-        msg.contains("请升级"),
+        msg.contains("please upgrade"),
         "upgrade prompt surfaces to the user: {msg}",
     );
 }

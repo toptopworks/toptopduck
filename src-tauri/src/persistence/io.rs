@@ -116,8 +116,8 @@ impl std::fmt::Display for LoadError {
             Self::Parse(d) => write!(f, "parse .duck failed: {d}"),
             Self::VersionMismatch { found, supported } => write!(
                 f,
-                "此 .duck 由更高版本（format_version={found}）制作，\
-                 当前 app 仅支持 {supported}，请升级 app 后再打开"
+                "this .duck was made by a newer app (format_version={found}); \
+                 current app supports only {supported}, please upgrade"
             ),
             // Delegate to MigrationError's Display (names the failing step /
             // field) -- preserve the typed error instead of flattening.
@@ -187,13 +187,13 @@ pub fn read_duck(path: &Path) -> Result<Recipe, LoadError> {
     let raw = value
         .get("format_version")
         .and_then(|v| v.as_u64())
-        .ok_or_else(|| LoadError::Parse("format_version 缺失或非数值".into()))?;
+        .ok_or_else(|| LoadError::Parse("format_version missing or non-numeric".into()))?;
     // Reject an out-of-range version instead of truncating with `as u32`: a
     // hand-edited file with format_version > u32::MAX would wrap and route
     // to a wrong branch (e.g. 2^32+1 -> 1 -> treated as current, bypassing
     // the honest-refuse). External input -- ADR-0034 / ADR-0036 never silent.
     let version = u32::try_from(raw)
-        .map_err(|_| LoadError::Parse(format!("format_version 超出 u32 范围: {raw}")))?;
+        .map_err(|_| LoadError::Parse(format!("format_version out of u32 range: {raw}")))?;
     let value = if version > RECIPE_FORMAT_VERSION {
         return Err(LoadError::VersionMismatch {
             found: version,
@@ -218,7 +218,7 @@ pub fn read_duck(path: &Path) -> Result<Recipe, LoadError> {
     for src in &recipe.sources {
         if !seen.insert(&src.reference_name) {
             return Err(LoadError::Parse(format!(
-                "源引用名重复：{}",
+                "duplicate source reference name: {}",
                 src.reference_name
             )));
         }

@@ -85,8 +85,9 @@ impl Provider for AnthropicProvider {
         };
         // serde_json::to_value only fails on non-finite floats / depth limits;
         // our body is plain strings, so this is defensive.
-        let body_value = serde_json::to_value(&body)
-            .map_err(|e| ProviderError::Unavailable(format!("请求序列化失败：{e}")))?;
+        let body_value = serde_json::to_value(&body).map_err(|e| {
+            ProviderError::Unavailable(format!("request serialization failed: {e}"))
+        })?;
 
         let response = ureq::post(&url)
             .set("x-api-key", &key)
@@ -106,13 +107,13 @@ impl Provider for AnthropicProvider {
             // Transport error, 5xx, or a 4xx other than auth: transient/retryable
             // -- the orchestrator consumes the single retry budget, then fails.
             Err(e) => {
-                return Err(ProviderError::Unavailable(format!("LLM 调用失败：{e}")));
+                return Err(ProviderError::Unavailable(format!("LLM call failed: {e}")));
             }
         };
 
         let raw: RawResponse = response
             .into_json()
-            .map_err(|e| ProviderError::Unavailable(format!("响应读取失败：{e}")))?;
+            .map_err(|e| ProviderError::Unavailable(format!("response read failed: {e}")))?;
         // The model's JSON contract rides the first text block. Anthropic may
         // also emit tool-use / other blocks; we asked for text-only JSON, so a
         // missing text block is a contract violation -> retried Unavailable.
@@ -120,7 +121,7 @@ impl Provider for AnthropicProvider {
             .content
             .iter()
             .find_map(|b| (b.kind == "text").then(|| b.text.clone()).flatten())
-            .ok_or_else(|| ProviderError::Unavailable("LLM 响应无文本内容".into()))?;
+            .ok_or_else(|| ProviderError::Unavailable("LLM response has no text content".into()))?;
         parse_reply(&text)
     }
 }
@@ -256,20 +257,22 @@ fn render_response(r: &ResponsePayload) -> String {
 /// orchestrator retries, then fails the turn honestly).
 fn parse_reply(text: &str) -> Result<ProviderReply, ProviderError> {
     let json_str = extract_json_object(text).ok_or_else(|| {
-        ProviderError::Unavailable(format!("LLM 响应不是 JSON 对象：{}", truncate(text)))
+        ProviderError::Unavailable(format!(
+            "LLM response is not a JSON object: {}",
+            truncate(text)
+        ))
     })?;
     let val: serde_json::Value = serde_json::from_str(json_str)
-        .map_err(|e| ProviderError::Unavailable(format!("JSON 解析失败：{e}")))?;
+        .map_err(|e| ProviderError::Unavailable(format!("JSON parse failed: {e}")))?;
     let kind = val
         .get("type")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| ProviderError::Unavailable("LLM 响应缺少 type 字段".into()))?;
+        .ok_or_else(|| ProviderError::Unavailable("LLM response missing type field".into()))?;
     match kind {
         "sql" => {
-            let sql = val
-                .get("sql")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ProviderError::Unavailable("sql 响应缺少 sql 字段".into()))?;
+            let sql = val.get("sql").and_then(|v| v.as_str()).ok_or_else(|| {
+                ProviderError::Unavailable("sql response missing sql field".into())
+            })?;
             let viz = parse_viz(val.get("viz"))?;
             let assumption = val
                 .get("assumption")
@@ -282,19 +285,19 @@ fn parse_reply(text: &str) -> Result<ProviderReply, ProviderError> {
             })
         }
         "text" => {
-            let body = val
-                .get("body")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ProviderError::Unavailable("text 响应缺少 body 字段".into()))?;
-            let kind_str = val
-                .get("kind")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ProviderError::Unavailable("text 响应缺少 kind 字段".into()))?;
+            let body = val.get("body").and_then(|v| v.as_str()).ok_or_else(|| {
+                ProviderError::Unavailable("text response missing body field".into())
+            })?;
+            let kind_str = val.get("kind").and_then(|v| v.as_str()).ok_or_else(|| {
+                ProviderError::Unavailable("text response missing kind field".into())
+            })?;
             let text_kind = match kind_str {
                 "clarify" => TextKind::Clarify,
                 "refuse" => TextKind::Refuse,
                 other => {
-                    return Err(ProviderError::Unavailable(format!("未知文本类型：{other}")));
+                    return Err(ProviderError::Unavailable(format!(
+                        "unknown text kind: {other}"
+                    )));
                 }
             };
             let assumption = val
@@ -307,7 +310,9 @@ fn parse_reply(text: &str) -> Result<ProviderReply, ProviderError> {
                 assumption,
             })
         }
-        other => Err(ProviderError::Unavailable(format!("未知响应类型：{other}"))),
+        other => Err(ProviderError::Unavailable(format!(
+            "unknown response type: {other}"
+        ))),
     }
 }
 
@@ -324,7 +329,7 @@ fn parse_viz(v: Option<&serde_json::Value>) -> Result<Option<VizSpec>, ProviderE
     let kind_str = v
         .get("kind")
         .and_then(|x| x.as_str())
-        .ok_or_else(|| ProviderError::Unavailable("viz 缺少 kind 字段".into()))?;
+        .ok_or_else(|| ProviderError::Unavailable("viz missing kind field".into()))?;
     let kind = match kind_str {
         "bar" => ChartKind::Bar,
         "line" => ChartKind::Line,
@@ -333,13 +338,15 @@ fn parse_viz(v: Option<&serde_json::Value>) -> Result<Option<VizSpec>, ProviderE
         "pie" => ChartKind::Pie,
         "table" => ChartKind::Table,
         other => {
-            return Err(ProviderError::Unavailable(format!("未知图表类型：{other}")));
+            return Err(ProviderError::Unavailable(format!(
+                "unknown chart kind: {other}"
+            )));
         }
     };
     let spec = v
         .get("spec")
         .and_then(|x| x.as_str())
-        .ok_or_else(|| ProviderError::Unavailable("viz 缺少 spec 字段".into()))?;
+        .ok_or_else(|| ProviderError::Unavailable("viz missing spec field".into()))?;
     Ok(Some(VizSpec {
         kind,
         spec: spec.to_string(),

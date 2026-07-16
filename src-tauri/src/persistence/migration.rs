@@ -59,9 +59,10 @@ impl std::fmt::Display for MigrationError {
         match self {
             Self::NoTransform { from, supported } => write!(
                 f,
-                "无法迁移 format_version={from} 至当前 {supported}：迁移链缺失该版本步进"
+                "cannot migrate format_version={from} to current {supported}: \
+                 migration chain has no step for that version"
             ),
-            Self::Field(d) => write!(f, "迁移失败：{d}"),
+            Self::Field(d) => write!(f, "migration failed: {d}"),
         }
     }
 }
@@ -94,7 +95,9 @@ pub fn migrate_to_current(value: Value, from_version: u32) -> Result<Value, Migr
         // production path on an object root, but this is a pub API so it
         // defends its own contract (ADR-0034 honest parse).
         let obj = current.as_object_mut().ok_or_else(|| {
-            MigrationError::Field("recipe 根节点不是对象，无法 stamp format_version".into())
+            MigrationError::Field(
+                "recipe root is not an object; cannot stamp format_version".into(),
+            )
         })?;
         obj.insert("format_version".to_string(), Value::from(v));
     }
@@ -122,14 +125,15 @@ mod transforms {
             for src in sources.iter_mut() {
                 let obj = src
                     .as_object_mut()
-                    .ok_or_else(|| MigrationError::Field("源条目不是对象".into()))?;
+                    .ok_or_else(|| MigrationError::Field("source entry is not an object".into()))?;
                 if !obj.contains_key("display_name") {
                     let reference_name = obj
                         .get("reference_name")
                         .and_then(|v| v.as_str())
                         .ok_or_else(|| {
                             MigrationError::Field(
-                                "源缺少 reference_name，无法填默认 display_name".into(),
+                                "source missing reference_name; cannot fill default display_name"
+                                    .into(),
                             )
                         })?;
                     obj.insert("display_name".to_string(), Value::from(reference_name));
@@ -387,7 +391,7 @@ mod tests {
         });
         let err = transforms::v0_to_v1(v0).unwrap_err();
         assert!(
-            matches!(&err, MigrationError::Field(msg) if msg.contains("对象")),
+            matches!(&err, MigrationError::Field(msg) if msg.contains("not an object")),
             "expected Field error naming the non-object source, got {err:?}",
         );
     }
