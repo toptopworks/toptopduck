@@ -1,0 +1,63 @@
+{
+  "DuckLoadError": [
+    "Io",
+    "Migration",
+    "Parse",
+    "VersionMismatch"
+  ],
+  "MigrationError": [
+    "Field",
+    "NoTransform"
+  ],
+  "RemoveSourceError": [
+    "InvalidContinueWith",
+    "IsActive",
+    "NotActive",
+    "NotFound"
+  ],
+  "RenameError": [
+    "DisplayTaken",
+    "InvalidLabel",
+    "NotFound"
+  ],
+  "RenameSessionError": [
+    "EmptyName"
+  ],
+  "ResumeError": [
+    "Aborted",
+    "ActiveMissing",
+    "AlreadyOpen",
+    "Cancelled",
+    "Load",
+    "Replay",
+    "SourceMissing"
+  ],
+  "SaveError": [
+    "AlreadyOpen",
+    "Io",
+    "Rename",
+    "Serialize"
+  ],
+  "SessionError": [
+    "Engine",
+    "InFlight",
+    "InvalidId",
+    "NotFound",
+    "RemoveSource",
+    "RenameDataset",
+    "RenameSession",
+    "Resume",
+    "Resuming",
+    "Turn"
+  ],
+  "TurnError": [
+    "Execute",
+    "UnknownDataset"
+  ],
+  "TurnFailure": [
+    "Execute",
+    "NotWired",
+    "Resource",
+    "StaleReference"
+  ]
+}
