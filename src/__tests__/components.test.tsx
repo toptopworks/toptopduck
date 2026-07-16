@@ -23,6 +23,7 @@ import type {
   DatasetPrivacy,
   GuidanceRequest,
   ProviderConfigView,
+  StaleReason,
   ThreadEntry,
   TurnRecord,
 } from "../types";
@@ -628,6 +629,43 @@ describe("WorkingSetList", () => {
       </IntlProvider>,
     );
     expect(screen.getByRole("button", { name: /5 rows/ })).toBeInTheDocument();
+  });
+
+  it("renders the stale badge verb for a Replaced anchor (issue #41 AC4)", () => {
+    // Pins the Replaced arm of the workingSet.staleRow ICU select (the Deleted
+    // arm is covered above) so a regression that drops the arm renders empty;
+    // mirrors the ResultView stale-verb coverage in the Thread suite.
+    const stale: DatasetDescriptor = {
+      ...mockDataset,
+      reference_name: "result_1",
+      display_name: "count",
+      stale: {
+        reference_name: "people",
+        display_name: "员工表",
+        reason: "Replaced" as const,
+      },
+    };
+    renderI18n(
+      <WorkingSetList
+        datasets={[stale]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    expect(screen.getByText(/因「员工表」已更新而失效/)).toBeInTheDocument();
+  });
+
+  it("exhausts every StaleReason variant in the workingSet.staleRow select (ADR-0041)", () => {
+    // Compile-time guard: the workingSet.staleRow ICU {reason, select} must name
+    // every StaleReason variant as an arm. Adding a variant without extending
+    // this map fails tsc (mirrors Thread.tsx staleChipVerb's never-guard), so the
+    // select's `other` arm stays unreachable instead of silently masking a new case.
+    const arms: Record<StaleReason, true> = {
+      Deleted: true,
+      Replaced: true,
+    };
+    expect(Object.keys(arms).sort()).toEqual(["Deleted", "Replaced"]);
   });
 });
 
