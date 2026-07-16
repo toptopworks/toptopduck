@@ -239,3 +239,36 @@ fn error_variant_kinds_match_golden() {
         golden_path.display(),
     );
 }
+
+/// The frontend `fmtError` (src/api.ts) narrows a typed reject on its top-level
+/// `kind` via structural guards in a fixed order -- `isSessionError`, then
+/// `isSaveError`, then `isStoreCommandError`. A shared top-level `kind` between
+/// any two of these enums would let the SECOND guard silently never fire and
+/// mis-route the reject to the wrong formatter. This pins the disjointness the
+/// dispatch relies on (the rustdoc claim on each enum), promoting it from a
+/// comment to a CI gate.
+///
+/// Scoped to the three TOP-LEVEL reject enums only. Nested sub-errors
+/// legitimately reuse names (DuckLoadError::Io and SaveError::Io both exist)
+/// and never compete at the fmtError top level, so a full 11-enum disjoint
+/// check would false-positive on intentional reuse.
+#[test]
+fn top_level_reject_kind_sets_are_disjoint() {
+    let map = variant_kind_map();
+    let top_level = ["SessionError", "SaveError", "StoreCommandError"];
+    // kind -> first enum that owns it; a second owner is a dispatch collision.
+    let mut first_owner: BTreeMap<String, &str> = BTreeMap::new();
+    for name in top_level {
+        for kind in map
+            .get(name)
+            .unwrap_or_else(|| panic!("top-level reject enum {name} missing from variant_kind_map"))
+        {
+            if let Some(prev) = first_owner.insert(kind.clone(), name) {
+                panic!(
+                    "top-level reject kind `{kind}` is shared by {prev} and {name}; \
+                     fmtError's kind dispatch would silently mis-route it"
+                );
+            }
+        }
+    }
+}

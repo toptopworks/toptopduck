@@ -768,6 +768,34 @@ pub fn rename_session(
     s.rename(&new_name).map_err(SessionError::RenameSession)
 }
 
+/// The cold-rename file operation, extracted so the blank-name short-circuit
+/// and gate ordering are unit-testable without a Tauri / async runtime (issue
+/// #130). The command wrapper just moves this onto a blocking thread; every
+/// behavioral branch -- BlankName before canonicalize, the OpenConflict gate,
+/// and `release` on every post-acquire path -- lives here.
+fn rename_persisted_session_blocking(path: &Path, new_name: &str) -> Result<(), StoreCommandError> {
+    use crate::persistence::{canonicalize_duck, read_duck, release, save_atomic, try_acquire};
+    let trimmed = new_name.trim();
+    if trimmed.is_empty() {
+        return Err(StoreCommandError::BlankName(RenameSessionError::EmptyName));
+    }
+    let canonical =
+        canonicalize_duck(path).map_err(|e| StoreCommandError::IoFailure(e.to_string()))?;
+    // Gate: try_acquire returns false when the canonical path is already
+    // held -- an open session owns it. Refuse rather than race its writer.
+    if !try_acquire(&canonical) {
+        return Err(StoreCommandError::OpenConflict);
+    }
+    let outcome = (|| -> Result<(), StoreCommandError> {
+        let mut recipe =
+            read_duck(path).map_err(|e| StoreCommandError::IoFailure(e.to_string()))?;
+        recipe.session_name = trimmed.to_string();
+        save_atomic(path, &recipe).map_err(|e| StoreCommandError::IoFailure(e.to_string()))
+    })();
+    release(&canonical);
+    outcome
+}
+
 /// Rename a CLOSED `.duck` recipe's session_name in place (ADR-0060, issue #81).
 /// For a session that is not currently open: read the recipe, rewrite the
 /// session_name header, atomic-save -- no DuckDB instance is built. The
@@ -781,28 +809,9 @@ pub async fn rename_persisted_session(
     path: String,
     new_name: String,
 ) -> Result<(), StoreCommandError> {
-    use crate::persistence::{canonicalize_duck, read_duck, release, save_atomic, try_acquire};
     let path = PathBuf::from(path);
-    tauri::async_runtime::spawn_blocking(move || -> Result<(), StoreCommandError> {
-        let trimmed = new_name.trim();
-        if trimmed.is_empty() {
-            return Err(StoreCommandError::BlankName(RenameSessionError::EmptyName));
-        }
-        let canonical =
-            canonicalize_duck(&path).map_err(|e| StoreCommandError::IoFailure(e.to_string()))?;
-        // Gate: try_acquire returns false when the canonical path is already
-        // held -- an open session owns it. Refuse rather than race its writer.
-        if !try_acquire(&canonical) {
-            return Err(StoreCommandError::OpenConflict);
-        }
-        let outcome = (|| -> Result<(), StoreCommandError> {
-            let mut recipe =
-                read_duck(&path).map_err(|e| StoreCommandError::IoFailure(e.to_string()))?;
-            recipe.session_name = trimmed.to_string();
-            save_atomic(&path, &recipe).map_err(|e| StoreCommandError::IoFailure(e.to_string()))
-        })();
-        release(&canonical);
-        outcome
+    tauri::async_runtime::spawn_blocking(move || {
+        rename_persisted_session_blocking(&path, &new_name)
     })
     .await
     .map_err(|e| StoreCommandError::IoFailure(e.to_string()))?
@@ -1110,5 +1119,59 @@ mod tests {
             err,
             SessionError::RemoveSource(RemoveSourceError::NotFound("nope".into())),
         );
+    }
+
+    /// Blank name short-circuits to BlankName BEFORE canonicalize runs (issue
+    /// #130). The path's parent does not exist, so a reorder that canonicalized
+    /// first would surface IoFailure instead -- pinning the result as BlankName
+    /// also pins the ordering. Exercises the extracted blocking helper directly;
+    /// the command wrapper only moves it onto a blocking thread.
+    #[test]
+    fn rename_persisted_session_blank_name_short_circuits_before_canonicalize() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // `no_such_subdir` was never created -> canonicalize_duck (which
+        // canonicalizes the parent dir) would fail here.
+        let missing_parent = dir.path().join("no_such_subdir").join("file.duck");
+        let err = rename_persisted_session_blocking(&missing_parent, "   ")
+            .expect_err("blank name rejects");
+        assert_eq!(
+            err,
+            StoreCommandError::BlankName(RenameSessionError::EmptyName)
+        );
+    }
+
+    /// The complement: a non-blank name on the same missing-parent path reaches
+    /// canonicalize and maps to IoFailure -- confirming the blank-name check is
+    /// what differentiates the two outcomes, and that a canonicalize failure
+    /// folds to IoFailure (not a later stage that never runs).
+    #[test]
+    fn rename_persisted_session_nonblank_name_reaches_canonicalize() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing_parent = dir.path().join("no_such_subdir").join("file.duck");
+        let err = rename_persisted_session_blocking(&missing_parent, "new name")
+            .expect_err("missing parent rejects");
+        assert!(
+            matches!(err, StoreCommandError::IoFailure(_)),
+            "non-blank name with a missing-parent path should be IoFailure, got {err:?}",
+        );
+    }
+
+    /// A held canonical key (an open session owns the path) makes try_acquire
+    /// fail and the helper refuses with OpenConflict (ADR-0035 single-writer
+    /// gate). Also pins that the OpenConflict path does NOT release a key it
+    /// never acquired, and that the gate runs only after canonicalize succeeds.
+    #[test]
+    fn rename_persisted_session_held_key_yields_open_conflict() {
+        use crate::persistence::{canonicalize_duck, release, try_acquire};
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Parent (dir) exists, so canonicalize_duck succeeds even though the
+        // file itself is absent (it canonicalizes the parent + rejoins the name).
+        let file = dir.path().join("held.duck");
+        let canonical = canonicalize_duck(&file).expect("canonicalize (parent-based)");
+        assert!(try_acquire(&canonical), "test takes the canonical key");
+        let err =
+            rename_persisted_session_blocking(&file, "new name").expect_err("held key rejects");
+        assert_eq!(err, StoreCommandError::OpenConflict);
+        release(&canonical);
     }
 }
