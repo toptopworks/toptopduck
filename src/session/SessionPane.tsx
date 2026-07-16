@@ -93,7 +93,10 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
           catches precisely". See memory: react19-nested-errorboundary-outer-
           catches. */}
       {/* --- Thread rail (ADR-0045/0047) ---------------------------------- */}
-      <section className="session-rail" aria-label="对话时间线">
+      <section
+        className="session-rail"
+        aria-label={intl.formatMessage({ id: "session.rail.ariaLabel", defaultMessage: "Conversation timeline" })}
+      >
         <ErrorBoundary name="thread" onReset={resetSessionCache}>
           <Thread
             entries={s.thread}
@@ -104,12 +107,20 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
           />
         </ErrorBoundary>
         {s.thread.length === 0 && (
-          <p className="rail-empty muted">尚无对话。在下方提问或加载数据开始。</p>
+          <p className="rail-empty muted">
+            <FormattedMessage
+              id="session.rail.empty"
+              defaultMessage="No conversations yet. Ask a question below or load data to begin."
+            />
+          </p>
         )}
       </section>
 
       {/* --- Workspace (ADR-0045/0062 R2) -------------------------------- */}
-      <section className="session-workspace" aria-label="工作区">
+      <section
+        className="session-workspace"
+        aria-label={intl.formatMessage({ id: "session.workspace.ariaLabel", defaultMessage: "Workspace" })}
+      >
         <div className="workspace-tabs" role="tablist">
           <button
             type="button"
@@ -118,7 +129,7 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
             className={tab === "result" ? "active" : undefined}
             onClick={() => setTab("result")}
           >
-            结果
+            <FormattedMessage id="session.tab.result" defaultMessage="Results" />
           </button>
           <button
             type="button"
@@ -127,14 +138,29 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
             className={tab === "workingSet" ? "active" : undefined}
             onClick={() => setTab("workingSet")}
           >
-            工作集
+            <FormattedMessage id="session.tab.workingSet" defaultMessage="Working set" />
           </button>
           {/* active (server truth, ADR-0051/0060) shown read-only here so the
                 user sees what the next question targets by default. Naming it
                 here, not in QuestionBar, keeps QuestionBar presentational. */}
           {s.activeName && (
-            <Badge variant="default" className="active-chip" title="下一个提问默认作用于此表">
-              作用于 {s.datasets.find((d) => d.reference_name === s.activeName)?.display_name ?? s.activeName}
+            <Badge
+              variant="default"
+              className="active-chip"
+              title={intl.formatMessage({
+                id: "session.activeChip.title",
+                defaultMessage: "The next question targets this table by default",
+              })}
+            >
+              <FormattedMessage
+                id="session.activeChip.label"
+                defaultMessage="Targets {name}"
+                values={{
+                  name:
+                    s.datasets.find((d) => d.reference_name === s.activeName)?.display_name ??
+                    s.activeName,
+                }}
+              />
             </Badge>
           )}
         </div>
@@ -245,9 +271,17 @@ function WorkspaceResult({
         <div className="workspace-hero">
           <FileDropzone onIngest={onIngest} loading={loading} />
           <p className="muted">
-            {hasData
-              ? "数据已加载。在下方提问开始分析，或在「工作集」管理数据。"
-              : "拖入或选择一个数据文件开始分析。"}
+            {hasData ? (
+              <FormattedMessage
+                id="session.hero.hasData"
+                defaultMessage="Data loaded. Ask a question below to start analyzing, or manage it in the Working set tab."
+              />
+            ) : (
+              <FormattedMessage
+                id="session.hero.empty"
+                defaultMessage="Drop or select a data file to start analyzing."
+              />
+            )}
           </p>
         </div>
       );
@@ -379,7 +413,9 @@ function WorkspaceWorkingSet({
   return (
     <div className="layout working-set-layout">
       <section className="panel">
-        <h2>工作集</h2>
+        <h2>
+          <FormattedMessage id="session.workingSet.title" defaultMessage="Working set" />
+        </h2>
         <WorkingSetList
           datasets={datasets}
           activeName={activeName}
@@ -398,7 +434,12 @@ function WorkspaceWorkingSet({
             onPrivacyChange={onPrivacyChange}
           />
         ) : (
-          <p className="muted">选择一个数据集查看其结构。</p>
+          <p className="muted">
+            <FormattedMessage
+              id="session.workingSet.emptyDetail"
+              defaultMessage="Select a dataset to see its structure."
+            />
+          </p>
         )}
       </section>
     </div>

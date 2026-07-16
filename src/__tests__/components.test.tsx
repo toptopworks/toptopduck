@@ -23,6 +23,7 @@ import type {
   DatasetPrivacy,
   GuidanceRequest,
   ProviderConfigView,
+  StaleReason,
   ThreadEntry,
   TurnRecord,
 } from "../types";
@@ -62,12 +63,10 @@ function renderThread(ui: ReactElement) {
   );
 }
 
-// QuestionBar reaches react-intl for the ADR-0059 phase strings (ADR-0052), so
-// its tests render inside a zh-CN IntlProvider like the Thread tests above. The
-// bar's placeholder / aria-label / button labels are still hard-coded zh (a
-// pre-existing follow-up); only the phase strings read the catalog, and these
-// tests do not exercise them, but the provider must still wrap the component
-// because useIntl() runs unconditionally at the top of QuestionBar.
+// QuestionBar routes all of its chrome (placeholder / aria-label / button
+// labels / phase feedback) through react-intl (ADR-0052), so its tests render
+// inside a zh-CN IntlProvider like the Thread tests above. useIntl() runs
+// unconditionally at the top of QuestionBar, so the provider must wrap it.
 function renderQuestionBar(ui: ReactElement) {
   return render(
     <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
@@ -76,12 +75,11 @@ function renderQuestionBar(ui: ReactElement) {
   );
 }
 
-// DisclosureBanner + ResultView route their disclosure chrome through react-intl
-// (ADR-0052, issue #108 -- the disclosure text moved to the catalog when the
-// bespoke <aside>/<p> banners became shadcn Alerts). withIntl wraps a node for
-// a rerender call (RTL's rerender replaces the whole tree, so it must re-provide
-// the provider); renderI18n is the render-time convenience. zh-CN keeps the
-// Chinese chrome assertions holding, mirroring renderThread/renderQuestionBar.
+// DisclosureBanner + ResultView + WorkingSetList + ActiveSourceDeleteDialog route
+// their chrome through react-intl (ADR-0052, issue #108/#137). withIntl wraps a
+// node for a rerender call (RTL's rerender replaces the whole tree, so it must
+// re-provide the provider); renderI18n is the render-time convenience. zh-CN
+// keeps the Chinese chrome assertions holding, mirroring renderThread/renderQuestionBar.
 function withIntl(ui: ReactElement) {
   return (
     <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
@@ -360,7 +358,7 @@ describe("WorkingSetList", () => {
   afterEach(() => vi.restoreAllMocks());
 
   it("lists datasets and marks the active one", () => {
-    render(
+    renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
         activeName="people"
@@ -376,7 +374,7 @@ describe("WorkingSetList", () => {
   });
 
   it("shows an empty hint when there are no datasets", () => {
-    render(
+    renderI18n(
       <WorkingSetList datasets={[]} activeName={null} onSelect={() => {}} onRename={() => {}} />,
     );
     expect(screen.getByText(/工作集为空/)).toBeInTheDocument();
@@ -385,7 +383,7 @@ describe("WorkingSetList", () => {
   it("renames a dataset's display label via prompt (ADR-0037, issue #8)", () => {
     const onRename = vi.fn();
     vi.spyOn(window, "prompt").mockReturnValue("员工表");
-    render(
+    renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
@@ -402,7 +400,7 @@ describe("WorkingSetList", () => {
   it("ignores an empty, cancelled, or no-change rename prompt", () => {
     const onRename = vi.fn();
     const promptSpy = vi.spyOn(window, "prompt");
-    render(
+    renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
@@ -425,7 +423,7 @@ describe("WorkingSetList", () => {
   it("trims surrounding whitespace before renaming", () => {
     const onRename = vi.fn();
     vi.spyOn(window, "prompt").mockReturnValue("  员工表  ");
-    render(
+    renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
@@ -441,7 +439,7 @@ describe("WorkingSetList", () => {
   it("ignores a whitespace-only rename prompt", () => {
     const onRename = vi.fn();
     vi.spyOn(window, "prompt").mockReturnValue("   ");
-    render(
+    renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
@@ -457,7 +455,7 @@ describe("WorkingSetList", () => {
     // A rename in flight locks the button: rapid double-clicks must not fire a
     // second IPC before the first settles (the backend would run its label-
     // collision check against stale state and reject a valid rename).
-    render(
+    renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
@@ -475,7 +473,7 @@ describe("WorkingSetList", () => {
     // reference name -- the name the backend takes over.
     const onReplace = vi.fn();
     vi.mocked(open).mockResolvedValue("/x/new.csv");
-    render(
+    renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
@@ -491,7 +489,7 @@ describe("WorkingSetList", () => {
   it("ignores a cancelled replace picker (issue #11)", async () => {
     const onReplace = vi.fn();
     vi.mocked(open).mockResolvedValue(null); // cancelled
-    render(
+    renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
@@ -506,7 +504,7 @@ describe("WorkingSetList", () => {
   });
 
   it("disables the replace button while loading (issue #11)", () => {
-    render(
+    renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
@@ -524,7 +522,7 @@ describe("WorkingSetList", () => {
     // the identity the backend removes (not the display label).
     const onDelete = vi.fn();
     vi.spyOn(window, "confirm").mockReturnValue(true);
-    render(
+    renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
@@ -542,7 +540,7 @@ describe("WorkingSetList", () => {
     // A no at the confirm gate never reaches the backend -- no IPC, no removal.
     const onDelete = vi.fn();
     vi.spyOn(window, "confirm").mockReturnValue(false);
-    render(
+    renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
@@ -559,7 +557,7 @@ describe("WorkingSetList", () => {
     // loading is true while any async op (incl. an in-flight turn) runs -- the
     // execution window disables source management so a mid-turn delete cannot
     // interleave with the query.
-    render(
+    renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
@@ -575,9 +573,9 @@ describe("WorkingSetList", () => {
   it("renders a stale badge whose verb follows the anchor reason (issue #41 AC4)", () => {
     // AC4: a stale result row carries a badge naming the invalidating source,
     // with "已删除" for a Deleted anchor and "已更新" for a Replaced anchor
-    // (wording sourced from WorkingSetList's local staleRowText helper; Thread's
-    // chip uses its own i18n staleChipVerb, so the two surfaces no longer share
-    // a helper -- issue #107 retired staleBadge.ts when the badge became a Badge).
+    // (wording sourced from the workingSet.staleRow ICU select message; Thread's
+    // chip uses its own i18n staleChipVerb, so the two surfaces do not share
+    // wording -- issue #107 retired staleBadge.ts when the badge became a Badge).
     const stale: DatasetDescriptor = {
       ...mockDataset,
       reference_name: "result_1",
@@ -588,7 +586,7 @@ describe("WorkingSetList", () => {
         reason: "Deleted" as const,
       },
     };
-    render(
+    renderI18n(
       <WorkingSetList
         datasets={[stale]}
         activeName={null}
@@ -597,6 +595,77 @@ describe("WorkingSetList", () => {
       />,
     );
     expect(screen.getByText(/因「员工表」已删除而失效/)).toBeInTheDocument();
+  });
+
+  it("renders the row-count plural 'one' branch via the en defaultMessage (ADR-0052)", () => {
+    // The zh-CN catalog collapses workingSet.rowCount to "{count} 行", so the
+    // en {count, plural, ...} branches are reachable only via defaultMessage.
+    // An empty English provider (the renderSettings pattern) routes FormattedMessage
+    // to the canonical defaultMessage so the plural stays covered. The negative
+    // assertion guards against a one/other swap or a stray "rows" in the one arm.
+    render(
+      <IntlProvider locale="en" messages={{}} onError={() => {}}>
+        <WorkingSetList
+          datasets={[{ ...mockDataset, row_count: 1 }]}
+          activeName={null}
+          onSelect={() => {}}
+          onRename={() => {}}
+        />
+      </IntlProvider>,
+    );
+    expect(screen.getByRole("button", { name: /1 row/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /1 rows/ })).not.toBeInTheDocument();
+  });
+
+  it("renders the row-count plural 'other' branch via the en defaultMessage (ADR-0052)", () => {
+    render(
+      <IntlProvider locale="en" messages={{}} onError={() => {}}>
+        <WorkingSetList
+          datasets={[{ ...mockDataset, row_count: 5 }]}
+          activeName={null}
+          onSelect={() => {}}
+          onRename={() => {}}
+        />
+      </IntlProvider>,
+    );
+    expect(screen.getByRole("button", { name: /5 rows/ })).toBeInTheDocument();
+  });
+
+  it("renders the stale badge verb for a Replaced anchor (issue #41 AC4)", () => {
+    // Pins the Replaced arm of the workingSet.staleRow ICU select (the Deleted
+    // arm is covered above) so a regression that drops the arm renders empty;
+    // mirrors the ResultView stale-verb coverage in the Thread suite.
+    const stale: DatasetDescriptor = {
+      ...mockDataset,
+      reference_name: "result_1",
+      display_name: "count",
+      stale: {
+        reference_name: "people",
+        display_name: "员工表",
+        reason: "Replaced" as const,
+      },
+    };
+    renderI18n(
+      <WorkingSetList
+        datasets={[stale]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    expect(screen.getByText(/因「员工表」已更新而失效/)).toBeInTheDocument();
+  });
+
+  it("exhausts every StaleReason variant in the workingSet.staleRow select (ADR-0041)", () => {
+    // Compile-time guard: the workingSet.staleRow ICU {reason, select} must name
+    // every StaleReason variant as an arm. Adding a variant without extending
+    // this map fails tsc (mirrors Thread.tsx staleChipVerb's never-guard), so the
+    // select's `other` arm stays unreachable instead of silently masking a new case.
+    const arms: Record<StaleReason, true> = {
+      Deleted: true,
+      Replaced: true,
+    };
+    expect(Object.keys(arms).sort()).toEqual(["Deleted", "Replaced"]);
   });
 });
 
@@ -1639,7 +1708,7 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
     // AC5: every remaining source is a candidate. AC2: the first is pre-selected
     // so a single Confirm carries (ref, continueWith) to the backend.
     const onConfirm = vi.fn();
-    render(
+    renderI18n(
       <ActiveSourceDeleteDialog
         target={target}
         candidates={candidates}
@@ -1661,7 +1730,7 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
     // The focus moves to whichever source the user chooses, not always the
     // first -- picking items then confirming carries items as the continuation.
     const onConfirm = vi.fn();
-    render(
+    renderI18n(
       <ActiveSourceDeleteDialog
         target={target}
         candidates={candidates}
@@ -1677,7 +1746,7 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
   it("cancel does not fire onConfirm (AC3)", () => {
     const onConfirm = vi.fn();
     const onCancel = vi.fn();
-    render(
+    renderI18n(
       <ActiveSourceDeleteDialog
         target={target}
         candidates={candidates}
@@ -1697,7 +1766,7 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
     // is inert, so onCancel never fires (mirroring the original "no accidental
     // dismiss" intent of the confirm, now enforced by the primitive).
     const onCancel = vi.fn();
-    render(
+    renderI18n(
       <ActiveSourceDeleteDialog
         target={target}
         candidates={candidates}
@@ -1716,7 +1785,7 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
     // action. Pins the overlay-dismiss path the prior ESC test did not cover.
     const onConfirm = vi.fn();
     const onCancel = vi.fn();
-    render(
+    renderI18n(
       <ActiveSourceDeleteDialog
         target={target}
         candidates={candidates}
@@ -1744,7 +1813,7 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
     // async remove decides unmount. A failure leaves the dialog open for retry --
     // verified by onConfirm firing AND the alertdialog still being in the DOM.
     const onConfirm = vi.fn();
-    render(
+    renderI18n(
       <ActiveSourceDeleteDialog
         target={target}
         candidates={candidates}

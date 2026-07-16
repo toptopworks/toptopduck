@@ -1,33 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
+import { useIntl, FormattedMessage } from "react-intl";
 import { Badge } from "./ui/badge";
-import type { DatasetDescriptor, StaleAnchor, StaleReason } from "../types";
-
-// The verb for a stale row, parameterized by why the result went stale (issue
-// #41 AC4): a Deleted upstream source -> "已删除"; a Replaced source (re-uploaded
-// under the same reference name, ADR-0025) -> "已更新". Exhaustive switch mirrors
-// the Rust `match` so a future StaleReason variant forces a branch here.
-// Inlined from the former staleBadge.ts (issue #107): the text helper had this
-// single consumer once Thread grew its own i18n staleChipVerb, so the module was
-// retired in favor of Badge-driven rendering with the wording kept local.
-function staleRowVerb(reason: StaleReason): string {
-  switch (reason) {
-    case "Deleted":
-      return "已删除";
-    case "Replaced":
-      return "已更新";
-    default: {
-      const unhandled: never = reason;
-      throw new Error(`unhandled stale reason: ${JSON.stringify(unhandled)}`);
-    }
-  }
-}
-
-// Full stale-row text naming the source that invalidated the result. The reason
-// distinguishes "因源已删除而失效" (source removed, issue #40) from "因源已更新
-// 而失效" (source re-uploaded, issue #41 ADR-0025).
-function staleRowText(anchor: StaleAnchor): string {
-  return `因「${anchor.display_name}」${staleRowVerb(anchor.reason)}而失效`;
-}
+import type { DatasetDescriptor } from "../types";
 
 export function WorkingSetList({
   datasets,
@@ -64,14 +38,26 @@ export function WorkingSetList({
   // IPC and source-vs-turn interleaving.
   loading?: boolean;
 }) {
+  const intl = useIntl();
+
   if (datasets.length === 0) {
-    return <p className="muted">工作集为空 — 拖入或拾取一个数据文件开始。</p>;
+    return (
+      <p className="muted">
+        <FormattedMessage
+          id="workingSet.empty"
+          defaultMessage="Working set is empty — drop or pick a data file to start."
+        />
+      </p>
+    );
   }
 
   // Prompt for a new display label. The answer is trimmed; a blank or
   // no-change result is ignored. A collision is rejected by the backend.
   const promptRename = (d: DatasetDescriptor) => {
-    const next = window.prompt("重命名显示名", d.display_name);
+    const next = window.prompt(
+      intl.formatMessage({ id: "workingSet.rename.title", defaultMessage: "Rename display label" }),
+      d.display_name,
+    );
     if (!next) return; // cancelled
     const trimmed = next.trim();
     if (trimmed && trimmed !== d.display_name) {
@@ -88,7 +74,7 @@ export function WorkingSetList({
       multiple: false,
       filters: [
         {
-          name: "数据文件",
+          name: intl.formatMessage({ id: "workingSet.fileFilter", defaultMessage: "Data files" }),
           extensions: ["csv", "parquet", "json", "jsonl", "ndjson"],
         },
       ],
@@ -104,7 +90,12 @@ export function WorkingSetList({
   // the active source and any removal while results exist, surfacing those as a
   // "删源失败" error in App -- the confirm here is only the user's intent gate.
   const confirmDelete = (d: DatasetDescriptor) => {
-    const ok = window.confirm(`确定从工作集删除「${d.display_name}」？`);
+    const ok = window.confirm(
+      intl.formatMessage(
+        { id: "workingSet.delete.confirm", defaultMessage: "Remove {name} from the working set?" },
+        { name: d.display_name },
+      ),
+    );
     if (ok) {
       onDelete?.(d.reference_name);
     }
@@ -119,19 +110,35 @@ export function WorkingSetList({
         >
           <button type="button" onClick={() => onSelect(d.reference_name)}>
             {d.display_name}
-            {d.reference_name === activeName ? " · 当前表" : ""}
-            <small> {d.row_count} 行</small>
+            {d.reference_name === activeName ? (
+              <FormattedMessage id="workingSet.activeSuffix" defaultMessage=" · current table" />
+            ) : null}
+            <small>
+              {" "}
+              <FormattedMessage
+                id="workingSet.rowCount"
+                defaultMessage="{count, plural, one {# row} other {# rows}}"
+                values={{ count: d.row_count }}
+              />
+            </small>
           </button>
           {d.stale && (
             <Badge variant="secondary" className="stale-badge">
-              {staleRowText(d.stale)}
+              <FormattedMessage
+                id="workingSet.staleRow"
+                defaultMessage="Invalidated because {name} was {reason, select, Deleted {deleted} Replaced {updated} other {changed}}"
+                values={{ name: d.stale.display_name, reason: d.stale.reason }}
+              />
             </Badge>
           )}
           <button
             type="button"
             className="rename"
-            aria-label={`重命名 ${d.display_name}`}
-            title="重命名显示名"
+            aria-label={intl.formatMessage(
+              { id: "workingSet.rename.ariaLabel", defaultMessage: "Rename {name}" },
+              { name: d.display_name },
+            )}
+            title={intl.formatMessage({ id: "workingSet.rename.title", defaultMessage: "Rename display label" })}
             disabled={loading}
             onClick={() => promptRename(d)}
           >
@@ -141,8 +148,14 @@ export function WorkingSetList({
             <button
               type="button"
               className="replace"
-              aria-label={`换源 ${d.display_name}`}
-              title="重新上传替换此数据集（沿用引用名）"
+              aria-label={intl.formatMessage(
+                { id: "workingSet.replace.ariaLabel", defaultMessage: "Replace source {name}" },
+                { name: d.display_name },
+              )}
+              title={intl.formatMessage({
+                id: "workingSet.replace.title",
+                defaultMessage: "Re-upload to replace this dataset (keeps the reference name)",
+              })}
               disabled={loading}
               onClick={() => void pickReplace(d)}
             >
@@ -153,8 +166,14 @@ export function WorkingSetList({
             <button
               type="button"
               className="delete"
-              aria-label={`删除 ${d.display_name}`}
-              title="从工作集删除此数据集"
+              aria-label={intl.formatMessage(
+                { id: "workingSet.delete.ariaLabel", defaultMessage: "Delete {name}" },
+                { name: d.display_name },
+              )}
+              title={intl.formatMessage({
+                id: "workingSet.delete.title",
+                defaultMessage: "Remove this dataset from the working set",
+              })}
               disabled={loading}
               onClick={() => confirmDelete(d)}
             >

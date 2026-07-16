@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useIntl, type IntlShape } from "react-intl";
+import { useIntl, FormattedMessage, type IntlShape } from "react-intl";
 import type { TurnPhase } from "../types";
 
 interface QuestionBarProps {
@@ -21,13 +21,9 @@ interface QuestionBarProps {
 // stop button replaces the submit so the user can cancel the in-flight query.
 // The discrete phase feedback (ADR-0059) renders alongside the stop button --
 // "Thinking (attempt N) / Querying" reflects the two honest boundaries (LLM
-// HTTP + SQL), not a fabricated percentage. The phase strings are i18n'd via
-// react-intl (ADR-0052); see the catalog keys questionBar.phase.*.
-//
-// NOTE: the phase strings ship through the react-intl catalog (ADR-0052)
-// because they are NEW ADR-0059 strings. The rest of this bar's chrome
-// (placeholder / aria-label / button labels) is still hard-coded zh -- a
-// pre-existing debt that predates this change; i18n'ing it is a follow-up.
+// HTTP + SQL), not a fabricated percentage. The whole bar's chrome (placeholder,
+// aria-label, button labels, phase feedback) ships through the react-intl
+// catalog (ADR-0052); see the questionBar.* keys.
 export function QuestionBar({ onSubmit, onCancel, loading, phase = null }: QuestionBarProps) {
   const intl = useIntl();
   const [value, setValue] = useState("");
@@ -49,8 +45,8 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null }: Quest
         type="text"
         value={value}
         onChange={(e) => setValue(e.target.value)}
-        placeholder="用自然语言提问…"
-        aria-label="提问"
+        placeholder={intl.formatMessage({ id: "questionBar.placeholder", defaultMessage: "Ask in natural language…" })}
+        aria-label={intl.formatMessage({ id: "questionBar.ariaLabel", defaultMessage: "Question" })}
         disabled={loading}
       />
       {loading && phase !== null && (
@@ -68,11 +64,11 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null }: Quest
         // stop button fires the cancel token -> the in-flight ask lands as
         // Cancelled (ADR-0028 D).
         <button type="button" onClick={onCancel} className="cancel">
-          停止
+          <FormattedMessage id="questionBar.cancel" defaultMessage="Stop" />
         </button>
       ) : (
         <button type="submit" disabled={value.trim() === ""}>
-          提问
+          <FormattedMessage id="questionBar.submit" defaultMessage="Ask" />
         </button>
       )}
     </form>
