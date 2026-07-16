@@ -1162,7 +1162,7 @@ impl Session {
         if let Err(e) = self.conn.execute_batch(&attach_sql) {
             let _ = std::fs::remove_file(&snap.file_path);
             return LoadOutcome::Error(LoadError::Other {
-                detail: format!("挂载快照失败：{e}"),
+                detail: format!("failed to mount snapshot: {e}"),
             });
         }
 

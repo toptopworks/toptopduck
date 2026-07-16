@@ -263,6 +263,13 @@ pub enum LoadError {
     Io {
         detail: String,
     },
+    /// A replace targeted a reference name no dataset carries (issue #131).
+    /// Surfaced distinctly from `Other` so the frontend renders the shared
+    /// `error.dataset.notFound` catalog id instead of flattening a backend
+    /// free-text detail into the primary message.
+    UnknownDataset {
+        reference_name: String,
+    },
     Other {
         detail: String,
     },
@@ -280,6 +287,9 @@ impl std::fmt::Display for LoadError {
             Self::LegacyExcel => write!(f, "legacy .xls not supported (re-save as .xlsx)"),
             Self::Parse { detail } => write!(f, "parse failed: {detail}"),
             Self::Io { detail } => write!(f, "read failed: {detail}"),
+            Self::UnknownDataset { reference_name } => {
+                write!(f, "dataset not found: {reference_name}")
+            }
             Self::Other { detail } => write!(f, "load failed: {detail}"),
         }
     }

@@ -8,7 +8,7 @@
 
 | 层 | 路径 | 触发 | 落点 |
 |---|---|---|---|
-| L0 数据/契约 | 0033 Vega 退化 / 0015 load error / 0030 truncation | 数据级失败 | ResultView try/catch、loadErrorMessage、Failed outcome |
+| L0 数据/契约 | 0033 Vega 退化 / 0015 load error / 0030 truncation | 数据级失败 | ResultView try/catch、loadErrorDisplay、Failed outcome |
 | L1 操作/异步 | IPC error / cancel / persist-error | handler async | setError 红字、Cancelled outcome、横幅 |
 | **L2 渲染（新增）** | **render 阶段 throw** | 组件 map 炸、数据运行时变形 | **分区降级卡** |
 | **L3 顶层兜底（新增）** | L2 边界自身 throw / shell 级异常 | 罕见 | 整页降级卡 + 重载 |

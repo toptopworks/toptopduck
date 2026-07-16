@@ -273,8 +273,8 @@ impl super::Session {
         let existing = match self.working_set.get(reference_name) {
             Some(d) => d.clone(),
             None => {
-                return LoadOutcome::Error(LoadError::Other {
-                    detail: format!("找不到引用名为「{reference_name}」的数据集，无法换源"),
+                return LoadOutcome::Error(LoadError::UnknownDataset {
+                    reference_name: reference_name.to_string(),
                 })
             }
         };
@@ -287,8 +287,9 @@ impl super::Session {
             ingest::Dispatched::Xls => return LoadOutcome::Error(LoadError::LegacyExcel),
             ingest::Dispatched::Xlsx => {
                 return LoadOutcome::Error(LoadError::Other {
-                    detail: "换源暂不支持 Excel 工作簿（多 sheet 语义待定），请改用结构化文件"
-                        .into(),
+                    detail:
+                        "xlsx replace is not supported (multi-sheet semantics pending); use a structured file"
+                            .into(),
                 });
             }
             _ => match ingest::reader_for(&dispatched) {
@@ -331,9 +332,10 @@ impl super::Session {
             );
             let _ = fs::remove_file(&new_snap.file_path);
             return LoadOutcome::Error(LoadError::Other {
-                // Prefix-free: App.tsx prepends "换源失败：" for kind "replace",
-                // matching the load path (loadErrorMessage surfaces detail verbatim).
-                detail: format!("无法挂载新快照（{e}）"),
+                // English technical detail for the fold (issue #131): the primary
+                // message is the fixed catalog wording; the DuckDB attach error
+                // rides in the technical-details fold, not the primary message.
+                detail: format!("failed to mount new snapshot: {e}"),
             });
         }
         // Release the swap file's handle so the promote step can rename it. This
@@ -351,7 +353,7 @@ impl super::Session {
             );
             let _ = fs::remove_file(&new_snap.file_path);
             return LoadOutcome::Error(LoadError::Other {
-                detail: format!("无法释放新快照（{e}）"),
+                detail: format!("failed to release new snapshot: {e}"),
             });
         }
 
@@ -370,7 +372,7 @@ impl super::Session {
             );
             let _ = fs::remove_file(&new_snap.file_path);
             return LoadOutcome::Error(LoadError::Other {
-                detail: format!("无法释放旧快照（{e}）"),
+                detail: format!("failed to release old snapshot: {e}"),
             });
         }
         // Old detached -- remove its file. Best-effort (mirrors rollback_excel):
@@ -413,7 +415,7 @@ impl super::Session {
             quote_ident(reference_name)
         )) {
             return LoadOutcome::Error(LoadError::Other {
-                detail: format!("无法挂载新快照（{e}）"),
+                detail: format!("failed to mount new snapshot: {e}"),
             });
         }
 

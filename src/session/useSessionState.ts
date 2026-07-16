@@ -19,7 +19,7 @@ import {
   setDatasetPrivacy,
   takePersistError,
 } from "../api";
-import { loadErrorMessage } from "../loadErrorMessage";
+import { loadErrorDisplay } from "../loadErrorDisplay";
 import { sessionKeys } from "./queryKeys";
 import {
   deriveWorkspaceContent,
@@ -369,7 +369,7 @@ export function useSessionState(
         } else if (result.kind === "NeedsGuidance") {
           setGuidance({ request: result.data, path });
         } else {
-          setError({ message: loadErrorMessage(result.data, intl), kind: "load" });
+          setError({ ...loadErrorDisplay(result.data, intl), kind: "load" });
         }
       } catch (e) {
         setError(appErrorFrom(e, intl, "load"));
@@ -412,7 +412,7 @@ export function useSessionState(
           setViewedResult(null);
           setPinnedToHistory(false);
         } else if (result.kind === "Error") {
-          setError({ message: loadErrorMessage(result.data, intl), kind: "load" });
+          setError({ ...loadErrorDisplay(result.data, intl), kind: "load" });
         } else {
           // NeedsGuidance should not recur after an explicit header pick.
           setError({
@@ -484,7 +484,7 @@ export function useSessionState(
             kind: "replace",
           });
         } else {
-          setError({ message: loadErrorMessage(result.data, intl), kind: "replace" });
+          setError({ ...loadErrorDisplay(result.data, intl), kind: "replace" });
         }
       } catch (e) {
         setError(appErrorFrom(e, intl, "replace"));
