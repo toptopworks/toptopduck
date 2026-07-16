@@ -76,5 +76,14 @@ export function loadErrorDisplay(
         }),
         detail: err.data.detail,
       };
+    // Exhaustiveness guard (issue #131): LoadError crosses IPC with no runtime
+    // validator (api.ts invoke<LoadOutcome> is unchecked), so a future backend
+    // variant would silently fall through to `undefined` and render a blank
+    // banner. Throw at the boundary instead -- mirrors every kind-dispatch
+    // formatter in api.ts (formatDuckLoadError, formatSaveError, ...).
+    default: {
+      const unhandled: never = err;
+      throw new Error(`unhandled LoadError kind: ${JSON.stringify(unhandled)}`);
+    }
   }
 }

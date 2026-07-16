@@ -1058,8 +1058,10 @@ fn replace_unknown_reference_is_rejected() {
     let mut session = Session::new().expect("session");
     load_ok(&mut session, &fixture("people.csv"));
     match session.replace_source("nope", &fixture("flat.json")) {
-        LoadOutcome::Error(_) => {}
-        other => panic!("expected Error, got {other:?}"),
+        LoadOutcome::Error(LoadError::UnknownDataset { reference_name }) => {
+            assert_eq!(reference_name, "nope");
+        }
+        other => panic!("expected UnknownDataset, got {other:?}"),
     }
     assert_eq!(session.list().len(), 1); // unchanged
     assert_eq!(session.snapshot_row_count("people").unwrap(), 5); // old still queryable
