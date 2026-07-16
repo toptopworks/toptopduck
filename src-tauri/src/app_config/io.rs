@@ -116,7 +116,8 @@ pub fn temp_path_for(target: &Path) -> Option<std::path::PathBuf> {
 pub fn write_at(target: &Path, cfg: &AppConfig) -> Result<(), WriteError> {
     let json =
         serde_json::to_string_pretty(cfg).map_err(|e| WriteError::Serialize(e.to_string()))?;
-    let tmp = temp_path_for(target).ok_or_else(|| WriteError::Io("无法推导临时文件路径".into()))?;
+    let tmp = temp_path_for(target)
+        .ok_or_else(|| WriteError::Io("could not derive temp file path".into()))?;
 
     {
         let mut file = fs::File::create(&tmp).map_err(|e| WriteError::Io(e.to_string()))?;
@@ -149,9 +150,9 @@ pub enum WriteError {
 impl std::fmt::Display for WriteError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::Serialize(d) => write!(f, "序列化 app-config 失败：{d}"),
-            Self::Io(d) => write!(f, "写 app-config 临时文件失败：{d}"),
-            Self::Rename(d) => write!(f, "替换 app-config 失败：{d}"),
+            Self::Serialize(d) => write!(f, "serialize app-config failed: {d}"),
+            Self::Io(d) => write!(f, "write app-config temp file failed: {d}"),
+            Self::Rename(d) => write!(f, "replace app-config failed: {d}"),
         }
     }
 }

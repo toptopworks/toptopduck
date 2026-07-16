@@ -95,6 +95,13 @@ const CATALOG_IDS: Readonly<Record<string, Readonly<Record<string, string | null
     Rename: "error.save.rename",
     AlreadyOpen: "error.duck.alreadyOpen",
   },
+  StoreCommandError: {
+    OpenConflict: "error.store.openConflict",
+    BlankName: "error.session.renameEmpty", // reuses rename_session's id
+    IoFailure: "error.store.ioFailure",
+    KeychainFailure: "error.store.keychainFailure",
+    ConfigWriteFailure: "error.store.configWriteFailure",
+  },
   RenameSessionError: {
     EmptyName: "error.session.renameEmpty",
   },

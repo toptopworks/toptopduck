@@ -11,8 +11,15 @@
 //! serde-structured (`#[serde(tag = "kind", content = "data")]`) so the
 //! frontend narrows on `kind` and renders a locale message -- the Chinese
 //! wording no longer crosses IPC. Session-AGNOSTIC commands (api key /
-//! provider / app config / recent file / session listing) still return
-//! `Result<T, String>` (their failures are not the typed session-error shape).
+//! provider / app config / recent file / session listing) return
+//! `Result<T, StoreCommandError>` for the cold-store subset (issue #130):
+//! [`StoreCommandError`] is serde-structured like [`SessionError`], so the
+//! frontend narrows on `kind` and renders a locale message -- the Chinese
+//! wording no longer crosses IPC. The cold-store subset covers `delete_session`
+//! / `rename_persisted_session` (a cross-session `.duck` file), the keychain
+//! commands, and `set_provider_config` / `set_app_config`. The remaining
+//! session-agnostic commands (read-only listing / has-key / recent-file) cannot
+//! fail with a user-facing refusal and keep returning `Result<T, String>`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,7 +35,7 @@ use crate::model::{
 };
 use crate::persistence::{list_session_metadata, SaveError, SessionMetadata};
 use crate::provider::live_config::LiveProviderConfig;
-use crate::session::{ResumeEvent, ResumeProgress, Session};
+use crate::session::{RenameSessionError, ResumeEvent, ResumeProgress, Session};
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
 
 /// ADR-0063: the close-and-wait-release variant's wait ceiling. Aligned to
@@ -37,6 +44,52 @@ use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore}
 /// so the user can retry; the single-writer gate is NOT weakened (the canonical
 /// key stays the sole release point in `Session::Drop`).
 const CLOSE_WAIT_RELEASE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// A session-AGNOSTIC cold-store command failed (issue #130). The cold-store
+/// commands -- `delete_session` / `rename_persisted_session` (a cross-session
+/// `.duck` file), `set_api_key` / `clear_api_key` (the OS keychain), and
+/// `set_provider_config` / `set_app_config` (an app-config write) -- reject with
+/// this typed enum instead of a free-text `String`, so the frontend renders each
+/// refusal through the locale catalog (ADR-0052 layer 2) and the Chinese wording
+/// no longer crosses IPC. Adjacently-tagged (`#[serde(tag = "kind", content =
+/// "data")]`) like [`SessionError`]; the top-level `kind` set is disjoint from
+/// every other typed IPC error's, so the frontend's kind dispatch is unambiguous.
+///
+/// `BlankName` wraps [`RenameSessionError`] so the blank-name refusal has ONE
+/// typed shape across `rename_session` (open) and `rename_persisted_session`
+/// (cold) -- the frontend renders the same catalog id for both. The three
+/// failure variants carry the English technical detail for the fold; user-facing
+/// wording lives in the catalog, not the backend string (ADR-0052).
+///
+/// `Display` is Rust-log-only -- NOT the IPC contract (the frontend reads the
+/// serde `kind`, never this string).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "data")]
+pub enum StoreCommandError {
+    /// A delete / cold-rename targeted a `.duck` path an open in-memory session
+    /// owns. The single-writer canonical-key gate refused it (ADR-0035 Decision
+    /// 3); the frontend closes the session first.
+    #[error("session is open; close it first")]
+    OpenConflict,
+    /// A cold-rename was given a blank name. Wraps
+    /// [`RenameSessionError::EmptyName`] (issue #130 AC: the blank-name refusal
+    /// is typed-identical to `rename_session`'s, not a second shape).
+    #[error("{0}")]
+    BlankName(RenameSessionError),
+    /// An underlying IO failure (canonicalize / read / atomic-save / file
+    /// remove) carrying the English technical detail for the fold.
+    #[error("{0}")]
+    IoFailure(String),
+    /// The OS keychain access failed (ADR-0029 trust root). Carries the English
+    /// technical detail; no key is ever leaked in the message.
+    #[error("{0}")]
+    KeychainFailure(String),
+    /// An app-config write failed (serialize / temp-write / rename). Carries the
+    /// English technical detail for the fold; the three WriteError stages are
+    /// one refusal to the user, not three messages.
+    #[error("{0}")]
+    ConfigWriteFailure(String),
+}
 
 /// Reject a mutating command while THIS session is resuming (ADR-0053, made
 /// per-session by ADR-0056). `open_duck(session_id, ...)` rebuilds that one
@@ -509,8 +562,12 @@ pub fn has_api_key(live: State<'_, LiveProviderConfig>) -> Result<bool, String> 
 /// Store the API key the frontend collected (ADR-0029: a one-shot
 /// frontend-to-Rust transfer; the key is never returned back across IPC).
 #[tauri::command]
-pub fn set_api_key(live: State<'_, LiveProviderConfig>, key: String) -> Result<(), String> {
+pub fn set_api_key(
+    live: State<'_, LiveProviderConfig>,
+    key: String,
+) -> Result<(), StoreCommandError> {
     live.set_key(&key)
+        .map_err(StoreCommandError::KeychainFailure)
 }
 
 /// Remove the stored API key. Idempotent: a missing entry is success; a real
@@ -518,8 +575,8 @@ pub fn set_api_key(live: State<'_, LiveProviderConfig>, key: String) -> Result<(
 /// come out. After a successful clear, `has_api_key` is false and the next turn
 /// refuses honestly as not-wired.
 #[tauri::command]
-pub fn clear_api_key(live: State<'_, LiveProviderConfig>) -> Result<(), String> {
-    live.clear_key()
+pub fn clear_api_key(live: State<'_, LiveProviderConfig>) -> Result<(), StoreCommandError> {
+    live.clear_key().map_err(StoreCommandError::KeychainFailure)
 }
 
 /// Read the effective provider endpoint + whether a key is set (ADR-0019/0029/
@@ -546,10 +603,12 @@ pub fn get_provider_config(
 pub fn set_provider_config(
     live: State<'_, LiveProviderConfig>,
     config: ProviderConfig,
-) -> Result<ProviderConfigView, String> {
+) -> Result<ProviderConfigView, StoreCommandError> {
     let mut cfg = live.load();
     cfg.provider = config;
-    let stored = live.store(cfg).map_err(|e| e.to_string())?;
+    let stored = live
+        .store(cfg)
+        .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))?;
     Ok(ProviderConfigView {
         base_url: stored.provider.base_url,
         model: stored.provider.model,
@@ -584,8 +643,9 @@ pub fn get_app_config(live: State<'_, LiveProviderConfig>) -> Result<AppConfig, 
 pub fn set_app_config(
     live: State<'_, LiveProviderConfig>,
     config: AppConfig,
-) -> Result<AppConfig, String> {
-    live.store(config).map_err(|e| e.to_string())
+) -> Result<AppConfig, StoreCommandError> {
+    live.store(config)
+        .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))
 }
 
 /// Record a recently-opened `.duck` path into the app-config recent-files list
@@ -648,11 +708,11 @@ pub async fn list_sessions(
 pub async fn delete_session(
     live: State<'_, LiveProviderConfig>,
     path: String,
-) -> Result<(), String> {
+) -> Result<(), StoreCommandError> {
     use crate::persistence::{canonicalize_duck, release, try_acquire};
     let live = live.inner().clone();
     let trimmed = path.trim().to_string();
-    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), StoreCommandError> {
         if trimmed.is_empty() {
             return Ok(());
         }
@@ -670,12 +730,12 @@ pub async fn delete_session(
         };
         // Gate: a held canonical key means an open session owns this path.
         if !try_acquire(&canonical) {
-            return Err("该会话已打开，请先关闭再删除".to_string());
+            return Err(StoreCommandError::OpenConflict);
         }
         let outcome = match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("删除 .duck 失败：{e}")),
+            Err(e) => Err(StoreCommandError::IoFailure(e.to_string())),
         };
         release(&canonical);
         // Drop from recent_files only when the file is actually gone -- a
@@ -687,7 +747,7 @@ pub async fn delete_session(
         outcome
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| StoreCommandError::IoFailure(e.to_string()))?
 }
 
 /// Rename the OPEN session bound to `session_id` (ADR-0060, issue #81). Sets the
@@ -717,30 +777,35 @@ pub fn rename_session(
 /// sessions via `rename_session` by id). Runs the file IO off the async/UI
 /// thread (AC8), like `list_sessions`.
 #[tauri::command]
-pub async fn rename_persisted_session(path: String, new_name: String) -> Result<(), String> {
+pub async fn rename_persisted_session(
+    path: String,
+    new_name: String,
+) -> Result<(), StoreCommandError> {
     use crate::persistence::{canonicalize_duck, read_duck, release, save_atomic, try_acquire};
     let path = PathBuf::from(path);
-    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), StoreCommandError> {
         let trimmed = new_name.trim();
         if trimmed.is_empty() {
-            return Err("会话名不能为空".to_string());
+            return Err(StoreCommandError::BlankName(RenameSessionError::EmptyName));
         }
-        let canonical = canonicalize_duck(&path).map_err(|e| e.to_string())?;
+        let canonical =
+            canonicalize_duck(&path).map_err(|e| StoreCommandError::IoFailure(e.to_string()))?;
         // Gate: try_acquire returns false when the canonical path is already
         // held -- an open session owns it. Refuse rather than race its writer.
         if !try_acquire(&canonical) {
-            return Err("该会话已打开，请在打开的会话中重命名".to_string());
+            return Err(StoreCommandError::OpenConflict);
         }
-        let outcome = (|| -> Result<(), String> {
-            let mut recipe = read_duck(&path).map_err(|e| e.to_string())?;
+        let outcome = (|| -> Result<(), StoreCommandError> {
+            let mut recipe =
+                read_duck(&path).map_err(|e| StoreCommandError::IoFailure(e.to_string()))?;
             recipe.session_name = trimmed.to_string();
-            save_atomic(&path, &recipe).map_err(|e| e.to_string())
+            save_atomic(&path, &recipe).map_err(|e| StoreCommandError::IoFailure(e.to_string()))
         })();
         release(&canonical);
         outcome
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| StoreCommandError::IoFailure(e.to_string()))?
 }
 
 // --- Cross-session persistence (issue #48, ADR-0034/0036) -------------------

@@ -32,6 +32,7 @@ pub use app_config::{
     WindowGeometry, APP_CONFIG_FORMAT_VERSION, RECENT_FILES_CAP,
 };
 pub use cancel::CancelToken;
+pub use commands::StoreCommandError;
 pub use model::{
     ChartKind, ColumnSchema, DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet,
     LoadError, LoadOutcome, ProviderConfig, ProviderConfigView, RectifyProvenance,

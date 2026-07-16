@@ -30,7 +30,7 @@ use std::path::PathBuf;
 
 use toptopduck_lib::{
     DuckLoadError, MigrationError, RemoveSourceError, RenameError, RenameSessionError, ResumeError,
-    SaveError, SessionError, TurnError, TurnFailure,
+    SaveError, SessionError, StoreCommandError, TurnError, TurnFailure,
 };
 
 /// Read the serde wire `kind` tag off one instance. Every enum here is
@@ -149,6 +149,16 @@ fn save_error() -> Vec<SaveError> {
     ]
 }
 
+fn store_command_error() -> Vec<StoreCommandError> {
+    vec![
+        StoreCommandError::OpenConflict,
+        StoreCommandError::BlankName(RenameSessionError::EmptyName),
+        StoreCommandError::IoFailure(String::new()),
+        StoreCommandError::KeychainFailure(String::new()),
+        StoreCommandError::ConfigWriteFailure(String::new()),
+    ]
+}
+
 fn rename_session_error() -> Vec<RenameSessionError> {
     vec![RenameSessionError::EmptyName]
 }
@@ -177,6 +187,7 @@ fn variant_kind_map() -> BTreeMap<&'static str, Vec<String>> {
         ("ResumeError", to_kinds(&resume_error())),
         ("SaveError", to_kinds(&save_error())),
         ("SessionError", to_kinds(&session_error())),
+        ("StoreCommandError", to_kinds(&store_command_error())),
         ("TurnError", to_kinds(&turn_error())),
         ("TurnFailure", to_kinds(&turn_failure())),
     ] {

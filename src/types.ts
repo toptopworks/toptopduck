@@ -111,6 +111,22 @@ export type SaveError =
   | { kind: "Rename"; data: string }
   | { kind: "AlreadyOpen"; data: string };
 
+// Why a session-agnostic cold-store command failed (issue #130). Mirrors the
+// Rust `StoreCommandError` (serde adjacently-tagged). Rejects from
+// delete_session / rename_persisted_session (a cross-session .duck file),
+// set_api_key / clear_api_key (the OS keychain), and set_provider_config /
+// set_app_config (an app-config write). BlankName wraps RenameSessionError so
+// the blank-name refusal matches rename_session's (one shape, one catalog id);
+// the three failure variants carry the English technical detail under data for
+// the fold. The top-level kind set is disjoint from SessionError / SaveError,
+// so fmtError's kind dispatch is unambiguous.
+export type StoreCommandError =
+  | { kind: "OpenConflict" }
+  | { kind: "BlankName"; data: RenameSessionError }
+  | { kind: "IoFailure"; data: string }
+  | { kind: "KeychainFailure"; data: string }
+  | { kind: "ConfigWriteFailure"; data: string };
+
 // Per-dataset privacy controls (ADR-0011, issue #9 slice 5): mirror of the Rust
 // `DatasetPrivacy`. The config rides the descriptor (single source of truth),
 // persists in the working set, and is readable by the (future, PRD #1) window

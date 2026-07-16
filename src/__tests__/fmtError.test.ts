@@ -2,7 +2,7 @@ import { createIntl } from "react-intl";
 import { describe, expect, it } from "vitest";
 
 import { errorDetail, fmtError } from "../api";
-import type { ResumeError, SaveError, SessionError } from "../types";
+import type { ResumeError, SaveError, SessionError, StoreCommandError } from "../types";
 
 // An IntlShape carrying the typed-error message ids (mirroring the locale
 // files) so fmtError resolves kind -> catalog wording. This pins the kind ->
@@ -40,6 +40,10 @@ const intl = createIntl({
     "error.session.notFound": "Session not found or closed",
     "error.session.renameEmpty": "Session name must not be empty",
     "error.session.resuming": "Session is resuming, please try again shortly",
+    "error.store.configWriteFailure": "Failed to save settings",
+    "error.store.ioFailure": "A file operation failed",
+    "error.store.keychainFailure": "Failed to access the OS keychain",
+    "error.store.openConflict": "This session is currently open; close it first",
     "error.turn.execute": "Failed to execute the query",
   },
 });
@@ -235,6 +239,39 @@ describe("fmtError — SaveError", () => {
   });
 });
 
+describe("fmtError — StoreCommandError", () => {
+  it("renders each StoreCommandError kind via the locale catalog (issue #130)", () => {
+    // The cold-store commands (delete / rename-persisted / keychain / provider
+    // + app config) reject with a typed StoreCommandError. BlankName reuses the
+    // renameEmpty id so the blank-name refusal matches rename_session's.
+    const cases: Array<[StoreCommandError, string]> = [
+      [{ kind: "OpenConflict" }, "This session is currently open; close it first"],
+      [
+        { kind: "BlankName", data: { kind: "EmptyName" } },
+        "Session name must not be empty",
+      ],
+      [{ kind: "IoFailure", data: "io-fail" }, "A file operation failed"],
+      [{ kind: "KeychainFailure", data: "kc-fail" }, "Failed to access the OS keychain"],
+      [{ kind: "ConfigWriteFailure", data: "cfg-fail" }, "Failed to save settings"],
+    ];
+    for (const [err, expected] of cases) {
+      expect(fmtError(err, intl)).toBe(expected);
+    }
+  });
+
+  it("does not leak the failure detail into the rendered message (ADR-0029)", () => {
+    expect(fmtError({ kind: "IoFailure", data: "sk-ant-secret" }, intl)).toBe(
+      "A file operation failed",
+    );
+    expect(fmtError({ kind: "KeychainFailure", data: "sk-ant-secret" }, intl)).toBe(
+      "Failed to access the OS keychain",
+    );
+    expect(fmtError({ kind: "ConfigWriteFailure", data: "sk-ant-secret" }, intl)).toBe(
+      "Failed to save settings",
+    );
+  });
+});
+
 describe("fmtError — fallback", () => {
   it("falls back for non-typed rejects (JS Error / string / opaque object)", () => {
     expect(fmtError(new Error("boom"), intl)).toBe("boom");
@@ -309,6 +346,17 @@ describe("errorDetail", () => {
     expect(errorDetail({ kind: "Io", data: "io-fail" })).toBe("io-fail");
     expect(errorDetail({ kind: "Rename", data: "rename-fail" })).toBe("rename-fail");
     expect(errorDetail({ kind: "AlreadyOpen", data: "/x/a.duck" })).toBe("/x/a.duck");
+  });
+
+  it("extracts StoreCommandError failure detail for the fold (issue #130)", () => {
+    expect(errorDetail({ kind: "IoFailure", data: "io-fail" })).toBe("io-fail");
+    expect(errorDetail({ kind: "KeychainFailure", data: "kc-fail" })).toBe("kc-fail");
+    expect(errorDetail({ kind: "ConfigWriteFailure", data: "cfg-fail" })).toBe("cfg-fail");
+  });
+
+  it("returns null for self-contained StoreCommandError kinds (issue #130)", () => {
+    expect(errorDetail({ kind: "OpenConflict" })).toBeNull();
+    expect(errorDetail({ kind: "BlankName", data: { kind: "EmptyName" } })).toBeNull();
   });
 
   it("extracts SessionError::Turn::Execute detail and nulls UnknownDataset (issue #121)", () => {
