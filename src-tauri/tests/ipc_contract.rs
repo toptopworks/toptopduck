@@ -310,6 +310,36 @@ fn rename_session_error_serializes_adjacently_tagged() {
 }
 
 #[test]
+fn store_command_error_serializes_adjacently_tagged() {
+    // StoreCommandError (cold-store commands, issue #130) crosses IPC as the
+    // reject of delete_session / rename_persisted_session / keychain / provider
+    // + app config. OpenConflict is a unit variant; BlankName nests
+    // RenameSessionError (the blank-name refusal matches rename_session's
+    // shape); the three failure variants carry the English detail under data.
+    use toptopduck_lib::{RenameSessionError, StoreCommandError};
+    assert_wire(
+        &StoreCommandError::OpenConflict,
+        r#"{"kind":"OpenConflict"}"#,
+    );
+    assert_wire(
+        &StoreCommandError::BlankName(RenameSessionError::EmptyName),
+        r#"{"kind":"BlankName","data":{"kind":"EmptyName"}}"#,
+    );
+    assert_wire(
+        &StoreCommandError::IoFailure("disk full".into()),
+        r#"{"kind":"IoFailure","data":"disk full"}"#,
+    );
+    assert_wire(
+        &StoreCommandError::KeychainFailure("locked".into()),
+        r#"{"kind":"KeychainFailure","data":"locked"}"#,
+    );
+    assert_wire(
+        &StoreCommandError::ConfigWriteFailure("rename busy".into()),
+        r#"{"kind":"ConfigWriteFailure","data":"rename busy"}"#,
+    );
+}
+
+#[test]
 fn text_kind_serializes_as_a_bare_variant_string() {
     // TextKind is a plain (untagged) enum, so each variant crosses IPC as its
     // bare name string -- the shape src/types.ts mirrors for the textual

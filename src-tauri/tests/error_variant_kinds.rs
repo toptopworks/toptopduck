@@ -30,7 +30,7 @@ use std::path::PathBuf;
 
 use toptopduck_lib::{
     DuckLoadError, MigrationError, RemoveSourceError, RenameError, RenameSessionError, ResumeError,
-    SaveError, SessionError, TurnError, TurnFailure,
+    SaveError, SessionError, StoreCommandError, TurnError, TurnFailure,
 };
 
 /// Read the serde wire `kind` tag off one instance. Every enum here is
@@ -149,6 +149,16 @@ fn save_error() -> Vec<SaveError> {
     ]
 }
 
+fn store_command_error() -> Vec<StoreCommandError> {
+    vec![
+        StoreCommandError::OpenConflict,
+        StoreCommandError::BlankName(RenameSessionError::EmptyName),
+        StoreCommandError::IoFailure(String::new()),
+        StoreCommandError::KeychainFailure(String::new()),
+        StoreCommandError::ConfigWriteFailure(String::new()),
+    ]
+}
+
 fn rename_session_error() -> Vec<RenameSessionError> {
     vec![RenameSessionError::EmptyName]
 }
@@ -177,6 +187,7 @@ fn variant_kind_map() -> BTreeMap<&'static str, Vec<String>> {
         ("ResumeError", to_kinds(&resume_error())),
         ("SaveError", to_kinds(&save_error())),
         ("SessionError", to_kinds(&session_error())),
+        ("StoreCommandError", to_kinds(&store_command_error())),
         ("TurnError", to_kinds(&turn_error())),
         ("TurnFailure", to_kinds(&turn_failure())),
     ] {
@@ -227,4 +238,37 @@ fn error_variant_kinds_match_golden() {
          then add the matching catalog id + frontend format* switch case.",
         golden_path.display(),
     );
+}
+
+/// The frontend `fmtError` (src/api.ts) narrows a typed reject on its top-level
+/// `kind` via structural guards in a fixed order -- `isSessionError`, then
+/// `isSaveError`, then `isStoreCommandError`. A shared top-level `kind` between
+/// any two of these enums would let the SECOND guard silently never fire and
+/// mis-route the reject to the wrong formatter. This pins the disjointness the
+/// dispatch relies on (the rustdoc claim on each enum), promoting it from a
+/// comment to a CI gate.
+///
+/// Scoped to the three TOP-LEVEL reject enums only. Nested sub-errors
+/// legitimately reuse names (DuckLoadError::Io and SaveError::Io both exist)
+/// and never compete at the fmtError top level, so a full 11-enum disjoint
+/// check would false-positive on intentional reuse.
+#[test]
+fn top_level_reject_kind_sets_are_disjoint() {
+    let map = variant_kind_map();
+    let top_level = ["SessionError", "SaveError", "StoreCommandError"];
+    // kind -> first enum that owns it; a second owner is a dispatch collision.
+    let mut first_owner: BTreeMap<String, &str> = BTreeMap::new();
+    for name in top_level {
+        for kind in map
+            .get(name)
+            .unwrap_or_else(|| panic!("top-level reject enum {name} missing from variant_kind_map"))
+        {
+            if let Some(prev) = first_owner.insert(kind.clone(), name) {
+                panic!(
+                    "top-level reject kind `{kind}` is shared by {prev} and {name}; \
+                     fmtError's kind dispatch would silently mis-route it"
+                );
+            }
+        }
+    }
 }

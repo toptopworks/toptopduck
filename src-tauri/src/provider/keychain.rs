@@ -123,11 +123,12 @@ impl KeychainStore {
     }
 }
 
-/// Map a keyring error to a user-facing string. The OS keychain is the trust
-/// root for the key, so an access failure is surfaced plainly (no key leaked in
-/// the message).
+/// Map a keyring error to an English technical detail. Rides
+/// [`StoreCommandError::KeychainFailure`](crate::commands::StoreCommandError)
+/// (issue #130) into the frontend's technical-details fold; the user-facing
+/// wording lives in the catalog, not here. No key is leaked (ADR-0029).
 fn keychain_err(e: keyring::Error) -> String {
-    format!("系统钥匙串访问失败：{e}")
+    format!("keychain access failed: {e}")
 }
 
 /// Test double for [`ProviderConfigSource`]: fixed key + base URL + model +

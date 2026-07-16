@@ -20,6 +20,7 @@ import type {
   SessionError,
   SessionMetadata,
   SheetGuidance,
+  StoreCommandError,
   ThreadEntry,
   TurnError,
   TurnFailure,
@@ -305,6 +306,33 @@ function isSaveError(e: unknown): e is SaveError {
   }
 }
 
+// Narrow an unknown value to a StoreCommandError (issue #130). Rejects from the
+// cold-store commands (delete / rename-persisted / keychain / provider + app
+// config). Same L1 defensive shape as the other guards: a variant's data is
+// verified before the guard promises it. BlankName recurses RenameSessionError.
+function isStoreCommandError(e: unknown): e is StoreCommandError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "OpenConflict":
+      return true;
+    case "BlankName": {
+      const d = (e as { data?: unknown }).data;
+      return (
+        typeof d === "object" &&
+        d !== null &&
+        (d as { kind?: unknown }).kind === "EmptyName"
+      );
+    }
+    case "IoFailure":
+    case "KeychainFailure":
+    case "ConfigWriteFailure":
+      return typeof (e as { data?: unknown }).data === "string";
+    default:
+      return false;
+  }
+}
+
 // Narrow an unknown value to a RemoveSourceError (issue #121). Reached via
 // isSessionError's RemoveSource branch (remove_source / remove_active_source
 // rejects). IsActive carries a struct; the newtype variants carry a string.
@@ -477,6 +505,46 @@ function formatSaveError(e: SaveError, intl: IntlShape): string {
     default: {
       const unhandled: never = e;
       throw new Error(`unhandled SaveError kind: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+// Format a StoreCommandError through the locale catalog (issue #130). BlankName
+// reuses error.session.renameEmpty (the same id as SessionError::RenameSession)
+// so the blank-name refusal has one user-facing shape across rename_session
+// and rename_persisted_session. The three failure variants render a generic
+// message; their English data rides the technical-details fold (ADR-0029: no
+// key leaks).
+function formatStoreCommandError(e: StoreCommandError, intl: IntlShape): string {
+  switch (e.kind) {
+    case "OpenConflict":
+      return intl.formatMessage({
+        id: "error.store.openConflict",
+        defaultMessage: "This session is currently open; close it first",
+      });
+    case "BlankName":
+      return intl.formatMessage({
+        id: "error.session.renameEmpty",
+        defaultMessage: "Session name must not be empty",
+      });
+    case "IoFailure":
+      return intl.formatMessage({
+        id: "error.store.ioFailure",
+        defaultMessage: "A file operation failed",
+      });
+    case "KeychainFailure":
+      return intl.formatMessage({
+        id: "error.store.keychainFailure",
+        defaultMessage: "Failed to access the OS keychain",
+      });
+    case "ConfigWriteFailure":
+      return intl.formatMessage({
+        id: "error.store.configWriteFailure",
+        defaultMessage: "Failed to save settings",
+      });
+    default: {
+      const unhandled: never = e;
+      throw new Error(`unhandled StoreCommandError kind: ${JSON.stringify(unhandled)}`);
     }
   }
 }
@@ -656,6 +724,9 @@ export function fmtError(e: unknown, intl: IntlShape): string {
   if (isSaveError(e)) {
     return formatSaveError(e, intl);
   }
+  if (isStoreCommandError(e)) {
+    return formatStoreCommandError(e, intl);
+  }
   if (e instanceof Error) return e.message;
   if (typeof e === "string") return e;
   // Opaque object: stringify best-effort. A cyclic reject would throw, so fall
@@ -671,8 +742,9 @@ export function fmtError(e: unknown, intl: IntlShape): string {
 // (issue #119 / #120). Returns the underlying string from a typed error's
 // `data` -- SessionError::Engine, ResumeError::Engine / SourceMissing / Replay
 // / AlreadyOpen, the nested DuckLoadError io/parse/migration detail, or a
-// SaveError's io/serde/rename detail / AlreadyOpen path -- and null for every
-// variant whose message is already self-contained (so the fold is omitted).
+// SaveError's io/serde/rename detail / AlreadyOpen path, or a StoreCommandError's
+// io/keychain/config-write detail -- and null for every variant whose message
+// is already self-contained (so the fold is omitted).
 // fmtError keeps this detail OUT of the primary message; ADR-0029 holds -- the
 // Rust side is audited to keep secrets out of these payloads (the resume /
 // save paths are keychain-free) -- so the raw detail is safe to surface.
@@ -687,6 +759,19 @@ export function errorDetail(e: unknown): string | null {
     // Every SaveError variant carries a string under data (the detail or the
     // AlreadyOpen path) -- all useful in the fold.
     return e.data;
+  }
+  if (isStoreCommandError(e)) {
+    // The three failure variants carry the English technical detail for the
+    // fold; OpenConflict / BlankName are self-contained (the message already
+    // names the refusal).
+    if (
+      e.kind === "IoFailure" ||
+      e.kind === "KeychainFailure" ||
+      e.kind === "ConfigWriteFailure"
+    ) {
+      return e.data;
+    }
+    return null;
   }
   return null;
 }

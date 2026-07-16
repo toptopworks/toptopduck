@@ -56,11 +56,15 @@ pub enum SaveError {
 impl std::fmt::Display for SaveError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::Serialize(d) => write!(f, "序列化 .duck 失败：{d}"),
-            Self::Io(d) => write!(f, "写 .duck 临时文件失败：{d}"),
-            Self::Rename(d) => write!(f, "替换 .duck 失败：{d}"),
+            Self::Serialize(d) => write!(f, "serialize .duck failed: {d}"),
+            Self::Io(d) => write!(f, "write .duck temp file failed: {d}"),
+            Self::Rename(d) => write!(f, "replace .duck failed: {d}"),
             Self::AlreadyOpen(p) => {
-                write!(f, "该 .duck 已在本进程打开，不能重复保存：{}", p.display())
+                write!(
+                    f,
+                    "the .duck is already open in this process: {}",
+                    p.display()
+                )
             }
         }
     }
@@ -108,15 +112,15 @@ impl From<crate::persistence::migration::MigrationError> for LoadError {
 impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::Io(d) => write!(f, "读取 .duck 失败：{d}"),
-            Self::Parse(d) => write!(f, "解析 .duck 失败：{d}"),
+            Self::Io(d) => write!(f, "read .duck failed: {d}"),
+            Self::Parse(d) => write!(f, "parse .duck failed: {d}"),
             Self::VersionMismatch { found, supported } => write!(
                 f,
                 "此 .duck 由更高版本（format_version={found}）制作，\
                  当前 app 仅支持 {supported}，请升级 app 后再打开"
             ),
-            // Delegate to MigrationError's Display (Chinese, names the failing
-            // step / field) -- preserve the typed error instead of flattening.
+            // Delegate to MigrationError's Display (names the failing step /
+            // field) -- preserve the typed error instead of flattening.
             Self::Migration(e) => write!(f, "{e}"),
         }
     }
@@ -142,7 +146,8 @@ pub fn save_atomic(target: &Path, recipe: &Recipe) -> Result<(), SaveError> {
     // cleanly in a text editor / git diff.
     let json =
         serde_json::to_string_pretty(recipe).map_err(|e| SaveError::Serialize(e.to_string()))?;
-    let tmp = temp_path_for(target).ok_or_else(|| SaveError::Io("无法推导临时文件路径".into()))?;
+    let tmp = temp_path_for(target)
+        .ok_or_else(|| SaveError::Io("could not derive temp file path".into()))?;
 
     {
         let mut file = fs::File::create(&tmp).map_err(|e| SaveError::Io(e.to_string()))?;

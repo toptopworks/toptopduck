@@ -50,6 +50,13 @@
     "Resuming",
     "Turn"
   ],
+  "StoreCommandError": [
+    "BlankName",
+    "ConfigWriteFailure",
+    "IoFailure",
+    "KeychainFailure",
+    "OpenConflict"
+  ],
   "TurnError": [
     "Execute",
     "UnknownDataset"
