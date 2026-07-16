@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { FormattedMessage } from "react-intl";
 import type { DatasetDescriptor } from "../types";
 import {
   AlertDialog,
@@ -51,9 +52,18 @@ export function ActiveSourceDeleteDialog({
     <AlertDialog defaultOpen>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>删除焦点源「{target.display_name}」</AlertDialogTitle>
+          <AlertDialogTitle>
+            <FormattedMessage
+              id="activeSourceDelete.title"
+              defaultMessage="Remove focus source {name}"
+              values={{ name: target.display_name }}
+            />
+          </AlertDialogTitle>
           <AlertDialogDescription>
-            此源是当前焦点表。删除后请在剩余源中选一个继续分析（或中止，工作集保持不变）。
+            <FormattedMessage
+              id="activeSourceDelete.description"
+              defaultMessage="This source is the current focus table. After removing it, pick one of the remaining sources to continue (or cancel — the working set stays unchanged)."
+            />
           </AlertDialogDescription>
         </AlertDialogHeader>
         <ul className="dialog-list">
@@ -73,7 +83,9 @@ export function ActiveSourceDeleteDialog({
           ))}
         </ul>
         <AlertDialogFooter>
-          <AlertDialogCancel onClick={onCancel}>中止</AlertDialogCancel>
+          <AlertDialogCancel onClick={onCancel}>
+            <FormattedMessage id="activeSourceDelete.cancel" defaultMessage="Cancel" />
+          </AlertDialogCancel>
           <AlertDialogAction
             onClick={(e) => {
               if (selected) {
@@ -87,7 +99,7 @@ export function ActiveSourceDeleteDialog({
             }}
             disabled={!selected}
           >
-            继续
+            <FormattedMessage id="activeSourceDelete.confirm" defaultMessage="Continue" />
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
