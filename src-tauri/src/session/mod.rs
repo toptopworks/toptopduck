@@ -1989,7 +1989,7 @@ impl Session {
         let path = self
             .duck_path
             .clone()
-            .ok_or_else(|| SaveError::Io("未绑定 .duck，无法解决冲突".into()))?;
+            .ok_or_else(|| SaveError::Io("no .duck path bound; cannot resolve conflict".into()))?;
         let recipe = self.build_recipe();
         save_atomic(&path, &recipe)?;
         // save succeeded -- the conflict IS resolved (disk now holds in-memory

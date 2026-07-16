@@ -217,9 +217,9 @@ impl std::fmt::Display for ProviderError {
         match self {
             Self::NotWired => write!(
                 f,
-                "未配置有效的 LLM 提供方（请在设置中配置 Anthropic API key 后重试）"
+                "no LLM provider wired (configure an Anthropic API key, then retry)"
             ),
-            Self::Unavailable(detail) => write!(f, "LLM 提供方调用失败：{detail}"),
+            Self::Unavailable(detail) => write!(f, "LLM provider call failed: {detail}"),
         }
     }
 }

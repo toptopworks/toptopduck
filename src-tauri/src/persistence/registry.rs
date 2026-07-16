@@ -45,12 +45,12 @@ pub fn canonicalize_duck(path: &Path) -> Result<PathBuf, std::io::Error> {
     if let Ok(canonical) = path.canonicalize() {
         return Ok(canonical);
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "无父目录"))?;
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent directory")
+    })?;
     let file_name = path
         .file_name()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "无文件名"))?;
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no file name"))?;
     let parent_canonical = parent.canonicalize()?;
     Ok(parent_canonical.join(file_name))
 }
