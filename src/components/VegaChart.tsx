@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { useIntl } from "react-intl";
 import embed, { type VisualizationSpec } from "vega-embed";
 import type { Result } from "vega-embed";
 
@@ -8,6 +9,7 @@ import {
   onThemeChange,
   type VegaThemeConfig,
 } from "../theme/vega-theme";
+import type { VizFailureReason } from "../viz";
 
 // Vega-Lite chart renderer (ADR-0016/0033/0050). Owns three concerns that the
 // old inline ResultView logic did not:
@@ -61,12 +63,15 @@ function vegaConfig(theme: VegaThemeConfig): object {
 interface VegaChartProps {
   spec: VisualizationSpec;
   /** Fired when Vega-Embed rejects (render failure). The caller swaps in the
-   * degradation disclosure (ADR-0033). Stable identity keeps the embed effect
-   * from re-running; a useState setter is naturally stable. */
-  onError: (reason: string) => void;
+   * degradation disclosure (ADR-0033). Carries a typed `{ kind: "render" }`
+   * reason so the disclosure renders via the same catalog path as a decode
+   * failure (ADR-0052 i18n closeout, issue #138). Stable identity keeps the
+   * embed effect from re-running; a useState setter is naturally stable. */
+  onError: (reason: VizFailureReason) => void;
 }
 
 export function VegaChart({ spec, onError }: VegaChartProps) {
+  const intl = useIntl();
   const containerRef = useRef<HTMLDivElement>(null);
   // The most recent embed result; finalized on re-embed / unmount / theme swap.
   const viewRef = useRef<Result | null>(null);
@@ -99,12 +104,12 @@ export function VegaChart({ spec, onError }: VegaChartProps) {
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        // Log the full error for diagnostics (ADR-0029): a bare "渲染出错"
-        // discarded the cause, leaving ops unable to tell a bad spec from a
-        // canvas/WebGL failure. Forward err.message so the degrade disclosure
-        // (ADR-0033) carries the actual cause; non-Error rejections fall back.
+        // Log the full error for diagnostics (ADR-0029): the disclosure only
+        // carries a typed { kind: "render" } reason (ADR-0052 i18n closeout), so
+        // the engine detail that distinguishes a bad spec from a canvas/WebGL
+        // failure lives here in the log, not in the user-facing banner.
         log.warn("viz", "vega-embed render failed", err);
-        onErrorRef.current(err instanceof Error && err.message ? err.message : "渲染出错");
+        onErrorRef.current({ kind: "render" });
       });
     return () => {
       cancelled = true;
@@ -139,7 +144,7 @@ export function VegaChart({ spec, onError }: VegaChartProps) {
         .catch((err: unknown) => {
           if (unmounted) return;
           log.warn("viz", "vega-embed theme re-embed failed", err);
-          onErrorRef.current(err instanceof Error && err.message ? err.message : "渲染出错");
+          onErrorRef.current({ kind: "render" });
         });
     });
     return () => {
@@ -164,5 +169,11 @@ export function VegaChart({ spec, onError }: VegaChartProps) {
     return () => ro.disconnect();
   }, []);
 
-  return <div ref={containerRef} className="viz-chart" aria-label="图表" />;
+  return (
+    <div
+      ref={containerRef}
+      className="viz-chart"
+      aria-label={intl.formatMessage({ id: "viz.chartLabel", defaultMessage: "Chart" })}
+    />
+  );
 }

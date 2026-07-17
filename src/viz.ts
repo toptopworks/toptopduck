@@ -25,13 +25,32 @@ const WHITELISTED_MARKS: ReadonlySet<string> = new Set([
   "arc", // pie
 ]);
 
+/** A typed viz-degradation reason (ADR-0052 i18n closeout, issue #138). The
+ * decode pre-check produces the first three kinds; the `render` kind is added
+ * by VegaChart when Vega-Embed rejects. Keeping the reason structured (not a
+ * bare localized string) lets the disclosure layer pick the catalog message per
+ * kind in the active locale, so no Chinese leaks into an en-US disclosure. The
+ * `mark` on `unsupportedMark` is engine output (layer 4 -- never translated),
+ * interpolated as-is into the catalog message. */
+export type VizFailureReason =
+  | { kind: "invalidJson" }
+  | { kind: "notObject" }
+  | { kind: "unsupportedMark"; mark: string }
+  | { kind: "render" };
+
+/** The decode pre-check can never produce `render` -- that path belongs to
+ * VegaChart. Narrowing the failure variant to the decode-only subset documents
+ * that boundary at the type level (and keeps ResultView's exhaustiveness check
+ * honest about which kinds `decodeViz` can actually emit). */
+export type VizDecodeReason = Exclude<VizFailureReason, { kind: "render" }>;
+
 /** The outcome of decoding one provider viz spec. The `ok` variant carries the
  * parsed Vega-Lite object ready to render; the failure variant carries the
- * user-facing reason the chart could not be shown (so the ResultView can
- * disclose it honestly, ADR-0033 -- silent degradation is a silent lie). */
+ * typed reason the chart could not be shown (so the ResultView can disclose it
+ * honestly, ADR-0033 -- silent degradation is a silent lie). */
 export type DecodeResult =
   | { ok: true; spec: object }
-  | { ok: false; reason: string };
+  | { ok: false; reason: VizDecodeReason };
 
 /** Parse + whitelist-check a provider viz spec (ADR-0016/0033). A null/missing
  * viz is the default table turn (NOT a degradation) and is handled by the
@@ -42,17 +61,14 @@ export function decodeViz(viz: VizSpec): DecodeResult {
   try {
     parsed = JSON.parse(viz.spec);
   } catch {
-    return { ok: false, reason: "规格不是合法的 JSON" };
+    return { ok: false, reason: { kind: "invalidJson" } };
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return { ok: false, reason: "规格不是 Vega-Lite 对象" };
+    return { ok: false, reason: { kind: "notObject" } };
   }
   const mark = readMark(parsed);
   if (mark !== null && !WHITELISTED_MARKS.has(mark)) {
-    return {
-      ok: false,
-      reason: `图表类型「${mark}」不在支持的范围内（仅支持柱/线/面积/散点/饼图）`,
-    };
+    return { ok: false, reason: { kind: "unsupportedMark", mark } };
   }
   return { ok: true, spec: parsed };
 }

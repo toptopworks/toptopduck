@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { FormattedMessage, useIntl } from "react-intl";
+import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import { describeReject, readRows } from "../api";
-import { decodeViz } from "../viz";
+import { decodeViz, type VizFailureReason } from "../viz";
 import { ErrorBanner } from "./ErrorBanner";
 import { Alert, AlertDescription } from "./ui/alert";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
@@ -43,6 +43,46 @@ const NUMERIC_TYPES: ReadonlySet<string> = new Set([
 function isNumericType(canonicalType: string): boolean {
   const base = canonicalType.split("(", 1)[0].toUpperCase().trim();
   return NUMERIC_TYPES.has(base);
+}
+
+// Render a typed viz-degradation reason as a locale-catalog string (ADR-0052
+// i18n closeout, issue #138). Both decode failures (from decodeViz) and render
+// failures (from VegaChart) flow through here, so the {reason} interpolated
+// into disclosure.result.vizDegraded is always in the active locale -- no
+// Chinese leaks into an en-US disclosure. The `mark` on unsupportedMark is
+// engine output (layer 4 -- never translated), interpolated verbatim. The
+// `default` arm keeps the switch exhaustive as VizFailureReason grows.
+function formatVizFailure(reason: VizFailureReason, intl: IntlShape): string {
+  switch (reason.kind) {
+    case "invalidJson":
+      return intl.formatMessage({
+        id: "viz.error.invalidJson",
+        defaultMessage: "the spec is not valid JSON",
+      });
+    case "notObject":
+      return intl.formatMessage({
+        id: "viz.error.notObject",
+        defaultMessage: "the spec is not a Vega-Lite object",
+      });
+    case "unsupportedMark":
+      return intl.formatMessage(
+        {
+          id: "viz.error.unsupportedMark",
+          defaultMessage:
+            "the chart type \"{mark}\" is not supported (only bar/line/area/scatter/pie)",
+        },
+        { mark: reason.mark },
+      );
+    case "render":
+      return intl.formatMessage({
+        id: "viz.error.render",
+        defaultMessage: "render error",
+      });
+    default: {
+      const unhandled: never = reason;
+      throw new Error(`unhandled VizFailureReason kind: ${JSON.stringify(unhandled)}`);
+    }
+  }
 }
 
 interface ResultViewProps {
@@ -131,7 +171,7 @@ export function ResultView({
   // render failure reported by VegaChart degrades the same way. memoized so the
   // chart-slot decision stays stable across re-renders.
   const decoded = useMemo(() => (viz ? decodeViz(viz) : null), [viz]);
-  const [renderError, setRenderError] = useState<string | null>(null);
+  const [renderError, setRenderError] = useState<VizFailureReason | null>(null);
 
   // A new result/viz resets the render-failure state so it gets a fresh try.
   useEffect(() => {
@@ -160,8 +200,20 @@ export function ResultView({
 
   return (
     <section className="result-view">
-      <h2 id={headingId}>结果：{referenceName}</h2>
-      <p className="meta">行数：{total}</p>
+      <h2 id={headingId}>
+        <FormattedMessage
+          id="result.title"
+          defaultMessage="Result: {name}"
+          values={{ name: referenceName }}
+        />
+      </h2>
+      <p className="meta">
+        <FormattedMessage
+          id="result.rowCount"
+          defaultMessage="Rows: {count}"
+          values={{ count: total }}
+        />
+      </p>
 
       {staleAnchor && (
         // ADR-0047 stage-stale / ADR-0041 honest wording: the rows below are
@@ -181,7 +233,15 @@ export function ResultView({
         </Alert>
       )}
 
-      {assumption && <p className="assumption">假设：{assumption}</p>}
+      {assumption && (
+        <p className="assumption">
+          <FormattedMessage
+            id="result.assumption"
+            defaultMessage="Assumption: {text}"
+            values={{ text: assumption }}
+          />
+        </p>
+      )}
 
       {showRowDisclosure && (
         // ADR-0057 large-result disclosure: an honest banner (not silent
@@ -223,14 +283,15 @@ export function ResultView({
         // ADR-0033: an emitted viz that failed to decode/render REPLACES the
         // chart slot with this honest disclosure (not a fourth stacked item).
         // Warning Alert (ADR-0050), role="status"; the table still shows, so it
-        // reads as a caution, not a fatal error. {reason} is the decode/render
-        // failure detail (sourced from decodeViz / Vega-Embed).
+        // reads as a caution, not a fatal error. {reason} is the typed
+        // decode/render failure rendered through formatVizFailure so it always
+        // lands in the active locale (ADR-0052, issue #138).
         <Alert variant="warning" role="status" className="my-2">
           <AlertDescription>
             <FormattedMessage
               id="disclosure.result.vizDegraded"
               defaultMessage="The chart could not render; the table is shown instead. {reason}"
-              values={{ reason: degradedReason }}
+              values={{ reason: formatVizFailure(degradedReason, intl) }}
             />
           </AlertDescription>
         </Alert>
@@ -256,7 +317,9 @@ export function ResultView({
         <TableBody>
           {shown === 0 && !loading && (
             <TableRow>
-              <TableCell className="muted">（无数据行）</TableCell>
+              <TableCell className="muted">
+                <FormattedMessage id="result.emptyRows" defaultMessage="(no data rows)" />
+              </TableCell>
             </TableRow>
           )}
           {/* key is the in-window index, not offset+i: rows are window-scoped,
@@ -288,21 +351,29 @@ export function ResultView({
       */}
       <div className="page-info sticky">
         <span aria-live="polite">
-          第 {total === 0 ? 0 : offset + 1}–{offset + shown} 行（共 {total} 行）
+          <FormattedMessage
+            id="result.pagination.range"
+            defaultMessage="Rows {start}–{end} (of {total})"
+            values={{
+              start: total === 0 ? 0 : offset + 1,
+              end: offset + shown,
+              total,
+            }}
+          />
         </span>
         <button
           type="button"
           disabled={!hasPrev || loading}
           onClick={() => loadPage(Math.max(0, offset - pageSize))}
         >
-          上一页
+          <FormattedMessage id="result.pagination.prev" defaultMessage="Previous" />
         </button>
         <button
           type="button"
           disabled={!hasNext || loading}
           onClick={() => loadPage(offset + pageSize)}
         >
-          下一页
+          <FormattedMessage id="result.pagination.next" defaultMessage="Next" />
         </button>
       </div>
     </section>
