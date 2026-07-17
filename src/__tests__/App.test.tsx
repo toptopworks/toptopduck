@@ -49,7 +49,8 @@ vi.mock("../api", async (importOriginal) => {
 
 import { open } from "@tauri-apps/plugin-dialog";
 import { SessionPane } from "../session/SessionPane";
-import { catalogFor } from "../i18n";
+import type { AppErrorKind } from "../session/useSessionState";
+import { catalogFor, type CatalogKey, type EffectiveLocale } from "../i18n";
 import {
   activeDataset,
   askQuestion,
@@ -70,11 +71,11 @@ import {
 // them. The shell-level cold-start + multi-session behavior lives in
 // Shell.test.tsx. Each render gets a fresh QueryClient (ADR-0051: test renders
 // never share cache). zh-CN so the i18n'd chrome matches the assertions.
-function renderPane(): void {
+function renderPane(locale: EffectiveLocale = "zh-CN"): void {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const wrap = (children: ReactNode) => (
     <QueryClientProvider client={queryClient}>
-      <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")} defaultLocale="en-US">
+      <IntlProvider locale={locale} messages={catalogFor(locale)} defaultLocale="en-US">
         {children}
       </IntlProvider>
     </QueryClientProvider>
@@ -84,6 +85,32 @@ function renderPane(): void {
       <SessionPane sessionId="sess-1" pendingIngestPath={null} onIngestConsumed={() => {}} />,
     ),
   );
+}
+
+// The catalog key for an operation verb (issue #139). The negative prefix
+// assertions below build the expected "{verb} failed"/"{verb}失败" text from
+// the catalog so they track the verb wording instead of duplicating a hard-
+// coded string, and the same helper serves the en-US locale test.
+function verbKey(kind: AppErrorKind): CatalogKey {
+  switch (kind) {
+    case "load": return "error.verb.load";
+    case "rename": return "error.verb.rename";
+    case "replace": return "error.verb.replace";
+    case "delete": return "error.verb.delete";
+    case "privacy": return "error.verb.privacy";
+    case "ask": return "error.verb.ask";
+  }
+}
+
+// The "{verb}失败" prefix substring for the zh-CN test locale, built from the
+// catalog so the assertion tracks the verb wording instead of duplicating a
+// hard-coded string (issue #139 locale-aware closeout). Used only in the
+// negative -- asserting an operation's failure banner does NOT carry another
+// operation's prefix (a rename rejection is never mislabelled a load failure).
+// The en-US locale is covered positively by the English-prefix assertion in
+// the locale-consistency test below, so this helper stays zh-CN-scoped.
+function failedPrefix(kind: AppErrorKind): RegExp {
+  return new RegExp(`${catalogFor("zh-CN")[verbKey(kind)]}失败`);
 }
 
 const guidedDataset: DatasetDescriptor = {
@@ -225,8 +252,8 @@ describe("App rename flow", () => {
     await waitFor(() =>
       expect(screen.getByText(/显示名「员工表」已被其他数据集使用/)).toBeInTheDocument(),
     );
-    // The rename rejection must not inherit the ingest flow's "加载失败" prefix.
-    expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
+    // The rename rejection must not inherit the ingest flow's load prefix.
+    expect(screen.queryByText(failedPrefix("load"))).not.toBeInTheDocument();
   });
 });
 
@@ -257,9 +284,42 @@ describe("App privacy flow", () => {
       expect(screen.getByText(/权限不足，无法修改隐私设置/)).toBeInTheDocument(),
     );
     // The privacy rejection must not carry any other operation's prefix.
-    expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/重命名失败/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/换源失败/)).not.toBeInTheDocument();
+    expect(screen.queryByText(failedPrefix("load"))).not.toBeInTheDocument();
+    expect(screen.queryByText(failedPrefix("rename"))).not.toBeInTheDocument();
+    expect(screen.queryByText(failedPrefix("replace"))).not.toBeInTheDocument();
+  });
+});
+
+describe("App error-prefix locale consistency (issue #139)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [guidedDataset];
+    vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
+  });
+
+  it("renders the rename-failure prefix in English under en-US", async () => {
+    // ADR-0052 / issue #139: the "{verb} failed:" prefix and the underlying
+    // catalog message must render in the SAME locale. Under en-US a rename
+    // rejection shows "Rename failed: <english message>" -- no Chinese leak
+    // from the prior hard-coded verb table.
+    renderPane("en-US");
+    fireEvent.click(await screen.findByRole("tab", { name: "Working set" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+    );
+
+    vi.spyOn(window, "prompt").mockReturnValue("员工表");
+    vi.mocked(renameDataset).mockRejectedValueOnce({
+      kind: "RenameDataset",
+      data: { kind: "DisplayTaken", data: "员工表" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Rename/ }));
+
+    // Both the prefix and the underlying refusal (en-US catalog
+    // error.dataset.displayTaken) render in English -- locale consistent.
+    await waitFor(() =>
+      expect(screen.getByText(/Rename failed: Display label/)).toBeInTheDocument(),
+    );
   });
 });
 

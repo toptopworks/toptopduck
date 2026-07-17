@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useIntl, FormattedMessage } from "react-intl";
 import { useQueryClient } from "@tanstack/react-query";
 import { fmtError, errorDetail, formatTurnFailure, turnFailureDetail } from "../api";
-import { useSessionState, errorPrefix } from "./useSessionState";
+import { useSessionState } from "./useSessionState";
 import { ActiveSourceDeleteDialog } from "../components/ActiveSourceDeleteDialog";
 import { DatasetDetail } from "../components/DatasetDetail";
 import { ErrorBanner } from "../components/ErrorBanner";
@@ -168,7 +168,7 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
         <div className="workspace-body">
           {s.error && (
             <ErrorBanner
-              message={`${errorPrefix(s.error.kind)}${s.error.message}`}
+              message={s.error.message}
               detail={s.error.detail}
             />
           )}
