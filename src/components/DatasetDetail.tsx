@@ -1,3 +1,4 @@
+import { FormattedMessage } from "react-intl";
 import type { DatasetDescriptor, DatasetPrivacy } from "../types";
 import { PrivacyControls } from "./PrivacyControls";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
@@ -14,18 +15,38 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
   return (
     <section className="dataset-detail">
       <h2>
-        {dataset.display_name} <small>(引用名：{dataset.reference_name})</small>
+        {dataset.display_name}{" "}
+        <small>
+          <FormattedMessage
+            id="workingSet.detail.referenceName"
+            defaultMessage="(reference name: {name})"
+            values={{ name: dataset.reference_name }}
+          />
+        </small>
       </h2>
       <p className="meta">
-        行数：{dataset.row_count} · 指纹：{dataset.fingerprint.slice(0, 12)}…
+        <FormattedMessage
+          id="workingSet.detail.meta"
+          defaultMessage="Rows: {rows} · fingerprint: {fingerprint}…"
+          values={{ rows: dataset.row_count, fingerprint: dataset.fingerprint.slice(0, 12) }}
+        />
       </p>
 
-      <h3>列与推断类型</h3>
+      <h3>
+        <FormattedMessage
+          id="workingSet.detail.columnsHeading"
+          defaultMessage="Columns & inferred types"
+        />
+      </h3>
       <Table className="schema">
         <TableHeader>
           <TableRow>
-            <TableHead>列</TableHead>
-            <TableHead>DuckDB 类型</TableHead>
+            <TableHead>
+              <FormattedMessage id="column.col" defaultMessage="Column" />
+            </TableHead>
+            <TableHead>
+              <FormattedMessage id="column.type" defaultMessage="DuckDB type" />
+            </TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -38,9 +59,16 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
         </TableBody>
       </Table>
 
-      <h3>加载时冻结的首 3 行样本</h3>
+      <h3>
+        <FormattedMessage
+          id="workingSet.detail.sampleHeading"
+          defaultMessage="First 3 rows frozen at load time"
+        />
+      </h3>
       {dataset.sample.length === 0 ? (
-        <p className="muted">（无数据行）</p>
+        <p className="muted">
+          <FormattedMessage id="result.emptyRows" defaultMessage="(no data rows)" />
+        </p>
       ) : (
         <Table className="sample">
           <TableHeader>
@@ -70,7 +98,13 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
         />
       )}
 
-      <p className="source">来源文件：{dataset.source_path}</p>
+      <p className="source">
+        <FormattedMessage
+          id="workingSet.detail.sourceFile"
+          defaultMessage="Source file: {path}"
+          values={{ path: dataset.source_path }}
+        />
+      </p>
     </section>
   );
 }

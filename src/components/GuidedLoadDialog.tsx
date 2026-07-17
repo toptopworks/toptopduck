@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { FormattedMessage, useIntl } from "react-intl";
 import type { GuidanceRequest, SheetGuidance, SheetRectify } from "../types";
 import {
   Dialog,
@@ -36,6 +37,7 @@ export function GuidedLoadDialog({
   onSubmit: (guidance: SheetGuidance[]) => void;
   onCancel: () => void;
 }) {
+  const intl = useIntl();
   const [choices, setChoices] = useState<Record<string, SheetChoice>>(() => {
     const init: Record<string, SheetChoice> = {};
     for (const s of request.sheets) {
@@ -98,9 +100,18 @@ export function GuidedLoadDialog({
         }}
         className="max-h-[85vh] overflow-y-auto sm:max-w-2xl"
       >
-        <DialogTitle>引导加载：{request.workbook_name}</DialogTitle>
+        <DialogTitle>
+          <FormattedMessage
+            id="guidedLoad.title"
+            defaultMessage="Guided load: {name}"
+            values={{ name: request.workbook_name }}
+          />
+        </DialogTitle>
         <DialogDescription>
-          自动规整无法确定表头位置。请为每个工作表指定表头所在行，并勾选要跳过的非数据行。
+          <FormattedMessage
+            id="guidedLoad.description"
+            defaultMessage="Auto-tidy could not pin down the header row. For each sheet, point at the header row and tick any non-data rows to skip."
+          />
         </DialogDescription>
         {request.sheets.map((sheet) => {
           const c = choices[sheet.name];
@@ -108,7 +119,10 @@ export function GuidedLoadDialog({
             <section key={sheet.name}>
               <h3>{sheet.name}</h3>
               <label>
-                表头所在行：
+                <FormattedMessage
+                  id="guidedLoad.headerRowLabel"
+                  defaultMessage="Header row:"
+                />
                 <select
                   value={c.headerRow}
                   onChange={(e) => setHeaderRow(sheet.name, Number(e.target.value))}
@@ -116,7 +130,10 @@ export function GuidedLoadDialog({
                 >
                   {sheet.preview.map((_, i) => (
                     <option key={i} value={i + 1}>
-                      第 {i + 1} 行
+                      {intl.formatMessage(
+                        { id: "guidedLoad.rowOption", defaultMessage: "Row {n}" },
+                        { n: i + 1 },
+                      )}
                     </option>
                   ))}
                 </select>
@@ -156,10 +173,12 @@ export function GuidedLoadDialog({
         })}
         <DialogFooter>
           <Button variant="outline" onClick={onCancel} disabled={loading}>
-            取消
+            <FormattedMessage id="guidedLoad.cancel" defaultMessage="Cancel" />
           </Button>
           <Button onClick={submit} disabled={loading}>
-            {loading ? "加载中…" : "按选择加载"}
+            {loading
+              ? intl.formatMessage({ id: "guidedLoad.loading", defaultMessage: "Loading…" })
+              : intl.formatMessage({ id: "guidedLoad.submit", defaultMessage: "Load by selection" })}
           </Button>
         </DialogFooter>
       </DialogContent>

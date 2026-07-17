@@ -206,7 +206,7 @@ describe("DisclosureBanner", () => {
 
 describe("DatasetDetail", () => {
   it("renders canonical column types and the frozen sample", () => {
-    render(<DatasetDetail dataset={mockDataset} />);
+    renderI18n(<DatasetDetail dataset={mockDataset} />);
     expect(screen.getByText("BIGINT")).toBeInTheDocument();
     expect(screen.getByText("VARCHAR")).toBeInTheDocument();
     expect(screen.getByText("Alice")).toBeInTheDocument();
@@ -216,7 +216,7 @@ describe("DatasetDetail", () => {
   });
 
   it("shows a no-rows hint when the sample is empty", () => {
-    render(<DatasetDetail dataset={{ ...mockDataset, sample: [], row_count: 0 }} />);
+    renderI18n(<DatasetDetail dataset={{ ...mockDataset, sample: [], row_count: 0 }} />);
     expect(screen.getByText(/无数据行/)).toBeInTheDocument();
   });
 
@@ -230,13 +230,13 @@ describe("DatasetDetail", () => {
       ],
       sample: [["1", "{'city': NYC}", "[a, b]"]],
     };
-    render(<DatasetDetail dataset={nested} />);
+    renderI18n(<DatasetDetail dataset={nested} />);
     expect(screen.getByText("STRUCT(city VARCHAR, zip VARCHAR)")).toBeInTheDocument();
     expect(screen.getByText("LIST(VARCHAR)")).toBeInTheDocument();
   });
 
   it("renders privacy controls + disclosure when onPrivacyChange is supplied (issue #9)", () => {
-    render(<DatasetDetail dataset={mockDataset} onPrivacyChange={() => {}} />);
+    renderI18n(<DatasetDetail dataset={mockDataset} onPrivacyChange={() => {}} />);
     // The sample toggle and the per-column "type only" header are present.
     expect(screen.getByText(/隐私控制/)).toBeInTheDocument();
     expect(screen.getByText(/向云端 LLM 发送样本值/)).toBeInTheDocument();
@@ -249,7 +249,7 @@ describe("DatasetDetail", () => {
 
 describe("PrivacyControls", () => {
   it("defaults to samples on and no type-only columns (ADR-0011)", () => {
-    render(
+    renderI18n(
       <PrivacyControls dataset={mockDataset} loading={false} onPrivacyChange={() => {}} />,
     );
     const sampleToggle = screen.getByLabelText(/向云端 LLM 发送样本值/);
@@ -261,7 +261,7 @@ describe("PrivacyControls", () => {
 
   it("turning off samples emits the whole config with send_samples=false (AC1)", () => {
     const onPrivacyChange = vi.fn();
-    render(
+    renderI18n(
       <PrivacyControls dataset={mockDataset} loading={false} onPrivacyChange={onPrivacyChange} />,
     );
     fireEvent.click(screen.getByLabelText(/向云端 LLM 发送样本值/));
@@ -273,7 +273,7 @@ describe("PrivacyControls", () => {
 
   it("marking a column type-only adds it to type_only_columns (AC2)", () => {
     const onPrivacyChange = vi.fn();
-    render(
+    renderI18n(
       <PrivacyControls dataset={mockDataset} loading={false} onPrivacyChange={onPrivacyChange} />,
     );
     fireEvent.click(screen.getByLabelText(/仅类型 name/));
@@ -289,7 +289,7 @@ describe("PrivacyControls", () => {
       ...mockDataset,
       privacy: { send_samples: true, type_only_columns: ["name"] },
     };
-    render(
+    renderI18n(
       <PrivacyControls dataset={dataset} loading={false} onPrivacyChange={onPrivacyChange} />,
     );
     fireEvent.click(screen.getByLabelText(/仅类型 name/));
@@ -304,7 +304,7 @@ describe("PrivacyControls", () => {
       ...mockDataset,
       privacy: { send_samples: false, type_only_columns: ["name"] },
     };
-    render(
+    renderI18n(
       <PrivacyControls dataset={dataset} loading={false} onPrivacyChange={() => {}} />,
     );
     // Samples off + one type-only column reflected honestly.
@@ -321,7 +321,7 @@ describe("PrivacyControls", () => {
       ...mockDataset,
       privacy: { send_samples: true, type_only_columns: ["gone"] },
     };
-    render(
+    renderI18n(
       <PrivacyControls dataset={dataset} loading={false} onPrivacyChange={() => {}} />,
     );
     // No hidden columns reported (the stale "gone" isn't a current column) --
@@ -337,7 +337,7 @@ describe("PrivacyControls", () => {
       ...mockDataset,
       privacy: { send_samples: false, type_only_columns: ["id", "name"] },
     };
-    render(
+    renderI18n(
       <PrivacyControls dataset={dataset} loading={false} onPrivacyChange={() => {}} />,
     );
     expect(screen.getByText(/0 列发送/)).toBeInTheDocument();
@@ -345,7 +345,7 @@ describe("PrivacyControls", () => {
   });
 
   it("disables the toggles while loading (prevents concurrent IPC)", () => {
-    render(
+    renderI18n(
       <PrivacyControls dataset={mockDataset} loading={true} onPrivacyChange={() => {}} />,
     );
     expect(screen.getByLabelText(/向云端 LLM 发送样本值/)).toBeDisabled();
@@ -687,7 +687,7 @@ describe("GuidedLoadDialog", () => {
 
   it("submits one SheetGuidance per sheet with the chosen header row", () => {
     const onSubmit = vi.fn();
-    render(
+    renderI18n(
       <GuidedLoadDialog
         request={request}
         loading={false}
@@ -707,7 +707,7 @@ describe("GuidedLoadDialog", () => {
   it("cancel calls onCancel without submitting", () => {
     const onSubmit = vi.fn();
     const onCancel = vi.fn();
-    render(
+    renderI18n(
       <GuidedLoadDialog
         request={request}
         loading={false}
@@ -726,7 +726,7 @@ describe("GuidedLoadDialog", () => {
     // pins the ESC→onCancel path and that it never reaches onSubmit.
     const onCancel = vi.fn();
     const onSubmit = vi.fn();
-    render(
+    renderI18n(
       <GuidedLoadDialog
         request={request}
         loading={false}
@@ -745,7 +745,7 @@ describe("GuidedLoadDialog", () => {
     // pending ingest isn't aborted by an accidental ESC or overlay click --
     // mirroring the cancel / submit buttons' loading-disabled state.
     const onCancel = vi.fn();
-    render(
+    renderI18n(
       <GuidedLoadDialog
         request={request}
         loading={true}
