@@ -66,30 +66,87 @@ export type AppErrorKind =
   | "privacy"
   | "ask";
 
-/** Operation verb per error kind -- exhaustive over AppErrorKind, so TS catches
- * a missing entry when a new kind is added. The full "X失败：" prefix is derived
- * (errorPrefix) rather than stored, so the refresh-failed message can reuse the
- * verb without stripping punctuation off a decorated string. */
-export const ERROR_VERB: Record<AppErrorKind, string> = {
-  load: "加载",
-  rename: "重命名",
-  replace: "换源",
-  delete: "删源",
-  privacy: "隐私设置",
-  ask: "提问",
-};
-
-/** Full "X失败：" prefix for an error kind, composed from ERROR_VERB so the verb
- * and the prefix can never drift apart. */
-export function errorPrefix(kind: AppErrorKind): string {
-  return `${ERROR_VERB[kind]}失败：`;
+/** The locale verb for an error kind (ADR-0052, issue #139). Catalog-backed so
+ * the verb tracks the active locale -- the prior ERROR_VERB map hard-coded
+ * Chinese verbs and wrapped an English catalog message in a Chinese prefix,
+ * breaking locale consistency under en-US. Each arm carries a literal id +
+ * defaultMessage so @formatjs/cli extract recovers it for the catalog guard. */
+function errorVerb(intl: IntlShape, kind: AppErrorKind): string {
+  switch (kind) {
+    case "load":
+      return intl.formatMessage({ id: "error.verb.load", defaultMessage: "Load" });
+    case "rename":
+      return intl.formatMessage({ id: "error.verb.rename", defaultMessage: "Rename" });
+    case "replace":
+      return intl.formatMessage({
+        id: "error.verb.replace",
+        defaultMessage: "Replace source",
+      });
+    case "delete":
+      return intl.formatMessage({
+        id: "error.verb.delete",
+        defaultMessage: "Delete source",
+      });
+    case "privacy":
+      return intl.formatMessage({
+        id: "error.verb.privacy",
+        defaultMessage: "Privacy update",
+      });
+    case "ask":
+      return intl.formatMessage({ id: "error.verb.ask", defaultMessage: "Ask" });
+    default: {
+      // Exhaustiveness guard (issue #139): a new AppErrorKind member without a
+      // case would fall through and return undefined, rendering a malformed
+      // " failed: ..." banner (verb lost). tsconfig has no noImplicitReturns,
+      // so the switch alone does NOT enforce exhaustiveness -- mirror the
+      // default-never-throw guard used by loadErrorDisplay + api.ts formatters.
+      const unhandled: never = kind;
+      throw new Error(`unhandled AppErrorKind: ${JSON.stringify(unhandled)}`);
+    }
+  }
 }
 
-/** Build an AppError from an IPC reject: the locale message via fmtError plus
- * the technical detail (issues #119/#120) for the collapsed fold. null when
- * the message is self-contained, so the fold is omitted. */
+/** Compose the "{verb} failed: {message}" banner for an operation reject
+ * (issue #139). Both the verb and the failure template render through the
+ * active locale, so the catalog message underneath is no longer wrapped in a
+ * hard-coded Chinese prefix. */
+function flowFailedMessage(intl: IntlShape, kind: AppErrorKind, message: string): string {
+  return intl.formatMessage(
+    {
+      id: "error.flow.failed",
+      defaultMessage: "{verb} failed: {message}",
+    },
+    { verb: errorVerb(intl, kind), message },
+  );
+}
+
+/** Compose the "{verb} saved, but refreshing the working set failed: {message}"
+ * banner for a post-mutation refresh reject (issue #139). The operation itself
+ * succeeded (its change is persisted server-side); only the cache refresh
+ * failed, so the banner is tagged with the operation kind but worded as a
+ * refresh failure rather than a fresh "{verb} failed". */
+function refreshFailedMessage(intl: IntlShape, kind: AppErrorKind, message: string): string {
+  return intl.formatMessage(
+    {
+      id: "error.flow.savedRefreshFailed",
+      defaultMessage: "{verb} saved, but refreshing the working set failed: {message}",
+    },
+    { verb: errorVerb(intl, kind), message },
+  );
+}
+
+/** Build an AppError from an IPC reject: the locale message via fmtError,
+ * prefixed with the operation's "{verb} failed:" template (issue #139) so the
+ * banner is one locale-consistent sentence, plus the technical detail
+ * (issues #119/#120) for the collapsed fold. The message is always non-null
+ * (flowFailedMessage + fmtError both return strings); the detail fold is
+ * omitted only when AppError.detail is null -- see the field doc. */
 function appErrorFrom(e: unknown, intl: IntlShape, kind: AppErrorKind): AppError {
-  return { message: fmtError(e, intl), kind, detail: errorDetail(e) };
+  return {
+    message: flowFailedMessage(intl, kind, fmtError(e, intl)),
+    kind,
+    detail: errorDetail(e),
+  };
 }
 
 // Module-level empty constants so `query.data ?? EMPTY` keeps a stable reference
@@ -266,7 +323,7 @@ export function useSessionState(
         ]);
       } catch (refreshErr) {
         setError({
-          message: `${ERROR_VERB[kind]}已保存，但刷新工作集失败：${fmtError(refreshErr, intl)}`,
+          message: refreshFailedMessage(intl, kind, fmtError(refreshErr, intl)),
           kind,
           detail: errorDetail(refreshErr),
         });
@@ -333,7 +390,7 @@ export function useSessionState(
           ]);
         } catch (refreshErr) {
           setError({
-            message: `${ERROR_VERB.ask}已保存，但刷新工作集失败：${fmtError(refreshErr, intl)}`,
+            message: refreshFailedMessage(intl, "ask", fmtError(refreshErr, intl)),
             kind: "ask",
             detail: errorDetail(refreshErr),
           });
@@ -416,7 +473,11 @@ export function useSessionState(
         } else {
           // NeedsGuidance should not recur after an explicit header pick.
           setError({
-            message: "仍无法规整此工作表，请调整表头选择后重试",
+            message: intl.formatMessage({
+              id: "error.flow.guidedStillNeedsGuidance",
+              defaultMessage:
+                "The worksheet still cannot be rectified; adjust the header selection and retry",
+            }),
             kind: "load",
           });
         }
@@ -480,7 +541,11 @@ export function useSessionState(
         } else if (result.kind === "NeedsGuidance") {
           // Structured replace never yields NeedsGuidance; defensive guard.
           setError({
-            message: "换源暂不支持需规整引导的文件，请改用结构化文件",
+            message: intl.formatMessage({
+              id: "error.flow.replaceNeedsGuidanceUnsupported",
+              defaultMessage:
+                "Replace source does not support files needing rectify guidance; use a structured file instead",
+            }),
             kind: "replace",
           });
         } else {
