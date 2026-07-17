@@ -88,9 +88,12 @@ uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
 # OS locale read (ADR-0052, issue #78): when the locale preference is "system",
 # the Rust core resolves the OS locale itself (the frontend never pushes locale
-# over IPC). sys-locale wraps GetUserDefaultLocaleName on Windows and
-# LANG/LC_* on Unix -- a tiny dependency-free shim that lets the provider
-# resolve "system" identically to the webview's navigator.language in practice.
+# over IPC). sys-locale reads the user's preferred UI language on every desktop
+# platform -- GetUserPreferredUILanguages on Windows, CFLocaleCopyPreferredLanguages
+# on macOS, and the LANGUAGE/LC_* env on Linux -- the same display-language
+# signal the webview's navigator.language reflects, so the two resolve "system"
+# identically in steady state. The narrow drift window (a live OS-language
+# switch lagging the webview's cached copy) is recorded in ADR-0052 Decision 7.
 sys-locale = "0.3"
 
 # Desktop-only Tauri plugins (issue #100, ADR-0008 cross-platform). Gated to
