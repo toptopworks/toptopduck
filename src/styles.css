@@ -9,7 +9,6 @@
  * .resume-progress tints below are still bespoke (no owner migrated yet) and
  * retire with their components. */
 * { box-sizing: border-box; }
-main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
 header h1 { margin: 0 0 0.5rem; }
 .header-actions {
   display: flex; align-items: center; gap: 0.75rem;
@@ -101,7 +100,7 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 
 /* =========================================================================
  * Chat-style three-column shell (ADR-0045/0060/0062, issue #79).
- * Replaces the v0 single-column `main { max-width: 1100px }` scaffold. The
+ * Replaced the v0 single-column `main` scaffold. The
  * session sidebar is col 1 (full height, independent -- R1: QuestionBar does
  * NOT span over it); the right block holds the thin top bar + the session
  * pane (rail + workspace + a QuestionBar that spans rail + workspace only).
@@ -121,7 +120,6 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
  * apply at once). */
 .shell.rail-collapsed .session-pane { grid-template-columns: 1fr; }
 .shell.rail-collapsed .session-rail { display: none; }
-.shell-init { padding: 2rem; max-width: none; }
 
 /* --- Col 1: session sidebar (ADR-0060 沉色 chrome) ----------------------- */
 .session-sidebar {
