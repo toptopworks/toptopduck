@@ -94,6 +94,15 @@ function errorVerb(intl: IntlShape, kind: AppErrorKind): string {
       });
     case "ask":
       return intl.formatMessage({ id: "error.verb.ask", defaultMessage: "Ask" });
+    default: {
+      // Exhaustiveness guard (issue #139): a new AppErrorKind member without a
+      // case would fall through and return undefined, rendering a malformed
+      // " failed: ..." banner (verb lost). tsconfig has no noImplicitReturns,
+      // so the switch alone does NOT enforce exhaustiveness -- mirror the
+      // default-never-throw guard used by loadErrorDisplay + api.ts formatters.
+      const unhandled: never = kind;
+      throw new Error(`unhandled AppErrorKind: ${JSON.stringify(unhandled)}`);
+    }
   }
 }
 
@@ -129,8 +138,9 @@ function refreshFailedMessage(intl: IntlShape, kind: AppErrorKind, message: stri
 /** Build an AppError from an IPC reject: the locale message via fmtError,
  * prefixed with the operation's "{verb} failed:" template (issue #139) so the
  * banner is one locale-consistent sentence, plus the technical detail
- * (issues #119/#120) for the collapsed fold. null when the message is
- * self-contained, so the fold is omitted. */
+ * (issues #119/#120) for the collapsed fold. The message is always non-null
+ * (flowFailedMessage + fmtError both return strings); the detail fold is
+ * omitted only when AppError.detail is null -- see the field doc. */
 function appErrorFrom(e: unknown, intl: IntlShape, kind: AppErrorKind): AppError {
   return {
     message: flowFailedMessage(intl, kind, fmtError(e, intl)),

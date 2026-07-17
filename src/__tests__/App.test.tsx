@@ -99,6 +99,13 @@ function verbKey(kind: AppErrorKind): CatalogKey {
     case "delete": return "error.verb.delete";
     case "privacy": return "error.verb.privacy";
     case "ask": return "error.verb.ask";
+    default: {
+      // Exhaustiveness guard: mirrors errorVerb in useSessionState so a new
+      // AppErrorKind member forces a test update here too (tsconfig has no
+      // noImplicitReturns, so the switch alone does not enforce it).
+      const unhandled: never = kind;
+      throw new Error(`unhandled AppErrorKind: ${JSON.stringify(unhandled)}`);
+    }
   }
 }
 
@@ -283,6 +290,9 @@ describe("App privacy flow", () => {
     await waitFor(() =>
       expect(screen.getByText(/权限不足，无法修改隐私设置/)).toBeInTheDocument(),
     );
+    // Positive pin on the privacy verb so a verb-swap regression (privacy/ask
+    // exchanged, etc.) is caught, not just the cross-operation mismatch below.
+    expect(screen.getByText(failedPrefix("privacy"))).toBeInTheDocument();
     // The privacy rejection must not carry any other operation's prefix.
     expect(screen.queryByText(failedPrefix("load"))).not.toBeInTheDocument();
     expect(screen.queryByText(failedPrefix("rename"))).not.toBeInTheDocument();
@@ -296,6 +306,10 @@ describe("App error-prefix locale consistency (issue #139)", () => {
     state.workingSet = [guidedDataset];
     vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
   });
+  // The savedRefreshFailed test spies on QueryClient.prototype (below);
+  // restoreAllMocks (not just clearAllMocks) so the spy cannot leak into a
+  // sibling describe's QueryClient and turn its refresh green red.
+  afterEach(() => vi.restoreAllMocks());
 
   it("renders the rename-failure prefix in English under en-US", async () => {
     // ADR-0052 / issue #139: the "{verb} failed:" prefix and the underlying
@@ -319,6 +333,40 @@ describe("App error-prefix locale consistency (issue #139)", () => {
     // error.dataset.displayTaken) render in English -- locale consistent.
     await waitFor(() =>
       expect(screen.getByText(/Rename failed: Display label/)).toBeInTheDocument(),
+    );
+  });
+
+  it("renders the refresh-failure template in English under en-US (issue #139)", async () => {
+    // ADR-0052 / issue #139: the "{verb} saved, but refreshing the working set
+    // failed:" template (refreshFailedMessage) must render in the active locale
+    // too -- not just the "{verb} failed:" reject template. A rename that
+    // succeeds server-side but whose post-mutation cache refresh rejects
+    // surfaces under the en-US savedRefreshFailed template with the Rename verb
+    // and the refresh error's message (fmtError -> e.message for a plain Error).
+    // Spy on the prototype so every QueryClient instance's invalidateQueries
+    // rejects; refreshServerState awaits Promise.all over three of them.
+    vi.spyOn(QueryClient.prototype, "invalidateQueries").mockRejectedValue(
+      new Error("refresh boom"),
+    );
+    renderPane("en-US");
+    fireEvent.click(await screen.findByRole("tab", { name: "Working set" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+    );
+
+    vi.spyOn(window, "prompt").mockReturnValue("renamed");
+    vi.mocked(renameDataset).mockResolvedValue({
+      ...guidedDataset,
+      display_name: "renamed",
+    } as never);
+    fireEvent.click(screen.getByRole("button", { name: /^Rename/ }));
+
+    // Rename persisted; only the cache refresh failed. The en-US
+    // savedRefreshFailed template renders (Rename verb + refresh-error msg).
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Rename saved, but refreshing the working set failed/),
+      ).toBeInTheDocument(),
     );
   });
 });
@@ -374,7 +422,7 @@ describe("App ask flow", () => {
       expect(screen.getByText(/未配置有效的 LLM 提供方/)).toBeInTheDocument(),
     );
     // an ask failure must not inherit the load-flow prefix.
-    expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
+    expect(screen.queryByText(failedPrefix("load"))).not.toBeInTheDocument();
   });
 
   it("shows a textual outcome in the thread and opens no result pane (issue #23)", async () => {
@@ -461,9 +509,9 @@ describe("App delete-source flow (issue #38)", () => {
       expect(screen.getByText(/删源失败：找不到引用名为「people」的数据集/)).toBeInTheDocument(),
     );
     // No other operation's prefix is used.
-    expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/重命名失败/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/换源失败/)).not.toBeInTheDocument();
+    expect(screen.queryByText(failedPrefix("load"))).not.toBeInTheDocument();
+    expect(screen.queryByText(failedPrefix("rename"))).not.toBeInTheDocument();
+    expect(screen.queryByText(failedPrefix("replace"))).not.toBeInTheDocument();
     // A RemoveSource reject is a command reject, not a turn outcome, so the
     // ask-turn Failed card (.textual-card.failed, issue #125) must not render.
     expect(document.querySelector(".textual-card.failed")).not.toBeInTheDocument();
@@ -597,7 +645,7 @@ describe("App delete-active-source flow (issue #39)", () => {
     await waitFor(() =>
       expect(screen.getByText(/删源失败：「ghost」不是剩余可用源之一/)).toBeInTheDocument(),
     );
-    expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/重命名失败/)).not.toBeInTheDocument();
+    expect(screen.queryByText(failedPrefix("load"))).not.toBeInTheDocument();
+    expect(screen.queryByText(failedPrefix("rename"))).not.toBeInTheDocument();
   });
 });
