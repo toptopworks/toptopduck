@@ -1209,21 +1209,22 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
   it("embeds the spec and finalizes the view on unmount", async () => {
     const finalize = vi.fn();
     vi.mocked(embed).mockResolvedValue({ finalize } as unknown as Awaited<ReturnType<typeof embed>>);
-    const { unmount } = render(<VegaChart spec={barSpec} onError={() => {}} />);
+    const { unmount } = renderI18n(<VegaChart spec={barSpec} onError={() => {}} />);
     await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
     unmount();
     await waitFor(() => expect(finalize).toHaveBeenCalledTimes(1));
   });
 
-  it("forwards the render failure's message via onError so the caller degrades", async () => {
+  it("forwards a render failure as a typed render reason via onError so the caller degrades", async () => {
     // ADR-0033: a Vega-Embed rejection routes to onError so ResultView degrades.
-    // The error's message is forwarded (not a bare "渲染出错") so the disclosure
-    // carries the actual cause; the full error is also log.warn'd for diagnostics
-    // (was silently discarded -- silent-failure finding on PR #115).
+    // The failure is forwarded as a typed { kind: "render" } reason, unified with
+    // the decode-failure path (ADR-0052 i18n closeout, issue #138); the full error
+    // is log.warn'd for diagnostics (the bare "渲染出错" used to be silently
+    // discarded -- silent-failure finding on PR #115, preserved at the log layer).
     vi.mocked(embed).mockRejectedValue(new Error("vega boom"));
     const onError = vi.fn();
-    render(<VegaChart spec={barSpec} onError={onError} />);
-    await waitFor(() => expect(onError).toHaveBeenCalledWith("vega boom"));
+    renderI18n(<VegaChart spec={barSpec} onError={onError} />);
+    await waitFor(() => expect(onError).toHaveBeenCalledWith({ kind: "render" }));
   });
 
   it("finalizes the prior view when the spec changes (no leak across results)", async () => {
@@ -1231,12 +1232,12 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
     vi.mocked(embed).mockResolvedValue(
       { finalize: finalizeA } as unknown as Awaited<ReturnType<typeof embed>>,
     );
-    const { rerender } = render(<VegaChart spec={barSpec} onError={() => {}} />);
+    const { rerender } = renderI18n(<VegaChart spec={barSpec} onError={() => {}} />);
     await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
     // A new spec identity re-runs the embed effect; the prior view is finalized
     // (cancelled branch if A is still pending, or overwrite-finalize if resolved).
     const lineSpec = { mark: "line" } as unknown as VisualizationSpec;
-    rerender(<VegaChart spec={lineSpec} onError={() => {}} />);
+    rerender(withIntl(<VegaChart spec={lineSpec} onError={() => {}} />));
     await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(finalizeA).toHaveBeenCalled());
   });

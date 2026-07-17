@@ -41,25 +41,28 @@ describe("decodeViz", () => {
   });
 
   describe("rejects a malformed spec", () => {
-    it("rejects invalid JSON with a reason", () => {
+    it("rejects invalid JSON with a typed invalidJson reason", () => {
       const result = decodeViz(viz("bar", "not-valid-json"));
       expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.reason).toBeTruthy();
+      if (!result.ok) expect(result.reason).toEqual({ kind: "invalidJson" });
     });
 
-    it("rejects a JSON array (not a Vega-Lite object)", () => {
+    it("rejects a JSON array with a typed notObject reason", () => {
       const result = decodeViz(viz("bar", "[1, 2, 3]"));
       expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toEqual({ kind: "notObject" });
     });
 
-    it("rejects a JSON primitive (not a Vega-Lite object)", () => {
+    it("rejects a JSON primitive with a typed notObject reason", () => {
       const result = decodeViz(viz("bar", "\"just a string\""));
       expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toEqual({ kind: "notObject" });
     });
 
-    it("rejects a JSON null", () => {
+    it("rejects a JSON null with a typed notObject reason", () => {
       const result = decodeViz(viz("bar", "null"));
       expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toEqual({ kind: "notObject" });
     });
   });
 
@@ -67,15 +70,16 @@ describe("decodeViz", () => {
     // A whitelisted kind whose spec nonetheless draws a chart v1 does not ship
     // (a heatmap rect, a geoshape, a text) degrades. v1 = table/bar/line/
     // scatter/area/pie only.
-    it.each(["rect", "geoshape", "text", "tick"])("rejects the %s mark", (mark) => {
+    it.each(["rect", "geoshape", "text", "tick"])("rejects the %s mark with a typed unsupportedMark reason", (mark) => {
       const result = decodeViz(viz("bar", JSON.stringify({ mark })));
       expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.reason).toContain(mark);
+      if (!result.ok) expect(result.reason).toEqual({ kind: "unsupportedMark", mark });
     });
 
     it("rejects a non-whitelisted mark given as an object type", () => {
       const result = decodeViz(viz("bar", JSON.stringify({ mark: { type: "rect" } })));
       expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toEqual({ kind: "unsupportedMark", mark: "rect" });
     });
   });
 

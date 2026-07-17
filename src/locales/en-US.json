@@ -77,6 +77,13 @@
   "questionBar.submit": "Ask",
   "rail.collapse": "Collapse conversation rail",
   "rail.expand": "Expand conversation rail",
+  "result.assumption": "Assumption: {text}",
+  "result.emptyRows": "(no data rows)",
+  "result.pagination.next": "Next",
+  "result.pagination.prev": "Previous",
+  "result.pagination.range": "Rows {start}–{end} (of {total})",
+  "result.rowCount": "Rows: {count}",
+  "result.title": "Result: {name}",
   "resume.opening": "Opening…",
   "resume.replay": "Replaying {index}/{total}: {name}",
   "resume.source": "Verifying source {index}/{total}: {name}",
@@ -176,5 +183,10 @@
   "workingSet.replace.ariaLabel": "Replace source {name}",
   "workingSet.replace.title": "Re-upload to replace this dataset (keeps the reference name)",
   "workingSet.rowCount": "{count, plural, one {# row} other {# rows}}",
-  "workingSet.staleRow": "Invalidated because {name} was {reason, select, Deleted {deleted} Replaced {updated} other {changed}}"
+  "workingSet.staleRow": "Invalidated because {name} was {reason, select, Deleted {deleted} Replaced {updated} other {changed}}",
+  "viz.chartLabel": "Chart",
+  "viz.error.invalidJson": "the spec is not valid JSON",
+  "viz.error.notObject": "the spec is not a Vega-Lite object",
+  "viz.error.render": "render error",
+  "viz.error.unsupportedMark": "the chart type \"{mark}\" is not supported (only bar/line/area/scatter/pie)"
 }
