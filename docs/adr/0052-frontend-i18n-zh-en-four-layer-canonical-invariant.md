@@ -45,6 +45,18 @@
 - `useLocale()` hook 与 0050 `useTheme()` **同形**，经 Tauri IPC 读写 0038；根节点 `<IntlProvider>` live 重渲、无需重启。
 - 防漂移：`@formatjs/cli extract` 进 CI，强制 en catalog key 集合 == zh catalog。
 
+**（7）system 模式 locale 信号源同源澄清（issue #140）**
+
+"跟随系统"时，前端 chrome locale（`useLocale` 读 `navigator.language`）与后端 LLM locale（`LiveProviderConfig::locale` 读 `sys_locale::get_locale()`）**信号源同源**，两端均绑定**显示/UI 语言语义**，不读**区域格式**：
+
+- Windows：`sys_locale` 调 `GetUserPreferredUILanguages`，与 WebView2 的 `navigator.language` 同源于 OS 首选语言列表。
+- macOS：`sys_locale` 调 `CFLocaleCopyPreferredLanguages`，与 WebKit `navigator.language`（从 preferredLanguages 派生）同 API。
+- Linux：`sys_locale` 读 `LANGUAGE`/`LC_ALL`/`LC_MESSAGES`/`LANG` 优先级，与 webkitgtk 同 env 派生。
+
+因此"英文 UI + 中文区域格式"这类常见分离配置**两端都返回英文**，不产生 chrome/LLM 语言漂移。真实漂移窗口极窄且属运行时而非信号源：应用运行期间切换 OS 首选语言，WebView 持有的 `navigator.language` 副本可能滞后于 Rust 侧每次 fresh 读取，直到 WebView 进程重启同步；前端 `useLocale` 的 `languagechange` 监听进一步收窄此窗口。此权衡可接受。
+
+据此否决信号源收敛（option (b) 系列）：(b1) FE→BE 下发 locale hint 与 Considered options 已否决的"locale 经 IPC 由 frontend 推"同构；(b2) BE→FE 查询 IPC 虽方向相反（trust root 留 Rust）未被既有否决覆盖，但引入 `IntlProvider` 异步化与首屏默认态代价，收益窄于成本；(b3) 后端读 WebView navigator 物理不可行（Rust 进程无 WebView 上下文）。跨语言 resolve 规则（前端 `resolveLocaleTag` / 后端 `resolve_locale_from_tag`）以对齐的 parity 测试锁定，防单边回归。
+
 ## Context
 
 ADR-0049（样式栈）、0050（视觉系统主题）、0051（前端状态分层）已落地，前端骨架只剩 i18n 这一根跨切面关切未决。更关键的是：`src-tauri/src/provider/prompt.rs` 的 `CAPABILITY_BOUNDARY_PROMPT` 是一个 `pub const &str`、整段硬编码中文（能力边界 + 输出契约，40 行），`render_schema_context` 的标签（"引用名"/"行数"/"列"/"样本"…）也是 Rust 侧硬编码中文——**当前架构已内嵌一个 locale 决策（system prompt 冻结 zh）**，prompt 组装完全在 Rust 侧。i18n 不能只覆盖 UI chrome，必须决定 locale 如何进 prompt。本 ADR 收口这六块。

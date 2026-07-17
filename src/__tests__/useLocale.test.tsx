@@ -15,11 +15,16 @@ import {
 
 describe("resolveLocaleTag (ADR-0052 mapping)", () => {
   it("maps zh* tags to zh-CN and en* tags to en-US", () => {
+    // Cross-language parity with resolve_locale_from_tag (prompt.rs): the case
+    // set MUST stay aligned so a resolve-rule change on one side breaks the
+    // other side's test. The Rust &str signature has no undefined, so the
+    // frontend's undefined case (below) maps to the empty-string case there.
     expect(resolveLocaleTag("zh-CN")).toBe("zh-CN");
     expect(resolveLocaleTag("zh-TW")).toBe("zh-CN");
     expect(resolveLocaleTag("zh")).toBe("zh-CN");
     expect(resolveLocaleTag("en-US")).toBe("en-US");
     expect(resolveLocaleTag("en_GB.UTF-8")).toBe("en-US");
+    expect(resolveLocaleTag("en")).toBe("en-US");
   });
 
   it("falls back to en-US for unknown or empty tags", () => {

@@ -452,6 +452,11 @@ mod tests {
         // ADR-0052: zh* -> ZhCN, en* -> EnUS. BCP-47, POSIX, and bare language
         // subtags all collapse by prefix after lowercasing -- region/codeset
         // suffixes do not change the language family.
+        //
+        // Cross-language parity with resolveLocaleTag (useLocale.ts): the case
+        // set MUST stay aligned so a resolve-rule change on one side breaks the
+        // other side's test. The &str signature has no undefined, so the
+        // frontend's undefined case maps to the empty-string case here.
         assert_eq!(resolve_locale_from_tag("zh-CN"), ResponseLocale::ZhCN);
         assert_eq!(resolve_locale_from_tag("zh_TW"), ResponseLocale::ZhCN);
         assert_eq!(resolve_locale_from_tag("zh"), ResponseLocale::ZhCN);
