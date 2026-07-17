@@ -1,3 +1,4 @@
+import { FormattedMessage, useIntl } from "react-intl";
 import { open } from "@tauri-apps/plugin-dialog";
 
 export function FileDropzone({
@@ -7,12 +8,16 @@ export function FileDropzone({
   onIngest: (path: string) => void;
   loading: boolean;
 }) {
+  const intl = useIntl();
+
   async function pick() {
     const selected = await open({
       multiple: false,
       filters: [
         {
-          name: "数据文件",
+          // The file-filter label is shared with WorkingSetList's replace picker
+          // (workingSet.fileFilter) so the two pickers read identically.
+          name: intl.formatMessage({ id: "workingSet.fileFilter", defaultMessage: "Data files" }),
           extensions: ["csv", "parquet", "json", "jsonl", "ndjson", "xlsx"],
         },
       ],
@@ -28,9 +33,16 @@ export function FileDropzone({
   return (
     <div className="dropzone">
       <button onClick={pick} disabled={loading}>
-        {loading ? "加载中…" : "选择数据文件"}
+        {loading
+          ? intl.formatMessage({ id: "workingSet.dropzone.loading", defaultMessage: "Loading…" })
+          : intl.formatMessage({ id: "workingSet.dropzone.pick", defaultMessage: "Pick a data file" })}
       </button>
-      <span className="muted">或把 .csv / .parquet / .json / .xlsx 文件拖到窗口</span>
+      <span className="muted">
+        <FormattedMessage
+          id="workingSet.dropzone.dragHint"
+          defaultMessage="or drop a .csv / .parquet / .json / .xlsx file onto the window"
+        />
+      </span>
     </div>
   );
 }
