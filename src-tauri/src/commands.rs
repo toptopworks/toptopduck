@@ -580,25 +580,25 @@ pub fn clear_api_key(live: State<'_, LiveProviderConfig>) -> Result<(), StoreCom
 }
 
 /// Read the effective provider endpoint + whether a key is set (ADR-0019/0029/
-/// 0038). The base URL + model cross IPC from app-config; the key does not (only
-/// the boolean, from the keychain).
+/// 0038/0064). The base URL + model come from the ACTIVE profile in app-config;
+/// the key does not cross IPC (only the boolean, from the active profile's
+/// keychain slot `key-<active_profile_id>`).
 #[tauri::command]
 pub fn get_provider_config(
     live: State<'_, LiveProviderConfig>,
 ) -> Result<ProviderConfigView, String> {
     let cfg = live.load();
-    Ok(ProviderConfigView {
-        base_url: cfg.provider.base_url,
-        model: cfg.provider.model,
-        has_key: live.has_key(),
-    })
+    // view() shares the active-missing fallback with the live provider read
+    // path, so the IPC never hands the frontend "" (ADR-0019/0029/0064).
+    Ok(cfg.provider.view(live.has_key()))
 }
 
-/// Save the non-secret provider endpoint (Anthropic-protocol base URL + model,
-/// ADR-0019/0038) into app-config. Empty fields normalize to the v1 defaults so
-/// the stored config is always valid (and `get_provider_config` then reads
-/// consistent values). The API key never enters this path (ADR-0029/0038: key
-/// confined to the OS keychain; app-config has no key field at all).
+/// Save the non-secret provider config (ADR-0019/0038/0064) into app-config --
+/// the multi-profile shape `{profiles, active_profile}`. normalize clamps the
+/// active profile's empty endpoint fields to the canonical defaults and
+/// repairs an empty profiles list / dangling active id, so the stored config is
+/// always valid. The API key never enters this path (ADR-0029/0038: key confined
+/// to the OS keychain; app-config has no key field at all).
 #[tauri::command]
 pub fn set_provider_config(
     live: State<'_, LiveProviderConfig>,
@@ -609,11 +609,7 @@ pub fn set_provider_config(
     let stored = live
         .store(cfg)
         .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))?;
-    Ok(ProviderConfigView {
-        base_url: stored.provider.base_url,
-        model: stored.provider.model,
-        has_key: live.has_key(),
-    })
+    Ok(stored.provider.view(live.has_key()))
 }
 
 // --- App-level config (issue #53, ADR-0038) --------------------------------

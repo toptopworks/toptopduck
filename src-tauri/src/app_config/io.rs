@@ -71,9 +71,12 @@ pub(crate) enum AppConfigReadError {
     /// `format_version` is above the app's current -- a newer app made the file.
     /// Degrade to defaults rather than mis-parsing (app-config policy, ADR-0038).
     HigherVersion { found: u32, supported: u32 },
-    /// `format_version` is below current. v1 is the lowest, so this is impossible
-    /// today; the branch is honest and documents that forward migration would go
-    /// here if a v2 ever needs to preserve v1 prefs (YAGNI until then -- degrade).
+    /// `format_version` is below current. v2 (issue #150, ADR-0064) marks the
+    /// provider schema shape change to multi-profile; a leftover v1 file lands
+    /// here and degrades to the default profile skeleton (ADR-0064 declines a
+    /// v1->v2 migrator -- the app is unreleased, so a stale v1 file resets to
+    /// defaults rather than being converted). Any older shape lands here as
+    /// future versions ship.
     LowerVersion { found: u32, supported: u32 },
     /// A secret-named key was detected in the raw JSON. Refuse the file.
     SecretField(String),
@@ -92,7 +95,7 @@ impl std::fmt::Display for AppConfigReadError {
             ),
             Self::LowerVersion { found, supported } => write!(
                 f,
-                "format_version {found} < supported {supported} (migration pending, degraded)"
+                "format_version {found} < supported {supported} (stale shape, reset to defaults)"
             ),
             Self::SecretField(name) => {
                 write!(f, "secret-named field `{name}` refused (secrets-never)")
@@ -287,8 +290,17 @@ mod tests {
             row_cap: 500_000,
             statement_timeout_ms: 10_000,
         };
-        cfg.provider.base_url = "https://gateway.example.test".into();
-        cfg.provider.model = "claude-opus-4-8".into();
+        // Set the ACTIVE profile's endpoint (the default config ships one
+        // anthropic profile) so a successful round-trip is distinguishable from
+        // a defaults-degrade.
+        {
+            let active = cfg
+                .provider
+                .active_mut()
+                .expect("default config has an active profile");
+            active.base_url = "https://gateway.example.test".into();
+            active.model = "claude-opus-4-8".into();
+        }
         cfg.record_recent_file("/tmp/analysis.duck");
         // Issue #84: non-default shell prefs exercise the new field's full io
         // round-trip (a default-equal shell would pass == trivially).
@@ -364,6 +376,17 @@ mod tests {
             future = APP_CONFIG_FORMAT_VERSION + 1
         );
         fs::write(&path, &future).expect("write");
+        assert_eq!(read_at(&path), AppConfig::defaults());
+    }
+
+    #[test]
+    fn read_a_lower_version_degrades_to_defaults() {
+        // Issue #150 / ADR-0064: a leftover v1 app-config file (the old single-
+        // endpoint shape) honest-degrades to the v2 default profile skeleton,
+        // not a crash or a mis-parse. ADR-0064 declines a v1->v2 migrator (the
+        // app is unreleased, so a stale v1 file resets to defaults).
+        let (_dir, path) = temp("config.json");
+        fs::write(&path, b"{\"format_version\":1,\"theme\":\"dark\"}").expect("write");
         assert_eq!(read_at(&path), AppConfig::defaults());
     }
 
@@ -450,10 +473,7 @@ mod tests {
         let cfg = read_at(&path);
         assert_eq!(cfg.theme, Theme::Dark); // the one field that was present
         assert_eq!(cfg.engine, EngineDefaults::default()); // gap filled
-        assert_eq!(
-            cfg.provider,
-            crate::app_config::model::ProviderEndpoint::default()
-        );
+        assert_eq!(cfg.provider, crate::model::ProviderConfig::default());
     }
 
     #[test]
@@ -492,6 +512,16 @@ mod tests {
         assert_eq!(
             parse_at(&path),
             Err(AppConfigReadError::SecretField("api_key".into()))
+        );
+
+        // Lower version (stale v1 shape, issue #150 / ADR-0064).
+        fs::write(&path, b"{\"format_version\":1}").expect("write");
+        assert_eq!(
+            parse_at(&path),
+            Err(AppConfigReadError::LowerVersion {
+                found: 1,
+                supported: APP_CONFIG_FORMAT_VERSION
+            })
         );
     }
 }

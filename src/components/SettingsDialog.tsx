@@ -7,7 +7,14 @@ import {
   getProviderConfig,
   setApiKey,
 } from "../api";
-import type { AppConfig, EngineDefaults, LocalePreference, ProviderConfig, Theme } from "../types";
+import type {
+  AppConfig,
+  EngineDefaults,
+  LocalePreference,
+  ProviderConfig,
+  ProviderProfile,
+  Theme,
+} from "../types";
 import {
   Dialog,
   DialogContent,
@@ -62,6 +69,23 @@ export function SettingsDialog({
   const [locale, setLocale] = useState<LocalePreference>(appConfig.locale);
   const [engine, setEngine] = useState<EngineDefaults>(appConfig.engine);
   const [provider, setProvider] = useState<ProviderConfig>(appConfig.provider);
+
+  // The endpoint inputs edit the ACTIVE profile (ADR-0064). Falls back to the
+  // first profile when active_profile is dangling (normalize repairs on save;
+  // the UI never hands the user a dead endpoint to type into).
+  const activeProfile =
+    provider.profiles.find((p) => p.id === provider.active_profile) ??
+    provider.profiles[0];
+
+  // Patch the active profile's fields, immutably (coding-style: never mutate).
+  function updateActiveProfile(patch: Partial<ProviderProfile>) {
+    setProvider({
+      ...provider,
+      profiles: provider.profiles.map((p) =>
+        p.id === provider.active_profile ? { ...p, ...patch } : p,
+      ),
+    });
+  }
 
   // The key never enters app-config (ADR-0029/0038): it is collected here only
   // to forward once to the keychain. An empty field means "leave the stored key
@@ -216,8 +240,8 @@ export function SettingsDialog({
                 />
                 <Input
                   type="text"
-                  value={provider.base_url}
-                  onChange={(e) => setProvider({ ...provider, base_url: e.target.value })}
+                  value={activeProfile.base_url}
+                  onChange={(e) => updateActiveProfile({ base_url: e.target.value })}
                   disabled={saving}
                 />
               </Label>
@@ -225,8 +249,8 @@ export function SettingsDialog({
                 <FormattedMessage id="settings.modelLabel" defaultMessage="Model (Sonnet-class by default):" />
                 <Input
                   type="text"
-                  value={provider.model}
-                  onChange={(e) => setProvider({ ...provider, model: e.target.value })}
+                  value={activeProfile.model}
+                  onChange={(e) => updateActiveProfile({ model: e.target.value })}
                   disabled={saving}
                 />
               </Label>

@@ -736,13 +736,14 @@ pub struct RowPage {
     pub limit: u64,
 }
 
-// --- LLM provider config (issue #29, ADR-0007/0019/0029) -------------------
+// --- LLM provider config (issue #29/#150, ADR-0007/0019/0029/0064) ------------
 //
-// Non-secret provider config: the Anthropic-protocol endpoint base URL and the
-// model id. The API key is NOT here -- it lives in the OS keychain (ADR-0029
-// invariant 3) and never crosses to the frontend. This type is the
-// set_provider_config input and the storage shape (Rust-side keychain entry);
-// get_provider_config returns the view below (config + a has_key bool).
+// Multi-profile provider config (ADR-0064): a list of named access profiles
+// (protocol + endpoint + model) plus the id of the active one. The active
+// profile drives the live provider; its id is the keychain account suffix
+// (`key-<id>`). The API key is NOT here (ADR-0029/0038: key only in the OS
+// keychain, never in app-config). This slice ships a single default anthropic
+// profile -- the multi-profile / openai-protocol surface is a follow-up.
 
 /// v1 default endpoint (ADR-0019: Anthropic native protocol + configurable
 /// `baseURL`; default is Anthropic direct).
@@ -753,11 +754,82 @@ pub const DEFAULT_PROVIDER_BASE_URL: &str = "https://api.anthropic.com";
 /// stronger (Fable/Opus) or cheaper (Haiku) model via the config.
 pub const DEFAULT_PROVIDER_MODEL: &str = "claude-sonnet-4-6";
 
-/// Non-secret provider config (ADR-0019/0029): the Anthropic-protocol endpoint
-/// base URL + the model id. Stored Rust-side (keychain entry as JSON); never
-/// carries the API key. Crosses IPC as the set_provider_config input.
+/// The wire protocol a profile speaks (ADR-0064). Two variants are planned --
+/// anthropic (Anthropic Messages native, `x-api-key` auth) and openai (OpenAI
+/// Chat Completions, Bearer auth; covers OpenAI direct / DeepSeek / GLM / Qwen
+/// / Ollama compatible endpoints). This slice ships only `Anthropic`; the
+/// `Openai` variant is a follow-up slice. Crosses IPC as the bare lowercase
+/// variant name (mirrors the ChartKind convention).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    #[default]
+    Anthropic,
+    // Openai -- ADR-0064 second adapter; not wired in this slice.
+}
+
+/// Stable identity of a provider profile (ADR-0064, mirroring the ADR-0037
+/// reference_name half of the stable-vs-display split). Created once when the
+/// profile is minted and never mutated thereafter -- [`ProviderProfile::display_name`]
+/// is the renamable half. Opaque: carried verbatim across IPC and used as the
+/// keychain account suffix (`key-<id>`). Callers must not assume any structure.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProfileId(pub String);
+
+impl ProfileId {
+    /// The id as a string slice (for keychain account formatting, lookups, etc.).
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ProfileId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for ProfileId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for ProfileId {
+    fn default() -> Self {
+        // Falls back to the default profile's id so a config missing the
+        // active_profile field (serde default) points at the built-in default
+        // profile rather than an empty / dangling id.
+        Self(DEFAULT_PROFILE_ID.to_string())
+    }
+}
+
+/// The id of the built-in default profile (ADR-0064/0038 honest-degrade +
+/// first-launch skeleton). FIXED so repeated first-launches and degrades
+/// converge on the same keychain account (`key-default`) rather than minting a
+/// fresh id each time -- a user who sets a key once keeps it across a degrade.
+/// User-created profiles (a follow-up slice) will mint their own ids.
+pub const DEFAULT_PROFILE_ID: &str = "default";
+
+/// Display name of the built-in default profile.
+const DEFAULT_PROFILE_DISPLAY_NAME: &str = "Anthropic";
+
+/// One named access profile (ADR-0064): protocol + endpoint + model. The key
+/// lives separately in the OS keychain under `key-<id>` (ADR-0029/0038). `id`
+/// is stable (created once); `display_name` is renamable (ADR-0037 split).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderConfig {
+pub struct ProviderProfile {
+    /// Stable identity (ADR-0037 reference half); also the keychain account
+    /// suffix (`key-<id>`).
+    pub id: ProfileId,
+    /// Renamable display label (ADR-0037 display half). Sans key, sans protocol
+    /// semantics -- purely what the UI shows.
+    #[serde(default)]
+    pub display_name: String,
+    /// Wire protocol (ADR-0064); defaults to Anthropic.
+    #[serde(default)]
+    pub protocol: Protocol,
     /// Anthropic Messages API base URL (ADR-0019: configurable `baseURL`,
     /// default Anthropic direct). A user's own Anthropic-compatible gateway goes
     /// here. `#[serde(default)]` keeps older stored blobs deserializing.
@@ -768,23 +840,106 @@ pub struct ProviderConfig {
     pub model: String,
 }
 
-/// Serde default for [`ProviderConfig::base_url`] (used both at deserialize time
-/// for older blobs and by [`ProviderConfig::defaults`]).
+impl ProviderProfile {
+    /// The built-in default anthropic profile (ADR-0064 skeleton): the
+    /// honest-degrade target and the single profile this slice ships.
+    pub fn default_anthropic() -> Self {
+        Self {
+            id: ProfileId(DEFAULT_PROFILE_ID.to_string()),
+            display_name: DEFAULT_PROFILE_DISPLAY_NAME.to_string(),
+            protocol: Protocol::Anthropic,
+            base_url: DEFAULT_PROVIDER_BASE_URL.to_string(),
+            model: DEFAULT_PROVIDER_MODEL.to_string(),
+        }
+    }
+}
+
+/// Serde default for a profile's [`ProviderProfile::base_url`] (used at
+/// deserialize time for older blobs and by [`ProviderProfile::default_anthropic`]).
 fn default_provider_base_url() -> String {
     DEFAULT_PROVIDER_BASE_URL.to_string()
 }
 
-/// Serde default for [`ProviderConfig::model`].
+/// Serde default for a profile's [`ProviderProfile::model`].
 fn default_provider_model() -> String {
     DEFAULT_PROVIDER_MODEL.to_string()
 }
 
+/// Non-secret multi-profile provider config (ADR-0064): a list of named access
+/// profiles plus the id of the active one. Never carries the API key
+/// (ADR-0029/0038 -- the key lives only in the OS keychain under `key-<id>`).
+/// This is BOTH the app-config storage shape ([`crate::app_config::AppConfig`].provider)
+/// AND the `set_provider_config` IPC input -- one shape, no DRY split between a
+/// "storage" and a "wire" variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    /// The named access profiles (ADR-0064). At least one in any valid config;
+    /// [`ProviderConfig::defaults`] seeds the single default anthropic profile.
+    #[serde(default)]
+    pub profiles: Vec<ProviderProfile>,
+    /// The id of the active profile (ADR-0064: global single active). Its
+    /// protocol + endpoint + model drive the live provider, and its id drives
+    /// the keychain account the key is read from.
+    #[serde(default)]
+    pub active_profile: ProfileId,
+}
+
 impl ProviderConfig {
-    /// The v1 defaults (Anthropic direct endpoint, Sonnet-class model).
+    /// The built-in defaults (ADR-0064): one anthropic profile, active.
     pub fn defaults() -> Self {
+        let profile = ProviderProfile::default_anthropic();
         Self {
-            base_url: DEFAULT_PROVIDER_BASE_URL.to_string(),
-            model: DEFAULT_PROVIDER_MODEL.to_string(),
+            active_profile: profile.id.clone(),
+            profiles: vec![profile],
+        }
+    }
+
+    /// The active profile, or `None` when no profile matches `active_profile`
+    /// (a malformed config that [`crate::app_config::AppConfig::normalize`]
+    /// repairs). Live readers fall back to the canonical defaults when this
+    /// returns `None` so a hand-edited gap never hands the provider an empty
+    /// endpoint.
+    pub fn active(&self) -> Option<&ProviderProfile> {
+        self.profiles.iter().find(|p| p.id == self.active_profile)
+    }
+
+    /// Mutable access to the active profile, or `None` when no profile matches
+    /// `active_profile`. [`crate::app_config::AppConfig::normalize`] establishes
+    /// the invariant (non-empty + active points at a real profile) before
+    /// callers that `expect` a profile run.
+    pub fn active_mut(&mut self) -> Option<&mut ProviderProfile> {
+        self.profiles
+            .iter_mut()
+            .find(|p| p.id == self.active_profile)
+    }
+
+    /// The active profile's base URL, or the canonical default when no profile
+    /// matches `active_profile` (a malformed config normalize repairs). Shared
+    /// by the live provider read path and the IPC view so a dangling active
+    /// always yields the same endpoint the provider itself uses, never "".
+    pub fn effective_base_url(&self) -> &str {
+        self.active()
+            .map(|p| p.base_url.as_str())
+            .unwrap_or(DEFAULT_PROVIDER_BASE_URL)
+    }
+
+    /// The active profile's model, or the canonical default (see
+    /// [`Self::effective_base_url`]).
+    pub fn effective_model(&self) -> &str {
+        self.active()
+            .map(|p| p.model.as_str())
+            .unwrap_or(DEFAULT_PROVIDER_MODEL)
+    }
+
+    /// The IPC-shaped view of the active profile's endpoint + whether a key is
+    /// set (ADR-0029: only the boolean crosses). One shape for both
+    /// `get_provider_config` and `set_provider_config` so the active-missing
+    /// fallback policy is single-sourced, not duplicated per call site.
+    pub fn view(&self, has_key: bool) -> ProviderConfigView {
+        ProviderConfigView {
+            base_url: self.effective_base_url().to_string(),
+            model: self.effective_model().to_string(),
+            has_key,
         }
     }
 }

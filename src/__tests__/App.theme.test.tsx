@@ -15,9 +15,9 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 // appConfigWith lives in the hoisted block so the hoisted api mock factory can
 // call it (factories run above imports; only vi.hoisted values are in scope).
 const { appConfigWith } = vi.hoisted(() => {
-  function appConfigWith(theme: "system" | "light" | "dark") {
+  function appConfigWith(theme: "system" | "light" | "dark"): AppConfig {
     return {
-      format_version: 1,
+      format_version: 2,
       theme,
       // Pin zh-CN so the Chinese chrome labels the assertions below depend on
       // render regardless of the host navigator.language (theme test, not i18n).
@@ -25,7 +25,18 @@ const { appConfigWith } = vi.hoisted(() => {
       window: { width: 800, height: 600, x: null, y: null, maximized: false },
       engine: { memory_limit: "512MB", threads: 1, row_cap: 100, statement_timeout_ms: 30000 },
       privacy: { send_samples: true },
-      provider: { base_url: "https://api.anthropic.com", model: "claude-sonnet-4-6" },
+      provider: {
+        profiles: [
+          {
+            id: "default",
+            display_name: "Anthropic",
+            protocol: "anthropic",
+            base_url: "https://api.anthropic.com",
+            model: "claude-sonnet-4-6",
+          },
+        ],
+        active_profile: "default",
+      },
       export: { last_dir: null, default_format: "csv" },
       tunables: { retry_budget: 3, window_turns: 6, far_window: 12 },
       recent_files: [] as string[],
