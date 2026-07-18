@@ -30,8 +30,9 @@ use tauri::{Emitter, State};
 use crate::app_config::AppConfig;
 use crate::cancel::CancelToken;
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, LoadOutcome, ProviderConfig, ProviderConfigView,
-    RemoveSourceError, RowPage, SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
+    DatasetDescriptor, DatasetPrivacy, LoadOutcome, ProfileId, ProfileKeyStatus, ProviderConfig,
+    ProviderConfigView, RemoveSourceError, RowPage, SheetGuidance, ThreadEntry, TurnOutcome,
+    TurnProgress,
 };
 use crate::persistence::{list_session_metadata, SaveError, SessionMetadata};
 use crate::provider::live_config::LiveProviderConfig;
@@ -610,6 +611,52 @@ pub fn set_provider_config(
         .store(cfg)
         .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))?;
     Ok(stored.provider.view(live.has_key()))
+}
+
+/// Per-profile key status overlay (issue #153, ADR-0064/0029). Returns one
+/// entry per profile currently in app-config: the profile id plus whether its
+/// keychain slot (`key-<id>`) holds a key (a boolean, never the key). The
+/// Profiles UI seeds its `has_key` view from this; profile records themselves
+/// come from app-config (single-sourced). A profile minted client-side but not
+/// yet saved is absent here -- the UI defaults it to `has_key=false` until
+/// `set_profile_key` returns `true`. Read-only: cannot fail with a user-facing
+/// refusal, so it returns `Result<_, String>`.
+#[tauri::command]
+pub fn list_provider_profiles(
+    live: State<'_, LiveProviderConfig>,
+) -> Result<Vec<ProfileKeyStatus>, String> {
+    Ok(live.list_profile_key_status())
+}
+
+/// Store the API key for the named profile (issue #153, ADR-0029 one-shot
+/// frontend -> Rust transfer; ADR-0064 per-profile slot `key-<profile_id>`).
+/// Returns the NEW `has_key` (true on success) so the frontend updates its
+/// overlay without a re-fetch. `profileId` is the opaque profile id; it need not
+/// match a saved profile yet (a freshly-minted id before Save is a valid target
+/// -- the key lands in its slot and the profile's later Save references it).
+#[tauri::command]
+pub fn set_profile_key(
+    live: State<'_, LiveProviderConfig>,
+    profile_id: String,
+    key: String,
+) -> Result<bool, StoreCommandError> {
+    let id = ProfileId(profile_id);
+    live.set_profile_key(&id, &key)
+        .map_err(StoreCommandError::KeychainFailure)
+}
+
+/// Remove the key for the named profile (issue #153). Idempotent: a missing
+/// entry is success. Returns the NEW `has_key` (false on success). A real
+/// keychain error propagates so the frontend can tell the user the key did not
+/// come out (ADR-0029 trust root -- a failed delete must not read as "removed").
+#[tauri::command]
+pub fn clear_profile_key(
+    live: State<'_, LiveProviderConfig>,
+    profile_id: String,
+) -> Result<bool, StoreCommandError> {
+    let id = ProfileId(profile_id);
+    live.clear_profile_key(&id)
+        .map_err(StoreCommandError::KeychainFailure)
 }
 
 // --- App-level config (issue #53, ADR-0038) --------------------------------

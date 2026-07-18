@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::app_config::{self, AppConfig, LocalePreference};
-use crate::model::Protocol;
+use crate::model::{ProfileId, Protocol};
 use crate::provider::keychain::{KeychainStore, ProviderConfigSource};
 use crate::provider::prompt::{resolve_locale_from_tag, ResponseLocale};
 
@@ -79,6 +79,51 @@ impl LiveProviderConfig {
     pub fn clear_key(&self) -> Result<(), String> {
         self.keychain
             .clear_key_for(&self.load().provider.active_profile)
+    }
+
+    // --- Per-profile key (issue #153, ADR-0064) ------------------------------
+    //
+    // The Profiles management UI edits keys for ANY profile, not just the active
+    // one. These delegate to the per-profile keychain slots (`key-<id>`) that the
+    // active-path methods above resolve through the active id. Each returns the
+    // NEW has_key for the targeted profile (issue #153 AC: set/clear returns a
+    // bool) so the frontend updates its overlay without a re-fetch. The profile
+    // id is opaque (ADR-0064) -- a string that does not match a stored profile
+    // still addresses a valid keychain slot (e.g. a freshly-minted id before its
+    // profile is saved, or an orphan after a delete -- ADR-0064 sanctions both).
+
+    /// Key-status overlay for every profile currently in app-config (issue
+    /// #153). The Profiles UI seeds its per-profile `has_key` view from this;
+    /// profile RECORDS stay single-sourced from app-config. A profile minted
+    /// client-side but not yet saved is absent here (the UI defaults it to
+    /// `has_key=false` until `set_profile_key` returns `true`).
+    pub fn list_profile_key_status(&self) -> Vec<crate::model::ProfileKeyStatus> {
+        self.load()
+            .provider
+            .profiles
+            .iter()
+            .map(|p| crate::model::ProfileKeyStatus {
+                profile_id: p.id.as_str().to_string(),
+                has_key: self.keychain.has_key_for(&p.id),
+            })
+            .collect()
+    }
+
+    /// Store the key for the named profile (one-shot frontend -> Rust transfer,
+    /// ADR-0029; per-profile slot `key-<id>`, ADR-0064). Returns the new has_key
+    /// (true on success) so the frontend updates its overlay without a re-fetch.
+    pub fn set_profile_key(&self, profile_id: &ProfileId, key: &str) -> Result<bool, String> {
+        self.keychain.set_key_for(profile_id, key)?;
+        Ok(self.keychain.has_key_for(profile_id))
+    }
+
+    /// Remove the key for the named profile (idempotent). Returns the new
+    /// has_key (false on success). A missing entry is success -- clear is a
+    /// no-op when nothing was stored; a real keychain error propagates so the
+    /// frontend can tell the user the key did not come out (ADR-0029 trust root).
+    pub fn clear_profile_key(&self, profile_id: &ProfileId) -> Result<bool, String> {
+        self.keychain.clear_key_for(profile_id)?;
+        Ok(self.keychain.has_key_for(profile_id))
     }
 
     // --- App-config (preferences + endpoint, ADR-0038) -----------------------
@@ -278,7 +323,9 @@ impl ProviderConfigSource for LiveProviderConfig {
 mod tests {
     use super::*;
     use crate::app_config::{EngineDefaults, LocalePreference, Theme};
-    use crate::model::{DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL};
+    use crate::model::{
+        ProfileId, Protocol, ProviderProfile, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
+    };
 
     /// A LiveProviderConfig bound to a temp-dir config path (no real keychain
     /// dependency in tests; the keychain methods that touch the OS entry are not
@@ -524,5 +571,41 @@ mod tests {
             resolved,
             ResponseLocale::ZhCN | ResponseLocale::EnUS
         ));
+    }
+
+    #[test]
+    fn list_profile_key_status_returns_one_entry_per_profile_with_bool() {
+        // Issue #153: the overlay returns one entry per profile in app-config,
+        // keyed by id, with has_key from the per-profile keychain slot. Synthetic
+        // ids that no real keychain entry uses -> has_key is deterministically
+        // false (the keychain read is a non-mutating Entry lookup, the same path
+        // the existing api_key() tests exercise). profile_id is the opaque id
+        // verbatim; the UI never assumes structure.
+        let (_dir, live) = live();
+        let mut cfg = AppConfig::defaults();
+        cfg.provider.profiles = vec![
+            ProviderProfile {
+                id: ProfileId("__test_list_a".into()),
+                display_name: "A".into(),
+                protocol: Protocol::Anthropic,
+                base_url: DEFAULT_PROVIDER_BASE_URL.into(),
+                model: DEFAULT_PROVIDER_MODEL.into(),
+            },
+            ProviderProfile {
+                id: ProfileId("__test_list_b".into()),
+                display_name: "B".into(),
+                protocol: Protocol::Openai,
+                base_url: "https://api.deepseek.example.test".into(),
+                model: "deepseek-chat".into(),
+            },
+        ];
+        live.store(cfg).expect("store");
+        let status = live.list_profile_key_status();
+        assert_eq!(status.len(), 2);
+        assert_eq!(status[0].profile_id, "__test_list_a");
+        assert_eq!(status[1].profile_id, "__test_list_b");
+        // No keychain entry exists for these synthetic ids -> has_key false.
+        assert!(!status[0].has_key);
+        assert!(!status[1].has_key);
     }
 }

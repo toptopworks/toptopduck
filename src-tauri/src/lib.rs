@@ -35,11 +35,12 @@ pub use cancel::CancelToken;
 pub use commands::StoreCommandError;
 pub use model::{
     ChartKind, ColumnSchema, DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet,
-    LoadError, LoadOutcome, ProfileId, Protocol, ProviderConfig, ProviderConfigView,
-    ProviderProfile, RectifyProvenance, RemoveSourceError, RenameError, RowPage, SheetGuidance,
-    SheetRectify, SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, StaleReason, TextKind,
-    ThreadEntry, TurnError, TurnFailure, TurnOutcome, TurnPhase, TurnProgress, TurnRecord, VizSpec,
-    DEFAULT_PROFILE_ID, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
+    LoadError, LoadOutcome, ProfileId, ProfileKeyStatus, Protocol, ProviderConfig,
+    ProviderConfigView, ProviderProfile, RectifyProvenance, RemoveSourceError, RenameError,
+    RowPage, SheetGuidance, SheetRectify, SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor,
+    StaleReason, TextKind, ThreadEntry, TurnError, TurnFailure, TurnOutcome, TurnPhase,
+    TurnProgress, TurnRecord, VizSpec, DEFAULT_PROFILE_ID, DEFAULT_PROVIDER_BASE_URL,
+    DEFAULT_PROVIDER_MODEL,
 };
 pub use persistence::{
     LoadError as DuckLoadError, MigrationError, RecipeError, SaveError, SessionMetadata,
@@ -241,6 +242,9 @@ pub fn run() {
             commands::clear_api_key,
             commands::get_provider_config,
             commands::set_provider_config,
+            commands::list_provider_profiles,
+            commands::set_profile_key,
+            commands::clear_profile_key,
             commands::get_app_config,
             commands::set_app_config,
             commands::record_recent_file,

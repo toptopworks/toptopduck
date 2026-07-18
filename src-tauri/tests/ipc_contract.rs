@@ -806,3 +806,26 @@ fn session_metadata_serializes_flat_snake_case() {
         r#"{"session_id":"/x/analysis.duck","display_name":"analysis","last_modified_at":1700000000000,"source_summary":{"first_source_name":"orders","source_count":1,"turn_count":2},"format_version":1}"#,
     );
 }
+
+#[test]
+fn profile_key_status_serializes_as_a_flat_object() {
+    // ProfileKeyStatus (issue #153) crosses IPC as a flat `{profile_id, has_key}`
+    // object -- one entry per profile in the list_provider_profiles return. The
+    // shape src/types.ts mirrors: profile_id is the opaque id string, has_key is
+    // a boolean (ADR-0029 -- never the key itself).
+    use toptopduck_lib::ProfileKeyStatus;
+    assert_wire(
+        &ProfileKeyStatus {
+            profile_id: "default".into(),
+            has_key: true,
+        },
+        r#"{"profile_id":"default","has_key":true}"#,
+    );
+    assert_wire(
+        &ProfileKeyStatus {
+            profile_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890".into(),
+            has_key: false,
+        },
+        r#"{"profile_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","has_key":false}"#,
+    );
+}

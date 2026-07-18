@@ -990,3 +990,18 @@ pub struct ProviderConfigView {
     /// invariant 3: the key never crosses to the frontend).
     pub has_key: bool,
 }
+
+/// Per-profile key-status overlay (issue #153, ADR-0064/0029). The Profiles
+/// management UI lists every profile with whether its keychain slot
+/// (`key-<profile_id>`) holds a key -- a boolean only, never the key itself
+/// (ADR-0029 invariant 3). The profile RECORDS come from app-config (the single
+/// source of truth for the list); this view only carries the key status the
+/// app-config deliberately does not store. `list_provider_profiles` returns one
+/// entry per profile currently in app-config.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileKeyStatus {
+    /// The stable profile id (also the keychain account suffix `key-<id>`).
+    pub profile_id: String,
+    /// Whether a key is stored for this profile. A boolean only (ADR-0029).
+    pub has_key: bool,
+}

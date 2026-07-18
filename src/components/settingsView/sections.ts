@@ -5,12 +5,7 @@
 // resolves ids statically, and a helper returning {id} would break the
 // i18n:check CI gate (ADR-0052).
 
-import type {
-  EngineDefaults,
-  LocalePreference,
-  ProviderProfile,
-  Theme,
-} from "../../types";
+import type { EngineDefaults, LocalePreference, Theme } from "../../types";
 
 /** The four settings panes (ADR-0065): General / Profiles / Engine / Privacy. */
 export type SettingsSection = "general" | "profiles" | "engine" | "privacy";
@@ -27,9 +22,15 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSection> = [
   "privacy",
 ];
 
-/** The mutable settings form state shared between SettingsView and its section
- *  children. Held by the parent (one atomic save commits the whole document);
- *  each pane is a pure editor over a slice of it. */
+/** The mutable settings form state shared between SettingsView and its General /
+ *  Engine section children. Held by the parent (one atomic save commits the
+ *  whole document); each pane is a pure editor over a slice of it.
+ *
+ *  Issue #153: the API-key + endpoint fields moved OUT of General into the
+ *  Profiles pane (per-profile management, ADR-0064). The Profiles pane takes its
+ *  own prop slice (ProfilesSectionProps in ProfilesSection.tsx) -- the `provider`
+ *  config + mutators + its own key overlay -- rather than this shared bag, so
+ *  the General/Engine panes stay free of profile entanglement. */
 export interface SettingsForm {
   theme: Theme;
   setTheme: (t: Theme) => void;
@@ -37,10 +38,5 @@ export interface SettingsForm {
   setLocale: (l: LocalePreference) => void;
   engine: EngineDefaults;
   setEngine: (e: EngineDefaults) => void;
-  apiKey: string;
-  setApiKey: (k: string) => void;
-  hasKey: boolean;
-  activeProfile: ProviderProfile;
-  updateActiveProfile: (patch: Partial<ProviderProfile>) => void;
   saving: boolean;
 }
