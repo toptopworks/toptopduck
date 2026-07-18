@@ -253,8 +253,9 @@ impl Provider for UnwiredProvider {
 /// [`ProviderConfigSource`] and, on each [`Provider::generate`] call, reads the
 /// active profile's [`Protocol`] fresh and dispatches to the matching adapter
 /// ([`anthropic::AnthropicProvider`] or [`openai::OpenaiProvider`]). Reading
-/// per-turn (not caching at construction) honors the "切换协议下一回合生效"
-/// AC: a profile switch / protocol edit lands the next turn on the new adapter.
+/// per-turn (not caching at construction) honors the protocol-switch-takes-
+/// effect-next-turn AC: a profile switch / protocol edit lands the next turn
+/// on the new adapter.
 ///
 /// Generic over `C` so production wires [`crate::LiveProviderConfig`] (reads
 /// app-config + keychain fresh each turn) while tests inject
@@ -396,8 +397,9 @@ mod tests {
 
     #[test]
     fn re_reads_protocol_per_turn_not_cached_at_construction() {
-        // AC "每回合读 active_profile": a protocol switch between two turns of
-        // the SAME LiveProvider routes the second turn to the new adapter. The
+        // AC "re-read active_profile each turn": a protocol switch between two
+        // turns of the SAME LiveProvider routes the second turn to the new
+        // adapter. The
         // flippable config's protocol (shared via Arc<Mutex> across the clone
         // the LiveProvider holds) is mutated AFTER construction; if the router
         // cached the protocol at construction, both turns would hit the same

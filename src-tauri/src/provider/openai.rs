@@ -10,8 +10,9 @@
 //! Covers OpenAI direct / DeepSeek / GLM / Qwen / Ollama compatible endpoints:
 //! the user points the profile's `base_url` at the endpoint (including its
 //! version path segment, e.g. `https://api.openai.com/v1`), and this adapter
-//! appends `/chat/completions` -- matching the openai SDK `base_url + path`
-//! convention so all five providers work with no per-provider special case.
+//! appends `/chat/completions` -- the path documented by OpenAI's Chat
+//! Completions API -- so all five providers work with no per-provider special
+//! case.
 //!
 //! The bare-prompt contract (ADR-0009) is unchanged from anthropic: no
 //! tool-calling / function calling. The model emits one JSON object in its
@@ -30,7 +31,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::provider::keychain::ProviderConfigSource;
-use crate::provider::prompt::{build_system_prompt, render_response};
+use crate::provider::prompt::{
+    build_system_prompt, render_response, render_summary_turn_note, Message,
+};
 use crate::provider::reply::parse_reply;
 use crate::provider::{Provider, ProviderError, ProviderReply, ProviderRequest, TurnPayload};
 
@@ -73,8 +76,8 @@ impl Provider for OpenaiProvider {
         let base_url = self.config.base_url();
         let model = self.config.model();
         // The user's base_url carries any version path segment (e.g. `/v1`);
-        // only `/chat/completions` is appended -- matches the openai SDK
-        // `base_url + path` convention so GLM's `/api/paas/v4` and Qwen's
+        // only `/chat/completions` (the path documented by OpenAI's Chat
+        // Completions API) is appended, so GLM's `/api/paas/v4` and Qwen's
         // `/compatible-mode/v1` work with no special case.
         let url = format!(
             "{base}/chat/completions",
@@ -177,12 +180,6 @@ struct OpenaiRequest<'a> {
     messages: Vec<Message>,
 }
 
-#[derive(Serialize)]
-struct Message {
-    role: &'static str,
-    content: String,
-}
-
 /// Minimal OpenAI response shape -- `choices` plus an optional `error`
 /// envelope. Extra fields (id, model, usage, finish_reason) are ignored by serde.
 #[derive(Deserialize)]
@@ -225,10 +222,11 @@ struct RawMessage {
 /// FIRST message (role "system"), then each prior turn becomes a user (its
 /// question) + assistant (its rendered response) pair, oldest first; the
 /// asking question is the final user turn. After the system message, roles
-/// strictly alternate user/assistant and the conversation ends on a user turn
-/// -- OpenAI allows the leading system message that Anthropic's alternation
-/// rule forbids, which is the sole structural difference from the anthropic
-/// `build_messages`.
+/// strictly alternate user/assistant and the conversation ends on a user
+/// turn. Unlike the anthropic adapter -- which carries the system prompt in
+/// the request body's `system` field and starts `messages` with a user turn
+/// -- OpenAI Chat Completions has no separate system field, so the system
+/// prompt rides a leading role="system" message.
 fn build_messages(request: &ProviderRequest, system: String) -> Vec<Message> {
     let mut msgs = Vec::with_capacity(request.history.len() * 2 + 2);
     msgs.push(Message {
@@ -257,10 +255,7 @@ fn build_messages(request: &ProviderRequest, system: String) -> Vec<Message> {
                     role: "user",
                     content: question_excerpt.clone(),
                 });
-                let note = match result {
-                    Some(name) => format!("（该轮已生成结果 {name}）"),
-                    None => "（该轮未生成结果）".to_string(),
-                };
+                let note = render_summary_turn_note(result);
                 msgs.push(Message {
                     role: "assistant",
                     content: note,

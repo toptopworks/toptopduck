@@ -20,6 +20,8 @@
 //! the ADR-0038 preference (never crosses IPC from the frontend, never enters
 //! [`ProviderRequest`]).
 
+use serde::Serialize;
+
 use super::{ColumnRef, DatasetRef, ProviderRequest, ResponsePayload};
 use crate::model::TextKind;
 
@@ -214,6 +216,30 @@ fn render_column(col: &ColumnRef) -> String {
     match &col.name {
         Some(name) => format!("{name}: {ty}", ty = col.canonical_type),
         None => format!("_: {ty} (仅类型)", ty = col.canonical_type),
+    }
+}
+
+/// One message in the windowed conversation array (protocol-agnostic): a role
+/// ("system" / "user" / "assistant") plus the text content. Both adapters
+/// build their wire-shape messages from this single type -- the only difference
+/// is placement (openai leads the array with a system message; anthropic puts
+/// system in the request body's `system` field and starts `messages` with a
+/// user turn). Shared so the array element shape cannot drift between protocols
+/// (ADR-0064, issue #152).
+#[derive(Serialize)]
+pub(crate) struct Message {
+    pub(crate) role: &'static str,
+    pub(crate) content: String,
+}
+
+/// Render the far-window turn note (ADR-0039): a Summary turn ships only the
+/// verbatim question excerpt plus whether it produced a result -- no SQL, no
+/// schema. Shared by both adapters' `build_messages` so the Chinese wording
+/// cannot drift between protocols.
+pub(crate) fn render_summary_turn_note(result: &Option<String>) -> String {
+    match result {
+        Some(name) => format!("（该轮已生成结果 {name}）"),
+        None => "（该轮未生成结果）".to_string(),
     }
 }
 

@@ -4,12 +4,6 @@
 //! shape, auth, response container) differs per adapter (anthropic / openai),
 //! but the text contract the model emits is shared. Each adapter extracts the
 //! model's text block its own way, then hands it here.
-//!
-//! Extracted from the anthropic adapter (issue #152, ADR-0064) so the openai
-//! adapter reuses the identical parse path -- "复用 parse_reply" -- without the
-//! two adapters drifting on what counts as a contract violation. The anthropic
-//! adapter's behavior is unchanged: the same text in yields the same
-//! [`ProviderReply`] (or [`ProviderError::Unavailable`]) out.
 
 use crate::model::{ChartKind, TextKind, VizSpec};
 use crate::provider::{ProviderError, ProviderReply};

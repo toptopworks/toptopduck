@@ -942,9 +942,22 @@ impl ProviderConfig {
     /// ADR-0064): `LiveProvider` reads this each turn so a protocol switch on
     /// the active profile lands the next turn on the new adapter, no caching.
     pub fn effective_protocol(&self) -> Protocol {
-        self.active()
-            .map(|p| p.protocol)
-            .unwrap_or(Protocol::Anthropic)
+        match self.active() {
+            Some(profile) => profile.protocol,
+            None => {
+                // A malformed config whose active_profile points nowhere: log
+                // the silent fallback so the misconfiguration is observable.
+                // normalize repairs it on the next store; a hand-edit gap
+                // otherwise lands the turn on the Anthropic default with no
+                // trace, and a wrong-protocol turn is hard to diagnose from
+                // the bare NotWired/Unavailable it produces downstream.
+                log::warn!(
+                    "active_profile does not match any profile; falling back to \
+                     Anthropic protocol for this turn"
+                );
+                Protocol::Anthropic
+            }
+        }
     }
 
     /// The IPC-shaped view of the active profile's endpoint + whether a key is

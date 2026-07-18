@@ -22,7 +22,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::provider::keychain::ProviderConfigSource;
-use crate::provider::prompt::{build_system_prompt, render_response};
+use crate::provider::prompt::{
+    build_system_prompt, render_response, render_summary_turn_note, Message,
+};
 use crate::provider::reply::parse_reply;
 use crate::provider::{Provider, ProviderError, ProviderReply, ProviderRequest, TurnPayload};
 
@@ -125,9 +127,10 @@ impl Provider for AnthropicProvider {
         let raw: RawResponse = response
             .into_json()
             .map_err(|e| ProviderError::Unavailable(format!("response read failed: {e}")))?;
-        // The model's JSON contract rides the first text block. Anthropic may
-        // also emit tool-use / other blocks; we asked for text-only JSON, so a
-        // missing text block is a contract violation -> retried Unavailable.
+        // The model's JSON contract rides the first text block. We send no
+        // `tools` field (ADR-0064 bare-prompt contract), so Anthropic should
+        // not emit tool-use blocks; a missing text block is a contract
+        // violation -> retried Unavailable.
         let text = raw
             .content
             .iter()
@@ -147,12 +150,6 @@ struct AnthropicRequest<'a> {
     max_tokens: u32,
     system: String,
     messages: Vec<Message>,
-}
-
-#[derive(Serialize)]
-struct Message {
-    role: &'static str,
-    content: String,
 }
 
 /// Minimal Anthropic response shape -- only the `content` array is read. Extra
@@ -198,10 +195,7 @@ fn build_messages(request: &ProviderRequest) -> Vec<Message> {
                     role: "user",
                     content: question_excerpt.clone(),
                 });
-                let note = match result {
-                    Some(name) => format!("（该轮已生成结果 {name}）"),
-                    None => "（该轮未生成结果）".to_string(),
-                };
+                let note = render_summary_turn_note(result);
                 msgs.push(Message {
                     role: "assistant",
                     content: note,
