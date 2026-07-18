@@ -95,15 +95,28 @@ impl Provider for AnthropicProvider {
 
         let response = match response {
             Ok(r) => r,
-            // Auth rejected (bad/missing key seen by the server, or forbidden):
-            // permanent for this turn -- map to NotWired so it is NOT retried
-            // (three 401s would only burn time). The user sees a configure-key
-            // prompt via the NotWired message.
-            Err(ureq::Error::Status(status, _)) if status == 401 || status == 403 => {
-                return Err(ProviderError::NotWired);
+            Err(ureq::Error::Status(status, resp)) => {
+                // Auth rejected (bad/missing key seen by the server, or
+                // forbidden): permanent for this turn -- map to NotWired so it
+                // is NOT retried (three 401s would only burn time). The user
+                // sees a configure-key prompt via the NotWired message.
+                if status == 401 || status == 403 {
+                    return Err(ProviderError::NotWired);
+                }
+                // Any other HTTP status (5xx overloaded, or a 4xx payload
+                // rejection): surface the upstream body so the user sees WHY
+                // (e.g. Anthropic's overloaded_error, model_not_found) instead
+                // of a bare status code. Transient/retryable -- the orchestrator
+                // consumes the single retry budget, then fails. reply::truncate
+                // bounds the server-controlled string and its CJK-safe floor
+                // keeps this panic-free.
+                let body = resp.into_string().unwrap_or_default();
+                return Err(ProviderError::Unavailable(format!(
+                    "LLM call failed (HTTP {status}): {}",
+                    crate::provider::reply::truncate(&body)
+                )));
             }
-            // Transport error, 5xx, or a 4xx other than auth: transient/retryable
-            // -- the orchestrator consumes the single retry budget, then fails.
+            // Transport error (DNS / TCP / TLS / timeout): transient/retryable.
             Err(e) => {
                 return Err(ProviderError::Unavailable(format!("LLM call failed: {e}")));
             }

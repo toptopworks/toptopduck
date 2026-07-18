@@ -131,12 +131,14 @@ fn extract_json_object(text: &str) -> Option<&str> {
 }
 
 /// Truncate a string for an error message (avoid flooding the user / log with a
-/// long malformed model reply). Floors to a UTF-8 char boundary: a naive
-/// `&s[..LIMIT]` panics when the cut lands mid-character, and model replies (and
-/// the errors built from them) are routinely CJK -- so this path, of all paths,
-/// must not panic on multi-byte text. (`rust-version = 1.77` predates the
-/// stable `floor_char_boundary`, so the floor is manual.)
-fn truncate(s: &str) -> String {
+/// long malformed model reply or upstream HTTP body). Floors to a UTF-8 char
+/// boundary: a naive `&s[..LIMIT]` panics when the cut lands mid-character, and
+/// model replies / gateway error bodies (and the errors built from them) are
+/// routinely CJK -- so this path, of all paths, must not panic on multi-byte
+/// text. (`rust-version = 1.77` predates the stable `floor_char_boundary`, so
+/// the floor is manual.) Shared across the adapters so both the reply-text path
+/// and the HTTP-error-body path stay panic-free from one source.
+pub(crate) fn truncate(s: &str) -> String {
     const LIMIT: usize = 200;
     if s.len() <= LIMIT {
         return s.to_string();

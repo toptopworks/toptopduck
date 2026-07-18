@@ -104,16 +104,29 @@ impl Provider for OpenaiProvider {
 
         let response = match response {
             Ok(r) => r,
-            // Auth rejected (bad/missing key seen by the server, or forbidden):
-            // permanent for this turn -- map to NotWired so it is NOT retried
-            // (three 401s would only burn time). The user sees a configure-key
-            // prompt via the NotWired message. Mirrors the anthropic path
-            // (ADR-0044).
-            Err(ureq::Error::Status(status, _)) if status == 401 || status == 403 => {
-                return Err(ProviderError::NotWired);
+            Err(ureq::Error::Status(status, resp)) => {
+                // Auth rejected (bad/missing key seen by the server, or
+                // forbidden): permanent for this turn -- map to NotWired so it
+                // is NOT retried (three 401s would only burn time). The user
+                // sees a configure-key prompt via the NotWired message. Mirrors
+                // the anthropic path (ADR-0044).
+                if status == 401 || status == 403 {
+                    return Err(ProviderError::NotWired);
+                }
+                // Any other HTTP status (5xx, or a 4xx payload/param rejection
+                // such as model_not_found / context_length_exceeded): surface
+                // the upstream body so the user sees WHY instead of a bare
+                // status code. Transient/retryable -- the orchestrator consumes
+                // the single retry budget, then fails. The body is a server-
+                // controlled string; reply::truncate bounds it and its CJK-safe
+                // floor keeps this panic-free.
+                let body = resp.into_string().unwrap_or_default();
+                return Err(ProviderError::Unavailable(format!(
+                    "LLM call failed (HTTP {status}): {}",
+                    crate::provider::reply::truncate(&body)
+                )));
             }
-            // Transport error, 5xx, or a 4xx other than auth: transient/retryable
-            // -- the orchestrator consumes the single retry budget, then fails.
+            // Transport error (DNS / TCP / TLS / timeout): transient/retryable.
             Err(e) => {
                 return Err(ProviderError::Unavailable(format!("LLM call failed: {e}")));
             }
@@ -122,16 +135,33 @@ impl Provider for OpenaiProvider {
         let raw: RawResponse = response
             .into_json()
             .map_err(|e| ProviderError::Unavailable(format!("response read failed: {e}")))?;
-        // The model's JSON contract rides the first choice's text content.
-        // OpenAI returns content=null only when the model emitted tool calls
-        // (which we never request); a missing/empty choices array or null
-        // content is a contract violation -> retried Unavailable.
+        // The model's JSON contract rides the first choice's text content. Some
+        // OpenAI-compatible gateways return HTTP 200 with an `error` envelope
+        // (content_filter, quota, upstream fault) instead of `choices`; surface
+        // that envelope first so the cause is diagnosable. A missing/empty
+        // choices array with no error envelope is a contract violation ->
+        // retried Unavailable.
         let text = raw
             .choices
             .into_iter()
             .next()
-            .and_then(|c| c.message.content)
-            .ok_or_else(|| ProviderError::Unavailable("LLM response has no text content".into()))?;
+            .and_then(|c| c.message.content);
+        let text = match text {
+            Some(t) => t,
+            None => match raw.error {
+                Some(err) => {
+                    return Err(ProviderError::Unavailable(format!(
+                        "LLM returned error envelope: {}",
+                        err.message.unwrap_or_else(|| "unknown error".into())
+                    )));
+                }
+                None => {
+                    return Err(ProviderError::Unavailable(
+                        "LLM response has no text content".into(),
+                    ));
+                }
+            },
+        };
         parse_reply(&text)
     }
 }
@@ -153,12 +183,27 @@ struct Message {
     content: String,
 }
 
-/// Minimal OpenAI response shape -- only the `choices` array is read. Extra
-/// fields (id, model, usage, finish_reason) are ignored by serde.
+/// Minimal OpenAI response shape -- `choices` plus an optional `error`
+/// envelope. Extra fields (id, model, usage, finish_reason) are ignored by serde.
 #[derive(Deserialize)]
 struct RawResponse {
     #[serde(default)]
     choices: Vec<RawChoice>,
+    /// Some OpenAI-compatible gateways return HTTP 200 with an error envelope
+    /// (`{"error":{"message":...}}`) instead of `choices` -- content_filter,
+    /// quota exhaustion, upstream model fault. Surfaced by the caller when
+    /// choices is empty so the cause is diagnosable rather than a bare "no
+    /// text content". Absent on a normal reply (ignored by serde).
+    #[serde(default)]
+    error: Option<RawError>,
+}
+
+/// The `error` object inside a 200-body error envelope (gateway-injected).
+/// Only `message` is read; other fields (code, type) are ignored by serde.
+#[derive(Deserialize)]
+struct RawError {
+    #[serde(default)]
+    message: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -169,8 +214,8 @@ struct RawChoice {
 #[derive(Deserialize)]
 struct RawMessage {
     /// The model's text reply. `None` when the server returned null (a
-    /// tool-call-only response, which we never request) -- treated as a
-    /// contract violation by the caller.
+    /// tool-call-only / content-filtered response, which we never request) --
+    /// treated as a contract violation by the caller.
     #[serde(default)]
     content: Option<String>,
 }
@@ -505,6 +550,60 @@ mod tests {
             p.generate(&sample_request("q")),
             Err(ProviderError::Unavailable(_))
         ));
+    }
+
+    #[test]
+    fn error_envelope_at_http_200_surfaces_message() {
+        // Some OpenAI-compatible gateways (Azure content_filter, proxy quota)
+        // return HTTP 200 with an `error` envelope instead of `choices`. The
+        // envelope's message must surface so the cause is diagnosable -- not a
+        // bare "no text content" that hides the upstream reason.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_body(
+                serde_json::json!({
+                    "error": {"message": "content filter triggered", "code": "content_filter"}
+                })
+                .to_string(),
+            )
+            .create();
+        let p = provider_at(&server.url(), Some("sk-test"));
+        match p.generate(&sample_request("q")) {
+            Err(ProviderError::Unavailable(msg)) => assert!(
+                msg.contains("content filter triggered"),
+                "error envelope message should surface, got: {msg}"
+            ),
+            other => panic!("expected Unavailable carrying envelope, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn http_400_surfaces_upstream_body_message() {
+        // A 4xx payload/param rejection (model_not_found, context_length) is
+        // transient/retryable (Unavailable), but the upstream body must surface
+        // so the user sees WHY the model rejected the request -- not a bare
+        // status code.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(400)
+            .with_body(
+                serde_json::json!({
+                    "error": {"message": "The model `gpt4o` does not exist", "code": "model_not_found"}
+                })
+                .to_string(),
+            )
+            .create();
+        let p = provider_at(&server.url(), Some("sk-test"));
+        match p.generate(&sample_request("q")) {
+            Err(ProviderError::Unavailable(msg)) => assert!(
+                msg.contains("gpt4o") && msg.contains("400"),
+                "400 body + status should surface, got: {msg}"
+            ),
+            other => panic!("expected Unavailable carrying 400 body, got {other:?}"),
+        }
     }
 
     #[test]
