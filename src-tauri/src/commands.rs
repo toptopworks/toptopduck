@@ -32,6 +32,7 @@ use crate::cancel::CancelToken;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, LoadOutcome, ProviderConfig, ProviderConfigView,
     RemoveSourceError, RowPage, SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
+    DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
 };
 use crate::persistence::{list_session_metadata, SaveError, SessionMetadata};
 use crate::provider::live_config::LiveProviderConfig;
@@ -580,25 +581,36 @@ pub fn clear_api_key(live: State<'_, LiveProviderConfig>) -> Result<(), StoreCom
 }
 
 /// Read the effective provider endpoint + whether a key is set (ADR-0019/0029/
-/// 0038). The base URL + model cross IPC from app-config; the key does not (only
-/// the boolean, from the keychain).
+/// 0038/0064). The base URL + model come from the ACTIVE profile in app-config;
+/// the key does not cross IPC (only the boolean, from the active profile's
+/// keychain slot `key-<active_profile_id>`).
 #[tauri::command]
 pub fn get_provider_config(
     live: State<'_, LiveProviderConfig>,
 ) -> Result<ProviderConfigView, String> {
     let cfg = live.load();
+    let active = cfg.provider.active();
     Ok(ProviderConfigView {
-        base_url: cfg.provider.base_url,
-        model: cfg.provider.model,
+        // Fall back to the canonical defaults so the IPC view matches what
+        // live_config (the actual provider read path) would resolve -- a
+        // dangling active profile (hand-edited config before normalize runs)
+        // yields the same endpoint the provider itself uses, never "".
+        base_url: active
+            .map(|p| p.base_url.clone())
+            .unwrap_or_else(|| DEFAULT_PROVIDER_BASE_URL.to_string()),
+        model: active
+            .map(|p| p.model.clone())
+            .unwrap_or_else(|| DEFAULT_PROVIDER_MODEL.to_string()),
         has_key: live.has_key(),
     })
 }
 
-/// Save the non-secret provider endpoint (Anthropic-protocol base URL + model,
-/// ADR-0019/0038) into app-config. Empty fields normalize to the v1 defaults so
-/// the stored config is always valid (and `get_provider_config` then reads
-/// consistent values). The API key never enters this path (ADR-0029/0038: key
-/// confined to the OS keychain; app-config has no key field at all).
+/// Save the non-secret provider config (ADR-0019/0038/0064) into app-config --
+/// the multi-profile shape `{profiles, active_profile}`. normalize clamps the
+/// active profile's empty endpoint fields to the canonical defaults and
+/// repairs an empty profiles list / dangling active id, so the stored config is
+/// always valid. The API key never enters this path (ADR-0029/0038: key confined
+/// to the OS keychain; app-config has no key field at all).
 #[tauri::command]
 pub fn set_provider_config(
     live: State<'_, LiveProviderConfig>,
@@ -609,9 +621,14 @@ pub fn set_provider_config(
     let stored = live
         .store(cfg)
         .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))?;
+    let active = stored.provider.active();
     Ok(ProviderConfigView {
-        base_url: stored.provider.base_url,
-        model: stored.provider.model,
+        base_url: active
+            .map(|p| p.base_url.clone())
+            .unwrap_or_else(|| DEFAULT_PROVIDER_BASE_URL.to_string()),
+        model: active
+            .map(|p| p.model.clone())
+            .unwrap_or_else(|| DEFAULT_PROVIDER_MODEL.to_string()),
         has_key: live.has_key(),
     })
 }

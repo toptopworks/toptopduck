@@ -18,9 +18,13 @@ use crate::window::WINDOW_TURNS;
 
 /// App-config schema version (ADR-0038 -- separate domain from the `.duck`
 /// `format_version`: app-config is machine-local and migrates with the app, not
-/// across users). v1 is the first version; the read path honest-degrades any
-/// other version to built-in defaults (ADR-0038 "corrupt/missing -> defaults").
-pub const APP_CONFIG_FORMAT_VERSION: u32 = 1;
+/// across users). v2 (issue #150, ADR-0064) marks the provider schema shape
+/// change to the multi-profile `ProviderConfig { profiles, active_profile }`.
+/// A leftover v1 file honest-degrades to built-in defaults via the read path's
+/// `LowerVersion` branch -- the app is unreleased, so ADR-0064 declines a
+/// v1->v2 migrator and treats a stale v1 file as a reset to defaults
+/// (ADR-0038). Any other version also honest-degrades to built-in defaults.
+pub const APP_CONFIG_FORMAT_VERSION: u32 = 2;
 
 /// V1 default per-statement timeout (ms). No prior constant existed; 30s is a
 /// conservative ceiling for a local DuckDB query under the resource caps.
@@ -143,18 +147,6 @@ impl Default for PrivacyDefaults {
     }
 }
 
-/// Anthropic-protocol endpoint config (ADR-0019), SANS the API key. The key
-/// lives ONLY in the OS keychain (ADR-0029/0038); app-config must never carry
-/// it -- enforced structurally (the reused [`ProviderConfig`] carries only
-/// `base_url` + `model`, no key field) plus a secret-field scan on read.
-///
-/// `ProviderConfig` is the single shape used both for app-config storage and as
-/// the IPC wire type for `set_provider_config` -- no DRY split between a
-/// "storage" and a "wire" variant. The key stays in the OS keychain, NOT here.
-///
-/// (Type alias kept so call sites read as "the endpoint half of app-config".)
-pub type ProviderEndpoint = ProviderConfig;
-
 /// Export starting directory + default format (ADR-0004/0015). `last_dir` is a
 /// path POINTER (the last-used export folder), not user-data content -- allowed
 /// under ADR-0038's pointer-vs-content split.
@@ -260,7 +252,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub privacy: PrivacyDefaults,
     #[serde(default)]
-    pub provider: ProviderEndpoint,
+    pub provider: ProviderConfig,
     #[serde(default)]
     pub export: ExportDefaults,
     #[serde(default)]
@@ -288,7 +280,7 @@ impl AppConfig {
             window: WindowGeometry::default(),
             engine: EngineDefaults::default(),
             privacy: PrivacyDefaults::default(),
-            provider: ProviderEndpoint::default(),
+            provider: ProviderConfig::default(),
             export: ExportDefaults::default(),
             tunables: Tunables::default(),
             recent_files: Vec::new(),
@@ -337,22 +329,47 @@ impl AppConfig {
     /// - `format_version` pinned to the current schema version (a wrong/foreign
     ///   value would make the next read honest-degrade the WHOLE config to
     ///   defaults, silently losing every pref the user just saved);
-    /// - empty/whitespace `base_url` / `model` -> the canonical defaults (so the
-    ///   provider always has a valid endpoint; mirrors the legacy
-    ///   `set_provider_config` normalization);
+    /// - `provider.profiles` non-empty (an empty list seeds the default
+    ///   skeleton) and `active_profile` pointing at a real profile (a dangling
+    ///   id falls back to the first);
+    /// - empty/whitespace `base_url` / `model` on the ACTIVE profile -> the
+    ///   canonical defaults (so the provider always has a valid endpoint);
     /// - `threads` clamped to >= 1 (DuckDB rejects `PRAGMA threads=0`);
     /// - `window_turns` clamped to >= 1 (0 would summarize every turn, which is
     ///   nonsensical rather than dangerous).
     pub fn normalize(&mut self) {
         self.format_version = APP_CONFIG_FORMAT_VERSION;
-        let base_url = self.provider.base_url.trim().to_string();
-        self.provider.base_url = if base_url.is_empty() {
+        // Ensure at least one profile; an empty list is malformed -> seed the
+        // default skeleton (ADR-0064/0038 honest-degrade target).
+        if self.provider.profiles.is_empty() {
+            self.provider = ProviderConfig::defaults();
+        }
+        // Ensure active_profile points at an existing profile; a dangling id
+        // falls back to the first profile so the live provider always has a
+        // valid endpoint to read.
+        if !self
+            .provider
+            .profiles
+            .iter()
+            .any(|p| p.id == self.provider.active_profile)
+        {
+            self.provider.active_profile = self.provider.profiles[0].id.clone();
+        }
+        // Normalize the active profile's endpoint fields (mirrors the legacy
+        // set_provider_config normalization): empty -> canonical defaults so the
+        // provider always has a valid endpoint.
+        let active = self
+            .provider
+            .active_mut()
+            .expect("normalize ensures a non-empty profiles list with a valid active id");
+        let base_url = active.base_url.trim().to_string();
+        active.base_url = if base_url.is_empty() {
             DEFAULT_PROVIDER_BASE_URL.to_string()
         } else {
             base_url
         };
-        let model = self.provider.model.trim().to_string();
-        self.provider.model = if model.is_empty() {
+        let model = active.model.trim().to_string();
+        active.model = if model.is_empty() {
             DEFAULT_PROVIDER_MODEL.to_string()
         } else {
             model
@@ -383,10 +400,10 @@ mod tests {
     }
 
     #[test]
-    fn defaults_use_canonical_provider_endpoint() {
+    fn defaults_use_canonical_provider_profile() {
         // app-config reuses model::ProviderConfig verbatim, so its default must
-        // equal the canonical provider default (Anthropic direct, Sonnet-class).
-        let provider = ProviderEndpoint::default();
+        // equal the canonical provider default (one anthropic profile, active).
+        let provider = ProviderConfig::default();
         assert_eq!(provider, crate::model::ProviderConfig::defaults());
     }
 
@@ -506,26 +523,78 @@ mod tests {
 
     #[test]
     fn normalize_fills_empty_endpoint_fields_with_defaults() {
-        // Empty / whitespace base_url + model must fall back to the canonical
-        // defaults so the stored config always hands the provider a valid endpoint.
+        // Empty / whitespace base_url + model on the ACTIVE profile must fall
+        // back to the canonical defaults so the stored config always hands the
+        // provider a valid endpoint.
         let mut cfg = AppConfig::defaults();
-        cfg.provider.base_url = "   ".into();
-        cfg.provider.model = "".into();
+        let active = cfg
+            .provider
+            .active_mut()
+            .expect("default config has an active profile");
+        active.base_url = "   ".into();
+        active.model = "".into();
         cfg.normalize();
-        assert_eq!(cfg.provider.base_url, DEFAULT_PROVIDER_BASE_URL);
-        assert_eq!(cfg.provider.model, DEFAULT_PROVIDER_MODEL);
+        let active = cfg.provider.active().expect("active profile still present");
+        assert_eq!(active.base_url, DEFAULT_PROVIDER_BASE_URL);
+        assert_eq!(active.model, DEFAULT_PROVIDER_MODEL);
     }
 
     #[test]
     fn normalize_keeps_a_set_endpoint_value() {
-        // A user-supplied custom endpoint survives normalization (only empties
-        // reset to the default).
+        // A user-supplied custom endpoint on the active profile survives
+        // normalization (only empties reset to the default).
         let mut cfg = AppConfig::defaults();
-        cfg.provider.base_url = "  https://gateway.example.test  ".into();
-        cfg.provider.model = "claude-opus-4-8".into();
+        let active = cfg
+            .provider
+            .active_mut()
+            .expect("default config has an active profile");
+        active.base_url = "  https://gateway.example.test  ".into();
+        active.model = "claude-opus-4-8".into();
         cfg.normalize();
-        assert_eq!(cfg.provider.base_url, "https://gateway.example.test");
-        assert_eq!(cfg.provider.model, "claude-opus-4-8");
+        let active = cfg.provider.active().expect("active profile still present");
+        assert_eq!(active.base_url, "https://gateway.example.test");
+        assert_eq!(active.model, "claude-opus-4-8");
+    }
+
+    #[test]
+    fn normalize_seeds_default_profile_when_profiles_empty() {
+        // A malformed config with an empty profiles list is repaired to the
+        // default skeleton (ADR-0064/0038 honest-degrade target).
+        let mut cfg = AppConfig::defaults();
+        cfg.provider.profiles.clear();
+        cfg.normalize();
+        assert_eq!(cfg.provider, ProviderConfig::defaults());
+        assert!(!cfg.provider.profiles.is_empty());
+        assert!(cfg.provider.active().is_some());
+    }
+
+    #[test]
+    fn normalize_repairs_a_dangling_active_profile() {
+        // active_profile pointing at a non-existent id falls back to the first
+        // profile so the live provider always has a valid endpoint to read.
+        let mut cfg = AppConfig::defaults();
+        cfg.provider.active_profile = crate::model::ProfileId("no-such-profile".into());
+        cfg.normalize();
+        let first_id = cfg.provider.profiles[0].id.clone();
+        assert_eq!(cfg.provider.active_profile, first_id);
+        assert!(cfg.provider.active().is_some());
+    }
+
+    #[test]
+    fn renaming_display_name_keeps_profile_id_stable() {
+        // ADR-0037 split (referenced by ADR-0064): display_name is renamable;
+        // id is stable. Renaming the label does NOT mint a new id, so the
+        // keychain account (`key-<id>`) and the active_profile pointer stay
+        // valid across a rename.
+        let mut cfg = AppConfig::defaults();
+        let original_id = cfg.provider.active().expect("active profile").id.clone();
+        cfg.provider
+            .active_mut()
+            .expect("active profile")
+            .display_name = "Renamed".into();
+        let active = cfg.provider.active().expect("active profile");
+        assert_eq!(active.id, original_id);
+        assert_eq!(active.display_name, "Renamed");
     }
 
     #[test]

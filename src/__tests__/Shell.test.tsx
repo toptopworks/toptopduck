@@ -1055,7 +1055,18 @@ function baseAppConfig(shell: AppConfig["shell"]): AppConfig {
     window: { width: 800, height: 600, x: null, y: null, maximized: false },
     engine: { memory_limit: "512MB", threads: 1, row_cap: 100, statement_timeout_ms: 30000 },
     privacy: { send_samples: true },
-    provider: { base_url: "https://api.anthropic.com", model: "claude-sonnet-4-6" },
+    provider: {
+      profiles: [
+        {
+          id: "default",
+          display_name: "Anthropic",
+          protocol: "anthropic",
+          base_url: "https://api.anthropic.com",
+          model: "claude-sonnet-4-6",
+        },
+      ],
+      active_profile: "default",
+    },
     export: { last_dir: null, default_format: "csv" },
     tunables: { retry_budget: 3, window_turns: 6, far_window: 12 },
     recent_files: [],

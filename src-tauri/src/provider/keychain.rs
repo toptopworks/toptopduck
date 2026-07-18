@@ -21,6 +21,7 @@
 use keyring::Entry;
 
 use super::prompt::ResponseLocale;
+use crate::model::ProfileId;
 
 /// Read-only provider configuration + key access. The provider depends on this
 /// abstraction so its unit tests inject fixed values ([`StaticConfig`]) instead
@@ -44,12 +45,21 @@ pub trait ProviderConfigSource: Send {
     fn locale(&self) -> ResponseLocale;
 }
 
-/// Service/account coordinates for the two keychain entries. The provider-config
-/// account is now a LEGACY migration source only (ADR-0038 moved its contents to
-/// app-config); it is read once on first launch and best-effort cleared.
+/// Service/account coordinates for the keychain entries. The API-key account is
+/// PER-PROFILE (ADR-0064): `key-<profile_id>`, so each profile's key is isolated
+/// in its own OS entry. The pre-#150 single-slot `anthropic-api-key` entry is
+/// NOT migrated and NOT cleaned up (ADR-0064: orphan is harmless; dev machines
+/// re-set their key under the new account). The provider-config account is a
+/// LEGACY migration source only (ADR-0038 moved its contents to app-config); it
+/// is read once on first launch and best-effort cleared.
 const SERVICE: &str = "toptopduck";
-const KEY_ACCOUNT: &str = "anthropic-api-key";
+const KEY_ACCOUNT_PREFIX: &str = "key-";
 const CONFIG_ACCOUNT: &str = "provider-config";
+
+/// The keychain account for a profile's API key (ADR-0064): `key-<profile_id>`.
+fn key_account(profile_id: &ProfileId) -> String {
+    format!("{KEY_ACCOUNT_PREFIX}{profile_id}")
+}
 
 /// Production keychain-backed store (ADR-0029 invariant 3). Key-only as of
 /// ADR-0038: the non-secret provider config moved to app-config. Stateless and
@@ -65,26 +75,29 @@ impl KeychainStore {
         Self
     }
 
-    /// Whether an API key is stored. The IPC `has_api_key` command returns this
-    /// directly -- a boolean, never the key (ADR-0029).
-    pub fn has_key(&self) -> bool {
-        self.fetch_key().is_some()
+    /// Whether an API key is stored for the given profile (ADR-0064 per-profile
+    /// slot `key-<profile_id>`). The IPC `has_api_key` command routes here with
+    /// the active profile's id; it returns a boolean, never the key (ADR-0029).
+    pub fn has_key_for(&self, profile_id: &ProfileId) -> bool {
+        self.fetch_key_for(profile_id).is_some()
     }
 
-    /// Store the API key the frontend sent once (ADR-0029: frontend-to-Rust
-    /// one-shot; thereafter the frontend never receives it back).
-    pub fn set_key(&self, key: &str) -> Result<(), String> {
-        let entry = Entry::new(SERVICE, KEY_ACCOUNT).map_err(keychain_err)?;
+    /// Store the API key for the given profile under `key-<profile_id>`
+    /// (ADR-0029 frontend-to-Rust one-shot; ADR-0064 per-profile slot).
+    /// Thereafter the frontend never receives it back.
+    pub fn set_key_for(&self, profile_id: &ProfileId, key: &str) -> Result<(), String> {
+        let entry = Entry::new(SERVICE, &key_account(profile_id)).map_err(keychain_err)?;
         entry.set_password(key).map_err(keychain_err)?;
         Ok(())
     }
 
-    /// Remove the stored key. Idempotent: a missing entry is success. Any other
-    /// keychain error is surfaced rather than swallowed -- the OS keychain is the
-    /// trust root for the key (ADR-0029), so a failed delete must not silently
-    /// read as "key removed" while the key still sits in the keyring.
-    pub fn clear_key(&self) -> Result<(), String> {
-        let entry = Entry::new(SERVICE, KEY_ACCOUNT).map_err(keychain_err)?;
+    /// Remove the stored key for the given profile. Idempotent: a missing entry
+    /// is success. Any other keychain error is surfaced rather than swallowed --
+    /// the OS keychain is the trust root for the key (ADR-0029), so a failed
+    /// delete must not silently read as "key removed" while the key still sits
+    /// in the keyring.
+    pub fn clear_key_for(&self, profile_id: &ProfileId) -> Result<(), String> {
+        let entry = Entry::new(SERVICE, &key_account(profile_id)).map_err(keychain_err)?;
         match entry.delete_credential() {
             Ok(()) => Ok(()),
             // Idempotent: clearing when nothing is stored is a no-op success.
@@ -93,10 +106,11 @@ impl KeychainStore {
         }
     }
 
-    /// The stored API key, or `None` when nothing is stored. The provider reads
-    /// this per turn (stateless: each call opens the OS entry fresh).
-    pub fn fetch_key(&self) -> Option<String> {
-        let entry = Entry::new(SERVICE, KEY_ACCOUNT).ok()?;
+    /// The stored API key for the given profile, or `None` when nothing is
+    /// stored. The provider reads this per turn (stateless: each call opens the
+    /// OS entry fresh) for the active profile.
+    pub fn fetch_key_for(&self, profile_id: &ProfileId) -> Option<String> {
+        let entry = Entry::new(SERVICE, &key_account(profile_id)).ok()?;
         entry.get_password().ok()
     }
 
@@ -162,6 +176,15 @@ impl ProviderConfigSource for StaticConfig {
 mod tests {
     use super::*;
     use crate::model::DEFAULT_PROVIDER_BASE_URL;
+
+    #[test]
+    fn key_account_is_profile_prefixed() {
+        // ADR-0064: the per-profile keychain account is `key-<profile_id>`, so
+        // each profile's key is isolated in its own OS entry. The pre-#150
+        // single-slot `anthropic-api-key` account is NOT produced here.
+        assert_eq!(key_account(&ProfileId("default".into())), "key-default");
+        assert_eq!(key_account(&ProfileId("abc-123".into())), "key-abc-123");
+    }
 
     #[test]
     fn static_config_returns_fixed_values() {

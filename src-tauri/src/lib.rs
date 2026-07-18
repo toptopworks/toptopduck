@@ -28,18 +28,18 @@ pub mod window;
 pub mod workingset;
 
 pub use app_config::{
-    AppConfig, EngineDefaults, ExportDefaults, PrivacyDefaults, ProviderEndpoint, Theme, Tunables,
-    WindowGeometry, APP_CONFIG_FORMAT_VERSION, RECENT_FILES_CAP,
+    AppConfig, EngineDefaults, ExportDefaults, PrivacyDefaults, Theme, Tunables, WindowGeometry,
+    APP_CONFIG_FORMAT_VERSION, RECENT_FILES_CAP,
 };
 pub use cancel::CancelToken;
 pub use commands::StoreCommandError;
 pub use model::{
     ChartKind, ColumnSchema, DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet,
-    LoadError, LoadOutcome, ProviderConfig, ProviderConfigView, RectifyProvenance,
-    RemoveSourceError, RenameError, RowPage, SheetGuidance, SheetRectify, SourceLifecycleEvent,
-    SourceLifecycleKind, StaleAnchor, StaleReason, TextKind, ThreadEntry, TurnError, TurnFailure,
-    TurnOutcome, TurnPhase, TurnProgress, TurnRecord, VizSpec, DEFAULT_PROVIDER_BASE_URL,
-    DEFAULT_PROVIDER_MODEL,
+    LoadError, LoadOutcome, ProfileId, Protocol, ProviderConfig, ProviderConfigView,
+    ProviderProfile, RectifyProvenance, RemoveSourceError, RenameError, RowPage, SheetGuidance,
+    SheetRectify, SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, StaleReason, TextKind,
+    ThreadEntry, TurnError, TurnFailure, TurnOutcome, TurnPhase, TurnProgress, TurnRecord, VizSpec,
+    DEFAULT_PROFILE_ID, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
 };
 pub use persistence::{
     LoadError as DuckLoadError, MigrationError, RecipeError, SaveError, SessionMetadata,

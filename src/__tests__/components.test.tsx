@@ -1833,13 +1833,24 @@ describe("SettingsDialog (issue #111)", () => {
   // A complete app-config fixture; only theme/locale are exercised, the rest
   // round-trips verbatim (the dialog commits the whole document atomically).
   const baseConfig: AppConfig = {
-    format_version: 1,
+    format_version: 2,
     theme: "system",
     locale: "system",
     window: { width: 800, height: 600, x: null, y: null, maximized: false },
     engine: { memory_limit: "512MB", threads: 2, row_cap: 1000, statement_timeout_ms: 30000 },
     privacy: { send_samples: true },
-    provider: { base_url: "https://api.anthropic.com", model: "claude-sonnet" },
+    provider: {
+      profiles: [
+        {
+          id: "default",
+          display_name: "Anthropic",
+          protocol: "anthropic",
+          base_url: "https://api.anthropic.com",
+          model: "claude-sonnet",
+        },
+      ],
+      active_profile: "default",
+    },
     export: { last_dir: null, default_format: "csv" },
     tunables: { retry_budget: 3, window_turns: 10, far_window: 30 },
     recent_files: [],
