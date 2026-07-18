@@ -152,9 +152,8 @@ export function SettingsView({
   // through refs so the handler identity stays stable across renders (no
   // add/remove churn on every App render). A busy state (loading/saving) bails
   // so an in-flight atomic app-config write cannot be torn; otherwise ESC
-  // closes the view. (An earlier two-listener capture/bubble design relied on
-  // preventDefault stopping the sibling listener -- it does not; same-element
-  // listeners all fire regardless of preventDefault, so the busy guard leaked.)
+  // closes the view. (Same-element listeners all fire regardless of
+  // preventDefault, so the busy guard is the real gate, not event suppression.)
   const busyRef = useRef(busy);
   useEffect(() => {
     busyRef.current = busy;

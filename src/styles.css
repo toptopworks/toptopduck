@@ -274,6 +274,9 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
   font-size: 0.9rem; color: var(--foreground);
 }
 .settings-nav-button:hover { background: var(--accent); }
+/* `all: unset` strips the UA focus outline; restore one for keyboard users
+   (WCAG 2.4.7 Focus Visible). Same --ring token the question-bar input uses. */
+.settings-nav-button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .settings-nav-button[aria-current="page"] {
   background: var(--primary); color: var(--primary-foreground); font-weight: 600;
 }
