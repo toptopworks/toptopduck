@@ -32,7 +32,6 @@ use crate::cancel::CancelToken;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, LoadOutcome, ProviderConfig, ProviderConfigView,
     RemoveSourceError, RowPage, SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
-    DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
 };
 use crate::persistence::{list_session_metadata, SaveError, SessionMetadata};
 use crate::provider::live_config::LiveProviderConfig;
@@ -589,20 +588,9 @@ pub fn get_provider_config(
     live: State<'_, LiveProviderConfig>,
 ) -> Result<ProviderConfigView, String> {
     let cfg = live.load();
-    let active = cfg.provider.active();
-    Ok(ProviderConfigView {
-        // Fall back to the canonical defaults so the IPC view matches what
-        // live_config (the actual provider read path) would resolve -- a
-        // dangling active profile (hand-edited config before normalize runs)
-        // yields the same endpoint the provider itself uses, never "".
-        base_url: active
-            .map(|p| p.base_url.clone())
-            .unwrap_or_else(|| DEFAULT_PROVIDER_BASE_URL.to_string()),
-        model: active
-            .map(|p| p.model.clone())
-            .unwrap_or_else(|| DEFAULT_PROVIDER_MODEL.to_string()),
-        has_key: live.has_key(),
-    })
+    // view() shares the active-missing fallback with the live provider read
+    // path, so the IPC never hands the frontend "" (ADR-0019/0029/0064).
+    Ok(cfg.provider.view(live.has_key()))
 }
 
 /// Save the non-secret provider config (ADR-0019/0038/0064) into app-config --
@@ -621,16 +609,7 @@ pub fn set_provider_config(
     let stored = live
         .store(cfg)
         .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))?;
-    let active = stored.provider.active();
-    Ok(ProviderConfigView {
-        base_url: active
-            .map(|p| p.base_url.clone())
-            .unwrap_or_else(|| DEFAULT_PROVIDER_BASE_URL.to_string()),
-        model: active
-            .map(|p| p.model.clone())
-            .unwrap_or_else(|| DEFAULT_PROVIDER_MODEL.to_string()),
-        has_key: live.has_key(),
-    })
+    Ok(stored.provider.view(live.has_key()))
 }
 
 // --- App-level config (issue #53, ADR-0038) --------------------------------

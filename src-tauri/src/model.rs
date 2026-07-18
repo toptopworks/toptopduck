@@ -912,6 +912,36 @@ impl ProviderConfig {
             .iter_mut()
             .find(|p| p.id == self.active_profile)
     }
+
+    /// The active profile's base URL, or the canonical default when no profile
+    /// matches `active_profile` (a malformed config normalize repairs). Shared
+    /// by the live provider read path and the IPC view so a dangling active
+    /// always yields the same endpoint the provider itself uses, never "".
+    pub fn effective_base_url(&self) -> &str {
+        self.active()
+            .map(|p| p.base_url.as_str())
+            .unwrap_or(DEFAULT_PROVIDER_BASE_URL)
+    }
+
+    /// The active profile's model, or the canonical default (see
+    /// [`Self::effective_base_url`]).
+    pub fn effective_model(&self) -> &str {
+        self.active()
+            .map(|p| p.model.as_str())
+            .unwrap_or(DEFAULT_PROVIDER_MODEL)
+    }
+
+    /// The IPC-shaped view of the active profile's endpoint + whether a key is
+    /// set (ADR-0029: only the boolean crosses). One shape for both
+    /// `get_provider_config` and `set_provider_config` so the active-missing
+    /// fallback policy is single-sourced, not duplicated per call site.
+    pub fn view(&self, has_key: bool) -> ProviderConfigView {
+        ProviderConfigView {
+            base_url: self.effective_base_url().to_string(),
+            model: self.effective_model().to_string(),
+            has_key,
+        }
+    }
 }
 
 impl Default for ProviderConfig {

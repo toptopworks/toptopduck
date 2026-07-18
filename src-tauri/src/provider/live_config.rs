@@ -21,7 +21,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::app_config::{self, AppConfig, LocalePreference};
-use crate::model::{DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL};
 use crate::provider::keychain::{KeychainStore, ProviderConfigSource};
 use crate::provider::prompt::{resolve_locale_from_tag, ResponseLocale};
 
@@ -116,18 +115,12 @@ impl LiveProviderConfig {
     /// re-reads from disk.
     fn migrate_from_legacy_blob(&self, blob: String) -> AppConfig {
         let mut cfg = AppConfig::defaults();
-        // The legacy blob is the pre-#53 `{base_url, model}` shape. Splice both
-        // into the default profile's endpoint when they parse; anything else
-        // leaves the defaults in place.
+        // The legacy blob is the pre-#53 `{base_url, model}` shape. Splice
+        // both into the default profile's endpoint when they parse; anything
+        // else leaves the defaults in place (ADR-0038 honest-degrade -- the
+        // pure splice helper is unit-tested per shape branch).
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&blob) {
-            let base_url = value.get("base_url").and_then(|v| v.as_str());
-            let model = value.get("model").and_then(|v| v.as_str());
-            if let (Some(base_url), Some(model)) = (base_url, model) {
-                if let Some(active) = cfg.provider.active_mut() {
-                    active.base_url = base_url.to_string();
-                    active.model = model.to_string();
-                }
-            }
+            splice_legacy_endpoint(&mut cfg, &value);
         }
         cfg.normalize();
         // Persist FIRST, clear the legacy blob AFTER. Writing first keeps the
@@ -217,6 +210,22 @@ impl LiveProviderConfig {
     }
 }
 
+/// Splice the legacy pre-#53 `{base_url, model}` blob into the active
+/// profile's endpoint (ADR-0038 one-time migration). Honest-degrade: a
+/// malformed / partial / wrong-typed blob leaves the defaults in place --
+/// the migration never fails, it just carries less forward. Pure (no IO) so
+/// each shape branch is unit-testable without a keychain.
+fn splice_legacy_endpoint(cfg: &mut AppConfig, blob: &serde_json::Value) {
+    let base_url = blob.get("base_url").and_then(|v| v.as_str());
+    let model = blob.get("model").and_then(|v| v.as_str());
+    if let (Some(base_url), Some(model)) = (base_url, model) {
+        if let Some(active) = cfg.provider.active_mut() {
+            active.base_url = base_url.to_string();
+            active.model = model.to_string();
+        }
+    }
+}
+
 impl ProviderConfigSource for LiveProviderConfig {
     fn api_key(&self) -> Option<String> {
         // Per-turn read of the ACTIVE profile's keychain slot (ADR-0064). Fresh
@@ -228,22 +237,15 @@ impl ProviderConfigSource for LiveProviderConfig {
     }
     fn base_url(&self) -> String {
         // Fresh disk read each call -- a reconfigured endpoint on the active
-        // profile lands live on the next turn, no caching. Falls back to the
-        // canonical default when the active profile is missing (a malformed
-        // config normalize repairs on the next store; a hand-edited gap never
-        // hands the provider an empty endpoint).
-        let cfg = self.load();
-        cfg.provider
-            .active()
-            .map(|p| p.base_url.clone())
-            .unwrap_or_else(|| DEFAULT_PROVIDER_BASE_URL.to_string())
+        // profile lands live on the next turn, no caching. effective_base_url
+        // falls back to the canonical default when the active profile is
+        // missing (a malformed config normalize repairs on the next store;
+        // a hand-edited gap never hands the provider an empty endpoint) --
+        // the same fallback the IPC view uses, single-sourced.
+        self.load().provider.effective_base_url().to_string()
     }
     fn model(&self) -> String {
-        let cfg = self.load();
-        cfg.provider
-            .active()
-            .map(|p| p.model.clone())
-            .unwrap_or_else(|| DEFAULT_PROVIDER_MODEL.to_string())
+        self.load().provider.effective_model().to_string()
     }
     fn locale(&self) -> ResponseLocale {
         // ADR-0052: resolve the persisted preference (ADR-0038) here in Rust --
@@ -286,6 +288,61 @@ mod tests {
         // None here).
         let (_dir, live) = live();
         assert_eq!(live.load(), AppConfig::defaults());
+    }
+
+    #[test]
+    fn splice_legacy_endpoint_copies_both_fields_when_well_formed() {
+        // The pre-#53 legacy blob shape is `{base_url, model}`. Both fields
+        // splice into the active profile's endpoint when present and stringy.
+        let mut cfg = AppConfig::defaults();
+        let blob = serde_json::json!({
+            "base_url": "https://gateway.example.test",
+            "model": "claude-fable-5"
+        });
+        splice_legacy_endpoint(&mut cfg, &blob);
+        let active = cfg.provider.active().expect("active profile");
+        assert_eq!(active.base_url, "https://gateway.example.test");
+        assert_eq!(active.model, "claude-fable-5");
+    }
+
+    #[test]
+    fn splice_legacy_endpoint_leaves_defaults_when_one_field_missing() {
+        // ADR-0038 honest-degrade: a partial blob (only base_url) carries
+        // nothing forward -- BOTH fields stay at the canonical defaults so a
+        // half-shape legacy entry never seeds a mismatched endpoint/model pair.
+        let mut cfg = AppConfig::defaults();
+        let blob = serde_json::json!({ "base_url": "https://gateway.example.test" });
+        splice_legacy_endpoint(&mut cfg, &blob);
+        let active = cfg.provider.active().expect("active profile");
+        assert_eq!(active.base_url, DEFAULT_PROVIDER_BASE_URL);
+        assert_eq!(active.model, DEFAULT_PROVIDER_MODEL);
+    }
+
+    #[test]
+    fn splice_legacy_endpoint_leaves_defaults_when_fields_are_wrong_type() {
+        // Non-string fields (a number where base_url is expected, a bool where
+        // model is expected) do not splice -- as_str() is None for both, so the
+        // defaults stand rather than seeding a nonsense endpoint.
+        let mut cfg = AppConfig::defaults();
+        let blob = serde_json::json!({ "base_url": 42, "model": true });
+        splice_legacy_endpoint(&mut cfg, &blob);
+        let active = cfg.provider.active().expect("active profile");
+        assert_eq!(active.base_url, DEFAULT_PROVIDER_BASE_URL);
+        assert_eq!(active.model, DEFAULT_PROVIDER_MODEL);
+    }
+
+    #[test]
+    fn splice_legacy_endpoint_leaves_defaults_when_blob_is_not_an_object() {
+        // A non-object JSON value (array / string / null) has no base_url/model
+        // keys, so the splice is a no-op and the defaults stand. (A malformed
+        // JSON string never reaches this function -- migrate_from_legacy_blob
+        // gates on serde_json::from_str succeeding first.)
+        let mut cfg = AppConfig::defaults();
+        let blob = serde_json::json!(["not", "an", "object"]);
+        splice_legacy_endpoint(&mut cfg, &blob);
+        let active = cfg.provider.active().expect("active profile");
+        assert_eq!(active.base_url, DEFAULT_PROVIDER_BASE_URL);
+        assert_eq!(active.model, DEFAULT_PROVIDER_MODEL);
     }
 
     #[test]

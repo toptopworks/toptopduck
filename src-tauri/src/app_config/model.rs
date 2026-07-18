@@ -598,6 +598,34 @@ mod tests {
     }
 
     #[test]
+    fn view_surfaces_active_profile_endpoint_and_has_key() {
+        // The IPC view carries the active profile's base URL + model verbatim
+        // and the key boolean as-is (ADR-0029: only the boolean crosses).
+        let mut provider = ProviderConfig::defaults();
+        provider.active_mut().expect("active profile").base_url =
+            "https://gateway.example.test".into();
+        let view = provider.view(true);
+        assert_eq!(view.base_url, "https://gateway.example.test");
+        assert_eq!(view.model, crate::model::DEFAULT_PROVIDER_MODEL);
+        assert!(view.has_key);
+    }
+
+    #[test]
+    fn view_falls_back_to_defaults_when_active_profile_dangling() {
+        // A dangling active_profile (a malformed config normalize repairs)
+        // yields the canonical defaults, never "" -- the IPC view must match
+        // what the live provider read path resolves, so the frontend never
+        // observes an empty endpoint while the provider reads a real one.
+        let mut provider = ProviderConfig::defaults();
+        provider.active_profile = crate::model::ProfileId("no-such-profile".into());
+        // No normalize() -- pin the read-time fallback, not the store-time repair.
+        let view = provider.view(false);
+        assert_eq!(view.base_url, crate::model::DEFAULT_PROVIDER_BASE_URL);
+        assert_eq!(view.model, crate::model::DEFAULT_PROVIDER_MODEL);
+        assert!(!view.has_key);
+    }
+
+    #[test]
     fn normalize_clamps_counts_to_at_least_one() {
         // threads=0 would make DuckDB reject the PRAGMA; window_turns=0 would
         // summarize every turn. Both clamp to >=1.
