@@ -9,7 +9,7 @@ import { SessionSidebar } from "./session/SessionSidebar";
 import { DisclosureBanner } from "./components/DisclosureBanner";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { DegradeCard, ErrorBoundary } from "./components/ErrorBoundary";
-import { SettingsDialog } from "./components/SettingsDialog";
+import { SettingsView } from "./components/settingsView/SettingsView";
 import { Alert } from "./components/ui/alert";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { log } from "./lib/log";
@@ -810,7 +810,7 @@ export default function App() {
             )}
           >
             <div
-              className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${railCollapsed ? " rail-collapsed" : ""}`}
+              className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${railCollapsed ? " rail-collapsed" : ""}${settingsOpen ? " settings-mode" : ""}`}
             >
               {/* Col 1: session sidebar (ADR-0060) -- full height, independent
               column (R1: QuestionBar does NOT span over it). */}
@@ -927,7 +927,7 @@ export default function App() {
               )}
 
               {settingsOpen && appConfig && (
-                <SettingsDialog
+                <SettingsView
                   appConfig={appConfig}
                   onCommitAppConfig={(cfg) => void commitAppConfig(cfg)}
                   onClose={() => {
