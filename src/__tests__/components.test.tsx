@@ -15,7 +15,7 @@ import { Thread } from "../components/Thread";
 import { TooltipProvider } from "../components/ui/tooltip";
 import { VegaChart } from "../components/VegaChart";
 import { WorkingSetList } from "../components/WorkingSetList";
-import { listProviderProfiles, readRows, setProfileKey } from "../api";
+import { clearProfileKey, listProviderProfiles, readRows, setProfileKey } from "../api";
 import embed, { type VisualizationSpec } from "vega-embed";
 import type {
   AppConfig,
@@ -2101,5 +2101,57 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
     // The badge flips to "Key set" (the IPC's returned bool updates the overlay).
     await screen.findByText("Key set");
     expect(screen.queryByText("No key")).not.toBeInTheDocument();
+  });
+
+  it("edits a profile's display name and commits it on save (issue #153)", async () => {
+    // AC#3: display_name is the renamable half of the ADR-0037/0064 split
+    // (ProfileId stays immutable). The edit form's Display name field patches
+    // the selected profile via updateProfile; Save commits the renamed list in
+    // one atomic app-config write.
+    const onCommitAppConfig = vi.fn().mockResolvedValue(undefined);
+    renderSettings(
+      <SettingsView
+        appConfig={baseConfig}
+        onCommitAppConfig={onCommitAppConfig}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    // The default profile is selected by default; its current name shows first.
+    await screen.findByText("Anthropic");
+    fireEvent.change(screen.getByLabelText("Display name"), {
+      target: { value: "My Claude" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalled());
+    const committed = onCommitAppConfig.mock.calls[0][0];
+    // display_name updated; the stable id is unchanged (ADR-0037/0064).
+    expect(committed.provider.profiles[0].display_name).toBe("My Claude");
+    expect(committed.provider.profiles[0].id).toBe("default");
+  });
+
+  it("clear key calls clearProfileKey and flips the badge to No key (issue #153)", async () => {
+    // AC#4: clear is the symmetric immediate per-profile IPC (ADR-0029 one-shot);
+    // the returned bool (false on success) flips the has_key overlay so the badge
+    // updates without a re-fetch. Pins the clear path the set-key test does not.
+    vi.mocked(listProviderProfiles).mockResolvedValue([
+      { profile_id: "default", has_key: true },
+    ]);
+    vi.mocked(clearProfileKey).mockResolvedValue(false);
+    renderSettings(
+      <SettingsView
+        appConfig={baseConfig}
+        onCommitAppConfig={vi.fn()}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    // The default profile starts with a key stored; Clear key is available.
+    await screen.findByText("Key set");
+    fireEvent.click(screen.getByRole("button", { name: "Clear key" }));
+    await waitFor(() => expect(vi.mocked(clearProfileKey)).toHaveBeenCalledWith("default"));
+    // The badge flips to "No key" (the IPC's returned bool updates the overlay).
+    await screen.findByText("No key");
+    expect(screen.queryByText("Key set")).not.toBeInTheDocument();
   });
 });
