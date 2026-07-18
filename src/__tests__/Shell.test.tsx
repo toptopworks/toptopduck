@@ -374,7 +374,10 @@ describe("App multi-session shell (issue #81 ACs)", () => {
     );
     fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
     await waitFor(() => expect(createSession).toHaveBeenCalledTimes(2));
-    expect(conversation).toHaveBeenCalledTimes(2); // one per session mount
+    // Wait for both panes to fire their thread query -- conversation runs in
+    // the SessionPane mount effect (async), so asserting it synchronously
+    // right after createSession races the query fire (flake on slower CI).
+    await waitFor(() => expect(conversation).toHaveBeenCalledTimes(2));
 
     // Switch back to the first session via its sidebar entry. Keep-alive: the
     // inactive SessionPane was never unmounted, so no refetch.
