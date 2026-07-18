@@ -626,6 +626,30 @@ mod tests {
     }
 
     #[test]
+    fn provider_config_round_trips_a_non_default_active_profile() {
+        // ADR-0037: ProfileId is the stable reference half -- it must survive
+        // a serde round trip so active_profile still resolves to the right
+        // profile (and thus the right `key-<id>` slot) after a store -> load.
+        // A non-default id is used so the assertion cannot pass by coincidence
+        // with DEFAULT_PROFILE_ID.
+        let mut cfg = AppConfig::defaults();
+        let profile = cfg.provider.profiles.get_mut(0).expect("default profile");
+        profile.id = crate::model::ProfileId("user-profile-7".into());
+        profile.display_name = "My Gateway".into();
+        cfg.provider.active_profile = crate::model::ProfileId("user-profile-7".into());
+
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: AppConfig = serde_json::from_str(&json).expect("deserialize");
+
+        let active = back
+            .provider
+            .active()
+            .expect("active resolves after round trip");
+        assert_eq!(active.id, crate::model::ProfileId("user-profile-7".into()));
+        assert_eq!(active.display_name, "My Gateway");
+    }
+
+    #[test]
     fn normalize_clamps_counts_to_at_least_one() {
         // threads=0 would make DuckDB reject the PRAGMA; window_turns=0 would
         // summarize every turn. Both clamp to >=1.
