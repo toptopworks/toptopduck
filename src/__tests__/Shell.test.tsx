@@ -1348,10 +1348,11 @@ describe("App top-bar active profile switcher (issue #154, ADR-0065)", () => {
   });
 
   it("selecting a profile commits the new active id via setAppConfig (live next turn)", async () => {
-    // AC3: the switch reuses the #153 set-active path (commitAppConfig ->
-    // setAppConfig with provider.active_profile). live_config reads
-    // active_profile fresh each turn (ADR-0064), so the persisted id takes
-    // effect on the next ask -- this assertion pins the persistence half.
+    // AC3: the switch commits via commitAppConfig with provider.active_profile
+    // -- the same app-config write the settings Save uses (#153), but immediate
+    // (no draft). live_config reads active_profile fresh each turn (ADR-0064),
+    // so the persisted id takes effect on the next ask -- this assertion pins
+    // the persistence half.
     vi.mocked(getAppConfig).mockResolvedValue(twoProfileConfig());
     vi.mocked(listProviderProfiles).mockResolvedValue([
       { profile_id: "anthropic", has_key: true },
@@ -1360,7 +1361,7 @@ describe("App top-bar active profile switcher (issue #154, ADR-0065)", () => {
     render(<App />);
     await waitFor(() => expect(screen.getByText("Anthropic")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /活跃接入档案/ }));
-    fireEvent.click(screen.getByRole("button", { name: /切换到.*GLM/ }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: /切换到.*GLM/ }));
     await waitFor(() =>
       expect(setAppConfig).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1383,7 +1384,7 @@ describe("App top-bar active profile switcher (issue #154, ADR-0065)", () => {
     render(<App />);
     await waitFor(() => expect(screen.getByText("Anthropic")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /活跃接入档案/ }));
-    fireEvent.click(screen.getByRole("button", { name: /切换到.*GLM/ }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: /切换到.*GLM/ }));
     // The trigger's accessible name now carries GLM (optimistic state flip).
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /活跃接入档案/ })).toHaveTextContent("GLM"),
@@ -1418,7 +1419,7 @@ describe("App top-bar active profile switcher (issue #154, ADR-0065)", () => {
     render(<App />);
     await waitFor(() => expect(listProviderProfiles).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole("button", { name: /活跃接入档案/ }));
-    fireEvent.click(screen.getByRole("button", { name: /切换到.*GLM/ }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: /切换到.*GLM/ }));
     await waitFor(() =>
       expect(setAppConfig).toHaveBeenCalledWith(
         expect.objectContaining({

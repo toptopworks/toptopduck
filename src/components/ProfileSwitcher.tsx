@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { ChevronDown } from "lucide-react";
 import { FormattedMessage, useIntl } from "react-intl";
 
@@ -25,12 +26,15 @@ import { Badge } from "./ui/badge";
 // from the parent's provider prop (app-config); only the key booleans overlay
 // here, mirroring ProfilesSection's pattern.
 //
-// Disclosure mechanics: a plain <button> trigger + a conditionally rendered
-// menu (no Radix DropdownMenu dependency). Click-outside + ESC close the menu;
-// selecting an item closes it too. The trigger is a real <button> (not a
-// <summary>) so jsdom assigns it role="button" and the black-box App tests can
-// drive it via getByRole -- a native <summary>'s implicit role is inconsistent
-// across jsdom versions.
+// Disclosure mechanics: a plain <button> trigger (aria-haspopup="menu") + a
+// conditionally rendered menu using the ARIA menu pattern (role="menu" +
+// role="menuitemradio" items, aria-checked marks the active one). Hand-rolled
+// rather than Radix DropdownMenu -- the project has not copy-in'd that primitive
+// and this is a single static list, so the full DropdownMenu component would be
+// YAGNI. Keyboard contract (ARIA menu): opening moves focus onto the active
+// item; ArrowUp/ArrowDown traverse the items; ESC and click-outside close;
+// selecting commits and closes. The trigger is a real <button> so its implicit
+// role and the menuitemradio children stay consistent for the black-box tests.
 
 export interface ProfileSwitcherProps {
   // The non-secret provider config from app-config (profiles list + active id).
@@ -43,11 +47,12 @@ export interface ProfileSwitcherProps {
   /** Disable the SWITCH (each menu item) while the parent is mid-write or an
    *  ask is in flight, so a second switch cannot land before the first persists
    *  or race an in-flight turn. The trigger stays clickable (browsing the list
-   *  is harmless); only selecting is gated. */
-  disabled?: boolean;
+   *  is harmless); only selecting is gated. Named for what it gates -- the
+   *  trigger remains interactive, so this is not a whole-component disable. */
+  disableSwitch?: boolean;
 }
 
-export function ProfileSwitcher({ provider, onSwitchActive, disabled }: ProfileSwitcherProps) {
+export function ProfileSwitcher({ provider, onSwitchActive, disableSwitch }: ProfileSwitcherProps) {
   const intl = useIntl();
 
   // Per-profile has_key overlay (issue #154). Fetched once on mount; never
@@ -105,6 +110,41 @@ export function ProfileSwitcher({ provider, onSwitchActive, disabled }: ProfileS
     };
   }, [open]);
 
+  // Menu keyboard nav (ARIA menu pattern). One ref slot per item so ArrowUp/
+  // ArrowDown can move focus between them; the list is static across renders
+  // (profiles come from the parent prop), so index-keyed slots stay stable.
+  const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
+
+  // On open, move focus onto the active item (or the first) -- the ARIA menu
+  // contract puts focus inside the menu, not on the trigger.
+  useEffect(() => {
+    if (!open) return;
+    const items = itemRefs.current.filter((b): b is HTMLButtonElement => b !== null);
+    if (items.length === 0) return;
+    const activeIdx = provider.profiles.findIndex((p) => p.id === provider.active_profile);
+    (items[activeIdx] ?? items[0]).focus();
+    // Re-focus only when the menu opens; provider.profiles is static while the
+    // menu is open, so it is intentionally absent from deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  function onMenuKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    const items = itemRefs.current.filter((b): b is HTMLButtonElement => b !== null);
+    if (items.length === 0) return;
+    e.preventDefault();
+    const cur = items.findIndex((b) => b === document.activeElement);
+    const next =
+      e.key === "ArrowDown"
+        ? cur < 0
+          ? 0
+          : (cur + 1) % items.length
+        : cur <= 0
+          ? items.length - 1
+          : cur - 1;
+    items[next].focus();
+  }
+
   function handleSelect(id: string) {
     setOpen(false);
     // No-op when the user re-picks the already-active profile (avoids a
@@ -126,7 +166,7 @@ export function ProfileSwitcher({ provider, onSwitchActive, disabled }: ProfileS
       <button
         type="button"
         className="profile-switcher-trigger"
-        aria-haspopup="true"
+        aria-haspopup="menu"
         aria-expanded={open}
         aria-label={intl.formatMessage(
           { id: "header.profileSwitcher.labelAria", defaultMessage: "Active profile: {name}" },
@@ -140,23 +180,28 @@ export function ProfileSwitcher({ provider, onSwitchActive, disabled }: ProfileS
       {open && (
         <div
           className="profile-switcher-menu"
-          role="list"
+          role="menu"
           aria-label={intl.formatMessage({
             id: "header.profileSwitcher.menuAria",
             defaultMessage: "Switch active profile",
           })}
+          onKeyDown={onMenuKeyDown}
         >
-          {provider.profiles.map((p) => {
+          {provider.profiles.map((p, i) => {
             const isActive = p.id === provider.active_profile;
             const pHasKey = profileKeys[p.id] ?? false;
             const label = p.display_name.trim() || unnamed;
             return (
               <button
                 key={p.id}
+                ref={(el) => {
+                  itemRefs.current[i] = el;
+                }}
                 type="button"
                 className="profile-switcher-item"
-                disabled={disabled}
-                aria-current={isActive ? "true" : undefined}
+                role="menuitemradio"
+                aria-checked={isActive}
+                disabled={disableSwitch}
                 aria-label={intl.formatMessage(
                   {
                     id: "header.profileSwitcher.switchAria",

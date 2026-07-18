@@ -228,7 +228,7 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
  * A lightweight disclosure (no Radix DropdownMenu dep). The trigger carries the
  * active profile's display name + a chevron; the menu drops below it, absolutely
  * positioned off the .profile-switcher anchor. The menu lists every profile
- * with its has_key badge; aria-current marks the active one. Hidden with the
+ * with its has_key badge; aria-checked marks the active one. Hidden with the
  * rest of the topbar under .shell.settings-mode (ADR-0065). */
 .profile-switcher { position: relative; }
 .profile-switcher-trigger {
@@ -259,7 +259,7 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 }
 .profile-switcher-item:hover:not(:disabled) { background: var(--muted); }
 .profile-switcher-item:disabled { opacity: 0.5; cursor: not-allowed; }
-.profile-switcher-item[aria-current="true"] { font-weight: 600; }
+.profile-switcher-item[aria-checked="true"] { font-weight: 600; }
 .profile-switcher-item-name {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
