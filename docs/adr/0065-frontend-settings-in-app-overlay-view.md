@@ -2,7 +2,7 @@
 
 ## Decision
 
-设置面板作为**应用内全屏覆盖视图**（in-app overlay view），而非模态 Dialog。打开设置 = shell 内容区（session sidebar + session pane）被 `<SettingsView/>` 替换；左上角「‹ Back to app」退出、恢复原 session shell 与原 activeSession（keep-alive 不受影响）。设置视图自带 header（返回按钮 + 「Settings」标题），主 top bar 在设置视图内隐藏；左侧为设置分类导航（General / Profiles / Engine / Privacy），右侧为选中分类内容。非模态、无遮罩——就是当前视图。设置内的确认类弹窗（如删除 profile）仍用 Radix AlertDialog。
+设置面板作为**应用内全屏覆盖视图**（in-app overlay view），而非模态 Dialog。打开设置 = shell 在 session shell 之上并列渲染 `<SettingsView/>` 覆盖层（`{settingsOpen && <SettingsView/>}`），session sidebar + topbar + keep-alive session pane 仍挂载、靠 `.shell.settings-mode` CSS（`display:none`）隐藏；左上角「‹ Back to app」退出、移除覆盖层即恢复原 session shell 与原 activeSession（组件树未卸载，in-flight turn 不中断）。设置视图自带 header（返回按钮 + 「Settings」标题），主 top bar 在设置视图内隐藏；左侧为设置分类导航（General / Profiles / Engine / Privacy），右侧为选中分类内容。非模态、无遮罩——就是当前视图。设置内的确认类弹窗（如删除 profile）仍用 Radix AlertDialog。
 
 ## Context
 
@@ -24,7 +24,7 @@
 
 ## Consequences
 
-- **shell 层条件渲染**：`settingsOpen ? <SettingsView/> : <SessionShell/>`；SettingsView 含自己的 header（返回按钮 + 标题）+ 左导航 + 右内容。打开/关闭是视图切换，非 Dialog open/close。
+- **shell 层并列渲染 + CSS 隐藏**：settingsOpen 时 shell 在 session shell 之上并列渲染 `<SettingsView/>` 覆盖层（`{settingsOpen && <SettingsView/>}`），session sidebar + topbar + keep-alive session pane 不卸载、靠 `.shell.settings-mode > :not(.settings-overlay) { display:none }` 隐藏；SettingsView 含自己的 header（返回按钮 + 标题）+ 左导航 + 右内容。打开/关闭是覆盖层挂载/卸载 + CSS 类切换，非 Dialog open/close，也非 session shell 的 ternary unmount。
 - **关联 ADR-0045/0054/0060**：设置视图覆盖时，session shell（two-pane 0045、collapse 0054、session nav 0060）整体不可见但状态保留；返回原样恢复。shell collapse prefs（0054）不进设置视图。
 - **Radix Dialog 不再用于设置**：保留给其他场景（如 profile 删除确认用 AlertDialog）；现有 `SettingsDialog` 组件退役或重构为 `SettingsView`。
 - **keep-alive session 不受影响**：设置视图是 shell 层覆盖，`openSessions` / `activeSessionId` 状态保留；切回立即恢复运行中的 turn（若在 flight）。
