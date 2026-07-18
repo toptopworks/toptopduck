@@ -40,3 +40,13 @@ _Avoid_: 数据库(database)、状态(state)
 **当前表 (Active Dataset)**:
 一个提问在用户未显式指明时所作用的 Dataset——默认是上一步的中间结果，会话开始时即**最近上传的源 Dataset**；由 LLM 从对话上下文隐式解析，用户通常无需感知其存在。用户可显式点名覆盖（如"在原始数据上重新算"、"在订单表上"）。
 _Avoid_: 选中项(selection)、焦点(focus)、当前行(current row)
+
+### LLM 接入
+
+**协议 (Protocol)**:
+LLM 接入的线协议，支持两种——**anthropic**（Anthropic Messages 原生、`x-api-key` 鉴权）与 **openai**（OpenAI Chat Completions、Bearer 鉴权，覆盖 OpenAI 直连 / DeepSeek / GLM / Qwen / Ollama 等兼容端点）。接入档案的差异轴是「协议 + endpoint + model + key 的组合」，而非 provider 名——多家共用同一协议。
+_Avoid_: 提供商(provider)、API、后端(backend)
+
+**接入档案 (Profile)**:
+一套命名的 LLM 接入组合 = 协议 + endpoint + model + key，是用户在设置里创建、命名、并指定其一为活跃的单元。非机密部分（协议/endpoint/model/展示名）住 app-config（ADR-0038），key 住 OS keychain 的 per-profile slot（ADR-0029），活跃 Profile 全局单一、不进 `.duck`（ADR-0034/0036）。它是机器级接入偏好，与具体分析正交。
+_Avoid_: 账号(account)、连接(connection)、配置项(config item)

@@ -1,5 +1,7 @@
 # LLM reachability & v1 user scoping: BYOK over Anthropic protocol with configurable baseURL
 
+> 本 ADR 的「v1 收窄为已具备 Claude 可达接入的用户」「否决多 provider 留作 v2」结论**被 ADR-0064 推翻**——v2 正式开放多协议（anthropic + openai）多 profile；本 ADR「诚实披露载荷外发」「Anthropic 协议 + 可配 baseURL 的接入形态」结论**保留**。见 ADR-0064。
+
 ## Decision
 
 v1 把目标用户**诚实收窄**为"已具备 Claude 可达接入"的用户——主要通过 **Anthropic 原生协议**接入（Anthropic 直连 key，或经用户自有、兼容 Anthropic 协议的中转网关）。接入形态固定为 **Anthropic 原生协议（`x-api-key` 鉴权）+ 可配 `baseURL`**；**不**在 v1 实现 Bedrock（AWS sigv4）/ Vertex（GCP OAuth）的异构签名（直接用 Bedrock/Vertex 原生签名的企业 v1 需自套 Anthropic 兼容层，或待 v2）。网络接入要求作为**诚实准入门槛**在首次引导与产品定位中明示；**不为大陆纯小白用户做接入兜底**（留作 v2 扩展点）。

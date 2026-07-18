@@ -26,3 +26,4 @@ BYOK 已定（ADR-0006）。需决定单家 vs 多家、选哪家。
 - **v1 默认 Sonnet 级（钉版本，如 `claude-sonnet-4-6`）**：SQL + 结构化输出一线、成本可控；用户可切顶级（Fable/Opus）/Haiku。选型须满足结构化输出可靠（耦合 ADR-0009 + ADR-0016）。
 - 加提供商是未来扩展点，不阻塞 v1。
 - 薄抽象的 v1 形态已落地（ADR-0019）：单一 Anthropic 协议 + 可配 `baseURL`；Bedrock/Vertex 异构签名为 v2 扩展点。
+- **被 ADR-0064 校准**：薄抽象（`Provider` trait 协议无关）结论兑现——新增 `openai` 协议适配器为第二个实现；「单一 Claude 质量命脉」收窄结论推翻为「多协议、语义质量仍靠模型」。见 ADR-0064。
