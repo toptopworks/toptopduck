@@ -228,6 +228,77 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 .shell > .resume-progress { grid-column: 2; grid-row: 2; margin: 0; border-radius: 0; }
 .shell > .shell-error { grid-column: 2; grid-row: 2; margin: 0.4rem 1rem; }
 
+/* --- Settings in-app overlay view (ADR-0065, issue #151) -----------------
+ * When settings-mode is on the shell grid collapses to a single cell and the
+ * SettingsView overlay covers it. Non-modal, no mask -- the overlay IS the
+ * current view. The session sidebar + topbar + keep-alive session panes stay
+ * MOUNTED underneath (display:none): App state + any in-flight turn survive the
+ * round trip, restored unchanged on return (no refetch, no resume replay). */
+.shell.settings-mode { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+.shell.settings-mode > :not(.settings-overlay) { display: none; }
+.settings-overlay {
+  grid-column: 1; grid-row: 1;
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  grid-template-rows: auto 1fr auto;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--background);
+  outline: none; /* container is focus-managed (tabindex=-1), no focus ring */
+}
+.settings-overlay:focus-visible { outline: none; }
+.settings-header {
+  grid-column: 1 / -1; grid-row: 1;
+  display: flex; align-items: center; gap: 0.75rem;
+  padding: 0 1rem; height: 44px; min-height: 44px;
+  border-bottom: 1px solid var(--border);
+  background: var(--background);
+}
+.settings-back {
+  /* ghost-variant Button carries the hover tint; this class only narrows the
+     chrome so the back affordance reads as a compact nav arrow, not a CTA. */
+  height: 32px; padding: 0 0.6rem; font-size: 0.9rem; font-weight: 500;
+}
+.settings-title { margin: 0; font-size: 1rem; font-weight: 600; }
+.settings-nav {
+  grid-column: 1; grid-row: 2 / -1;
+  background: var(--muted);
+  border-right: 1px solid var(--border);
+  padding: 0.5rem;
+  display: flex; flex-direction: column; gap: 0.15rem;
+  overflow-y: auto;
+}
+.settings-nav-button {
+  all: unset; cursor: pointer;
+  padding: 0.4rem 0.6rem; border-radius: var(--radius);
+  font-size: 0.9rem; color: var(--foreground);
+}
+.settings-nav-button:hover { background: var(--accent); }
+/* `all: unset` strips the UA focus outline; restore one for keyboard users
+   (WCAG 2.4.7 Focus Visible). Same --ring token the question-bar input uses. */
+.settings-nav-button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.settings-nav-button[aria-current="page"] {
+  background: var(--primary); color: var(--primary-foreground); font-weight: 600;
+}
+.settings-content {
+  grid-column: 2; grid-row: 2;
+  overflow-y: auto;
+  padding: 1.5rem;
+  max-width: 720px;
+}
+.settings-section-heading {
+  margin: 0 0 1rem; font-size: 1.05rem; font-weight: 600;
+}
+.settings-profiles-placeholder { font-size: 0.92rem; line-height: 1.5; }
+.settings-error { margin-top: 0.75rem; }
+.settings-footer {
+  grid-column: 2; grid-row: 3;
+  display: flex; justify-content: flex-end; gap: 0.5rem;
+  padding: 0.75rem 1.5rem;
+  border-top: 1px solid var(--border);
+  background: var(--background);
+}
+
 /* --- Row 3 (cols 2+): session pane host ---------------------------------
  * The host is a positioning context for the keep-alive layer stack: every open
  * session renders a .session-pane-layer absolutely filling it; non-active

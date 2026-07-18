@@ -10,7 +10,7 @@ import { GuidedLoadDialog } from "../components/GuidedLoadDialog";
 import { PrivacyControls } from "../components/PrivacyControls";
 import { QuestionBar } from "../components/QuestionBar";
 import { COLUMN_DISCLOSURE_THRESHOLD, ResultView, ROW_DISCLOSURE_THRESHOLD } from "../components/ResultView";
-import { SettingsDialog } from "../components/SettingsDialog";
+import { SettingsView } from "../components/settingsView/SettingsView";
 import { Thread } from "../components/Thread";
 import { TooltipProvider } from "../components/ui/tooltip";
 import { VegaChart } from "../components/VegaChart";
@@ -1829,9 +1829,9 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
   });
 });
 
-describe("SettingsDialog (issue #111)", () => {
+describe("SettingsView (issue #151, ADR-0065)", () => {
   // A complete app-config fixture; only theme/locale are exercised, the rest
-  // round-trips verbatim (the dialog commits the whole document atomically).
+  // round-trips verbatim (the view commits the whole document atomically).
   const baseConfig: AppConfig = {
     format_version: 2,
     theme: "system",
@@ -1868,11 +1868,12 @@ describe("SettingsDialog (issue #111)", () => {
   });
 
   it("commits the chosen theme + locale RadioGroup values on save", async () => {
-    // onValueChange wires each RadioGroup to local state; a save commits them in
-    // one atomic app-config write. The rest of the config round-trips unchanged.
+    // The General pane is the default section; its theme + locale radios wire
+    // to local state. A save commits them in one atomic app-config write. The
+    // rest of the config round-trips unchanged.
     const onCommitAppConfig = vi.fn().mockResolvedValue(undefined);
     renderSettings(
-      <SettingsDialog
+      <SettingsView
         appConfig={baseConfig}
         onCommitAppConfig={onCommitAppConfig}
         onClose={() => {}}
@@ -1900,7 +1901,7 @@ describe("SettingsDialog (issue #111)", () => {
     const onCommitAppConfig = vi.fn().mockResolvedValue(undefined);
     const onClose = vi.fn();
     renderSettings(
-      <SettingsDialog
+      <SettingsView
         appConfig={baseConfig}
         onCommitAppConfig={onCommitAppConfig}
         onClose={onClose}
@@ -1914,16 +1915,16 @@ describe("SettingsDialog (issue #111)", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("prevents ESC dismiss while saving (atomic-write guard)", async () => {
+  it("prevents ESC exit while saving (atomic-write guard, ADR-0065)", async () => {
     // busy = loading || saving. A never-resolving onCommitAppConfig keeps saving
-    // true; onEscapeKeyDown then preventDefault's so a mid-save ESC cannot close
-    // the dialog (the atomic app-config write would otherwise be torn).
+    // true; the window-level ESC listener then bails so a mid-save ESC cannot
+    // close the view (the atomic app-config write would otherwise be torn).
     const onCommitAppConfig = vi
       .fn()
       .mockImplementation(() => new Promise<void>(() => {}));
     const onClose = vi.fn();
     renderSettings(
-      <SettingsDialog
+      <SettingsView
         appConfig={baseConfig}
         onCommitAppConfig={onCommitAppConfig}
         onClose={onClose}
@@ -1933,35 +1934,54 @@ describe("SettingsDialog (issue #111)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     // Confirm the saving state is active before asserting the guard.
     await screen.findByText(/Saving/);
-    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    fireEvent.keyDown(window, { key: "Escape" });
     await new Promise((r) => setTimeout(r, 0));
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
-  it("prevents overlay-click dismiss while saving (atomic-write guard)", async () => {
-    // Same busy guard via onInteractOutside: an overlay click mid-save is
-    // swallowed so the write is not interrupted.
-    const onCommitAppConfig = vi
-      .fn()
-      .mockImplementation(() => new Promise<void>(() => {}));
+  it("ESC exits when not busy (ADR-0065 keyboard exit)", async () => {
+    // Without a mask, ESC is the keyboard exit. Once loading finishes (not
+    // saving), ESC closes the view via the window-level listener.
     const onClose = vi.fn();
     renderSettings(
-      <SettingsDialog
+      <SettingsView
         appConfig={baseConfig}
-        onCommitAppConfig={onCommitAppConfig}
+        onCommitAppConfig={vi.fn().mockResolvedValue(undefined)}
         onClose={onClose}
       />,
     );
     await screen.findByLabelText(/Anthropic API key/);
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await screen.findByText(/Saving/);
-    await new Promise((r) => setTimeout(r, 0));
-    fireEvent.pointerDown(document.body, { button: 0 });
-    fireEvent.pointerUp(document.body, { button: 0 });
-    fireEvent.click(document.body);
-    await new Promise((r) => setTimeout(r, 0));
-    expect(onClose).not.toHaveBeenCalled();
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("switches panes via the left nav (ADR-0065)", async () => {
+    // The left nav's four buttons swap the right pane; switching does NOT save
+    // (no commit until Save). Engine shows the engine fieldset, Privacy shows
+    // the disclosure banner, Profiles shows the placeholder.
+    const onCommitAppConfig = vi.fn().mockResolvedValue(undefined);
+    renderSettings(
+      <SettingsView
+        appConfig={baseConfig}
+        onCommitAppConfig={onCommitAppConfig}
+        onClose={() => {}}
+      />,
+    );
+    await screen.findByLabelText(/Anthropic API key/);
+    // Default pane is General; switch to Engine.
+    fireEvent.click(screen.getByRole("button", { name: "Engine" }));
+    // The engine legend appears (migrated from SettingsDialog's engine fieldset).
+    expect(screen.getByText("Engine defaults (ADR-0005)")).toBeInTheDocument();
+    // The General pane's API-key label is gone (only the active section renders).
+    expect(screen.queryByLabelText(/Anthropic API key/)).not.toBeInTheDocument();
+    // Switch to Privacy: the disclosure banner (ADR-0011/0019) mounts.
+    fireEvent.click(screen.getByRole("button", { name: "Privacy" }));
+    expect(screen.getByRole("note")).toBeInTheDocument();
+    // Switch to Profiles: the placeholder renders.
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    expect(screen.getByText(/Profile management is coming/)).toBeInTheDocument();
+    // No save happened during the tour.
+    expect(onCommitAppConfig).not.toHaveBeenCalled();
   });
 });
