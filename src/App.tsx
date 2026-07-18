@@ -9,6 +9,7 @@ import { SessionSidebar } from "./session/SessionSidebar";
 import { DisclosureBanner } from "./components/DisclosureBanner";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { DegradeCard, ErrorBoundary } from "./components/ErrorBoundary";
+import { ProfileSwitcher } from "./components/ProfileSwitcher";
 import { SettingsView } from "./components/settingsView/SettingsView";
 import { Alert } from "./components/ui/alert";
 import { TooltipProvider } from "./components/ui/tooltip";
@@ -351,6 +352,40 @@ export default function App() {
     setAppConfigState(cfg);
     await setAppConfig(cfg);
   }, []);
+
+  // Switch the active profile from the top-bar quick switcher (issue #154,
+  // ADR-0065). There is no separate set-active IPC: active_profile lives in
+  // app-config (ADR-0038/0064), so the switch is one commitAppConfig write of
+  // provider.active_profile -- the SAME persistence layer the settings Save
+  // uses (#153 SettingsView.save -> onCommitAppConfig). The CONTRACT differs
+  // from #153: settings stages the change in a draft and commits on Save
+  // (batched with theme/locale/engine), while the top-bar switcher commits
+  // IMMEDIATELY (a one-profile swap, no draft) so the next ask picks it up.
+  // live_config reads active_profile fresh each turn (ADR-0064 -- the
+  // ProviderConfigSource impl does a disk read per call, no caching), so the
+  // next ask uses the new profile's endpoint + keychain slot. The active
+  // profile changed -> refresh the header key indicator (hasKey reflects the
+  // NEW active profile's keychain slot, ADR-0029 boolean). commitAppConfig is
+  // optimistic (state flips before the IPC awaits); a write failure surfaces
+  // the error but does NOT roll back, mirroring SettingsView Save --
+  // live_config still reads disk truth, so a failed write leaves the next ask
+  // on the OLD profile.
+  const switchActiveProfile = useCallback(
+    async (id: string): Promise<void> => {
+      if (!appConfig) return;
+      if (id === appConfig.provider.active_profile) return;
+      try {
+        await commitAppConfig({
+          ...appConfig,
+          provider: { ...appConfig.provider, active_profile: id },
+        });
+        void refreshKeyStatus();
+      } catch (e) {
+        setShellError(describeReject(e, intl));
+      }
+    },
+    [appConfig, commitAppConfig, refreshKeyStatus, intl],
+  );
 
   // Commit the two shell collapse prefs as one app-config write (ADR-0038/0054,
   // issue #84). No-op before app-config resolves (appConfigRef null) -- the
@@ -856,6 +891,21 @@ export default function App() {
                     <FormattedMessage id="session.defaultName" defaultMessage="New session" />
                   )}
                 </span>
+                {appConfig && (
+                  // Active-profile quick switcher (issue #154, ADR-0065). Sits
+                  // next to the session name as the other "current context"
+                  // indicator: which profile the next ask will use. Commits the
+                  // new active_profile immediately (no draft -- the settings
+                  // view's stage + Save is the management path); management
+                  // stays behind the gear. .settings-mode CSS hides the whole
+                  // topbar (this included) when settings are open, so no
+                  // settings-open guard here.
+                  <ProfileSwitcher
+                    provider={appConfig.provider}
+                    onSwitchActive={(id) => void switchActiveProfile(id)}
+                    disableSwitch={busy}
+                  />
+                )}
                 {atSoftCap && (
                   // Session-count soft-cap hint (ADR-0046): too many open
                   // sessions risk memory pressure. A warning Alert (ADR-0050,
