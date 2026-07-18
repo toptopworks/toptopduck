@@ -9,6 +9,7 @@ import type {
   DuckLoadError,
   LoadOutcome,
   MigrationError,
+  ProfileKeyStatus,
   ProviderConfig,
   ProviderConfigView,
   RemoveSourceError,
@@ -945,6 +946,34 @@ export async function getProviderConfig(): Promise<ProviderConfigView> {
 
 export async function setProviderConfig(config: ProviderConfig): Promise<ProviderConfigView> {
   return invoke<ProviderConfigView>("set_provider_config", { config });
+}
+
+// Per-profile key management (issue #153, ADR-0064/0029). The Profiles UI edits
+// keys for ANY profile, not just the active one. Each profile's key lives in its
+// own keychain slot `key-<profile_id>`; the frontend learns only booleans,
+// never the key (ADR-0029 invariant 3). The active-profile commands above
+// (hasApiKey/setApiKey/clearApiKey) stay for the header indicator's active view.
+
+// One entry per profile currently in app-config: the profile id plus whether its
+// keychain slot holds a key. Profile RECORDS stay single-sourced from
+// app-config; this overlays only the key status. Read-only -- cannot refuse.
+export async function listProviderProfiles(): Promise<ProfileKeyStatus[]> {
+  return invoke<ProfileKeyStatus[]>("list_provider_profiles");
+}
+
+// Store the key for the named profile (ADR-0029 one-shot transfer; the key
+// never returns across IPC). Returns the NEW has_key so the UI updates its
+// overlay without a re-fetch. `profileId` is the opaque profile id; it need not
+// match a saved profile yet (a freshly-minted id before Save is a valid target).
+export async function setProfileKey(profileId: string, key: string): Promise<boolean> {
+  return invoke<boolean>("set_profile_key", { profileId, key });
+}
+
+// Remove the key for the named profile (idempotent). Returns the NEW has_key
+// (false on success). A keychain error rejects with StoreCommandError so the UI
+// can tell the user the key did not come out (ADR-0029 trust root).
+export async function clearProfileKey(profileId: string): Promise<boolean> {
+  return invoke<boolean>("clear_profile_key", { profileId });
 }
 
 // --- Cross-session persistence (issue #48, ADR-0034/0036) -----------------

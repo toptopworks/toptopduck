@@ -414,6 +414,20 @@ export interface ProviderConfigView {
   has_key: boolean;
 }
 
+// Per-profile key-status overlay (issue #153, ADR-0064/0029). The Profiles
+// management UI lists every profile with whether its keychain slot
+// (`key-<profile_id>`) holds a key -- a boolean only, never the key itself
+// (ADR-0029 invariant 3). The profile RECORDS come from app-config (single
+// source of truth for the list); this view only carries the key status that
+// app-config deliberately does not store. Mirrors the Rust ProfileKeyStatus;
+// `list_provider_profiles` returns one entry per profile currently in app-config.
+export interface ProfileKeyStatus {
+  // The stable profile id (also the keychain account suffix `key-<id>`).
+  profile_id: string;
+  // Whether a key is stored for this profile. A boolean only (ADR-0029).
+  has_key: boolean;
+}
+
 // One resume-progress event (issue #48, ADR-0034 visible progress). Mirrors
 // the Rust `ResumeEvent` (serde externally-tagged: `"Source"` / `"Replay"` as
 // the variant key). Emitted by the backend `open_duck` command via a Tauri

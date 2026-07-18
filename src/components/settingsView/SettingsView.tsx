@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { ArrowLeft } from "lucide-react";
 
-import { clearApiKey, fmtError, getProviderConfig, setApiKey } from "../../api";
+import { fmtError } from "../../api";
 import type {
   AppConfig,
   EngineDefaults,
@@ -14,27 +14,41 @@ import type {
 import { Button } from "../ui/button";
 import { EngineSection } from "./EngineSection";
 import { GeneralSection } from "./GeneralSection";
+import { ProfilesSection, type ProfilesSectionProps } from "./ProfilesSection";
 import { PrivacySection } from "./PrivacySection";
-import { ProfilesPlaceholder } from "./ProfilesPlaceholder";
 import { SETTINGS_SECTIONS, type SettingsForm, type SettingsSection } from "./sections";
 
-// In-app overlay settings view (ADR-0065, issue #151). Replaces the modal
-// SettingsDialog: while settingsOpen is true the shell renders <SettingsView/>
-// instead of <SessionShell/>, covering the grid (non-modal, no mask -- it IS
-// the current view). The view owns its header (‹ Back to app + Settings title),
-// a left section nav (General / Profiles / Engine / Privacy), the active
-// section's content on the right, and a footer with the global Save / Cancel /
-// Clear-key actions. session sidebar + topbar + the keep-alive session panes
-// stay mounted (display:none) underneath so App state and any in-flight turn
-// survive the round trip. Entry: topbar gear (settingsOpen=true). Exit: ‹ Back
-// or ESC (settingsOpen=false).
+// In-app overlay settings view (ADR-0065, issue #151/#153). While settingsOpen
+// is true the shell renders <SettingsView/> instead of <SessionShell/>,
+// covering the grid (non-modal, no mask -- it IS the current view). The view
+// owns its header (‹ Back to app + Settings title), a left section nav
+// (General / Profiles / Engine / Privacy), the active section's content on the
+// right, and a footer with the global Save / Cancel actions. session sidebar +
+// topbar + the keep-alive session panes stay mounted (display:none) underneath
+// so App state and any in-flight turn survive the round trip. Entry: topbar
+// gear (settingsOpen=true). Exit: ‹ Back or ESC (settingsOpen=false).
 //
-// This slice migrates the EXISTING preferences verbatim (ADR-0065: only the
-// form factor changes): theme / locale / engine + the API-key + endpoint fields
-// stay editable on the General pane while the Profiles pane is a placeholder
-// (the endpoint + key move into per-profile management in a later slice). Radix
-// Dialog is no longer used for settings; AlertDialog remains available for
-// future delete-profile confirmations.
+// Issue #153: the API-key + endpoint fields moved OUT of General into the
+// Profiles pane (per-profile management, ADR-0064). Save now commits only
+// theme + locale + engine + the provider config (profiles list + active id);
+// per-profile key set/clear is immediate IPC inside ProfilesSection (the key
+// never rides the app-config write, ADR-0029/0038).
+
+// Mirror of the Rust DEFAULT_PROVIDER_BASE_URL / DEFAULT_PROVIDER_MODEL
+// (src-tauri/src/model.rs). A freshly-created profile seeds from these so the
+// edit form shows a sensible anthropic endpoint before the first save (the
+// backend's normalize would otherwise clamp empties to the same values on
+// save). Kept in sync with the Rust constants; drift here only affects the new-
+// profile skeleton default, not stored configs.
+const NEW_PROFILE_DEFAULT_BASE_URL = "https://api.anthropic.com";
+const NEW_PROFILE_DEFAULT_MODEL = "claude-sonnet-4-6";
+
+/** Mint a fresh, stable, opaque profile id (ADR-0064). UUID v4 via the Web
+ *  Crypto API (available in the Tauri webview's secure context). The id is the
+ *  keychain account suffix (`key-<id>`); callers must not assume structure. */
+function newProfileId(): string {
+  return crypto.randomUUID();
+}
 
 // Renders the label for one settings section. Each case is a STATIC
 // <FormattedMessage id="..." defaultMessage="..." /> literal so @formatjs/cli
@@ -62,23 +76,23 @@ function SectionLabel({ section }: { section: SettingsSection }) {
 }
 
 // Renders the active section's content pane. Mirrors SectionLabel's
-// exhaustiveness guard: a new SettingsSection value fails to compile here
-// (never is not assignable) and throws at runtime, so the render branch set
-// cannot silently drift out of sync with the union -- a bare
-// `{section === "x" && ...}` ladder would compile-fail-free on a new id and
-// render an empty pane.
+// exhaustiveness guard. The Profiles case takes its own prop slice
+// (ProfilesSectionProps) rather than the shared SettingsForm, so the General /
+// Engine panes stay free of profile entanglement (issue #153).
 function SectionContent({
   section,
   form,
+  profilesProps,
 }: {
   section: SettingsSection;
   form: SettingsForm;
+  profilesProps: ProfilesSectionProps;
 }) {
   switch (section) {
     case "general":
       return <GeneralSection form={form} />;
     case "profiles":
-      return <ProfilesPlaceholder />;
+      return <ProfilesSection {...profilesProps} />;
     case "engine":
       return <EngineSection form={form} />;
     case "privacy":
@@ -101,8 +115,8 @@ export function SettingsView({
   // Persist the edited app-config. The parent keeps its state + the disk in
   // sync; this view does not call setAppConfig directly.
   onCommitAppConfig: (cfg: AppConfig) => Promise<void> | void;
-  // Called on ‹ Back / Cancel / Save / Clear-key success / ESC. The parent
-  // uses it to both unmount the view and refresh its key-status indicator.
+  // Called on ‹ Back / Cancel / Save / ESC. The parent uses it to both unmount
+  // the view and refresh its key-status indicator.
   onClose: () => void;
 }) {
   const intl = useIntl();
@@ -114,53 +128,53 @@ export function SettingsView({
   const [engine, setEngine] = useState<EngineDefaults>(appConfig.engine);
   const [provider, setProvider] = useState<ProviderConfig>(appConfig.provider);
 
-  // The endpoint inputs edit the ACTIVE profile (ADR-0064). Falls back to the
-  // first profile when active_profile is dangling (normalize repairs on save;
-  // the UI never hands the user a dead endpoint to type into).
-  const activeProfile =
-    provider.profiles.find((p) => p.id === provider.active_profile) ??
-    provider.profiles[0];
-
-  // Patch the active profile's fields, immutably (coding-style: never mutate).
-  function updateActiveProfile(patch: Partial<ProviderProfile>) {
-    setProvider({
-      ...provider,
-      profiles: provider.profiles.map((p) =>
-        p.id === provider.active_profile ? { ...p, ...patch } : p,
-      ),
-    });
-  }
-
-  // The key never enters app-config (ADR-0029/0038): it is collected here only
-  // to forward once to the keychain. An empty field means "leave the stored key
-  // as-is"; `hasKey` reflects the stored status as a boolean, never the value.
-  const [apiKey, setApiKeyField] = useState("");
-  const [hasKey, setHasKey] = useState(false);
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Load the key status on open (the only piece NOT in app-config). Endpoint /
-  // theme / locale / engine are seeded from the prop, so no extra fetch is needed.
-  useEffect(() => {
-    let cancelled = false;
-    getProviderConfig()
-      .then((cfg) => {
-        if (cancelled) return;
-        setHasKey(cfg.has_key);
-      })
-      .catch((e) => {
-        if (!cancelled) setError(fmtError(e, intl));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [intl]);
+  // --- Provider mutators (issue #153, ADR-0064) ------------------------------
+  // All immutable (coding-style: never mutate). Profile LIST + active id land
+  // on Save as part of the atomic app-config write; per-profile key set/clear
+  // is separate immediate IPC inside ProfilesSection.
 
-  const busy = loading || saving;
+  const updateProfile = useCallback(
+    (id: string, patch: Partial<ProviderProfile>) => {
+      setProvider((prev) => ({
+        ...prev,
+        profiles: prev.profiles.map((p) => (p.id === id ? { ...p, ...patch } : p)),
+      }));
+    },
+    [],
+  );
+
+  const createProfile = useCallback((): string => {
+    // Mint a fresh id + an anthropic-protocol skeleton. Returns the id so the
+    // Profiles pane can auto-select the new profile for editing.
+    const id = newProfileId();
+    const profile: ProviderProfile = {
+      id,
+      display_name: "",
+      protocol: "anthropic",
+      base_url: NEW_PROFILE_DEFAULT_BASE_URL,
+      model: NEW_PROFILE_DEFAULT_MODEL,
+    };
+    setProvider((prev) => ({ ...prev, profiles: [...prev.profiles, profile] }));
+    return id;
+  }, []);
+
+  const deleteProfile = useCallback((id: string) => {
+    // Local removal only (committed on Save). The profile's keychain entry
+    // (`key-<id>`) is left in place -- ADR-0064 sanctions the orphan as
+    // harmless (the id is never referenced again). normalize repairs an empty
+    // profiles list / dangling active id on Save.
+    setProvider((prev) => ({
+      ...prev,
+      profiles: prev.profiles.filter((p) => p.id !== id),
+    }));
+  }, []);
+
+  const setActiveProfile = useCallback((id: string) => {
+    setProvider((prev) => ({ ...prev, active_profile: id }));
+  }, []);
 
   // Focus management (ADR-0065 accessibility). On enter, remember the trigger
   // (topbar gear) and move focus onto the overlay's container (tabindex=-1, no
@@ -179,14 +193,13 @@ export function SettingsView({
   // ESC exit (ADR-0065): preserve the dialog's ESC habit even without a mask.
   // One window-level keydown listener, registered ONCE; busy + onClose are read
   // through refs so the handler identity stays stable across renders (no
-  // add/remove churn on every App render). A busy state (loading/saving) bails
-  // so an in-flight atomic app-config write cannot be torn; otherwise ESC
-  // closes the view. (Same-element listeners all fire regardless of
-  // preventDefault, so the busy guard is the real gate, not event suppression.)
-  const busyRef = useRef(busy);
+  // add/remove churn on every App render). A busy state (saving) bails so an
+  // in-flight atomic app-config write cannot be torn; otherwise ESC closes the
+  // view.
+  const savingRef = useRef(saving);
   useEffect(() => {
-    busyRef.current = busy;
-  }, [busy]);
+    savingRef.current = saving;
+  }, [saving]);
   const onCloseRef = useRef(onClose);
   useEffect(() => {
     onCloseRef.current = onClose;
@@ -194,7 +207,7 @@ export function SettingsView({
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key !== "Escape") return;
-      if (busyRef.current) {
+      if (savingRef.current) {
         e.preventDefault();
         return;
       }
@@ -209,14 +222,10 @@ export function SettingsView({
     setSaving(true);
     setError(null);
     try {
-      // The key is sent only when the user typed one -- an empty field means
-      // "leave the stored key as-is" (the user is editing config only).
-      const trimmedKey = apiKey.trim();
-      if (trimmedKey) {
-        await setApiKey(trimmedKey);
-        setHasKey(true);
-      }
-      // One atomic app-config write carries theme + locale + engine + endpoint.
+      // One atomic app-config write carries theme + locale + engine + the
+      // provider config (profiles list + active id). The key never enters this
+      // path (ADR-0029/0038: per-profile key set/clear is separate immediate
+      // IPC inside ProfilesSection).
       await onCommitAppConfig({
         ...appConfig,
         theme,
@@ -224,21 +233,6 @@ export function SettingsView({
         engine,
         provider,
       });
-      setApiKeyField(""); // never retain the key in component state after save
-      onClose();
-    } catch (e) {
-      setError(fmtError(e, intl));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function clearKey() {
-    setSaving(true);
-    setError(null);
-    try {
-      await clearApiKey();
-      setHasKey(false);
       onClose();
     } catch (e) {
       setError(fmtError(e, intl));
@@ -254,13 +248,19 @@ export function SettingsView({
     setLocale,
     engine,
     setEngine,
-    apiKey,
-    setApiKey: setApiKeyField,
-    hasKey,
-    activeProfile,
-    updateActiveProfile,
     saving,
   };
+
+  const profilesProps: ProfilesSectionProps = {
+    provider,
+    updateProfile,
+    createProfile,
+    deleteProfile,
+    setActiveProfile,
+    saving,
+  };
+
+  const busy = saving;
 
   return (
     <div
@@ -308,13 +308,7 @@ export function SettingsView({
         <h3 className="settings-section-heading">
           <SectionLabel section={section} />
         </h3>
-        {loading ? (
-          <p className="text-muted-foreground">
-            <FormattedMessage id="settings.reading" defaultMessage="Reading current config…" />
-          </p>
-        ) : (
-          <SectionContent section={section} form={form} />
-        )}
+        <SectionContent section={section} form={form} profilesProps={profilesProps} />
         {error && <p className="settings-error text-destructive text-sm">{error}</p>}
       </main>
 
@@ -322,11 +316,6 @@ export function SettingsView({
         <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
           <FormattedMessage id="settings.cancel" defaultMessage="Cancel" />
         </Button>
-        {hasKey && (
-          <Button type="button" variant="destructive" onClick={clearKey} disabled={busy}>
-            <FormattedMessage id="settings.clearKey" defaultMessage="Clear key" />
-          </Button>
-        )}
         <Button type="button" onClick={save} disabled={busy}>
           {saving ? (
             <FormattedMessage id="settings.saving" defaultMessage="Saving…" />

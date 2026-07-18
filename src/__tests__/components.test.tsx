@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import type { ReactElement } from "react";
 import { catalogFor } from "../i18n";
@@ -15,14 +15,13 @@ import { Thread } from "../components/Thread";
 import { TooltipProvider } from "../components/ui/tooltip";
 import { VegaChart } from "../components/VegaChart";
 import { WorkingSetList } from "../components/WorkingSetList";
-import { getProviderConfig, readRows, setApiKey } from "../api";
+import { listProviderProfiles, readRows, setProfileKey } from "../api";
 import embed, { type VisualizationSpec } from "vega-embed";
 import type {
   AppConfig,
   DatasetDescriptor,
   DatasetPrivacy,
   GuidanceRequest,
-  ProviderConfigView,
   StaleReason,
   ThreadEntry,
   TurnRecord,
@@ -33,13 +32,15 @@ import type {
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
-  // readRows: ResultView pagination. getProviderConfig/setApiKey: SettingsDialog's
-  // keychain surface (mocked so the dialog never reaches Tauri).
+  // readRows: ResultView pagination. listProviderProfiles/setProfileKey/
+  // clearProfileKey: SettingsView's Profiles pane keychain surface (issue #153,
+  // mocked so the pane never reaches Tauri).
   return {
     ...actual,
     readRows: vi.fn(),
-    getProviderConfig: vi.fn(),
-    setApiKey: vi.fn(),
+    listProviderProfiles: vi.fn(),
+    setProfileKey: vi.fn(),
+    clearProfileKey: vi.fn(),
   };
 });
 // Vega-Embed needs a real canvas; jsdom has none, so the render itself is
@@ -1856,16 +1857,17 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
     recent_files: [],
     shell: { sidebar_collapsed: false, rail_collapsed: false },
   };
-  const providerView: ProviderConfigView = {
-    base_url: "https://api.anthropic.com",
-    model: "claude-sonnet",
-    has_key: false,
-  };
+  const profileKeysDefault = [{ profile_id: "default", has_key: false }];
 
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(getProviderConfig).mockResolvedValue(providerView);
+    vi.mocked(listProviderProfiles).mockResolvedValue(profileKeysDefault);
   });
+
+  // Issue #153: the General pane renders synchronously (the global loading gate
+  // is gone -- the key-status overlay fetch lives inside ProfilesSection, which
+  // only mounts when the user switches to Profiles). Tests that stay on General
+  // wait on the Theme legend as a render-ready signal.
 
   it("commits the chosen theme + locale RadioGroup values on save", async () => {
     // The General pane is the default section; its theme + locale radios wire
@@ -1879,8 +1881,7 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
         onClose={() => {}}
       />,
     );
-    // Wait for loading to finish (the form renders once getProviderConfig resolves).
-    await screen.findByLabelText(/Anthropic API key/);
+    await screen.findByText("Theme");
     // Switch theme to dark + locale to English via the RadioGroups.
     fireEvent.click(screen.getByRole("radio", { name: "Dark" }));
     fireEvent.click(screen.getByRole("radio", { name: "English" }));
@@ -1893,11 +1894,11 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
     expect(committed.provider).toEqual(baseConfig.provider);
   });
 
-  it("does not forward an empty apiKey to setApiKey (leave-as-is contract)", async () => {
-    // ADR-0029/0038: an empty key field means "leave the stored key as-is". Save
-    // still commits the app-config but never calls setApiKey (the key stays in
-    // the OS keychain untouched).
-    vi.mocked(setApiKey).mockResolvedValue(undefined);
+  it("Save commits app-config and closes (no key IPC from the view, issue #153)", async () => {
+    // Issue #153: key set/clear moved INTO ProfilesSection (immediate per-profile
+    // IPC). SettingsView.save() is now a pure app-config write -- it never calls
+    // any key IPC. The leave-as-is contract now lives in the Profiles key input
+    // (an empty field disables Set), not in the Save path.
     const onCommitAppConfig = vi.fn().mockResolvedValue(undefined);
     const onClose = vi.fn();
     renderSettings(
@@ -1907,18 +1908,16 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
         onClose={onClose}
       />,
     );
-    await screen.findByLabelText(/Anthropic API key/);
-    // apiKey field is intentionally left empty.
+    await screen.findByText("Theme");
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalled());
-    expect(vi.mocked(setApiKey)).not.toHaveBeenCalled();
     expect(onClose).toHaveBeenCalled();
   });
 
   it("prevents ESC exit while saving (atomic-write guard, ADR-0065)", async () => {
-    // busy = loading || saving. A never-resolving onCommitAppConfig keeps saving
-    // true; the window-level ESC listener then bails so a mid-save ESC cannot
-    // close the view (the atomic app-config write would otherwise be torn).
+    // busy = saving (issue #153 dropped the loading gate). A never-resolving
+    // onCommitAppConfig keeps saving true; the window-level ESC listener bails
+    // so a mid-save ESC cannot close the view (the atomic write would be torn).
     const onCommitAppConfig = vi
       .fn()
       .mockImplementation(() => new Promise<void>(() => {}));
@@ -1930,7 +1929,7 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
         onClose={onClose}
       />,
     );
-    await screen.findByLabelText(/Anthropic API key/);
+    await screen.findByText("Theme");
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     // Confirm the saving state is active before asserting the guard.
     await screen.findByText(/Saving/);
@@ -1941,8 +1940,8 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
   });
 
   it("ESC exits when not busy (ADR-0065 keyboard exit)", async () => {
-    // Without a mask, ESC is the keyboard exit. Once loading finishes (not
-    // saving), ESC closes the view via the window-level listener.
+    // Without a mask, ESC is the keyboard exit. When not saving, ESC closes the
+    // view via the window-level listener.
     const onClose = vi.fn();
     renderSettings(
       <SettingsView
@@ -1951,7 +1950,7 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
         onClose={onClose}
       />,
     );
-    await screen.findByLabelText(/Anthropic API key/);
+    await screen.findByText("Theme");
     fireEvent.keyDown(window, { key: "Escape" });
     expect(onClose).toHaveBeenCalled();
   });
@@ -1959,7 +1958,8 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
   it("switches panes via the left nav (ADR-0065)", async () => {
     // The left nav's four buttons swap the right pane; switching does NOT save
     // (no commit until Save). Engine shows the engine fieldset, Privacy shows
-    // the disclosure banner, Profiles shows the placeholder.
+    // the disclosure banner, Profiles shows the profile list (issue #153: no
+    // longer a placeholder).
     const onCommitAppConfig = vi.fn().mockResolvedValue(undefined);
     renderSettings(
       <SettingsView
@@ -1968,20 +1968,138 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
         onClose={() => {}}
       />,
     );
-    await screen.findByLabelText(/Anthropic API key/);
+    await screen.findByText("Theme");
     // Default pane is General; switch to Engine.
     fireEvent.click(screen.getByRole("button", { name: "Engine" }));
-    // The engine legend appears (migrated from SettingsDialog's engine fieldset).
     expect(screen.getByText("Engine defaults (ADR-0005)")).toBeInTheDocument();
-    // The General pane's API-key label is gone (only the active section renders).
-    expect(screen.queryByLabelText(/Anthropic API key/)).not.toBeInTheDocument();
     // Switch to Privacy: the disclosure banner (ADR-0011/0019) mounts.
     fireEvent.click(screen.getByRole("button", { name: "Privacy" }));
     expect(screen.getByRole("note")).toBeInTheDocument();
-    // Switch to Profiles: the placeholder renders.
+    // Switch to Profiles: the profile list renders (New profile button present).
     fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
-    expect(screen.getByText(/Profile management is coming/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New profile" })).toBeInTheDocument();
     // No save happened during the tour.
     expect(onCommitAppConfig).not.toHaveBeenCalled();
+  });
+
+  // --- Profiles pane: master-detail + CRUD + key status (issue #153 ACs) -----
+
+  it("Profiles pane lists profiles with key-status badges (issue #153)", async () => {
+    vi.mocked(listProviderProfiles).mockResolvedValue([
+      { profile_id: "default", has_key: true },
+    ]);
+    renderSettings(
+      <SettingsView
+        appConfig={baseConfig}
+        onCommitAppConfig={vi.fn()}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    // The single profile shows its display name + the "Key set" badge; the
+    // active badge is also present (default is the active profile).
+    await screen.findByText("Anthropic");
+    expect(screen.getByText("Key set")).toBeInTheDocument();
+    expect(screen.getByText("Active")).toBeInTheDocument();
+    expect(screen.queryByText("No key")).not.toBeInTheDocument();
+  });
+
+  it("creates a new profile via New profile and commits it on save (issue #153)", async () => {
+    const onCommitAppConfig = vi.fn().mockResolvedValue(undefined);
+    renderSettings(
+      <SettingsView
+        appConfig={baseConfig}
+        onCommitAppConfig={onCommitAppConfig}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    await screen.findByRole("button", { name: "New profile" });
+    fireEvent.click(screen.getByRole("button", { name: "New profile" }));
+    // A second list item appears with the "Unnamed profile" placeholder (the
+    // new profile's display_name starts empty).
+    expect(screen.getByText("Unnamed profile")).toBeInTheDocument();
+    // Save commits the new profile list (2 profiles now).
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalled());
+    const committed = onCommitAppConfig.mock.calls[0][0];
+    expect(committed.provider.profiles.length).toBe(2);
+    // The new profile's id is stable + non-empty (ProfileId minted client-side).
+    const created = committed.provider.profiles[1];
+    expect(created.id).toBeTruthy();
+    expect(created.protocol).toBe("anthropic");
+  });
+
+  it("delete opens an AlertDialog and confirming removes the profile (issue #153)", async () => {
+    // Start with two profiles so deletion leaves one (the AlertDialog confirm
+    // is the AC's accidental-delete guard).
+    const twoProfileConfig: AppConfig = {
+      ...baseConfig,
+      provider: {
+        profiles: [
+          baseConfig.provider.profiles[0],
+          {
+            id: "second",
+            display_name: "GLM",
+            protocol: "openai",
+            base_url: "https://open.bigmodel.cn/api/paas/v4",
+            model: "glm-4",
+          },
+        ],
+        active_profile: "default",
+      },
+    };
+    vi.mocked(listProviderProfiles).mockResolvedValue([
+      { profile_id: "default", has_key: false },
+      { profile_id: "second", has_key: false },
+    ]);
+    renderSettings(
+      <SettingsView
+        appConfig={twoProfileConfig}
+        onCommitAppConfig={vi.fn()}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    await screen.findByText("GLM");
+    // Open the delete confirm for the second profile.
+    const deleteButtons = screen.getAllByRole("button", { name: "Delete" });
+    fireEvent.click(deleteButtons[1]);
+    // AlertDialog mounts (destructive confirm: no accidental delete).
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toBeInTheDocument();
+    // Confirming scopes to the dialog (the list also has Delete buttons).
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
+    );
+    // The profile is gone from the list.
+    expect(screen.queryByText("GLM")).not.toBeInTheDocument();
+  });
+
+  it("set key calls setProfileKey and flips the badge to Key set (issue #153)", async () => {
+    // Key set is immediate IPC (ADR-0029 one-shot); the returned bool flips the
+    // has_key overlay so the badge updates without a re-fetch.
+    vi.mocked(setProfileKey).mockResolvedValue(true);
+    renderSettings(
+      <SettingsView
+        appConfig={baseConfig}
+        onCommitAppConfig={vi.fn()}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    await screen.findByText("No key");
+    // Type a key + click Set key (the default profile is the selected one).
+    fireEvent.change(screen.getByPlaceholderText("Paste key"), {
+      target: { value: "sk-test-153" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Set key" }));
+    await waitFor(() =>
+      expect(vi.mocked(setProfileKey)).toHaveBeenCalledWith("default", "sk-test-153"),
+    );
+    // The badge flips to "Key set" (the IPC's returned bool updates the overlay).
+    await screen.findByText("Key set");
+    expect(screen.queryByText("No key")).not.toBeInTheDocument();
   });
 });

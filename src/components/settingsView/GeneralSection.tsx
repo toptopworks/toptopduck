@@ -1,110 +1,32 @@
-import { FormattedMessage, useIntl } from "react-intl";
+import { FormattedMessage } from "react-intl";
 import { Monitor, Moon, Sun } from "lucide-react";
 
 import type { LocalePreference, Theme } from "../../types";
-import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { RadioGroup, RadioGroupItem } from "../ui/radio-group";
 import type { SettingsForm } from "./sections";
 
-// General pane (ADR-0065, issue #151): theme + locale + the API-key + endpoint
-// fields, migrated verbatim from SettingsDialog. The endpoint + key live here
-// as a transitional home -- they move into per-profile management on the
-// Profiles pane in a later slice; this slice preserves every preference
-// verbatim so no behavior changes vs. the prior dialog.
+// General pane (ADR-0065, issue #151/#153): theme + locale. The API-key +
+// endpoint fields that lived here as a transitional home (issue #151) moved
+// INTO per-profile management on the Profiles pane (issue #153, ADR-0064) --
+// this pane now carries only the app-level appearance + language preferences.
+// The storage-model intro stays (it describes where prefs + the key live, which
+// is still accurate and useful orientation for a user browsing General).
 export function GeneralSection({ form }: { form: SettingsForm }) {
-  const intl = useIntl();
-  const {
-    theme,
-    setTheme,
-    locale,
-    setLocale,
-    apiKey,
-    setApiKey,
-    hasKey,
-    activeProfile,
-    updateActiveProfile,
-    saving,
-  } = form;
+  const { theme, setTheme, locale, setLocale, saving } = form;
 
   return (
     <div className="grid gap-6">
       {/* Verbatim intro migrated from SettingsDialog's DialogDescription: where
           preferences live (system app-data) vs. where the key lives (OS
-          keychain only). Sits at the top of General, the same place the prior
-          dialog carried it above the form. */}
+          keychain only). The key half is now managed per-profile on the
+          Profiles pane; the storage split this describes is unchanged. */}
       <p className="text-muted-foreground text-sm">
         <FormattedMessage
           id="settings.intro"
           defaultMessage="Preferences and defaults live in the system app-data directory (orthogonal to the shareable .duck); the API key lives only in this machine's OS keychain, read by the Rust core — the frontend and page never hold it, and it is never written to app-config."
         />
       </p>
-      <section className="grid gap-2">
-        <Label>
-          <FormattedMessage id="settings.apiKeyLabel" defaultMessage="Anthropic API key:" />
-          <Input
-            type="password"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder={
-              hasKey
-                ? intl.formatMessage({
-                    id: "settings.apiKeyPlaceholderSet",
-                    defaultMessage: "Saved (leave blank to keep as-is)",
-                  })
-                : intl.formatMessage({
-                    id: "settings.apiKeyPlaceholderUnset",
-                    defaultMessage: "Paste your Anthropic API key",
-                  })
-            }
-            disabled={saving}
-            autoComplete="off"
-          />
-        </Label>
-        <p className="text-muted-foreground text-sm">
-          {hasKey ? (
-            <FormattedMessage
-              id="settings.apiKeyHintHas"
-              defaultMessage="A key is currently saved. Leave blank on save to keep it unchanged; you can click &quot;Clear key&quot; below."
-            />
-          ) : (
-            <FormattedMessage
-              id="settings.apiKeyHintMissing"
-              defaultMessage='No key configured yet — asking will return a "not configured" failure.'
-            />
-          )}
-        </p>
-      </section>
-
-      <section className="grid gap-2">
-        <Label>
-          <FormattedMessage
-            id="settings.baseUrlLabel"
-            defaultMessage="Endpoint base URL (optional, Anthropic direct by default):"
-          />
-          <Input
-            type="text"
-            value={activeProfile.base_url}
-            onChange={(e) => updateActiveProfile({ base_url: e.target.value })}
-            disabled={saving}
-          />
-        </Label>
-        <Label>
-          <FormattedMessage id="settings.modelLabel" defaultMessage="Model (Sonnet-class by default):" />
-          <Input
-            type="text"
-            value={activeProfile.model}
-            onChange={(e) => updateActiveProfile({ model: e.target.value })}
-            disabled={saving}
-          />
-        </Label>
-        <p className="text-muted-foreground text-sm">
-          <FormattedMessage
-            id="settings.endpointHint"
-            defaultMessage="If you use a self-hosted Anthropic-protocol-compatible gateway, put it in base URL; the payload goes through that gateway, and its retention/training policy is your responsibility."
-          />
-        </p>
-      </section>
 
       <fieldset className="grid gap-2 border-0 p-0 m-0">
         <legend className="text-sm font-medium">
