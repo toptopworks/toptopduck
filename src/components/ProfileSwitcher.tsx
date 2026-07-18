@@ -44,10 +44,14 @@ export interface ProfileSwitcherProps {
    *  reads it fresh on the next turn, ADR-0064). The parent owns the persistence
    *  path -- this component never calls setProviderConfig/setAppConfig directly. */
   onSwitchActive: (id: string) => void;
-  /** Disable the SWITCH (each menu item) while the parent is mid-write or an
-   *  ask is in flight, so a second switch cannot land before the first persists
-   *  or race an in-flight turn. The trigger stays clickable (browsing the list
-   *  is harmless); only selecting is gated. Named for what it gates -- the
+  /** Disable each menu item while the parent reports busy. The switch write
+   *  itself needs NO guard here: commitAppConfig is optimistic (state flips
+   *  before the IPC awaits) and live_config re-reads active_profile fresh each
+   *  turn (ADR-0064), so a mid-switch ask is safe and a rapid double-switch
+   *  converges on the last click. Today the only busy source is .duck
+   *  persistence/resume (App's `persistenceBusy || resumeStatus`), during which
+   *  a profile swap is pointless. The trigger stays clickable (browsing the
+   *  list is harmless); only selecting is gated. Named for what it gates -- the
    *  trigger remains interactive, so this is not a whole-component disable. */
   disableSwitch?: boolean;
 }
