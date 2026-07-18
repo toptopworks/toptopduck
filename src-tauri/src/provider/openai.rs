@@ -1,21 +1,29 @@
-//! Real LLM provider: Anthropic Messages API over the native protocol
-//! (ADR-0007/0019, issue #29). Replaces the offline fake as the production
-//! provider; the fake stays for deterministic offline tests (ADR-0007 shared
-//! test base -- never deleted).
+//! Real LLM provider: OpenAI Chat Completions API over the OpenAI-compatible
+//! wire protocol (ADR-0064, issue #152). The second [`Provider`] adapter,
+//! alongside [`super::anthropic::AnthropicProvider`]. A pure HTTP translation
+//! layer -- it constructs the Chat Completions request shape, attaches Bearer
+//! auth, reads `choices[0].message.content`, and reuses the shared
+//! [`super::reply::parse_reply`] for the ADR-0009 bare-JSON contract. The
+//! anthropic adapter is untouched; the two share only the protocol-agnostic
+//! text contract ([`super::reply`] + [`super::prompt::render_response`]).
 //!
-//! What this module owns:
-//! - the ONLY network egress surface in the app (ADR-0029 invariant 1): the
-//!   Rust core places the HTTP call, attaches the key from the keychain, and
-//!   returns only the parsed reply -- the webview has no HTTP path and no key;
-//! - the capability-boundary system prompt + per-turn schema context
-//!   (ADR-0017/0011), assembled from [`crate::provider::prompt`];
-//! - the strict-JSON output contract (ADR-0009): the model returns one JSON
-//!   object; this module parses it into [`ProviderReply`] or yields a retried
-//!   [`ProviderError::Unavailable`] on any malformed/transport outcome.
+//! Covers OpenAI direct / DeepSeek / GLM / Qwen / Ollama compatible endpoints:
+//! the user points the profile's `base_url` at the endpoint (including its
+//! version path segment, e.g. `https://api.openai.com/v1`), and this adapter
+//! appends `/chat/completions` -- matching the openai SDK `base_url + path`
+//! convention so all five providers work with no per-provider special case.
 //!
-//! Blocking HTTP (ureq) fits the sync [`Provider::generate`] contract: the
-//! orchestrator runs `ask` on a `spawn_blocking` thread, so no async runtime is
-//! pulled in and the turn stays cancellable at the flag-check between attempts.
+//! The bare-prompt contract (ADR-0009) is unchanged from anthropic: no
+//! tool-calling / function calling. The model emits one JSON object in its
+//! text content; this adapter extracts that text and hands it to the shared
+//! parser. (ADR-0064 known risk: weak models on the bare-JSON contract may
+//! raise ADR-0028 retry rates; a per-model local tool-calling introduction is
+//! deferred until a model's retry rate actually exceeds the threshold.)
+//!
+//! Like the anthropic adapter, blocking HTTP (ureq) fits the sync
+//! [`Provider::generate`] contract: the orchestrator runs `ask` on a
+//! `spawn_blocking` thread, so no async runtime is pulled in and the turn
+//! stays cancellable at the flag-check between attempts.
 
 use std::time::Duration;
 
@@ -26,40 +34,37 @@ use crate::provider::prompt::{build_system_prompt, render_response};
 use crate::provider::reply::parse_reply;
 use crate::provider::{Provider, ProviderError, ProviderReply, ProviderRequest, TurnPayload};
 
-/// Anthropic Messages API protocol version header value (ADR-0019: native
-/// Anthropic protocol). Pinned; bumped only when Anthropic ships a breaking
-/// revision the v1 contract relies on.
-const ANTHROPIC_VERSION: &str = "2023-06-01";
-
-/// Cap on the model's reply length. Sized for a SQL + a Vega-Lite spec + an
-/// assumption note (a viz spec can run long); bounded so a runaway reply never
-/// balloons. Not a user-facing cap (the engine result-row cap, ADR-0005 L3,
-/// governs materialized size -- this bounds only the model's text).
+/// Cap on the model's reply length (mirrors the anthropic adapter). Sized for a
+/// SQL + a Vega-Lite spec + an assumption note; bounded so a runaway reply
+/// never balloons. Not a user-facing cap (the engine result-row cap,
+/// ADR-0005 L3, governs materialized size).
 const MAX_TOKENS: u32 = 4096;
 
-/// Wall-clock ceiling on one LLM HTTP call. Bounds a hung call so the cancel
-/// path eventually lands: a cancel during the (blocking) call is only seen
-/// after the call returns, so this timeout is the backstop. Maps to a retried
-/// [`ProviderError::Unavailable`] on expiry (transient), not a hard failure.
+/// Wall-clock ceiling on one LLM HTTP call (mirrors the anthropic adapter).
+/// Bounds a hung call so the cancel path eventually lands: a cancel during the
+/// (blocking) call is only seen after the call returns, so this timeout is the
+/// backstop. Maps to a retried [`ProviderError::Unavailable`] on expiry.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// The real Claude client behind the [`Provider`] trait (ADR-0007). Holds a
-/// [`ProviderConfigSource`] for per-turn key + endpoint + model reads (live, no
-/// caching); tests inject [`StaticConfig`], production wires
-/// [`KeychainStore`](super::keychain::KeychainStore).
-pub struct AnthropicProvider {
+/// The OpenAI Chat Completions client behind the [`Provider`] trait (ADR-0064).
+/// Holds a [`ProviderConfigSource`] for per-turn key + endpoint + model +
+/// protocol reads (live, no caching); tests inject [`StaticConfig`]. Same
+/// shape as [`super::anthropic::AnthropicProvider`] -- the difference is purely
+/// the wire shape constructed in [`OpenaiProvider::generate`].
+pub struct OpenaiProvider {
     config: Box<dyn ProviderConfigSource>,
 }
 
-impl AnthropicProvider {
+impl OpenaiProvider {
     /// Wire the provider with a key/config source. Production passes the shared
-    /// keychain store; tests pass a fixed [`StaticConfig`].
+    /// live config (via [`super::LiveProvider`] routing); tests pass a fixed
+    /// [`StaticConfig`].
     pub fn new(config: Box<dyn ProviderConfigSource>) -> Self {
         Self { config }
     }
 }
 
-impl Provider for AnthropicProvider {
+impl Provider for OpenaiProvider {
     fn generate(&self, request: &ProviderRequest) -> Result<ProviderReply, ProviderError> {
         // ADR-0029 invariant 3: the key is fetched here, in the Rust core, per
         // turn. Absent key -> NotWired (permanent for this turn, not retried) --
@@ -67,19 +72,24 @@ impl Provider for AnthropicProvider {
         let key = self.config.api_key().ok_or(ProviderError::NotWired)?;
         let base_url = self.config.base_url();
         let model = self.config.model();
-        let url = format!("{base}/v1/messages", base = base_url.trim_end_matches('/'));
+        // The user's base_url carries any version path segment (e.g. `/v1`);
+        // only `/chat/completions` is appended -- matches the openai SDK
+        // `base_url + path` convention so GLM's `/api/paas/v4` and Qwen's
+        // `/compatible-mode/v1` work with no special case.
+        let url = format!(
+            "{base}/chat/completions",
+            base = base_url.trim_end_matches('/')
+        );
 
         // ADR-0052 (issue #78): assemble the system prompt via the shared
-        // build_system_prompt so the locale directive is always inserted between
-        // the canonical boundary prompt and the schema context. The locale is
-        // read from the config source (resolved in Rust, never in ProviderRequest
-        // / never pushed by the frontend).
+        // build_system_prompt so the locale directive + canonical boundary +
+        // schema context are identical to the anthropic adapter. The system
+        // prompt rides the first message (role "system") per OpenAI convention.
         let system = build_system_prompt(request, self.config.locale());
-        let body = AnthropicRequest {
+        let body = OpenaiRequest {
             model: &model,
             max_tokens: MAX_TOKENS,
-            system,
-            messages: build_messages(request),
+            messages: build_messages(request, system),
         };
         // serde_json::to_value only fails on non-finite floats / depth limits;
         // our body is plain strings, so this is defensive.
@@ -88,8 +98,7 @@ impl Provider for AnthropicProvider {
         })?;
 
         let response = ureq::post(&url)
-            .set("x-api-key", &key)
-            .set("anthropic-version", ANTHROPIC_VERSION)
+            .set("Authorization", &format!("Bearer {key}"))
             .timeout(REQUEST_TIMEOUT)
             .send_json(body_value);
 
@@ -98,7 +107,8 @@ impl Provider for AnthropicProvider {
             // Auth rejected (bad/missing key seen by the server, or forbidden):
             // permanent for this turn -- map to NotWired so it is NOT retried
             // (three 401s would only burn time). The user sees a configure-key
-            // prompt via the NotWired message.
+            // prompt via the NotWired message. Mirrors the anthropic path
+            // (ADR-0044).
             Err(ureq::Error::Status(status, _)) if status == 401 || status == 403 => {
                 return Err(ProviderError::NotWired);
             }
@@ -112,27 +122,28 @@ impl Provider for AnthropicProvider {
         let raw: RawResponse = response
             .into_json()
             .map_err(|e| ProviderError::Unavailable(format!("response read failed: {e}")))?;
-        // The model's JSON contract rides the first text block. Anthropic may
-        // also emit tool-use / other blocks; we asked for text-only JSON, so a
-        // missing text block is a contract violation -> retried Unavailable.
+        // The model's JSON contract rides the first choice's text content.
+        // OpenAI returns content=null only when the model emitted tool calls
+        // (which we never request); a missing/empty choices array or null
+        // content is a contract violation -> retried Unavailable.
         let text = raw
-            .content
-            .iter()
-            .find_map(|b| (b.kind == "text").then(|| b.text.clone()).flatten())
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|c| c.message.content)
             .ok_or_else(|| ProviderError::Unavailable("LLM response has no text content".into()))?;
         parse_reply(&text)
     }
 }
 
-/// The Anthropic Messages API request body (ADR-0019 native protocol). `system`
-/// carries the capability-boundary prompt + schema context; `messages` carries
-/// the windowed conversation as alternating user/assistant turns ending on the
-/// asking question.
+/// The OpenAI Chat Completions request body (ADR-0064 openai protocol). The
+/// system prompt + schema context ride the first message (role "system");
+/// `messages` carries the windowed conversation as the system message followed
+/// by alternating user/assistant turns ending on the asking question.
 #[derive(Serialize)]
-struct AnthropicRequest<'a> {
+struct OpenaiRequest<'a> {
     model: &'a str,
     max_tokens: u32,
-    system: String,
     messages: Vec<Message>,
 }
 
@@ -142,27 +153,43 @@ struct Message {
     content: String,
 }
 
-/// Minimal Anthropic response shape -- only the `content` array is read. Extra
-/// fields (id, model, usage, stop_reason) are ignored by serde.
+/// Minimal OpenAI response shape -- only the `choices` array is read. Extra
+/// fields (id, model, usage, finish_reason) are ignored by serde.
 #[derive(Deserialize)]
 struct RawResponse {
-    content: Vec<RawBlock>,
+    #[serde(default)]
+    choices: Vec<RawChoice>,
 }
 
 #[derive(Deserialize)]
-struct RawBlock {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(default)]
-    text: Option<String>,
+struct RawChoice {
+    message: RawMessage,
 }
 
-/// Build the Anthropic messages array from the windowed payload: each prior
-/// turn becomes a user (its question) + assistant (its rendered response) pair,
-/// oldest first; the asking question is the final user turn. Roles strictly
-/// alternate (Anthropic requires it), and the first message is always `user`.
-fn build_messages(request: &ProviderRequest) -> Vec<Message> {
-    let mut msgs = Vec::with_capacity(request.history.len() * 2 + 1);
+#[derive(Deserialize)]
+struct RawMessage {
+    /// The model's text reply. `None` when the server returned null (a
+    /// tool-call-only response, which we never request) -- treated as a
+    /// contract violation by the caller.
+    #[serde(default)]
+    content: Option<String>,
+}
+
+/// Build the OpenAI messages array from the windowed payload: the system
+/// prompt (capability boundary + locale directive + schema context) is the
+/// FIRST message (role "system"), then each prior turn becomes a user (its
+/// question) + assistant (its rendered response) pair, oldest first; the
+/// asking question is the final user turn. After the system message, roles
+/// strictly alternate user/assistant and the conversation ends on a user turn
+/// -- OpenAI allows the leading system message that Anthropic's alternation
+/// rule forbids, which is the sole structural difference from the anthropic
+/// `build_messages`.
+fn build_messages(request: &ProviderRequest, system: String) -> Vec<Message> {
+    let mut msgs = Vec::with_capacity(request.history.len() * 2 + 2);
+    msgs.push(Message {
+        role: "system",
+        content: system,
+    });
     for turn in &request.history {
         match turn {
             TurnPayload::Full { question, response } => {
@@ -212,26 +239,21 @@ mod tests {
     use crate::provider::{ColumnRef, DatasetRef, ResponsePayload};
 
     /// Build a provider whose key/endpoint/model are fixed and point at a
-    /// mockito server URL (no OS keychain, no real network). Locale defaults to
-    /// EnUS (the least-surprise fallback); tests that assert the locale
-    /// directive use `provider_at_locale`.
-    fn provider_at(url: &str, key: Option<&str>) -> AnthropicProvider {
+    /// mockito server URL (no OS keychain, no real network), speaking the
+    /// OpenAI protocol. Locale defaults to EnUS.
+    fn provider_at(url: &str, key: Option<&str>) -> OpenaiProvider {
         provider_at_locale(url, key, ResponseLocale::EnUS)
     }
 
     /// Build a provider with an explicit resolved locale (for the i18n
     /// directive assertions -- ADR-0052).
-    fn provider_at_locale(
-        url: &str,
-        key: Option<&str>,
-        locale: ResponseLocale,
-    ) -> AnthropicProvider {
-        AnthropicProvider::new(Box::new(StaticConfig {
+    fn provider_at_locale(url: &str, key: Option<&str>, locale: ResponseLocale) -> OpenaiProvider {
+        OpenaiProvider::new(Box::new(StaticConfig {
             key: key.map(str::to_string),
             base_url: url.to_string(),
-            model: "claude-sonnet-4-6".to_string(),
+            model: "gpt-4o".to_string(),
             locale,
-            protocol: Protocol::Anthropic,
+            protocol: Protocol::Openai,
         }))
     }
 
@@ -254,25 +276,25 @@ mod tests {
         }
     }
 
-    /// Wrap a model JSON reply in the Anthropic response envelope.
-    fn anthropic_body(model_json: &str) -> String {
+    /// Wrap a model JSON reply in the OpenAI Chat Completions response envelope.
+    fn openai_body(model_json: &str) -> String {
         serde_json::json!({
-            "content": [{"type": "text", "text": model_json}],
-            "usage": {"input_tokens": 10, "output_tokens": 5},
+            "choices": [{"message": {"role": "assistant", "content": model_json}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
         })
         .to_string()
     }
 
     #[test]
     fn parses_sql_reply_round_trip() {
-        // AC: a real provider turns an Anthropic text envelope carrying the SQL
-        // contract into ProviderReply::Sql verbatim.
+        // AC: the openai adapter turns a Chat Completions envelope carrying the
+        // SQL contract into ProviderReply::Sql verbatim (parse_reply reused).
         let mut server = mockito::Server::new();
         let _mock = server
-            .mock("POST", "/v1/messages")
-            .match_header("x-api-key", "sk-test")
+            .mock("POST", "/chat/completions")
+            .match_header("authorization", "Bearer sk-test")
             .with_status(200)
-            .with_body(anthropic_body(
+            .with_body(openai_body(
                 r#"{"type":"sql","sql":"SELECT COUNT(*) AS n FROM \"people\".data","viz":null,"assumption":null}"#,
             ))
             .create();
@@ -296,9 +318,9 @@ mod tests {
     fn parses_sql_with_viz_and_assumption() {
         let mut server = mockito::Server::new();
         let _mock = server
-            .mock("POST", "/v1/messages")
+            .mock("POST", "/chat/completions")
             .with_status(200)
-            .with_body(anthropic_body(
+            .with_body(openai_body(
                 r#"{"type":"sql","sql":"SELECT 1","viz":{"kind":"bar","spec":"{\"mark\":\"bar\"}"},"assumption":"regr_slope 斜率"}"#,
             ))
             .create();
@@ -323,9 +345,9 @@ mod tests {
     fn parses_clarify_and_refuse_text_replies() {
         let mut server = mockito::Server::new();
         let _m1 = server
-            .mock("POST", "/v1/messages")
+            .mock("POST", "/chat/completions")
             .with_status(200)
-            .with_body(anthropic_body(
+            .with_body(openai_body(
                 r#"{"type":"text","kind":"clarify","body":"按哪个 name？","assumption":null}"#,
             ))
             .create();
@@ -340,9 +362,9 @@ mod tests {
 
         let mut server = mockito::Server::new();
         let _m2 = server
-            .mock("POST", "/v1/messages")
+            .mock("POST", "/chat/completions")
             .with_status(200)
-            .with_body(anthropic_body(
+            .with_body(openai_body(
                 r#"{"type":"text","kind":"refuse","body":"不做预测，可改为按季度汇总销量","assumption":"避开预测建模"}"#,
             ))
             .create();
@@ -365,9 +387,8 @@ mod tests {
     fn missing_key_is_not_wired() {
         // ADR-0029: no key -> NotWired (permanent, not retried), returned
         // BEFORE any HTTP call. Pointed at a bogus URL that would actively
-        // refuse a connection: if the code path ever tried the network it would
-        // surface an Unavailable (connect error), not NotWired -- so the
-        // NotWired assertion proves no call was placed.
+        // refuse a connection: if the code path tried the network it would
+        // surface an Unavailable (connect error), not NotWired.
         let p = provider_at("http://127.0.0.1:1", None);
         assert_eq!(
             p.generate(&sample_request("q")).unwrap_err(),
@@ -378,12 +399,13 @@ mod tests {
     #[test]
     fn auth_rejected_is_not_retried_not_wired() {
         // A 401 is permanent for this turn: map to NotWired so the orchestrator
-        // does not burn the retry budget on three identical auth failures.
+        // does not burn the retry budget on three identical auth failures
+        // (ADR-0044).
         let mut server = mockito::Server::new();
         let _mock = server
-            .mock("POST", "/v1/messages")
+            .mock("POST", "/chat/completions")
             .with_status(401)
-            .with_body(r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#)
+            .with_body(r#"{"error":{"message":"Invalid API key","type":"invalid_api_key"}}"#)
             .create();
         let p = provider_at(&server.url(), Some("sk-bad"));
         assert_eq!(
@@ -398,11 +420,9 @@ mod tests {
         // the orchestrator's retry budget.
         let mut server = mockito::Server::new();
         let _mock = server
-            .mock("POST", "/v1/messages")
+            .mock("POST", "/chat/completions")
             .with_status(503)
-            .with_body(
-                r#"{"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}"#,
-            )
+            .with_body(r#"{"error":{"message":"Service unavailable"}}"#)
             .create();
         let p = provider_at(&server.url(), Some("sk-test"));
         match p.generate(&sample_request("q")) {
@@ -413,13 +433,13 @@ mod tests {
 
     #[test]
     fn malformed_reply_is_unavailable() {
-        // Contract violations (missing type / not JSON) -> Unavailable (retried
-        // then failed honestly). The orchestrator never silently invents SQL.
+        // Contract violations (not JSON) -> Unavailable (retried then failed
+        // honestly). parse_reply reused -- identical contract to anthropic.
         let mut server = mockito::Server::new();
         let _mock = server
-            .mock("POST", "/v1/messages")
+            .mock("POST", "/chat/completions")
             .with_status(200)
-            .with_body(anthropic_body("这不是 JSON"))
+            .with_body(openai_body("这不是 JSON"))
             .create();
         let p = provider_at(&server.url(), Some("sk-test"));
         assert!(matches!(
@@ -430,13 +450,13 @@ mod tests {
 
     #[test]
     fn json_in_markdown_fence_still_parses() {
-        // Defensive extraction tolerates a model that wrapped the JSON in a
-        // ``` fence despite the instruction not to.
+        // Defensive extraction (shared parse_reply) tolerates a model that
+        // wrapped the JSON in a ``` fence despite the instruction not to.
         let mut server = mockito::Server::new();
         let _mock = server
-            .mock("POST", "/v1/messages")
+            .mock("POST", "/chat/completions")
             .with_status(200)
-            .with_body(anthropic_body(
+            .with_body(openai_body(
                 "```json\n{\"type\":\"sql\",\"sql\":\"SELECT 1\",\"viz\":null,\"assumption\":null}\n```",
             ))
             .create();
@@ -448,69 +468,116 @@ mod tests {
     }
 
     #[test]
-    fn sends_model_system_and_question_in_body() {
-        // The request carries the configured model, the capability-boundary
-        // system prompt (incl. the data context), and the asking question.
+    fn null_content_is_unavailable() {
+        // OpenAI returns content=null for a tool-call-only response (which we
+        // never request). A null/missing content is a contract violation ->
+        // retried Unavailable, never an empty-string SQL.
         let mut server = mockito::Server::new();
         let _mock = server
-            .mock("POST", "/v1/messages")
-            .match_header("x-api-key", "sk-test")
-            .match_header("anthropic-version", "2023-06-01")
-            .match_body(mockito::Matcher::Regex(
-                r#""model":"claude-sonnet-4-6""#.to_string(),
-            ))
-            .match_body(mockito::Matcher::Regex(r#""role":"user""#.to_string()))
+            .mock("POST", "/chat/completions")
             .with_status(200)
-            .with_body(anthropic_body(
+            .with_body(
+                serde_json::json!({
+                    "choices": [{"message": {"role": "assistant", "content": null}}]
+                })
+                .to_string(),
+            )
+            .create();
+        let p = provider_at(&server.url(), Some("sk-test"));
+        assert!(matches!(
+            p.generate(&sample_request("q")),
+            Err(ProviderError::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn empty_choices_is_unavailable() {
+        // An empty choices array (server returned no completion) is a contract
+        // violation -> retried Unavailable.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_body(serde_json::json!({"choices": []}).to_string())
+            .create();
+        let p = provider_at(&server.url(), Some("sk-test"));
+        assert!(matches!(
+            p.generate(&sample_request("q")),
+            Err(ProviderError::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn sends_bearer_auth_model_and_chat_completions_path() {
+        // AC: the request carries Bearer auth (not x-api-key), the configured
+        // model, and lands at {base}/chat/completions (the version path is the
+        // user's to include in base_url).
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .match_header("authorization", "Bearer sk-test")
+            .match_body(mockito::Matcher::Regex(r#""model":"gpt-4o""#.to_string()))
+            .match_body(mockito::Matcher::Regex(r#""role":"system""#.to_string()))
+            .match_body(mockito::Matcher::Regex(r#""role":"user""#.to_string()))
+            .match_body(mockito::Matcher::Regex(r#""max_tokens":4096"#.to_string()))
+            .with_status(200)
+            .with_body(openai_body(
                 r#"{"type":"sql","sql":"SELECT 1","viz":null,"assumption":null}"#,
             ))
             .create();
         let p = provider_at(&server.url(), Some("sk-test"));
         p.generate(&sample_request("多少行")).expect("reply");
-        _mock.assert(); // matched model + role + auth headers
+        _mock.assert(); // matched Bearer auth + model + roles + path
     }
 
     #[test]
-    fn system_prompt_carries_locale_directive_and_canonical_boundary() {
-        // ADR-0052 (issue #78): the assembled system prompt must carry BOTH the
-        // canonical boundary (layer 4, untouched) AND the locale directive
-        // (layer 3). Match the body for the zh directive phrase + a canonical
-        // landmark; the default EnUS provider is also asserted to carry its own
-        // directive. This is the end-to-end proof the locale threads from the
-        // config source through build_system_prompt into the HTTP body.
+    fn appends_chat_completions_to_base_url_with_version_segment() {
+        // The user's base_url includes the version path (openai SDK convention);
+        // the adapter appends only `/chat/completions`. A base_url ending in a
+        // trailing slash must not produce `//chat/completions`, and the user's
+        // `/v1` segment must be preserved verbatim.
         let mut server = mockito::Server::new();
         let _mock = server
-            .mock("POST", "/v1/messages")
+            .mock("POST", "/v1/chat/completions")
+            .with_status(200)
+            .with_body(openai_body(
+                r#"{"type":"sql","sql":"SELECT 1","viz":null,"assumption":null}"#,
+            ))
+            .create();
+        // base_url ends in `/v1/` (trailing slash); the adapter trims it and
+        // appends `/chat/completions` -> `{server}/v1/chat/completions`.
+        let p = provider_at(&format!("{}/v1/", server.url()), Some("sk-test"));
+        p.generate(&sample_request("q")).expect("reply");
+        _mock.assert();
+    }
+
+    #[test]
+    fn system_message_carries_locale_directive_and_canonical_boundary() {
+        // ADR-0052: the system message (role "system", first in the array)
+        // carries BOTH the canonical boundary (layer 4) AND the locale
+        // directive (layer 3) -- identical content to the anthropic adapter's
+        // system field, just placed in a message. End-to-end proof the locale
+        // threads through build_system_prompt into the openai body.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
             .match_body(mockito::Matcher::Regex("简体中文".to_string()))
             .match_body(mockito::Matcher::Regex("IN-SCOPE".to_string()))
             .with_status(200)
-            .with_body(anthropic_body(
+            .with_body(openai_body(
                 r#"{"type":"sql","sql":"SELECT 1","viz":null,"assumption":null}"#,
             ))
             .create();
         let p = provider_at_locale(&server.url(), Some("sk-test"), ResponseLocale::ZhCN);
         p.generate(&sample_request("画图")).expect("reply");
         _mock.assert();
-
-        // The EnUS directive must also land when the resolved locale is EnUS.
-        let mut server_en = mockito::Server::new();
-        let _mock_en = server_en
-            .mock("POST", "/v1/messages")
-            .match_body(mockito::Matcher::Regex("U.S. English".to_string()))
-            .with_status(200)
-            .with_body(anthropic_body(
-                r#"{"type":"sql","sql":"SELECT 1","viz":null,"assumption":null}"#,
-            ))
-            .create();
-        let p_en = provider_at_locale(&server_en.url(), Some("sk-test"), ResponseLocale::EnUS);
-        p_en.generate(&sample_request("draw")).expect("reply");
-        _mock_en.assert();
     }
 
     #[test]
-    fn history_renders_as_alternating_user_assistant_messages() {
-        // ADR-0023: a recent materialized prior turn ships as user(question) +
-        // assistant(rendered response). Verify the rendered messages alternate.
+    fn history_renders_as_system_then_alternating_user_assistant() {
+        // The OpenAI message array: system first, then a recent materialized
+        // prior turn as user(question) + assistant(rendered response), then the
+        // asking question as the final user turn.
         let request = ProviderRequest {
             question: "现在呢".into(),
             history: vec![TurnPayload::Full {
@@ -524,12 +591,17 @@ mod tests {
             datasets: Vec::new(),
             active: None,
         };
-        let msgs = build_messages(&request);
+        let msgs = build_messages(&request, "SYS".into());
         let roles: Vec<&str> = msgs.iter().map(|m| m.role).collect();
-        assert_eq!(roles, vec!["user", "assistant", "user"]);
+        assert_eq!(
+            roles,
+            vec!["system", "user", "assistant", "user"],
+            "system leads, then alternating user/assistant, ending on user"
+        );
+        assert_eq!(msgs[0].content, "SYS");
         assert_eq!(msgs.last().unwrap().content, "现在呢");
         // The prior response is rendered human-readable, naming its result.
-        let assistant = &msgs[1].content;
+        let assistant = &msgs[2].content;
         assert!(assistant.contains("result_1") && assistant.contains("SELECT 1"));
     }
 }

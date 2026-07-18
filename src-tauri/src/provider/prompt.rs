@@ -20,7 +20,8 @@
 //! the ADR-0038 preference (never crosses IPC from the frontend, never enters
 //! [`ProviderRequest`]).
 
-use super::{ColumnRef, DatasetRef, ProviderRequest};
+use super::{ColumnRef, DatasetRef, ProviderRequest, ResponsePayload};
+use crate::model::TextKind;
 
 /// The resolved response locale (ADR-0052 layer 3). Two-state -- the third
 /// persistence state ("system") is resolved to one of these before reaching
@@ -213,6 +214,56 @@ fn render_column(col: &ColumnRef) -> String {
     match &col.name {
         Some(name) => format!("{name}: {ty}", ty = col.canonical_type),
         None => format!("_: {ty} (仅类型)", ty = col.canonical_type),
+    }
+}
+
+/// Render a prior turn's [`ResponsePayload`] as the assistant message text the
+/// model sees in its own history (ADR-0023 point 1: recent turns ship the
+/// provider's prior response). Human-readable, not the raw JSON the model
+/// emitted -- the model reasons over summarized context, not its own wire form.
+///
+/// Protocol-agnostic (issue #152, ADR-0064): the anthropic and openai adapters
+/// both feed prior turns as alternating user/assistant messages, and the
+/// rendered assistant text is identical regardless of wire protocol. Extracted
+/// from the anthropic adapter so the two adapters share one rendering path.
+pub fn render_response(r: &ResponsePayload) -> String {
+    match r {
+        ResponsePayload::Materialized {
+            result,
+            sql,
+            assumption,
+        } => {
+            let mut s = format!("（已生成结果 {result}）");
+            if let Some(sql) = sql {
+                s.push_str(" SQL：");
+                s.push_str(sql);
+            }
+            if let Some(a) = assumption {
+                s.push_str(" 方法/假设：");
+                s.push_str(a);
+            }
+            s
+        }
+        ResponsePayload::Textual {
+            kind,
+            body,
+            assumption,
+        } => {
+            let tag = match kind {
+                TextKind::Clarify => "反问",
+                TextKind::Refuse => "越界拒绝",
+            };
+            let mut s = format!("（上一步：{tag}）{body}");
+            if let Some(a) = assumption {
+                s.push_str(" 说明：");
+                s.push_str(a);
+            }
+            s
+        }
+        ResponsePayload::Failed { reason } => {
+            format!("（上一步失败：{reason}）")
+        }
+        ResponsePayload::Cancelled => "（上一步已取消）".to_string(),
     }
 }
 

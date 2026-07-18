@@ -12,7 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 use toptopduck_lib::{
-    AnthropicProvider, CancelToken, LoadOutcome, ResponseLocale, Session, StaticConfig,
+    AnthropicProvider, CancelToken, LoadOutcome, Protocol, ResponseLocale, Session, StaticConfig,
     TurnFailure, TurnOutcome,
 };
 
@@ -48,6 +48,7 @@ fn real_provider_end_to_end_materializes_result() {
         base_url: server.url(),
         model: "claude-sonnet-4-6".into(),
         locale: ResponseLocale::EnUS,
+        protocol: Protocol::Anthropic,
     }));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
 
@@ -89,6 +90,7 @@ fn real_provider_missing_key_yields_failed_turn() {
         base_url: server.url(),
         model: "claude-sonnet-4-6".into(),
         locale: ResponseLocale::EnUS,
+        protocol: Protocol::Anthropic,
     }));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     let outcome = session.ask("anything");
@@ -128,6 +130,7 @@ fn real_provider_cancel_during_http_block_lands_cancelled() {
         base_url: server.url(),
         model: "claude-sonnet-4-6".into(),
         locale: ResponseLocale::EnUS,
+        protocol: Protocol::Anthropic,
     }));
     let mut session = Session::with_provider_and_cancel(Box::new(provider), Arc::clone(&cancel))
         .expect("session");

@@ -15,9 +15,12 @@ pub mod anthropic;
 pub mod fake;
 pub mod keychain;
 pub mod live_config;
+pub mod openai;
 pub mod prompt;
+pub mod reply;
 
-use crate::model::TextKind;
+use crate::model::{Protocol, TextKind};
+use crate::provider::keychain::ProviderConfigSource;
 
 /// One column of a dataset as it appears in the LLM payload. The name is hidden
 /// when the user marked the column "type only" (ADR-0011): the provider learns
@@ -243,5 +246,205 @@ pub struct UnwiredProvider;
 impl Provider for UnwiredProvider {
     fn generate(&self, _request: &ProviderRequest) -> Result<ProviderReply, ProviderError> {
         Err(ProviderError::NotWired)
+    }
+}
+
+/// Per-turn protocol router (ADR-0064, issue #152). Holds a
+/// [`ProviderConfigSource`] and, on each [`Provider::generate`] call, reads the
+/// active profile's [`Protocol`] fresh and dispatches to the matching adapter
+/// ([`anthropic::AnthropicProvider`] or [`openai::OpenaiProvider`]). Reading
+/// per-turn (not caching at construction) honors the "切换协议下一回合生效"
+/// AC: a profile switch / protocol edit lands the next turn on the new adapter.
+///
+/// Generic over `C` so production wires [`crate::LiveProviderConfig`] (reads
+/// app-config + keychain fresh each turn) while tests inject
+/// [`crate::StaticConfig`] (or a flipping double for the per-turn assertion).
+/// `Clone` is required because each dispatch constructs a fresh adapter
+/// (cheaper than restructuring the adapters to borrow their config source).
+pub struct LiveProvider<C: ProviderConfigSource + Clone + 'static> {
+    config: C,
+}
+
+impl<C: ProviderConfigSource + Clone + 'static> LiveProvider<C> {
+    /// Wire the router with the live config source. The source's `protocol()`
+    /// is read on each `generate`, so a protocol change in the underlying store
+    /// takes effect the next turn without re-booting the session.
+    pub fn new(config: C) -> Self {
+        Self { config }
+    }
+}
+
+impl<C: ProviderConfigSource + Clone + 'static> Provider for LiveProvider<C> {
+    fn generate(&self, request: &ProviderRequest) -> Result<ProviderReply, ProviderError> {
+        match self.config.protocol() {
+            Protocol::Anthropic => {
+                anthropic::AnthropicProvider::new(Box::new(self.config.clone())).generate(request)
+            }
+            Protocol::Openai => {
+                openai::OpenaiProvider::new(Box::new(self.config.clone())).generate(request)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Protocol;
+    use crate::provider::prompt::ResponseLocale;
+    use std::sync::{Arc, Mutex};
+
+    /// A minimal request with no history / datasets -- the routing tests only
+    /// care which HTTP endpoint the dispatch hit, not the body shape.
+    fn bare_request() -> ProviderRequest {
+        ProviderRequest {
+            question: "q".into(),
+            history: Vec::new(),
+            datasets: Vec::new(),
+            active: None,
+        }
+    }
+
+    /// A config source whose `protocol` can be flipped between turns (via the
+    /// shared `Arc<Mutex>`), to prove `LiveProvider` re-reads `protocol()` per
+    /// turn rather than caching it at construction. All other fields are fixed.
+    /// `Clone` shares the protocol cell so a flip after construction is visible
+    /// to the already-built `LiveProvider`.
+    #[derive(Clone)]
+    struct FlippableConfig {
+        key: String,
+        base_url: String,
+        model: String,
+        locale: ResponseLocale,
+        protocol: Arc<Mutex<Protocol>>,
+    }
+
+    impl ProviderConfigSource for FlippableConfig {
+        fn api_key(&self) -> Option<String> {
+            Some(self.key.clone())
+        }
+        fn base_url(&self) -> String {
+            self.base_url.clone()
+        }
+        fn model(&self) -> String {
+            self.model.clone()
+        }
+        fn locale(&self) -> ResponseLocale {
+            self.locale
+        }
+        fn protocol(&self) -> Protocol {
+            *self
+                .protocol
+                .lock()
+                .expect("flippable protocol mutex poisoned")
+        }
+    }
+
+    fn flippable(url: &str, protocol: Protocol) -> FlippableConfig {
+        FlippableConfig {
+            key: "sk-test".into(),
+            base_url: url.into(),
+            model: "m".into(),
+            locale: ResponseLocale::EnUS,
+            protocol: Arc::new(Mutex::new(protocol)),
+        }
+    }
+
+    #[test]
+    fn routes_anthropic_protocol_to_messages_endpoint() {
+        // AC: protocol=Anthropic dispatches to the anthropic adapter -- the
+        // request lands at /v1/messages with x-api-key auth.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/v1/messages")
+            .match_header("x-api-key", "sk-test")
+            .with_status(200)
+            .with_body(
+                serde_json::json!({
+                    "content": [{"type":"text","text":
+                        r#"{"type":"sql","sql":"SELECT 1","viz":null,"assumption":null}"#}]
+                })
+                .to_string(),
+            )
+            .create();
+        let p = LiveProvider::new(flippable(&server.url(), Protocol::Anthropic));
+        p.generate(&bare_request()).expect("anthropic reply");
+        _mock.assert();
+    }
+
+    #[test]
+    fn routes_openai_protocol_to_chat_completions_endpoint() {
+        // AC: protocol=Openai dispatches to the openai adapter -- the request
+        // lands at /chat/completions with Bearer auth.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .match_header("authorization", "Bearer sk-test")
+            .with_status(200)
+            .with_body(
+                serde_json::json!({
+                    "choices": [{"message": {"role":"assistant","content":
+                        r#"{"type":"sql","sql":"SELECT 1","viz":null,"assumption":null}"#}}]
+                })
+                .to_string(),
+            )
+            .create();
+        let p = LiveProvider::new(flippable(&server.url(), Protocol::Openai));
+        p.generate(&bare_request()).expect("openai reply");
+        _mock.assert();
+    }
+
+    #[test]
+    fn re_reads_protocol_per_turn_not_cached_at_construction() {
+        // AC "每回合读 active_profile": a protocol switch between two turns of
+        // the SAME LiveProvider routes the second turn to the new adapter. The
+        // flippable config's protocol (shared via Arc<Mutex> across the clone
+        // the LiveProvider holds) is mutated AFTER construction; if the router
+        // cached the protocol at construction, both turns would hit the same
+        // endpoint. One server mocks BOTH protocol paths so base_url stays
+        // constant -- the protocol flip alone reroutes.
+        let mut server = mockito::Server::new();
+        let openai_mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_body(
+                serde_json::json!({
+                    "choices": [{"message": {"role":"assistant","content":
+                        r#"{"type":"sql","sql":"SELECT 1","viz":null,"assumption":null}"#}}]
+                })
+                .to_string(),
+            )
+            .create();
+        let anthropic_mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_body(
+                serde_json::json!({
+                    "content": [{"type":"text","text":
+                        r#"{"type":"sql","sql":"SELECT 2","viz":null,"assumption":null}"#}]
+                })
+                .to_string(),
+            )
+            .create();
+
+        // Start in Openai mode. The LiveProvider holds a CLONE of cfg, but
+        // FlippableConfig::clone shares the protocol Arc<Mutex> -- so flipping
+        // cfg.protocol below is visible to the router's per-turn read.
+        let cfg = flippable(&server.url(), Protocol::Openai);
+        let p = LiveProvider::new(cfg.clone());
+
+        // Turn 1: Openai -> /chat/completions.
+        p.generate(&bare_request()).expect("turn 1 openai");
+        openai_mock.assert(); // hit exactly once
+
+        // Flip the shared protocol cell to Anthropic -- NO re-construction of
+        // the LiveProvider. The next turn re-reads protocol() and reroutes.
+        *cfg.protocol
+            .lock()
+            .expect("flippable protocol mutex poisoned") = Protocol::Anthropic;
+
+        // Turn 2: SAME LiveProvider, now Anthropic -> /v1/messages.
+        p.generate(&bare_request()).expect("turn 2 anthropic");
+        anthropic_mock.assert(); // hit exactly once
     }
 }
