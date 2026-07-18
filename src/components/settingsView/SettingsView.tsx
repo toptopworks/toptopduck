@@ -176,6 +176,16 @@ export function SettingsView({
     setProvider((prev) => ({ ...prev, active_profile: id }));
   }, []);
 
+  // Close-blocker ref fed by the Profiles pane (issue #153 review): while a
+  // per-profile key IPC is in flight, ESC / Back / Cancel must not unmount the
+  // pane -- the returned has_key would land on an unmounted component and a
+  // failure would never reach the user (ADR-0029 trust root). A ref (not state)
+  // so the ESC handler reads it without re-subscribing the window listener.
+  const profileBlockingRef = useRef(false);
+  const handleProfilesBusyChange = useCallback((busy: boolean) => {
+    profileBlockingRef.current = busy;
+  }, []);
+
   // Focus management (ADR-0065 accessibility). On enter, remember the trigger
   // (topbar gear) and move focus onto the overlay's container (tabindex=-1, no
   // ring). On exit, restore focus to the trigger. Radix Dialog used to do this
@@ -193,9 +203,10 @@ export function SettingsView({
   // ESC exit (ADR-0065): preserve the dialog's ESC habit even without a mask.
   // One window-level keydown listener, registered ONCE; busy + onClose are read
   // through refs so the handler identity stays stable across renders (no
-  // add/remove churn on every App render). A busy state (saving) bails so an
-  // in-flight atomic app-config write cannot be torn; otherwise ESC closes the
-  // view.
+  // add/remove churn on every App render). A busy state (saving, or a key IPC
+  // in flight inside the Profiles pane) bails so an in-flight atomic app-config
+  // write or a one-shot keychain transfer cannot be torn; otherwise ESC closes
+  // the view.
   const savingRef = useRef(saving);
   useEffect(() => {
     savingRef.current = saving;
@@ -207,7 +218,7 @@ export function SettingsView({
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key !== "Escape") return;
-      if (savingRef.current) {
+      if (savingRef.current || profileBlockingRef.current) {
         e.preventDefault();
         return;
       }
@@ -258,6 +269,7 @@ export function SettingsView({
     deleteProfile,
     setActiveProfile,
     saving,
+    onBusyChange: handleProfilesBusyChange,
   };
 
   const busy = saving;

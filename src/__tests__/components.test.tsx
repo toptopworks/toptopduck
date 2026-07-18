@@ -2154,4 +2154,50 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
     await screen.findByText("No key");
     expect(screen.queryByText("Key set")).not.toBeInTheDocument();
   });
+
+  it("a failed set-key leaves the badge unchanged and surfaces the error (issue #153, ADR-0029)", async () => {
+    // Trust-root guard: if setProfileKey rejects, the has_key overlay MUST NOT
+    // flip -- setProfileKeys runs only on the success branch, so the badge stays
+    // at "No key", and the failure message reaches the user. A regression that
+    // flips the badge optimistically (or drops the try/catch) would let the user
+    // believe a key is stored when it is not (ADR-0029 violation).
+    vi.mocked(setProfileKey).mockRejectedValue(new Error("keychain locked"));
+    renderSettings(
+      <SettingsView
+        appConfig={baseConfig}
+        onCommitAppConfig={vi.fn()}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    await screen.findByText("No key");
+    fireEvent.change(screen.getByPlaceholderText("Paste key"), {
+      target: { value: "sk-test-153" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Set key" }));
+    // The badge stays "No key" (failure must not read as set); the error lands.
+    await screen.findByText("keychain locked");
+    expect(screen.getByText("No key")).toBeInTheDocument();
+    expect(screen.queryByText("Key set")).not.toBeInTheDocument();
+  });
+
+  it("Profiles pane surfaces a key-status fetch failure without blocking CRUD (issue #153)", async () => {
+    // If list_provider_profiles rejects (a keychain read outage), the pane must
+    // render the error rather than silently showing an empty list. The rest of
+    // the pane stays usable -- New profile is still enabled (the error is
+    // informational, not a hard block on CRUD).
+    vi.mocked(listProviderProfiles).mockRejectedValue(
+      new Error("keychain unavailable"),
+    );
+    renderSettings(
+      <SettingsView
+        appConfig={baseConfig}
+        onCommitAppConfig={vi.fn()}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    await screen.findByText("keychain unavailable");
+    expect(screen.getByRole("button", { name: "New profile" })).toBeEnabled();
+  });
 });

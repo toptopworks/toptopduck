@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 
 import { clearProfileKey, fmtError, listProviderProfiles, setProfileKey } from "../../api";
@@ -53,6 +53,12 @@ export interface ProfilesSectionProps {
   setActiveProfile: (id: string) => void;
   /** Disable field edits while the parent is mid-Save. */
   saving: boolean;
+  /** Notifies the parent when a per-profile key IPC is in flight so ESC / Back
+   *  / Cancel cannot unmount this pane mid-flight -- otherwise the returned
+   *  has_key would land on an unmounted component and a failure would never
+   *  reach the user (ADR-0029 trust root). Optional: the pane renders without
+   *  it but loses the close guard. */
+  onBusyChange?: (busy: boolean) => void;
 }
 
 export function ProfilesSection({
@@ -62,6 +68,7 @@ export function ProfilesSection({
   deleteProfile,
   setActiveProfile,
   saving,
+  onBusyChange,
 }: ProfilesSectionProps) {
   const intl = useIntl();
 
@@ -89,6 +96,16 @@ export function ProfilesSection({
   // The profile id whose delete AlertDialog is open (null = none).
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
+  // Stable ref to intl so the mount-time fetch effect can run once ([] deps)
+  // instead of re-firing on an intl identity change. useIntl()'s intl is stable
+  // per locale, but a locale flip while Settings is open would otherwise refetch
+  // locale-independent booleans and flash keysLoading. The effect reads intl
+  // through the ref for its error formatter only.
+  const intlRef = useRef(intl);
+  useEffect(() => {
+    intlRef.current = intl;
+  }, [intl]);
+
   // Seed the key-status overlay once on mount. Profile RECORDS stay single-
   // sourced from the parent's provider config; this only carries the booleans.
   useEffect(() => {
@@ -101,7 +118,7 @@ export function ProfilesSection({
         setProfileKeys(map);
       })
       .catch((e) => {
-        if (!cancelled) setKeysError(fmtError(e, intl));
+        if (!cancelled) setKeysError(fmtError(e, intlRef.current));
       })
       .finally(() => {
         if (!cancelled) setKeysLoading(false);
@@ -109,7 +126,15 @@ export function ProfilesSection({
     return () => {
       cancelled = true;
     };
-  }, [intl]);
+  }, []);
+
+  // Mirror keyBusy to the parent so ESC / Back / Cancel are blocked while a key
+  // IPC is in flight (issue #153 review): a mid-flight set/clear must not be
+  // torn by an unmount -- the returned has_key would land on an unmounted
+  // component and a failure would never reach the user (ADR-0029 trust root).
+  useEffect(() => {
+    onBusyChange?.(keyBusy);
+  }, [keyBusy, onBusyChange]);
 
   // Keep selectedId valid as the profiles list mutates (create/delete). If the
   // selected id was deleted (or is null once profiles exist), fall back to the
@@ -215,12 +240,17 @@ export function ProfilesSection({
         ) : (
           <ul
             className="profiles-list-items"
-            role="radiogroup"
             aria-label={intl.formatMessage({
               id: "settings.profiles.listAria",
               defaultMessage: "Active profile",
             })}
           >
+            {/* A plain list, NOT role="radiogroup": each row carries a radio
+                (select active) + a button (select for edit) + a delete button,
+                and ARIA's radiogroup model permits only radio descendants. The
+                radios share name="profiles-active" so the browser groups them
+                natively (mutually exclusive); each radio's aria-label already
+                carries the profile name, so its accessible name is complete. */}
             {provider.profiles.map((p) => {
               const isActive = p.id === provider.active_profile;
               const pHasKey = profileKeys[p.id] ?? false;
