@@ -363,10 +363,11 @@ export interface RowPage {
   limit: number;
 }
 
-// The wire protocol a profile speaks (ADR-0064). This slice ships only
-// "anthropic" (Anthropic Messages native); "openai" is a follow-up slice.
-// Mirrors the Rust Protocol enum (serde rename_all="lowercase").
-export type Protocol = "anthropic";
+// The wire protocol a profile speaks (ADR-0064). "anthropic" = Anthropic
+// Messages native (x-api-key auth); "openai" = OpenAI Chat Completions (Bearer
+// auth; covers OpenAI direct / DeepSeek / GLM / Qwen / Ollama compatible
+// endpoints). Mirrors the Rust Protocol enum (serde rename_all="lowercase").
+export type Protocol = "anthropic" | "openai";
 
 // One named access profile (ADR-0064): protocol + endpoint + model. The API key
 // lives separately in the OS keychain under key-<id> (ADR-0029/0038). id is

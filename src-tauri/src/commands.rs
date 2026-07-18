@@ -139,13 +139,13 @@ pub fn create_session(
     live: State<'_, LiveProviderConfig>,
 ) -> Result<String, SessionError> {
     let cancel = Arc::new(CancelToken::new());
-    // The real LLM provider (ADR-0007): reads the API key from the OS keychain
-    // and the endpoint config from app-config (ADR-0038) via the shared
+    // The real LLM provider (ADR-0007/0064): a LiveProvider router that reads
+    // the active profile's protocol per turn and dispatches to the anthropic
+    // or openai adapter. Reads the API key from the OS keychain and the
+    // endpoint config from app-config (ADR-0038) via the shared
     // LiveProviderConfig. A fresh session starts usable once a key is stored;
     // before that every turn refuses honestly as not-wired.
-    let provider = Box::new(crate::AnthropicProvider::new(Box::new(
-        live.inner().clone(),
-    )));
+    let provider = Box::new(crate::LiveProvider::new(live.inner().clone()));
     let id = store.create(cancel, provider)?;
     Ok(id.to_string())
 }
@@ -878,14 +878,13 @@ pub async fn open_duck(
     let closing_flag = handle.closing_flag();
     let handle_for_task = Arc::clone(&handle);
     // The resumed session reuses the SAME provider wiring as a fresh session
-    // (ADR-0007): the real Anthropic client reading the key from the OS keychain
-    // and the endpoint from app-config (ADR-0038), via the shared
-    // LiveProviderConfig. Resume itself is LLM-free (it re-executes stored SQL),
-    // but the next new turn after resume must reach a live provider -- so the
-    // provider is wired at open time, not deferred.
-    let provider = Box::new(crate::AnthropicProvider::new(Box::new(
-        live.inner().clone(),
-    )));
+    // (ADR-0007/0064): a LiveProvider router that dispatches to the anthropic
+    // or openai adapter based on the active profile's protocol, reading the
+    // key from the OS keychain and the endpoint from app-config (ADR-0038),
+    // via the shared LiveProviderConfig. Resume itself is LLM-free (it
+    // re-executes stored SQL), but the next new turn after resume must reach a
+    // live provider -- so the provider is wired at open time, not deferred.
+    let provider = Box::new(crate::LiveProvider::new(live.inner().clone()));
     let app_for_cb = app.clone();
     let sid = session_id.clone();
     let inner = tauri::async_runtime::spawn_blocking(move || {

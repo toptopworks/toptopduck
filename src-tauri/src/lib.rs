@@ -49,9 +49,10 @@ pub use provider::anthropic::AnthropicProvider;
 pub use provider::fake::FakeProvider;
 pub use provider::keychain::{KeychainStore, ProviderConfigSource, StaticConfig};
 pub use provider::live_config::LiveProviderConfig;
+pub use provider::openai::OpenaiProvider;
 pub use provider::prompt::{build_system_prompt, ResponseLocale};
 pub use provider::{
-    ColumnRef, DatasetRef, Provider, ProviderError, ProviderReply, ProviderRequest,
+    ColumnRef, DatasetRef, LiveProvider, Provider, ProviderError, ProviderReply, ProviderRequest,
     ResponsePayload, TurnPayload, UnwiredProvider,
 };
 pub use session::{

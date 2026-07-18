@@ -754,18 +754,23 @@ pub const DEFAULT_PROVIDER_BASE_URL: &str = "https://api.anthropic.com";
 /// stronger (Fable/Opus) or cheaper (Haiku) model via the config.
 pub const DEFAULT_PROVIDER_MODEL: &str = "claude-sonnet-4-6";
 
-/// The wire protocol a profile speaks (ADR-0064). Two variants are planned --
-/// anthropic (Anthropic Messages native, `x-api-key` auth) and openai (OpenAI
-/// Chat Completions, Bearer auth; covers OpenAI direct / DeepSeek / GLM / Qwen
-/// / Ollama compatible endpoints). This slice ships only `Anthropic`; the
-/// `Openai` variant is a follow-up slice. Crosses IPC as the bare lowercase
-/// variant name (mirrors the ChartKind convention).
+/// The wire protocol a profile speaks (ADR-0064). Two variants: anthropic
+/// (Anthropic Messages native, `x-api-key` auth) and openai (OpenAI Chat
+/// Completions, Bearer auth; covers OpenAI direct / DeepSeek / GLM / Qwen /
+/// Ollama compatible endpoints). Crosses IPC as the bare lowercase variant
+/// name (mirrors the ChartKind convention).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     #[default]
     Anthropic,
-    // Openai -- ADR-0064 second adapter; not wired in this slice.
+    /// OpenAI Chat Completions wire protocol (ADR-0064). A pure HTTP
+    /// translation layer: Chat Completions request shape, Bearer auth, reads
+    /// `choices[0].message.content`, reuses the shared `parse_reply`. Covers
+    /// OpenAI direct / DeepSeek / GLM / Qwen / Ollama compatible endpoints --
+    /// the user points `base_url` at the endpoint (incl. its version path
+    /// segment, e.g. `/v1`); the adapter appends `/chat/completions`.
+    Openai,
 }
 
 /// Stable identity of a provider profile (ADR-0064, mirroring the ADR-0037
@@ -929,6 +934,30 @@ impl ProviderConfig {
         self.active()
             .map(|p| p.model.as_str())
             .unwrap_or(DEFAULT_PROVIDER_MODEL)
+    }
+
+    /// The active profile's wire protocol, or [`Protocol::Anthropic`] when no
+    /// profile matches `active_profile` (a malformed config normalize repairs).
+    /// Drives the live provider's per-turn adapter routing (issue #152,
+    /// ADR-0064): `LiveProvider` reads this each turn so a protocol switch on
+    /// the active profile lands the next turn on the new adapter, no caching.
+    pub fn effective_protocol(&self) -> Protocol {
+        match self.active() {
+            Some(profile) => profile.protocol,
+            None => {
+                // A malformed config whose active_profile points nowhere: log
+                // the silent fallback so the misconfiguration is observable.
+                // normalize repairs it on the next store; a hand-edit gap
+                // otherwise lands the turn on the Anthropic default with no
+                // trace, and a wrong-protocol turn is hard to diagnose from
+                // the bare NotWired/Unavailable it produces downstream.
+                log::warn!(
+                    "active_profile does not match any profile; falling back to \
+                     Anthropic protocol for this turn"
+                );
+                Protocol::Anthropic
+            }
+        }
     }
 
     /// The IPC-shaped view of the active profile's endpoint + whether a key is

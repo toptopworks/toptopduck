@@ -21,12 +21,12 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{ChartKind, TextKind, VizSpec};
 use crate::provider::keychain::ProviderConfigSource;
-use crate::provider::prompt::build_system_prompt;
-use crate::provider::{
-    Provider, ProviderError, ProviderReply, ProviderRequest, ResponsePayload, TurnPayload,
+use crate::provider::prompt::{
+    build_system_prompt, render_response, render_summary_turn_note, Message,
 };
+use crate::provider::reply::parse_reply;
+use crate::provider::{Provider, ProviderError, ProviderReply, ProviderRequest, TurnPayload};
 
 /// Anthropic Messages API protocol version header value (ADR-0019: native
 /// Anthropic protocol). Pinned; bumped only when Anthropic ships a breaking
@@ -97,15 +97,28 @@ impl Provider for AnthropicProvider {
 
         let response = match response {
             Ok(r) => r,
-            // Auth rejected (bad/missing key seen by the server, or forbidden):
-            // permanent for this turn -- map to NotWired so it is NOT retried
-            // (three 401s would only burn time). The user sees a configure-key
-            // prompt via the NotWired message.
-            Err(ureq::Error::Status(status, _)) if status == 401 || status == 403 => {
-                return Err(ProviderError::NotWired);
+            Err(ureq::Error::Status(status, resp)) => {
+                // Auth rejected (bad/missing key seen by the server, or
+                // forbidden): permanent for this turn -- map to NotWired so it
+                // is NOT retried (three 401s would only burn time). The user
+                // sees a configure-key prompt via the NotWired message.
+                if status == 401 || status == 403 {
+                    return Err(ProviderError::NotWired);
+                }
+                // Any other HTTP status (5xx overloaded, or a 4xx payload
+                // rejection): surface the upstream body so the user sees WHY
+                // (e.g. Anthropic's overloaded_error, model_not_found) instead
+                // of a bare status code. Transient/retryable -- the orchestrator
+                // consumes the single retry budget, then fails. reply::truncate
+                // bounds the server-controlled string and its CJK-safe floor
+                // keeps this panic-free.
+                let body = resp.into_string().unwrap_or_default();
+                return Err(ProviderError::Unavailable(format!(
+                    "LLM call failed (HTTP {status}): {}",
+                    crate::provider::reply::truncate(&body)
+                )));
             }
-            // Transport error, 5xx, or a 4xx other than auth: transient/retryable
-            // -- the orchestrator consumes the single retry budget, then fails.
+            // Transport error (DNS / TCP / TLS / timeout): transient/retryable.
             Err(e) => {
                 return Err(ProviderError::Unavailable(format!("LLM call failed: {e}")));
             }
@@ -114,9 +127,10 @@ impl Provider for AnthropicProvider {
         let raw: RawResponse = response
             .into_json()
             .map_err(|e| ProviderError::Unavailable(format!("response read failed: {e}")))?;
-        // The model's JSON contract rides the first text block. Anthropic may
-        // also emit tool-use / other blocks; we asked for text-only JSON, so a
-        // missing text block is a contract violation -> retried Unavailable.
+        // The model's JSON contract rides the first text block. We send no
+        // `tools` field (ADR-0064 bare-prompt contract), so Anthropic should
+        // not emit tool-use blocks; a missing text block is a contract
+        // violation -> retried Unavailable.
         let text = raw
             .content
             .iter()
@@ -136,12 +150,6 @@ struct AnthropicRequest<'a> {
     max_tokens: u32,
     system: String,
     messages: Vec<Message>,
-}
-
-#[derive(Serialize)]
-struct Message {
-    role: &'static str,
-    content: String,
 }
 
 /// Minimal Anthropic response shape -- only the `content` array is read. Extra
@@ -187,10 +195,7 @@ fn build_messages(request: &ProviderRequest) -> Vec<Message> {
                     role: "user",
                     content: question_excerpt.clone(),
                 });
-                let note = match result {
-                    Some(name) => format!("（该轮已生成结果 {name}）"),
-                    None => "（该轮未生成结果）".to_string(),
-                };
+                let note = render_summary_turn_note(result);
                 msgs.push(Message {
                     role: "assistant",
                     content: note,
@@ -205,191 +210,13 @@ fn build_messages(request: &ProviderRequest) -> Vec<Message> {
     msgs
 }
 
-/// Render a prior turn's [`ResponsePayload`] as the assistant message text the
-/// model sees in its own history (ADR-0023 point 1: recent turns ship the
-/// provider's prior response). Human-readable, not the raw JSON the model
-/// emitted -- the model reasons over summarized context, not its own wire form.
-fn render_response(r: &ResponsePayload) -> String {
-    match r {
-        ResponsePayload::Materialized {
-            result,
-            sql,
-            assumption,
-        } => {
-            let mut s = format!("（已生成结果 {result}）");
-            if let Some(sql) = sql {
-                s.push_str(" SQL：");
-                s.push_str(sql);
-            }
-            if let Some(a) = assumption {
-                s.push_str(" 方法/假设：");
-                s.push_str(a);
-            }
-            s
-        }
-        ResponsePayload::Textual {
-            kind,
-            body,
-            assumption,
-        } => {
-            let tag = match kind {
-                TextKind::Clarify => "反问",
-                TextKind::Refuse => "越界拒绝",
-            };
-            let mut s = format!("（上一步：{tag}）{body}");
-            if let Some(a) = assumption {
-                s.push_str(" 说明：");
-                s.push_str(a);
-            }
-            s
-        }
-        ResponsePayload::Failed { reason } => {
-            format!("（上一步失败：{reason}）")
-        }
-        ResponsePayload::Cancelled => "（上一步已取消）".to_string(),
-    }
-}
-
-/// Parse the model's reply text into [`ProviderReply`] (ADR-0009 contract). The
-/// model is instructed to emit exactly one JSON object; this defensively
-/// tolerates surrounding prose / markdown fences by extracting the outermost
-/// `{...}` span first. Any deviation -> [`ProviderError::Unavailable`] (the
-/// orchestrator retries, then fails the turn honestly).
-fn parse_reply(text: &str) -> Result<ProviderReply, ProviderError> {
-    let json_str = extract_json_object(text).ok_or_else(|| {
-        ProviderError::Unavailable(format!(
-            "LLM response is not a JSON object: {}",
-            truncate(text)
-        ))
-    })?;
-    let val: serde_json::Value = serde_json::from_str(json_str)
-        .map_err(|e| ProviderError::Unavailable(format!("JSON parse failed: {e}")))?;
-    let kind = val
-        .get("type")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| ProviderError::Unavailable("LLM response missing type field".into()))?;
-    match kind {
-        "sql" => {
-            let sql = val.get("sql").and_then(|v| v.as_str()).ok_or_else(|| {
-                ProviderError::Unavailable("sql response missing sql field".into())
-            })?;
-            let viz = parse_viz(val.get("viz"))?;
-            let assumption = val
-                .get("assumption")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            Ok(ProviderReply::Sql {
-                sql: sql.to_string(),
-                viz,
-                assumption,
-            })
-        }
-        "text" => {
-            let body = val.get("body").and_then(|v| v.as_str()).ok_or_else(|| {
-                ProviderError::Unavailable("text response missing body field".into())
-            })?;
-            let kind_str = val.get("kind").and_then(|v| v.as_str()).ok_or_else(|| {
-                ProviderError::Unavailable("text response missing kind field".into())
-            })?;
-            let text_kind = match kind_str {
-                "clarify" => TextKind::Clarify,
-                "refuse" => TextKind::Refuse,
-                other => {
-                    return Err(ProviderError::Unavailable(format!(
-                        "unknown text kind: {other}"
-                    )));
-                }
-            };
-            let assumption = val
-                .get("assumption")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            Ok(ProviderReply::Text {
-                kind: text_kind,
-                body: body.to_string(),
-                assumption,
-            })
-        }
-        other => Err(ProviderError::Unavailable(format!(
-            "unknown response type: {other}"
-        ))),
-    }
-}
-
-/// Parse the optional viz field (`{"kind":..., "spec":...}`) into [`VizSpec`].
-/// A non-whitelisted kind is a contract violation (retried), matching the
-/// engine-side whitelist enforcement (ADR-0016/0033).
-fn parse_viz(v: Option<&serde_json::Value>) -> Result<Option<VizSpec>, ProviderError> {
-    let Some(v) = v else {
-        return Ok(None);
-    };
-    if v.is_null() {
-        return Ok(None);
-    }
-    let kind_str = v
-        .get("kind")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| ProviderError::Unavailable("viz missing kind field".into()))?;
-    let kind = match kind_str {
-        "bar" => ChartKind::Bar,
-        "line" => ChartKind::Line,
-        "scatter" => ChartKind::Scatter,
-        "area" => ChartKind::Area,
-        "pie" => ChartKind::Pie,
-        "table" => ChartKind::Table,
-        other => {
-            return Err(ProviderError::Unavailable(format!(
-                "unknown chart kind: {other}"
-            )));
-        }
-    };
-    let spec = v
-        .get("spec")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| ProviderError::Unavailable("viz missing spec field".into()))?;
-    Ok(Some(VizSpec {
-        kind,
-        spec: spec.to_string(),
-    }))
-}
-
-/// Extract the outermost `{...}` span from `text`, tolerating markdown fences
-/// or surrounding prose. Returns the inclusive substring, or `None` when no
-/// brace pair is present.
-fn extract_json_object(text: &str) -> Option<&str> {
-    let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    if end >= start {
-        Some(&text[start..=end])
-    } else {
-        None
-    }
-}
-
-/// Truncate a string for an error message (avoid flooding the user / log with a
-/// long malformed model reply). Floors to a UTF-8 char boundary: a naive
-/// `&s[..LIMIT]` panics when the cut lands mid-character, and model replies (and
-/// the errors built from them) are routinely CJK -- so this path, of all paths,
-/// must not panic on multi-byte text. (`rust-version = 1.77` predates the
-/// stable `floor_char_boundary`, so the floor is manual.)
-fn truncate(s: &str) -> String {
-    const LIMIT: usize = 200;
-    if s.len() <= LIMIT {
-        return s.to_string();
-    }
-    let mut end = LIMIT;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{ChartKind, Protocol, TextKind};
     use crate::provider::keychain::StaticConfig;
     use crate::provider::prompt::ResponseLocale;
-    use crate::provider::{ColumnRef, DatasetRef};
+    use crate::provider::{ColumnRef, DatasetRef, ResponsePayload};
 
     /// Build a provider whose key/endpoint/model are fixed and point at a
     /// mockito server URL (no OS keychain, no real network). Locale defaults to
@@ -411,6 +238,7 @@ mod tests {
             base_url: url.to_string(),
             model: "claude-sonnet-4-6".to_string(),
             locale,
+            protocol: Protocol::Anthropic,
         }))
     }
 
@@ -710,35 +538,5 @@ mod tests {
         // The prior response is rendered human-readable, naming its result.
         let assistant = &msgs[1].content;
         assert!(assistant.contains("result_1") && assistant.contains("SELECT 1"));
-    }
-
-    #[test]
-    fn extract_json_object_handles_prose_and_fences() {
-        assert_eq!(extract_json_object(r#"{"a":1}"#), Some(r#"{"a":1}"#));
-        assert_eq!(
-            extract_json_object("prefix ```json\n{\"a\":1}\n``` suffix"),
-            Some(r#"{"a":1}"#)
-        );
-        assert_eq!(extract_json_object("no braces here"), None);
-    }
-
-    #[test]
-    fn truncate_floors_to_char_boundary_for_cjk_replies() {
-        // 120 CJK chars = 360 bytes; byte 200 (the LIMIT) lands mid-character.
-        // A naive `&s[..200]` would panic on the char boundary; truncate floors.
-        let reply = "中".repeat(120);
-        let out = truncate(&reply);
-        assert!(
-            out.ends_with('…'),
-            "truncated output should end with ellipsis"
-        );
-        // The head must hold only whole '中' chars -- the floor dropped no halves.
-        let head: String = out.chars().filter(|&c| c != '…').collect();
-        assert!(head.chars().all(|c| c == '中'));
-        assert!(head.chars().count() < 120);
-
-        // Short input passes through verbatim (no ellipsis added).
-        assert_eq!(truncate("短回复"), "短回复");
-        assert_eq!(truncate(""), "");
     }
 }

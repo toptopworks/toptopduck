@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::app_config::{self, AppConfig, LocalePreference};
+use crate::model::Protocol;
 use crate::provider::keychain::{KeychainStore, ProviderConfigSource};
 use crate::provider::prompt::{resolve_locale_from_tag, ResponseLocale};
 
@@ -262,6 +263,14 @@ impl ProviderConfigSource for LiveProviderConfig {
             LocalePreference::ZhCN => ResponseLocale::ZhCN,
             LocalePreference::EnUS => ResponseLocale::EnUS,
         }
+    }
+    fn protocol(&self) -> Protocol {
+        // ADR-0064 (issue #152): the active profile's wire protocol drives the
+        // per-turn adapter routing. Fresh disk read each call so a protocol
+        // switch (a different profile set active, or the active profile's
+        // protocol edited) lands the next turn on the new adapter, no caching
+        // -- matches the keychain/endpoint/locale philosophy.
+        self.load().provider.effective_protocol()
     }
 }
 

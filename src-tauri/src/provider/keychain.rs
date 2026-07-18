@@ -21,7 +21,7 @@
 use keyring::Entry;
 
 use super::prompt::ResponseLocale;
-use crate::model::ProfileId;
+use crate::model::{ProfileId, Protocol};
 
 /// Read-only provider configuration + key access. The provider depends on this
 /// abstraction so its unit tests inject fixed values ([`StaticConfig`]) instead
@@ -43,6 +43,11 @@ pub trait ProviderConfigSource: Send {
     /// source resolves the "system" preference to a concrete locale itself
     /// (reading the OS locale), so the provider stays free of that concern.
     fn locale(&self) -> ResponseLocale;
+    /// The active profile's wire protocol (ADR-0064, issue #152). Drives the
+    /// per-turn adapter routing in [`crate::provider::LiveProvider`] -- read
+    /// fresh each turn so a protocol switch on the active profile lands the
+    /// next turn on the new adapter.
+    fn protocol(&self) -> Protocol;
 }
 
 /// Service/account coordinates for the keychain entries. The API-key account is
@@ -146,15 +151,19 @@ fn keychain_err(e: keyring::Error) -> String {
 }
 
 /// Test double for [`ProviderConfigSource`]: fixed key + base URL + model +
-/// locale, no OS access. Lets the real provider's HTTP/auth/parse path run
-/// against a mockito server without any keychain (the orchestrator integration
-/// test uses it too). Not used in production, where
+/// locale + protocol, no OS access. Lets the real provider's HTTP/auth/parse
+/// path run against a mockito server without any keychain (the orchestrator
+/// integration test uses it too). Not used in production, where
 /// [`crate::provider::LiveProviderConfig`] is wired.
 pub struct StaticConfig {
     pub key: Option<String>,
     pub base_url: String,
     pub model: String,
     pub locale: ResponseLocale,
+    /// The wire protocol the double reports (issue #152). Anthropic-adapter /
+    /// pre-#152 mockito tests set [`Protocol::Anthropic`]; openai-adapter and
+    /// routing tests set [`Protocol::Openai`].
+    pub protocol: Protocol,
 }
 
 impl ProviderConfigSource for StaticConfig {
@@ -169,6 +178,9 @@ impl ProviderConfigSource for StaticConfig {
     }
     fn locale(&self) -> ResponseLocale {
         self.locale
+    }
+    fn protocol(&self) -> Protocol {
+        self.protocol
     }
 }
 
@@ -193,11 +205,13 @@ mod tests {
             base_url: "https://example.test".into(),
             model: "claude-test".into(),
             locale: ResponseLocale::EnUS,
+            protocol: Protocol::Anthropic,
         };
         assert_eq!(cfg.api_key().as_deref(), Some("sk-test"));
         assert_eq!(cfg.base_url(), "https://example.test");
         assert_eq!(cfg.model(), "claude-test");
         assert_eq!(cfg.locale(), ResponseLocale::EnUS);
+        assert_eq!(cfg.protocol(), Protocol::Anthropic);
     }
 
     #[test]
@@ -208,6 +222,7 @@ mod tests {
             base_url: DEFAULT_PROVIDER_BASE_URL.into(),
             model: "m".into(),
             locale: ResponseLocale::EnUS,
+            protocol: Protocol::Anthropic,
         };
         assert!(cfg.api_key().is_none());
     }
