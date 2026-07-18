@@ -72,12 +72,20 @@ function HeaderActions({
   onOpenDuck,
   onSaveAs,
   onOpenSettings,
+  settingsDisabled,
 }: {
   disabled: boolean;
   hasKey: boolean;
   onOpenDuck: () => void;
   onSaveAs: () => void;
   onOpenSettings: () => void;
+  // C1: the gear stays disabled until appConfig resolves. Opening settings
+  // while appConfig is null white-screens the shell -- .settings-mode hides
+  // the session shell but SettingsView does not render (its own appConfig
+  // gate) and its window ESC listener never mounts, leaving no exit. The
+  // gate mirrors the SettingsView render condition (settingsOpen && appConfig)
+  // so the unreachable state is never entered.
+  settingsDisabled: boolean;
 }) {
   const intl = useIntl();
   const saveDisabledTitle = intl.formatMessage({
@@ -116,7 +124,7 @@ function HeaderActions({
           />
         )}
       </span>
-      <button onClick={onOpenSettings}>
+      <button onClick={onOpenSettings} disabled={settingsDisabled}>
         <FormattedMessage id="header.settings" defaultMessage="Settings" />
       </button>
     </div>
@@ -875,6 +883,7 @@ export default function App() {
                   onOpenDuck={() => void handleOpenDuck()}
                   onSaveAs={() => void handleSaveAs()}
                   onOpenSettings={() => setSettingsOpen(true)}
+                  settingsDisabled={!appConfig}
                 />
               </header>
 

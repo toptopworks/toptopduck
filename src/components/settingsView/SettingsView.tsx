@@ -61,6 +61,35 @@ function SectionLabel({ section }: { section: SettingsSection }) {
   }
 }
 
+// Renders the active section's content pane. Mirrors SectionLabel's
+// exhaustiveness guard: a new SettingsSection value fails to compile here
+// (never is not assignable) and throws at runtime, so the render branch set
+// cannot silently drift out of sync with the union -- a bare
+// `{section === "x" && ...}` ladder would compile-fail-free on a new id and
+// render an empty pane.
+function SectionContent({
+  section,
+  form,
+}: {
+  section: SettingsSection;
+  form: SettingsForm;
+}) {
+  switch (section) {
+    case "general":
+      return <GeneralSection form={form} />;
+    case "profiles":
+      return <ProfilesPlaceholder />;
+    case "engine":
+      return <EngineSection form={form} />;
+    case "privacy":
+      return <PrivacySection />;
+    default: {
+      const _exhaustive: never = section;
+      throw new Error(`Unknown settings section: ${String(_exhaustive)}`);
+    }
+  }
+}
+
 export function SettingsView({
   appConfig,
   onCommitAppConfig,
@@ -284,12 +313,7 @@ export function SettingsView({
             <FormattedMessage id="settings.reading" defaultMessage="Reading current config…" />
           </p>
         ) : (
-          <>
-            {section === "general" && <GeneralSection form={form} />}
-            {section === "profiles" && <ProfilesPlaceholder />}
-            {section === "engine" && <EngineSection form={form} />}
-            {section === "privacy" && <PrivacySection />}
-          </>
+          <SectionContent section={section} form={form} />
         )}
         {error && <p className="settings-error text-destructive text-sm">{error}</p>}
       </main>

@@ -77,6 +77,21 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     vi.stubGlobal("navigator", { language: "zh-CN" });
   });
 
+  it("gear stays disabled until appConfig loads (C1 white-screen guard)", async () => {
+    // C1 regression: opening settings while appConfig is null white-screens
+    // the shell -- .settings-mode hides the session shell but SettingsView
+    // does not render (appConfig gate) and its window ESC listener never
+    // mounts, leaving no exit. The gear is disabled until appConfig resolves
+    // (settingsDisabled = !appConfig), mirroring the SettingsView render
+    // condition. getAppConfig never resolves here so appConfig stays null.
+    vi.mocked(getAppConfig).mockImplementation(
+      () => new Promise<AppConfig>(() => {}),
+    );
+    render(<App />);
+    const gear = screen.getByRole("button", { name: "设置" });
+    expect(gear).toBeDisabled();
+  });
+
   it("gear opens the settings overlay and hides the session shell (settingsOpen ternary)", async () => {
     // Topbar gear sets settingsOpen=true; the shell carries .settings-mode so
     // CSS (.shell.settings-mode > :not(.settings-overlay) { display: none })
