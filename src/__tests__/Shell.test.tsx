@@ -84,6 +84,9 @@ vi.mock("../api", async (importOriginal) => {
       model: "claude-sonnet-4-6",
       has_key: true,
     })),
+    // issue #154: ProfileSwitcher fetches the per-profile key overlay once on
+    // mount. Default empty; each switcher test overrides the profiles + keys.
+    listProviderProfiles: vi.fn(async () => []),
     getAppConfig: vi.fn(async () => null),
     setAppConfig: vi.fn(async (cfg: AppConfig) => cfg),
   };
@@ -102,6 +105,7 @@ import {
   getAppConfig,
   ingestFile,
   listSessions,
+  listProviderProfiles,
   listWorkingSet,
   openDuck,
   readRows,
@@ -1265,5 +1269,164 @@ describe("App session soft-cap hint (ADR-0046/0050, issue #108)", () => {
     const alert = within(topbar).getByRole("status");
     expect(alert.getAttribute("data-slot")).toBe("alert");
     expect(alert).toHaveTextContent(/打开的会话较多/);
+  });
+});
+
+// A two-profile app-config for the #154 switcher tests: Anthropic (anthropic
+// protocol) + GLM (openai protocol). The active id is parameterized so the
+// "after the switch" test can seed GLM-already-active and assert the trigger.
+function twoProfileConfig(activeId: string = "anthropic"): AppConfig {
+  return {
+    format_version: 2,
+    theme: "system" as const,
+    locale: "system" as const,
+    window: { width: 800, height: 600, x: null, y: null, maximized: false },
+    engine: { memory_limit: "512MB", threads: 1, row_cap: 100, statement_timeout_ms: 30000 },
+    privacy: { send_samples: true },
+    provider: {
+      profiles: [
+        {
+          id: "anthropic",
+          display_name: "Anthropic",
+          protocol: "anthropic",
+          base_url: "https://api.anthropic.com",
+          model: "claude-sonnet-4-6",
+        },
+        {
+          id: "glm",
+          display_name: "GLM",
+          protocol: "openai",
+          base_url: "https://open.bigmodel.cn/api/paas/v4",
+          model: "glm-4",
+        },
+      ],
+      active_profile: activeId,
+    },
+    export: { last_dir: null, default_format: "csv" },
+    tunables: { retry_budget: 3, window_turns: 6, far_window: 12 },
+    recent_files: [] as string[],
+    shell: { sidebar_collapsed: false, rail_collapsed: false },
+  };
+}
+
+describe("App top-bar active profile switcher (issue #154, ADR-0065)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("renders the active profile display name in the top bar", async () => {
+    // AC1: the switcher trigger carries the ACTIVE profile's display name so the
+    // user sees "what am I about to ask with" without opening settings.
+    vi.mocked(getAppConfig).mockResolvedValue(twoProfileConfig());
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Anthropic")).toBeInTheDocument());
+    // The switcher lives inside the topbar (not the settings overlay).
+    const topbar = document.querySelector(".topbar") as HTMLElement;
+    expect(topbar.querySelector(".profile-switcher")).not.toBeNull();
+  });
+
+  it("dropdown lists every profile with its key-status badge", async () => {
+    // AC2: expanding reveals every profile (display name + has_key badge) so the
+    // user can pick by name AND see which profiles are usable.
+    vi.mocked(getAppConfig).mockResolvedValue(twoProfileConfig());
+    vi.mocked(listProviderProfiles).mockResolvedValue([
+      { profile_id: "anthropic", has_key: true },
+      { profile_id: "glm", has_key: false },
+    ]);
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Anthropic")).toBeInTheDocument());
+    // Open the dropdown via its trigger.
+    fireEvent.click(screen.getByRole("button", { name: /活跃接入档案/ }));
+    // Both profiles render as items; their key-status badges are visible.
+    expect(screen.getByText("GLM")).toBeInTheDocument();
+    expect(screen.getByText("已设 key")).toBeInTheDocument(); // anthropic has key
+    expect(screen.getByText("无 key")).toBeInTheDocument(); // glm has no key
+  });
+
+  it("selecting a profile commits the new active id via setAppConfig (live next turn)", async () => {
+    // AC3: the switch reuses the #153 set-active path (commitAppConfig ->
+    // setAppConfig with provider.active_profile). live_config reads
+    // active_profile fresh each turn (ADR-0064), so the persisted id takes
+    // effect on the next ask -- this assertion pins the persistence half.
+    vi.mocked(getAppConfig).mockResolvedValue(twoProfileConfig());
+    vi.mocked(listProviderProfiles).mockResolvedValue([
+      { profile_id: "anthropic", has_key: true },
+      { profile_id: "glm", has_key: false },
+    ]);
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Anthropic")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /活跃接入档案/ }));
+    fireEvent.click(screen.getByRole("button", { name: /切换到.*GLM/ }));
+    await waitFor(() =>
+      expect(setAppConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          provider: expect.objectContaining({ active_profile: "glm" }),
+        }),
+      ),
+    );
+  });
+
+  it("after the switch the trigger shows the new active profile name", async () => {
+    // AC3 (UI half): the optimistic app-config update flips provider.
+    // active_profile in state, so the trigger's displayed name follows the
+    // switch immediately. (The live read on the next turn is the backend half,
+    // already covered by #150's live_config fresh-read tests.)
+    vi.mocked(getAppConfig).mockResolvedValue(twoProfileConfig());
+    vi.mocked(listProviderProfiles).mockResolvedValue([
+      { profile_id: "anthropic", has_key: true },
+      { profile_id: "glm", has_key: false },
+    ]);
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Anthropic")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /活跃接入档案/ }));
+    fireEvent.click(screen.getByRole("button", { name: /切换到.*GLM/ }));
+    // The trigger's accessible name now carries GLM (optimistic state flip).
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /活跃接入档案/ })).toHaveTextContent("GLM"),
+    );
+  });
+
+  it("keeps the switcher mounted but hidden under settings-mode (ADR-0065)", async () => {
+    // AC4: settingsOpen=true puts .settings-mode on the shell, which CSS-hides
+    // the topbar (and the switcher with it). The switcher STAYS MOUNTED (keep-
+    // alive) so its key-overlay fetch is not torn and it reappears on return.
+    vi.mocked(getAppConfig).mockResolvedValue(twoProfileConfig());
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Anthropic")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    await waitFor(() =>
+      expect(document.querySelector(".shell")?.classList.contains("settings-mode")).toBe(true),
+    );
+    // The switcher is still in the DOM (display:none hides it, not unmount).
+    expect(document.querySelector(".profile-switcher")).toBeInTheDocument();
+  });
+
+  it("does not refetch the key overlay after a switch (per-profile key is invariant)", async () => {
+    // The has_key overlay is fetched once on mount; a switch moves the active
+    // pointer, not the keys, so listProviderProfiles is NOT re-called. Pins the
+    // mount-once contract so a regression that refetches on every switch (extra
+    // IPC churn) is caught.
+    vi.mocked(getAppConfig).mockResolvedValue(twoProfileConfig());
+    vi.mocked(listProviderProfiles).mockResolvedValue([
+      { profile_id: "anthropic", has_key: true },
+      { profile_id: "glm", has_key: false },
+    ]);
+    render(<App />);
+    await waitFor(() => expect(listProviderProfiles).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: /活跃接入档案/ }));
+    fireEvent.click(screen.getByRole("button", { name: /切换到.*GLM/ }));
+    await waitFor(() =>
+      expect(setAppConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          provider: expect.objectContaining({ active_profile: "glm" }),
+        }),
+      ),
+    );
+    // Still exactly one fetch -- the switch did not trigger a re-fetch.
+    expect(listProviderProfiles).toHaveBeenCalledTimes(1);
   });
 });
