@@ -208,10 +208,11 @@ export function Thread({
 // Tooltip to card-truncation full-text recovery, issue #106). The truncated span
 // is the Tooltip trigger; the full text rides TooltipContent so a hover recovers
 // what the fixed rail width clipped. asChild keeps the trigger span a direct
-// flex child (no wrapper node), so the truncation layout in styles.css is
-// undisturbed. Replaces the v0 native title attribute (which carried the same
-// full text but only as the browser's slow, unstyled tooltip). max-w-xs caps the
-// popover so a long question wraps instead of stretching the rail-wide tooltip.
+// flex child (no wrapper node) so the `truncate` utility on the same span owns
+// the ellipsis end-to-end. Replaces the v0 native title attribute (which carried
+// the same full text but only as the browser's slow, unstyled tooltip). max-w-xs
+// caps the popover so a long question wraps instead of stretching the rail-wide
+// tooltip.
 // `text` is ReactNode so a source marker can append its i18n'd stale suffix
 // alongside the verbatim name. Keyboard recovery is a non-goal: the trigger span
 // carries no tabIndex, matching the v0 native title (which keyboard users could
@@ -366,11 +367,18 @@ function sourceMarkerText(
 // the four-way color encoding (A=primary / B=muted / C=destructive / D=muted,
 // per ADR-0047) is owned by the component and flips with .dark alongside the
 // token -- no [data-outcome] hue hook in styles.css (retired by ADR-0067).
+//
+// OutcomeTone is the closed union of the three text-* utilities this function
+// emits. Typing the return field as OutcomeTone (not string) lets the compiler
+// enforce the ADR-0047 hue mapping: a typo like "text-primay", or a stray warm
+// class on the Textual/Cancelled branch (which ADR-0017 forbids), is a type
+// error rather than a silent broken render.
+type OutcomeTone = "text-primary" | "text-muted-foreground" | "text-destructive";
 function outcomeVisual(
   intl: IntlShape,
   outcome: TurnOutcome,
   stale: boolean,
-): { Icon: LucideIcon; label: string; tone: string } {
+): { Icon: LucideIcon; label: string; tone: OutcomeTone } {
   if (stale && outcome.kind === "Materialized") {
     return {
       Icon: CircleOff,
@@ -535,9 +543,10 @@ function StaleChip({
   // now carries layout + the disabled dim only; the variant owns the color so
   // the chip rides the --secondary token and flips with .dark. The hover tint
   // (ADR-0050 stale = muted) is gated on enabled: the inert chip never promises
-  // a hover it cannot perform. The disabled dim is opacity-[0.55] verbatim from
-  // the legacy `.thread .stale-chip:disabled` rule (#169 behavior-equivalence);
-  // arbitrary because Tailwind v4's opacity scale has no 0.55 step.
+  // a hover it cannot perform. The disabled dim is opacity-[0.55] -- a value
+  // between Tailwind v4's 0.4/0.5/0.6 opacity steps (hence the arbitrary
+  // bracket), tuned so the inert chip still reads as present without inviting a
+  // click.
   return (
     <Badge
       variant="secondary"
