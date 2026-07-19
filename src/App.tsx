@@ -6,7 +6,6 @@ import { LogicalPosition, LogicalSize, getCurrentWindow } from "@tauri-apps/api/
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { SessionPane } from "./session/SessionPane";
 import { SessionSidebar } from "./session/SessionSidebar";
-import { DisclosureBanner } from "./components/DisclosureBanner";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { DegradeCard, ErrorBoundary } from "./components/ErrorBoundary";
 import { ProfileSwitcher } from "./components/ProfileSwitcher";
@@ -1004,10 +1003,11 @@ export default function App() {
 }
 
 // Cold-start / all-closed hero (ADR-0061). The right side when no session is
-// active: a "new session" call-to-action + a privacy disclosure. This is the
-// shell-level empty state before any DuckDB instance exists (zero memory until
-// the user acts). A freshly-created unsaved session shows its own hero inside
-// its SessionPane.
+// active: a "new session" call-to-action. The privacy disclosure lives in
+// SettingsView's Privacy pane (ADR-0066) -- the hero no longer duplicates it.
+// This is the shell-level empty state before any DuckDB instance exists (zero
+// memory until the user acts). A freshly-created unsaved session shows its own
+// hero inside its SessionPane.
 function ColdStartHero({
   disabled,
   onNew,
@@ -1037,12 +1037,6 @@ function ColdStartHero({
       >
         <FormattedMessage id="coldStart.newSession" defaultMessage="New session" />
       </button>
-      <details className="sidebar-disclosure">
-        <summary className="muted">
-          <FormattedMessage id="coldStart.privacy" defaultMessage="Privacy disclosure" />
-        </summary>
-        <DisclosureBanner />
-      </details>
     </div>
   );
 }
