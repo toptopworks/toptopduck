@@ -766,6 +766,30 @@ describe("GuidedLoadDialog", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(onCancel).not.toHaveBeenCalled();
   });
+
+  it("renders the preview table via the Table primitive with the .preview class hook (ADR-0067)", () => {
+    // ADR-0067: GuidedLoadDialog's native <table className="preview"> was
+    // migrated to the Table primitive. The .preview class hook must survive
+    // cn() onto the real <table>, and every preview row must render. A
+    // regression that drops the className or breaks the primitive render would
+    // fail here -- the other GuidedLoadDialog tests only assert onSubmit /
+    // onCancel wiring, not the preview-table DOM.
+    renderI18n(
+      <GuidedLoadDialog
+        request={request}
+        loading={false}
+        onSubmit={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    // Radix Dialog renders into a portal on document.body, so query the
+    // document, not the render container. The .preview class hook survives
+    // cn() onto the real <table>, and every preview row renders.
+    expect(document.querySelector("table.preview")).not.toBeNull();
+    expect(document.querySelectorAll("table.preview tr")).toHaveLength(
+      request.sheets[0]!.preview.length,
+    );
+  });
 });
 
 describe("ResultView", () => {
@@ -2205,13 +2229,14 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
 
 describe("Table primitives (ADR-0067, issue #168 self-contained)", () => {
   // ADR-0067 retires the styles.css global `table / th / td` element rules; the
-  // Table primitives now carry their own border / bg / padding utility so they
+  // Table primitives carry their own border / bg / padding utilities so they
   // render correctly with NO global table CSS. This pins the structural
   // invariant -- a regression that drops border / bg-muted would silently
-  // revert to relying on the retired global rules (the layering the table.tsx
-  // comment used to document). jsdom has no layout engine, so these are
-  // className-contract assertions on the real rendered elements, not visual
-  // checks.
+  // revert to relying on the retired global rules. jsdom has no layout engine,
+  // so these are className-contract assertions on the real rendered elements,
+  // not visual checks. Each token is asserted via split(/\s+/) + toContain so
+  // `border` does not match `border-collapse` / `border-b` etc. -- a bare
+  // toMatch(/\bborder\b/) passes spuriously against any border-* utility.
   it("Table renders a <table> with border-collapse (no global table rule needed)", () => {
     const { container } = render(
       <Table>
@@ -2224,7 +2249,7 @@ describe("Table primitives (ADR-0067, issue #168 self-contained)", () => {
     );
     const table = container.querySelector("table");
     expect(table).not.toBeNull();
-    expect(table?.className).toMatch(/\bborder-collapse\b/);
+    expect(table?.className.split(/\s+/)).toContain("border-collapse");
   });
 
   it("TableHead carries its own border + bg-muted + text-sm (no global th rule needed)", () => {
@@ -2239,15 +2264,12 @@ describe("Table primitives (ADR-0067, issue #168 self-contained)", () => {
     );
     const th = container.querySelector("th");
     expect(th).not.toBeNull();
-    // Grid border on the cell itself (the legacy global `th, td { border: ... }`
-    // rule), now expressed as the `border` utility -- border-color comes from
-    // app.css's @layer base `* { border-color: var(--border) }`.
-    expect(th?.className).toMatch(/\bborder\b/);
-    // Header tint (the legacy global `th { background: var(--muted) }` rule).
-    expect(th?.className).toMatch(/bg-muted/);
-    // Font-size (the legacy global `th, td { font-size: 0.9rem }` rule), now
-    // text-sm -- ADR-0067 Decision 2 snaps 0.9rem to the nearest scale step.
-    expect(th?.className).toMatch(/\btext-sm\b/);
+    // Grid border (border-color from app.css @layer base).
+    expect(th?.className.split(/\s+/)).toContain("border");
+    // Header tint.
+    expect(th?.className.split(/\s+/)).toContain("bg-muted");
+    // Font-size (ADR-0067 Decision 2: scale over arbitrary values).
+    expect(th?.className.split(/\s+/)).toContain("text-sm");
   });
 
   it("TableCell carries its own border + text-sm (no global td rule needed)", () => {
@@ -2262,7 +2284,7 @@ describe("Table primitives (ADR-0067, issue #168 self-contained)", () => {
     );
     const td = container.querySelector("td");
     expect(td).not.toBeNull();
-    expect(td?.className).toMatch(/\bborder\b/);
-    expect(td?.className).toMatch(/\btext-sm\b/);
+    expect(td?.className.split(/\s+/)).toContain("border");
+    expect(td?.className.split(/\s+/)).toContain("text-sm");
   });
 });
