@@ -3,6 +3,7 @@ import { FormattedMessage, useIntl } from "react-intl";
 
 import { clearProfileKey, fmtError, listProviderProfiles, setProfileKey } from "../../api";
 import type { Protocol, ProviderConfig, ProviderProfile } from "../../types";
+import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -218,10 +219,10 @@ export function ProfilesSection({
   });
 
   return (
-    <div className="profiles-master-detail">
+    <div className="profiles-master-detail gap-6">
       {/* Left: profile list (master). */}
-      <div className="profiles-list">
-        <div className="profiles-list-actions">
+      <div className="profiles-list flex flex-col gap-2">
+        <div className="profiles-list-actions flex">
           <Button type="button" onClick={handleCreate} disabled={fieldsDisabled}>
             <FormattedMessage id="settings.profiles.new" defaultMessage="New profile" />
           </Button>
@@ -239,7 +240,7 @@ export function ProfilesSection({
           </p>
         ) : (
           <ul
-            className="profiles-list-items"
+            className="profiles-list-items list-none m-0 p-0 flex flex-col gap-1"
             aria-label={intl.formatMessage({
               id: "settings.profiles.listAria",
               defaultMessage: "Active profile",
@@ -259,12 +260,20 @@ export function ProfilesSection({
               return (
                 <li
                   key={p.id}
-                  className={`profiles-list-item${isSelected ? " selected" : ""}`}
+                  // selected (issue #170 AC: rendering unchanged) lifts the
+                  // border + bg tint as conditional utilities over the ADR-0050
+                  // token, replacing the retired .profiles-list-item.selected
+                  // CSS rule. The `selected` hook class is kept for selector /
+                  // test stability alongside the utilities (Thread.tsx pattern).
+                  className={cn(
+                    "profiles-list-item flex items-center gap-1.5 py-1.5 px-1.5 rounded-md border border-transparent",
+                    isSelected && "selected border-border bg-muted",
+                  )}
                 >
                   <input
                     type="radio"
                     name="profiles-active"
-                    className="profiles-active-radio"
+                    className="profiles-active-radio m-0 shrink-0"
                     checked={isActive}
                     onChange={() => setActiveProfile(p.id)}
                     aria-label={intl.formatMessage(
@@ -277,11 +286,20 @@ export function ProfilesSection({
                   />
                   <button
                     type="button"
-                    className="profiles-list-item-select"
+                    className={cn(
+                      // Same [all:unset] + hover/focus-visible ring contract as
+                      // settings-nav-button (WCAG 2.4.7 -- see there). flex-1 +
+                      // min-w-0 are row-specific: share space with the radio +
+                      // delete button + let the inner name truncate.
+                      "profiles-list-item-select [all:unset] cursor-pointer flex-1 min-w-0",
+                      "flex items-center gap-1.5 py-1 px-1.5 rounded-md text-sm text-foreground",
+                      "hover:bg-accent",
+                      "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+                    )}
                     onClick={() => setSelectedId(p.id)}
                     aria-current={isSelected ? "true" : undefined}
                   >
-                    <span className="profiles-list-item-name">{label}</span>
+                    <span className="profiles-list-item-name truncate">{label}</span>
                     {isActive && (
                       <Badge variant="default">
                         <FormattedMessage
@@ -323,7 +341,7 @@ export function ProfilesSection({
       </div>
 
       {/* Right: edit form (detail). */}
-      <div className="profiles-edit">
+      <div className="profiles-edit min-w-0">
         {selected ? (
           <div className="grid gap-4">
             <fieldset className="grid gap-2 border-0 p-0 m-0">

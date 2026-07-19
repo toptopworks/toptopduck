@@ -272,7 +272,23 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
  * SettingsView overlay covers it. Non-modal, no mask -- the overlay IS the
  * current view. The session sidebar + topbar + keep-alive session panes stay
  * MOUNTED underneath (display:none): App state + any in-flight turn survive the
- * round trip, restored unchanged on return (no refetch, no resume replay). */
+ * round trip, restored unchanged on return (no refetch, no resume replay).
+ *
+ * ADR-0067 (issue #170): the `.settings-*` / `.profiles-*` VISUAL rules
+ * retired into SettingsView.tsx + ProfilesSection.tsx as Tailwind utility +
+ * ADR-0050 token + conditional className. This section keeps ONLY the grid +
+ * flex LAYOUT shells below (overlay grid, header/nav/content/footer grid
+ * positioning + flex flow, profiles-master-detail grid + its <=640px stacking
+ * media query -- issue #170 AC: responsive stacking stays); cramming them
+ * into utility long-strings would obscure the overlay / master-detail
+ * structure (ADR-0067 Decision 1). The semantic class hooks (.settings-overlay
+ * / .settings-header / .settings-nav / .settings-content / .settings-footer /
+ * .settings-nav-button / .profiles-master-detail / .profiles-list-item /
+ * .profiles-list-item-select etc.) stay on the components for selector / test
+ * stability. The retirement SCOPE is the decision of record in ADR-0067 +
+ * each component's ADR-0067 inline comment -- not re-listed here, since a
+ * hand-kept copy would drift on the next migration slice.
+ */
 .shell.settings-mode { grid-template-columns: 1fr; grid-template-rows: 1fr; }
 .shell.settings-mode > :not(.settings-overlay) { display: none; }
 .settings-overlay {
@@ -282,104 +298,35 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
   grid-template-rows: auto 1fr auto;
   height: 100vh;
   overflow: hidden;
-  background: var(--background);
-  outline: none; /* container is focus-managed (tabindex=-1), no focus ring */
 }
-.settings-overlay:focus-visible { outline: none; }
 .settings-header {
   grid-column: 1 / -1; grid-row: 1;
-  display: flex; align-items: center; gap: 0.75rem;
-  padding: 0 1rem; height: 44px; min-height: 44px;
-  border-bottom: 1px solid var(--border);
-  background: var(--background);
+  display: flex; align-items: center;
+  height: 44px; min-height: 44px;
 }
-.settings-back {
-  /* ghost-variant Button carries the hover tint; this class only narrows the
-     chrome so the back affordance reads as a compact nav arrow, not a CTA. */
-  height: 32px; padding: 0 0.6rem; font-size: 0.9rem; font-weight: 500;
-}
-.settings-title { margin: 0; font-size: 1rem; font-weight: 600; }
 .settings-nav {
   grid-column: 1; grid-row: 2 / -1;
-  background: var(--muted);
-  border-right: 1px solid var(--border);
-  padding: 0.5rem;
-  display: flex; flex-direction: column; gap: 0.15rem;
+  display: flex; flex-direction: column;
   overflow-y: auto;
-}
-.settings-nav-button {
-  all: unset; cursor: pointer;
-  padding: 0.4rem 0.6rem; border-radius: var(--radius);
-  font-size: 0.9rem; color: var(--foreground);
-}
-.settings-nav-button:hover { background: var(--accent); }
-/* `all: unset` strips the UA focus outline; restore one for keyboard users
-   (WCAG 2.4.7 Focus Visible). Same --ring token the question-bar input uses. */
-.settings-nav-button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-.settings-nav-button[aria-current="page"] {
-  background: var(--primary); color: var(--primary-foreground); font-weight: 600;
 }
 .settings-content {
   grid-column: 2; grid-row: 2;
   overflow-y: auto;
-  padding: 1.5rem;
-  max-width: 1000px;
 }
-.settings-section-heading {
-  margin: 0 0 1rem; font-size: 1.05rem; font-weight: 600;
-}
-/* Profiles master-detail (issue #153, ADR-0064/0065). Left column lists every
- * profile (name + active/key badges); right is the selected profile's edit
- * form. Two columns on desktop, stacked on narrow widths. */
+/* Profiles master-detail (issue #153, ADR-0064/0065). Two columns on desktop,
+ * stacked on narrow widths. The <=640px stacking is a behavior-equivalence AC
+ * (issue #170) and stays here as layout, not on the component. */
 .profiles-master-detail {
   display: grid;
   grid-template-columns: minmax(220px, 280px) 1fr;
-  gap: 1.5rem;
   align-items: start;
 }
 @media (max-width: 640px) {
   .profiles-master-detail { grid-template-columns: 1fr; }
 }
-.profiles-list {
-  display: flex; flex-direction: column; gap: 0.5rem;
-}
-.profiles-list-actions { display: flex; }
-.profiles-list-items {
-  list-style: none; margin: 0; padding: 0;
-  display: flex; flex-direction: column; gap: 0.25rem;
-}
-.profiles-list-item {
-  display: flex; align-items: center; gap: 0.4rem;
-  padding: 0.35rem 0.4rem;
-  border-radius: var(--radius);
-  border: 1px solid transparent;
-}
-.profiles-list-item.selected {
-  border-color: var(--border);
-  background: var(--muted);
-}
-.profiles-active-radio { margin: 0; flex: 0 0 auto; }
-.profiles-list-item-select {
-  all: unset; cursor: pointer;
-  flex: 1 1 auto; min-width: 0;
-  display: flex; align-items: center; gap: 0.4rem;
-  padding: 0.25rem 0.4rem; border-radius: var(--radius);
-  font-size: 0.9rem;
-}
-.profiles-list-item-select:hover { background: var(--accent); }
-.profiles-list-item-select:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-.profiles-list-item-name {
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.profiles-delete { flex: 0 0 auto; }
-.profiles-edit { min-width: 0; }
-.settings-error { margin-top: 0.75rem; }
 .settings-footer {
   grid-column: 2; grid-row: 3;
-  display: flex; justify-content: flex-end; gap: 0.5rem;
-  padding: 0.75rem 1.5rem;
-  border-top: 1px solid var(--border);
-  background: var(--background);
+  display: flex; justify-content: flex-end;
 }
 
 /* --- Row 3 (cols 2+): session pane host ---------------------------------
