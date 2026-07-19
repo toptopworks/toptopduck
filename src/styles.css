@@ -193,9 +193,6 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 .session-menu button:hover { background: var(--accent); }
 .session-menu button.danger { color: var(--destructive); }
 
-.sidebar-disclosure { margin-top: auto; font-size: 0.82rem; }
-.sidebar-disclosure summary { cursor: pointer; color: var(--muted-foreground); padding: 0.3rem 0; }
-
 /* --- Row 1 (cols 2+): thin top bar (ADR-0060 ~40px) --------------------- */
 .topbar {
   grid-column: 2; grid-row: 1;

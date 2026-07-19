@@ -6,7 +6,6 @@ import {
   type SidebarEntry,
   type SidebarGroupKind,
 } from "./sidebarModel";
-import { DisclosureBanner } from "../components/DisclosureBanner";
 import type { SessionMetadata } from "../types";
 import {
   AlertDialog,
@@ -169,13 +168,6 @@ export function SessionSidebar({
           </li>
         )}
       </ul>
-
-      <details className="sidebar-disclosure">
-        <summary className="muted">
-          <FormattedMessage id="sidebar.privacy" defaultMessage="Privacy disclosure" />
-        </summary>
-        <DisclosureBanner />
-      </details>
 
       {pendingAction?.kind === "rename" && (
         <RenameSessionDialog
