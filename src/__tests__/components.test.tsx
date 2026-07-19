@@ -1717,6 +1717,129 @@ describe("Thread", () => {
     // No source marker is highlighted.
     expect(container.querySelector(`.source-entry[data-highlighted="true"]`)).toBeNull();
   });
+
+  // --- ADR-0067 (issue #169): visual expression migrated to Tailwind utility
+  // + ADR-0050 token on the component; the four-outcome / stale-ghost / source-
+  // marker / jump-select SEMANTICS are unchanged. These pin the className
+  // contract so a regression that drops a utility silently reverts to the
+  // retired styles.css rules. jsdom has no layout engine, so these are
+  // className assertions on the real rendered elements (cf. the Table primitive
+  // tests above), split(/\s+/) + toContain so `text-primary` does not match
+  // `text-primary-foreground` etc.
+
+  it("encodes the four outcomes by text-* tone on the outcome-icon (ADR-0047/0050, issue #169)", () => {
+    // The outcome color encoding (ADR-0047 A/B/C/D hues mapped to ADR-0050
+    // tokens) now lives on the outcome-icon span as a text-* utility, replacing
+    // the [data-outcome] hue hooks retired from styles.css.
+    const records: TurnRecord[] = [
+      materializedRecord("result_1", null),
+      { question: "q", outcome: { kind: "Textual", data: { text_kind: "Clarify", body: "b", assumption: null } } },
+      { question: "q", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "boom" } } } },
+      { question: "q", outcome: { kind: "Cancelled" } },
+    ];
+    const { container } = renderThread(
+      <Thread entries={records.map(turnEntry)} selectedResult={null} onSelectResult={() => {}} />,
+    );
+    const tone = (outcome: string) =>
+      container
+        .querySelector(`.turn-entry[data-outcome="${outcome}"] .outcome-icon`)
+        ?.className.split(/\s+/);
+    expect(tone("materialized")).toContain("text-primary");
+    // B (textual) MUST stay muted-neutral -- never warm -- so an honest refuse
+    // is not misread as failure (ADR-0047 B!=C, ADR-0017).
+    expect(tone("textual")).toContain("text-muted-foreground");
+    expect(tone("failed")).toContain("text-destructive");
+    expect(tone("cancelled")).toContain("text-muted-foreground");
+  });
+
+  it("ghosts a stale Materialized turn via opacity-50 + dotted line-through (ADR-0041/0047, issue #169)", () => {
+    // The stale-ghost dim + question strike now ride the component as utilities
+    // (opacity-50 on the card, line-through decoration-dotted on the question),
+    // replacing the .stale-ghost CSS rules in styles.css.
+    const entries: ThreadEntry[] = [turnEntry(materializedRecord("result_1", null))];
+    const { container } = renderThread(
+      <Thread
+        entries={entries}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        staleByReference={
+          new Map([
+            ["result_1", { reference_name: "people", display_name: "员工表", reason: "Replaced" as const }],
+          ])
+        }
+      />,
+    );
+    const card = container.querySelector(".turn-card");
+    expect(card?.className.split(/\s+/)).toContain("opacity-50");
+    const question = container.querySelector(".turn-question");
+    expect(question?.className.split(/\s+/)).toContain("line-through");
+    expect(question?.className.split(/\s+/)).toContain("decoration-dotted");
+  });
+
+  it("weakens Failed + Cancelled via opacity-60, never collapsed (ADR-0028 Why 2, issue #169)", () => {
+    // ADR-0028 Why 2: recent intent stays visible even when it produced nothing.
+    // The opacity-60 weak state now rides the card as a utility.
+    const records: TurnRecord[] = [
+      { question: "坏查询", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } } },
+      { question: "中途取消", outcome: { kind: "Cancelled" } },
+    ];
+    const { container } = renderThread(
+      <Thread entries={records.map(turnEntry)} selectedResult={null} onSelectResult={() => {}} />,
+    );
+    const failedCard = container.querySelector(`.turn-entry[data-outcome="failed"] .turn-card`);
+    const cancelledCard = container.querySelector(`.turn-entry[data-outcome="cancelled"] .turn-card`);
+    expect(failedCard?.className.split(/\s+/)).toContain("opacity-60");
+    expect(cancelledCard?.className.split(/\s+/)).toContain("opacity-60");
+  });
+
+  it("encodes the three source lifecycle kinds by border-l-* tone (ADR-0047, issue #169)", () => {
+    // The three-way border-left hue (Added=primary / Replaced=accent-foreground /
+    // Deleted=destructive) now rides the marker as a literal border-l-* utility,
+    // replacing the .source-lifecycle.added/replaced/deleted CSS rules.
+    const entries: ThreadEntry[] = [
+      { entry: "Source", data: { kind: "Added", reference_name: "people", display_name: "员工表" } },
+      { entry: "Source", data: { kind: "Replaced", reference_name: "people", display_name: "员工表" } },
+      { entry: "Source", data: { kind: "Deleted", reference_name: "orders", display_name: "订单表" } },
+    ];
+    const { container } = renderThread(
+      <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
+    );
+    const tone = (kind: string) =>
+      container
+        .querySelector(`.source-entry[data-source-kind="${kind}"] .source-lifecycle`)
+        ?.className.split(/\s+/);
+    expect(tone("added")).toContain("border-l-primary");
+    expect(tone("replaced")).toContain("border-l-accent-foreground");
+    expect(tone("deleted")).toContain("border-l-destructive");
+  });
+
+  it("jump-select lifts the matched source marker via bg-accent + ring (ADR-0047 chip-trace, issue #169)", () => {
+    // The jump-select highlight now rides the marker as bg-accent + ring-2
+    // ring-primary utilities, replacing the [data-highlighted] CSS rule. The
+    // wrapping <li> still carries data-highlighted (the caller-derived flag) for
+    // selector stability, but the visual lands on the inner .source-lifecycle.
+    const entries: ThreadEntry[] = [
+      { entry: "Source", data: { kind: "Added", reference_name: "people", display_name: "员工表" } },
+      turnEntry(materializedRecord("result_1", null)),
+      { entry: "Source", data: { kind: "Replaced", reference_name: "people", display_name: "员工表" } },
+    ];
+    const staleByReference = new Map([
+      ["result_1", { reference_name: "people", display_name: "员工表", reason: "Replaced" as const }],
+    ]);
+    const { container } = renderThread(
+      <Thread
+        entries={entries}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        staleByReference={staleByReference}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /源已更新/ }));
+    const highlighted = container.querySelector(`.source-entry[data-highlighted="true"] .source-lifecycle`);
+    expect(highlighted?.className.split(/\s+/)).toContain("bg-accent");
+    expect(highlighted?.className.split(/\s+/)).toContain("ring-2");
+    expect(highlighted?.className.split(/\s+/)).toContain("ring-primary");
+  });
 });
 
 describe("ActiveSourceDeleteDialog (issue #39)", () => {

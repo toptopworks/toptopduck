@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
 import type {
   DatasetDescriptor,
   SourceLifecycleEvent,
@@ -131,10 +132,10 @@ export function Thread({
         defaultMessage: "Conversation history",
       })}
     >
-      <h2>
+      <h2 className="m-0 mb-1.5 text-xs text-muted-foreground uppercase tracking-wider">
         <FormattedMessage id="thread.title" defaultMessage="Conversation" />
       </h2>
-      <ol>
+      <ol className="list-none m-0 p-0">
         {entries.map((entry, i) => {
           if (entry.entry === "Turn") {
             const staleAnchor =
@@ -190,7 +191,11 @@ export function Thread({
               data-source-kind={entry.data.kind.toLowerCase()}
               data-highlighted={highlightedSourceIdx === i ? "true" : undefined}
             >
-              <SourceMarker event={entry.data} staleCount={staleCount} />
+              <SourceMarker
+                event={entry.data}
+                staleCount={staleCount}
+                highlighted={highlightedSourceIdx === i}
+              />
             </li>
           );
         })}
@@ -240,15 +245,37 @@ function TruncatingTooltip({
 // is thin and full-width so the two species read as visually distinct at a
 // glance. The display name is layer-4 canonical (ADR-0037) and passes through
 // the {name} ICU placeholder untranslated.
+//
+// ADR-0067 (issue #169): the marker's visual details (bg-muted tint, three-way
+// border-left color encoding, jump-select highlight ring) migrated here from
+// styles.css's `.thread .source-lifecycle*` rules. The three lifecycle kinds
+// each carry a tailwind border-l-* utility over the ADR-0050 token so the kind
+// is readable at a glance (Added=primary / Replaced=accent-foreground /
+// Deleted=destructive, ADR-0047 source-marker species). The jump-select
+// highlight (ADR-0047 chip-trace) lifts bg-accent + ring-2 ring-primary on the
+// marker a stale chip points at; the `highlighted` flag is derived by the
+// caller from data-highlighted on the wrapping <li>, but the visual lands on
+// the marker itself so the highlight owns the whole bar.
 function SourceMarker({
   event,
   staleCount,
+  highlighted,
 }: {
   event: SourceLifecycleEvent;
   staleCount: number;
+  highlighted: boolean;
 }) {
   const intl = useIntl();
   const { Icon, text } = sourceMarkerText(intl, event.kind, event.display_name);
+  // The three-way border-left hue is the kind's identity cue (ADR-0047). Each
+  // branch is a literal utility so the Tailwind scanner keeps the class; a
+  // computed `border-l-${kind}` string would be tree-shaken away.
+  const borderTone =
+    event.kind === "Added"
+      ? "border-l-primary"
+      : event.kind === "Replaced"
+        ? "border-l-accent-foreground"
+        : "border-l-destructive"; // Deleted (exhaustive over SourceLifecycleKind).
   // The stale suffix (ADR-0047 invalidation disclosure) is i18n'd (ADR-0052)
   // and rides both the visible marker and the hover Tooltip, so a marker
   // truncated by the fixed source-row width still discloses the count on hover.
@@ -262,14 +289,23 @@ function SourceMarker({
       />
     ) : null;
   return (
-    <p className={`source-lifecycle ${event.kind.toLowerCase()}`}>
-      <Icon className="source-icon" aria-hidden="true" />
+    <p
+      className={cn(
+        "source-lifecycle flex items-center gap-1 m-0 py-1 px-1.5",
+        "text-xs text-muted-foreground border-l-2 rounded-r-md bg-muted",
+        // Hook class kept for kind-targeted selectors/tests (.source-lifecycle.added etc.).
+        event.kind.toLowerCase(),
+        borderTone,
+        highlighted && "bg-accent ring-2 ring-primary",
+      )}
+    >
+      <Icon className="source-icon w-3.5 h-3.5 shrink-0" aria-hidden="true" />
       <TruncatingTooltip
         text={staleSuffix ? <>{text}{staleSuffix}</> : text}
-        className="source-text"
+        className="source-text min-w-0 truncate"
       >
         {text}
-        {staleSuffix && <span className="source-stale-count">{staleSuffix}</span>}
+        {staleSuffix && <span className="source-stale-count text-destructive">{staleSuffix}</span>}
       </TruncatingTooltip>
     </p>
   );
@@ -321,20 +357,28 @@ function sourceMarkerText(
   }
 }
 
-// A turn's outcome mapped to its Lucide glyph + accessible label (ADR-0047/0050
-// four-outcome visual language, ADR-0052 i18n). A stale Materialized turn swaps
-// Table2 for CircleOff (ghost). The label rides the icon's aria-label so the
-// outcome kind is conveyed to assistive tech and is queryable in tests without
-// relying on color alone.
+// A turn's outcome mapped to its Lucide glyph + accessible label + color tone
+// (ADR-0047/0050 four-outcome visual language, ADR-0052 i18n). A stale
+// Materialized turn swaps Table2 for CircleOff (ghost). The label rides the
+// icon's aria-label so the outcome kind is conveyed to assistive tech and is
+// queryable in tests without relying on color alone. The tone rides the
+// outcome-icon span as a Tailwind text-* utility over the ADR-0050 token, so
+// the four-way color encoding (A=primary / B=muted / C=destructive / D=muted,
+// per ADR-0047) is owned by the component and flips with .dark alongside the
+// token -- no [data-outcome] hue hook in styles.css (retired by ADR-0067).
 function outcomeVisual(
   intl: IntlShape,
   outcome: TurnOutcome,
   stale: boolean,
-): { Icon: LucideIcon; label: string } {
+): { Icon: LucideIcon; label: string; tone: string } {
   if (stale && outcome.kind === "Materialized") {
     return {
       Icon: CircleOff,
       label: intl.formatMessage({ id: "thread.outcome.stale", defaultMessage: "Result stale" }),
+      // The ghost already dims the whole card via opacity-50 (TurnCard); the
+      // CircleOff glyph reads as muted-foreground so the icon and the dimmed
+      // card agree on "dead" -- distinct from a fresh Materialized's primary.
+      tone: "text-muted-foreground",
     };
   }
   switch (outcome.kind) {
@@ -345,6 +389,8 @@ function outcomeVisual(
           id: "thread.outcome.materialized",
           defaultMessage: "Result ready",
         }),
+        // A materialized round = teal --primary (ADR-0047 A hue).
+        tone: "text-primary",
       };
     case "Textual":
       return {
@@ -356,6 +402,9 @@ function outcomeVisual(
         // MessageCircleQuestion the canonical glyph. The label still names
         // which sub-kind (Clarify vs Refuse) so the split is legible without it.
         Icon: MessageCircleQuestion,
+        // B is intentionally neutral (ADR-0047 B!=C; ADR-0017 honest refuse /
+        // clarify must NOT read as failure, so no warm tint).
+        tone: "text-muted-foreground",
         label:
           outcome.data.text_kind === "Clarify"
             ? intl.formatMessage({
@@ -370,11 +419,16 @@ function outcomeVisual(
     case "Failed":
       return {
         Icon: TriangleAlert,
+        // C failure round = --destructive (ADR-0047 C hue).
+        tone: "text-destructive",
         label: intl.formatMessage({ id: "thread.outcome.failed", defaultMessage: "Failed" }),
       };
     case "Cancelled":
       return {
         Icon: Ban,
+        // D cancelled round = weakened grey (ADR-0047 D hue); the card also
+        // dims via opacity-60 (TurnCard) per ADR-0028 Why 2.
+        tone: "text-muted-foreground",
         label: intl.formatMessage({
           id: "thread.outcome.cancelled",
           defaultMessage: "Cancelled",
@@ -477,11 +531,22 @@ function StaleChip({
   const verb = staleChipVerb(intl, reason);
   // Badge secondary = muted-neutral (ADR-0050 stale semantic); asChild merges
   // the variant onto the <button> so the chip stays a real focusable / clickable
-  // control with a disabled state. The stale-chip class now carries layout +
-  // the disabled dim only; the variant owns the color so the chip rides the
-  // --secondary token and flips with .dark.
+  // control with a disabled state. ADR-0067 (issue #169): the stale-chip class
+  // now carries layout + the disabled dim only; the variant owns the color so
+  // the chip rides the --secondary token and flips with .dark. The hover tint
+  // (ADR-0050 stale = muted) is gated on enabled: the inert chip never promises
+  // a hover it cannot perform. The disabled dim is opacity-[0.55] verbatim from
+  // the legacy `.thread .stale-chip:disabled` rule (#169 behavior-equivalence);
+  // arbitrary because Tailwind v4's opacity scale has no 0.55 step.
   return (
-    <Badge variant="secondary" asChild className="stale-chip">
+    <Badge
+      variant="secondary"
+      asChild
+      className={cn(
+        "stale-chip ml-1 cursor-pointer",
+        "enabled:hover:bg-muted disabled:cursor-not-allowed disabled:opacity-[0.55]",
+      )}
+    >
       <button
         type="button"
         disabled={!hasJumpTarget}
@@ -544,18 +609,45 @@ function TurnCard({
 }: TurnCardProps) {
   const intl = useIntl();
   const isStale = !!staleAnchor;
-  const { Icon, label } = outcomeVisual(intl, record.outcome, isStale);
+  const { Icon, label, tone } = outcomeVisual(intl, record.outcome, isStale);
+  // ADR-0028 Why 2: Failed/Cancelled are weakened but not collapsed (opacity-
+  // 60); a stale Materialized turn ghosts further (opacity-50, ADR-0041/0047).
+  // Stale only lands on Materialized turns, so the two dims never stack.
+  const weakened =
+    record.outcome.kind === "Failed" || record.outcome.kind === "Cancelled";
   return (
-    <div className={`turn-card${isStale ? " stale-ghost" : ""}`} data-stale={isStale ? "true" : undefined}>
-      <div className="turn-head">
-        <span className="outcome-icon" role="img" aria-label={label}>
-          <Icon aria-hidden="true" />
+    <div
+      className={cn(
+        "turn-card rounded-md py-1.5",
+        isStale && "stale-ghost opacity-50",
+        weakened && "opacity-60",
+      )}
+      data-stale={isStale ? "true" : undefined}
+    >
+      <div className="turn-head flex items-center gap-1.5 min-w-0">
+        <span
+          className={cn(
+            "outcome-icon inline-flex items-center justify-center w-4 h-4 shrink-0",
+            tone,
+          )}
+          role="img"
+          aria-label={label}
+        >
+          <Icon aria-hidden="true" className="w-4 h-4" />
         </span>
         {/* The verbatim question is the identity handle (ADR-0039): single-line,
             tail-ellipsis truncation keeps the head (where identity concentrates)
             visible at a fixed rail width (ADR-0054). The full text rides the
-            Tooltip (ADR-0050, issue #106). */}
-        <TruncatingTooltip text={record.question} className="turn-question">
+            Tooltip (ADR-0050, issue #106). A stale ghost also strikes the
+            question through dotted (ADR-0041/0047) -- the strike is question-
+            local so the truncation + tooltip still recover the full text. */}
+        <TruncatingTooltip
+          text={record.question}
+          className={cn(
+            "turn-question flex-1 min-w-0 truncate text-sm text-foreground",
+            isStale && "line-through decoration-dotted",
+          )}
+        >
           {record.question}
         </TruncatingTooltip>
         {/* The active chip (ADR-0047) flags a turn that explicitly named a
@@ -569,10 +661,13 @@ function TurnCard({
           <Tooltip>
             <TooltipTrigger asChild>
               {/* Badge default = teal --primary (ADR-0050 active semantic); the
-                  turn-active-chip class now carries layout only (flex-shrink,
+                  turn-active-chip class carries layout only (flex-shrink,
                   8rem tail-ellipsis + the test selector), the variant owns the
                   color so the chip recolors with .dark alongside the token. */}
-              <Badge variant="default" className="turn-active-chip">
+              <Badge
+                variant="default"
+                className="turn-active-chip shrink-0 max-w-32 truncate"
+              >
                 →{mentionedDataset.display_name}
               </Badge>
             </TooltipTrigger>
@@ -607,7 +702,7 @@ function AssumptionNote({ assumption }: { assumption: string | null }) {
   const intl = useIntl();
   if (!assumption) return null;
   return (
-    <span className="assumption">
+    <span className="assumption block text-xs italic text-muted-foreground">
       {intl.formatMessage(
         { id: "thread.assumption", defaultMessage: "Assumption: {text}" },
         { text: assumption },
@@ -639,10 +734,22 @@ function TurnBody({
       const { dataset, assumption } = record.outcome.data;
       const active = dataset.reference_name === selectedResult;
       return (
-        <p className="turn-outcome">
+        <p className="turn-outcome mt-1 ml-6 text-xs leading-snug">
+          {/* result-link is a real <button> (clickable, focusable) but stripped
+              of native button chrome via [all:unset] so it reads as an inline
+              link; subsequent utilities rebuild the box model + token color.
+              `active`/`stale` are kept as hook classes (semantic + test
+              selectors) -- their visual lands on the same element via the
+              conditional utilities below. */}
           <button
             type="button"
-            className={`${active ? "result-link active" : "result-link"}${staleAnchor ? " stale" : ""}`}
+            className={cn(
+              "result-link [all:unset] cursor-pointer inline-block text-primary",
+              "px-1.5 py-0.5 rounded-md border border-transparent",
+              "hover:bg-accent",
+              active && "active font-semibold border-primary",
+              staleAnchor && "stale text-muted-foreground border-dashed",
+            )}
             aria-current={active ? "true" : undefined}
             onClick={() => onSelectResult(dataset.reference_name)}
           >
@@ -667,15 +774,20 @@ function TurnBody({
       const { text_kind, body, assumption } = record.outcome.data;
       const isClarify = text_kind === "Clarify";
       return (
-        <p className={`turn-outcome textual ${text_kind.toLowerCase()}`}>
-          <span className="textual-kind">
+        <p
+          className={cn(
+            "turn-outcome textual mt-1 ml-6 text-xs leading-snug",
+            text_kind.toLowerCase(),
+          )}
+        >
+          <span className="textual-kind inline-block mr-1 text-muted-foreground">
             {isClarify ? (
               <FormattedMessage id="thread.outcome.clarify" defaultMessage="Needs clarification" />
             ) : (
               <FormattedMessage id="thread.outcome.refused" defaultMessage="Cannot fulfill" />
             )}
           </span>
-          <span className="textual-body">{body}</span>
+          <span className="textual-body text-foreground">{body}</span>
           <AssumptionNote assumption={assumption} />
         </p>
       );
@@ -687,16 +799,16 @@ function TurnBody({
       const failure = record.outcome.data;
       const detail = turnFailureDetail(failure);
       return (
-        <div className="turn-outcome failed">
+        <div className="turn-outcome failed mt-1 ml-6 text-xs leading-snug">
           {/* <div>, not <p>: a <p> cannot legally contain the <details> fold. */}
-          <span className="failed-reason">{formatTurnFailure(failure, intl)}</span>
+          <span className="failed-reason text-destructive">{formatTurnFailure(failure, intl)}</span>
           <TechnicalDetailsFold detail={detail} />
         </div>
       );
     }
     case "Cancelled":
       return (
-        <p className="turn-outcome cancelled">
+        <p className="turn-outcome cancelled mt-1 ml-6 text-xs leading-snug text-muted-foreground">
           <FormattedMessage id="thread.outcome.cancelled" defaultMessage="Cancelled" />
         </p>
       );
