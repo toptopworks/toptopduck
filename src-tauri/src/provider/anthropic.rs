@@ -399,11 +399,12 @@ mod tests {
     #[test]
     fn forbidden_403_is_not_retried_not_wired() {
         // A 403 is permanent for this turn (forbidden scope / IP-style block):
-        // map to NotWired so the orchestrator does not burn the retry budget on
-        // three identical rejections. Mirrors the 401 contract; pins the
-        // compound `status == 401 || status == 403` guard so a regression to
-        // `status == 401` alone cannot ship green while 403 falls through to a
-        // retried Unavailable that auto-retries forever.
+        // the adapter maps it to NotWired, mirroring the 401 contract above, so
+        // the orchestrator does not burn the retry budget on three identical
+        // rejections. `_mock.assert()` pins that the HTTP path was actually
+        // taken (rules out the missing-key short-circuit), and the NotWired
+        // result pins that a regression dropping 403 from the auth-rejected
+        // set would fail here.
         let mut server = mockito::Server::new();
         let _mock = server
             .mock("POST", "/v1/messages")
@@ -415,6 +416,7 @@ mod tests {
             AnthropicProvider::generate(&cfg, &sample_request("q")).unwrap_err(),
             ProviderError::NotWired
         );
+        _mock.assert();
     }
 
     #[test]

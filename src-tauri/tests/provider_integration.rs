@@ -1,11 +1,13 @@
 //! Real-provider integration (issue #29, ADR-0007/0029): wires a LiveProvider
-//! (routing to the Anthropic adapter) into a Session and drives one ask ->
-//! materialize turn against a mockito server standing in for Anthropic.
-//! Verifies the full chain the unit tests cannot -- window assembly -> real
-//! HTTP provider -> SQL execution -> result_N materialization -- without a
-//! network or a real key. The orchestrator's behavior is provider-agnostic
-//! (FakeProvider covers the contract offline); this test pins that the real
-//! provider plugs in correctly.
+//! into a Session and drives one ask -> materialize turn against a mockito
+//! server standing in for the configured provider. Both protocols are covered
+//! -- Anthropic (issue #29) and OpenAI (issue #160), the latter doubling as
+//! the LiveProvider protocol-routing proof. Verifies the full chain the unit
+//! tests cannot -- window assembly -> real HTTP provider -> SQL execution ->
+//! result_N materialization -- without a network or a real key. The
+//! orchestrator's behavior is provider-agnostic (FakeProvider covers the
+//! contract offline); these tests pin that the real providers plug in
+//! correctly.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,8 +48,8 @@ fn anthropic_live_provider(url: String, key: Option<&str>) -> LiveProvider<Stati
 
 /// Wire a LiveProvider with an OpenAI-protocol StaticConfig pointing at `url`.
 /// Mirrors [`anthropic_live_provider`]; only the protocol field (and a realistic
-/// openai-shaped model id) differ. Drives both openai end-to-end tests so their
-/// bodies stay focused on the behavior under test.
+/// openai-shaped model id) differ. Drives the openai end-to-end test so its
+/// body stays focused on the behavior under test.
 fn openai_live_provider(url: String, key: Option<&str>) -> LiveProvider<StaticConfig> {
     LiveProvider::new(StaticConfig {
         key: key.map(str::to_string),
@@ -174,14 +176,18 @@ fn real_provider_cancel_during_http_block_lands_cancelled() {
 
 #[test]
 fn real_openai_provider_end_to_end_materializes_result() {
-    // Mirrors real_provider_end_to_end_materializes_result on the OpenAI
-    // protocol (issue #160): LiveProvider routes to OpenaiProvider, the openai
-    // adapter's SQL is executed by the engine, and result_1 materializes. Pins
-    // the full chain (window -> LiveProvider dispatch -> OpenaiProvider HTTP ->
-    // SQL execution -> materialization) the unit tests cannot reach end-to-end.
+    // End-to-end on the OpenAI protocol (issue #160): LiveProvider routes to
+    // OpenaiProvider via protocol(), the adapter POSTs {base}/chat/completions
+    // with Bearer auth (matched here -- an anthropic dispatch would hit
+    // /v1/messages with x-api-key, miss the mock, 404), the openai adapter's
+    // SQL is executed by the engine, and result_1 materializes. `_mock.assert()`
+    // + `match_header` are the routing proof; the row_count / sample
+    // assertions are the materialization proof. Pins the full chain the unit
+    // tests cannot reach end-to-end.
     let mut server = mockito::Server::new();
     let _mock = server
         .mock("POST", "/chat/completions")
+        .match_header("authorization", "Bearer sk-test")
         .with_status(200)
         .with_body(openai_body(
             r#"{"type":"sql","sql":"SELECT COUNT(*) AS n FROM \"people\".data","viz":null,"assumption":null}"#,
@@ -214,42 +220,7 @@ fn real_openai_provider_end_to_end_materializes_result() {
         }
         other => panic!("expected Materialized, got {other:?}"),
     }
-}
-
-#[test]
-fn live_provider_routes_openai_profile_end_to_end() {
-    // The production wiring point (LiveProvider::new at commands.rs) dispatches
-    // by protocol() each turn. A StaticConfig with protocol:Openai must route
-    // the turn to OpenaiProvider -- the HTTP call lands at
-    // {base}/chat/completions with Bearer auth, NOT {base}/v1/messages with
-    // x-api-key. Only the openai path is mocked and matched on the Bearer
-    // header; an anthropic dispatch would miss the mock (404) and fail the
-    // turn. _mock.assert() is the routing proof.
-    let mut server = mockito::Server::new();
-    let _mock = server
-        .mock("POST", "/chat/completions")
-        .match_header("authorization", "Bearer sk-test")
-        .with_status(200)
-        .with_body(openai_body(
-            r#"{"type":"sql","sql":"SELECT COUNT(*) AS n FROM \"people\".data","viz":null,"assumption":null}"#,
-        ))
-        .create();
-
-    let provider = openai_live_provider(server.url(), Some("sk-test"));
-    let mut session = Session::with_provider(Box::new(provider)).expect("session");
-
-    let people = fixtures_dir().join("people.csv");
-    match session.ingest(&people) {
-        LoadOutcome::Loaded(_) => {}
-        other => panic!("expected people.csv to load, got {other:?}"),
-    }
-
-    let outcome = session.ask("多少人");
-    match outcome {
-        TurnOutcome::Materialized { .. } => {}
-        other => panic!("expected Materialized, got {other:?}"),
-    }
-    // The openai endpoint was hit (Bearer auth + /chat/completions); an
+    // Routing proof: the openai endpoint was hit with Bearer auth; an
     // anthropic dispatch would have missed this mock and 404'd.
     _mock.assert();
 }

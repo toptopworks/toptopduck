@@ -455,13 +455,13 @@ mod tests {
 
     #[test]
     fn forbidden_403_is_not_retried_not_wired() {
-        // A 403 is permanent for this turn (quota / IP ban / forbidden scope --
-        // common for GLM/Qwen compatible gateways): map to NotWired so the
-        // orchestrator does not burn the retry budget on three identical
-        // rejections (ADR-0044). Mirrors the 401 contract; pins the compound
-        // `status == 401 || status == 403` guard so a regression to
-        // `status == 401` alone cannot ship green while 403 falls through to a
-        // retried Unavailable that auto-retries forever.
+        // A 403 is permanent for this turn (forbidden scope / IP-style block):
+        // the adapter maps it to NotWired, mirroring the 401 contract above, so
+        // the orchestrator does not burn the retry budget on three identical
+        // rejections (ADR-0044). `_mock.assert()` pins that the HTTP path was
+        // actually taken (rules out the missing-key short-circuit), and the
+        // NotWired result pins that a regression dropping 403 from the
+        // auth-rejected set would fail here.
         let mut server = mockito::Server::new();
         let _mock = server
             .mock("POST", "/chat/completions")
@@ -473,6 +473,7 @@ mod tests {
             OpenaiProvider::generate(&cfg, &sample_request("q")).unwrap_err(),
             ProviderError::NotWired
         );
+        _mock.assert();
     }
 
     #[test]
@@ -489,6 +490,53 @@ mod tests {
         match OpenaiProvider::generate(&cfg, &sample_request("q")) {
             Err(ProviderError::Unavailable(_)) => {}
             other => panic!("expected Unavailable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_429_is_unavailable_for_retry() {
+        // A 429 from an OpenAI-compatible gateway falls through the
+        // auth-rejected guard and becomes Unavailable -- transient/retryable,
+        // same path as 5xx. Pins that 429 stays OUT of the auth-rejected set:
+        // a regression that added `|| status == 429` to the NotWired guard
+        // would silently make rate limits permanent, which is wrong.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(429)
+            .with_body(r#"{"error":{"message":"rate limit","type":"rate_limit_exceeded"}}"#)
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match OpenaiProvider::generate(&cfg, &sample_request("q")) {
+            Err(ProviderError::Unavailable(_)) => {}
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn payload_4xx_is_unavailable_with_upstream_body() {
+        // A non-auth 4xx (model_not_found / context_length_exceeded) surfaces
+        // the upstream body so the user sees WHY instead of a bare status --
+        // pinned here, distinct from the 5xx transport path. Retried once by
+        // the orchestrator, then fails honestly. The body-contains checks pin
+        // that a regression to a bare status message (dropping the upstream
+        // body) would fail here.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(400)
+            .with_body(r#"{"error":{"message":"model not found","type":"model_not_found"}}"#)
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match OpenaiProvider::generate(&cfg, &sample_request("q")) {
+            Err(ProviderError::Unavailable(msg)) => {
+                assert!(msg.contains("HTTP 400"), "status surfaced: {msg}");
+                assert!(
+                    msg.contains("model not found"),
+                    "upstream body surfaced: {msg}"
+                );
+            }
+            other => panic!("expected Unavailable with body, got {other:?}"),
         }
     }
 

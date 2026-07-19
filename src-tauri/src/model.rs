@@ -1012,21 +1012,32 @@ mod tests {
 
     #[test]
     fn effective_protocol_returns_active_protocol() {
-        // ADR-0064 (issue #152): the active profile's protocol drives the live
-        // provider's per-turn adapter routing. Set an Openai protocol on the
-        // active profile and read it back via effective_protocol; flip to
-        // Anthropic and read again to prove it tracks the active field, not a
-        // cached value. The live source (LiveProviderConfig::protocol) delegates
-        // here, so this is the load-bearing leaf of the per-turn read path.
+        // ADR-0064 (issue #152): effective_protocol follows the active_profile
+        // POINTER, not a fixed field -- switching active to a different profile
+        // lands that profile's protocol on the next read. Seed a second profile
+        // with the Openai protocol and flip active_profile between the two; the
+        // read tracks each flip, never a cached value. The live source
+        // (LiveProviderConfig::protocol) delegates here, so this is the
+        // load-bearing leaf of the per-turn read path.
         let mut cfg = ProviderConfig::defaults();
-        cfg.active_mut()
-            .expect("defaults have an active profile")
-            .protocol = Protocol::Openai;
+        let anthropic_id = cfg.active_profile.clone();
+        let openai_id = ProfileId("__test_openai_profile".into());
+        cfg.profiles.push(ProviderProfile {
+            id: openai_id.clone(),
+            display_name: "OpenAI".into(),
+            protocol: Protocol::Openai,
+            base_url: "https://api.openai.example.test".into(),
+            model: "gpt-4o".into(),
+        });
+        // Default active profile is the Anthropic one.
+        assert_eq!(cfg.effective_protocol(), Protocol::Anthropic);
+
+        // Flip active_profile to the Openai profile -- effective_protocol follows.
+        cfg.active_profile = openai_id;
         assert_eq!(cfg.effective_protocol(), Protocol::Openai);
 
-        cfg.active_mut()
-            .expect("defaults have an active profile")
-            .protocol = Protocol::Anthropic;
+        // Flip back -- the read tracks each pointer switch, never a cached value.
+        cfg.active_profile = anthropic_id;
         assert_eq!(cfg.effective_protocol(), Protocol::Anthropic);
     }
 

@@ -617,9 +617,13 @@ mod tests {
         // on the next trait read -- no LiveProvider reboot, no cached protocol.
         // The live source reads disk per call, so flipping active_profile
         // between two profiles (Anthropic + Openai) surfaces each one's
-        // protocol in turn. Pins that a future once_cell cache (which would
-        // freeze the protocol at boot) cannot sneak in green.
+        // protocol in turn. Two cache regressions are pinned: (a) a once_cell
+        // populated on the first protocol() call would freeze at the first
+        // read; (b) a snapshot taken at LiveProviderConfig::new would freeze
+        // at construction -- rebinding the source between flips (and re-reading
+        // it after the second flip) proves neither can sneak in green.
         let (_dir, live) = live();
+        let path = live.path().to_path_buf();
         let mut cfg = AppConfig::defaults();
         let anthropic_id = cfg.provider.active_profile.clone();
         let openai_id = ProfileId("__test_openai_profile".into());
@@ -640,11 +644,19 @@ mod tests {
         live.store(cfg).expect("store");
         assert_eq!(live.protocol(), Protocol::Openai);
 
-        // Flip back to the anthropic profile -- the live read follows each switch.
+        // Rebind the source to the same path -- a constructor-time snapshot
+        // cache would freeze Openai here, but the live read must follow the
+        // next flip below too.
+        let rebound = LiveProviderConfig::new(KeychainStore::new(), path);
+        assert_eq!(rebound.protocol(), Protocol::Openai);
+
+        // Flip back to the anthropic profile -- both the original and the
+        // rebound source follow each switch.
         let mut cfg = live.load();
         cfg.provider.active_profile = anthropic_id;
         live.store(cfg).expect("store");
         assert_eq!(live.protocol(), Protocol::Anthropic);
+        assert_eq!(rebound.protocol(), Protocol::Anthropic);
     }
 
     #[test]
