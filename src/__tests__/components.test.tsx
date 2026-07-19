@@ -12,6 +12,7 @@ import { QuestionBar } from "../components/QuestionBar";
 import { COLUMN_DISCLOSURE_THRESHOLD, ResultView, ROW_DISCLOSURE_THRESHOLD } from "../components/ResultView";
 import { SettingsView } from "../components/settingsView/SettingsView";
 import { Thread } from "../components/Thread";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { TooltipProvider } from "../components/ui/tooltip";
 import { VegaChart } from "../components/VegaChart";
 import { WorkingSetList } from "../components/WorkingSetList";
@@ -764,6 +765,30 @@ describe("GuidedLoadDialog", () => {
     fireEvent.click(document.body);
     await new Promise((r) => setTimeout(r, 0));
     expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("renders the preview table via the Table primitive with the .preview class hook (ADR-0067)", () => {
+    // ADR-0067: GuidedLoadDialog's native <table className="preview"> was
+    // migrated to the Table primitive. The .preview class hook must survive
+    // cn() onto the real <table>, and every preview row must render. A
+    // regression that drops the className or breaks the primitive render would
+    // fail here -- the other GuidedLoadDialog tests only assert onSubmit /
+    // onCancel wiring, not the preview-table DOM.
+    renderI18n(
+      <GuidedLoadDialog
+        request={request}
+        loading={false}
+        onSubmit={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    // Radix Dialog renders into a portal on document.body, so query the
+    // document, not the render container. The .preview class hook survives
+    // cn() onto the real <table>, and every preview row renders.
+    expect(document.querySelector("table.preview")).not.toBeNull();
+    expect(document.querySelectorAll("table.preview tr")).toHaveLength(
+      request.sheets[0]!.preview.length,
+    );
   });
 });
 
@@ -2199,5 +2224,67 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
     await screen.findByText("keychain unavailable");
     expect(screen.getByRole("button", { name: "New profile" })).toBeEnabled();
+  });
+});
+
+describe("Table primitives (ADR-0067, issue #168 self-contained)", () => {
+  // ADR-0067 retires the styles.css global `table / th / td` element rules; the
+  // Table primitives carry their own border / bg / padding utilities so they
+  // render correctly with NO global table CSS. This pins the structural
+  // invariant -- a regression that drops border / bg-muted would silently
+  // revert to relying on the retired global rules. jsdom has no layout engine,
+  // so these are className-contract assertions on the real rendered elements,
+  // not visual checks. Each token is asserted via split(/\s+/) + toContain so
+  // `border` does not match `border-collapse` / `border-b` etc. -- a bare
+  // toMatch(/\bborder\b/) passes spuriously against any border-* utility.
+  it("Table renders a <table> with border-collapse (no global table rule needed)", () => {
+    const { container } = render(
+      <Table>
+        <TableBody>
+          <TableRow>
+            <TableCell>x</TableCell>
+          </TableRow>
+        </TableBody>
+      </Table>,
+    );
+    const table = container.querySelector("table");
+    expect(table).not.toBeNull();
+    expect(table?.className.split(/\s+/)).toContain("border-collapse");
+  });
+
+  it("TableHead carries its own border + bg-muted + text-sm (no global th rule needed)", () => {
+    const { container } = render(
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>h</TableHead>
+          </TableRow>
+        </TableHeader>
+      </Table>,
+    );
+    const th = container.querySelector("th");
+    expect(th).not.toBeNull();
+    // Grid border (border-color from app.css @layer base).
+    expect(th?.className.split(/\s+/)).toContain("border");
+    // Header tint.
+    expect(th?.className.split(/\s+/)).toContain("bg-muted");
+    // Font-size (ADR-0067 Decision 2: scale over arbitrary values).
+    expect(th?.className.split(/\s+/)).toContain("text-sm");
+  });
+
+  it("TableCell carries its own border + text-sm (no global td rule needed)", () => {
+    const { container } = render(
+      <Table>
+        <TableBody>
+          <TableRow>
+            <TableCell>c</TableCell>
+          </TableRow>
+        </TableBody>
+      </Table>,
+    );
+    const td = container.querySelector("td");
+    expect(td).not.toBeNull();
+    expect(td?.className.split(/\s+/)).toContain("border");
+    expect(td?.className.split(/\s+/)).toContain("text-sm");
   });
 });

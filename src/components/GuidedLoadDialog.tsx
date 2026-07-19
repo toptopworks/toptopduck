@@ -9,6 +9,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table";
 
 // Per-sheet guided choices gathered in the dialog.
 interface SheetChoice {
@@ -138,18 +139,18 @@ export function GuidedLoadDialog({
                   ))}
                 </select>
               </label>
-              <table className="preview">
-                <tbody>
+              <Table className="preview">
+                <TableBody>
                   {sheet.preview.map((cells, i) => {
                     const rowNo = i + 1;
                     const isHeader = rowNo === c.headerRow;
                     const isSkip = c.skipRows.includes(rowNo);
                     return (
-                      <tr
+                      <TableRow
                         key={i}
                         className={isHeader ? "header-row" : isSkip ? "skip-row" : undefined}
                       >
-                        <td className="row-no">
+                        <TableCell className="row-no">
                           <label>
                             <input
                               type="checkbox"
@@ -159,15 +160,15 @@ export function GuidedLoadDialog({
                             />
                             {rowNo}
                           </label>
-                        </td>
+                        </TableCell>
                         {cells.map((cell, j) => (
-                          <td key={j}>{cell}</td>
+                          <TableCell key={j}>{cell}</TableCell>
                         ))}
-                      </tr>
+                      </TableRow>
                     );
                   })}
-                </tbody>
-              </table>
+                </TableBody>
+              </Table>
             </section>
           );
         })}
