@@ -260,13 +260,15 @@ impl Provider for UnwiredProvider {
 /// Generic over `C` so production wires [`crate::LiveProviderConfig`] (reads
 /// app-config + keychain fresh each turn) while tests inject
 /// [`crate::StaticConfig`] (or a flipping double for the per-turn assertion).
-/// `Clone` is required because each dispatch constructs a fresh adapter
-/// (cheaper than restructuring the adapters to borrow their config source).
-pub struct LiveProvider<C: ProviderConfigSource + Clone + 'static> {
+/// `C` is NOT required to be `Clone` (issue #159): each dispatch borrows
+/// `&self.config` for the duration of the adapter call -- the adapter is a
+/// stateless translator that reads the source per turn and never stores it,
+/// so no ownership transfer (and no clone) is needed.
+pub struct LiveProvider<C: ProviderConfigSource + 'static> {
     config: C,
 }
 
-impl<C: ProviderConfigSource + Clone + 'static> LiveProvider<C> {
+impl<C: ProviderConfigSource + 'static> LiveProvider<C> {
     /// Wire the router with the live config source. The source's `protocol()`
     /// is read on each `generate`, so a protocol change in the underlying store
     /// takes effect the next turn without re-booting the session.
@@ -275,15 +277,11 @@ impl<C: ProviderConfigSource + Clone + 'static> LiveProvider<C> {
     }
 }
 
-impl<C: ProviderConfigSource + Clone + 'static> Provider for LiveProvider<C> {
+impl<C: ProviderConfigSource + 'static> Provider for LiveProvider<C> {
     fn generate(&self, request: &ProviderRequest) -> Result<ProviderReply, ProviderError> {
         match self.config.protocol() {
-            Protocol::Anthropic => {
-                anthropic::AnthropicProvider::new(Box::new(self.config.clone())).generate(request)
-            }
-            Protocol::Openai => {
-                openai::OpenaiProvider::new(Box::new(self.config.clone())).generate(request)
-            }
+            Protocol::Anthropic => anthropic::AnthropicProvider::generate(&self.config, request),
+            Protocol::Openai => openai::OpenaiProvider::generate(&self.config, request),
         }
     }
 }
@@ -309,8 +307,10 @@ mod tests {
     /// A config source whose `protocol` can be flipped between turns (via the
     /// shared `Arc<Mutex>`), to prove `LiveProvider` re-reads `protocol()` per
     /// turn rather than caching it at construction. All other fields are fixed.
-    /// `Clone` shares the protocol cell so a flip after construction is visible
-    /// to the already-built `LiveProvider`.
+    /// Derives `Clone` (shares the protocol cell) so the test can hand a copy
+    /// to `LiveProvider` and still mutate the shared cell afterward -- a test
+    /// convenience, not a router requirement (`LiveProvider<C>` does not
+    /// require `Clone`, issue #159).
     #[derive(Clone)]
     struct FlippableConfig {
         key: String,
@@ -429,9 +429,11 @@ mod tests {
             )
             .create();
 
-        // Start in Openai mode. The LiveProvider holds a CLONE of cfg, but
-        // FlippableConfig::clone shares the protocol Arc<Mutex> -- so flipping
-        // cfg.protocol below is visible to the router's per-turn read.
+        // Start in Openai mode. The test clones cfg (FlippableConfig derives
+        // Clone -- the protocol Arc<Mutex> is shared across the clone) so it
+        // can hand a copy to LiveProvider and keep cfg to flip its protocol
+        // below. LiveProvider<C> itself does not require Clone (issue #159);
+        // the clone here is a test convenience, not a router requirement.
         let cfg = flippable(&server.url(), Protocol::Openai);
         let p = LiveProvider::new(cfg.clone());
 
@@ -448,5 +450,45 @@ mod tests {
         // Turn 2: SAME LiveProvider, now Anthropic -> /v1/messages.
         p.generate(&bare_request()).expect("turn 2 anthropic");
         anthropic_mock.assert(); // hit exactly once
+    }
+
+    #[test]
+    fn accepts_a_non_clone_config_source() {
+        // AC #159: LiveProvider must not require Clone on its config source.
+        // The router borrows &self.config per turn (stateless adapter reads it
+        // in-call and never stores it), so a source without Clone compiles and
+        // routes. If the Clone bound were ever re-added, this test would fail
+        // to compile -- a regression guard for the ownership-to-borrow refactor.
+        #[derive(Default)]
+        struct NonCloneSource;
+        impl ProviderConfigSource for NonCloneSource {
+            fn api_key(&self) -> Option<String> {
+                None
+            }
+            fn base_url(&self) -> String {
+                String::new()
+            }
+            fn model(&self) -> String {
+                String::new()
+            }
+            fn locale(&self) -> ResponseLocale {
+                ResponseLocale::EnUS
+            }
+            fn protocol(&self) -> Protocol {
+                Protocol::Anthropic
+            }
+        }
+
+        let provider = LiveProvider::new(NonCloneSource);
+        // Drive one turn to confirm the borrow path runs: with no key the
+        // adapter read api_key() off &self.config and returned NotWired before
+        // any HTTP call. That NonCloneSource cannot be cloned AT ALL is enforced
+        // by the type system (no Clone impl) -- the bound removal is what makes
+        // this compile; the runtime assert just confirms dispatch reached the
+        // matching adapter branch.
+        assert_eq!(
+            provider.generate(&bare_request()).unwrap_err(),
+            ProviderError::NotWired
+        );
     }
 }

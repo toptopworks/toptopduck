@@ -35,7 +35,7 @@ use crate::provider::prompt::{
     build_system_prompt, render_response, render_summary_turn_note, Message,
 };
 use crate::provider::reply::parse_reply;
-use crate::provider::{Provider, ProviderError, ProviderReply, ProviderRequest, TurnPayload};
+use crate::provider::{ProviderError, ProviderReply, ProviderRequest, TurnPayload};
 
 /// Cap on the model's reply length (mirrors the anthropic adapter). Sized for a
 /// SQL + a Vega-Lite spec + an assumption note; bounded so a runaway reply
@@ -49,32 +49,33 @@ const MAX_TOKENS: u32 = 4096;
 /// backstop. Maps to a retried [`ProviderError::Unavailable`] on expiry.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// The OpenAI Chat Completions client behind the [`Provider`] trait (ADR-0064).
-/// Holds a [`ProviderConfigSource`] for per-turn key + endpoint + model +
-/// protocol reads (live, no caching); tests inject [`StaticConfig`]. Same
-/// shape as [`super::anthropic::AnthropicProvider`] -- the difference is purely
-/// the wire shape constructed in [`OpenaiProvider::generate`].
-pub struct OpenaiProvider {
-    config: Box<dyn ProviderConfigSource>,
-}
+/// The OpenAI Chat Completions translation layer (ADR-0064). Stateless (issue
+/// #159): each [`Self::generate`] call borrows a [`ProviderConfigSource`] for
+/// per-turn key + endpoint + model + locale reads (live, no caching); tests
+/// inject [`StaticConfig`], production wires [`LiveProvider`](super::LiveProvider)
+/// holding a [`KeychainStore`](super::keychain::KeychainStore). Same shape as
+/// [`super::anthropic::AnthropicProvider`] -- never instantiated, the unit
+/// struct is a namespace for the [`Self::generate`] associated function; the
+/// difference from the anthropic adapter is purely the wire shape constructed
+/// in [`Self::generate`].
+pub struct OpenaiProvider;
 
 impl OpenaiProvider {
-    /// Wire the provider with a key/config source. Production passes the shared
-    /// live config (via [`super::LiveProvider`] routing); tests pass a fixed
-    /// [`StaticConfig`].
-    pub fn new(config: Box<dyn ProviderConfigSource>) -> Self {
-        Self { config }
-    }
-}
-
-impl Provider for OpenaiProvider {
-    fn generate(&self, request: &ProviderRequest) -> Result<ProviderReply, ProviderError> {
+    /// Place one OpenAI Chat Completions API call. Reads the key + endpoint +
+    /// model + locale from `config` per call (live, no caching); blocking HTTP
+    /// (ureq) fits the sync caller contract -- the orchestrator runs `ask` on a
+    /// `spawn_blocking` thread (ADR-0007), so no async runtime is pulled in and
+    /// the turn stays cancellable at the flag-check between attempts.
+    pub fn generate(
+        config: &dyn ProviderConfigSource,
+        request: &ProviderRequest,
+    ) -> Result<ProviderReply, ProviderError> {
         // ADR-0029 invariant 3: the key is fetched here, in the Rust core, per
         // turn. Absent key -> NotWired (permanent for this turn, not retried) --
         // the orchestrator surfaces it as a failed turn prompting configuration.
-        let key = self.config.api_key().ok_or(ProviderError::NotWired)?;
-        let base_url = self.config.base_url();
-        let model = self.config.model();
+        let key = config.api_key().ok_or(ProviderError::NotWired)?;
+        let base_url = config.base_url();
+        let model = config.model();
         // The user's base_url carries any version path segment (e.g. `/v1`);
         // only `/chat/completions` (the path documented by OpenAI's Chat
         // Completions API) is appended, so GLM's `/api/paas/v4` and Qwen's
@@ -88,7 +89,7 @@ impl Provider for OpenaiProvider {
         // build_system_prompt so the locale directive + canonical boundary +
         // schema context are identical to the anthropic adapter. The system
         // prompt rides the first message (role "system") per OpenAI convention.
-        let system = build_system_prompt(request, self.config.locale());
+        let system = build_system_prompt(request, config.locale());
         let body = OpenaiRequest {
             model: &model,
             max_tokens: MAX_TOKENS,
@@ -278,23 +279,22 @@ mod tests {
     use crate::provider::prompt::ResponseLocale;
     use crate::provider::{ColumnRef, DatasetRef, ResponsePayload};
 
-    /// Build a provider whose key/endpoint/model are fixed and point at a
-    /// mockito server URL (no OS keychain, no real network), speaking the
-    /// OpenAI protocol. Locale defaults to EnUS.
-    fn provider_at(url: &str, key: Option<&str>) -> OpenaiProvider {
-        provider_at_locale(url, key, ResponseLocale::EnUS)
+    /// Build a fixed config pointing at a mockito server URL (no OS keychain,
+    /// no real network), speaking the OpenAI protocol. Locale defaults to EnUS.
+    fn config_at(url: &str, key: Option<&str>) -> StaticConfig {
+        config_at_locale(url, key, ResponseLocale::EnUS)
     }
 
-    /// Build a provider with an explicit resolved locale (for the i18n
-    /// directive assertions -- ADR-0052).
-    fn provider_at_locale(url: &str, key: Option<&str>, locale: ResponseLocale) -> OpenaiProvider {
-        OpenaiProvider::new(Box::new(StaticConfig {
+    /// Build a config with an explicit resolved locale (for the i18n directive
+    /// assertions -- ADR-0052).
+    fn config_at_locale(url: &str, key: Option<&str>, locale: ResponseLocale) -> StaticConfig {
+        StaticConfig {
             key: key.map(str::to_string),
             base_url: url.to_string(),
             model: "gpt-4o".to_string(),
             locale,
             protocol: Protocol::Openai,
-        }))
+        }
     }
 
     /// One minimal request with a dataset + active pointer.
@@ -338,8 +338,8 @@ mod tests {
                 r#"{"type":"sql","sql":"SELECT COUNT(*) AS n FROM \"people\".data","viz":null,"assumption":null}"#,
             ))
             .create();
-        let p = provider_at(&server.url(), Some("sk-test"));
-        let reply = p.generate(&sample_request("多少行")).expect("sql reply");
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        let reply = OpenaiProvider::generate(&cfg, &sample_request("多少行")).expect("sql reply");
         match reply {
             ProviderReply::Sql {
                 sql,
@@ -364,8 +364,8 @@ mod tests {
                 r#"{"type":"sql","sql":"SELECT 1","viz":{"kind":"bar","spec":"{\"mark\":\"bar\"}"},"assumption":"regr_slope 斜率"}"#,
             ))
             .create();
-        let p = provider_at(&server.url(), Some("sk-test"));
-        match p.generate(&sample_request("画图")).unwrap() {
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match OpenaiProvider::generate(&cfg, &sample_request("画图")).unwrap() {
             ProviderReply::Sql {
                 sql,
                 viz,
@@ -391,8 +391,8 @@ mod tests {
                 r#"{"type":"text","kind":"clarify","body":"按哪个 name？","assumption":null}"#,
             ))
             .create();
-        let p = provider_at(&server.url(), Some("sk-test"));
-        match p.generate(&sample_request("汇总")).unwrap() {
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match OpenaiProvider::generate(&cfg, &sample_request("汇总")).unwrap() {
             ProviderReply::Text { kind, body, .. } => {
                 assert_eq!(kind, TextKind::Clarify);
                 assert_eq!(body, "按哪个 name？");
@@ -408,8 +408,8 @@ mod tests {
                 r#"{"type":"text","kind":"refuse","body":"不做预测，可改为按季度汇总销量","assumption":"避开预测建模"}"#,
             ))
             .create();
-        let p = provider_at(&server.url(), Some("sk-test"));
-        match p.generate(&sample_request("预测下季度")).unwrap() {
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match OpenaiProvider::generate(&cfg, &sample_request("预测下季度")).unwrap() {
             ProviderReply::Text {
                 kind,
                 body,
@@ -429,9 +429,9 @@ mod tests {
         // BEFORE any HTTP call. Pointed at a bogus URL that would actively
         // refuse a connection: if the code path tried the network it would
         // surface an Unavailable (connect error), not NotWired.
-        let p = provider_at("http://127.0.0.1:1", None);
+        let cfg = config_at("http://127.0.0.1:1", None);
         assert_eq!(
-            p.generate(&sample_request("q")).unwrap_err(),
+            OpenaiProvider::generate(&cfg, &sample_request("q")).unwrap_err(),
             ProviderError::NotWired
         );
     }
@@ -447,9 +447,9 @@ mod tests {
             .with_status(401)
             .with_body(r#"{"error":{"message":"Invalid API key","type":"invalid_api_key"}}"#)
             .create();
-        let p = provider_at(&server.url(), Some("sk-bad"));
+        let cfg = config_at(&server.url(), Some("sk-bad"));
         assert_eq!(
-            p.generate(&sample_request("q")).unwrap_err(),
+            OpenaiProvider::generate(&cfg, &sample_request("q")).unwrap_err(),
             ProviderError::NotWired
         );
     }
@@ -464,8 +464,8 @@ mod tests {
             .with_status(503)
             .with_body(r#"{"error":{"message":"Service unavailable"}}"#)
             .create();
-        let p = provider_at(&server.url(), Some("sk-test"));
-        match p.generate(&sample_request("q")) {
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match OpenaiProvider::generate(&cfg, &sample_request("q")) {
             Err(ProviderError::Unavailable(_)) => {}
             other => panic!("expected Unavailable, got {other:?}"),
         }
@@ -481,9 +481,9 @@ mod tests {
             .with_status(200)
             .with_body(openai_body("这不是 JSON"))
             .create();
-        let p = provider_at(&server.url(), Some("sk-test"));
+        let cfg = config_at(&server.url(), Some("sk-test"));
         assert!(matches!(
-            p.generate(&sample_request("q")),
+            OpenaiProvider::generate(&cfg, &sample_request("q")),
             Err(ProviderError::Unavailable(_))
         ));
     }
@@ -500,8 +500,8 @@ mod tests {
                 "```json\n{\"type\":\"sql\",\"sql\":\"SELECT 1\",\"viz\":null,\"assumption\":null}\n```",
             ))
             .create();
-        let p = provider_at(&server.url(), Some("sk-test"));
-        match p.generate(&sample_request("q")).unwrap() {
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match OpenaiProvider::generate(&cfg, &sample_request("q")).unwrap() {
             ProviderReply::Sql { sql, .. } => assert_eq!(sql, "SELECT 1"),
             other => panic!("expected Sql, got {other:?}"),
         }
@@ -523,9 +523,9 @@ mod tests {
                 .to_string(),
             )
             .create();
-        let p = provider_at(&server.url(), Some("sk-test"));
+        let cfg = config_at(&server.url(), Some("sk-test"));
         assert!(matches!(
-            p.generate(&sample_request("q")),
+            OpenaiProvider::generate(&cfg, &sample_request("q")),
             Err(ProviderError::Unavailable(_))
         ));
     }
@@ -540,9 +540,9 @@ mod tests {
             .with_status(200)
             .with_body(serde_json::json!({"choices": []}).to_string())
             .create();
-        let p = provider_at(&server.url(), Some("sk-test"));
+        let cfg = config_at(&server.url(), Some("sk-test"));
         assert!(matches!(
-            p.generate(&sample_request("q")),
+            OpenaiProvider::generate(&cfg, &sample_request("q")),
             Err(ProviderError::Unavailable(_))
         ));
     }
@@ -564,8 +564,8 @@ mod tests {
                 .to_string(),
             )
             .create();
-        let p = provider_at(&server.url(), Some("sk-test"));
-        match p.generate(&sample_request("q")) {
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match OpenaiProvider::generate(&cfg, &sample_request("q")) {
             Err(ProviderError::Unavailable(msg)) => assert!(
                 msg.contains("content filter triggered"),
                 "error envelope message should surface, got: {msg}"
@@ -591,8 +591,8 @@ mod tests {
                 .to_string(),
             )
             .create();
-        let p = provider_at(&server.url(), Some("sk-test"));
-        match p.generate(&sample_request("q")) {
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match OpenaiProvider::generate(&cfg, &sample_request("q")) {
             Err(ProviderError::Unavailable(msg)) => assert!(
                 msg.contains("gpt4o") && msg.contains("400"),
                 "400 body + status should surface, got: {msg}"
@@ -619,8 +619,8 @@ mod tests {
                 r#"{"type":"sql","sql":"SELECT 1","viz":null,"assumption":null}"#,
             ))
             .create();
-        let p = provider_at(&server.url(), Some("sk-test"));
-        p.generate(&sample_request("多少行")).expect("reply");
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        OpenaiProvider::generate(&cfg, &sample_request("多少行")).expect("reply");
         _mock.assert(); // matched Bearer auth + model + roles + path
     }
 
@@ -640,8 +640,8 @@ mod tests {
             .create();
         // base_url ends in `/v1/` (trailing slash); the adapter trims it and
         // appends `/chat/completions` -> `{server}/v1/chat/completions`.
-        let p = provider_at(&format!("{}/v1/", server.url()), Some("sk-test"));
-        p.generate(&sample_request("q")).expect("reply");
+        let cfg = config_at(&format!("{}/v1/", server.url()), Some("sk-test"));
+        OpenaiProvider::generate(&cfg, &sample_request("q")).expect("reply");
         _mock.assert();
     }
 
@@ -662,8 +662,8 @@ mod tests {
                 r#"{"type":"sql","sql":"SELECT 1","viz":null,"assumption":null}"#,
             ))
             .create();
-        let p = provider_at_locale(&server.url(), Some("sk-test"), ResponseLocale::ZhCN);
-        p.generate(&sample_request("画图")).expect("reply");
+        let cfg = config_at_locale(&server.url(), Some("sk-test"), ResponseLocale::ZhCN);
+        OpenaiProvider::generate(&cfg, &sample_request("画图")).expect("reply");
         _mock.assert();
     }
 

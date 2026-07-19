@@ -26,7 +26,7 @@ use crate::provider::prompt::{
     build_system_prompt, render_response, render_summary_turn_note, Message,
 };
 use crate::provider::reply::parse_reply;
-use crate::provider::{Provider, ProviderError, ProviderReply, ProviderRequest, TurnPayload};
+use crate::provider::{ProviderError, ProviderReply, ProviderRequest, TurnPayload};
 
 /// Anthropic Messages API protocol version header value (ADR-0019: native
 /// Anthropic protocol). Pinned; bumped only when Anthropic ships a breaking
@@ -45,30 +45,32 @@ const MAX_TOKENS: u32 = 4096;
 /// [`ProviderError::Unavailable`] on expiry (transient), not a hard failure.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// The real Claude client behind the [`Provider`] trait (ADR-0007). Holds a
-/// [`ProviderConfigSource`] for per-turn key + endpoint + model reads (live, no
-/// caching); tests inject [`StaticConfig`], production wires
-/// [`KeychainStore`](super::keychain::KeychainStore).
-pub struct AnthropicProvider {
-    config: Box<dyn ProviderConfigSource>,
-}
+/// The Anthropic Messages API translation layer (ADR-0007). Stateless (issue
+/// #159): each [`Self::generate`] call borrows a [`ProviderConfigSource`] for
+/// per-turn key + endpoint + model + locale reads (live, no caching); tests
+/// inject [`StaticConfig`], production wires [`LiveProvider`](super::LiveProvider)
+/// holding a [`KeychainStore`](super::keychain::KeychainStore). Never
+/// instantiated -- the unit struct is a namespace for the [`Self::generate`]
+/// associated function invoked by the router per dispatch.
+pub struct AnthropicProvider;
 
 impl AnthropicProvider {
-    /// Wire the provider with a key/config source. Production passes the shared
-    /// keychain store; tests pass a fixed [`StaticConfig`].
-    pub fn new(config: Box<dyn ProviderConfigSource>) -> Self {
-        Self { config }
-    }
-}
-
-impl Provider for AnthropicProvider {
-    fn generate(&self, request: &ProviderRequest) -> Result<ProviderReply, ProviderError> {
+    /// Place one Anthropic Messages API call (ADR-0019 native protocol). Reads
+    /// the key + endpoint + model + locale from `config` per call (live, no
+    /// caching); blocking HTTP (ureq) fits the sync caller contract -- the
+    /// orchestrator runs `ask` on a `spawn_blocking` thread (ADR-0007), so no
+    /// async runtime is pulled in and the turn stays cancellable at the
+    /// flag-check between attempts.
+    pub fn generate(
+        config: &dyn ProviderConfigSource,
+        request: &ProviderRequest,
+    ) -> Result<ProviderReply, ProviderError> {
         // ADR-0029 invariant 3: the key is fetched here, in the Rust core, per
         // turn. Absent key -> NotWired (permanent for this turn, not retried) --
         // the orchestrator surfaces it as a failed turn prompting configuration.
-        let key = self.config.api_key().ok_or(ProviderError::NotWired)?;
-        let base_url = self.config.base_url();
-        let model = self.config.model();
+        let key = config.api_key().ok_or(ProviderError::NotWired)?;
+        let base_url = config.base_url();
+        let model = config.model();
         let url = format!("{base}/v1/messages", base = base_url.trim_end_matches('/'));
 
         // ADR-0052 (issue #78): assemble the system prompt via the shared
@@ -76,7 +78,7 @@ impl Provider for AnthropicProvider {
         // the canonical boundary prompt and the schema context. The locale is
         // read from the config source (resolved in Rust, never in ProviderRequest
         // / never pushed by the frontend).
-        let system = build_system_prompt(request, self.config.locale());
+        let system = build_system_prompt(request, config.locale());
         let body = AnthropicRequest {
             model: &model,
             max_tokens: MAX_TOKENS,
@@ -218,28 +220,23 @@ mod tests {
     use crate::provider::prompt::ResponseLocale;
     use crate::provider::{ColumnRef, DatasetRef, ResponsePayload};
 
-    /// Build a provider whose key/endpoint/model are fixed and point at a
-    /// mockito server URL (no OS keychain, no real network). Locale defaults to
-    /// EnUS (the least-surprise fallback); tests that assert the locale
-    /// directive use `provider_at_locale`.
-    fn provider_at(url: &str, key: Option<&str>) -> AnthropicProvider {
-        provider_at_locale(url, key, ResponseLocale::EnUS)
+    /// Build a fixed config pointing at a mockito server URL (no OS keychain,
+    /// no real network). Locale defaults to EnUS (the least-surprise fallback);
+    /// tests that assert the locale directive use `config_at_locale`.
+    fn config_at(url: &str, key: Option<&str>) -> StaticConfig {
+        config_at_locale(url, key, ResponseLocale::EnUS)
     }
 
-    /// Build a provider with an explicit resolved locale (for the i18n
-    /// directive assertions -- ADR-0052).
-    fn provider_at_locale(
-        url: &str,
-        key: Option<&str>,
-        locale: ResponseLocale,
-    ) -> AnthropicProvider {
-        AnthropicProvider::new(Box::new(StaticConfig {
+    /// Build a config with an explicit resolved locale (for the i18n directive
+    /// assertions -- ADR-0052).
+    fn config_at_locale(url: &str, key: Option<&str>, locale: ResponseLocale) -> StaticConfig {
+        StaticConfig {
             key: key.map(str::to_string),
             base_url: url.to_string(),
             model: "claude-sonnet-4-6".to_string(),
             locale,
             protocol: Protocol::Anthropic,
-        }))
+        }
     }
 
     /// One minimal request with a dataset + active pointer.
@@ -283,8 +280,9 @@ mod tests {
                 r#"{"type":"sql","sql":"SELECT COUNT(*) AS n FROM \"people\".data","viz":null,"assumption":null}"#,
             ))
             .create();
-        let p = provider_at(&server.url(), Some("sk-test"));
-        let reply = p.generate(&sample_request("多少行")).expect("sql reply");
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        let reply =
+            AnthropicProvider::generate(&cfg, &sample_request("多少行")).expect("sql reply");
         match reply {
             ProviderReply::Sql {
                 sql,
@@ -309,8 +307,8 @@ mod tests {
                 r#"{"type":"sql","sql":"SELECT 1","viz":{"kind":"bar","spec":"{\"mark\":\"bar\"}"},"assumption":"regr_slope 斜率"}"#,
             ))
             .create();
-        let p = provider_at(&server.url(), Some("sk-test"));
-        match p.generate(&sample_request("画图")).unwrap() {
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match AnthropicProvider::generate(&cfg, &sample_request("画图")).unwrap() {
             ProviderReply::Sql {
                 sql,
                 viz,
@@ -336,8 +334,8 @@ mod tests {
                 r#"{"type":"text","kind":"clarify","body":"按哪个 name？","assumption":null}"#,
             ))
             .create();
-        let p = provider_at(&server.url(), Some("sk-test"));
-        match p.generate(&sample_request("汇总")).unwrap() {
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match AnthropicProvider::generate(&cfg, &sample_request("汇总")).unwrap() {
             ProviderReply::Text { kind, body, .. } => {
                 assert_eq!(kind, TextKind::Clarify);
                 assert_eq!(body, "按哪个 name？");
@@ -353,8 +351,8 @@ mod tests {
                 r#"{"type":"text","kind":"refuse","body":"不做预测，可改为按季度汇总销量","assumption":"避开预测建模"}"#,
             ))
             .create();
-        let p = provider_at(&server.url(), Some("sk-test"));
-        match p.generate(&sample_request("预测下季度")).unwrap() {
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match AnthropicProvider::generate(&cfg, &sample_request("预测下季度")).unwrap() {
             ProviderReply::Text {
                 kind,
                 body,
@@ -375,9 +373,9 @@ mod tests {
         // refuse a connection: if the code path ever tried the network it would
         // surface an Unavailable (connect error), not NotWired -- so the
         // NotWired assertion proves no call was placed.
-        let p = provider_at("http://127.0.0.1:1", None);
+        let cfg = config_at("http://127.0.0.1:1", None);
         assert_eq!(
-            p.generate(&sample_request("q")).unwrap_err(),
+            AnthropicProvider::generate(&cfg, &sample_request("q")).unwrap_err(),
             ProviderError::NotWired
         );
     }
@@ -392,9 +390,9 @@ mod tests {
             .with_status(401)
             .with_body(r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#)
             .create();
-        let p = provider_at(&server.url(), Some("sk-bad"));
+        let cfg = config_at(&server.url(), Some("sk-bad"));
         assert_eq!(
-            p.generate(&sample_request("q")).unwrap_err(),
+            AnthropicProvider::generate(&cfg, &sample_request("q")).unwrap_err(),
             ProviderError::NotWired
         );
     }
@@ -411,8 +409,8 @@ mod tests {
                 r#"{"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}"#,
             )
             .create();
-        let p = provider_at(&server.url(), Some("sk-test"));
-        match p.generate(&sample_request("q")) {
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match AnthropicProvider::generate(&cfg, &sample_request("q")) {
             Err(ProviderError::Unavailable(_)) => {}
             other => panic!("expected Unavailable, got {other:?}"),
         }
@@ -428,9 +426,9 @@ mod tests {
             .with_status(200)
             .with_body(anthropic_body("这不是 JSON"))
             .create();
-        let p = provider_at(&server.url(), Some("sk-test"));
+        let cfg = config_at(&server.url(), Some("sk-test"));
         assert!(matches!(
-            p.generate(&sample_request("q")),
+            AnthropicProvider::generate(&cfg, &sample_request("q")),
             Err(ProviderError::Unavailable(_))
         ));
     }
@@ -447,8 +445,8 @@ mod tests {
                 "```json\n{\"type\":\"sql\",\"sql\":\"SELECT 1\",\"viz\":null,\"assumption\":null}\n```",
             ))
             .create();
-        let p = provider_at(&server.url(), Some("sk-test"));
-        match p.generate(&sample_request("q")).unwrap() {
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match AnthropicProvider::generate(&cfg, &sample_request("q")).unwrap() {
             ProviderReply::Sql { sql, .. } => assert_eq!(sql, "SELECT 1"),
             other => panic!("expected Sql, got {other:?}"),
         }
@@ -472,8 +470,8 @@ mod tests {
                 r#"{"type":"sql","sql":"SELECT 1","viz":null,"assumption":null}"#,
             ))
             .create();
-        let p = provider_at(&server.url(), Some("sk-test"));
-        p.generate(&sample_request("多少行")).expect("reply");
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        AnthropicProvider::generate(&cfg, &sample_request("多少行")).expect("reply");
         _mock.assert(); // matched model + role + auth headers
     }
 
@@ -495,8 +493,8 @@ mod tests {
                 r#"{"type":"sql","sql":"SELECT 1","viz":null,"assumption":null}"#,
             ))
             .create();
-        let p = provider_at_locale(&server.url(), Some("sk-test"), ResponseLocale::ZhCN);
-        p.generate(&sample_request("画图")).expect("reply");
+        let cfg = config_at_locale(&server.url(), Some("sk-test"), ResponseLocale::ZhCN);
+        AnthropicProvider::generate(&cfg, &sample_request("画图")).expect("reply");
         _mock.assert();
 
         // The EnUS directive must also land when the resolved locale is EnUS.
@@ -509,8 +507,8 @@ mod tests {
                 r#"{"type":"sql","sql":"SELECT 1","viz":null,"assumption":null}"#,
             ))
             .create();
-        let p_en = provider_at_locale(&server_en.url(), Some("sk-test"), ResponseLocale::EnUS);
-        p_en.generate(&sample_request("draw")).expect("reply");
+        let cfg_en = config_at_locale(&server_en.url(), Some("sk-test"), ResponseLocale::EnUS);
+        AnthropicProvider::generate(&cfg_en, &sample_request("draw")).expect("reply");
         _mock_en.assert();
     }
 

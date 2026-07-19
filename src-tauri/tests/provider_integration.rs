@@ -1,10 +1,11 @@
-//! Real-provider integration (issue #29, ADR-0007/0029): wires the real
-//! AnthropicProvider into a Session and drives one ask -> materialize turn
-//! against a mockito server standing in for Anthropic. Verifies the full chain
-//! the unit tests cannot -- window assembly -> real HTTP provider -> SQL
-//! execution -> result_N materialization -- without a network or a real key.
-//! The orchestrator's behavior is provider-agnostic (FakeProvider covers the
-//! contract offline); this test pins that the real provider plugs in correctly.
+//! Real-provider integration (issue #29, ADR-0007/0029): wires a LiveProvider
+//! (routing to the Anthropic adapter) into a Session and drives one ask ->
+//! materialize turn against a mockito server standing in for Anthropic.
+//! Verifies the full chain the unit tests cannot -- window assembly -> real
+//! HTTP provider -> SQL execution -> result_N materialization -- without a
+//! network or a real key. The orchestrator's behavior is provider-agnostic
+//! (FakeProvider covers the contract offline); this test pins that the real
+//! provider plugs in correctly.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use toptopduck_lib::{
-    AnthropicProvider, CancelToken, LoadOutcome, Protocol, ResponseLocale, Session, StaticConfig,
+    CancelToken, LiveProvider, LoadOutcome, Protocol, ResponseLocale, Session, StaticConfig,
     TurnFailure, TurnOutcome,
 };
 
@@ -43,13 +44,13 @@ fn real_provider_end_to_end_materializes_result() {
         ))
         .create();
 
-    let provider = AnthropicProvider::new(Box::new(StaticConfig {
+    let provider = LiveProvider::new(StaticConfig {
         key: Some("sk-test".into()),
         base_url: server.url(),
         model: "claude-sonnet-4-6".into(),
         locale: ResponseLocale::EnUS,
         protocol: Protocol::Anthropic,
-    }));
+    });
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
 
     // Ingest the people fixture so the working set has a dataset to query.
@@ -85,13 +86,13 @@ fn real_provider_missing_key_yields_failed_turn() {
     // single retry budget does not help (NotWired is not retried), so the turn
     // lands as Failed immediately -- the user is prompted to configure a key.
     let server = mockito::Server::new();
-    let provider = AnthropicProvider::new(Box::new(StaticConfig {
+    let provider = LiveProvider::new(StaticConfig {
         key: None,
         base_url: server.url(),
         model: "claude-sonnet-4-6".into(),
         locale: ResponseLocale::EnUS,
         protocol: Protocol::Anthropic,
-    }));
+    });
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     let outcome = session.ask("anything");
     match outcome {
@@ -125,13 +126,13 @@ fn real_provider_cancel_during_http_block_lands_cancelled() {
         .create();
 
     let cancel = Arc::new(CancelToken::new());
-    let provider = AnthropicProvider::new(Box::new(StaticConfig {
+    let provider = LiveProvider::new(StaticConfig {
         key: Some("sk-test".into()),
         base_url: server.url(),
         model: "claude-sonnet-4-6".into(),
         locale: ResponseLocale::EnUS,
         protocol: Protocol::Anthropic,
-    }));
+    });
     let mut session = Session::with_provider_and_cancel(Box::new(provider), Arc::clone(&cancel))
         .expect("session");
 
