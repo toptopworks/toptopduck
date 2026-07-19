@@ -78,9 +78,19 @@ header h1 { margin: 0 0 0.5rem; }
 .dataset-detail h2 { margin: 0 0 0.25rem; }
 .dataset-detail small { color: var(--muted-foreground); font-weight: 400; }
 .meta { color: var(--muted-foreground); margin: 0.25rem 0 0.75rem; }
-table { border-collapse: collapse; width: 100%; margin: 0.5rem 0 1rem; }
-th, td { border: 1px solid var(--border); padding: 0.3rem 0.5rem; text-align: left; font-size: 0.9rem; }
-th { background: var(--muted); }
+/* ADR-0067 (issue #168): the global `table / th / td` element rules used to
+ * live here (border-collapse + grid border + th background + compact padding +
+ * font-size). They are retired into ui/table.tsx's self-contained primitives
+ * (Table carries border-collapse + mt-2 mb-4 + text-sm; TableHead carries
+ * border + bg-muted + text-sm; TableCell carries border + py-1 px-2 + text-sm).
+ * font-size snaps from the legacy 0.9rem to text-sm (the nearest Tailwind scale
+ * step, ADR-0067 Decision 2). The caller-scoped rules that remain (.schema td
+ * code, .privacy-cols td:last-child, table.result .num/.cell-null) are class
+ * hooks on the rendered <table>/<th>/<td>, not bare element rules -- kept as
+ * the per-call visual contract (ADR-0057 numeric right-align, NULL muted cell,
+ * schema type wrap). The .preview caller (GuidedLoadDialog) carries no
+ * caller-scoped rule -- its native <table> was migrated to the Table primitive
+ * alongside .privacy-cols so it renders correctly with no global table CSS. */
 code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 /* Nested DuckDB types (STRUCT(...)/LIST(...)/MAP(...)) can be long -- let the
    inferred-type column wrap instead of overflowing the panel. */

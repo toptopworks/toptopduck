@@ -12,6 +12,7 @@ import { QuestionBar } from "../components/QuestionBar";
 import { COLUMN_DISCLOSURE_THRESHOLD, ResultView, ROW_DISCLOSURE_THRESHOLD } from "../components/ResultView";
 import { SettingsView } from "../components/settingsView/SettingsView";
 import { Thread } from "../components/Thread";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { TooltipProvider } from "../components/ui/tooltip";
 import { VegaChart } from "../components/VegaChart";
 import { WorkingSetList } from "../components/WorkingSetList";
@@ -2199,5 +2200,69 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
     await screen.findByText("keychain unavailable");
     expect(screen.getByRole("button", { name: "New profile" })).toBeEnabled();
+  });
+});
+
+describe("Table primitives (ADR-0067, issue #168 self-contained)", () => {
+  // ADR-0067 retires the styles.css global `table / th / td` element rules; the
+  // Table primitives now carry their own border / bg / padding utility so they
+  // render correctly with NO global table CSS. This pins the structural
+  // invariant -- a regression that drops border / bg-muted would silently
+  // revert to relying on the retired global rules (the layering the table.tsx
+  // comment used to document). jsdom has no layout engine, so these are
+  // className-contract assertions on the real rendered elements, not visual
+  // checks.
+  it("Table renders a <table> with border-collapse (no global table rule needed)", () => {
+    const { container } = render(
+      <Table>
+        <TableBody>
+          <TableRow>
+            <TableCell>x</TableCell>
+          </TableRow>
+        </TableBody>
+      </Table>,
+    );
+    const table = container.querySelector("table");
+    expect(table).not.toBeNull();
+    expect(table?.className).toMatch(/\bborder-collapse\b/);
+  });
+
+  it("TableHead carries its own border + bg-muted + text-sm (no global th rule needed)", () => {
+    const { container } = render(
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>h</TableHead>
+          </TableRow>
+        </TableHeader>
+      </Table>,
+    );
+    const th = container.querySelector("th");
+    expect(th).not.toBeNull();
+    // Grid border on the cell itself (the legacy global `th, td { border: ... }`
+    // rule), now expressed as the `border` utility -- border-color comes from
+    // app.css's @layer base `* { border-color: var(--border) }`.
+    expect(th?.className).toMatch(/\bborder\b/);
+    // Header tint (the legacy global `th { background: var(--muted) }` rule).
+    expect(th?.className).toMatch(/bg-muted/);
+    // Font-size (the legacy global `th, td { font-size: 0.9rem }` rule), now
+    // text-sm -- ADR-0067 Decision 2 snaps 0.9rem to the nearest scale step.
+    expect(th?.className).toMatch(/\btext-sm\b/);
+  });
+
+  it("TableCell carries its own border + text-sm (no global td rule needed)", () => {
+    const { container } = render(
+      <Table>
+        <TableBody>
+          <TableRow>
+            <TableCell>c</TableCell>
+          </TableRow>
+        </TableBody>
+      </Table>,
+    );
+    const td = container.querySelector("td");
+    expect(td).not.toBeNull();
+    expect(td?.className).toMatch(/\bborder\b/);
+    expect(td?.className).toMatch(/\btext-sm\b/);
   });
 });

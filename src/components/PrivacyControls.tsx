@@ -1,5 +1,6 @@
 import { FormattedMessage, useIntl } from "react-intl";
 import type { DatasetDescriptor, DatasetPrivacy } from "../types";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 
 interface PrivacyControlsProps {
   dataset: DatasetDescriptor;
@@ -85,31 +86,31 @@ export function PrivacyControls({ dataset, loading, onPrivacyChange }: PrivacyCo
         </p>
       )}
 
-      <table className="privacy-cols">
-        <thead>
-          <tr>
-            <th scope="col">
+      <Table className="privacy-cols">
+        <TableHeader>
+          <TableRow>
+            <TableHead scope="col">
               <FormattedMessage id="column.col" defaultMessage="Column" />
-            </th>
-            <th scope="col">
+            </TableHead>
+            <TableHead scope="col">
               <FormattedMessage id="column.type" defaultMessage="DuckDB type" />
-            </th>
-            <th scope="col">
+            </TableHead>
+            <TableHead scope="col">
               <FormattedMessage
                 id="privacy.typeOnlyHeader"
                 defaultMessage="Type only (no values, no column name)"
               />
-            </th>
-          </tr>
-        </thead>
-        <tbody>
+            </TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {columns.map((c) => (
-            <tr key={c.name}>
-              <td>{c.name}</td>
-              <td>
+            <TableRow key={c.name}>
+              <TableCell>{c.name}</TableCell>
+              <TableCell>
                 <code>{c.canonical_type}</code>
-              </td>
-              <td>
+              </TableCell>
+              <TableCell>
                 <input
                   type="checkbox"
                   checked={typeOnly.has(c.name)}
@@ -120,11 +121,11 @@ export function PrivacyControls({ dataset, loading, onPrivacyChange }: PrivacyCo
                     { name: c.name },
                   )}
                 />
-              </td>
-            </tr>
+              </TableCell>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
 
       <p className="disclosure-summary">
         <strong>
