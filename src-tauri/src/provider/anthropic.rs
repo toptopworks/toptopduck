@@ -13,9 +13,8 @@
 //!   object; this module parses it into [`ProviderReply`] or yields a retried
 //!   [`ProviderError::Unavailable`] on any malformed/transport outcome.
 //!
-//! Blocking HTTP (ureq) fits the sync [`Provider::generate`] contract: the
-//! orchestrator runs `ask` on a `spawn_blocking` thread, so no async runtime is
-//! pulled in and the turn stays cancellable at the flag-check between attempts.
+//! Cancellation contract (blocking ureq + `spawn_blocking` + post-call flag
+//! check, ADR-0021) is documented on [`AnthropicProvider::generate`].
 
 use std::time::Duration;
 
@@ -58,7 +57,7 @@ impl AnthropicProvider {
     /// Place one Anthropic Messages API call (ADR-0019 native protocol). Reads
     /// the key + endpoint + model + locale from `config` per call (live, no
     /// caching); blocking HTTP (ureq) fits the sync caller contract -- the
-    /// orchestrator runs `ask` on a `spawn_blocking` thread (ADR-0007), so no
+    /// orchestrator runs `ask` on a `spawn_blocking` thread (ADR-0021), so no
     /// async runtime is pulled in and the turn stays cancellable at the
     /// flag-check between attempts.
     pub fn generate(

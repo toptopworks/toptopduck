@@ -21,10 +21,9 @@
 //! raise ADR-0028 retry rates; a per-model local tool-calling introduction is
 //! deferred until a model's retry rate actually exceeds the threshold.)
 //!
-//! Like the anthropic adapter, blocking HTTP (ureq) fits the sync
-//! [`Provider::generate`] contract: the orchestrator runs `ask` on a
-//! `spawn_blocking` thread, so no async runtime is pulled in and the turn
-//! stays cancellable at the flag-check between attempts.
+//! Cancellation contract (blocking ureq + `spawn_blocking` + post-call flag
+//! check, ADR-0021) mirrors the anthropic adapter; see
+//! [`super::anthropic::AnthropicProvider::generate`] for the rationale.
 
 use std::time::Duration;
 
@@ -64,7 +63,7 @@ impl OpenaiProvider {
     /// Place one OpenAI Chat Completions API call. Reads the key + endpoint +
     /// model + locale from `config` per call (live, no caching); blocking HTTP
     /// (ureq) fits the sync caller contract -- the orchestrator runs `ask` on a
-    /// `spawn_blocking` thread (ADR-0007), so no async runtime is pulled in and
+    /// `spawn_blocking` thread (ADR-0021), so no async runtime is pulled in and
     /// the turn stays cancellable at the flag-check between attempts.
     pub fn generate(
         config: &dyn ProviderConfigSource,

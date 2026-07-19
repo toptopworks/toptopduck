@@ -480,12 +480,19 @@ mod tests {
         }
 
         let provider = LiveProvider::new(NonCloneSource);
-        // Drive one turn to confirm the borrow path runs: with no key the
-        // adapter read api_key() off &self.config and returned NotWired before
-        // any HTTP call. That NonCloneSource cannot be cloned AT ALL is enforced
-        // by the type system (no Clone impl) -- the bound removal is what makes
-        // this compile; the runtime assert just confirms dispatch reached the
-        // matching adapter branch.
+        // The compile-pass is the load-bearing guard: NonCloneSource has no
+        // Clone impl, so re-adding `+ Clone` to LiveProvider<C>'s bound would
+        // fail this test to compile. The runtime assert is a cheap sanity
+        // check that dispatch still reaches the matching adapter branch
+        // (redundant with the borrow-path coverage in
+        // re_reads_protocol_per_turn_not_cached_at_construction).
+        //
+        // Scope: this guards the BOUND, not the production wiring. Production
+        // (commands.rs) still clones LiveProviderConfig at LiveProvider::new;
+        // the per-turn clone was removed only INSIDE LiveProvider::generate
+        // (which now borrows &self.config). The bound removal keeps the router
+        // source-agnostic -- it does not require any concrete source to
+        // forgo Clone.
         assert_eq!(
             provider.generate(&bare_request()).unwrap_err(),
             ProviderError::NotWired

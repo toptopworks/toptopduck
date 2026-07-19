@@ -31,6 +31,19 @@ fn anthropic_body(model_json: &str) -> String {
     .to_string()
 }
 
+/// Wire a LiveProvider with an Anthropic-protocol StaticConfig pointing at
+/// `url`. Only `key` varies across the three integration tests; collapsing
+/// the block here keeps the test bodies focused on the behavior under test.
+fn anthropic_live_provider(url: String, key: Option<&str>) -> LiveProvider<StaticConfig> {
+    LiveProvider::new(StaticConfig {
+        key: key.map(str::to_string),
+        base_url: url,
+        model: "claude-sonnet-4-6".into(),
+        locale: ResponseLocale::EnUS,
+        protocol: Protocol::Anthropic,
+    })
+}
+
 #[test]
 fn real_provider_end_to_end_materializes_result() {
     let mut server = mockito::Server::new();
@@ -44,13 +57,7 @@ fn real_provider_end_to_end_materializes_result() {
         ))
         .create();
 
-    let provider = LiveProvider::new(StaticConfig {
-        key: Some("sk-test".into()),
-        base_url: server.url(),
-        model: "claude-sonnet-4-6".into(),
-        locale: ResponseLocale::EnUS,
-        protocol: Protocol::Anthropic,
-    });
+    let provider = anthropic_live_provider(server.url(), Some("sk-test"));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
 
     // Ingest the people fixture so the working set has a dataset to query.
@@ -86,13 +93,7 @@ fn real_provider_missing_key_yields_failed_turn() {
     // single retry budget does not help (NotWired is not retried), so the turn
     // lands as Failed immediately -- the user is prompted to configure a key.
     let server = mockito::Server::new();
-    let provider = LiveProvider::new(StaticConfig {
-        key: None,
-        base_url: server.url(),
-        model: "claude-sonnet-4-6".into(),
-        locale: ResponseLocale::EnUS,
-        protocol: Protocol::Anthropic,
-    });
+    let provider = anthropic_live_provider(server.url(), None);
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     let outcome = session.ask("anything");
     match outcome {
@@ -126,13 +127,7 @@ fn real_provider_cancel_during_http_block_lands_cancelled() {
         .create();
 
     let cancel = Arc::new(CancelToken::new());
-    let provider = LiveProvider::new(StaticConfig {
-        key: Some("sk-test".into()),
-        base_url: server.url(),
-        model: "claude-sonnet-4-6".into(),
-        locale: ResponseLocale::EnUS,
-        protocol: Protocol::Anthropic,
-    });
+    let provider = anthropic_live_provider(server.url(), Some("sk-test"));
     let mut session = Session::with_provider_and_cancel(Box::new(provider), Arc::clone(&cancel))
         .expect("session");
 
