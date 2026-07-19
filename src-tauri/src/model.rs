@@ -1005,3 +1005,51 @@ pub struct ProfileKeyStatus {
     /// Whether a key is stored for this profile. A boolean only (ADR-0029).
     pub has_key: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_protocol_returns_active_protocol() {
+        // ADR-0064 (issue #152): effective_protocol follows the active_profile
+        // POINTER, not a fixed field -- switching active to a different profile
+        // lands that profile's protocol on the next read. Seed a second profile
+        // with the Openai protocol and flip active_profile between the two; the
+        // read tracks each flip, never a cached value. The live source
+        // (LiveProviderConfig::protocol) delegates here, so this is the
+        // load-bearing leaf of the per-turn read path.
+        let mut cfg = ProviderConfig::defaults();
+        let anthropic_id = cfg.active_profile.clone();
+        let openai_id = ProfileId("__test_openai_profile".into());
+        cfg.profiles.push(ProviderProfile {
+            id: openai_id.clone(),
+            display_name: "OpenAI".into(),
+            protocol: Protocol::Openai,
+            base_url: "https://api.openai.example.test".into(),
+            model: "gpt-4o".into(),
+        });
+        // Default active profile is the Anthropic one.
+        assert_eq!(cfg.effective_protocol(), Protocol::Anthropic);
+
+        // Flip active_profile to the Openai profile -- effective_protocol follows.
+        cfg.active_profile = openai_id;
+        assert_eq!(cfg.effective_protocol(), Protocol::Openai);
+
+        // Flip back -- the read tracks each pointer switch, never a cached value.
+        cfg.active_profile = anthropic_id;
+        assert_eq!(cfg.effective_protocol(), Protocol::Anthropic);
+    }
+
+    #[test]
+    fn effective_protocol_falls_back_to_anthropic_when_active_missing() {
+        // A malformed config whose active_profile points nowhere falls back to
+        // the Anthropic protocol default, never panics -- mirrors
+        // effective_base_url / effective_model. normalize repairs it on the
+        // next store; this pins the pre-normalize live-read behavior so a
+        // hand-edited gap never dispatches a turn on a wrong/no protocol.
+        let mut cfg = ProviderConfig::defaults();
+        cfg.active_profile = ProfileId("no-such-profile".into());
+        assert_eq!(cfg.effective_protocol(), Protocol::Anthropic);
+    }
+}
