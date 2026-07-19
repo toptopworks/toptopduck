@@ -287,12 +287,10 @@ export function ProfilesSection({
                   <button
                     type="button"
                     className={cn(
-                      // [all:unset] strips native <button> chrome; subsequent
-                      // utilities rebuild the box model. flex-1 + min-w-0 let
-                      // the row share space with the radio + delete button and
-                      // let the inner name truncate. focus-visible outline
-                      // restores the keyboard ring `all: unset` removed (WCAG
-                      // 2.4.7), matching the settings-nav-button contract.
+                      // Same [all:unset] + hover/focus-visible ring contract as
+                      // settings-nav-button (WCAG 2.4.7 -- see there). flex-1 +
+                      // min-w-0 are row-specific: share space with the radio +
+                      // delete button + let the inner name truncate.
                       "profiles-list-item-select [all:unset] cursor-pointer flex-1 min-w-0",
                       "flex items-center gap-1.5 py-1 px-1.5 rounded-md text-sm text-foreground",
                       "hover:bg-accent",

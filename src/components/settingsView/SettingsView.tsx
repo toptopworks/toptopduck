@@ -341,10 +341,9 @@ export function SettingsView({
         {/* Active section heading: same label the nav button shows (mirrors the
             catalog entry via SectionLabel, so a static id literal still drives
             formatjs extract). */}
-        {/* text-[1.05rem] preserves the retired rule's exact font-size; the
-            Tailwind type scale has no step between text-base (1rem) and
-            text-lg (1.125rem), so the arbitrary value honors the 1.05rem the
-            v0 styles.css set rather than snapping down (issue #170 AC). */}
+        {/* text-[1.05rem] preserves the retired rule's font-size (issue #170
+            AC: rendering unchanged) -- no Tailwind scale step matches, so the
+            arbitrary value honors it rather than snapping to text-base/lg. */}
         <h3 className="settings-section-heading m-0 mb-4 text-[1.05rem] font-semibold">
           <SectionLabel section={section} />
         </h3>

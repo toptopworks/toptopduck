@@ -2071,6 +2071,31 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
   };
   const profileKeysDefault = [{ profile_id: "default", has_key: false }];
 
+  // Two-profile config + key overlay: default (Anthropic, active/selected) +
+  // second (GLM/openai). Shared by the #153 delete test and the #170
+  // selected-state + focus-contract tests so each has a selected vs unselected
+  // contrast. active_profile stays "default" so the first row is selected.
+  const twoProfileConfig: AppConfig = {
+    ...baseConfig,
+    provider: {
+      profiles: [
+        baseConfig.provider.profiles[0],
+        {
+          id: "second",
+          display_name: "GLM",
+          protocol: "openai",
+          base_url: "https://open.bigmodel.cn/api/paas/v4",
+          model: "glm-4",
+        },
+      ],
+      active_profile: "default",
+    },
+  };
+  const twoProfileKeys = [
+    { profile_id: "default", has_key: false },
+    { profile_id: "second", has_key: false },
+  ];
+
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(listProviderProfiles).mockResolvedValue(profileKeysDefault);
@@ -2245,26 +2270,7 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
   it("delete opens an AlertDialog and confirming removes the profile (issue #153)", async () => {
     // Start with two profiles so deletion leaves one (the AlertDialog confirm
     // is the AC's accidental-delete guard).
-    const twoProfileConfig: AppConfig = {
-      ...baseConfig,
-      provider: {
-        profiles: [
-          baseConfig.provider.profiles[0],
-          {
-            id: "second",
-            display_name: "GLM",
-            protocol: "openai",
-            base_url: "https://open.bigmodel.cn/api/paas/v4",
-            model: "glm-4",
-          },
-        ],
-        active_profile: "default",
-      },
-    };
-    vi.mocked(listProviderProfiles).mockResolvedValue([
-      { profile_id: "default", has_key: false },
-      { profile_id: "second", has_key: false },
-    ]);
+    vi.mocked(listProviderProfiles).mockResolvedValue(twoProfileKeys);
     renderSettings(
       <SettingsView
         appConfig={twoProfileConfig}
@@ -2455,26 +2461,7 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
     // The default profile is selected by default; a second profile (when
     // present) is not. Both must render with the base border-transparent so
     // the unselected item reads as a flat row (not an empty bordered slot).
-    vi.mocked(listProviderProfiles).mockResolvedValue([
-      { profile_id: "default", has_key: false },
-      { profile_id: "second", has_key: false },
-    ]);
-    const twoProfileConfig: AppConfig = {
-      ...baseConfig,
-      provider: {
-        profiles: [
-          baseConfig.provider.profiles[0],
-          {
-            id: "second",
-            display_name: "GLM",
-            protocol: "openai",
-            base_url: "https://open.bigmodel.cn/api/paas/v4",
-            model: "glm-4",
-          },
-        ],
-        active_profile: "default",
-      },
-    };
+    vi.mocked(listProviderProfiles).mockResolvedValue(twoProfileKeys);
     const { container } = renderSettings(
       <SettingsView
         appConfig={twoProfileConfig}
@@ -2517,6 +2504,32 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
     const button = container.querySelector(".settings-nav-button");
     expect(button).not.toBeNull();
     const classes = button?.className.split(/\s+/);
+    expect(classes).toContain("[all:unset]");
+    expect(classes).toContain("focus-visible:outline-2");
+    expect(classes).toContain("focus-visible:outline-ring");
+    expect(classes).toContain("focus-visible:outline-offset-2");
+  });
+
+  it("profiles-list-item-select keeps [all:unset] + focus-visible outline contract (issue #170)", async () => {
+    // Mirror of the settings-nav-button contract above: the select button is
+    // also [all:unset], so it also needs the explicit focus-visible ring
+    // (WCAG 2.4.7). Pinning both guards against a regression that drops the
+    // reset or the outline on this twin element.
+    vi.mocked(listProviderProfiles).mockResolvedValue(twoProfileKeys);
+    const { container } = renderSettings(
+      <SettingsView
+        appConfig={twoProfileConfig}
+        onCommitAppConfig={vi.fn()}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    // Wait for the key-status overlay fetch to resolve so the select buttons
+    // render (the list is gated on listProviderProfiles resolving).
+    await screen.findByText("GLM");
+    const select = container.querySelector(".profiles-list-item-select");
+    expect(select).not.toBeNull();
+    const classes = select?.className.split(/\s+/);
     expect(classes).toContain("[all:unset]");
     expect(classes).toContain("focus-visible:outline-2");
     expect(classes).toContain("focus-visible:outline-ring");
