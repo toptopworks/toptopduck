@@ -11,6 +11,7 @@ import type {
   ProviderProfile,
   Theme,
 } from "../../types";
+import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { EngineSection } from "./EngineSection";
 import { GeneralSection } from "./GeneralSection";
@@ -281,30 +282,53 @@ export function SettingsView({
       role="dialog"
       aria-modal="false"
       aria-labelledby="settings-view-title"
-      className="settings-overlay"
+      className="settings-overlay bg-background outline-none focus-visible:outline-none"
     >
-      <header className="settings-header">
+      <header className="settings-header gap-3 px-4 border-b border-border bg-background">
         <Button
           type="button"
           variant="ghost"
-          className="settings-back"
+          // Compact chrome narrowing on top of the ghost Button (variant keeps
+          // the hover tint): h-8 + py-0 + px-2.5 makes ‹ Back read as a nav
+          // arrow, not a CTA. px-2.5 + its svg-variant override the default
+          // size's px-4 / has-[>svg]:px-3 so the horizontal chrome stays narrow
+          // whether or not the icon renders (ADR-0067 visual-on-token).
+          className="settings-back h-8 py-0 px-2.5 has-[>svg]:px-2.5"
           onClick={onClose}
           disabled={busy}
         >
           <ArrowLeft size={16} aria-hidden />
           <FormattedMessage id="settings.backToApp" defaultMessage="‹ Back to app" />
         </Button>
-        <h2 id="settings-view-title" className="settings-title">
+        <h2
+          id="settings-view-title"
+          className="settings-title m-0 text-base font-semibold"
+        >
           <FormattedMessage id="settings.title" defaultMessage="App Settings" />
         </h2>
       </header>
 
-      <nav className="settings-nav" aria-label="Settings sections">
+      <nav
+        className="settings-nav gap-0.5 p-2 bg-muted border-r border-border"
+        aria-label="Settings sections"
+      >
         {SETTINGS_SECTIONS.map((s) => (
           <button
             key={s}
             type="button"
-            className="settings-nav-button"
+            className={cn(
+              // [all:unset] strips native <button> chrome so the entry reads as
+              // a flat list row; subsequent utilities rebuild the box model over
+              // the ADR-0050 token. aria-current carries the active section
+              // (issue #170 AC: rendering unchanged) as bg-primary +
+              // text-primary-foreground + font-semibold, replacing the retired
+              // [aria-current="page"] CSS rule. The focus-visible outline
+              // restores the keyboard ring `all: unset` stripped (WCAG 2.4.7).
+              "settings-nav-button [all:unset] cursor-pointer py-1.5 px-2.5 rounded-md text-sm text-foreground",
+              "hover:bg-accent",
+              "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+              section === s && "bg-primary text-primary-foreground font-semibold",
+            )}
             aria-current={section === s ? "page" : undefined}
             onClick={() => setSection(s)}
           >
@@ -313,18 +337,24 @@ export function SettingsView({
         ))}
       </nav>
 
-      <main className="settings-content">
+      <main className="settings-content p-6 max-w-[1000px]">
         {/* Active section heading: same label the nav button shows (mirrors the
             catalog entry via SectionLabel, so a static id literal still drives
             formatjs extract). */}
-        <h3 className="settings-section-heading">
+        {/* text-[1.05rem] preserves the retired rule's exact font-size; the
+            Tailwind type scale has no step between text-base (1rem) and
+            text-lg (1.125rem), so the arbitrary value honors the 1.05rem the
+            v0 styles.css set rather than snapping down (issue #170 AC). */}
+        <h3 className="settings-section-heading m-0 mb-4 text-[1.05rem] font-semibold">
           <SectionLabel section={section} />
         </h3>
         <SectionContent section={section} form={form} profilesProps={profilesProps} />
-        {error && <p className="settings-error text-destructive text-sm">{error}</p>}
+        {error && (
+          <p className="settings-error mt-3 text-destructive text-sm">{error}</p>
+        )}
       </main>
 
-      <footer className="settings-footer">
+      <footer className="settings-footer gap-2 px-6 py-3 border-t border-border bg-background">
         <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
           <FormattedMessage id="settings.cancel" defaultMessage="Cancel" />
         </Button>

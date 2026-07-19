@@ -2412,6 +2412,116 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
     await screen.findByText("keychain unavailable");
     expect(screen.getByRole("button", { name: "New profile" })).toBeEnabled();
   });
+
+  // --- ADR-0067 (issue #170): visual expression migrated to Tailwind utility
+  // + ADR-0050 token on the component. The nav active / list selected / chrome
+  // SEMANTICS are unchanged; these pin the className contract so a regression
+  // that drops a utility silently reverts to the retired styles.css rules.
+  // jsdom has no layout engine, so these are className assertions on the real
+  // rendered elements (cf. the Thread rail + Table primitive tests), split
+  // (/\s+/) + toContain so `bg-primary` does not match `bg-primary-foreground`
+  // etc. The profiles-master-detail <=640px stacking is a CSS @media rule that
+  // stays in styles.css (issue #170 AC) and cannot be exercised in jsdom.
+
+  it("settings-nav-button aria-current lifts bg-primary + text-primary-foreground + font-semibold (issue #170)", () => {
+    // The active section's nav button carries its aria-current="page" styling
+    // as inline utilities over the ADR-0050 token, replacing the retired
+    // .settings-nav-button[aria-current="page"] CSS rule. General is the
+    // default section so its nav button is the active one on mount.
+    const { container } = renderSettings(
+      <SettingsView
+        appConfig={baseConfig}
+        onCommitAppConfig={vi.fn()}
+        onClose={() => {}}
+      />,
+    );
+    const active = container.querySelector(`.settings-nav-button[aria-current="page"]`);
+    expect(active).not.toBeNull();
+    const activeClasses = active?.className.split(/\s+/);
+    expect(activeClasses).toContain("bg-primary");
+    expect(activeClasses).toContain("text-primary-foreground");
+    expect(activeClasses).toContain("font-semibold");
+    // An inactive nav button does NOT carry the active utilities.
+    const inactive = container.querySelector(
+      `.settings-nav-button:not([aria-current="page"])`,
+    );
+    expect(inactive).not.toBeNull();
+    expect(inactive?.className.split(/\s+/)).not.toContain("bg-primary");
+  });
+
+  it("profiles-list-item.selected lifts border-border + bg-muted (issue #170)", async () => {
+    // The selected profile's list item carries the selected tint as inline
+    // utilities, replacing the retired .profiles-list-item.selected CSS rule.
+    // The default profile is selected by default; a second profile (when
+    // present) is not. Both must render with the base border-transparent so
+    // the unselected item reads as a flat row (not an empty bordered slot).
+    vi.mocked(listProviderProfiles).mockResolvedValue([
+      { profile_id: "default", has_key: false },
+      { profile_id: "second", has_key: false },
+    ]);
+    const twoProfileConfig: AppConfig = {
+      ...baseConfig,
+      provider: {
+        profiles: [
+          baseConfig.provider.profiles[0],
+          {
+            id: "second",
+            display_name: "GLM",
+            protocol: "openai",
+            base_url: "https://open.bigmodel.cn/api/paas/v4",
+            model: "glm-4",
+          },
+        ],
+        active_profile: "default",
+      },
+    };
+    const { container } = renderSettings(
+      <SettingsView
+        appConfig={twoProfileConfig}
+        onCommitAppConfig={vi.fn()}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    // Wait for the key-status overlay fetch to resolve so the profile rows
+    // render (the list is gated on listProviderProfiles resolving).
+    await screen.findByText("GLM");
+    const selected = container.querySelector(".profiles-list-item.selected");
+    expect(selected).not.toBeNull();
+    const selectedClasses = selected?.className.split(/\s+/);
+    expect(selectedClasses).toContain("border-border");
+    expect(selectedClasses).toContain("bg-muted");
+    // An unselected item keeps the transparent base border (no bg tint).
+    const unselected = container.querySelector(
+      ".profiles-list-item:not(.selected)",
+    );
+    expect(unselected).not.toBeNull();
+    const unselectedClasses = unselected?.className.split(/\s+/);
+    expect(unselectedClasses).toContain("border-transparent");
+    expect(unselectedClasses).not.toContain("bg-muted");
+  });
+
+  it("settings-nav-button keeps [all:unset] + focus-visible outline contract (issue #170)", () => {
+    // [all:unset] strips native button chrome so the entry reads as a flat row;
+    // the focus-visible outline restores the keyboard ring (WCAG 2.4.7) the
+    // reset removed. Pinning both guards against a regression that drops the
+    // reset (button regains UA chrome) or the outline (keyboard users lose the
+    // focus indicator).
+    const { container } = renderSettings(
+      <SettingsView
+        appConfig={baseConfig}
+        onCommitAppConfig={vi.fn()}
+        onClose={() => {}}
+      />,
+    );
+    const button = container.querySelector(".settings-nav-button");
+    expect(button).not.toBeNull();
+    const classes = button?.className.split(/\s+/);
+    expect(classes).toContain("[all:unset]");
+    expect(classes).toContain("focus-visible:outline-2");
+    expect(classes).toContain("focus-visible:outline-ring");
+    expect(classes).toContain("focus-visible:outline-offset-2");
+  });
 });
 
 describe("Table primitives (ADR-0067, issue #168 self-contained)", () => {
