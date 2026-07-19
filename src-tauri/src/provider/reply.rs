@@ -18,7 +18,7 @@ use crate::provider::{ProviderError, ProviderReply};
 pub fn parse_reply(text: &str) -> Result<ProviderReply, ProviderError> {
     let json_str = extract_json_object(text).ok_or_else(|| {
         ProviderError::Unavailable(format!(
-            "LLM response is not a JSON object: {}",
+            "LLM response had no JSON object carrying the `type` field: {}",
             truncate(text)
         ))
     })?;
@@ -162,15 +162,17 @@ fn find_balanced_object_end(text: &str, start: usize) -> Option<usize> {
 /// Extract the first balanced `{...}` object in `text` that parses as JSON and
 /// carries the ADR-0009 `type` field. Reasoning-style models (DeepSeek-R1,
 /// GLM-r, o1-compatible) often emit a leading `{"reasoning": "..."}` object
-/// plus prose before the real answer; the old find-`{` / rfind-`}` outermost
-/// span crossed both objects + the prose and failed to parse, so ADR-0028's
-/// retry kept firing on a recurrent malformed payload. We instead scan each
-/// balanced object and skip any candidate without `type`. Returns the
-/// inclusive substring, or `None` when no typed object is present.
+/// plus prose before the real answer; each balanced object is scanned and any
+/// candidate without `type` is skipped (issue #158). Returns the inclusive
+/// substring, or `None` when no typed object is present.
 fn extract_json_object(text: &str) -> Option<&str> {
     let mut cursor = 0usize;
     while let Some(rel) = text[cursor..].find('{') {
         let start = cursor + rel;
+        // Unbalanced leading object → give up the whole scan. Aligns with
+        // ADR-0028's "malformed = fail honestly, no lenient repair": a
+        // truncated/malformed stream surfaces as Unavailable for the
+        // single-budget retry loop, not silently skipped or repaired.
         let end = find_balanced_object_end(text, start)?;
         let candidate = &text[start..=end];
         let typed = serde_json::from_str::<serde_json::Value>(candidate)
@@ -219,10 +221,9 @@ mod tests {
 
     #[test]
     fn find_first_balanced_object_handles_prose_and_fences() {
-        // Single balanced object -- the happy path. Migrated from the old
-        // extract_json_object assertion: that function now filters by the
-        // ADR-0009 `type` field, so raw-scanner coverage of fence / prose /
-        // single-JSON inputs lives on the bottom helper.
+        // Single balanced object -- the happy path. Raw-scanner coverage of
+        // fence / prose / single-JSON inputs lives on this test-only helper
+        // because extract_json_object filters by the ADR-0009 `type` field.
         assert_eq!(find_first_balanced_object(r#"{"a":1}"#), Some(r#"{"a":1}"#));
         assert_eq!(
             find_first_balanced_object("prefix ```json\n{\"a\":1}\n``` suffix"),
@@ -260,9 +261,8 @@ mod tests {
     fn extract_json_object_skips_reasoning_object_for_typed_answer() {
         // Reasoning-style models (DeepSeek-R1, GLM-r, o1-compatible) emit a
         // leading `{"reasoning": ...}` object plus prose before the real
-        // answer. The old find-`{` / rfind-`}` outermost span crossed both
-        // objects + prose and failed to parse; we now skip the untyped
-        // candidate and return the typed answer (issue #158).
+        // answer. The untyped candidate is skipped and the typed answer is
+        // returned (issue #158).
         let text = concat!(
             r#"{"reasoning":"thinking..."}"#,
             "\n",
@@ -281,6 +281,34 @@ mod tests {
         // Unavailable, which ADR-0028 retries then fails honestly).
         assert_eq!(extract_json_object(r#"{"reasoning":"..."}"#), None);
         assert_eq!(extract_json_object(r#"{"a":1} prose {"b":2}"#), None);
+    }
+
+    #[test]
+    fn extract_json_object_returns_first_of_multiple_typed_objects() {
+        // When multiple typed objects are present, the FIRST is returned --
+        // the real answer precedes any trailing echo / duplicate.
+        let text = concat!(
+            r#"{"type":"sql","sql":"SELECT 1"}"#,
+            " ",
+            r#"{"type":"text","kind":"clarify","body":"?"}"#
+        );
+        assert_eq!(
+            extract_json_object(text),
+            Some(r#"{"type":"sql","sql":"SELECT 1"}"#)
+        );
+    }
+
+    #[test]
+    fn extract_json_object_gives_up_when_leading_braces_never_balance() {
+        // When the leading `{` cannot be balanced (here: an extra `{` leaves
+        // depth > 0 at the only `}`), the scanner returns None and the `?`
+        // propagates it -- the whole call yields None rather than skipping
+        // ahead to the inner `{"type":...}`. Aligns with ADR-0028: malformed
+        // = fail honestly, no lenient repair.
+        assert_eq!(
+            extract_json_object(r#"{{"type":"sql","sql":"SELECT 1"}"#),
+            None
+        );
     }
 
     #[test]
