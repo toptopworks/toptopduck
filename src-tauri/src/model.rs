@@ -1005,3 +1005,40 @@ pub struct ProfileKeyStatus {
     /// Whether a key is stored for this profile. A boolean only (ADR-0029).
     pub has_key: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_protocol_returns_active_protocol() {
+        // ADR-0064 (issue #152): the active profile's protocol drives the live
+        // provider's per-turn adapter routing. Set an Openai protocol on the
+        // active profile and read it back via effective_protocol; flip to
+        // Anthropic and read again to prove it tracks the active field, not a
+        // cached value. The live source (LiveProviderConfig::protocol) delegates
+        // here, so this is the load-bearing leaf of the per-turn read path.
+        let mut cfg = ProviderConfig::defaults();
+        cfg.active_mut()
+            .expect("defaults have an active profile")
+            .protocol = Protocol::Openai;
+        assert_eq!(cfg.effective_protocol(), Protocol::Openai);
+
+        cfg.active_mut()
+            .expect("defaults have an active profile")
+            .protocol = Protocol::Anthropic;
+        assert_eq!(cfg.effective_protocol(), Protocol::Anthropic);
+    }
+
+    #[test]
+    fn effective_protocol_falls_back_to_anthropic_when_active_missing() {
+        // A malformed config whose active_profile points nowhere falls back to
+        // the Anthropic protocol default, never panics -- mirrors
+        // effective_base_url / effective_model. normalize repairs it on the
+        // next store; this pins the pre-normalize live-read behavior so a
+        // hand-edited gap never dispatches a turn on a wrong/no protocol.
+        let mut cfg = ProviderConfig::defaults();
+        cfg.active_profile = ProfileId("no-such-profile".into());
+        assert_eq!(cfg.effective_protocol(), Protocol::Anthropic);
+    }
+}

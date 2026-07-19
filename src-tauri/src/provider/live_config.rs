@@ -574,6 +574,80 @@ mod tests {
     }
 
     #[test]
+    fn provider_source_reads_protocol_from_active_profile() {
+        // ADR-0064 (issue #152): the ProviderConfigSource::protocol read drives
+        // the live router's per-turn adapter dispatch. Seed an Openai protocol
+        // on the active profile, store, then read via the trait -- the trait
+        // must surface what the active profile carries, never a cached/default
+        // value (the production config source is the only protocol source the
+        // router reads, so its correctness is load-bearing).
+        let (_dir, live) = live();
+        let mut cfg = AppConfig::defaults();
+        {
+            let active = cfg
+                .provider
+                .active_mut()
+                .expect("default config has an active profile");
+            active.protocol = Protocol::Openai;
+        }
+        live.store(cfg).expect("store");
+        assert_eq!(live.protocol(), Protocol::Openai);
+    }
+
+    #[test]
+    fn provider_source_falls_back_to_anthropic_when_active_missing() {
+        // A hand-edited config whose active_profile points nowhere must fall
+        // back to the Anthropic protocol default on a LIVE read (before
+        // normalize repairs it on the next store), never panic -- mirrors the
+        // endpoint fallback contract. A wrong-protocol turn is hard to
+        // diagnose from the bare NotWired/Unavailable it produces downstream,
+        // so the fallback is deterministic Anthropic.
+        let (_dir, live) = live();
+        let mut cfg = AppConfig::defaults();
+        cfg.provider.active_profile = crate::model::ProfileId("no-such-profile".into());
+        // Write WITHOUT normalize so the dangling active id survives on disk
+        // (a hand-edit scenario, not the store path which repairs it).
+        app_config::write_at(live.path(), &cfg).expect("write");
+        assert_eq!(live.protocol(), Protocol::Anthropic);
+    }
+
+    #[test]
+    fn provider_source_protocol_reflects_profile_switch() {
+        // Core ADR-0064 AC: switching the active profile lands the new protocol
+        // on the next trait read -- no LiveProvider reboot, no cached protocol.
+        // The live source reads disk per call, so flipping active_profile
+        // between two profiles (Anthropic + Openai) surfaces each one's
+        // protocol in turn. Pins that a future once_cell cache (which would
+        // freeze the protocol at boot) cannot sneak in green.
+        let (_dir, live) = live();
+        let mut cfg = AppConfig::defaults();
+        let anthropic_id = cfg.provider.active_profile.clone();
+        let openai_id = ProfileId("__test_openai_profile".into());
+        cfg.provider.profiles.push(ProviderProfile {
+            id: openai_id.clone(),
+            display_name: "OpenAI".into(),
+            protocol: Protocol::Openai,
+            base_url: "https://api.openai.example.test".into(),
+            model: "gpt-4o".into(),
+        });
+        live.store(cfg).expect("store");
+        // Starts on the default anthropic profile.
+        assert_eq!(live.protocol(), Protocol::Anthropic);
+
+        // Flip active to the Openai profile (the IPC set_active path).
+        let mut cfg = live.load();
+        cfg.provider.active_profile = openai_id;
+        live.store(cfg).expect("store");
+        assert_eq!(live.protocol(), Protocol::Openai);
+
+        // Flip back to the anthropic profile -- the live read follows each switch.
+        let mut cfg = live.load();
+        cfg.provider.active_profile = anthropic_id;
+        live.store(cfg).expect("store");
+        assert_eq!(live.protocol(), Protocol::Anthropic);
+    }
+
+    #[test]
     fn list_profile_key_status_returns_one_entry_per_profile_with_bool() {
         // Issue #153: the overlay returns one entry per profile in app-config,
         // keyed by id, with has_key from the per-profile keychain slot. Synthetic

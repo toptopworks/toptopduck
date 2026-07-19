@@ -454,6 +454,28 @@ mod tests {
     }
 
     #[test]
+    fn forbidden_403_is_not_retried_not_wired() {
+        // A 403 is permanent for this turn (quota / IP ban / forbidden scope --
+        // common for GLM/Qwen compatible gateways): map to NotWired so the
+        // orchestrator does not burn the retry budget on three identical
+        // rejections (ADR-0044). Mirrors the 401 contract; pins the compound
+        // `status == 401 || status == 403` guard so a regression to
+        // `status == 401` alone cannot ship green while 403 falls through to a
+        // retried Unavailable that auto-retries forever.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(403)
+            .with_body(r#"{"error":{"message":"Forbidden","type":"forbidden"}}"#)
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        assert_eq!(
+            OpenaiProvider::generate(&cfg, &sample_request("q")).unwrap_err(),
+            ProviderError::NotWired
+        );
+    }
+
+    #[test]
     fn server_error_is_unavailable_for_retry() {
         // A 5xx (or transport error) is transient -> Unavailable, consumed by
         // the orchestrator's retry budget.
