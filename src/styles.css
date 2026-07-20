@@ -8,8 +8,10 @@
  * persist-warning moved to shadcn Input/Button/Alert variants in issue #172
  * (ADR-0067); the Workspace tabs/body/hero, the textual-card outcomes, and the
  * ResultView container + sticky pagination moved to Tailwind utility +
- * ADR-0050 token in issue #173 (ADR-0067). The .resume-progress tint below is
- * still bespoke (no owner migrated yet) and retires with its component. */
+ * ADR-0050 token in issue #173 (ADR-0067); the ErrorBoundary DegradeCard moved
+ * to shadcn Card + Button + TechnicalDetailsFold in issue #181 (ADR-0067). The
+ * .resume-progress tint below is still bespoke (no owner migrated yet) and
+ * retires with its component. */
 * { box-sizing: border-box; }
 header h1 { margin: 0 0 0.5rem; }
 .header-actions {
@@ -280,35 +282,14 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
   white-space: nowrap;
 }
 
-/* Degrade card (ADR-0058 L2/L3 fallback). A bordered, card-style block that
-   replaces a crashed partition. Friendly message + actions row + collapsible
-   technical details. Reads as a recoverable hiccup, not a fatal error. */
-.degrade-card {
-  padding: 1rem; margin: 0.5rem 0;
-  background: var(--card); border: 1px solid var(--border);
-  border-left: 3px solid var(--destructive);
-  border-radius: var(--radius-lg);
-}
-.degrade-card .degrade-message { margin: 0 0 0.5rem; line-height: 1.5; }
-.degrade-card .degrade-actions { display: flex; gap: 0.5rem; margin: 0.5rem 0; }
-.degrade-card .degrade-retry,
-.degrade-card .degrade-reload {
-  padding: 0.4rem 1rem; cursor: pointer; font-size: 0.9rem;
-  border: 1px solid var(--primary); background: var(--primary);
-  color: var(--primary-foreground); border-radius: var(--radius);
-}
-.degrade-card .degrade-reload {
-  border-color: var(--border); background: var(--card); color: var(--foreground);
-}
-.degrade-card .degrade-details { margin-top: 0.5rem; }
-.degrade-card .degrade-details summary { cursor: pointer; font-size: 0.82rem; }
-.degrade-card .degrade-stack {
-  margin: 0.4rem 0 0; padding: 0.5rem;
-  background: var(--muted); border-radius: var(--radius);
-  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
-  font-size: 0.8rem; white-space: pre-wrap; word-break: break-word;
-  max-height: 12rem; overflow-y: auto;
-}
+/* Degrade card (ADR-0058 L2/L3 fallback) visual rules retired in issue #181
+   (ADR-0067): the .degrade-card container + .degrade-message + .degrade-actions
+   + .degrade-retry / .degrade-reload buttons + .degrade-details / .degrade-stack
+   fold moved onto ErrorBoundary's <DegradeCard> as shadcn Card + Button
+   (default + outline variants) + TechnicalDetailsFold + literal border-l-[3px]
+   border-l-destructive utility. The .degrade-card class hook stays on the
+   <Card> for selector / test stability (ErrorBoundary.test.tsx queries
+   .degrade-card); only the visual rules are gone. */
 
 /* Working-set tab reuses the legacy .layout grid */
 .working-set-layout { margin-top: 0; }
