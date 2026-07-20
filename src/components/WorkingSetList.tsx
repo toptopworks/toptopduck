@@ -114,14 +114,13 @@ export function WorkingSetList({
   };
 
   return (
-    // ADR-0067 (issue #184): the .working-set / .working-set li /
-    // .working-set button / .working-set li.active button / .working-set small
-    // visual rules retired onto utility on each element below + the BUTTON_BASE
-    // constant (shared by the select + icon buttons). The class hooks
-    // (.working-set / .rename / .replace / .delete / .active / .stale) stay on
-    // the elements for selector / test stability; the active STATE now drives
-    // the button's own conditional className (bg-accent + font-semibold) instead
-    // of the retired .working-set li.active button descendant selector.
+    // ADR-0067 (issue #184): the working-set list / button / active-state /
+    // small visuals ride Tailwind utility on each element below + the
+    // BUTTON_BASE constant above (shared by the select + icon buttons). The
+    // active STATE drives the select button's own conditional className
+    // (bg-accent + font-semibold). The class hooks (.working-set / .rename /
+    // .replace / .delete / .active / .stale) stay on the elements as anchor
+    // points for selector queries and future migration slices.
     <ul className="working-set list-none m-0 p-0">
       {datasets.map((d) => (
         <li

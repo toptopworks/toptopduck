@@ -380,6 +380,40 @@ describe("WorkingSetList", () => {
     expect(screen.getByText(/当前表/)).toBeInTheDocument();
   });
 
+  it("lifts the active select button via bg-accent + font-semibold (ADR-0067, issue #184)", () => {
+    // The active STATE drives the select button's own conditional className
+    // (cn(BUTTON_BASE, isActive && "bg-accent font-semibold")), replacing the
+    // retired .working-set li.active button descendant selector. The 当前表
+    // suffix is driven by a separate conditional, so it does NOT pin the
+    // className branch -- this assertion does. An inactive row carries neither
+    // class.
+    const { rerender } = renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName="people"
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    const activeClasses = screen.getByRole("button", { name: /^people/ }).className.split(/\s+/);
+    expect(activeClasses).toContain("bg-accent");
+    expect(activeClasses).toContain("font-semibold");
+
+    rerender(
+      withIntl(
+        <WorkingSetList
+          datasets={[mockDataset]}
+          activeName={null}
+          onSelect={() => {}}
+          onRename={() => {}}
+        />,
+      ),
+    );
+    const inactiveClasses = screen.getByRole("button", { name: /^people/ }).className.split(/\s+/);
+    expect(inactiveClasses).not.toContain("bg-accent");
+    expect(inactiveClasses).not.toContain("font-semibold");
+  });
+
   it("shows an empty hint when there are no datasets", () => {
     renderI18n(
       <WorkingSetList datasets={[]} activeName={null} onSelect={() => {}} onRename={() => {}} />,

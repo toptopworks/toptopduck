@@ -59,12 +59,8 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
           {dataset.columns.map((c) => (
             <TableRow key={c.name}>
               <TableCell>{c.name}</TableCell>
-              {/* ADR-0067 (issue #184): the .schema td code caller-scoped
-                  word-break rule retired onto the <code> element directly
-                  (break-words ≈ overflow-wrap: break-word, the modern
-                  equivalent of word-break: break-word; whitespace-pre-wrap
-                  preserves internal spacing). Nested DuckDB types like
-                  STRUCT(...)/LIST(...) wrap instead of overflowing the panel. */}
+              {/* Nested DuckDB types (STRUCT(...)/LIST(...)) wrap instead of
+                  overflowing the panel. */}
               <TableCell><code className="break-words whitespace-pre-wrap">{c.canonical_type}</code></TableCell>
             </TableRow>
           ))}
