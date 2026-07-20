@@ -103,14 +103,12 @@ export function SessionSidebar({
     name || intl.formatMessage({ id: "session.defaultName", defaultMessage: "New session" });
 
   return (
-    // ADR-0067 (issue #171): the shell-skeleton visual rules (.session-sidebar
-    // bg/border/padding, .sidebar-new-button, .sidebar-error, .session-empty,
-    // .session-group* typography, .session-entry* states, .session-menu
-    // popover chrome) were retired from styles.css into inline Tailwind
-    // utilities over the ADR-0050 token. The .session-sidebar / .session-list
-    // LAYOUT shells (grid-column/row + flex column + flex:1 scroll container)
-    // stay in styles.css as layout-only. The semantic class hooks are kept on
-    // every element for selector / test stability.
+    // ADR-0067 (issue #171): the shell-skeleton visual rules ride inline
+    // utilities over the ADR-0050 token (see styles.css for the retirement
+    // list). The .session-sidebar / .session-list LAYOUT shells (grid-column
+    // /row + flex column + flex:1 scroll container) stay as layout-only CSS;
+    // the semantic class hooks are kept on every element for selector / test
+    // stability.
     <aside
       className="session-sidebar bg-muted border-r border-border p-2"
       aria-label={intl.formatMessage({ id: "sidebar.ariaLabel", defaultMessage: "Sessions" })}
@@ -210,6 +208,13 @@ export function SessionSidebar({
   );
 }
 
+// The session-menu item base (ADR-0067, issue #171): inline utilities
+// replacing the retired .session-menu button CSS rule. Composed per item via
+// cn() so the danger variant swaps text-foreground -> text-destructive
+// without copy-paste drift across the three items.
+const sessionMenuItemBase =
+  "[all:unset] cursor-pointer block w-full py-1 px-2 rounded-md text-sm hover:bg-accent";
+
 // One sidebar row: the session name (click to activate/open) + a sub-line
 // (first source + turn count) + a context-menu toggle. The menu is the single
 // entry point for rename / close / delete (ADR-0060 DRY).
@@ -256,8 +261,8 @@ function SidebarRow({
           "session-entry-main [all:unset] cursor-pointer flex-1 flex flex-col min-w-0 py-1.5 px-2 rounded-md text-foreground",
           "hover:bg-accent disabled:opacity-50 disabled:cursor-progress",
           entry.active && "bg-primary text-primary-foreground font-semibold",
-          // The open accent only shows when the row is NOT active (the active
-          // fill already signals it). var(--primary) matches the retired rule.
+          // The open accent only shows when the row is NOT active (the
+          // active fill already signals it).
           entry.sid && !entry.active && "shadow-[inset_2px_0_var(--primary)]",
         )}
         aria-current={entry.active ? "true" : undefined}
@@ -294,7 +299,7 @@ function SidebarRow({
           <button
             type="button"
             role="menuitem"
-            className="[all:unset] cursor-pointer block w-full py-1 px-2 rounded-md text-sm text-foreground hover:bg-accent"
+            className={cn(sessionMenuItemBase, "text-foreground")}
             onClick={onRename}
           >
             <FormattedMessage id="sidebar.menu.rename" defaultMessage="Rename" />
@@ -303,7 +308,7 @@ function SidebarRow({
             <button
               type="button"
               role="menuitem"
-              className="[all:unset] cursor-pointer block w-full py-1 px-2 rounded-md text-sm text-foreground hover:bg-accent"
+              className={cn(sessionMenuItemBase, "text-foreground")}
               onClick={onClose}
             >
               <FormattedMessage id="sidebar.menu.close" defaultMessage="Close" />
@@ -313,7 +318,7 @@ function SidebarRow({
             <button
               type="button"
               role="menuitem"
-              className="danger [all:unset] cursor-pointer block w-full py-1 px-2 rounded-md text-sm text-destructive hover:bg-accent"
+              className={cn("danger", sessionMenuItemBase, "text-destructive")}
               onClick={onDelete}
             >
               <FormattedMessage id="sidebar.menu.delete" defaultMessage="Delete" />

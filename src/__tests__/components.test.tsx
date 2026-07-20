@@ -2614,17 +2614,6 @@ describe("Table primitives (ADR-0067, issue #168 self-contained)", () => {
 // foreground` etc. The .session-sidebar / .topbar grid + flex LAYOUT shells
 // stay in styles.css and cannot be exercised in jsdom.
 
-// SessionSidebar routes its chrome through react-intl. Rendered inside an
-// empty-catalog English IntlProvider so FormattedMessage falls back to its
-// defaultMessage, mirroring renderSettings.
-function renderSidebar(ui: ReactElement) {
-  return render(
-    <IntlProvider locale="en" messages={{}} onError={() => {}}>
-      {ui}
-    </IntlProvider>,
-  );
-}
-
 // Two never-saved open sessions: the active one (sid === activeSessionId)
 // carries .active.open; the other carries .open:not(.active). Both land in
 // the Today group (buildSidebarGroups stamps `now` for unsaved sessions).
@@ -2640,7 +2629,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     // The active row's entry-main carries the active fill as inline utilities
     // over the ADR-0050 token (full-row fill selection signal), replacing the
     // retired .session-entry.active .session-entry-main CSS rule.
-    const { container } = renderSidebar(
+    const { container } = renderSettings(
       <SessionSidebar
         sessions={[]}
         openSessions={twoOpenSessions()}
@@ -2668,7 +2657,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     // still leaves a trace, replacing the retired
     // .session-entry.open:not(.active) .session-entry-main CSS rule. var(--primary)
     // matches the retired rule's hue.
-    const { container } = renderSidebar(
+    const { container } = renderSettings(
       <SessionSidebar
         sessions={[]}
         openSessions={twoOpenSessions()}
@@ -2705,7 +2694,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
       format_version: 1,
     };
-    const { container } = renderSidebar(
+    const { container } = renderSettings(
       <SessionSidebar
         sessions={[persisted]}
         openSessions={[]}
@@ -2726,6 +2715,10 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     expect(classes).toContain("[all:unset]");
     expect(classes).toContain("hover:bg-accent");
     expect(classes).toContain("rounded-md");
+    // disabled dims + drops the pointer (mirrors the retired .session-entry-
+    // main:disabled rule), symmetric to the profile-switcher-item disabled pin.
+    expect(classes).toContain("disabled:opacity-50");
+    expect(classes).toContain("disabled:cursor-progress");
     // The default row carries neither the active fill nor the open accent.
     expect(classes).not.toContain("bg-primary");
     expect(classes).not.toContain("shadow-[inset_2px_0_var(--primary)]");
@@ -2735,7 +2728,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     // The context-menu dropdown's popover chrome (absolute positioning off the
     // entry, card surface, border, box-shadow) rides inline utilities,
     // replacing the retired .session-menu CSS rule.
-    const { container } = renderSidebar(
+    const { container } = renderSettings(
       <SessionSidebar
         sessions={[]}
         openSessions={twoOpenSessions()}
@@ -2774,7 +2767,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
       format_version: 1,
     };
-    const { container } = renderSidebar(
+    const { container } = renderSettings(
       <SessionSidebar
         sessions={[persisted]}
         openSessions={[]}
@@ -2832,7 +2825,7 @@ describe("ProfileSwitcher shell-skeleton visuals (ADR-0067, issue #171)", () => 
     // The trigger's chrome (card surface, hover tint, max-width clamp) rides
     // inline utilities over the ADR-0050 token, replacing the retired
     // .profile-switcher-trigger (+ :hover) CSS rule.
-    const { container } = renderSidebar(
+    const { container } = renderSettings(
       <ProfileSwitcher provider={switcherProvider()} onSwitchActive={() => {}} />,
     );
     const trigger = container.querySelector(".profile-switcher-trigger");
@@ -2847,7 +2840,7 @@ describe("ProfileSwitcher shell-skeleton visuals (ADR-0067, issue #171)", () => 
     // The dropdown's popover chrome (absolute positioning off the .profile-
     // switcher anchor, high z-index, card surface, box-shadow) rides inline
     // utilities, replacing the retired .profile-switcher-menu CSS rule.
-    const { container } = renderSidebar(
+    const { container } = renderSettings(
       <ProfileSwitcher provider={switcherProvider()} onSwitchActive={() => {}} />,
     );
     fireEvent.click(screen.getByRole("button", { name: /Active profile:/ }));
@@ -2863,7 +2856,7 @@ describe("ProfileSwitcher shell-skeleton visuals (ADR-0067, issue #171)", () => 
     // The active profile's menu item carries aria-checked + font-semibold,
     // replacing the retired .profile-switcher-item[aria-checked="true"] CSS
     // rule. An inactive item does NOT carry font-semibold.
-    const { container } = renderSidebar(
+    const { container } = renderSettings(
       <ProfileSwitcher provider={switcherProvider()} onSwitchActive={() => {}} />,
     );
     fireEvent.click(screen.getByRole("button", { name: /Active profile:/ }));
@@ -2880,7 +2873,7 @@ describe("ProfileSwitcher shell-skeleton visuals (ADR-0067, issue #171)", () => 
     // only when the item is interactive; disabled items dim + drop the pointer,
     // never tint. Pinning both guards against a regression that hovers disabled
     // items or drops the disabled affordance.
-    const { container } = renderSidebar(
+    const { container } = renderSettings(
       <ProfileSwitcher provider={switcherProvider()} onSwitchActive={() => {}} />,
     );
     fireEvent.click(screen.getByRole("button", { name: /Active profile:/ }));

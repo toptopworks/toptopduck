@@ -166,15 +166,11 @@ export function ProfileSwitcher({ provider, onSwitchActive, disableSwitch }: Pro
   const activeProfile = provider.profiles.find((p) => p.id === provider.active_profile);
   const activeLabel = activeProfile?.display_name.trim() || unnamed;
 
-  // ADR-0067 (issue #171): the .profile-switcher* visual rules (trigger +
-  // hover, name truncation, chevron opacity, menu popover chrome + shadow, item
-  // three-state + aria-checked typography, error padding) were retired from
-  // styles.css into inline Tailwind utilities over the ADR-0050 token. The
-  // .profile-switcher position:relative anchor + .profile-switcher-menu
-  // absolute positioning stay as layout hooks (the menu is positioned off the
-  // anchor), but expressed as utilities here so styles.css carries no shell-
-  // chrome visual rule. The semantic class hooks are kept for selector / test
-  // stability.
+  // ADR-0067 (issue #171): the .profile-switcher* visual rules ride inline
+  // utilities over the ADR-0050 token (see styles.css for the retirement
+  // list). position:relative on the anchor + absolute on .profile-switcher-
+  // menu stay as layout hooks (the menu is positioned off the anchor); the
+  // semantic class hooks are kept for selector / test stability.
   return (
     <div className="profile-switcher relative" ref={containerRef}>
       <button
