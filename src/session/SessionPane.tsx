@@ -109,7 +109,10 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
           />
         </ErrorBoundary>
         {s.thread.length === 0 && (
-          <p className="rail-empty muted">
+          // ADR-0067 (issue #185): the .rail-empty visual rule (font-size +
+          // padding) + the .muted color rule retired onto utility; the class
+          // hooks had no selector / test dependents and are dropped.
+          <p className="text-[0.85rem] p-2 text-muted-foreground">
             <FormattedMessage
               id="session.rail.empty"
               defaultMessage="No conversations yet. Ask a question below or load data to begin."
@@ -301,7 +304,7 @@ function WorkspaceResult({
       return (
         <div className="workspace-hero flex flex-col items-center gap-4 p-8 text-center">
           <FileDropzone onIngest={onIngest} loading={loading} />
-          <p className="muted">
+          <p className="text-muted-foreground">
             {hasData ? (
               <FormattedMessage
                 id="session.hero.hasData"
@@ -496,7 +499,7 @@ function WorkspaceWorkingSet({
             onPrivacyChange={onPrivacyChange}
           />
         ) : (
-          <p className="muted">
+          <p className="text-muted-foreground">
             <FormattedMessage
               id="session.workingSet.emptyDetail"
               defaultMessage="Select a dataset to see its structure."

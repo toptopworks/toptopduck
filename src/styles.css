@@ -23,7 +23,14 @@
  * container), the DatasetDetail caller-scoped typography (.dataset-detail
  * h2/small, .meta, .source, .schema td code word-wrap), and the WorkingSetList
  * list/button/active-state/small rules moved to Tailwind utility + conditional
- * className + a shared BUTTON_BASE constant in issue #184 (ADR-0067). */
+ * className + a shared BUTTON_BASE constant in issue #184 (ADR-0067); the
+ * remaining shared + scattered utility classes -- the global code font-family
+ * element rule, the cross-component .muted color token, the QuestionBar
+ * .phase-indicator status-line font-size/color/white-space, and the SessionPane
+ * .rail-empty empty-state font-size/padding -- moved to Tailwind utility
+ * (font-mono / text-muted-foreground / text-[0.82rem] / text-[0.85rem] / p-2 /
+ * whitespace-nowrap) on each owner element in issue #185 (ADR-0067), retiring
+ * the last visual rules outside the layout-only shells. */
 * { box-sizing: border-box; }
 
 /* Viz (ADR-0016/0033): the chart container bounds a Vega-Embed render so a wide
@@ -36,12 +43,6 @@
    so the grid stays here; per-consumer margins live on the consumer
    (SessionPane WorkspaceWorkingSet) as utility. Single consumer. */
 .layout { display: grid; grid-template-columns: 280px 1fr; gap: 1.25rem; }
-/* Shared cross-component primitives: the monospace code font-family + the
- * .muted color token do not belong to any single component, so they stay here.
- * Component-scoped visuals ride Tailwind utility per ADR-0067 (see each
- * component's inline comment for the per-rule retiree record). */
-code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
-.muted { color: var(--muted-foreground); }
 
 /* Privacy controls (ADR-0011, issue #9): sample switch + per-column type-only.
  * ADR-0067 (issue #183): the .privacy / .privacy h3 / .privacy-samples /
@@ -51,8 +52,10 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
  * blue tint rides Tailwind's blue scale (bg-blue-50 / border-blue-200) as the
  * nearest-scale equivalent of the retired #f4f8ff / #d6e4ff. The class hooks
  * (.privacy / .privacy-samples / .privacy-cols / .disclosure-summary) stay on
- * the component for selector stability; the global .muted rule above is
- * shared with other components and stays. */
+ * the component for selector stability. ADR-0067 (issue #185): the global
+ * .muted color rule + the global code font-family element rule also retired
+ * (text-muted-foreground rides on each muted <p>/<span>/<li>/<small>/<td>;
+ * font-mono rides on each <code>) -- styles.css no longer carries either. */
 
 /* =========================================================================
  * Chat-style three-column shell (ADR-0045/0060/0062, issue #79).
@@ -225,8 +228,10 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
   padding: 0.5rem;
 }
 /* The Thread rail section does not carry a `.panel` hook -- the .session-rail
-   rule above supplies bg-card + 0.5rem padding directly. */
-.rail-empty { font-size: 0.85rem; padding: 0.5rem; }
+   rule above supplies bg-card + 0.5rem padding directly. ADR-0067 (issue
+   #185): the scattered .rail-empty empty-state rule (font-size + padding)
+   retired onto the SessionPane rail-empty <p> as utility (text-[0.85rem] +
+   p-2); the class hook had no selector / test dependent and is dropped. */
 
 .session-workspace {
   grid-column: 2; grid-row: 1;
@@ -264,11 +269,12 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 
 /* Phase indicator (ADR-0059 discrete phase feedback). Sits between the input
    and the stop button while a turn is in flight; reads as a muted status line
-   so it never competes with the primary input affordance. */
-.phase-indicator {
-  font-size: 0.82rem; color: var(--muted-foreground);
-  white-space: nowrap;
-}
+   so it never competes with the primary input affordance. ADR-0067 (issue
+   #185): the .phase-indicator visual rule (font-size + color + white-space)
+   retired onto the QuestionBar phase <span> as utility (text-[0.82rem] +
+   text-muted-foreground + whitespace-nowrap); the class hook had no selector /
+   test dependent (Shell.test.tsx queries role="status", not the class) and is
+   dropped. role="status" + aria-live stay on the element. */
 
 /* Degrade card (ADR-0058 L2/L3 fallback) visual rules retired in issue #181
    (ADR-0067); see ErrorBoundary.tsx DegradeCard for the per-rule retiree

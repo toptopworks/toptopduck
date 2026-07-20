@@ -123,7 +123,7 @@ export function SessionSidebar({
       </button>
 
       {loadError && (
-        <p className="sidebar-error muted mb-1.5 text-xs">
+        <p className="sidebar-error text-muted-foreground mb-1.5 text-xs">
           <FormattedMessage
             id="sidebar.loadError"
             defaultMessage="Could not load saved sessions."
@@ -170,7 +170,7 @@ export function SessionSidebar({
           </li>
         ))}
         {groups.length === 0 && !loadError && (
-          <li className="session-empty muted text-sm p-2">
+          <li className="session-empty text-muted-foreground text-sm p-2">
             <FormattedMessage
               id="sidebar.empty"
               defaultMessage="No saved sessions yet."
@@ -271,7 +271,7 @@ function SidebarRow({
         title={entry.path ?? undefined}
       >
         <span className="session-name text-sm truncate">{displayName}</span>
-        <span className="session-subline muted text-xs font-normal opacity-85">
+        <span className="session-subline text-muted-foreground text-xs font-normal opacity-85">
           {entry.firstSourceName ?? "—"}
           {" · "}
           <FormattedMessage

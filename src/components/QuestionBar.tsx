@@ -63,7 +63,15 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null }: Quest
         // on a blind retry (>1); the first attempt shows the bare verb (守
         // 0017 -- honest, not fabricated, and the first attempt needs no
         // "第 1 次" noise).
-        <span className="phase-indicator" role="status" aria-live="polite">
+        // ADR-0067 (issue #185): the .phase-indicator visual rule (font-size +
+        // color + white-space) retired onto utility here; the class hook had no
+        // selector / test dependent (Shell.test.tsx queries role="status", not
+        // the class) and is dropped. role="status" + aria-live stay.
+        <span
+          className="text-[0.82rem] text-muted-foreground whitespace-nowrap"
+          role="status"
+          aria-live="polite"
+        >
           {phaseLabel(phase, intl)}
         </span>
       )}

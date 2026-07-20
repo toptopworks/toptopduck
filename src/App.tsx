@@ -1098,7 +1098,7 @@ function ColdStartHero({
       <h2 className="cold-start-title m-0 mb-2 text-[1.4rem]">
         <FormattedMessage id="coldStart.title" defaultMessage="Start an analysis" />
       </h2>
-      <p className="muted">
+      <p className="text-muted-foreground">
         <FormattedMessage
           id="coldStart.hint"
           defaultMessage="Click “New session” on the left, or open a saved session to resume. Drop a data file to start a new analysis in one step."

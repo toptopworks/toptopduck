@@ -44,7 +44,7 @@ export function FileDropzone({
           ? intl.formatMessage({ id: "workingSet.dropzone.loading", defaultMessage: "Loading…" })
           : intl.formatMessage({ id: "workingSet.dropzone.pick", defaultMessage: "Pick a data file" })}
       </Button>
-      <span className="muted">
+      <span className="text-muted-foreground">
         <FormattedMessage
           id="workingSet.dropzone.dragHint"
           defaultMessage="or drop a .csv / .parquet / .json / .xlsx file onto the window"

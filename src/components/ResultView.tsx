@@ -337,7 +337,7 @@ export function ResultView({
         <TableBody>
           {shown === 0 && !loading && (
             <TableRow>
-              <TableCell className="muted">
+              <TableCell className="text-muted-foreground">
                 <FormattedMessage id="result.emptyRows" defaultMessage="(no data rows)" />
               </TableCell>
             </TableRow>
