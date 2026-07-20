@@ -872,9 +872,13 @@ describe("ResultView", () => {
       <ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />,
     );
     await waitFor(() => expect(readRows).toHaveBeenCalled());
-    // The empty-string cell carries the cell-null class (muted bg via CSS); the
-    // populated cell does not.
+    // The empty-string cell carries the cell-null hook (kept for selector
+    // stability) AND the bg-muted utility (ADR-0067, issue #173: the muted bg
+    // retired from styles.css onto the cell). Pin the utility so a regression
+    // that drops bg-muted but leaves the hook stays caught; the populated cell
+    // carries neither.
     expect(container.querySelectorAll("td.cell-null")).toHaveLength(1);
+    expect(container.querySelector("td.cell-null")?.className.split(/\s+/)).toContain("bg-muted");
     // The literal "NULL" never appears in the rendered output.
     expect(screen.queryByText("NULL")).not.toBeInTheDocument();
     // The non-NULL cell value still renders.
@@ -882,11 +886,12 @@ describe("ResultView", () => {
   });
 
   it("applies the .num class to a numeric column header + cell (ADR-0057)", async () => {
-    // ADR-0057: numeric canonical types right-align. The alignment is a CSS rule
-    // (table.result th.num/td.num { text-align: right }) -- not assertable in
-    // jsdom (no layout engine), so this pins the className contract at the
-    // component boundary: the class survives the Table primitive's cn() merge
-    // and lands on the real <th>/<td> the primitive renders.
+    // ADR-0057: numeric canonical types right-align. ADR-0067 (issue #173):
+    // the right-align retired from styles.css onto the cells as a text-right
+    // utility (alongside the .num hook, kept for selector stability). Pin the
+    // hook AND the utility on the real <th>/<td> the primitive renders -- jsdom
+    // cannot lay out text-align, but it CAN assert the className, so a
+    // regression that drops text-right but leaves the hook stays caught.
     vi.mocked(readRows).mockResolvedValue({
       columns: [
         { name: "id", canonical_type: "BIGINT" },
@@ -901,10 +906,12 @@ describe("ResultView", () => {
       <ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />,
     );
     await waitFor(() => expect(readRows).toHaveBeenCalled());
-    // The BIGINT column carries .num on both its header and its cell; the
-    // VARCHAR column carries neither.
+    // The BIGINT column carries .num + text-right on both its header and its
+    // cell; the VARCHAR column carries neither.
     expect(container.querySelectorAll("th.num")).toHaveLength(1);
     expect(container.querySelectorAll("td.num")).toHaveLength(1);
+    expect(container.querySelector("th.num")?.className.split(/\s+/)).toContain("text-right");
+    expect(container.querySelector("td.num")?.className.split(/\s+/)).toContain("text-right");
   });
 
   it("paginates backward via the previous button", async () => {

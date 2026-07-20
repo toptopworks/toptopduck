@@ -6,8 +6,10 @@
  * soft-cap) moved to shadcn Alert variants in issue #108; QuestionBar's
  * input/buttons, FileDropzone's button, ErrorBanner, and the session-pane
  * persist-warning moved to shadcn Input/Button/Alert variants in issue #172
- * (ADR-0067). The .resume-progress tint below is still bespoke (no owner
- * migrated yet) and retires with its component. */
+ * (ADR-0067); the Workspace tabs/body/hero, the textual-card outcomes, and the
+ * ResultView container + sticky pagination moved to Tailwind utility +
+ * ADR-0050 token in issue #173 (ADR-0067). The .resume-progress tint below is
+ * still bespoke (no owner migrated yet) and retires with its component. */
 * { box-sizing: border-box; }
 header h1 { margin: 0 0 0.5rem; }
 .header-actions {
@@ -47,10 +49,13 @@ header h1 { margin: 0 0 0.5rem; }
 .dataset-detail small { color: var(--muted-foreground); font-weight: 400; }
 .meta { color: var(--muted-foreground); margin: 0.25rem 0 0.75rem; }
 /* ADR-0067 (issue #168): the global `table / th / td` element rules were
- * retired into ui/table.tsx's self-contained primitives. The caller-scoped
- * class hooks below (.schema td code, .privacy-cols td:last-child,
- * table.result .num/.cell-null) remain as the per-call visual contract
- * (ADR-0057 numeric right-align, NULL muted cell, schema type wrap). */
+ * retired into ui/table.tsx's self-contained primitives. ADR-0067 (issue
+ * #173): the result caller-scoped table.result .num/.cell-null rules retired
+ * onto ResultView's cells as utility (text-right / bg-muted). The remaining
+ * caller-scoped hooks below (.schema td code, .privacy-cols td:last-child)
+ * stay as the per-call visual contract (schema type wrap, privacy action
+ * column width) -- their owners (DatasetDetail / PrivacyControls) have not
+ * yet migrated to utility. */
 code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 /* Nested DuckDB types (STRUCT(...)/LIST(...)/MAP(...)) can be long -- let the
    inferred-type column wrap instead of overflowing the panel. */
@@ -238,37 +243,22 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
   overflow-y: auto;
   display: flex; flex-direction: column;
 }
-.workspace-tabs {
-  display: flex; align-items: center; gap: 0.5rem;
-  padding: 0.4rem 1rem;
-  border-bottom: 1px solid var(--border);
-  background: var(--background);
-}
-.workspace-tabs [role="tab"] {
-  padding: 0.3rem 0.8rem; cursor: pointer; font-size: 0.9rem;
-  border: none; background: none; border-bottom: 2px solid transparent;
-  color: var(--muted-foreground);
-}
-.workspace-tabs [role="tab"].active {
-  color: var(--primary); border-bottom-color: var(--primary); font-weight: 600;
-}
+/* ADR-0067 (issue #173): the workspace + textual-card VISUAL rules retired
+ * into SessionPane.tsx + App.tsx as Tailwind utility + ADR-0050 token. The
+ * rule-by-rule retirement lives on each component's ADR-0067 inline comment
+ * (not re-listed here -- a hand-kept copy drifts on the next slice, per the
+ * retire-scope convention above). The semantic class hooks (.workspace-tabs /
+ * .workspace-body / .workspace-hero / .textual-card /
+ * .textual-card.{clarify,refuse,failed,cancelled}) stay on the components for
+ * selector / test stability; the bare "active" class on the tab button is kept
+ * as a state marker. The .active-chip rule below is layout-only (pushing the
+ * chip to the row's right edge) and stays here. */
 /* active-chip is now a Badge variant="default" (teal --primary, ADR-0050); this
    class carries layout only -- pushing the chip to the row's right edge. The
    variant owns color/bg/padding/radius so the chip rides the token system. */
 .active-chip {
   margin-left: auto;
 }
-.workspace-body { flex: 1; overflow-y: auto; padding: 1rem; }
-.workspace-hero { display: flex; flex-direction: column; align-items: center; gap: 1rem; padding: 2rem; text-align: center; }
-
-/* Textual outcome card (ADR-0062 R2 lastTurnText in the workspace) */
-.textual-card { padding: 1rem; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-lg); }
-.textual-card h3 { margin: 0 0 0.5rem; }
-.textual-card .textual-body { margin: 0.25rem 0; line-height: 1.5; }
-.textual-card.clarify { border-left: 3px solid var(--primary); }
-.textual-card.refuse { border-left: 3px solid var(--muted-foreground); }
-.textual-card.failed { border-left: 3px solid var(--destructive); }
-.textual-card.cancelled { opacity: 0.6; }
 
 /* QuestionBar area (ADR-0062 R1: spans rail + workspace). ADR-0067 (issue
    #172): the .question-bar input/button visual rules (focus outline, primary
@@ -323,25 +313,15 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 /* Working-set tab reuses the legacy .layout grid */
 .working-set-layout { margin-top: 0; }
 
-/* --- Result rendering (ADR-0057/0062 R4) -------------------------------- */
-.result-view h2 { margin: 0 0 0.25rem; }
-/* Numeric columns right-align by canonical_type (ADR-0057); NULL cells render
-   as muted whitespace (server NULL -> ""), never the literal "NULL". */
-table.result th.num, table.result td.num { text-align: right; }
-table.result td.cell-null { background: var(--muted); }
-/* Sticky pagination at the pane bottom (ADR-0062 R4). */
-.page-info.sticky {
-  position: sticky; bottom: 0;
-  background: var(--background);
-  border-top: 1px solid var(--border);
-  padding: 0.5rem 0; margin: 0;
-  display: flex; gap: 0.5rem; align-items: center;
-}
-.page-info.sticky button {
-  padding: 0.3rem 0.8rem; cursor: pointer; font-size: 0.88rem;
-  border: 1px solid var(--border); background: var(--card); border-radius: var(--radius);
-}
-.page-info.sticky button:disabled { opacity: 0.5; cursor: progress; }
+/* --- Result rendering (ADR-0057/0062 R4) --------------------------------
+ * ADR-0067 (issue #173): the result-view + sticky-pagination VISUAL rules
+ * retired into ResultView.tsx as Tailwind utility + ADR-0050 token. The
+ * rule-by-rule retirement lives on ResultView's ADR-0067 inline comments (not
+ * re-listed here -- a hand-kept copy drifts on the next slice, per the
+ * retire-scope convention above). The semantic hooks (.result-view / .result /
+ * .num / .cell-null / .page-info) stay on the component for selector / test
+ * stability; the bare `sticky` class on the pagination div IS the Tailwind
+ * position utility (position: sticky), no longer a CSS-class hook. */
 
 /* =========================================================================
  * Thread rail dual-species visual language (ADR-0047/0050, issue #80).

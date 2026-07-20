@@ -13,10 +13,11 @@ import { cn } from "@/lib/utils";
 // expressions, so the component renders correctly with NO global table CSS
 // (border-color comes from app.css's @layer base `* { border-color: var(--border) }`).
 // Caller class hooks (.schema / .result / .privacy-cols / .preview, .num /
-// .cell-null) pass through cn() to the rendered <table>/<th>/<td>, so the
-// caller-scoped styles.css rules (ADR-0057 numeric right-align, NULL muted
-// cell, schema type wrap) still apply independently of the primitives'
-// utilities -- there is no element-rule layering on the primitives.
+// .cell-null) pass through cn() to the rendered <table>/<th>/<td>. ADR-0067
+// (issue #173): the result caller-scoped styles.css rules (.num right-align,
+// .cell-null muted bg) retired onto ResultView's cells as utility alongside
+// the hooks; the still-caller-scoped rules (.schema td code wrap, .privacy-cols
+// last-column width) live on in styles.css until their owners migrate.
 
 function Table({ className, ...props }: ComponentProps<"table">) {
   return (
