@@ -17,11 +17,21 @@ export interface TechnicalDetailsFoldProps {
 export function TechnicalDetailsFold({ detail }: TechnicalDetailsFoldProps) {
   if (!detail) return null;
   return (
-    <details className="error-details">
-      <summary className="muted">
+    // ADR-0067 (issue #172): the fold's visual rules used to live under
+    // .error / .persist-warning parent cascades in styles.css. Those parent
+    // containers migrated to shadcn Alert variants (ErrorBanner -> destructive,
+    // the session-pane persist-warning -> warning), so the fold now carries
+    // its own utilities and renders identically inside any Alert or bare
+    // container (the Failed turn outcomes in Thread/SessionPane are bare). The
+    // .error-details / .error-stack class hooks stay for selector / test
+    // stability (Shell.test.tsx queries .shell-error .error-details).
+    <details className="error-details mt-2">
+      <summary className="muted cursor-pointer text-[0.82rem]">
         <FormattedMessage id="errorBoundary.details" defaultMessage="Technical details" />
       </summary>
-      <pre className="error-stack">{detail}</pre>
+      <pre className="error-stack mt-1.5 p-2 bg-muted rounded-md font-mono text-[0.8rem] whitespace-pre-wrap break-words max-h-48 overflow-y-auto">
+        {detail}
+      </pre>
     </details>
   );
 }

@@ -3,11 +3,11 @@
  * class set by useTheme. These rules are replaced component-by-component as the
  * Chat-style shell lands in later slices. The disclosure banners (privacy /
  * stale / viz-degradation / large-result / many-columns / session-count
- * soft-cap) moved to shadcn Alert variants in issue #108 -- their bespoke
- * blue/amber tints retired (the amber became the --warning token in app.css;
- * the info ones collapsed to Alert's bg-card default). The .persist-warning /
- * .resume-progress tints below are still bespoke (no owner migrated yet) and
- * retire with their components. */
+ * soft-cap) moved to shadcn Alert variants in issue #108; QuestionBar's
+ * input/buttons, FileDropzone's button, ErrorBanner, and the session-pane
+ * persist-warning moved to shadcn Input/Button/Alert variants in issue #172
+ * (ADR-0067). The .resume-progress tint below is still bespoke (no owner
+ * migrated yet) and retires with its component. */
 * { box-sizing: border-box; }
 header h1 { margin: 0 0 0.5rem; }
 .header-actions {
@@ -21,45 +21,13 @@ header h1 { margin: 0 0 0.5rem; }
 .key-ok { color: #1a7a3a; }
 .key-missing { color: #b06000; }
 
-.dropzone { display: flex; align-items: center; gap: 0.75rem; margin: 1rem 0; }
-.dropzone button {
-  padding: 0.5rem 1rem; font-size: 1rem; cursor: pointer;
-  border: 1px solid var(--primary); background: var(--primary); color: var(--primary-foreground); border-radius: var(--radius);
-}
-.dropzone button:disabled { opacity: 0.6; cursor: progress; }
-
-.error { color: var(--destructive); background: #fde7e9; padding: 0.5rem 0.8rem; border-radius: var(--radius); }
-.error .error-message { margin: 0; }
-.error .error-details { margin-top: 0.5rem; }
-.error .error-details summary { cursor: pointer; font-size: 0.82rem; }
-.error .error-stack {
-  margin: 0.4rem 0 0; padding: 0.5rem;
-  background: var(--muted); border-radius: var(--radius);
-  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
-  font-size: 0.8rem; white-space: pre-wrap; word-break: break-word;
-  max-height: 12rem; overflow-y: auto;
-}
-
-/* Resume progress (ADR-0034 visible progress) + persist-failure banner
-   (review H4). resume-progress is a transient info line; persist-warning is
-   an amber note -- the disk fell behind but the in-memory work is intact,
-   so it reads as a warning, distinct from the red fatal .error. */
+/* Resume progress (ADR-0034 visible progress). resume-progress is a transient
+   info line. The persist-failure banner that used to sit alongside it migrated
+   to a shadcn Alert warning variant in issue #172 (ADR-0067). The dropzone
+   button, the .error fatal banner, and their .error-* fold rules also retired
+   in #172: dropzone button -> Button default variant, .error -> Alert
+   destructive variant, .error-* fold -> TechnicalDetailsFold utilities. */
 .resume-progress { background: #eef6ff; border: 1px solid #b6d4ff; border-radius: 6px; padding: 0.4rem 0.8rem; font-size: 0.88rem; margin: 0.4rem 0; }
-.persist-warning { background: #fff4e5; border: 1px solid #ffd9a0; border-radius: 6px; padding: 0.5rem 0.8rem; font-size: 0.9rem; margin: 0.4rem 0; color: #8a5200; }
-/* The persist banner reuses the ErrorBanner's .error-* class names but sits
-   under .persist-warning (amber), not .error (red). Scope matching rules here
-   so the technical-details fold renders with the same monospace / scroll /
-   wrap constraints as the fatal-error fold (H2). */
-.persist-warning .error-message { margin: 0; }
-.persist-warning .error-details { margin-top: 0.5rem; }
-.persist-warning .error-details summary { cursor: pointer; font-size: 0.82rem; }
-.persist-warning .error-stack {
-  margin: 0.4rem 0 0; padding: 0.5rem;
-  background: var(--muted); border-radius: var(--radius);
-  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
-  font-size: 0.8rem; white-space: pre-wrap; word-break: break-word;
-  max-height: 12rem; overflow-y: auto;
-}
 
 /* Viz (ADR-0016/0033): the chart container bounds a Vega-Embed render so a wide
    spec scrolls instead of bursting the panel. The degraded-viz disclosure moved
@@ -302,25 +270,17 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 .textual-card.failed { border-left: 3px solid var(--destructive); }
 .textual-card.cancelled { opacity: 0.6; }
 
-/* QuestionBar area (ADR-0062 R1: spans rail + workspace) */
+/* QuestionBar area (ADR-0062 R1: spans rail + workspace). ADR-0067 (issue
+   #172): the .question-bar input/button visual rules (focus outline, primary
+   submit, outline cancel) retired into shadcn Input + Button variants on
+   QuestionBar.tsx; .session-questionbar stays as the grid-placement + chrome
+   layout shell. */
 .session-questionbar {
   grid-column: 1 / -1; grid-row: 2;
   border-top: 1px solid var(--border);
   background: var(--background);
   padding: 0.5rem 1rem;
 }
-.session-questionbar .question-bar { display: flex; gap: 0.5rem; align-items: center; }
-.session-questionbar .question-bar input {
-  flex: 1; padding: 0.5rem 0.75rem; font-size: 1rem;
-  border: 1px solid var(--input); border-radius: var(--radius); background: var(--card); color: var(--foreground);
-}
-.session-questionbar .question-bar input:focus { outline: 2px solid var(--ring); outline-offset: -1px; }
-.session-questionbar .question-bar button {
-  padding: 0.5rem 1rem; font-size: 0.95rem; cursor: pointer;
-  border: 1px solid var(--primary); background: var(--primary); color: var(--primary-foreground); border-radius: var(--radius);
-}
-.session-questionbar .question-bar button:disabled { opacity: 0.5; cursor: progress; }
-.session-questionbar .question-bar button.cancel { background: var(--card); color: var(--foreground); border-color: var(--border); }
 
 /* Phase indicator (ADR-0059 discrete phase feedback). Sits between the input
    and the stop button while a turn is in flight; reads as a muted status line

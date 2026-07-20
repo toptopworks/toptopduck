@@ -13,6 +13,7 @@ import { QuestionBar } from "../components/QuestionBar";
 import { ResultView } from "../components/ResultView";
 import { TechnicalDetailsFold } from "../components/TechnicalDetailsFold";
 import { Thread } from "../components/Thread";
+import { Alert, AlertDescription } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { WorkingSetList } from "../components/WorkingSetList";
 import type {
@@ -173,16 +174,24 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
             />
           )}
           {s.persistError && (
-            <div className="persist-warning" role="status">
-              <p className="error-message">
-                <FormattedMessage
-                  id="error.persist.banner"
-                  defaultMessage="Auto-save failed: {reason} (the latest in-memory changes were not written to disk; retry the save before closing the app.)"
-                  values={{ reason: fmtError(s.persistError, intl) }}
-                />
-              </p>
-              <TechnicalDetailsFold detail={persistDetail} />
-            </div>
+            // ADR-0067 (issue #172): the bespoke .persist-warning container
+            // (hardcoded amber #fff4e5 / #ffd9a0 / #8a5200) retired into a
+            // shadcn Alert warning variant, which consumes the --warning token.
+            // role="status" overrides the Alert's assertive "alert" default:
+            // the disk fell behind but the in-memory work is intact, so it
+            // reads as a polite caution, not an interrupting emergency.
+            <Alert variant="warning" role="status" className="mt-1.5">
+              <AlertDescription>
+                <p className="m-0">
+                  <FormattedMessage
+                    id="error.persist.banner"
+                    defaultMessage="Auto-save failed: {reason} (the latest in-memory changes were not written to disk; retry the save before closing the app.)"
+                    values={{ reason: fmtError(s.persistError, intl) }}
+                  />
+                </p>
+                <TechnicalDetailsFold detail={persistDetail} />
+              </AlertDescription>
+            </Alert>
           )}
 
           {tab === "result" ? (

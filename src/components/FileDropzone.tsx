@@ -1,5 +1,6 @@
 import { FormattedMessage, useIntl } from "react-intl";
 import { open } from "@tauri-apps/plugin-dialog";
+import { Button } from "./ui/button";
 
 export function FileDropzone({
   onIngest,
@@ -30,13 +31,19 @@ export function FileDropzone({
   // The file-picker button only. Window-level drag-and-drop is handled by a
   // single listener in the shell (App) so N keep-alive SessionPanes do not
   // stack N listeners and fire N ingests per drop; this component is pure UI.
+  //
+  // ADR-0067 (issue #172): the .dropzone button visual rules (primary fill +
+  // disabled dim) retired into a shadcn Button default variant. The .dropzone
+  // class hook stays for selector stability; the flex layout rides the
+  // component as utility. The disabled opacity is pinned to /60 to match the
+  // retired rule (Button default is /50).
   return (
-    <div className="dropzone">
-      <button onClick={pick} disabled={loading}>
+    <div className="dropzone flex items-center gap-3 my-4">
+      <Button onClick={pick} disabled={loading} className="disabled:opacity-60">
         {loading
           ? intl.formatMessage({ id: "workingSet.dropzone.loading", defaultMessage: "Loading…" })
           : intl.formatMessage({ id: "workingSet.dropzone.pick", defaultMessage: "Pick a data file" })}
-      </button>
+      </Button>
       <span className="muted">
         <FormattedMessage
           id="workingSet.dropzone.dragHint"
