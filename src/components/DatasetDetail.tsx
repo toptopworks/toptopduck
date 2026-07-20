@@ -21,7 +21,12 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
     // <p> used to ride the global .muted color rule; that rule is now retired
     // too, so the <p> carries text-muted-foreground inline (and the <code> in
     // the schema column carries font-mono, replacing the global code element
-    // rule).
+    // rule). Deliberate drop: the retired element rule listed "Cascadia Code"
+    // in its font stack; font-mono resolves to the Tailwind v4 default mono
+    // stack (ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, ...) which
+    // omits Cascadia Code -- accepted to align with the other font-mono
+    // consumers (<pre> error-stack in TechnicalDetailsFold) and avoid a
+    // bespoke --font-mono token override (ADR-0067 Decision 2).
     <section className="dataset-detail">
       <h2 className="m-0 mb-1">
         {dataset.display_name}{" "}
