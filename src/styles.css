@@ -14,7 +14,11 @@
  * cold-start hero CTA/title, and the dead header h1 margin rule moved to
  * shadcn Button + Badge + Alert + Tailwind utility + ADR-0050 token (the
  * header h1 rule was dead CSS -- no <h1> renders in the topbar -- and is
- * simply removed) in issue #182 (ADR-0067). */
+ * simply removed) in issue #182 (ADR-0067); the PrivacyControls container
+ * spacing, the .privacy-samples switch row, the .privacy-cols last-column
+ * caller-scoped width/nowrap/center, the .disclosure-summary info blue tint,
+ * and the .privacy .muted typography moved to Tailwind utility + the Table
+ * primitive's last-cell className in issue #183 (ADR-0067). */
 * { box-sizing: border-box; }
 
 /* Viz (ADR-0016/0033): the chart container bounds a Vega-Embed render so a wide
@@ -37,11 +41,12 @@
 /* ADR-0067 (issue #168): the global `table / th / td` element rules were
  * retired into ui/table.tsx's self-contained primitives. ADR-0067 (issue
  * #173): the result caller-scoped table.result .num/.cell-null rules retired
- * onto ResultView's cells as utility (text-right / bg-muted). The remaining
- * caller-scoped hooks below (.schema td code, .privacy-cols td:last-child)
- * stay as the per-call visual contract (schema type wrap, privacy action
- * column width) -- their owners (DatasetDetail / PrivacyControls) have not
- * yet migrated to utility. */
+ * onto ResultView's cells as utility (text-right / bg-muted). ADR-0067 (issue
+ * #183): the privacy caller-scoped .privacy-cols last-column width/nowrap/
+ * center rule retired onto PrivacyControls' last-cell className. The
+ * remaining caller-scoped hook below (.schema td code wrap) stays as the
+ * per-call visual contract (schema type wrap) -- its owner (DatasetDetail)
+ * has not yet migrated to utility. */
 code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 /* Nested DuckDB types (STRUCT(...)/LIST(...)/MAP(...)) can be long -- let the
    inferred-type column wrap instead of overflowing the panel. */
@@ -49,15 +54,16 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 .source { color: var(--muted-foreground); font-size: 0.85rem; word-break: break-all; }
 .muted { color: var(--muted-foreground); }
 
-/* Privacy controls (ADR-0011, issue #9): sample switch + per-column type-only. */
-.privacy { margin-top: 0.5rem; }
-.privacy h3 { margin: 0.75rem 0 0.25rem; }
-.privacy-samples { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9rem; }
-.privacy-cols { margin: 0.5rem 0; }
-.privacy-cols th[scope="col"]:last-child,
-.privacy-cols td:last-child { width: 1%; white-space: nowrap; text-align: center; }
-.disclosure-summary { font-size: 0.9rem; background: #f4f8ff; border: 1px solid #d6e4ff; border-radius: 6px; padding: 0.5rem 0.7rem; margin: 0.5rem 0; }
-.privacy .muted { font-size: 0.82rem; line-height: 1.5; margin: 0.25rem 0 0; }
+/* Privacy controls (ADR-0011, issue #9): sample switch + per-column type-only.
+ * ADR-0067 (issue #183): the .privacy / .privacy h3 / .privacy-samples /
+ * .privacy-cols / .privacy-cols last-column / .disclosure-summary /
+ * .privacy .muted visual rules retired onto PrivacyControls.tsx as Tailwind
+ * utility + the Table primitive's last-cell className; the disclosure info
+ * blue tint rides Tailwind's blue scale (bg-blue-50 / border-blue-200) as the
+ * nearest-scale equivalent of the retired #f4f8ff / #d6e4ff. The class hooks
+ * (.privacy / .privacy-samples / .privacy-cols / .disclosure-summary) stay on
+ * the component for selector stability; the global .muted rule above is
+ * shared with other components and stays. */
 
 /* =========================================================================
  * Chat-style three-column shell (ADR-0045/0060/0062, issue #79).

@@ -19,6 +19,26 @@ interface PrivacyControlsProps {
 // component only renders it and emits the next whole config on each toggle. The
 // future query-loop window assembler (PRD #1) reads the same config to prune the
 // actual send -- this slice stores + discloses, it does not prune.
+//
+// ADR-0067 (issue #183): the visual rules that used to live under `.privacy` /
+// `.privacy h3` / `.privacy-samples` / `.privacy-cols` /
+// `.privacy-cols td:last-child` / `.privacy-cols th[scope="col"]:last-child` /
+// `.disclosure-summary` / `.privacy .muted` in styles.css retired onto Tailwind
+// utility + the Table primitive's last-cell className. The class hooks
+// (`.privacy` / `.privacy-samples` / `.privacy-cols` / `.disclosure-summary`)
+// stay on the elements for selector stability; the global `.muted` rule
+// (color-only) is shared with other components and stays in styles.css, so the
+// two muted <p>'s keep the hook for the color and ride utility for the
+// font-size (text-[0.82rem] -- no scale step nearby) / line-height / top
+// margin. The disclosure-summary keeps its <p> + direct-text-node shape (no
+// Alert swap): the summary is a mixed inline run (<strong> heading + several
+// formatMessage fragments + trailing punctuation), whereas the Alert's grid +
+// AlertTitle/AlertDescription slot structure serves block disclosure content
+// (the DisclosureBanner info surface from #108) -- a different surface from
+// this per-dataset summary. The info blue tint rides Tailwind's blue scale
+// (bg-blue-50 / border-blue-200) as the nearest-scale equivalent of the retired
+// #f4f8ff / #d6e4ff; this summary is the app's only blue surface, so it stays
+// on the Tailwind scale rather than a bespoke info token (ADR-0067 Decision 2).
 export function PrivacyControls({ dataset, loading, onPrivacyChange }: PrivacyControlsProps) {
   const intl = useIntl();
   const { privacy, columns, reference_name } = dataset;
@@ -60,12 +80,12 @@ export function PrivacyControls({ dataset, loading, onPrivacyChange }: PrivacyCo
   });
 
   return (
-    <div className="privacy">
-      <h3>
+    <div className="privacy mt-2">
+      <h3 className="mt-3 mb-1">
         <FormattedMessage id="privacy.heading" defaultMessage="Privacy controls" />
       </h3>
 
-      <label className="privacy-samples">
+      <label className="privacy-samples flex items-center gap-1.5 text-sm">
         <input
           type="checkbox"
           checked={privacy.send_samples}
@@ -78,7 +98,7 @@ export function PrivacyControls({ dataset, loading, onPrivacyChange }: PrivacyCo
         />
       </label>
       {!privacy.send_samples && (
-        <p className="muted">
+        <p className="muted text-[0.82rem] leading-normal mt-1">
           <FormattedMessage
             id="privacy.samplesOff"
             defaultMessage="Sample sending is off: no cell value from this dataset enters the outgoing payload (column names and types still follow the column controls below)."
@@ -86,7 +106,7 @@ export function PrivacyControls({ dataset, loading, onPrivacyChange }: PrivacyCo
         </p>
       )}
 
-      <Table className="privacy-cols">
+      <Table className="privacy-cols my-2">
         <TableHeader>
           <TableRow>
             <TableHead scope="col">
@@ -95,7 +115,7 @@ export function PrivacyControls({ dataset, loading, onPrivacyChange }: PrivacyCo
             <TableHead scope="col">
               <FormattedMessage id="column.type" defaultMessage="DuckDB type" />
             </TableHead>
-            <TableHead scope="col">
+            <TableHead scope="col" className="w-[1%] whitespace-nowrap text-center">
               <FormattedMessage
                 id="privacy.typeOnlyHeader"
                 defaultMessage="Type only (no values, no column name)"
@@ -110,7 +130,7 @@ export function PrivacyControls({ dataset, loading, onPrivacyChange }: PrivacyCo
               <TableCell>
                 <code>{c.canonical_type}</code>
               </TableCell>
-              <TableCell>
+              <TableCell className="w-[1%] whitespace-nowrap text-center">
                 <input
                   type="checkbox"
                   checked={typeOnly.has(c.name)}
@@ -127,7 +147,7 @@ export function PrivacyControls({ dataset, loading, onPrivacyChange }: PrivacyCo
         </TableBody>
       </Table>
 
-      <p className="disclosure-summary">
+      <p className="disclosure-summary text-sm bg-blue-50 border border-blue-200 rounded-md px-3 py-2 my-2">
         <strong>
           {intl.formatMessage({
             id: "privacy.summary.heading",
@@ -164,7 +184,7 @@ export function PrivacyControls({ dataset, loading, onPrivacyChange }: PrivacyCo
             )
           : intl.formatMessage({ id: "privacy.summary.period", defaultMessage: "." })}
       </p>
-      <p className="muted">
+      <p className="muted text-[0.82rem] leading-normal mt-1">
         <FormattedMessage
           id="privacy.note.typeOnly"
           defaultMessage='Columns marked "Type only": neither their names nor their values are sent to the cloud LLM (only the type, so the LLM can still reason about the schema shape). When samples are on, these columns are also dropped from the samples.'
