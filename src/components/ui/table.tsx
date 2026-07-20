@@ -16,8 +16,10 @@ import { cn } from "@/lib/utils";
 // .cell-null) pass through cn() to the rendered <table>/<th>/<td>. ADR-0067
 // (issue #173): the result caller-scoped styles.css rules (.num right-align,
 // .cell-null muted bg) retired onto ResultView's cells as utility alongside
-// the hooks; the still-caller-scoped rules (.schema td code wrap, .privacy-cols
-// last-column width) live on in styles.css until their owners migrate.
+// the hooks; ADR-0067 (issue #183): the privacy caller-scoped .privacy-cols
+// last-column width/nowrap/center rule retired onto PrivacyControls' last-cell
+// className. The still-caller-scoped .schema td code wrap rule lives on in
+// styles.css until its owner (DatasetDetail) migrates.
 
 function Table({ className, ...props }: ComponentProps<"table">) {
   return (
