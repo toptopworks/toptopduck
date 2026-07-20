@@ -359,7 +359,12 @@ function WorkspaceResult({
 // .textual-card.failed); the hook doubles as the variant-utility lookup key.
 const TEXTUAL_CARD_BASE =
   "textual-card p-4 bg-card border border-border rounded-lg";
-const TEXTUAL_CARD_VARIANT: Record<string, string> = {
+// The variant key set is a closed domain -- Lowercase<TextKind> ("clarify" |
+// "refuse") for the Textual arm + "failed" + "cancelled" for the other two
+// outcome kinds. A literal-union Record catches key typos at compile time and
+// stays exhaustive if TextKind grows, matching the `default: never` pattern
+// used by the outcome switch below.
+const TEXTUAL_CARD_VARIANT: Record<"clarify" | "refuse" | "failed" | "cancelled", string> = {
   clarify: "border-l-[3px] border-l-primary",
   refuse: "border-l-[3px] border-l-muted-foreground",
   failed: "border-l-[3px] border-l-destructive",
@@ -372,8 +377,10 @@ function TextualOutcomeCard({ turn }: { turn: NonMaterializedTurn }) {
       const { text_kind, body, assumption } = turn.outcome.data;
       const isClarify = text_kind === "Clarify";
       // "clarify" | "refuse" -- the lowercase text_kind is both the kept class
-      // hook and the variant-utility lookup key.
-      const variantHook = text_kind.toLowerCase();
+      // hook and the variant-utility lookup key. Cast to the literal union so
+      // the TEXTUAL_CARD_VARIANT lookup is exhaustive-checked (TextKind is
+      // "Clarify" | "Refuse", so the cast is sound).
+      const variantHook = text_kind.toLowerCase() as "clarify" | "refuse";
       return (
         <article className={cn(TEXTUAL_CARD_BASE, variantHook, TEXTUAL_CARD_VARIANT[variantHook])}>
           <h3 className="m-0 mb-2">

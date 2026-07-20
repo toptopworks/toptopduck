@@ -244,18 +244,15 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
   display: flex; flex-direction: column;
 }
 /* ADR-0067 (issue #173): the workspace + textual-card VISUAL rules retired
- * into SessionPane.tsx + App.tsx as Tailwind utility + ADR-0050 token:
- * .workspace-tabs chrome (padding/border-bottom/background) + [role=tab] base
- * (padding/font/border-b/color) + .active primary underline, .workspace-body
- * padding, .workspace-hero flex column + centering + padding + text-align, and
- * the .textual-card block (padding/bg/border/radius, h3 margin, .textual-body
- * margin+line-height, .clarify/.refuse/.failed border-left, .cancelled
- * opacity). The semantic class hooks (.workspace-tabs / .workspace-body /
- * .workspace-hero / .textual-card / .textual-card.{clarify,refuse,failed,
- * cancelled}) stay on the components for selector / test stability; the bare
- * "active" class on the tab button is kept as a state marker. The .active-chip
- * rule below is layout-only (pushing the chip to the row's right edge) and
- * stays here. */
+ * into SessionPane.tsx + App.tsx as Tailwind utility + ADR-0050 token. The
+ * rule-by-rule retirement lives on each component's ADR-0067 inline comment
+ * (not re-listed here -- a hand-kept copy drifts on the next slice, per the
+ * retire-scope convention above). The semantic class hooks (.workspace-tabs /
+ * .workspace-body / .workspace-hero / .textual-card /
+ * .textual-card.{clarify,refuse,failed,cancelled}) stay on the components for
+ * selector / test stability; the bare "active" class on the tab button is kept
+ * as a state marker. The .active-chip rule below is layout-only (pushing the
+ * chip to the row's right edge) and stays here. */
 /* active-chip is now a Badge variant="default" (teal --primary, ADR-0050); this
    class carries layout only -- pushing the chip to the row's right edge. The
    variant owns color/bg/padding/radius so the chip rides the token system. */
@@ -318,13 +315,11 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 
 /* --- Result rendering (ADR-0057/0062 R4) --------------------------------
  * ADR-0067 (issue #173): the result-view + sticky-pagination VISUAL rules
- * retired into ResultView.tsx as Tailwind utility + ADR-0050 token: the
- * .result-view h2 margin, the caller-scoped table.result th.num/td.num
- * right-align, table.result td.cell-null muted-bg, the .page-info.sticky
- * container chrome (sticky bg / border-top / padding / flex row), and the
- * .page-info.sticky button rules (border / bg-card / radius / font / disabled
- * opacity + cursor). The semantic hooks (.result-view / .result / .num /
- * .cell-null / .page-info) stay on the component for selector / test
+ * retired into ResultView.tsx as Tailwind utility + ADR-0050 token. The
+ * rule-by-rule retirement lives on ResultView's ADR-0067 inline comments (not
+ * re-listed here -- a hand-kept copy drifts on the next slice, per the
+ * retire-scope convention above). The semantic hooks (.result-view / .result /
+ * .num / .cell-null / .page-info) stay on the component for selector / test
  * stability; the bare `sticky` class on the pagination div IS the Tailwind
  * position utility (position: sticky), no longer a CSS-class hook. */
 
