@@ -1,7 +1,19 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { useIntl, FormattedMessage } from "react-intl";
 import { Badge } from "./ui/badge";
+import { cn } from "../lib/utils";
 import type { DatasetDescriptor } from "../types";
+
+// ADR-0067 (issue #184): the .working-set button rule (all: unset + cursor +
+// padding + radius + display:block + width:100%) retired onto this shared
+// utility constant. Tailwind v4's Preflight already resets the button's
+// background to transparent, inherits font/color, and zeroes margin/padding, so
+// only the residual visual contract is re-stated here: strip the native border
+// + appearance, set the compact padding, the var(--radius) corner, the
+// full-width block layout, and left alignment (UA button text is centered).
+// Active state (bg-accent + font-semibold) layers on via cn() at the call site.
+const BUTTON_BASE =
+  "appearance-none border-0 cursor-pointer p-[0.4rem_0.5rem] rounded-md block w-full text-left";
 
 export function WorkingSetList({
   datasets,
@@ -102,18 +114,39 @@ export function WorkingSetList({
   };
 
   return (
-    <ul className="working-set">
+    // ADR-0067 (issue #184): the .working-set / .working-set li /
+    // .working-set button / .working-set li.active button / .working-set small
+    // visual rules retired onto utility on each element below + the BUTTON_BASE
+    // constant (shared by the select + icon buttons). The class hooks
+    // (.working-set / .rename / .replace / .delete / .active / .stale) stay on
+    // the elements for selector / test stability; the active STATE now drives
+    // the button's own conditional className (bg-accent + font-semibold) instead
+    // of the retired .working-set li.active button descendant selector.
+    <ul className="working-set list-none m-0 p-0">
       {datasets.map((d) => (
         <li
           key={d.reference_name}
-          className={`${d.reference_name === activeName ? "active" : ""}${d.stale ? " stale" : ""}`}
+          className={cn(
+            "my-[0.2rem]",
+            d.reference_name === activeName && "active",
+            d.stale && "stale",
+          )}
         >
-          <button type="button" onClick={() => onSelect(d.reference_name)}>
+          <button
+            type="button"
+            className={cn(
+              BUTTON_BASE,
+              d.reference_name === activeName && "bg-accent font-semibold",
+            )}
+            onClick={() => onSelect(d.reference_name)}
+          >
             {d.display_name}
             {d.reference_name === activeName ? (
               <FormattedMessage id="workingSet.activeSuffix" defaultMessage=" · current table" />
             ) : null}
-            <small>
+            {/* font-normal overrides the active button's font-semibold so the
+                row-count annotation stays muted-weight in either state. */}
+            <small className="text-muted-foreground font-normal">
               {" "}
               <FormattedMessage
                 id="workingSet.rowCount"
@@ -133,7 +166,7 @@ export function WorkingSetList({
           )}
           <button
             type="button"
-            className="rename"
+            className={cn(BUTTON_BASE, "rename")}
             aria-label={intl.formatMessage(
               { id: "workingSet.rename.ariaLabel", defaultMessage: "Rename {name}" },
               { name: d.display_name },
@@ -147,7 +180,7 @@ export function WorkingSetList({
           {onReplace && (
             <button
               type="button"
-              className="replace"
+              className={cn(BUTTON_BASE, "replace")}
               aria-label={intl.formatMessage(
                 { id: "workingSet.replace.ariaLabel", defaultMessage: "Replace source {name}" },
                 { name: d.display_name },
@@ -165,7 +198,7 @@ export function WorkingSetList({
           {onDelete && (
             <button
               type="button"
-              className="delete"
+              className={cn(BUTTON_BASE, "delete")}
               aria-label={intl.formatMessage(
                 { id: "workingSet.delete.ariaLabel", defaultMessage: "Delete {name}" },
                 { name: d.display_name },

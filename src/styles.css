@@ -18,7 +18,12 @@
  * spacing, the .privacy-samples switch row, the .privacy-cols last-column
  * caller-scoped width/nowrap/center, the .disclosure-summary info blue tint,
  * and the .privacy .muted typography moved to Tailwind utility + the Table
- * primitive's last-cell className in issue #183 (ADR-0067). */
+ * primitive's last-cell className in issue #183 (ADR-0067); the cross-component
+ * .panel card chrome (SessionPane WorkspaceWorkingSet sections + Thread rail
+ * container), the DatasetDetail caller-scoped typography (.dataset-detail
+ * h2/small, .meta, .source, .schema td code word-wrap), and the WorkingSetList
+ * list/button/active-state/small rules moved to Tailwind utility + conditional
+ * className + a shared BUTTON_BASE constant in issue #184 (ADR-0067). */
 * { box-sizing: border-box; }
 
 /* Viz (ADR-0016/0033): the chart container bounds a Vega-Embed render so a wide
@@ -26,32 +31,33 @@
    to a warning Alert variant in issue #108 (ADR-0050). */
 .viz-chart { margin: 0.5rem 0; max-width: 100%; overflow: auto; }
 
-.layout { display: grid; grid-template-columns: 280px 1fr; gap: 1.25rem; margin-top: 1rem; }
-.panel { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1rem; }
-
-.working-set { list-style: none; margin: 0; padding: 0; }
-.working-set li { margin: 0.2rem 0; }
-.working-set button { all: unset; cursor: pointer; padding: 0.4rem 0.5rem; border-radius: var(--radius); display: block; width: 100%; }
-.working-set li.active button { background: var(--accent); font-weight: 600; }
-.working-set small { color: var(--muted-foreground); font-weight: 400; }
-
-.dataset-detail h2 { margin: 0 0 0.25rem; }
-.dataset-detail small { color: var(--muted-foreground); font-weight: 400; }
-.meta { color: var(--muted-foreground); margin: 0.25rem 0 0.75rem; }
+/* Working-set tab grid (legacy .layout). ADR-0067 (issue #184): the
+   margin-top:1rem visual detail was stripped -- .layout has a single consumer
+   (SessionPane WorkspaceWorkingSet) and the .working-set-layout margin-top:0
+   override that zeroed it for that consumer also retired this slice; only the
+   grid structure stays (ADR-0067 Decision 1: a 280px/1fr two-column grid is
+   layout semantics, not a utility long-string). */
+.layout { display: grid; grid-template-columns: 280px 1fr; gap: 1.25rem; }
 /* ADR-0067 (issue #168): the global `table / th / td` element rules were
  * retired into ui/table.tsx's self-contained primitives. ADR-0067 (issue
  * #173): the result caller-scoped table.result .num/.cell-null rules retired
  * onto ResultView's cells as utility (text-right / bg-muted). ADR-0067 (issue
  * #183): the privacy caller-scoped .privacy-cols last-column width/nowrap/
- * center rule retired onto PrivacyControls' last-cell className. The
- * remaining caller-scoped hook below (.schema td code wrap) stays as the
- * per-call visual contract (schema type wrap) -- its owner (DatasetDetail)
- * has not yet migrated to utility. */
+ * center rule retired onto PrivacyControls' last-cell className. ADR-0067
+ * (issue #184): the cross-component .panel card chrome retired onto
+ * SessionPane.tsx WorkspaceWorkingSet sections (bg-card + border + rounded-lg
+ * + p-4) + the Thread rail section dropped its vestigial .panel hook (the
+ * .session-rail .panel transparent/borderless/paddingless override below was
+ * retired with it); the DatasetDetail caller-scoped typography (.dataset-detail
+ * h2/small margin + muted color, .meta muted color + margin, .source muted
+ * color + font-size + break-all, .schema td code word-wrap) retired onto
+ * DatasetDetail.tsx elements as utility; the WorkingSetList list-item/button/
+ * active-state/small rules retired onto WorkingSetList.tsx as utility + a
+ * shared BUTTON_BASE constant + conditional className for the active state.
+ * The class hooks (.panel / .dataset-detail / .meta / .source / .schema /
+ * .working-set) stay on the elements for selector stability; the global .muted
+ * rule (color-only) is shared with other components and stays here. */
 code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
-/* Nested DuckDB types (STRUCT(...)/LIST(...)/MAP(...)) can be long -- let the
-   inferred-type column wrap instead of overflowing the panel. */
-.schema td code { word-break: break-word; white-space: pre-wrap; }
-.source { color: var(--muted-foreground); font-size: 0.85rem; word-break: break-all; }
 .muted { color: var(--muted-foreground); }
 
 /* Privacy controls (ADR-0011, issue #9): sample switch + per-column type-only.
@@ -235,7 +241,10 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
   background: var(--card);
   padding: 0.5rem;
 }
-.session-rail .panel { border: none; padding: 0; background: transparent; }
+/* ADR-0067 (issue #184): the .session-rail .panel override (border:none /
+   padding:0 / background:transparent) retired -- the Thread rail section
+   dropped its vestigial .panel hook, so neither the base .panel rule nor this
+   override is reachable. The rail itself supplies bg-card + 0.5rem padding. */
 .rail-empty { font-size: 0.85rem; padding: 0.5rem; }
 
 .session-workspace {
@@ -285,8 +294,11 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
    record. The .degrade-card class hook stays on the <Card> for selector /
    test stability (ErrorBoundary.test.tsx queries .degrade-card). */
 
-/* Working-set tab reuses the legacy .layout grid */
-.working-set-layout { margin-top: 0; }
+/* ADR-0067 (issue #184): the .working-set-layout rule (margin-top:0 override
+   of .layout's former margin-top:1rem) retired -- .layout's margin-top:1rem
+   was stripped this slice (single consumer), so the override is moot. The
+   .working-set-layout hook stays on the SessionPane WorkspaceWorkingSet div
+   for selector stability. */
 
 /* --- Result rendering (ADR-0057/0062 R4) --------------------------------
  * ADR-0067 (issue #173): the result-view + sticky-pagination VISUAL rules

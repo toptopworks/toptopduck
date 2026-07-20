@@ -467,8 +467,16 @@ function WorkspaceWorkingSet({
   const shown = datasets.find((d) => d.reference_name === selected) ?? null;
 
   return (
+    // ADR-0067 (issue #184): the .working-set-layout rule (margin-top:0 override
+    // of .layout's margin-top:1rem) retired; .layout keeps its grid (structure,
+    // ADR-0067 Decision 1) but its margin-top:1rem visual detail is stripped too
+    // -- .layout has no other consumer, so dropping the margin preserves the
+    // flush-at-top rendering the override used to give. Both .layout and
+    // .working-set-layout hooks stay on the div for selector stability. The
+    // .panel card chrome on both sections (bg-card + border + rounded-lg +
+    // p-4) retired onto utility inline; the .panel class hook stays too.
     <div className="layout working-set-layout">
-      <section className="panel">
+      <section className="panel bg-card border rounded-lg p-4">
         <h2>
           <FormattedMessage id="session.workingSet.title" defaultMessage="Working set" />
         </h2>
@@ -482,7 +490,7 @@ function WorkspaceWorkingSet({
           loading={loading}
         />
       </section>
-      <section className="panel">
+      <section className="panel bg-card border rounded-lg p-4">
         {shown ? (
           <DatasetDetail
             dataset={shown}

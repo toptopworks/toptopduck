@@ -124,9 +124,14 @@ export function Thread({
   }, []);
 
   if (entries.length === 0) return null;
+  // ADR-0067 (issue #184): the vestigial .panel hook is dropped -- inside
+  // .session-rail it was overridden to transparent/borderless/paddingless
+  // (the rail itself supplies bg-card + padding), so the .panel rule plus its
+  // .session-rail .panel override both retire with no visual change. The
+  // .thread hook stays for selector / test stability (#169).
   return (
     <section
-      className="panel thread"
+      className="thread"
       aria-label={intl.formatMessage({
         id: "thread.ariaLabel",
         defaultMessage: "Conversation history",
