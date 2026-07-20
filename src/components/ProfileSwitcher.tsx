@@ -5,6 +5,7 @@ import { FormattedMessage, useIntl } from "react-intl";
 
 import { fmtError, listProviderProfiles } from "../api";
 import type { ProviderConfig } from "../types";
+import { cn } from "../lib/utils";
 import { Badge } from "./ui/badge";
 
 // Top-bar active-profile quick switcher (issue #154, ADR-0065). A lightweight
@@ -165,11 +166,20 @@ export function ProfileSwitcher({ provider, onSwitchActive, disableSwitch }: Pro
   const activeProfile = provider.profiles.find((p) => p.id === provider.active_profile);
   const activeLabel = activeProfile?.display_name.trim() || unnamed;
 
+  // ADR-0067 (issue #171): the .profile-switcher* visual rules (trigger +
+  // hover, name truncation, chevron opacity, menu popover chrome + shadow, item
+  // three-state + aria-checked typography, error padding) were retired from
+  // styles.css into inline Tailwind utilities over the ADR-0050 token. The
+  // .profile-switcher position:relative anchor + .profile-switcher-menu
+  // absolute positioning stay as layout hooks (the menu is positioned off the
+  // anchor), but expressed as utilities here so styles.css carries no shell-
+  // chrome visual rule. The semantic class hooks are kept for selector / test
+  // stability.
   return (
-    <div className="profile-switcher" ref={containerRef}>
+    <div className="profile-switcher relative" ref={containerRef}>
       <button
         type="button"
-        className="profile-switcher-trigger"
+        className="profile-switcher-trigger inline-flex items-center gap-1 py-1 px-2.5 text-sm cursor-pointer border border-border bg-card rounded-md text-foreground max-w-56 hover:bg-muted"
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={intl.formatMessage(
@@ -178,12 +188,12 @@ export function ProfileSwitcher({ provider, onSwitchActive, disableSwitch }: Pro
         )}
         onClick={() => setOpen((v) => !v)}
       >
-        <span className="profile-switcher-name">{activeLabel}</span>
-        <ChevronDown size={14} aria-hidden />
+        <span className="profile-switcher-name truncate font-medium">{activeLabel}</span>
+        <ChevronDown size={14} aria-hidden className="opacity-60 shrink-0" />
       </button>
       {open && (
         <div
-          className="profile-switcher-menu"
+          className="profile-switcher-menu absolute top-full right-0 z-50 min-w-64 max-w-80 flex flex-col gap-0.5 p-1 mt-0.5 border border-border bg-card rounded-md shadow-md"
           role="menu"
           aria-label={intl.formatMessage({
             id: "header.profileSwitcher.menuAria",
@@ -202,7 +212,14 @@ export function ProfileSwitcher({ provider, onSwitchActive, disableSwitch }: Pro
                   itemRefs.current[i] = el;
                 }}
                 type="button"
-                className="profile-switcher-item"
+                className={cn(
+                  "profile-switcher-item flex items-center justify-between gap-2 py-1.5 px-2 text-sm cursor-pointer border-0 bg-transparent rounded-sm text-foreground text-left",
+                  // :hover:not(:disabled) -- the muted tint applies only when
+                  // the item is interactive (mirrors the retired rule). Disabled
+                  // items dim + drop the pointer, never tint.
+                  "enabled:hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed",
+                  isActive && "font-semibold",
+                )}
                 role="menuitemradio"
                 aria-checked={isActive}
                 disabled={disableSwitch}
@@ -215,7 +232,7 @@ export function ProfileSwitcher({ provider, onSwitchActive, disableSwitch }: Pro
                 )}
                 onClick={() => handleSelect(p.id)}
               >
-                <span className="profile-switcher-item-name">{label}</span>
+                <span className="profile-switcher-item-name truncate">{label}</span>
                 <Badge variant={pHasKey ? "secondary" : "outline"}>
                   {pHasKey ? (
                     <FormattedMessage id="settings.profiles.keySet" defaultMessage="Key set" />
@@ -227,7 +244,7 @@ export function ProfileSwitcher({ provider, onSwitchActive, disableSwitch }: Pro
             );
           })}
           {keysError && (
-            <p className="profile-switcher-error text-destructive text-sm">{keysError}</p>
+            <p className="profile-switcher-error py-1.5 px-2 m-0 text-destructive text-sm">{keysError}</p>
           )}
         </div>
       )}

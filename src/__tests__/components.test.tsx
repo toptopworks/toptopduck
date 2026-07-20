@@ -8,8 +8,10 @@ import { DatasetDetail } from "../components/DatasetDetail";
 import { DisclosureBanner } from "../components/DisclosureBanner";
 import { GuidedLoadDialog } from "../components/GuidedLoadDialog";
 import { PrivacyControls } from "../components/PrivacyControls";
+import { ProfileSwitcher } from "../components/ProfileSwitcher";
 import { QuestionBar } from "../components/QuestionBar";
 import { COLUMN_DISCLOSURE_THRESHOLD, ResultView, ROW_DISCLOSURE_THRESHOLD } from "../components/ResultView";
+import { SessionSidebar } from "../session/SessionSidebar";
 import { SettingsView } from "../components/settingsView/SettingsView";
 import { Thread } from "../components/Thread";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
@@ -17,12 +19,15 @@ import { TooltipProvider } from "../components/ui/tooltip";
 import { VegaChart } from "../components/VegaChart";
 import { WorkingSetList } from "../components/WorkingSetList";
 import { clearProfileKey, listProviderProfiles, readRows, setProfileKey } from "../api";
+import type { OpenSession } from "../session/sidebarModel";
 import embed, { type VisualizationSpec } from "vega-embed";
 import type {
   AppConfig,
   DatasetDescriptor,
   DatasetPrivacy,
   GuidanceRequest,
+  ProviderConfig,
+  SessionMetadata,
   StaleReason,
   ThreadEntry,
   TurnRecord,
@@ -2596,5 +2601,281 @@ describe("Table primitives (ADR-0067, issue #168 self-contained)", () => {
     expect(td).not.toBeNull();
     expect(td?.className.split(/\s+/)).toContain("border");
     expect(td?.className.split(/\s+/)).toContain("text-sm");
+  });
+});
+
+// --- ADR-0067 (issue #171): shell-skeleton visuals migrated to Tailwind
+// utility + ADR-0050 token on the component. The active/open/menu/switcher
+// SEMANTICS are unchanged; these pin the className contract so a regression
+// that drops a utility silently reverts to the retired styles.css rules.
+// jsdom has no layout engine, so these are className assertions on the real
+// rendered elements (cf. the #170 SettingsView + Table primitive tests),
+// split (/\s+/) + toContain so `bg-primary` does not match `bg-primary-
+// foreground` etc. The .session-sidebar / .topbar grid + flex LAYOUT shells
+// stay in styles.css and cannot be exercised in jsdom.
+
+// SessionSidebar routes its chrome through react-intl. Rendered inside an
+// empty-catalog English IntlProvider so FormattedMessage falls back to its
+// defaultMessage, mirroring renderSettings.
+function renderSidebar(ui: ReactElement) {
+  return render(
+    <IntlProvider locale="en" messages={{}} onError={() => {}}>
+      {ui}
+    </IntlProvider>,
+  );
+}
+
+// Two never-saved open sessions: the active one (sid === activeSessionId)
+// carries .active.open; the other carries .open:not(.active). Both land in
+// the Today group (buildSidebarGroups stamps `now` for unsaved sessions).
+function twoOpenSessions(): OpenSession[] {
+  return [
+    { sid: "sess-active", name: "Active", path: null, pendingIngestPath: null },
+    { sid: "sess-bg", name: "Background", path: null, pendingIngestPath: null },
+  ];
+}
+
+describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
+  it("session-entry.active lifts bg-primary + text-primary-foreground + font-semibold", () => {
+    // The active row's entry-main carries the active fill as inline utilities
+    // over the ADR-0050 token (full-row fill selection signal), replacing the
+    // retired .session-entry.active .session-entry-main CSS rule.
+    const { container } = renderSidebar(
+      <SessionSidebar
+        sessions={[]}
+        openSessions={twoOpenSessions()}
+        activeSessionId="sess-active"
+        disabled={false}
+        loadError={null}
+        onNew={() => {}}
+        onActivate={() => {}}
+        onOpenPersisted={() => {}}
+        onClose={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    const active = container.querySelector(".session-entry.active .session-entry-main");
+    expect(active).not.toBeNull();
+    const classes = active?.className.split(/\s+/);
+    expect(classes).toContain("bg-primary");
+    expect(classes).toContain("text-primary-foreground");
+    expect(classes).toContain("font-semibold");
+  });
+
+  it("session-entry.open:not(.active) lifts the left accent shadow", () => {
+    // An open background session carries a 2px left inset accent shadow so it
+    // still leaves a trace, replacing the retired
+    // .session-entry.open:not(.active) .session-entry-main CSS rule. var(--primary)
+    // matches the retired rule's hue.
+    const { container } = renderSidebar(
+      <SessionSidebar
+        sessions={[]}
+        openSessions={twoOpenSessions()}
+        activeSessionId="sess-active"
+        disabled={false}
+        loadError={null}
+        onNew={() => {}}
+        onActivate={() => {}}
+        onOpenPersisted={() => {}}
+        onClose={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    const bg = container.querySelector(".session-entry.open:not(.active) .session-entry-main");
+    expect(bg).not.toBeNull();
+    expect(bg?.className.split(/\s+/)).toContain("shadow-[inset_2px_0_var(--primary)]");
+    // The active fill does NOT also apply to the background row.
+    expect(bg?.className.split(/\s+/)).not.toContain("bg-primary");
+  });
+
+  it("session-entry-main keeps [all:unset] + hover:bg-accent + rounded-md", () => {
+    // [all:unset] strips native button chrome so the row reads as a flat list
+    // entry; hover:bg-accent is the default-state hover tint (ADR-0050 accent
+    // token). Pinning both guards against a regression that drops the reset
+    // (button regains UA chrome) or the hover tint.
+    const { container } = renderSidebar(
+      <SessionSidebar
+        sessions={[]}
+        openSessions={twoOpenSessions()}
+        activeSessionId="sess-active"
+        disabled={false}
+        loadError={null}
+        onNew={() => {}}
+        onActivate={() => {}}
+        onOpenPersisted={() => {}}
+        onClose={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    const main = container.querySelector(".session-entry-main");
+    expect(main).not.toBeNull();
+    const classes = main?.className.split(/\s+/);
+    expect(classes).toContain("[all:unset]");
+    expect(classes).toContain("hover:bg-accent");
+    expect(classes).toContain("rounded-md");
+  });
+
+  it("session-menu popover carries absolute + bg-card + shadow + border", () => {
+    // The context-menu dropdown's popover chrome (absolute positioning off the
+    // entry, card surface, border, box-shadow) rides inline utilities,
+    // replacing the retired .session-menu CSS rule.
+    const { container } = renderSidebar(
+      <SessionSidebar
+        sessions={[]}
+        openSessions={twoOpenSessions()}
+        activeSessionId="sess-active"
+        disabled={false}
+        loadError={null}
+        onNew={() => {}}
+        onActivate={() => {}}
+        onOpenPersisted={() => {}}
+        onClose={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    // Open the menu on the first entry to mount the popover.
+    fireEvent.click(container.querySelector(".session-entry-menu") as HTMLButtonElement);
+    const menu = container.querySelector(".session-menu");
+    expect(menu).not.toBeNull();
+    const classes = menu?.className.split(/\s+/);
+    expect(classes).toContain("absolute");
+    expect(classes).toContain("bg-card");
+    expect(classes).toContain("border");
+    expect(classes).toContain("border-border");
+    expect(classes).toContain("shadow-md");
+  });
+
+  it("session-menu danger item lifts text-destructive (retires .session-menu button.danger)", () => {
+    // The delete menu item's destructive hue rides an inline utility, replacing
+    // the retired .session-menu button.danger CSS rule. Rendered only when an
+    // entry has a bound path (a persisted .duck); a never-saved open session
+    // has path=null, so seed a persisted row to surface the Delete item.
+    const persisted: SessionMetadata = {
+      session_id: "/x/persisted.duck",
+      display_name: "Persisted",
+      last_modified_at: Date.now(),
+      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+      format_version: 1,
+    };
+    const { container } = renderSidebar(
+      <SessionSidebar
+        sessions={[persisted]}
+        openSessions={[]}
+        activeSessionId={null}
+        disabled={false}
+        loadError={null}
+        onNew={() => {}}
+        onActivate={() => {}}
+        onOpenPersisted={() => {}}
+        onClose={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    fireEvent.click(container.querySelector(".session-entry-menu") as HTMLButtonElement);
+    const danger = container.querySelector(".session-menu button.danger");
+    expect(danger).not.toBeNull();
+    expect(danger?.className.split(/\s+/)).toContain("text-destructive");
+  });
+});
+
+// A two-profile ProviderConfig for the switcher tests: the active profile is
+// parameterized so the aria-checked test can seed any active id.
+function switcherProvider(activeId: string = "anthropic"): ProviderConfig {
+  return {
+    profiles: [
+      {
+        id: "anthropic",
+        display_name: "Anthropic",
+        protocol: "anthropic",
+        base_url: "https://api.anthropic.com",
+        model: "claude-sonnet-4-6",
+      },
+      {
+        id: "glm",
+        display_name: "GLM",
+        protocol: "openai",
+        base_url: "https://open.bigmodel.cn/api/paas/v4",
+        model: "glm-4",
+      },
+    ],
+    active_profile: activeId,
+  };
+}
+
+describe("ProfileSwitcher shell-skeleton visuals (ADR-0067, issue #171)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // ProfileSwitcher fetches the per-profile key overlay once on mount; an
+    // empty resolved list keeps the items rendered without key badges.
+    vi.mocked(listProviderProfiles).mockResolvedValue([]);
+  });
+
+  it("profile-switcher-trigger carries hover:bg-muted + max-w-56 + bg-card", () => {
+    // The trigger's chrome (card surface, hover tint, max-width clamp) rides
+    // inline utilities over the ADR-0050 token, replacing the retired
+    // .profile-switcher-trigger (+ :hover) CSS rule.
+    const { container } = renderSidebar(
+      <ProfileSwitcher provider={switcherProvider()} onSwitchActive={() => {}} />,
+    );
+    const trigger = container.querySelector(".profile-switcher-trigger");
+    expect(trigger).not.toBeNull();
+    const classes = trigger?.className.split(/\s+/);
+    expect(classes).toContain("hover:bg-muted");
+    expect(classes).toContain("max-w-56");
+    expect(classes).toContain("bg-card");
+  });
+
+  it("profile-switcher-menu carries absolute + shadow + z-50", () => {
+    // The dropdown's popover chrome (absolute positioning off the .profile-
+    // switcher anchor, high z-index, card surface, box-shadow) rides inline
+    // utilities, replacing the retired .profile-switcher-menu CSS rule.
+    const { container } = renderSidebar(
+      <ProfileSwitcher provider={switcherProvider()} onSwitchActive={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Active profile:/ }));
+    const menu = container.querySelector(".profile-switcher-menu");
+    expect(menu).not.toBeNull();
+    const classes = menu?.className.split(/\s+/);
+    expect(classes).toContain("absolute");
+    expect(classes).toContain("z-50");
+    expect(classes).toContain("shadow-md");
+  });
+
+  it("profile-switcher-item aria-checked lifts font-semibold", () => {
+    // The active profile's menu item carries aria-checked + font-semibold,
+    // replacing the retired .profile-switcher-item[aria-checked="true"] CSS
+    // rule. An inactive item does NOT carry font-semibold.
+    const { container } = renderSidebar(
+      <ProfileSwitcher provider={switcherProvider()} onSwitchActive={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Active profile:/ }));
+    const active = container.querySelector(`.profile-switcher-item[aria-checked="true"]`);
+    expect(active).not.toBeNull();
+    expect(active?.className.split(/\s+/)).toContain("font-semibold");
+    const inactive = container.querySelector(`.profile-switcher-item:not([aria-checked="true"])`);
+    expect(inactive).not.toBeNull();
+    expect(inactive?.className.split(/\s+/)).not.toContain("font-semibold");
+  });
+
+  it("profile-switcher-item carries enabled:hover:bg-muted + disabled dim", () => {
+    // :hover:not(:disabled) maps to enabled:hover:bg-muted so the tint applies
+    // only when the item is interactive; disabled items dim + drop the pointer,
+    // never tint. Pinning both guards against a regression that hovers disabled
+    // items or drops the disabled affordance.
+    const { container } = renderSidebar(
+      <ProfileSwitcher provider={switcherProvider()} onSwitchActive={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Active profile:/ }));
+    const item = container.querySelector(".profile-switcher-item");
+    expect(item).not.toBeNull();
+    const classes = item?.className.split(/\s+/);
+    expect(classes).toContain("enabled:hover:bg-muted");
+    expect(classes).toContain("disabled:opacity-50");
+    expect(classes).toContain("disabled:cursor-not-allowed");
   });
 });

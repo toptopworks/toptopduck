@@ -146,7 +146,10 @@ function SidebarToggle({
   return (
     <button
       type="button"
-      className="sidebar-toggle"
+      // ADR-0067 (issue #171): the .sidebar-toggle visual rule was retired
+      // from styles.css into inline utilities over the ADR-0050 token; the
+      // semantic class hook stays for selector stability.
+      className="sidebar-toggle py-0.5 px-2 text-base leading-none cursor-pointer border border-border bg-card rounded-md"
       aria-label={
         collapsed
           ? intl.formatMessage({ id: "sidebar.expand", defaultMessage: "Expand session bar" })
@@ -180,7 +183,11 @@ function RailToggle({
   return (
     <button
       type="button"
-      className="rail-toggle"
+      // ADR-0067 (issue #171): the .rail-toggle visual rule was retired from
+      // styles.css into inline utilities over the ADR-0050 token; the semantic
+      // class hook stays for selector stability. disabled dims + drops the
+      // pointer (the cold-start hero has no rail to collapse).
+      className="rail-toggle py-0.5 px-2 text-base leading-none cursor-pointer border border-border bg-card rounded-md disabled:opacity-50 disabled:cursor-not-allowed"
       disabled={disabled}
       aria-label={
         collapsed
@@ -872,8 +879,12 @@ export default function App() {
 
               {/* Row 1 (cols 2+): thin top bar (ADR-0060/0062 R1). The session name
               is READ-ONLY (ADR-0060: naming goes through the sidebar menu, the
-              single entry point -- DRY). */}
-              <header className="topbar">
+              single entry point -- DRY). ADR-0067 (issue #171): the .topbar
+              bg + border-bottom and the .topbar-session-name typography were
+              retired from styles.css into inline utilities over the ADR-0050
+              token; the .topbar grid + flex LAYOUT shell (grid-column/row +
+              display flex + height) stays in styles.css as layout-only. */}
+              <header className="topbar gap-3 px-4 border-b border-border bg-background">
                 <SidebarToggle
                   collapsed={sidebarCollapsed}
                   onToggle={toggleSidebarCollapse}
@@ -883,7 +894,7 @@ export default function App() {
                   disabled={!activeSession}
                   onToggle={toggleRailCollapse}
                 />
-                <span className="topbar-session-name">
+                <span className="topbar-session-name flex-1 min-w-0 font-semibold text-base truncate">
                   {activeSession?.name ? (
                     activeSession.name
                   ) : (

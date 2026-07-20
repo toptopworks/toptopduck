@@ -106,6 +106,27 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
  * session sidebar is col 1 (full height, independent -- R1: QuestionBar does
  * NOT span over it); the right block holds the thin top bar + the session
  * pane (rail + workspace + a QuestionBar that spans rail + workspace only).
+ *
+ * ADR-0067 (issue #171): the shell-skeleton VISUAL rules -- .session-sidebar
+ * bg/border/padding, .sidebar-new-button, .sidebar-error, .session-empty,
+ * .session-group* typography, .session-entry* three-state bg/color/accent,
+ * .session-entry-menu hover, .session-menu popover chrome + shadow + items,
+ * .topbar bg/border-bottom, .sidebar-toggle / .rail-toggle, .topbar-session-
+ * name typography + truncation, and the whole .profile-switcher* block
+ * (trigger + hover, name, chevron opacity, menu popover + shadow, item three-
+ * state + aria-checked typography, error padding) -- were retired into
+ * SessionSidebar.tsx + ProfileSwitcher.tsx + App.tsx as Tailwind utility +
+ * ADR-0050 token + conditional className. The GRID + FLEX LAYOUT shells
+ * below -- .shell (three-column grid + the sidebar/rail-collapsed grid
+ * overlays), .session-sidebar (col 1 grid + flex column + overflow-y scroll),
+ * .session-list (flex:1 scroll container), and .topbar (row 1 grid + flex row
+ * + fixed height) -- remain as semantic layout-only CSS; cramming them into
+ * utility long-strings would obscure the three-column shell structure
+ * (ADR-0067 Decision 1). The semantic class hooks (.session-sidebar /
+ * .session-entry / .session-entry-main / .session-menu / .topbar /
+ * .sidebar-toggle / .rail-toggle / .topbar-session-name / .profile-switcher /
+ * .profile-switcher-trigger / .profile-switcher-menu / .profile-switcher-item
+ * etc.) are kept on the components for selector / test stability.
  * ========================================================================= */
 .shell {
   height: 100vh;
@@ -123,146 +144,24 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 .shell.rail-collapsed .session-pane { grid-template-columns: 1fr; }
 .shell.rail-collapsed .session-rail { display: none; }
 
-/* --- Col 1: session sidebar (ADR-0060 沉色 chrome) ----------------------- */
+/* --- Col 1: session sidebar (ADR-0060) -- layout-only thin layer -------- */
 .session-sidebar {
   grid-column: 1;
   grid-row: 1 / -1;
-  background: var(--muted);
-  border-right: 1px solid var(--border);
-  padding: 0.5rem;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
 }
-.sidebar-title { margin: 0 0 0.5rem; font-size: 0.9rem; color: var(--muted-foreground); text-transform: uppercase; letter-spacing: 0.05em; }
+/* The flex:1 scroll container of the grouped session list (part of the
+ * sidebar layout shell -- visual group/entry/typography rules retired). */
 .session-list { list-style: none; margin: 0; padding: 0; flex: 1; overflow-y: auto; }
-.sidebar-new-button {
-  width: 100%; margin-bottom: 0.5rem; padding: 0.45rem; cursor: pointer;
-  border: 1px solid var(--primary); background: var(--primary); color: var(--primary-foreground);
-  border-radius: var(--radius); font-size: 0.9rem;
-}
-.sidebar-new-button:disabled { opacity: 0.6; cursor: progress; }
-.sidebar-error { font-size: 0.8rem; margin: 0 0 0.4rem; }
-.session-empty { font-size: 0.85rem; padding: 0.5rem; }
 
-/* Chat-style time groups (ADR-0060). */
-.session-group { margin: 0.4rem 0 0.2rem; }
-.session-group-title {
-  margin: 0 0 0.2rem; padding: 0 0.3rem;
-  font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em;
-  color: var(--muted-foreground);
-}
-.session-group-list { list-style: none; margin: 0; padding: 0; }
-
-/* One sidebar row: name+subline button + context-menu toggle. The active row
- * fills its background (ADR-0060: 整条填充 selection signal); an open-but-not-
- * active row gets a left accent. */
-.session-entry { position: relative; margin: 0.1rem 0; display: flex; align-items: stretch; }
-.session-entry-main {
-  all: unset; cursor: pointer; flex: 1; display: flex; flex-direction: column;
-  min-width: 0; /* allow the name span to truncate within the flex chain */
-  padding: 0.35rem 0.5rem; border-radius: var(--radius);
-  color: var(--foreground);
-}
-.session-entry-main:hover { background: var(--accent); }
-.session-entry-main:disabled { opacity: 0.5; cursor: progress; }
-.session-entry.active .session-entry-main {
-  background: var(--primary); color: var(--primary-foreground); font-weight: 600;
-}
-.session-entry.open:not(.active) .session-entry-main { box-shadow: inset 2px 0 var(--primary); }
-/* Tail-ellipsis truncation (ADR-0054): the session name is the entry's identity
- * handle; keep the head visible, tail off. */
-.session-name {
-  font-size: 0.9rem;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.session-subline { font-size: 0.76rem; font-weight: 400; opacity: 0.85; }
-.session-entry-menu {
-  all: unset; cursor: pointer; padding: 0 0.4rem; font-size: 1rem; line-height: 1;
-  border-radius: var(--radius); color: var(--muted-foreground);
-}
-.session-entry-menu:hover { background: var(--accent); color: var(--foreground); }
-.session-menu {
-  position: absolute; z-index: 5; right: 0.2rem; top: 100%;
-  min-width: 8rem; padding: 0.2rem;
-  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-}
-.session-menu button {
-  all: unset; cursor: pointer; display: block; width: 100%; padding: 0.3rem 0.5rem;
-  border-radius: var(--radius); font-size: 0.85rem; color: var(--foreground);
-}
-.session-menu button:hover { background: var(--accent); }
-.session-menu button.danger { color: var(--destructive); }
-
-/* --- Row 1 (cols 2+): thin top bar (ADR-0060 ~40px) --------------------- */
+/* --- Row 1 (cols 2+): thin top bar (ADR-0060 ~40px) -- layout-only ------- */
 .topbar {
   grid-column: 2; grid-row: 1;
-  display: flex; align-items: center; gap: 0.75rem;
-  padding: 0 1rem; height: 40px; min-height: 40px;
-  border-bottom: 1px solid var(--border);
-  background: var(--background);
+  display: flex; align-items: center;
+  height: 40px; min-height: 40px;
 }
-.sidebar-toggle {
-  padding: 0.15rem 0.5rem; cursor: pointer; font-size: 1rem; line-height: 1;
-  border: 1px solid var(--border); background: var(--card); border-radius: var(--radius);
-}
-/* Rail collapse toggle (ADR-0054 level 2, issue #84) mirrors the sidebar
- * toggle. Disabled on the cold-start hero (no rail to collapse). */
-.rail-toggle {
-  padding: 0.15rem 0.5rem; cursor: pointer; font-size: 1rem; line-height: 1;
-  border: 1px solid var(--border); background: var(--card); border-radius: var(--radius);
-}
-.rail-toggle:disabled { opacity: 0.5; cursor: not-allowed; }
-/* Tail-ellipsis truncation (ADR-0054: keep the head -- the identity handle,
- * ADR-0039). flex:1 + min-width:0 lets the span shrink within the topbar flex
- * row so a long session name yields to the fixed header actions instead of
- * pushing them off-screen. */
-.topbar-session-name {
-  flex: 1 1 auto; min-width: 0;
-  font-weight: 600; font-size: 0.95rem;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-/* --- Top-bar active profile quick switcher (issue #154, ADR-0065) ---------
- * A lightweight disclosure (no Radix DropdownMenu dep). The trigger carries the
- * active profile's display name + a chevron; the menu drops below it, absolutely
- * positioned off the .profile-switcher anchor. The menu lists every profile
- * with its has_key badge; aria-checked marks the active one. Hidden with the
- * rest of the topbar under .shell.settings-mode (ADR-0065). */
-.profile-switcher { position: relative; }
-.profile-switcher-trigger {
-  display: inline-flex; align-items: center; gap: 0.3rem;
-  padding: 0.25rem 0.6rem; font-size: 0.85rem; cursor: pointer;
-  border: 1px solid var(--border); background: var(--card); border-radius: var(--radius);
-  color: var(--foreground); max-width: 14rem;
-}
-.profile-switcher-trigger:hover { background: var(--muted); }
-.profile-switcher-name {
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-weight: 500;
-}
-.profile-switcher-trigger svg { opacity: 0.6; flex-shrink: 0; }
-.profile-switcher-menu {
-  position: absolute; top: 100%; right: 0; z-index: 50;
-  min-width: 16rem; max-width: 20rem;
-  display: flex; flex-direction: column; gap: 0.1rem;
-  padding: 0.25rem; margin-top: 0.15rem;
-  border: 1px solid var(--border); background: var(--card); border-radius: var(--radius);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-}
-.profile-switcher-item {
-  display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
-  padding: 0.35rem 0.5rem; font-size: 0.85rem; cursor: pointer;
-  border: none; background: transparent; border-radius: calc(var(--radius) - 2px);
-  color: var(--foreground); text-align: left;
-}
-.profile-switcher-item:hover:not(:disabled) { background: var(--muted); }
-.profile-switcher-item:disabled { opacity: 0.5; cursor: not-allowed; }
-.profile-switcher-item[aria-checked="true"] { font-weight: 600; }
-.profile-switcher-item-name {
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.profile-switcher-error { padding: 0.35rem 0.5rem; margin: 0; }
 /* --- Row 2: resume progress strip (ADR-0034; absent unless resume runs) -- */
 .shell > .resume-progress { grid-column: 2; grid-row: 2; margin: 0; border-radius: 0; }
 .shell > .shell-error { grid-column: 2; grid-row: 2; margin: 0.4rem 1rem; }
