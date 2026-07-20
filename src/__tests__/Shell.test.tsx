@@ -1457,8 +1457,13 @@ describe("App topbar header actions + key-state badge (issue #182)", () => {
     // clearAllMocks only clears call history, not implementations set by prior
     // describes (e.g. ProfileSwitcher's mockResolvedValue(twoProfileConfig())).
     // The C1 guard test below needs appConfig=null (the cold-start default) so
-    // the settings gear rides settingsDisabled=true -- reset explicitly.
-    vi.mocked(getAppConfig).mockResolvedValue(null);
+    // the settings gear rides settingsDisabled=true. getAppConfig's real
+    // signature is Promise<AppConfig> (null is an App-level state, not an IPC
+    // return), so hold the mock pending -- the mount effect's .then never
+    // fires and appConfig stays at its useState(null) initial.
+    vi.mocked(getAppConfig).mockImplementation(
+      () => new Promise<AppConfig>(() => {}),
+    );
     vi.stubGlobal("navigator", { language: "zh-CN" });
   });
 
