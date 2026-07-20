@@ -103,6 +103,7 @@ import {
   createSession,
   deleteSession,
   getAppConfig,
+  getProviderConfig,
   ingestFile,
   listSessions,
   listProviderProfiles,
@@ -809,6 +810,18 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
     });
     await waitFor(() => expect(screen.getByText(/校验源/)).toBeInTheDocument());
 
+    // ADR-0067 (issue #182): the strip migrated from a bespoke <p> tint to a
+    // shadcn Alert default variant, with role="status" + aria-live="polite"
+    // OVERRIDING the Alert's role="alert" assertive default (alert.tsx sets
+    // role before spreading props, so the caller override wins). A regression
+    // that drops either attribute lets a screen reader interrupt the user on
+    // every resume tick. Pin the override so the a11y contract is guarded.
+    const resumeAlert = document.querySelector(".resume-progress") as HTMLElement;
+    expect(resumeAlert).not.toBeNull();
+    expect(resumeAlert.getAttribute("role")).toBe("status");
+    expect(resumeAlert.getAttribute("aria-live")).toBe("polite");
+    expect(resumeAlert.getAttribute("data-slot")).toBe("alert");
+
     // Cleanup: let openDuck resolve and AWAIT openPersisted finishing (invalidate
     // + registerOpen + setResumeStatus(null) + finally unlisten) so no orphan
     // resume-progress listener leaks into the next test.
@@ -1432,5 +1445,107 @@ describe("App top-bar active profile switcher (issue #154, ADR-0065)", () => {
     );
     // Still exactly one fetch -- the switch did not trigger a re-fetch.
     expect(listProviderProfiles).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("App topbar header actions + key-state badge (issue #182)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    // clearAllMocks only clears call history, not implementations set by prior
+    // describes (e.g. ProfileSwitcher's mockResolvedValue(twoProfileConfig())).
+    // The C1 guard test below needs appConfig=null (the cold-start default) so
+    // the settings gear rides settingsDisabled=true. getAppConfig's real
+    // signature is Promise<AppConfig> (null is an App-level state, not an IPC
+    // return), so hold the mock pending -- the mount effect's .then never
+    // fires and appConfig stays at its useState(null) initial.
+    vi.mocked(getAppConfig).mockImplementation(
+      () => new Promise<AppConfig>(() => {}),
+    );
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("disables all three header buttons on cold start (no active session)", async () => {
+    // Cold-start gate: Open/Save ride disabled={busy || !activeSession} and the
+    // gear rides settingsDisabled={!appConfig}. With no session and appConfig
+    // unresolved, all three are unreachable. A regression that drops the gate
+    // lets Open/Save fire with nothing to act on.
+    render(<App />);
+    const buttons = await waitFor(() => {
+      const list = document.querySelectorAll(
+        ".header-actions [data-slot='button']",
+      );
+      expect(list.length).toBe(3);
+      return list;
+    });
+    buttons.forEach((btn) =>
+      expect((btn as HTMLButtonElement).disabled).toBe(true),
+    );
+  });
+
+  it("re-enables open/save with a session active; gear waits on appConfig (C1 guard)", async () => {
+    // App.tsx C1: opening settings while appConfig is null white-screens the
+    // shell (.settings-mode hides the shell but SettingsView does not render,
+    // no ESC exit). settingsDisabled={!appConfig} makes the state unreachable.
+    // The default getAppConfig mock returns null, so the gear stays disabled
+    // even after a session opens.
+    render(<App />);
+    await openSession();
+    const buttons = document.querySelectorAll(
+      ".header-actions [data-slot='button']",
+    );
+    expect((buttons[0] as HTMLButtonElement).disabled).toBe(false); // Open
+    expect((buttons[1] as HTMLButtonElement).disabled).toBe(false); // Save
+    expect((buttons[2] as HTMLButtonElement).disabled).toBe(true); // Settings
+  });
+
+  it("re-enables the gear once appConfig resolves (C1 white-screen guard)", async () => {
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+    );
+    render(<App />);
+    await openSession();
+    await waitFor(() => {
+      const gear = document.querySelectorAll(
+        ".header-actions [data-slot='button']",
+      )[2] as HTMLButtonElement;
+      expect(gear.disabled).toBe(false);
+    });
+  });
+
+  it("anchors the key-ok badge on the --primary token (ADR-0050, issue #182)", async () => {
+    // The key-state Badge migrated from hardcoded #1a7a3a / #b06000 to a shadcn
+    // Badge outline + text-primary (key-ok) / text-warning (key-missing). The
+    // class hook is the regression seam -- dropping it leaves the badge with no
+    // color semantic. data-slot="badge" anchors the shadcn Badge host.
+    vi.mocked(getProviderConfig).mockResolvedValue({
+      base_url: "https://api.anthropic.com",
+      model: "claude-sonnet-4-6",
+      has_key: true,
+    });
+    render(<App />);
+    await waitFor(() => {
+      const badge = document.querySelector(".key-ok") as HTMLElement;
+      expect(badge).not.toBeNull();
+      expect(badge.classList.contains("text-primary")).toBe(true);
+      expect(badge.getAttribute("data-slot")).toBe("badge");
+    });
+  });
+
+  it("anchors the key-missing badge on the --warning token (ADR-0050, issue #182)", async () => {
+    vi.mocked(getProviderConfig).mockResolvedValue({
+      base_url: "https://api.anthropic.com",
+      model: "claude-sonnet-4-6",
+      has_key: false,
+    });
+    render(<App />);
+    await waitFor(() => {
+      const badge = document.querySelector(".key-missing") as HTMLElement;
+      expect(badge).not.toBeNull();
+      expect(badge.classList.contains("text-warning")).toBe(true);
+      expect(badge.getAttribute("data-slot")).toBe("badge");
+    });
   });
 });
