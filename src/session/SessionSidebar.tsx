@@ -105,7 +105,7 @@ export function SessionSidebar({
   return (
     // ADR-0067 (issue #171): the shell-skeleton visual rules (.session-sidebar
     // bg/border/padding, .sidebar-new-button, .sidebar-error, .session-empty,
-    // .session-group* typography, .session-entry* three states, .session-menu
+    // .session-group* typography, .session-entry* states, .session-menu
     // popover chrome) were retired from styles.css into inline Tailwind
     // utilities over the ADR-0050 token. The .session-sidebar / .session-list
     // LAYOUT shells (grid-column/row + flex column + flex:1 scroll container)
@@ -235,7 +235,7 @@ function SidebarRow({
   onDelete: () => void;
 }) {
   const intl = useIntl();
-  // The three entry states (ADR-0060) ride inline utilities over the ADR-0050
+  // The entry states (ADR-0060) ride inline utilities over the ADR-0050
   // token: default = bg-transparent text-foreground; hover = bg-accent; active
   // (the visible session) = bg-primary text-primary-foreground font-semibold
   // (full-row fill selection signal); open-but-not-active = a 2px left inset accent

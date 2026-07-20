@@ -2690,16 +2690,26 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     expect(bg?.className.split(/\s+/)).not.toContain("bg-primary");
   });
 
-  it("session-entry-main keeps [all:unset] + hover:bg-accent + rounded-md", () => {
-    // [all:unset] strips native button chrome so the row reads as a flat list
-    // entry; hover:bg-accent is the default-state hover tint (ADR-0050 accent
-    // token). Pinning both guards against a regression that drops the reset
-    // (button regains UA chrome) or the hover tint.
+  it("session-entry-main keeps [all:unset] + hover:bg-accent + rounded-md on the default row", () => {
+    // A persisted row that is NOT open (sid === null) and NOT active carries
+    // the default-state utilities: [all:unset] strips native button chrome so
+    // the row reads as a flat list entry; hover:bg-accent is the default hover
+    // tint (ADR-0050 accent token); rounded-md is the row radius. Pinning on
+    // the default row (not the active row, which querySelector(".session-
+    // entry-main") would hit first under twoOpenSessions) guards against a
+    // regression that scopes hover to non-active entries only.
+    const persisted: SessionMetadata = {
+      session_id: "/x/default.duck",
+      display_name: "Default",
+      last_modified_at: Date.now(),
+      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+      format_version: 1,
+    };
     const { container } = renderSidebar(
       <SessionSidebar
-        sessions={[]}
-        openSessions={twoOpenSessions()}
-        activeSessionId="sess-active"
+        sessions={[persisted]}
+        openSessions={[]}
+        activeSessionId={null}
         disabled={false}
         loadError={null}
         onNew={() => {}}
@@ -2716,6 +2726,9 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     expect(classes).toContain("[all:unset]");
     expect(classes).toContain("hover:bg-accent");
     expect(classes).toContain("rounded-md");
+    // The default row carries neither the active fill nor the open accent.
+    expect(classes).not.toContain("bg-primary");
+    expect(classes).not.toContain("shadow-[inset_2px_0_var(--primary)]");
   });
 
   it("session-menu popover carries absolute + bg-card + shadow + border", () => {
