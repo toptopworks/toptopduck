@@ -13,10 +13,16 @@ interface DatasetDetailProps {
 
 export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: DatasetDetailProps) {
   return (
+    // ADR-0067 (issue #184): the caller-scoped visual rules that lived under
+    // .dataset-detail h2 / .dataset-detail small / .meta / .source / .schema td
+    // code in styles.css retired onto Tailwind utility on each element below.
+    // The class hooks (.dataset-detail / .meta / .source / .schema) stay on the
+    // elements for selector stability; the global .muted rule (color-only) is
+    // shared with other components and stays in styles.css.
     <section className="dataset-detail">
-      <h2>
+      <h2 className="m-0 mb-1">
         {dataset.display_name}{" "}
-        <small>
+        <small className="text-muted-foreground font-normal">
           <FormattedMessage
             id="workingSet.detail.referenceName"
             defaultMessage="(reference name: {name})"
@@ -24,7 +30,7 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
           />
         </small>
       </h2>
-      <p className="meta">
+      <p className="meta text-muted-foreground mt-1 mb-3">
         <FormattedMessage
           id="workingSet.detail.meta"
           defaultMessage="Rows: {rows} · fingerprint: {fingerprint}…"
@@ -53,7 +59,9 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
           {dataset.columns.map((c) => (
             <TableRow key={c.name}>
               <TableCell>{c.name}</TableCell>
-              <TableCell><code>{c.canonical_type}</code></TableCell>
+              {/* Nested DuckDB types (STRUCT(...)/LIST(...)) wrap instead of
+                  overflowing the panel. */}
+              <TableCell><code className="break-words whitespace-pre-wrap">{c.canonical_type}</code></TableCell>
             </TableRow>
           ))}
         </TableBody>
@@ -98,7 +106,7 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
         />
       )}
 
-      <p className="source">
+      <p className="source text-muted-foreground text-[0.85rem] break-all">
         <FormattedMessage
           id="workingSet.detail.sourceFile"
           defaultMessage="Source file: {path}"

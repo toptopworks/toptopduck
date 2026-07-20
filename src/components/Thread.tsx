@@ -124,9 +124,13 @@ export function Thread({
   }, []);
 
   if (entries.length === 0) return null;
+  // ADR-0067 (issue #184): the Thread rail section does not carry a `.panel`
+  // hook -- the rail itself (.session-rail in styles.css) supplies bg-card +
+  // 0.5rem padding, so a panel chrome here would be redundant. The .thread
+  // hook stays as the rail section's anchor (#169).
   return (
     <section
-      className="panel thread"
+      className="thread"
       aria-label={intl.formatMessage({
         id: "thread.ariaLabel",
         defaultMessage: "Conversation history",

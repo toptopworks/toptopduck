@@ -467,8 +467,14 @@ function WorkspaceWorkingSet({
   const shown = datasets.find((d) => d.reference_name === selected) ?? null;
 
   return (
+    // ADR-0067 (issue #184): the WorkspaceWorkingSet div carries the .layout
+    // grid (280px/1fr two-column master-detail, ADR-0067 Decision 1); both
+    // sections carry the panel card chrome (bg-card + border + rounded-lg +
+    // p-4) as utility. The .layout / .working-set-layout / .panel class hooks
+    // stay as anchor points; per-consumer margins live on the consumer, not
+    // the shared .layout rule.
     <div className="layout working-set-layout">
-      <section className="panel">
+      <section className="panel bg-card border rounded-lg p-4">
         <h2>
           <FormattedMessage id="session.workingSet.title" defaultMessage="Working set" />
         </h2>
@@ -482,7 +488,7 @@ function WorkspaceWorkingSet({
           loading={loading}
         />
       </section>
-      <section className="panel">
+      <section className="panel bg-card border rounded-lg p-4">
         {shown ? (
           <DatasetDetail
             dataset={shown}
