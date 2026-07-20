@@ -16,6 +16,7 @@ import { Thread } from "../components/Thread";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { WorkingSetList } from "../components/WorkingSetList";
+import { cn } from "@/lib/utils";
 import type {
   DatasetDescriptor,
   DatasetPrivacy,
@@ -122,12 +123,24 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
         className="session-workspace"
         aria-label={intl.formatMessage({ id: "session.workspace.ariaLabel", defaultMessage: "Workspace" })}
       >
-        <div className="workspace-tabs" role="tablist">
+        {/* ADR-0067 (issue #173): the .workspace-tabs visual chrome (padding,
+            border-bottom, background) + the [role=tab] base + .active
+            primary-underline retired from styles.css onto this component as
+            utility + ADR-0050 token. The .workspace-tabs hook + bare "active"
+            class stay for selector / test stability; twMerge picks
+            border-b-primary over border-b-transparent when the tab is active. */}
+        <div
+          className="workspace-tabs flex items-center gap-2 px-4 py-1.5 border-b bg-background"
+          role="tablist"
+        >
           <button
             type="button"
             role="tab"
             aria-selected={tab === "result"}
-            className={tab === "result" ? "active" : undefined}
+            className={cn(
+              "px-3 py-1.5 cursor-pointer text-sm border-b-2 border-b-transparent text-muted-foreground",
+              tab === "result" && "active text-primary border-b-primary font-semibold",
+            )}
             onClick={() => setTab("result")}
           >
             <FormattedMessage id="session.tab.result" defaultMessage="Results" />
@@ -136,7 +149,10 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
             type="button"
             role="tab"
             aria-selected={tab === "workingSet"}
-            className={tab === "workingSet" ? "active" : undefined}
+            className={cn(
+              "px-3 py-1.5 cursor-pointer text-sm border-b-2 border-b-transparent text-muted-foreground",
+              tab === "workingSet" && "active text-primary border-b-primary font-semibold",
+            )}
             onClick={() => setTab("workingSet")}
           >
             <FormattedMessage id="session.tab.workingSet" defaultMessage="Working set" />
@@ -166,7 +182,10 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
           )}
         </div>
 
-        <div className="workspace-body">
+        {/* ADR-0067 (issue #173): the .workspace-body visual rule (padding)
+            retired from styles.css; the flex-1 + overflow-y-auto layout could
+            move too, but the hook stays for selector / test stability. */}
+        <div className="workspace-body flex-1 overflow-y-auto p-4">
           {s.error && (
             <ErrorBanner
               message={s.error.message}
@@ -276,8 +295,11 @@ function WorkspaceResult({
       // Hero empty state (ADR-0061): the primary "load data" CTA. FileDropzone
       // drives both the drop target and the file picker. After a source is
       // loaded (hasData) the prompt pivots to "ask a question".
+      // ADR-0067 (issue #173): the .workspace-hero visual rule (flex column,
+      // centered, gap, padding, text-align) retired from styles.css onto
+      // utility; the .workspace-hero hook stays for selector stability.
       return (
-        <div className="workspace-hero">
+        <div className="workspace-hero flex flex-col items-center gap-4 p-8 text-center">
           <FileDropzone onIngest={onIngest} loading={loading} />
           <p className="muted">
             {hasData ? (
@@ -328,22 +350,40 @@ function WorkspaceResult({
 // turn is already narrowed to NonMaterializedTurn (workspace.ts), so Materialized
 // is excluded at the type level and the switch ends in `default: never` -- no
 // defensive `return null` for an unreachable case.
+//
+// ADR-0067 (issue #173): the .textual-card visual rule (padding/bg/border/
+// radius) + the per-outcome border-left retired from styles.css onto this
+// component as utility + ADR-0050 token. The semantic class hooks
+// (.textual-card / .textual-card.{clarify,refuse,failed,cancelled}) are kept on
+// the <article> for selector / test stability (Shell.test.tsx queries
+// .textual-card.failed); the hook doubles as the variant-utility lookup key.
+const TEXTUAL_CARD_BASE =
+  "textual-card p-4 bg-card border border-border rounded-lg";
+const TEXTUAL_CARD_VARIANT: Record<string, string> = {
+  clarify: "border-l-[3px] border-l-primary",
+  refuse: "border-l-[3px] border-l-muted-foreground",
+  failed: "border-l-[3px] border-l-destructive",
+  cancelled: "opacity-60",
+};
 function TextualOutcomeCard({ turn }: { turn: NonMaterializedTurn }) {
   const intl = useIntl();
   switch (turn.outcome.kind) {
     case "Textual": {
       const { text_kind, body, assumption } = turn.outcome.data;
       const isClarify = text_kind === "Clarify";
+      // "clarify" | "refuse" -- the lowercase text_kind is both the kept class
+      // hook and the variant-utility lookup key.
+      const variantHook = text_kind.toLowerCase();
       return (
-        <article className={`textual-card ${text_kind.toLowerCase()}`}>
-          <h3>
+        <article className={cn(TEXTUAL_CARD_BASE, variantHook, TEXTUAL_CARD_VARIANT[variantHook])}>
+          <h3 className="m-0 mb-2">
             {isClarify ? (
               <FormattedMessage id="thread.outcome.clarify" defaultMessage="Needs clarification" />
             ) : (
               <FormattedMessage id="thread.outcome.refused" defaultMessage="Cannot fulfill" />
             )}
           </h3>
-          <p className="textual-body">{body}</p>
+          <p className="textual-body my-1 leading-normal">{body}</p>
           {assumption && (
             <p className="assumption">
               <FormattedMessage
@@ -363,19 +403,19 @@ function TextualOutcomeCard({ turn }: { turn: NonMaterializedTurn }) {
       const failure = turn.outcome.data;
       const detail = turnFailureDetail(failure);
       return (
-        <article className="textual-card failed">
-          <h3>
+        <article className={cn(TEXTUAL_CARD_BASE, "failed", TEXTUAL_CARD_VARIANT.failed)}>
+          <h3 className="m-0 mb-2">
             <FormattedMessage id="thread.outcome.failed" defaultMessage="Failed" />
           </h3>
-          <p className="textual-body">{formatTurnFailure(failure, intl)}</p>
+          <p className="textual-body my-1 leading-normal">{formatTurnFailure(failure, intl)}</p>
           <TechnicalDetailsFold detail={detail} />
         </article>
       );
     }
     case "Cancelled":
       return (
-        <article className="textual-card cancelled">
-          <h3>
+        <article className={cn(TEXTUAL_CARD_BASE, "cancelled", TEXTUAL_CARD_VARIANT.cancelled)}>
+          <h3 className="m-0 mb-2">
             <FormattedMessage id="thread.outcome.cancelled" defaultMessage="Cancelled" />
           </h3>
         </article>

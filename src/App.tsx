@@ -1022,8 +1022,12 @@ function ColdStartHero({
   // Drop-to-create (ADR-0061, #81 A1) is now routed by the single shell-level
   // webview drop listener in App, which treats activeSessionId === null as the
   // cold-start case. This component is pure UI.
+  // ADR-0067 (issue #173): the .workspace-hero visual rule (flex column,
+  // centered, gap, padding, text-align) retired from styles.css onto utility.
+  // .cold-start-hero (positioning overlay) stays in styles.css as a layout-only
+  // hook; the workspace-hero hook stays for selector stability.
   return (
-    <div className="workspace-hero cold-start-hero">
+    <div className="workspace-hero cold-start-hero flex flex-col items-center gap-4 p-8 text-center">
       <h2 className="cold-start-title">
         <FormattedMessage id="coldStart.title" defaultMessage="Start an analysis" />
       </h2>

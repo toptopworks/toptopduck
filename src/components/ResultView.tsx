@@ -10,6 +10,14 @@ import type { ColumnSchema, StaleAnchor, VizSpec } from "../types";
 
 const DEFAULT_PAGE_SIZE = 100;
 
+// Pagination prev/next button base for the sticky bar (ADR-0057/0062 R4) --
+// retired from styles.css's .page-info.sticky button rule onto utility +
+// ADR-0050 token (ADR-0067, issue #173). Shared so prev/next stay in sync;
+// padding / font snap to the Tailwind scale per ADR-0067 (2), matching the
+// workspace tab buttons.
+const PAGE_BTN =
+  "px-3 py-1.5 cursor-pointer text-sm border border-border bg-card rounded-md disabled:opacity-50 disabled:cursor-progress";
+
 // Disclosure thresholds (ADR-0057: precise values are visual iteration, not
 // architecture). A result above either threshold renders an honest banner
 // rather than silently looking lightweight. Exported so tests can pin them.
@@ -200,7 +208,9 @@ export function ResultView({
 
   return (
     <section className="result-view">
-      <h2 id={headingId}>
+      {/* ADR-0067 (issue #173): the .result-view h2 margin rule retired from
+          styles.css onto utility. */}
+      <h2 id={headingId} className="mb-1">
         <FormattedMessage
           id="result.title"
           defaultMessage="Result: {name}"
@@ -303,12 +313,22 @@ export function ResultView({
         Table (ADR-0057): always present below the chart. Columns render in full
         with horizontal scroll; numeric cells right-align; NULL cells (server
         NULL -> "") render as muted whitespace, never the literal "NULL".
+
+        ADR-0067 (issue #173): the caller-scoped table.result th.num/td.num
+        right-align + td.cell-null muted-bg rules retired from styles.css onto
+        the cells as utility. The .num / .cell-null hooks stay on the cells for
+        selector / test stability (components.test.tsx queries th.num / td.num /
+        td.cell-null); the .result hook stays on the <table> as a semantic
+        marker for the caller-scoped contract.
       */}
       <Table className="result" aria-labelledby={headingId}>
         <TableHeader>
           <TableRow>
             {columns.map((c) => (
-              <TableHead key={c.name} className={isNumericType(c.canonical_type) ? "num" : undefined}>
+              <TableHead
+                key={c.name}
+                className={isNumericType(c.canonical_type) ? "num text-right" : undefined}
+              >
                 {c.name}
               </TableHead>
             ))}
@@ -332,10 +352,10 @@ export function ResultView({
                 // NULL handling (ADR-0057): server CASTs NULL to "", rendered
                 // as muted whitespace, never the literal "NULL" (honest display).
                 if (cell === "") {
-                  return <TableCell key={j} className="cell-null" />;
+                  return <TableCell key={j} className="cell-null bg-muted" />;
                 }
                 return (
-                  <TableCell key={j} className={numeric ? "num" : undefined}>
+                  <TableCell key={j} className={numeric ? "num text-right" : undefined}>
                     {cell}
                   </TableCell>
                 );
@@ -348,8 +368,18 @@ export function ResultView({
       {/*
         Pagination (ADR-0057/0062 R4): sticky at the pane bottom so it stays
         reachable after scrolling past the chart. No jump-page (ADR-0057).
+
+        ADR-0067 (issue #173): the .page-info.sticky container visual chrome
+        (bg / border-top / padding / flex row) + the .page-info.sticky button
+        rules (border / bg-card / radius / font / disabled opacity + cursor)
+        retired from styles.css onto utility + ADR-0050 token. The bare `sticky`
+        class is the Tailwind position utility (position: sticky); `page-info`
+        stays as a semantic hook. The button padding / font-size snap to the
+        Tailwind scale (PAGE_BTN: px-3 / py-1.5 / text-sm) per ADR-0067 (2),
+        matching the workspace tab buttons; the sub-pixel shift from the
+        retired 0.3rem 0.8rem / 0.88rem is imperceptible.
       */}
-      <div className="page-info sticky">
+      <div className="page-info sticky bottom-0 bg-background border-t border-border py-2 m-0 flex gap-2 items-center">
         <span aria-live="polite">
           <FormattedMessage
             id="result.pagination.range"
@@ -365,6 +395,7 @@ export function ResultView({
           type="button"
           disabled={!hasPrev || loading}
           onClick={() => loadPage(Math.max(0, offset - pageSize))}
+          className={PAGE_BTN}
         >
           <FormattedMessage id="result.pagination.prev" defaultMessage="Previous" />
         </button>
@@ -372,6 +403,7 @@ export function ResultView({
           type="button"
           disabled={!hasNext || loading}
           onClick={() => loadPage(offset + pageSize)}
+          className={PAGE_BTN}
         >
           <FormattedMessage id="result.pagination.next" defaultMessage="Next" />
         </button>
