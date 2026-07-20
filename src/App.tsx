@@ -98,17 +98,27 @@ function HeaderActions({
   // button + .key-ok / .key-missing visual rules (bespoke border/bg/radius,
   // hardcoded #1a7a3a / #b06000) retired from styles.css. The container rides
   // utility (flex row + density), the three action buttons became shadcn Button
-  // outline variants (border + bg-background + radius, the visual equivalent of
-  // the legacy .header-actions button), and the key-state span became a shadcn
-  // Badge outline variant with the green/orange status semantic re-anchored on
-  // ADR-0050 tokens: --primary teal (green family, "configured/active") for
-  // key-ok and --warning amber for key-missing. The .header-actions / .key-ok /
-  // .key-missing class hooks stay on the elements for selector / test stability.
+  // outline variants, and the key-state span became a shadcn Badge outline
+  // variant with the green/orange status semantic re-anchored on ADR-0050
+  // tokens: --primary teal (green family, "configured/active") for key-ok and
+  // --warning amber for key-missing. Two clarifications vs the legacy rule:
+  // (1) the outline variant rides bg-background (shadcn default), not the
+  // legacy var(--card) -- in dark mode this flattens the button into the topbar
+  // (also bg-background), aligning with the shadcn outline surface contract
+  // instead of the v0 card-raised tint; (2) each Button adds
+  // disabled:pointer-events-auto to override the shadcn base's
+  // disabled:pointer-events-none, which otherwise suppresses the native title
+  // tooltip (saveDisabledTitle / header.openDuck.title / header.saveAs.title)
+  // on the disabled open/save buttons -- a native disabled <button> still does
+  // not dispatch click, so re-enabling pointer-events is safe. The
+  // .header-actions / .key-ok / .key-missing class hooks stay on the elements
+  // for selector / test stability.
   return (
     <div className="header-actions flex items-center gap-3 my-2 text-sm">
       <Button
         variant="outline"
         size="sm"
+        className="disabled:pointer-events-auto"
         onClick={onOpenDuck}
         disabled={disabled}
         title={intl.formatMessage({
@@ -121,6 +131,7 @@ function HeaderActions({
       <Button
         variant="outline"
         size="sm"
+        className="disabled:pointer-events-auto"
         onClick={onSaveAs}
         disabled={disabled}
         title={disabled ? saveDisabledTitle : intl.formatMessage({
@@ -146,6 +157,7 @@ function HeaderActions({
       <Button
         variant="outline"
         size="sm"
+        className="disabled:pointer-events-auto"
         onClick={onOpenSettings}
         disabled={settingsDisabled}
       >
@@ -1073,10 +1085,14 @@ function ColdStartHero({
   // bespoke primary teal styling retired onto a shadcn Button default variant
   // (bg-primary + text-primary-foreground + rounded-md) sized lg for the CTA
   // weight. The disabled progress cursor is preserved via className override
-  // (disabled:cursor-progress disabled:opacity-60) -- the Button default's
-  // disabled:opacity-50 is nudged back to 0.6 to match the retired rule. The
-  // .cold-start-title / .primary-cta class hooks stay on the elements for
-  // selector / test stability.
+  // (disabled:pointer-events-auto disabled:cursor-progress disabled:opacity-60):
+  // disabled:pointer-events-auto re-opens the shadcn base's
+  // disabled:pointer-events-none (without it browsers ignore cursor under
+  // pointer-events:none and the cursor-progress hint never renders), and
+  // disabled:opacity-60 nudges the Button default's disabled:opacity-50 back to
+  // 0.6 to match the retired rule. A native disabled <button> still does not
+  // dispatch click, so re-enabling pointer-events is safe. The .cold-start-title
+  // / .primary-cta class hooks stay on the elements for selector / test stability.
   return (
     <div className="workspace-hero cold-start-hero flex flex-col items-center gap-4 p-8 text-center">
       <h2 className="cold-start-title m-0 mb-2 text-[1.4rem]">
@@ -1090,7 +1106,7 @@ function ColdStartHero({
       </p>
       <Button
         size="lg"
-        className="primary-cta disabled:cursor-progress disabled:opacity-60"
+        className="primary-cta disabled:pointer-events-auto disabled:cursor-progress disabled:opacity-60"
         disabled={disabled}
         onClick={onNew}
       >
