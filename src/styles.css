@@ -283,13 +283,9 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 }
 
 /* Degrade card (ADR-0058 L2/L3 fallback) visual rules retired in issue #181
-   (ADR-0067): the .degrade-card container + .degrade-message + .degrade-actions
-   + .degrade-retry / .degrade-reload buttons + .degrade-details / .degrade-stack
-   fold moved onto ErrorBoundary's <DegradeCard> as shadcn Card + Button
-   (default + outline variants) + TechnicalDetailsFold + literal border-l-[3px]
-   border-l-destructive utility. The .degrade-card class hook stays on the
-   <Card> for selector / test stability (ErrorBoundary.test.tsx queries
-   .degrade-card); only the visual rules are gone. */
+   (ADR-0067); see ErrorBoundary.tsx DegradeCard for the per-rule retiree
+   record. The .degrade-card class hook stays on the <Card> for selector /
+   test stability (ErrorBoundary.test.tsx queries .degrade-card). */
 
 /* Working-set tab reuses the legacy .layout grid */
 .working-set-layout { margin-top: 0; }

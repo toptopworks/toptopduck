@@ -132,21 +132,17 @@ interface DegradeCardProps {
 // rides a literal border-l-[3px] border-l-destructive, mirroring the
 // textual-card failed variant from issue #173.
 //
-// Card's defaults (gap-6 / py-6 / rounded-xl / shadow-sm) are overridden to
-// match the retired rule exactly: p-4 padding, my-2 outer margin, rounded-lg,
-// no shadow. gap-0 opts out of Card's flex gap so each section's own margin
-// drives the rhythm -- TechnicalDetailsFold carries mt-2 internally, and
-// flex gap would stack on top of it (flex items don't collapse margins with
-// the container's gap), widening the actions-to-details spacing past the
-// retired rule. message mb-2 + actions (no margin) + details mt-2 keeps the
-// 0.5rem rhythm the retired .degrade-* cascade produced via margin collapse.
+// gap-0 opts out of Card's flex gap so each section's own margin drives the
+// rhythm -- TechnicalDetailsFold carries mt-2 internally, and flex gap would
+// stack on top of it (flex items don't collapse margins with the container's
+// gap), widening the actions-to-details spacing past the retired rule.
 export function DegradeCard({ error, onRetry, name, onReload }: DegradeCardProps) {
   const intl = useIntl();
   return (
     <Card
       role="alert"
       data-region={name}
-      className="degrade-card gap-0 rounded-lg px-4 py-4 my-2 shadow-none border-l-[3px] border-l-destructive"
+      className="degrade-card gap-0 rounded-lg p-4 my-2 shadow-none border-l-[3px] border-l-destructive"
     >
       <p className="m-0 mb-2 leading-normal">
         {intl.formatMessage({
