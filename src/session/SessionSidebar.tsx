@@ -27,6 +27,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { cn } from "@/lib/utils";
 
 // Group heading (ADR-0060 Chat-style Today/Yesterday/Previous-7-days/Older). Each branch is a
 // STATIC-literal <FormattedMessage> call site so @formatjs/cli extract resolves
@@ -102,10 +103,19 @@ export function SessionSidebar({
     name || intl.formatMessage({ id: "session.defaultName", defaultMessage: "New session" });
 
   return (
-    <aside className="session-sidebar" aria-label={intl.formatMessage({ id: "sidebar.ariaLabel", defaultMessage: "Sessions" })}>
+    // ADR-0067 (issue #171): the shell-skeleton visual rules ride inline
+    // utilities over the ADR-0050 token (see styles.css for the retirement
+    // list). The .session-sidebar / .session-list LAYOUT shells (grid-column
+    // /row + flex column + flex:1 scroll container) stay as layout-only CSS;
+    // the semantic class hooks are kept on every element for selector / test
+    // stability.
+    <aside
+      className="session-sidebar bg-muted border-r border-border p-2"
+      aria-label={intl.formatMessage({ id: "sidebar.ariaLabel", defaultMessage: "Sessions" })}
+    >
       <button
         type="button"
-        className="sidebar-new-button"
+        className="sidebar-new-button w-full mb-2 p-2 cursor-pointer border border-primary bg-primary text-primary-foreground rounded-md text-sm disabled:opacity-60 disabled:cursor-progress"
         disabled={disabled}
         onClick={onNew}
       >
@@ -113,7 +123,7 @@ export function SessionSidebar({
       </button>
 
       {loadError && (
-        <p className="sidebar-error muted">
+        <p className="sidebar-error muted mb-1.5 text-xs">
           <FormattedMessage
             id="sidebar.loadError"
             defaultMessage="Could not load saved sessions."
@@ -123,11 +133,11 @@ export function SessionSidebar({
 
       <ul className="session-list">
         {groups.map((group) => (
-          <li key={group.kind} className="session-group">
-            <h3 className="session-group-title">
+          <li key={group.kind} className="session-group mt-1.5 mb-0.5">
+            <h3 className="session-group-title mb-0.5 px-1 text-xs uppercase tracking-wider text-muted-foreground">
               <GroupTitle kind={group.kind} />
             </h3>
-            <ul className="session-group-list">
+            <ul className="session-group-list list-none m-0 p-0">
               {group.entries.map((entry) => (
                 <SidebarRow
                   key={entry.key}
@@ -160,7 +170,7 @@ export function SessionSidebar({
           </li>
         ))}
         {groups.length === 0 && !loadError && (
-          <li className="session-empty muted">
+          <li className="session-empty muted text-sm p-2">
             <FormattedMessage
               id="sidebar.empty"
               defaultMessage="No saved sessions yet."
@@ -198,6 +208,13 @@ export function SessionSidebar({
   );
 }
 
+// The session-menu item base (ADR-0067, issue #171): inline utilities
+// replacing the retired .session-menu button CSS rule. Composed per item via
+// cn() so the danger variant swaps text-foreground -> text-destructive
+// without copy-paste drift across the three items.
+const sessionMenuItemBase =
+  "[all:unset] cursor-pointer block w-full py-1 px-2 rounded-md text-sm hover:bg-accent";
+
 // One sidebar row: the session name (click to activate/open) + a sub-line
 // (first source + turn count) + a context-menu toggle. The menu is the single
 // entry point for rename / close / delete (ADR-0060 DRY).
@@ -223,20 +240,38 @@ function SidebarRow({
   onDelete: () => void;
 }) {
   const intl = useIntl();
+  // The entry states (ADR-0060) ride inline utilities over the ADR-0050
+  // token: default = bg-transparent text-foreground; hover = bg-accent; active
+  // (the visible session) = bg-primary text-primary-foreground font-semibold
+  // (full-row fill selection signal); open-but-not-active = a 2px left inset accent
+  // shadow so an open background session still leaves a trace. The active/open
+  // modifiers stay as classes on the parent .session-entry hook for selector
+  // compatibility, and the same booleans compose the entry-main utilities.
   return (
     <li
-      className={`session-entry${entry.active ? " active" : ""}${entry.sid ? " open" : ""}`}
+      className={cn(
+        "session-entry relative my-0.5 flex items-stretch",
+        entry.active && "active",
+        entry.sid && "open",
+      )}
     >
       <button
         type="button"
-        className="session-entry-main"
+        className={cn(
+          "session-entry-main [all:unset] cursor-pointer flex-1 flex flex-col min-w-0 py-1.5 px-2 rounded-md text-foreground",
+          "hover:bg-accent disabled:opacity-50 disabled:cursor-progress",
+          entry.active && "bg-primary text-primary-foreground font-semibold",
+          // The open accent only shows when the row is NOT active (the
+          // active fill already signals it).
+          entry.sid && !entry.active && "shadow-[inset_2px_0_var(--primary)]",
+        )}
         aria-current={entry.active ? "true" : undefined}
         disabled={disabled}
         onClick={onActivate}
         title={entry.path ?? undefined}
       >
-        <span className="session-name">{displayName}</span>
-        <span className="session-subline muted">
+        <span className="session-name text-sm truncate">{displayName}</span>
+        <span className="session-subline muted text-xs font-normal opacity-85">
           {entry.firstSourceName ?? "—"}
           {" · "}
           <FormattedMessage
@@ -248,7 +283,7 @@ function SidebarRow({
       </button>
       <button
         type="button"
-        className="session-entry-menu"
+        className="session-entry-menu [all:unset] cursor-pointer px-1.5 text-base leading-none rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
         aria-label={intl.formatMessage({ id: "sidebar.menu.ariaLabel", defaultMessage: "Session actions" })}
         aria-expanded={menuOpen}
         disabled={disabled}
@@ -257,17 +292,35 @@ function SidebarRow({
         ⋯
       </button>
       {menuOpen && (
-        <div className="session-menu" role="menu">
-          <button type="button" role="menuitem" onClick={onRename}>
+        <div
+          className="session-menu absolute z-[5] right-1 top-full min-w-32 p-1 bg-card border border-border rounded-md shadow-md"
+          role="menu"
+        >
+          <button
+            type="button"
+            role="menuitem"
+            className={cn(sessionMenuItemBase, "text-foreground")}
+            onClick={onRename}
+          >
             <FormattedMessage id="sidebar.menu.rename" defaultMessage="Rename" />
           </button>
           {entry.sid && (
-            <button type="button" role="menuitem" onClick={onClose}>
+            <button
+              type="button"
+              role="menuitem"
+              className={cn(sessionMenuItemBase, "text-foreground")}
+              onClick={onClose}
+            >
               <FormattedMessage id="sidebar.menu.close" defaultMessage="Close" />
             </button>
           )}
           {entry.path && (
-            <button type="button" role="menuitem" className="danger" onClick={onDelete}>
+            <button
+              type="button"
+              role="menuitem"
+              className={cn("danger", sessionMenuItemBase, "text-destructive")}
+              onClick={onDelete}
+            >
               <FormattedMessage id="sidebar.menu.delete" defaultMessage="Delete" />
             </button>
           )}
