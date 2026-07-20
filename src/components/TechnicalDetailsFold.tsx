@@ -20,9 +20,11 @@ export function TechnicalDetailsFold({ detail }: TechnicalDetailsFoldProps) {
     // ADR-0067 (issue #172): the fold's visual rules used to live under
     // .error / .persist-warning parent cascades in styles.css. Those parent
     // containers migrated to shadcn Alert variants (ErrorBanner -> destructive,
-    // the session-pane persist-warning -> warning), so the fold now carries
-    // its own utilities and renders identically inside any Alert or bare
-    // container (the Failed turn outcomes in Thread/SessionPane are bare). The
+    // the session-pane persist-warning -> warning); the Thread / SessionPane
+    // Failed-turn folds were bare (no matching parent), so they previously
+    // rendered with only browser defaults. The fold now carries its own
+    // utilities, so all four callers (two Alerts + two bare Failed-turn cards)
+    // render with the same muted-bg + scroll-container treatment. The
     // .error-details / .error-stack class hooks stay for selector / test
     // stability (Shell.test.tsx queries .shell-error .error-details).
     <details className="error-details mt-2">
