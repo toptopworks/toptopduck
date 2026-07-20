@@ -161,4 +161,39 @@ describe("ErrorBoundary (ADR-0058)", () => {
     expect(card).toBeInTheDocument();
     expect(card!.dataset.region).toBe("inner");
   });
+
+  // ADR-0067 (issue #181): the .degrade-* CSS rules retired onto shadcn Card +
+  // Button (default + outline variants) + TechnicalDetailsFold. Pin the
+  // utility classes so a silent revert (raw <button> / raw <div> / dropped
+  // border-l-* accent) is caught at the build level. jsdom has no layout
+  // engine, so these are class-list assertions, not visual assertions --
+  // mirroring the border-l-* tone pin in components.test.tsx (issue #169).
+  it("DegradeCard: Card destructive accent + Button default/outline variants ride the token utilities (issue #181)", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    render(
+      wrap(
+        <ErrorBoundary
+          name="shell"
+          fallback={(error, retry) => (
+            <DegradeCard error={error} onRetry={retry} name="shell" onReload={() => undefined} />
+          )}
+        >
+          <Boom boom={true} label="a" />
+        </ErrorBoundary>,
+      ),
+    );
+    // Left-edge destructive accent -- the ADR-0058 recoverable-but-flagged
+    // tone, mirrored from the textual-card failed variant (issue #173).
+    const card = document.querySelector(".degrade-card") as HTMLElement;
+    expect(card.className.split(/\s+/)).toContain("border-l-destructive");
+    expect(card.className.split(/\s+/)).toContain("border-l-[3px]");
+    // Retry = primary teal (Button default variant rides --primary).
+    const retry = screen.getByRole("button", { name: "重试" });
+    expect(retry.className.split(/\s+/)).toContain("bg-primary");
+    // Reload = outline (Button outline variant rides bg-background + border).
+    const reload = screen.getByRole("button", { name: "重载" });
+    expect(reload.className.split(/\s+/)).toContain("bg-background");
+    // TechnicalDetailsFold carries the error message in its collapsed <pre>.
+    expect(screen.getByText(/boom-a/)).toBeInTheDocument();
+  });
 });

@@ -1,6 +1,9 @@
 import { Component, Fragment, type ErrorInfo, type ReactNode } from "react";
 import { useIntl } from "react-intl";
 import { log } from "../lib/log";
+import { Button } from "./ui/button";
+import { Card } from "./ui/card";
+import { TechnicalDetailsFold } from "./TechnicalDetailsFold";
 
 // Layered render-phase error boundaries (ADR-0058).
 //
@@ -118,35 +121,46 @@ interface DegradeCardProps {
 // technical details. The details are collapsed by default (honest -- not
 // hidden, but not scary), and carry the error message verbatim. onReload is
 // only wired by the L3 shell boundary; session/region boundaries omit it.
+//
+// ADR-0067 (issue #181): the degrade card's visual rules used to live under
+// .degrade-card / .degrade-message / .degrade-actions / .degrade-retry /
+// .degrade-reload / .degrade-details / .degrade-stack in styles.css. Those
+// retired onto shadcn Card + Button (default + outline variants) +
+// TechnicalDetailsFold; the .degrade-card class hook stays on the <Card> for
+// selector / test stability (ErrorBoundary.test.tsx queries .degrade-card).
+// The destructive left-edge accent (ADR-0058 recoverable-but-flagged tone)
+// rides a literal border-l-[3px] border-l-destructive, mirroring the
+// textual-card failed variant from issue #173.
+//
+// gap-0 opts out of Card's flex gap so each section's own margin drives the
+// rhythm -- TechnicalDetailsFold carries mt-2 internally, and flex gap would
+// stack on top of it (flex items don't collapse margins with the container's
+// gap), widening the actions-to-details spacing past the retired rule.
 export function DegradeCard({ error, onRetry, name, onReload }: DegradeCardProps) {
   const intl = useIntl();
   return (
-    <div className="degrade-card" role="alert" data-region={name}>
-      <p className="degrade-message">
+    <Card
+      role="alert"
+      data-region={name}
+      className="degrade-card gap-0 rounded-lg p-4 my-2 shadow-none border-l-[3px] border-l-destructive"
+    >
+      <p className="m-0 mb-2 leading-normal">
         {intl.formatMessage({
           id: "errorBoundary.message",
           defaultMessage: "This area couldn’t be displayed.",
         })}
       </p>
-      <div className="degrade-actions">
-        <button type="button" className="degrade-retry" onClick={onRetry}>
+      <div className="flex gap-2">
+        <Button onClick={onRetry}>
           {intl.formatMessage({ id: "errorBoundary.retry", defaultMessage: "Retry" })}
-        </button>
+        </Button>
         {onReload && (
-          <button type="button" className="degrade-reload" onClick={onReload}>
+          <Button variant="outline" onClick={onReload}>
             {intl.formatMessage({ id: "errorBoundary.reload", defaultMessage: "Reload" })}
-          </button>
+          </Button>
         )}
       </div>
-      <details className="degrade-details">
-        <summary className="muted">
-          {intl.formatMessage({
-            id: "errorBoundary.details",
-            defaultMessage: "Technical details",
-          })}
-        </summary>
-        <pre className="degrade-stack">{error.message}</pre>
-      </details>
-    </div>
+      <TechnicalDetailsFold detail={error.message} />
+    </Card>
   );
 }
