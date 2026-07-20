@@ -9,29 +9,13 @@
  * (ADR-0067); the Workspace tabs/body/hero, the textual-card outcomes, and the
  * ResultView container + sticky pagination moved to Tailwind utility +
  * ADR-0050 token in issue #173 (ADR-0067); the ErrorBoundary DegradeCard moved
- * to shadcn Card + Button + TechnicalDetailsFold in issue #181 (ADR-0067). The
- * .resume-progress tint below is still bespoke (no owner migrated yet) and
- * retires with its component. */
+ * to shadcn Card + Button + TechnicalDetailsFold in issue #181 (ADR-0067); the
+ * App shell header actions, key-state badges, resume-progress strip, the
+ * cold-start hero CTA/title, and the dead header h1 margin rule moved to
+ * shadcn Button + Badge + Alert + Tailwind utility + ADR-0050 token (the
+ * header h1 rule was dead CSS -- no <h1> renders in the topbar -- and is
+ * simply removed) in issue #182 (ADR-0067). */
 * { box-sizing: border-box; }
-header h1 { margin: 0 0 0.5rem; }
-.header-actions {
-  display: flex; align-items: center; gap: 0.75rem;
-  margin: 0.5rem 0; font-size: 0.88rem;
-}
-.header-actions button {
-  padding: 0.3rem 0.8rem; font-size: 0.88rem; cursor: pointer;
-  border: 1px solid var(--border); background: var(--card); border-radius: var(--radius);
-}
-.key-ok { color: #1a7a3a; }
-.key-missing { color: #b06000; }
-
-/* Resume progress (ADR-0034 visible progress). resume-progress is a transient
-   info line. The persist-failure banner that used to sit alongside it migrated
-   to a shadcn Alert warning variant in issue #172 (ADR-0067). The dropzone
-   button, the .error fatal banner, and their .error-* fold rules also retired
-   in #172: dropzone button -> Button default variant, .error -> Alert
-   destructive variant, .error-* fold -> TechnicalDetailsFold utilities. */
-.resume-progress { background: #eef6ff; border: 1px solid #b6d4ff; border-radius: 6px; padding: 0.4rem 0.8rem; font-size: 0.88rem; margin: 0.4rem 0; }
 
 /* Viz (ADR-0016/0033): the chart container bounds a Vega-Embed render so a wide
    spec scrolls instead of bursting the panel. The degraded-viz disclosure moved
@@ -137,8 +121,15 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
   display: flex; align-items: center;
   height: 40px; min-height: 40px;
 }
-/* --- Row 2: resume progress strip (ADR-0034; absent unless resume runs) -- */
-.shell > .resume-progress { grid-column: 2; grid-row: 2; margin: 0; border-radius: 0; }
+/* --- Row 2: resume progress strip (ADR-0034; absent unless resume runs) --
+ * ADR-0067 (issue #182): the .resume-progress bespoke tint retired onto a
+ * shadcn Alert default variant on App.tsx; this rule is layout-only now
+ * (grid-column / grid-row), placing the strip in the shell grid's row 2 / col
+ * 2. The Alert chrome (border + rounded-lg + bg-card) renders natively -- the
+ * retired margin:0 / border-radius:0 overrides existed only to defeat the
+ * legacy bespoke strip's own radius/padding, no longer needed. The
+ * .resume-progress class hook stays on the <Alert> for selector stability. */
+.shell > .resume-progress { grid-column: 2; grid-row: 2; }
 .shell > .shell-error { grid-column: 2; grid-row: 2; margin: 0.4rem 1rem; }
 
 /* --- Settings in-app overlay view (ADR-0065, issue #151) -----------------
@@ -212,14 +203,15 @@ code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
 .session-pane-host { grid-column: 2; grid-row: 3; overflow: hidden; position: relative; }
 .session-pane-layer { position: absolute; inset: 0; }
 .session-pane-layer.hidden { display: none; }
+/* ADR-0067 (issue #182): the .cold-start-title bespoke font-size (1.4rem) +
+ * margin and the .primary-cta bespoke primary teal styling retired onto
+ * utility (text-[1.4rem] + m-0 mb-2) + a shadcn Button default variant sized
+ * lg on App.tsx (the disabled progress cursor survives via className
+ * override). This rule is layout-only now -- the hero is the absolute-
+ * positioned overlay that fills the session-pane-host while no layer is
+ * active. The .cold-start-hero / .cold-start-title / .primary-cta class hooks
+ * stay on the elements for selector / test stability. */
 .cold-start-hero { position: absolute; inset: 0; overflow-y: auto; justify-content: center; }
-.cold-start-title { margin: 0 0 0.5rem; font-size: 1.4rem; }
-.primary-cta {
-  padding: 0.6rem 1.4rem; font-size: 1rem; cursor: pointer;
-  border: 1px solid var(--primary); background: var(--primary); color: var(--primary-foreground);
-  border-radius: var(--radius);
-}
-.primary-cta:disabled { opacity: 0.6; cursor: progress; }
 
 /* --- Nested grid: rail + workspace + QuestionBar (ADR-0062 R1) ----------
  * QuestionBar spans rail + workspace (grid-column 1 / -1); the session sidebar

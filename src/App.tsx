@@ -11,6 +11,8 @@ import { DegradeCard, ErrorBoundary } from "./components/ErrorBoundary";
 import { ProfileSwitcher } from "./components/ProfileSwitcher";
 import { SettingsView } from "./components/settingsView/SettingsView";
 import { Alert } from "./components/ui/alert";
+import { Badge } from "./components/ui/badge";
+import { Button } from "./components/ui/button";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { log } from "./lib/log";
 import { createQueryClient } from "./lib/queryClient";
@@ -92,9 +94,21 @@ function HeaderActions({
     id: "header.saveAs.disabledTitle",
     defaultMessage: "Open or create a session first",
   });
+  // ADR-0067 (issue #182): the .header-actions container + .header-actions
+  // button + .key-ok / .key-missing visual rules (bespoke border/bg/radius,
+  // hardcoded #1a7a3a / #b06000) retired from styles.css. The container rides
+  // utility (flex row + density), the three action buttons became shadcn Button
+  // outline variants (border + bg-background + radius, the visual equivalent of
+  // the legacy .header-actions button), and the key-state span became a shadcn
+  // Badge outline variant with the green/orange status semantic re-anchored on
+  // ADR-0050 tokens: --primary teal (green family, "configured/active") for
+  // key-ok and --warning amber for key-missing. The .header-actions / .key-ok /
+  // .key-missing class hooks stay on the elements for selector / test stability.
   return (
-    <div className="header-actions">
-      <button
+    <div className="header-actions flex items-center gap-3 my-2 text-sm">
+      <Button
+        variant="outline"
+        size="sm"
         onClick={onOpenDuck}
         disabled={disabled}
         title={intl.formatMessage({
@@ -103,8 +117,10 @@ function HeaderActions({
         })}
       >
         <FormattedMessage id="header.openDuck" defaultMessage="Open .duck" />
-      </button>
-      <button
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
         onClick={onSaveAs}
         disabled={disabled}
         title={disabled ? saveDisabledTitle : intl.formatMessage({
@@ -113,8 +129,11 @@ function HeaderActions({
         })}
       >
         <FormattedMessage id="header.saveAs" defaultMessage="Save as .duck" />
-      </button>
-      <span className={hasKey ? "key-ok" : "key-missing"}>
+      </Button>
+      <Badge
+        variant="outline"
+        className={hasKey ? "key-ok text-primary" : "key-missing text-warning"}
+      >
         {hasKey ? (
           <FormattedMessage id="header.keyOk" defaultMessage="LLM key configured" />
         ) : (
@@ -123,10 +142,15 @@ function HeaderActions({
             defaultMessage="No LLM key configured — asking will fail"
           />
         )}
-      </span>
-      <button onClick={onOpenSettings} disabled={settingsDisabled}>
+      </Badge>
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={onOpenSettings}
+        disabled={settingsDisabled}
+      >
         <FormattedMessage id="header.settings" defaultMessage="Settings" />
-      </button>
+      </Button>
     </div>
   );
 }
@@ -226,10 +250,26 @@ function ResumeProgress({ status }: { status: ResumeStatus }) {
         );
     }
   })();
+  // ADR-0067 (issue #182): the .resume-progress bespoke tint (hardcoded
+  // #eef6ff bg + #b6d4ff border + 6px radius + 0.4/0.8 padding) retired from
+  // styles.css onto a shadcn Alert default variant -- the "shadcn info surface"
+  // per alert-variants.ts (bg-card + border + rounded-lg). The legacy tint was
+  // a v0-scaffold Bootstrap-style blue with no matching ADR-0050 token; landing
+  // on Alert default retires it onto the same info surface other disclosures
+  // use, eliminating the cross-surface drift ADR-0067 Decision 1 targets. The
+  // transient info-line weight is preserved (single short status line, polite
+  // aria-live + role=status override the Alert's assertive default). The
+  // .resume-progress class hook stays on the Alert for selector stability and
+  // for the .shell > .resume-progress grid placement (still in styles.css as
+  // layout-only, grid-column/grid-row).
   return (
-    <p className="resume-progress" role="status" aria-live="polite">
+    <Alert
+      className="resume-progress my-1.5"
+      role="status"
+      aria-live="polite"
+    >
       {text}
-    </p>
+    </Alert>
   );
 }
 
@@ -1026,9 +1066,20 @@ function ColdStartHero({
   // centered, gap, padding, text-align) retired from styles.css onto utility.
   // .cold-start-hero (positioning overlay) stays in styles.css as a layout-only
   // hook; the workspace-hero hook stays for selector stability.
+  // ADR-0067 (issue #182): the .cold-start-title bespoke font-size (1.4rem) +
+  // margin retired onto utility (text-[1.4rem] + m-0 mb-2) -- arbitrary value
+  // preserves the exact retired size (Tailwind's nearest scale step text-2xl is
+  // 1.5rem, a 0.1rem drift from the AC "字号渲染不变"), and the .primary-cta
+  // bespoke primary teal styling retired onto a shadcn Button default variant
+  // (bg-primary + text-primary-foreground + rounded-md) sized lg for the CTA
+  // weight. The disabled progress cursor is preserved via className override
+  // (disabled:cursor-progress disabled:opacity-60) -- the Button default's
+  // disabled:opacity-50 is nudged back to 0.6 to match the retired rule. The
+  // .cold-start-title / .primary-cta class hooks stay on the elements for
+  // selector / test stability.
   return (
     <div className="workspace-hero cold-start-hero flex flex-col items-center gap-4 p-8 text-center">
-      <h2 className="cold-start-title">
+      <h2 className="cold-start-title m-0 mb-2 text-[1.4rem]">
         <FormattedMessage id="coldStart.title" defaultMessage="Start an analysis" />
       </h2>
       <p className="muted">
@@ -1037,14 +1088,14 @@ function ColdStartHero({
           defaultMessage="Click “New session” on the left, or open a saved session to resume. Drop a data file to start a new analysis in one step."
         />
       </p>
-      <button
-        type="button"
-        className="primary-cta"
+      <Button
+        size="lg"
+        className="primary-cta disabled:cursor-progress disabled:opacity-60"
         disabled={disabled}
         onClick={onNew}
       >
         <FormattedMessage id="coldStart.newSession" defaultMessage="New session" />
-      </button>
+      </Button>
     </div>
   );
 }
