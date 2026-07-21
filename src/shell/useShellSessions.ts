@@ -20,7 +20,6 @@
 // This replaces the per-SessionPane FileDropzone listeners, which stacked 1:1
 // with keep-alive panes and fired N ingests per single drop.
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Dispatch, SetStateAction } from "react";
 import type { IntlShape } from "react-intl";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -73,7 +72,7 @@ export function useShellSessions({
   openSessions: OpenSession[];
   activeSessionId: string | null;
   activeSession: OpenSession | null;
-  setActiveSessionId: Dispatch<SetStateAction<string | null>>;
+  activateSession: (sid: string) => void;
   /** Shell-wide busy gate: persistenceBusy (save / open / delete wait) OR a
    *  resume in flight. Drives the sidebar / topbar / hero disabled states and
    *  suspends the webview drop listener while busy. */
@@ -103,6 +102,17 @@ export function useShellSessions({
   const busy = persistenceBusy || resumeStatus !== null;
   const activeSession =
     openSessions.find((s) => s.sid === activeSessionId) ?? null;
+
+  // Switch the active session by id (sidebar click). Semantic action -- the
+  // raw setActiveSessionId setter stays internal: registerOpen / openPersisted
+  // / unmountOpen all adjust the active id as a side effect of their own
+  // mutation, and THIS is the only public way to flip it standalone. The hook
+  // contract narrows the arg to a non-null string so an outside caller cannot
+  // null-out the active id from outside the open/close lifecycle, and drops
+  // the updater-function form the raw Dispatch exposes (no consumer needs it).
+  const activateSession = useCallback((sid: string): void => {
+    setActiveSessionId(sid);
+  }, []);
 
   /** Add a freshly-minted session to the open set and activate it. The caller
    *  hands the createSession result + an optional bound path/name (resume). */
@@ -412,7 +422,7 @@ export function useShellSessions({
     openSessions,
     activeSessionId,
     activeSession,
-    setActiveSessionId,
+    activateSession,
     busy,
     resumeStatus,
     openNew,

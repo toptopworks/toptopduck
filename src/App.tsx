@@ -305,7 +305,7 @@ export default function App() {
     openSessions,
     activeSessionId,
     activeSession,
-    setActiveSessionId,
+    activateSession,
     busy,
     resumeStatus,
     openNew,
@@ -573,7 +573,7 @@ export default function App() {
                 disabled={busy}
                 loadError={sessionsError}
                 onNew={() => void openNew()}
-                onActivate={(sid) => setActiveSessionId(sid)}
+                onActivate={activateSession}
                 onOpenPersisted={(path, name) => void openPersisted(path, name)}
                 onClose={(sid) => void closeOpen(sid)}
                 onDelete={(path, sid) => void deletePersisted(path, sid)}
