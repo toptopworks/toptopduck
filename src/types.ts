@@ -71,3 +71,7 @@ export type {
   ShellPrefs,
   AppConfig,
 } from "./types/app-config";
+
+// The merged frontend error model (issue #194): the shell, session, and result
+// view all render IPC rejects through one AppError shape.
+export type { AppError, AppErrorKind, SessionFlowKind } from "./types/error";

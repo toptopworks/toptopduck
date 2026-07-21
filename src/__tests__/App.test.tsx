@@ -49,7 +49,7 @@ vi.mock("../api", async (importOriginal) => {
 
 import { open } from "@tauri-apps/plugin-dialog";
 import { SessionPane } from "../session/SessionPane";
-import type { AppErrorKind } from "../session/useSessionState";
+import type { SessionFlowKind } from "../types";
 import { catalogFor, type CatalogKey, type EffectiveLocale } from "../i18n";
 import {
   activeDataset,
@@ -91,7 +91,7 @@ function renderPane(locale: EffectiveLocale = "zh-CN"): void {
 // assertions below build the expected "{verb} failed"/"{verb}失败" text from
 // the catalog so they track the verb wording instead of duplicating a hard-
 // coded string, and the same helper serves the en-US locale test.
-function verbKey(kind: AppErrorKind): CatalogKey {
+function verbKey(kind: SessionFlowKind): CatalogKey {
   switch (kind) {
     case "load": return "error.verb.load";
     case "rename": return "error.verb.rename";
@@ -101,10 +101,10 @@ function verbKey(kind: AppErrorKind): CatalogKey {
     case "ask": return "error.verb.ask";
     default: {
       // Exhaustiveness guard: mirrors errorVerb in useSessionState so a new
-      // AppErrorKind member forces a test update here too (tsconfig has no
-      // noImplicitReturns, so the switch alone does not enforce it).
+      // SessionFlowKind member forces a test update here too. The `default:
+      // never` throw enforces this regardless of tsconfig flags.
       const unhandled: never = kind;
-      throw new Error(`unhandled AppErrorKind: ${JSON.stringify(unhandled)}`);
+      throw new Error(`unhandled SessionFlowKind: ${JSON.stringify(unhandled)}`);
     }
   }
 }
@@ -116,7 +116,7 @@ function verbKey(kind: AppErrorKind): CatalogKey {
 // operation's prefix (a rename rejection is never mislabelled a load failure).
 // The en-US locale is covered positively by the English-prefix assertion in
 // the locale-consistency test below, so this helper stays zh-CN-scoped.
-function failedPrefix(kind: AppErrorKind): RegExp {
+function failedPrefix(kind: SessionFlowKind): RegExp {
   return new RegExp(`${catalogFor("zh-CN")[verbKey(kind)]}失败`);
 }
 
