@@ -47,10 +47,15 @@ export type {
   TurnFailure,
   TurnOutcome,
   TurnRecord,
-  SourceLifecycleKind,
-  SourceLifecycleEvent,
   ThreadEntry,
 } from "./types/thread";
+
+// Source lifecycle shared kernel (issue #200): both dataset (StaleReason) and
+// thread (timeline entries) consume these names, so they live in their own leaf.
+export type {
+  SourceLifecycleKind,
+  SourceLifecycleEvent,
+} from "./types/lifecycle";
 
 export type {
   Protocol,

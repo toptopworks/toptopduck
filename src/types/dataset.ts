@@ -3,7 +3,7 @@
 // IPC). Covers column schemas, ingest guidance + outcomes, dataset descriptors
 // with privacy controls and stale anchors, and windowed row pages.
 
-import type { SourceLifecycleKind } from "./thread";
+import type { SourceLifecycleKind } from "./lifecycle";
 
 export interface ColumnSchema {
   name: string;
