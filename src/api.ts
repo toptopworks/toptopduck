@@ -4,6 +4,8 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { IntlShape } from "react-intl";
 import type {
   AppConfig,
+  AppError,
+  AppErrorKind,
   DatasetDescriptor,
   DatasetPrivacy,
   DuckLoadError,
@@ -851,15 +853,22 @@ function migrationErrorDetail(e: MigrationError): string | null {
 
 // Describe an IPC reject (or a take_persist_error returned value) for an error
 // banner: the locale message via fmtError plus the technical detail (issue
-// #119 / #120). Shared by the shell, the result view, and the session pane's
-// persist-warning banner so all surface the collapsed fold consistently -- a
-// close-wait timeout / resume / save reject carries its actionable hint in the
-// detail, which must not vanish at any layer (review H1/M2).
+// #119 / #120), tagged with the originating operation's kind (issue #194).
+// Shared by the shell (kind "shell"), the result view (kind "ask" -- a readRows
+// reject is the read phase of a turn; describeReject applies no verb prefix, so
+// the tag only satisfies the AppError shape and is not rendered), and the
+// session pane's persist-warning banner so all surface the collapsed fold
+// consistently -- a close-wait timeout / resume / save reject carries its
+// actionable hint in the detail, which must not vanish at any layer (review
+// H1/M2). The caller supplies kind (the shell knows it is a shell reject; the
+// session layer knows the mutation kind), so this helper stays DRY across the
+// three callers without re-deriving the tag from the call site.
 export function describeReject(
   e: unknown,
   intl: IntlShape,
-): { message: string; detail: string | null } {
-  return { message: fmtError(e, intl), detail: errorDetail(e) };
+  kind: AppErrorKind,
+): AppError {
+  return { message: fmtError(e, intl), kind, detail: errorDetail(e) };
 }
 
 // Format a TurnFailure (TurnOutcome::Failed.data, issue #125) through the

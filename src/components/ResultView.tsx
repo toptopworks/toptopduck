@@ -6,7 +6,7 @@ import { ErrorBanner } from "./ErrorBanner";
 import { Alert, AlertDescription } from "./ui/alert";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 import { VegaChart } from "./VegaChart";
-import type { ColumnSchema, StaleAnchor, VizSpec } from "../types";
+import type { AppError, ColumnSchema, StaleAnchor, VizSpec } from "../types";
 
 const DEFAULT_PAGE_SIZE = 100;
 
@@ -135,7 +135,10 @@ export function ResultView({
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<{ message: string; detail: string | null } | null>(null);
+  // Issue #194: readRows reject typed as AppError (kind "ask" -- the read phase
+  // of a turn; describeReject applies no verb prefix, so the tag only satisfies
+  // the merged shape and is not rendered by ErrorBanner).
+  const [error, setError] = useState<AppError | null>(null);
 
   // Stable id linking the table to its heading so the heading text is the
   // table's accessible name.
@@ -159,7 +162,7 @@ export function ResultView({
         setOffset(off);
       } catch (e) {
         if (seq !== seqRef.current) return;
-        setError(describeReject(e, intl));
+        setError(describeReject(e, intl, "ask"));
       } finally {
         if (seq === seqRef.current) setLoading(false);
       }
@@ -307,7 +310,7 @@ export function ResultView({
         </Alert>
       )}
 
-      {error && <ErrorBanner message={error.message} detail={error.detail} />}
+      {error && <ErrorBanner error={error} />}
 
       {/*
         Table (ADR-0057): always present below the chart. Columns render in full

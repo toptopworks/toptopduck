@@ -6,6 +6,7 @@ import { LogicalPosition, LogicalSize, getCurrentWindow } from "@tauri-apps/api/
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { SessionPane } from "./session/SessionPane";
 import { SessionSidebar } from "./session/SessionSidebar";
+import { useShellError } from "./shell/useShellError";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { DegradeCard, ErrorBoundary } from "./components/ErrorBoundary";
 import { ProfileSwitcher } from "./components/ProfileSwitcher";
@@ -302,13 +303,13 @@ export default function App() {
   const [sessionsEpoch, setSessionsEpoch] = useState(0);
   const [sessions, setSessions] = useState<SessionMetadata[]>([]);
   const [sessionsError, setSessionsError] = useState<string | null>(null);
-  // Shell-level IPC reject (issue #119): the locale message plus the Engine
-  // technical detail, so the shell surfaces the collapsed fold the same way the
-  // session pane does -- a close-wait timeout/conflict reject carries an
-  // actionable "retry shortly" hint in the detail that must not vanish here.
-  const [shellError, setShellError] = useState<
-    { message: string; detail: string | null } | null
-  >(null);
+  // Shell-level IPC reject (issue #194): useShellError owns the single AppError
+  // surfaced at the shell layer (createSession / openDuck / save / delete /
+  // rename persisted / profile switch), tagged kind "shell". ADR-0058 L1: the
+  // reject stays on the handler-async path, never lifted to an ErrorBoundary.
+  // The close-wait timeout / resume / save reject detail still rides the
+  // TechnicalDetailsFold under the banner (AC: display behavior unchanged).
+  const { shellError, setShellError } = useShellError();
   // Resume / open-busy indicator (ADR-0034). Resume blocks the open action; the
   // indicator shows globally while the clicked session is opening.
   const [resumeStatus, setResumeStatus] = useState<ResumeStatus | null>(null);
@@ -435,10 +436,10 @@ export default function App() {
         });
         void refreshKeyStatus();
       } catch (e) {
-        setShellError(describeReject(e, intl));
+        setShellError(describeReject(e, intl, "shell"));
       }
     },
-    [appConfig, commitAppConfig, refreshKeyStatus, intl],
+    [appConfig, commitAppConfig, refreshKeyStatus, intl, setShellError],
   );
 
   // Commit the two shell collapse prefs as one app-config write (ADR-0038/0054,
@@ -576,9 +577,9 @@ export default function App() {
       // placeholder until the user saves-as or renames (data, not chrome).
       registerOpen({ sid, name: "", path: null, pendingIngestPath: null });
     } catch (e) {
-      setShellError(describeReject(e, intl));
+      setShellError(describeReject(e, intl, "shell"));
     }
-  }, [intl, registerOpen]);
+  }, [intl, registerOpen, setShellError]);
 
   // Drop-to-create on the cold-start hero (ADR-0061, #81 A1): mint a session
   // and hand the dropped path to the new SessionPane as pendingIngestPath. The
@@ -594,12 +595,12 @@ export default function App() {
         const sid = await createSession();
         registerOpen({ sid, name: "", path: null, pendingIngestPath: path });
       } catch (e) {
-        setShellError(describeReject(e, intl));
+        setShellError(describeReject(e, intl, "shell"));
       } finally {
         droppingRef.current = false;
       }
     },
-    [intl, registerOpen],
+    [intl, registerOpen, setShellError],
   );
 
   // Single webview-level drop router (#81): Tauri's onDragDropEvent is a
@@ -692,13 +693,13 @@ export default function App() {
         registerOpen({ sid, name, path, pendingIngestPath: null });
         setResumeStatus(null);
       } catch (e) {
-        setShellError(describeReject(e, intl));
+        setShellError(describeReject(e, intl, "shell"));
         setResumeStatus(null);
       } finally {
         void unlisten();
       }
     },
-    [intl, openSessions, queryClient, registerOpen],
+    [intl, openSessions, queryClient, registerOpen, setShellError],
   );
 
   // Synchronous UI teardown for an open session: drop the cache + open-set
@@ -772,7 +773,7 @@ export default function App() {
             // Without this, the pane stays mounted on a sid the backend no
             // longer knows and every retry hits NotFound (dead loop).
             unmountOpen(sid);
-            setShellError(describeReject(e, intl));
+            setShellError(describeReject(e, intl, "shell"));
             return;
           }
           // The wait resolved -- canonical key is free, Session::Drop ran.
@@ -783,7 +784,7 @@ export default function App() {
         try {
           await deleteSession(path);
         } catch (e) {
-          setShellError(describeReject(e, intl));
+          setShellError(describeReject(e, intl, "shell"));
           return;
         }
         refreshSessions();
@@ -791,7 +792,7 @@ export default function App() {
         setPersistenceBusy(false);
       }
     },
-    [intl, unmountOpen, refreshSessions],
+    [intl, unmountOpen, refreshSessions, setShellError],
   );
 
   // Rename a sidebar entry (ADR-0060, single entry point). An OPEN session
@@ -811,12 +812,12 @@ export default function App() {
           await renamePersistedSession(path, trimmed);
         }
       } catch (e) {
-        setShellError(describeReject(e, intl));
+        setShellError(describeReject(e, intl, "shell"));
         return;
       }
       refreshSessions();
     },
-    [intl, refreshSessions],
+    [intl, refreshSessions, setShellError],
   );
 
   // --- Save / Open .duck (ADR-0034/0036) ----------------------------------
@@ -839,11 +840,11 @@ export default function App() {
       );
       void recordRecentFile(path).then(() => void refreshSessions());
     } catch (e) {
-      setShellError(describeReject(e, intl));
+      setShellError(describeReject(e, intl, "shell"));
     } finally {
       setPersistenceBusy(false);
     }
-  }, [intl, activeSession, refreshSessions]);
+  }, [intl, activeSession, refreshSessions, setShellError]);
 
   const handleOpenDuck = useCallback(async () => {
     setPersistenceBusy(true);
@@ -859,11 +860,11 @@ export default function App() {
       await openPersisted(path, stem);
       void recordRecentFile(path).then(() => void refreshSessions());
     } catch (e) {
-      setShellError(describeReject(e, intl));
+      setShellError(describeReject(e, intl, "shell"));
     } finally {
       setPersistenceBusy(false);
     }
-  }, [intl, openPersisted, refreshSessions]);
+  }, [intl, openPersisted, refreshSessions, setShellError]);
 
   return (
     <QueryClientProvider client={queryClient}>
@@ -1033,11 +1034,7 @@ export default function App() {
               </main>
 
               {shellError && (
-                <ErrorBanner
-                  className="shell-error"
-                  message={shellError.message}
-                  detail={shellError.detail}
-                />
+                <ErrorBanner className="shell-error" error={shellError} />
               )}
 
               {settingsOpen && appConfig && (

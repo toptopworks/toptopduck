@@ -28,10 +28,12 @@ import {
   type WorkspaceContent,
 } from "./workspace";
 import type {
+  AppError,
   DatasetDescriptor,
   DatasetPrivacy,
   GuidanceRequest,
   SaveError,
+  SessionFlowKind,
   SheetGuidance,
   StaleAnchor,
   ThreadEntry,
@@ -46,32 +48,20 @@ import type {
 // a future multi-session shell renders one SessionPane per open id and the
 // keyed caches stay isolated by the `['session', sid, ...]` prefix.
 
-/** An error tagged by the operation that produced it, so the displayed prefix
- * matches the action (a rename rejection is never mislabelled a load failure). */
-export interface AppError {
-  message: string;
-  kind: AppErrorKind;
-  /** Technical detail from a typed error reject (SessionError / ResumeError /
-   *  SaveError, issues #119/#120), rendered collapsed under the error banner.
-   *  null when the rendered message is already self-contained, so the fold is
-   *  omitted. ADR-0029: the Rust side is audited to keep secrets out of these
-   *  payloads (the resume / save paths are keychain-free). */
-  detail?: string | null;
-}
-export type AppErrorKind =
-  | "load"
-  | "rename"
-  | "replace"
-  | "delete"
-  | "privacy"
-  | "ask";
+// AppError / AppErrorKind / SessionFlowKind live in ../types/error (issue
+// 194) -- shared with the shell (useShellError) so the shell, the session pane,
+// and the result view render IPC rejects through one AppError shape. The verb
+// logic below is typed over SessionFlowKind (not the full AppErrorKind): a
+// shell reject has no verb prefix (describeReject renders the bare fmtError
+// message), so "shell" is intentionally excluded from the verb-bearing set --
+// compile-time invariant, not a runtime default-arm hope.
 
 /** The locale verb for an error kind (ADR-0052, issue #139). Catalog-backed so
  * the verb tracks the active locale -- the prior ERROR_VERB map hard-coded
  * Chinese verbs and wrapped an English catalog message in a Chinese prefix,
  * breaking locale consistency under en-US. Each arm carries a literal id +
  * defaultMessage so @formatjs/cli extract recovers it for the catalog guard. */
-function errorVerb(intl: IntlShape, kind: AppErrorKind): string {
+function errorVerb(intl: IntlShape, kind: SessionFlowKind): string {
   switch (kind) {
     case "load":
       return intl.formatMessage({ id: "error.verb.load", defaultMessage: "Load" });
@@ -95,13 +85,15 @@ function errorVerb(intl: IntlShape, kind: AppErrorKind): string {
     case "ask":
       return intl.formatMessage({ id: "error.verb.ask", defaultMessage: "Ask" });
     default: {
-      // Exhaustiveness guard (issue #139): a new AppErrorKind member without a
-      // case would fall through and return undefined, rendering a malformed
+      // Exhaustiveness guard (issue #139): a new SessionFlowKind member without
+      // a case would fall through and return undefined, rendering a malformed
       // " failed: ..." banner (verb lost). tsconfig has no noImplicitReturns,
       // so the switch alone does NOT enforce exhaustiveness -- mirror the
       // default-never-throw guard used by loadErrorDisplay + api.ts formatters.
+      // "shell" never reaches here: it is not a SessionFlowKind (issue #194 --
+      // shell rejects use describeReject with no verb prefix).
       const unhandled: never = kind;
-      throw new Error(`unhandled AppErrorKind: ${JSON.stringify(unhandled)}`);
+      throw new Error(`unhandled SessionFlowKind: ${JSON.stringify(unhandled)}`);
     }
   }
 }
@@ -110,7 +102,7 @@ function errorVerb(intl: IntlShape, kind: AppErrorKind): string {
  * (issue #139). Both the verb and the failure template render through the
  * active locale, so the catalog message underneath is no longer wrapped in a
  * hard-coded Chinese prefix. */
-function flowFailedMessage(intl: IntlShape, kind: AppErrorKind, message: string): string {
+function flowFailedMessage(intl: IntlShape, kind: SessionFlowKind, message: string): string {
   return intl.formatMessage(
     {
       id: "error.flow.failed",
@@ -125,7 +117,7 @@ function flowFailedMessage(intl: IntlShape, kind: AppErrorKind, message: string)
  * succeeded (its change is persisted server-side); only the cache refresh
  * failed, so the banner is tagged with the operation kind but worded as a
  * refresh failure rather than a fresh "{verb} failed". */
-function refreshFailedMessage(intl: IntlShape, kind: AppErrorKind, message: string): string {
+function refreshFailedMessage(intl: IntlShape, kind: SessionFlowKind, message: string): string {
   return intl.formatMessage(
     {
       id: "error.flow.savedRefreshFailed",
@@ -141,7 +133,7 @@ function refreshFailedMessage(intl: IntlShape, kind: AppErrorKind, message: stri
  * (issues #119/#120) for the collapsed fold. The message is always non-null
  * (flowFailedMessage + fmtError both return strings); the detail fold is
  * omitted only when AppError.detail is null -- see the field doc. */
-function appErrorFrom(e: unknown, intl: IntlShape, kind: AppErrorKind): AppError {
+function appErrorFrom(e: unknown, intl: IntlShape, kind: SessionFlowKind): AppError {
   return {
     message: flowFailedMessage(intl, kind, fmtError(e, intl)),
     kind,
@@ -314,7 +306,7 @@ export function useSessionState(
    * refresh). A failure here surfaces as a distinct "saved but refresh failed"
    * error tagged with the operation kind, never a silent no-op. */
   const refreshServerState = useCallback(
-    async (kind: AppErrorKind): Promise<void> => {
+    async (kind: SessionFlowKind): Promise<void> => {
       try {
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: sessionKeys.workingSet(sessionId) }),
@@ -496,7 +488,7 @@ export function useSessionState(
   // Rename / privacy / delete share the simple mutation shape: call the API,
   // then refresh. Tagged per-kind so a refusal carries the right prefix.
   const runSimpleMutation = useCallback(
-    async (kind: AppErrorKind, fn: () => Promise<unknown>) => {
+    async (kind: SessionFlowKind, fn: () => Promise<unknown>) => {
       setLoading(true);
       setError(null);
       try {
