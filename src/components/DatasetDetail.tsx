@@ -17,8 +17,16 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
     // .dataset-detail h2 / .dataset-detail small / .meta / .source / .schema td
     // code in styles.css retired onto Tailwind utility on each element below.
     // The class hooks (.dataset-detail / .meta / .source / .schema) stay on the
-    // elements for selector stability; the global .muted rule (color-only) is
-    // shared with other components and stays in styles.css.
+    // elements for selector stability. ADR-0067 (issue #185): the empty-rows
+    // <p> used to ride the global .muted color rule; that rule is now retired
+    // too, so the <p> carries text-muted-foreground inline (and the <code> in
+    // the schema column carries font-mono, replacing the global code element
+    // rule). Deliberate drop: the retired element rule listed "Cascadia Code"
+    // in its font stack; font-mono resolves to the Tailwind v4 default mono
+    // stack (ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, ...) which
+    // omits Cascadia Code -- accepted to align with the other font-mono
+    // consumers (<pre> error-stack in TechnicalDetailsFold) and avoid a
+    // bespoke --font-mono token override (ADR-0067 Decision 2).
     <section className="dataset-detail">
       <h2 className="m-0 mb-1">
         {dataset.display_name}{" "}
@@ -61,7 +69,7 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
               <TableCell>{c.name}</TableCell>
               {/* Nested DuckDB types (STRUCT(...)/LIST(...)) wrap instead of
                   overflowing the panel. */}
-              <TableCell><code className="break-words whitespace-pre-wrap">{c.canonical_type}</code></TableCell>
+              <TableCell><code className="font-mono break-words whitespace-pre-wrap">{c.canonical_type}</code></TableCell>
             </TableRow>
           ))}
         </TableBody>
@@ -74,7 +82,7 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
         />
       </h3>
       {dataset.sample.length === 0 ? (
-        <p className="muted">
+        <p className="text-muted-foreground">
           <FormattedMessage id="result.emptyRows" defaultMessage="(no data rows)" />
         </p>
       ) : (

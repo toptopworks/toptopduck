@@ -222,6 +222,18 @@ describe("DatasetDetail", () => {
     expect(screen.queryByText(/隐私控制/)).toBeNull();
   });
 
+  it("pins the schema-type <code> to font-mono (ADR-0067, issue #185)", () => {
+    // The global code { font-family } element rule retired; each <code> now
+    // carries font-mono inline. With the global backstop gone, a future <code>
+    // that drops font-mono would silently render in the body font -- pin the
+    // tagName + className here so the regression fails loudly (mirrors the
+    // bg-muted pinning pattern in the ResultView cell-null test).
+    renderI18n(<DatasetDetail dataset={mockDataset} />);
+    const typeCell = screen.getByText("BIGINT");
+    expect(typeCell.tagName).toBe("CODE");
+    expect(typeCell.className.split(/\s+/)).toContain("font-mono");
+  });
+
   it("shows a no-rows hint when the sample is empty", () => {
     renderI18n(<DatasetDetail dataset={{ ...mockDataset, sample: [], row_count: 0 }} />);
     expect(screen.getByText(/无数据行/)).toBeInTheDocument();

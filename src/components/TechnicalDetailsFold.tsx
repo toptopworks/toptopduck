@@ -28,7 +28,7 @@ export function TechnicalDetailsFold({ detail }: TechnicalDetailsFoldProps) {
     // .error-details / .error-stack class hooks stay for selector / test
     // stability (Shell.test.tsx queries .shell-error .error-details).
     <details className="error-details mt-2">
-      <summary className="muted cursor-pointer text-[0.82rem]">
+      <summary className="text-muted-foreground cursor-pointer text-[0.82rem]">
         <FormattedMessage id="errorBoundary.details" defaultMessage="Technical details" />
       </summary>
       <pre className="error-stack mt-1.5 p-2 bg-muted rounded-md font-mono text-[0.8rem] whitespace-pre-wrap break-words max-h-48 overflow-y-auto">

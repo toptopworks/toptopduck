@@ -54,7 +54,7 @@ export function WorkingSetList({
 
   if (datasets.length === 0) {
     return (
-      <p className="muted">
+      <p className="text-muted-foreground">
         <FormattedMessage
           id="workingSet.empty"
           defaultMessage="Working set is empty — drop or pick a data file to start."
