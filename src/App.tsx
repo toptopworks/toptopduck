@@ -278,14 +278,12 @@ export default function App() {
   }, []);
 
   // --- App-level config (ADR-0038, issue #196) ----------------------------
-  // useAppConfigState owns the AppConfig advisory state + every mutating action
-  // (commitAppConfig / switchActiveProfile / the two collapse toggles) + the
-  // load + geometry + collapse restore / persist effects + the locale / intl
-  // derived from appConfig.locale (ADR-0052). App reads effectiveLocale
-  // (IntlProvider + document.lang) + intl (the downstream shell hooks) from the
-  // return. commitAppConfig stays optimistic -- state + ref flip before the IPC
-  // await; a write failure surfaces the error but does NOT roll back
-  // (ADR-0068, mirrors SettingsView Save).
+  // Delegated to useAppConfigState (see that hook for the ADR-0068/0052
+  // contract + restore / persist effects). App injects setShellError
+  // (switchActiveProfile reject path) + refreshKeyStatus (mount + post-switch
+  // kick + settings-close) as deps; reads back AppConfig state + the derived
+  // effectiveLocale / intl + the two collapse toggles. hasKey + settingsOpen
+  // are App-local UI state (below).
   const {
     appConfig,
     effectiveLocale,

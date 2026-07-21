@@ -9,11 +9,9 @@
 // ADR-0068: this is advisory state held in React (NOT TanStack Query) -- the
 // app-config blob is the persistence layer for shell prefs (theme / locale /
 // recent files / window geometry / sidebar + rail collapse / active profile),
-// read once on mount and re-written on each mutation. commitAppConfig is
-// OPTIMISTIC (state + ref flip before the IPC await); a write failure surfaces
-// the error but does NOT roll back (mirrors SettingsView Save -- live_config
-// reads disk truth on the next turn, so a failed write leaves the next ask on
-// the OLD value).
+// read once on mount and re-written on each mutation. The optimistic +
+// no-rollback contract on every mutating action lives on commitAppConfig
+// below (the single persistence write all actions route through).
 //
 // Locale + intl live HERE (not in App): app-config owns locale (ADR-0038), and
 // the effective locale resolves from appConfig.locale via useLocale. App sits
@@ -55,9 +53,11 @@ export interface UseAppConfigStateDeps {
   setShellError: (error: AppError | null) => void;
   /** From App: refreshes the header key indicator (hasKey reflects the active
    *  profile's keychain slot, ADR-0029 boolean). Fired once on mount by the
-   *  load effect and again after a switchActiveProfile swap so the next ask's
-   *  slot is reflected. */
-  refreshKeyStatus: () => Promise<void> | void;
+   *  load effect, again after a switchActiveProfile swap so the next ask's
+   *  slot is reflected, and on settings-close (a Save may have changed the
+   *  slot -- App owns that handler). The impl catches its own rejects, so the
+   *  hook can fire-and-forget (`void refreshKeyStatus()`). */
+  refreshKeyStatus: () => Promise<void>;
 }
 
 /** The AppConfig advisory state + every mutating action + the restore / persist
@@ -129,6 +129,13 @@ export function useAppConfigState({
     };
   }, [refreshKeyStatus]);
 
+  // The single persistence write (ADR-0068). OPTIMISTIC -- state + ref flip
+  // BEFORE the IPC await; a write failure surfaces the error but does NOT roll
+  // back (live_config reads disk truth on the next turn, so a failed write
+  // leaves the next ask on the OLD value). Mirrors SettingsView Save. Callers
+  // install their own surfacing: switchActiveProfile wraps in try/catch ->
+  // setShellError; commitShellPrefs + the geometry persist flush attach
+  // .catch -> log.warn (the visible effect already landed optimistically).
   const commitAppConfig = useCallback(async (cfg: AppConfig): Promise<void> => {
     appConfigRef.current = cfg;
     setAppConfigState(cfg);
@@ -145,13 +152,11 @@ export function useAppConfigState({
   // IMMEDIATELY (a one-profile swap, no draft) so the next ask picks it up.
   // live_config reads active_profile fresh each turn (ADR-0064 -- the
   // ProviderConfigSource impl does a disk read per call, no caching), so the
-  // next ask uses the new profile's endpoint + keychain slot. The active
-  // profile changed -> refresh the header key indicator (hasKey reflects the
-  // NEW active profile's keychain slot, ADR-0029 boolean). commitAppConfig is
-  // optimistic (state flips before the IPC awaits); a write failure surfaces
-  // the error but does NOT roll back, mirroring SettingsView Save --
-  // live_config still reads disk truth, so a failed write leaves the next ask
-  // on the OLD profile.
+  // next ask uses the new profile's endpoint + keychain slot. Post-swap kick:
+  // refreshKeyStatus so the header key indicator reflects the NEW active
+  // profile's keychain slot (ADR-0029; see UseAppConfigStateDeps for the full
+  // kick surface). The optimistic + no-rollback contract is commitAppConfig's
+  // (above) -- a reject here is caught into setShellError.
   const switchActiveProfile = useCallback(
     async (id: string): Promise<void> => {
       if (!appConfig) return;
@@ -210,16 +215,22 @@ export function useAppConfigState({
     geometryRestoredRef.current = true;
     const { width, height, x, y, maximized } = appConfig.window;
     if (maximized) {
-      void win.maximize().catch(() => {});
+      void win.maximize().catch((e) => {
+        log.warn("geometry", "restore failed (maximize)", e);
+      });
     } else {
       void win
         .setSize(new LogicalSize(width, height))
         .then(async () => {
           if (x !== null && y !== null) {
-            await win.setPosition(new LogicalPosition(x, y)).catch(() => {});
+            await win.setPosition(new LogicalPosition(x, y)).catch((e) => {
+              log.warn("geometry", "restore failed (setPosition)", e);
+            });
           }
         })
-        .catch(() => {});
+        .catch((e) => {
+          log.warn("geometry", "restore failed (setSize)", e);
+        });
     }
   }, [appConfig]);
 
@@ -264,8 +275,14 @@ export function useAppConfigState({
       if (timer) clearTimeout(timer);
       timer = setTimeout(flush, 500);
     };
-    const unresizedP = win.onResized(schedule).catch(() => () => {});
-    const unmovedP = win.onMoved(schedule).catch(() => () => {});
+    const unresizedP = win.onResized(schedule).catch((e) => {
+      log.warn("geometry", "onResized subscription failed", e);
+      return () => {};
+    });
+    const unmovedP = win.onMoved(schedule).catch((e) => {
+      log.warn("geometry", "onMoved subscription failed", e);
+      return () => {};
+    });
     return () => {
       if (timer) clearTimeout(timer);
       void unresizedP.then((un) => un()).catch(() => {});

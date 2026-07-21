@@ -181,7 +181,7 @@ describe("useAppConfigState", () => {
     const cfg = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
     vi.mocked(getAppConfig).mockResolvedValue(cfg);
     vi.mocked(setAppConfig).mockRejectedValueOnce(new Error("ipc down"));
-    const { result, setShellError } = renderAppConfigState();
+    const { result, setShellError, refreshKeyStatus } = renderAppConfigState();
     await waitFor(() => expect(result.current.appConfig).toBe(cfg));
 
     await act(async () => {
@@ -189,6 +189,10 @@ describe("useAppConfigState", () => {
     });
 
     expect(setShellError).toHaveBeenCalledTimes(1);
+    // The post-switch refreshKeyStatus kick is inside the try block after the
+    // await, so a reject skips it -- the count stays at the mount-only 1
+    // (pins the ordering vs the happy-path 2-kick case).
+    expect(refreshKeyStatus).toHaveBeenCalledTimes(1);
     // Optimistic write does NOT roll back: state keeps the new active_profile
     // even though the IPC failed (ADR-0068: live_config reads disk truth next).
     expect(result.current.appConfig?.provider.active_profile).toBe("other");
