@@ -3,10 +3,10 @@ import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { ChevronDown } from "lucide-react";
 import { FormattedMessage, useIntl } from "react-intl";
 
-import { fmtError, listProviderProfiles } from "../api";
-import type { ProviderConfig } from "../types";
-import { cn } from "../lib/utils";
-import { Badge } from "./ui/badge";
+import { fmtError, listProviderProfiles } from "../../api";
+import type { ProviderConfig } from "../../types";
+import { cn } from "../../lib/utils";
+import { Badge } from "../ui/badge";
 
 // Top-bar active-profile quick switcher (issue #154, ADR-0065). A lightweight
 // disclosure anchored in the top bar: the trigger shows the ACTIVE profile's

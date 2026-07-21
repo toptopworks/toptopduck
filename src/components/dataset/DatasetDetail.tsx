@@ -1,7 +1,7 @@
 import { FormattedMessage } from "react-intl";
-import type { DatasetDescriptor, DatasetPrivacy } from "../types";
+import type { DatasetDescriptor, DatasetPrivacy } from "../../types";
 import { PrivacyControls } from "./PrivacyControls";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
 
 interface DatasetDetailProps {
   dataset: DatasetDescriptor;

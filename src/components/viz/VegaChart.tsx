@@ -3,13 +3,13 @@ import { useIntl } from "react-intl";
 import embed, { type VisualizationSpec } from "vega-embed";
 import type { Result } from "vega-embed";
 
-import { log } from "../lib/log";
+import { log } from "../../lib/log";
 import {
   buildVegaTheme,
   onThemeChange,
   type VegaThemeConfig,
-} from "../theme/vega-theme";
-import type { VizFailureReason } from "../viz";
+} from "../../theme/vega-theme";
+import type { VizFailureReason } from "../../viz";
 
 // Vega-Lite chart renderer (ADR-0016/0033/0050). Owns three concerns that the
 // old inline ResultView logic did not:

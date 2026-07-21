@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { describe, expect, it } from "vitest";
-import { ErrorBanner } from "../components/ErrorBanner";
+import { ErrorBanner } from "../components/common/ErrorBanner";
 import type { AppError } from "../types";
 
 // Issue #194: ErrorBanner takes a single `error: AppError` prop -- one render

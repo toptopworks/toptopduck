@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useIntl, FormattedMessage, type IntlShape } from "react-intl";
-import type { TurnPhase } from "../types";
-import { Button } from "./ui/button";
-import { Input } from "./ui/input";
+import type { TurnPhase } from "../../types";
+import { Button } from "../ui/button";
+import { Input } from "../ui/input";
 
 interface QuestionBarProps {
   onSubmit: (question: string) => void;

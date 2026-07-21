@@ -1,7 +1,7 @@
 import { type ReactNode } from "react";
 import { FormattedMessage } from "react-intl";
 
-import { Alert, AlertDescription } from "./ui/alert";
+import { Alert, AlertDescription } from "../ui/alert";
 
 // react-intl rich-text tag: <bold>...</bold> in a message resolves to <strong>,
 // preserving the emphasis the prior hard-coded <strong> carried. Module-scope so

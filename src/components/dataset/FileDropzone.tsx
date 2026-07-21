@@ -1,6 +1,6 @@
 import { FormattedMessage, useIntl } from "react-intl";
 import { open } from "@tauri-apps/plugin-dialog";
-import { Button } from "./ui/button";
+import { Button } from "../ui/button";
 
 export function FileDropzone({
   onIngest,

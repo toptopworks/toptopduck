@@ -1,19 +1,22 @@
 import { useCallback, useEffect, useState } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { FormattedMessage, IntlProvider, useIntl } from "react-intl";
+import { FormattedMessage, IntlProvider } from "react-intl";
 import { SessionPane } from "./session/SessionPane";
 import { SessionSidebar } from "./session/SessionSidebar";
 import { useShellError } from "./shell/useShellError";
 import { usePersistedSessions } from "./shell/usePersistedSessions";
-import { useShellSessions, type ResumeStatus } from "./shell/useShellSessions";
+import { useShellSessions } from "./shell/useShellSessions";
 import { useAppConfigState } from "./shell/useAppConfigState";
-import { ErrorBanner } from "./components/ErrorBanner";
-import { DegradeCard, ErrorBoundary } from "./components/ErrorBoundary";
-import { ProfileSwitcher } from "./components/ProfileSwitcher";
-import { SettingsView } from "./components/settingsView/SettingsView";
+import { HeaderActions } from "./shell/HeaderActions";
+import { SidebarToggle } from "./shell/SidebarToggle";
+import { RailToggle } from "./shell/RailToggle";
+import { ResumeProgress } from "./shell/ResumeProgress";
+import { ColdStartHero } from "./shell/ColdStartHero";
+import { ErrorBanner } from "./components/common/ErrorBanner";
+import { DegradeCard, ErrorBoundary } from "./components/common/ErrorBoundary";
+import { ProfileSwitcher } from "./components/settings/ProfileSwitcher";
+import { SettingsView } from "./components/settings/SettingsView";
 import { Alert } from "./components/ui/alert";
-import { Badge } from "./components/ui/badge";
-import { Button } from "./components/ui/button";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { log } from "./lib/log";
 import { createQueryClient } from "./lib/queryClient";
@@ -36,222 +39,6 @@ import { getProviderConfig } from "./api";
 /** Soft cap on keep-alive sessions (ADR-0046, non-blocking memory-pressure
  *  badge). Reaching it surfaces a sidebar badge; it never forces a close. */
 const SOFT_CAP_OPEN_SESSIONS = 8;
-
-// Header action cluster (ADR-0052 i18n). App sits above <IntlProvider> so it
-// cannot call useIntl(); this child renders inside the provider. IDs are STATIC
-// literals so @formatjs/cli extract can resolve them.
-function HeaderActions({
-  disabled,
-  hasKey,
-  onOpenDuck,
-  onSaveAs,
-  onOpenSettings,
-  settingsDisabled,
-}: {
-  disabled: boolean;
-  hasKey: boolean;
-  onOpenDuck: () => void;
-  onSaveAs: () => void;
-  onOpenSettings: () => void;
-  // C1: the gear stays disabled until appConfig resolves. Opening settings
-  // while appConfig is null white-screens the shell -- .settings-mode hides
-  // the session shell but SettingsView does not render (its own appConfig
-  // gate) and its window ESC listener never mounts, leaving no exit. The
-  // gate mirrors the SettingsView render condition (settingsOpen && appConfig)
-  // so the unreachable state is never entered.
-  settingsDisabled: boolean;
-}) {
-  const intl = useIntl();
-  const saveDisabledTitle = intl.formatMessage({
-    id: "header.saveAs.disabledTitle",
-    defaultMessage: "Open or create a session first",
-  });
-  // ADR-0067 (issue #182): the .header-actions container + .header-actions
-  // button + .key-ok / .key-missing visual rules (bespoke border/bg/radius,
-  // hardcoded #1a7a3a / #b06000) retired from styles.css. The container rides
-  // utility (flex row + density), the three action buttons became shadcn Button
-  // outline variants, and the key-state span became a shadcn Badge outline
-  // variant with the green/orange status semantic re-anchored on ADR-0050
-  // tokens: --primary teal (green family, "configured/active") for key-ok and
-  // --warning amber for key-missing. Two clarifications vs the legacy rule:
-  // (1) the outline variant rides bg-background (shadcn default), not the
-  // legacy var(--card) -- in dark mode this flattens the button into the topbar
-  // (also bg-background), aligning with the shadcn outline surface contract
-  // instead of the v0 card-raised tint; (2) each Button adds
-  // disabled:pointer-events-auto to override the shadcn base's
-  // disabled:pointer-events-none, which otherwise suppresses the native title
-  // tooltip (saveDisabledTitle / header.openDuck.title / header.saveAs.title)
-  // on the disabled open/save buttons -- a native disabled <button> still does
-  // not dispatch click, so re-enabling pointer-events is safe. The
-  // .header-actions / .key-ok / .key-missing class hooks stay on the elements
-  // for selector / test stability.
-  return (
-    <div className="header-actions flex items-center gap-3 my-2 text-sm">
-      <Button
-        variant="outline"
-        size="sm"
-        className="disabled:pointer-events-auto"
-        onClick={onOpenDuck}
-        disabled={disabled}
-        title={intl.formatMessage({
-          id: "header.openDuck.title",
-          defaultMessage: "Open a .duck to resume a prior analysis",
-        })}
-      >
-        <FormattedMessage id="header.openDuck" defaultMessage="Open .duck" />
-      </Button>
-      <Button
-        variant="outline"
-        size="sm"
-        className="disabled:pointer-events-auto"
-        onClick={onSaveAs}
-        disabled={disabled}
-        title={disabled ? saveDisabledTitle : intl.formatMessage({
-          id: "header.saveAs.title",
-          defaultMessage: "Save the current session as .duck (auto-saves each turn after)",
-        })}
-      >
-        <FormattedMessage id="header.saveAs" defaultMessage="Save as .duck" />
-      </Button>
-      <Badge
-        variant="outline"
-        className={hasKey ? "key-ok text-primary" : "key-missing text-warning"}
-      >
-        {hasKey ? (
-          <FormattedMessage id="header.keyOk" defaultMessage="LLM key configured" />
-        ) : (
-          <FormattedMessage
-            id="header.keyMissing"
-            defaultMessage="No LLM key configured — asking will fail"
-          />
-        )}
-      </Badge>
-      <Button
-        variant="outline"
-        size="sm"
-        className="disabled:pointer-events-auto"
-        onClick={onOpenSettings}
-        disabled={settingsDisabled}
-      >
-        <FormattedMessage id="header.settings" defaultMessage="Settings" />
-      </Button>
-    </div>
-  );
-}
-
-// Sidebar collapse toggle (ADR-0052 i18n). App sits above <IntlProvider> so the
-// button lives in this child component to reach intl. Each
-// intl.formatMessage branch is a STATIC literal so @formatjs/cli extract
-// resolves both ids (a template id would break the i18n:check CI gate).
-function SidebarToggle({
-  collapsed,
-  onToggle,
-}: {
-  collapsed: boolean;
-  onToggle: () => void;
-}) {
-  const intl = useIntl();
-  return (
-    <button
-      type="button"
-      // ADR-0067 (#171): visual rule -> inline utilities; semantic hook kept.
-      className="sidebar-toggle py-0.5 px-2 text-base leading-none cursor-pointer border border-border bg-card rounded-md"
-      aria-label={
-        collapsed
-          ? intl.formatMessage({ id: "sidebar.expand", defaultMessage: "Expand session bar" })
-          : intl.formatMessage({ id: "sidebar.collapse", defaultMessage: "Collapse session bar" })
-      }
-      aria-expanded={!collapsed}
-      onClick={onToggle}
-    >
-      {collapsed ? "»" : "«"}
-    </button>
-  );
-}
-
-// Thread-rail collapse toggle (ADR-0054 level 2, issue #84). Mirrors
-// SidebarToggle: the button lives in this child so it can reach intl (App sits
-// above <IntlProvider>). Each intl.formatMessage branch is a STATIC literal so
-// @formatjs/cli extract resolves both ids. Disabled when no session is active:
-// the rail only exists inside a SessionPane, so on the cold-start hero the
-// toggle has no visible target (the persisted pref still applies once a session
-// opens). The single-angle glyph ‹› distinguishes it from the sidebar's «».
-function RailToggle({
-  collapsed,
-  disabled,
-  onToggle,
-}: {
-  collapsed: boolean;
-  disabled: boolean;
-  onToggle: () => void;
-}) {
-  const intl = useIntl();
-  return (
-    <button
-      type="button"
-      // ADR-0067 (#171): visual rule -> inline utilities; disabled dims +
-      // drops the pointer (cold-start hero has no rail to collapse).
-      className="rail-toggle py-0.5 px-2 text-base leading-none cursor-pointer border border-border bg-card rounded-md disabled:opacity-50 disabled:cursor-not-allowed"
-      disabled={disabled}
-      aria-label={
-        collapsed
-          ? intl.formatMessage({ id: "rail.expand", defaultMessage: "Expand conversation rail" })
-          : intl.formatMessage({ id: "rail.collapse", defaultMessage: "Collapse conversation rail" })
-      }
-      aria-expanded={!collapsed}
-      onClick={onToggle}
-    >
-      {collapsed ? "›" : "‹"}
-    </button>
-  );
-}
-
-// Resume progress status (ADR-0034). ResumeStatus is a structured discriminated
-// union produced by useShellSessions (openPersisted's Source/Replay events) --
-// not a pre-baked string. App sits above <IntlProvider> and cannot format
-// messages itself, so ResumeProgress (a child inside the provider) renders the
-// union into the active locale. Each intl.formatMessage id is a STATIC literal
-// so @formatjs/cli extract resolves them.
-function ResumeProgress({ status }: { status: ResumeStatus }) {
-  const intl = useIntl();
-  const text = (() => {
-    switch (status.kind) {
-      case "opening":
-        return intl.formatMessage({ id: "resume.opening", defaultMessage: "Opening…" });
-      case "source":
-        return intl.formatMessage(
-          { id: "resume.source", defaultMessage: "Verifying source {index}/{total}: {name}" },
-          { index: status.index, total: status.total, name: status.name },
-        );
-      case "replay":
-        return intl.formatMessage(
-          { id: "resume.replay", defaultMessage: "Replaying {index}/{total}: {name}" },
-          { index: status.index, total: status.total, name: status.name },
-        );
-    }
-  })();
-  // ADR-0067 (issue #182): the .resume-progress bespoke tint (hardcoded
-  // #eef6ff bg + #b6d4ff border + 6px radius + 0.4/0.8 padding) retired from
-  // styles.css onto a shadcn Alert default variant -- the "shadcn info surface"
-  // per alert-variants.ts (bg-card + border + rounded-lg). The legacy tint was
-  // a v0-scaffold Bootstrap-style blue with no matching ADR-0050 token; landing
-  // on Alert default retires it onto the same info surface other disclosures
-  // use, eliminating the cross-surface drift ADR-0067 Decision 1 targets. The
-  // transient info-line weight is preserved (single short status line, polite
-  // aria-live + role=status override the Alert's assertive default). The
-  // .resume-progress class hook stays on the Alert for selector stability and
-  // for the .shell > .resume-progress grid placement (still in styles.css as
-  // layout-only, grid-column/grid-row).
-  return (
-    <Alert
-      className="resume-progress my-1.5"
-      role="status"
-      aria-live="polite"
-    >
-      {text}
-    </Alert>
-  );
-}
 
 export default function App() {
   // QueryClient (ADR-0051): lazy-init once per App mount so test renders never
@@ -527,63 +314,5 @@ export default function App() {
         </IntlProvider>
       </TooltipProvider>
     </QueryClientProvider>
-  );
-}
-
-// Cold-start / all-closed hero (ADR-0061). The right side when no session is
-// active: a "new session" call-to-action. The privacy disclosure lives in
-// SettingsView's Privacy pane (ADR-0066) -- the hero no longer duplicates it.
-// This is the shell-level empty state before any DuckDB instance exists (zero
-// memory until the user acts). A freshly-created unsaved session shows its own
-// hero inside its SessionPane.
-function ColdStartHero({
-  disabled,
-  onNew,
-}: {
-  disabled: boolean;
-  onNew: () => void;
-}) {
-  // Drop-to-create (ADR-0061, #81 A1) is now routed by the single shell-level
-  // webview drop listener in App, which treats activeSessionId === null as the
-  // cold-start case. This component is pure UI.
-  // ADR-0067 (issue #173): the .workspace-hero visual rule (flex column,
-  // centered, gap, padding, text-align) retired from styles.css onto utility.
-  // .cold-start-hero (positioning overlay) stays in styles.css as a layout-only
-  // hook; the workspace-hero hook stays for selector stability.
-  // ADR-0067 (issue #182): the .cold-start-title bespoke font-size (1.4rem) +
-  // margin retired onto utility (text-[1.4rem] + m-0 mb-2) -- arbitrary value
-  // preserves the exact retired size (Tailwind's nearest scale step text-2xl is
-  // 1.5rem, a 0.1rem drift from the AC "字号渲染不变"), and the .primary-cta
-  // bespoke primary teal styling retired onto a shadcn Button default variant
-  // (bg-primary + text-primary-foreground + rounded-md) sized lg for the CTA
-  // weight. The disabled progress cursor is preserved via className override
-  // (disabled:pointer-events-auto disabled:cursor-progress disabled:opacity-60):
-  // disabled:pointer-events-auto re-opens the shadcn base's
-  // disabled:pointer-events-none (without it browsers ignore cursor under
-  // pointer-events:none and the cursor-progress hint never renders), and
-  // disabled:opacity-60 nudges the Button default's disabled:opacity-50 back to
-  // 0.6 to match the retired rule. A native disabled <button> still does not
-  // dispatch click, so re-enabling pointer-events is safe. The .cold-start-title
-  // / .primary-cta class hooks stay on the elements for selector / test stability.
-  return (
-    <div className="workspace-hero cold-start-hero flex flex-col items-center gap-4 p-8 text-center">
-      <h2 className="cold-start-title m-0 mb-2 text-[1.4rem]">
-        <FormattedMessage id="coldStart.title" defaultMessage="Start an analysis" />
-      </h2>
-      <p className="text-muted-foreground">
-        <FormattedMessage
-          id="coldStart.hint"
-          defaultMessage="Click “New session” on the left, or open a saved session to resume. Drop a data file to start a new analysis in one step."
-        />
-      </p>
-      <Button
-        size="lg"
-        className="primary-cta disabled:pointer-events-auto disabled:cursor-progress disabled:opacity-60"
-        disabled={disabled}
-        onClick={onNew}
-      >
-        <FormattedMessage id="coldStart.newSession" defaultMessage="New session" />
-      </Button>
-    </div>
   );
 }
