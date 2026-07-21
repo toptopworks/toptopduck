@@ -101,9 +101,8 @@ function verbKey(kind: SessionFlowKind): CatalogKey {
     case "ask": return "error.verb.ask";
     default: {
       // Exhaustiveness guard: mirrors errorVerb in useSessionState so a new
-      // SessionFlowKind member forces a test update here too (tsconfig has no
-      // noImplicitReturns, so the switch alone does not enforce it). "shell" is
-      // intentionally not a SessionFlowKind (issue #194) -- it has no verb.
+      // SessionFlowKind member forces a test update here too. The `default:
+      // never` throw enforces this regardless of tsconfig flags.
       const unhandled: never = kind;
       throw new Error(`unhandled SessionFlowKind: ${JSON.stringify(unhandled)}`);
     }

@@ -5,10 +5,9 @@ import { ErrorBanner } from "../components/ErrorBanner";
 import type { AppError } from "../types";
 
 // Issue #194: ErrorBanner takes a single `error: AppError` prop -- one render
-// path, no shell/session branching. Shell rejects carry kind "shell"; session
-// rejects carry a SessionFlowKind. Only message + detail are rendered; kind is
-// carried but not displayed. The TechnicalDetailsFold appears when detail is
-// present and is omitted when null.
+// path, no shell/session branching. Only message + detail are rendered; kind
+// (shell / SessionFlowKind / read) is carried but not displayed. The
+// TechnicalDetailsFold appears when detail is present and is omitted when null.
 
 const messages = { "errorBoundary.details": "Technical details" };
 
@@ -57,5 +56,18 @@ describe("ErrorBanner (single AppError prop, issue #194)", () => {
       "shell-error",
     );
     expect(container.querySelector(".shell-error")).not.toBeNull();
+  });
+
+  it("does not render the kind into the banner DOM", () => {
+    // kind tags the operation upstream (verb prefix / tagging); ErrorBanner
+    // renders only message + detail, never kind. A regression leaking kind
+    // into the DOM (e.g. `{error.kind}: {error.message}`) would surface the
+    // literal kind text alongside the message.
+    const { container } = renderBanner({
+      message: "operation rejected",
+      kind: "shell",
+      detail: null,
+    });
+    expect(container.textContent).not.toContain("shell");
   });
 });

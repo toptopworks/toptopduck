@@ -49,12 +49,9 @@ import type {
 // keyed caches stay isolated by the `['session', sid, ...]` prefix.
 
 // AppError / AppErrorKind / SessionFlowKind live in ../types/error (issue
-// 194) -- shared with the shell (useShellError) so the shell, the session pane,
-// and the result view render IPC rejects through one AppError shape. The verb
-// logic below is typed over SessionFlowKind (not the full AppErrorKind): a
-// shell reject has no verb prefix (describeReject renders the bare fmtError
-// message), so "shell" is intentionally excluded from the verb-bearing set --
-// compile-time invariant, not a runtime default-arm hope.
+// #194). The verb logic below is typed over SessionFlowKind (not the full
+// AppErrorKind); see types/error.ts for why "shell" and "read" are excluded
+// from the verb-bearing set.
 
 /** The locale verb for an error kind (ADR-0052, issue #139). Catalog-backed so
  * the verb tracks the active locale -- the prior ERROR_VERB map hard-coded
@@ -87,11 +84,9 @@ function errorVerb(intl: IntlShape, kind: SessionFlowKind): string {
     default: {
       // Exhaustiveness guard (issue #139): a new SessionFlowKind member without
       // a case would fall through and return undefined, rendering a malformed
-      // " failed: ..." banner (verb lost). tsconfig has no noImplicitReturns,
-      // so the switch alone does NOT enforce exhaustiveness -- mirror the
-      // default-never-throw guard used by loadErrorDisplay + api.ts formatters.
-      // "shell" never reaches here: it is not a SessionFlowKind (issue #194 --
-      // shell rejects use describeReject with no verb prefix).
+      // " failed: ..." banner (verb lost). The `default: never` throw enforces
+      // this regardless of tsconfig flags -- mirror the guard used by
+      // loadErrorDisplay + api.ts formatters.
       const unhandled: never = kind;
       throw new Error(`unhandled SessionFlowKind: ${JSON.stringify(unhandled)}`);
     }
@@ -471,6 +466,7 @@ export function useSessionState(
                 "The worksheet still cannot be rectified; adjust the header selection and retry",
             }),
             kind: "load",
+            detail: null,
           });
         }
       } catch (e) {
@@ -539,6 +535,7 @@ export function useSessionState(
                 "Replace source does not support files needing rectify guidance; use a structured file instead",
             }),
             kind: "replace",
+            detail: null,
           });
         } else {
           setError({ ...loadErrorDisplay(result.data, intl), kind: "replace" });

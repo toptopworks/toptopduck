@@ -3,15 +3,12 @@
 // fmtError / describeReject); the Engine technical detail surfaces only when
 // present, reusing the shared errorBoundary.details locale key. Shared by the
 // shell, the session pane, and the result view so all three surface Engine.data
-// consistently -- previously only the session pane rendered the fold, so a
-// close-wait timeout reject lost its actionable "retry shortly" hint at the
-// shell layer.
+// consistently -- a close-wait timeout reject carries its actionable "retry
+// shortly" hint in the detail, which must not vanish at any layer.
 //
-// Issue #194: the prop shape is now a single `error: AppError` -- the prior
-// split (shell passed a bespoke { message, detail }, session passed an AppError
-// destructured to message/detail) is retired. kind is carried but not rendered
-// here; it tags the originating operation for upstream prefix logic. One render
-// path, no shell/session branching.
+// Issue #194: the prop shape is a single `error: AppError` -- one render path,
+// no shell/session branching. kind is carried but not rendered here; it tags
+// the originating operation for upstream prefix logic.
 import type { AppError } from "../types";
 import { Alert, AlertDescription } from "./ui/alert";
 import { TechnicalDetailsFold } from "./TechnicalDetailsFold";

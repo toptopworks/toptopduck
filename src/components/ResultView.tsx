@@ -135,9 +135,9 @@ export function ResultView({
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(false);
-  // Issue #194: readRows reject typed as AppError (kind "ask" -- the read phase
-  // of a turn; describeReject applies no verb prefix, so the tag only satisfies
-  // the merged shape and is not rendered by ErrorBanner).
+  // Issue #194: readRows reject typed as AppError, kind "read" (a readRows
+  // reject is the read phase of a turn; describeReject applies no verb prefix,
+  // and ErrorBanner renders only message + detail, not kind).
   const [error, setError] = useState<AppError | null>(null);
 
   // Stable id linking the table to its heading so the heading text is the
@@ -162,7 +162,7 @@ export function ResultView({
         setOffset(off);
       } catch (e) {
         if (seq !== seqRef.current) return;
-        setError(describeReject(e, intl, "ask"));
+        setError(describeReject(e, intl, "read"));
       } finally {
         if (seq === seqRef.current) setLoading(false);
       }

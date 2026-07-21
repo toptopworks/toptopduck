@@ -851,24 +851,27 @@ function migrationErrorDetail(e: MigrationError): string | null {
   }
 }
 
-// Describe an IPC reject (or a take_persist_error returned value) for an error
-// banner: the locale message via fmtError plus the technical detail (issue
-// #119 / #120), tagged with the originating operation's kind (issue #194).
-// Shared by the shell (kind "shell"), the result view (kind "ask" -- a readRows
-// reject is the read phase of a turn; describeReject applies no verb prefix, so
-// the tag only satisfies the AppError shape and is not rendered), and the
-// session pane's persist-warning banner so all surface the collapsed fold
-// consistently -- a close-wait timeout / resume / save reject carries its
-// actionable hint in the detail, which must not vanish at any layer (review
-// H1/M2). The caller supplies kind (the shell knows it is a shell reject; the
-// session layer knows the mutation kind), so this helper stays DRY across the
-// three callers without re-deriving the tag from the call site.
+// Describe an IPC reject for an error banner: the locale message via fmtError
+// plus the technical detail (issues #119 / #120), tagged with the originating
+// operation's kind (issue #194). Two callers: the shell (kind "shell", 9
+// handler sites in App.tsx) and the result view (kind "read" -- a readRows
+// reject). The session pane's persist-warning banner composes fmtError +
+// errorDetail inline (SessionPane.tsx), so it is NOT a caller here; the
+// close-wait / resume / save detail therefore surfaces consistently across
+// every layer. If fmtError yields an empty string (a bare throw with no
+// message, or a minified error), fall back to the Engine locale message so
+// the banner is never blank.
 export function describeReject(
   e: unknown,
   intl: IntlShape,
   kind: AppErrorKind,
 ): AppError {
-  return { message: fmtError(e, intl), kind, detail: errorDetail(e) };
+  const message = fmtError(e, intl) ||
+    intl.formatMessage({
+      id: "error.session.engine",
+      defaultMessage: "Internal error",
+    });
+  return { message, kind, detail: errorDetail(e) };
 }
 
 // Format a TurnFailure (TurnOutcome::Failed.data, issue #125) through the

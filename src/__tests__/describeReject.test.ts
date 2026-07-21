@@ -3,10 +3,10 @@ import { describe, expect, it } from "vitest";
 import { describeReject, errorDetail, fmtError } from "../api";
 import type { AppErrorKind } from "../types";
 
-// Issue #194: describeReject returns an AppError (was a bare { message, detail }).
-// The caller-supplied kind is carried through unchanged; message/detail still
-// come from fmtError + errorDetail, so the shell / result-view / session callers
-// share one reject-description helper.
+// Issue #194: describeReject returns an AppError tagged with the caller's
+// kind. message/detail come from fmtError + errorDetail; the kind is carried
+// through unchanged. Two callers: the shell (kind "shell") and the result
+// view (kind "read").
 
 const intl = createIntl({
   locale: "en",
@@ -36,10 +36,20 @@ describe("describeReject (returns AppError, issue #194)", () => {
     "privacy",
     "ask",
     "shell",
+    "read",
   ] as AppErrorKind[])("carries the %s kind without altering message/detail", (kind) => {
     const out = describeReject(engineReject, intl, kind);
     expect(out.kind).toBe(kind);
     expect(out.message).toBe("Internal error");
     expect(out.detail).toBe("close-wait timed out");
+  });
+
+  it("falls back to the Engine locale message when fmtError yields empty", () => {
+    // A bare throw with no message (or a minified error): fmtError returns the
+    // empty string via the `e instanceof Error` branch, so describeReject
+    // substitutes the Engine locale message so the banner is never blank.
+    const out = describeReject(new Error(""), intl, "shell");
+    expect(out.message).toBe("Internal error");
+    expect(out.kind).toBe("shell");
   });
 });

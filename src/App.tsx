@@ -305,10 +305,9 @@ export default function App() {
   const [sessionsError, setSessionsError] = useState<string | null>(null);
   // Shell-level IPC reject (issue #194): useShellError owns the single AppError
   // surfaced at the shell layer (createSession / openDuck / save / delete /
-  // rename persisted / profile switch), tagged kind "shell". ADR-0058 L1: the
-  // reject stays on the handler-async path, never lifted to an ErrorBoundary.
-  // The close-wait timeout / resume / save reject detail still rides the
-  // TechnicalDetailsFold under the banner (AC: display behavior unchanged).
+  // rename persisted / profile switch), tagged kind "shell". The close-wait
+  // timeout / resume / save reject detail rides the TechnicalDetailsFold under
+  // the banner. ADR-0058 L1 is documented at src/shell/useShellError.ts.
   const { shellError, setShellError } = useShellError();
   // Resume / open-busy indicator (ADR-0034). Resume blocks the open action; the
   // indicator shows globally while the clicked session is opening.
