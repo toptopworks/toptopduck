@@ -6,9 +6,9 @@ import type { EffectiveTheme, ThemeChangeDetail } from "./useTheme";
 // from the same shadcn CSS tokens the app shell uses, so the chart never drifts
 // from the app and flips with the .dark class automatically. The single source
 // of truth is the token set in app.css; this util only reads + reshapes it into
-// a Vega config. Not wired yet: the future Vega renderer (deferred past issue
-// #77) will call buildVegaTheme on mount and re-call it on each theme-change
-// event via onThemeChange. This slice ships the util + tokens only.
+// a Vega config. VegaChart consumes buildVegaTheme on mount and re-subscribes
+// via onThemeChange so each effective-theme flip re-derives the config and
+// re-embeds with the fresh palette.
 
 // Okabe-Ito colorblind-safe palette (ADR-0050 multi-series). v1 ships a proven
 // accessible category palette rather than a bespoke brand ramp (deferred to v2).
@@ -42,9 +42,9 @@ const documentVarReader: CssVarReader = (name) => {
 /** The Vega config derived from the live tokens. background/text come from the
  * shadcn shell tokens; domain/grid are the axis domain line + gridlines
  * (ADR-0050: --border / --muted); primary is the single-series mark color
- * (teal); category is the multi-series palette (Okabe-Ito). Reserved for the
- * v1 whitelist marks (ADR-0016); not mapped onto a spec until the renderer
- * lands post-#77. */
+ * (teal); category is the multi-series palette (Okabe-Ito). VegaChart.vegaConfig
+ * maps these fields onto a Vega-Lite config (mark fill / axis / legend / range)
+ * for the v1 whitelist marks (ADR-0016). */
 export interface VegaThemeConfig {
   background: string;
   text: string;
