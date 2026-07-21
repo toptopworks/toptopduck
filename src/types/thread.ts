@@ -4,9 +4,6 @@
 // source lifecycle events, ADR-0040).
 
 import type { DatasetDescriptor } from "./dataset";
-// SourceLifecycleEvent moved to the shared lifecycle kernel (issue #200); the
-// inline definition forced dataset.ts to back-import SourceLifecycleKind,
-// closing a dataset <-> thread cycle.
 import type { SourceLifecycleEvent } from "./lifecycle";
 
 // Which kind of non-SQL textual response the provider returned (ADR-0009
@@ -86,9 +83,6 @@ export interface TurnRecord {
   question: string;
   outcome: TurnOutcome;
 }
-
-// SourceLifecycleKind + SourceLifecycleEvent now live in ./lifecycle.ts (issue
-// #200); ThreadEntry.Source below uses the import at the top of this file.
 
 // One entry of the unified conversation timeline (ADR-0040): a Turn (question +
 // outcome) OR a source lifecycle event. Adjacently-tagged (`{entry, data}`) so

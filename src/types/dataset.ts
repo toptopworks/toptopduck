@@ -3,9 +3,6 @@
 // IPC). Covers column schemas, ingest guidance + outcomes, dataset descriptors
 // with privacy controls and stale anchors, and windowed row pages.
 
-// SourceLifecycleKind lives in the shared lifecycle kernel (issue #200); the
-// previous `from "./thread"` back-import made StaleReason's derivation here the
-// return edge of a dataset <-> thread cycle.
 import type { SourceLifecycleKind } from "./lifecycle";
 
 export interface ColumnSchema {

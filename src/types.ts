@@ -50,8 +50,8 @@ export type {
   ThreadEntry,
 } from "./types/thread";
 
-// Source lifecycle shared kernel (issue #200): moved out of types/thread so
-// dataset and thread no longer import-cycle through these names.
+// Source lifecycle shared kernel (issue #200): both dataset (StaleReason) and
+// thread (timeline entries) consume these names, so they live in their own leaf.
 export type {
   SourceLifecycleKind,
   SourceLifecycleEvent,
