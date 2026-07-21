@@ -1,4 +1,4 @@
-import { DisclosureBanner } from "../DisclosureBanner";
+import { DisclosureBanner } from "../common/DisclosureBanner";
 
 // Privacy pane (ADR-0065, issue #151): carries the ADR-0011/0029 honest-
 // disclosure text -- what leaves the machine when asking (schema + sample

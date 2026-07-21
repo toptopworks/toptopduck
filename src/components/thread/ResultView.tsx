@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
-import { describeReject, readRows } from "../api";
-import { decodeViz, type VizFailureReason } from "../viz";
-import { ErrorBanner } from "./ErrorBanner";
-import { Alert, AlertDescription } from "./ui/alert";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
-import { VegaChart } from "./VegaChart";
-import type { AppError, ColumnSchema, StaleAnchor, VizSpec } from "../types";
+import { describeReject, readRows } from "../../api";
+import { decodeViz, type VizFailureReason } from "../../viz";
+import { ErrorBanner } from "../common/ErrorBanner";
+import { Alert, AlertDescription } from "../ui/alert";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
+import { VegaChart } from "../viz/VegaChart";
+import type { AppError, ColumnSchema, StaleAnchor, VizSpec } from "../../types";
 
 const DEFAULT_PAGE_SIZE = 100;
 

@@ -1,8 +1,8 @@
 import { Component, Fragment, type ErrorInfo, type ReactNode } from "react";
 import { useIntl } from "react-intl";
-import { log } from "../lib/log";
-import { Button } from "./ui/button";
-import { Card } from "./ui/card";
+import { log } from "../../lib/log";
+import { Button } from "../ui/button";
+import { Card } from "../ui/card";
 import { TechnicalDetailsFold } from "./TechnicalDetailsFold";
 
 // Layered render-phase error boundaries (ADR-0058).

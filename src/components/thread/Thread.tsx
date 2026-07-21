@@ -23,9 +23,9 @@ import type {
   ThreadEntry,
   TurnOutcome,
   TurnRecord,
-} from "../types";
-import { formatTurnFailure, turnFailureDetail } from "../api";
-import { TechnicalDetailsFold } from "./TechnicalDetailsFold";
+} from "../../types";
+import { formatTurnFailure, turnFailureDetail } from "../../api";
+import { TechnicalDetailsFold } from "../common/TechnicalDetailsFold";
 
 // A compact label slice for the active-chip match (ADR-0047): the thread only
 // needs the names to detect when a question explicitly points at a dataset, so

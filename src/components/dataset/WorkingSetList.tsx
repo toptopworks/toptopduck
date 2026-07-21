@@ -1,8 +1,8 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { useIntl, FormattedMessage } from "react-intl";
-import { Badge } from "./ui/badge";
-import { cn } from "../lib/utils";
-import type { DatasetDescriptor } from "../types";
+import { Badge } from "../ui/badge";
+import { cn } from "../../lib/utils";
+import type { DatasetDescriptor } from "../../types";
 
 // ADR-0067 (issue #184): the .working-set button rule (all: unset + cursor +
 // padding + radius + display:block + width:100%) retired onto this shared
