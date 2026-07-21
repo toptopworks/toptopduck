@@ -4,11 +4,10 @@ import type { Theme } from "../types";
 // Three-state theme module (ADR-0050). The hook resolves the persisted
 // preference to an effective appearance, applies it to <html> via the .dark
 // class (the shadcn/Tailwind dark tokens key off it), follows the OS preference
-// while in "system" mode, and announces each change as a window event exposed
-// for the Vega theme bridge (./vega-theme.ts onThemeChange) to rebuild its
-// derived config. The bridge is not wired yet (deferred past issue #77).
-// Persistence itself lives in app-config (ADR-0038); this hook only reads the
-// resolved preference.
+// while in "system" mode, and announces each change as a window event the Vega
+// theme bridge (./vega-theme.ts onThemeChange) consumes to rebuild its derived
+// config. Persistence itself lives in app-config (ADR-0038); this hook only
+// reads the resolved preference.
 
 export type EffectiveTheme = "light" | "dark";
 

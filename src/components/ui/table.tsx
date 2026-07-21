@@ -18,8 +18,9 @@ import { cn } from "@/lib/utils";
 // .cell-null muted bg) retired onto ResultView's cells as utility alongside
 // the hooks; ADR-0067 (issue #183): the privacy caller-scoped .privacy-cols
 // last-column width/nowrap/center rule retired onto PrivacyControls' last-cell
-// className. The still-caller-scoped .schema td code wrap rule lives on in
-// styles.css until its owner (DatasetDetail) migrates.
+// className. ADR-0067 (issue #184): the .schema td code word-wrap rule retired
+// onto DatasetDetail's <code> element (font-mono + break-words + whitespace-
+// pre-wrap); styles.css carries no caller-scoped code rule.
 
 function Table({ className, ...props }: ComponentProps<"table">) {
   return (
