@@ -1,7 +1,7 @@
 // Runtime open-session state (issue #195). Owns the in-memory OPEN session set
 // + active id (ADR-0060 multi-session) + every action that mutates them:
 // register / openNew / openPersisted / dropFile / onWebviewDrop /
-// clearPendingIngest / unmountOpen / closeOpen / deletePersisted / renameEntry /
+// clearPendingIngest / activateSession / closeOpen / deletePersisted / renameEntry /
 // handleSaveAs / handleOpenDuck. The resume + persistence-busy indicators live
 // here too -- they drive the shell `busy` flag that gates the webview drop
 // listener + the sidebar / topbar / hero disabled states.
@@ -46,7 +46,7 @@ import type { OpenSession } from "../session/sidebarModel";
  *  a pre-baked string: App sits above <IntlProvider> and cannot format messages
  *  itself, so the ResumeProgress child (inside the provider) renders the union
  *  into the active locale. Produced by openPersisted (Source / Replay events
- *  from onResumeProgress) and consumed by ResumeProgress in <App>. */
+ *  from onResumeProgress) and consumed by ResumeProgress in App.tsx. */
 export type ResumeStatus =
   | { kind: "opening" }
   | { kind: "source"; index: number; total: number; name: string }
