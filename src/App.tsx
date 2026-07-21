@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { createIntl, FormattedMessage, IntlProvider, useIntl } from "react-intl";
-import { LogicalPosition, LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
+import { FormattedMessage, IntlProvider, useIntl } from "react-intl";
 import { SessionPane } from "./session/SessionPane";
 import { SessionSidebar } from "./session/SessionSidebar";
 import { useShellError } from "./shell/useShellError";
 import { usePersistedSessions } from "./shell/usePersistedSessions";
 import { useShellSessions, type ResumeStatus } from "./shell/useShellSessions";
+import { useAppConfigState } from "./shell/useAppConfigState";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { DegradeCard, ErrorBoundary } from "./components/ErrorBoundary";
 import { ProfileSwitcher } from "./components/ProfileSwitcher";
@@ -17,10 +17,9 @@ import { Button } from "./components/ui/button";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { log } from "./lib/log";
 import { createQueryClient } from "./lib/queryClient";
-import { catalogFor, coerceLocalePreference, useLocale } from "./i18n";
+import { catalogFor } from "./i18n";
 import { useTheme } from "./theme/useTheme";
-import { describeReject, getAppConfig, getProviderConfig, setAppConfig } from "./api";
-import type { AppConfig } from "./types";
+import { getProviderConfig } from "./api";
 
 // The Chat-style three-column shell (ADR-0045/0060/0062, issue #81). App owns
 // APP-level state: the OPEN-session set + active id (ADR-0060 multi-session),
@@ -37,16 +36,6 @@ import type { AppConfig } from "./types";
 /** Soft cap on keep-alive sessions (ADR-0046, non-blocking memory-pressure
  *  badge). Reaching it surfaces a sidebar badge; it never forces a close. */
 const SOFT_CAP_OPEN_SESSIONS = 8;
-
-/** Acquire the main window, or null when the Tauri bridge is absent (jsdom
- * tests). Every window-geometry call site is a no-op without it. */
-function safeMainWindow(): ReturnType<typeof getCurrentWindow> | null {
-  try {
-    return getCurrentWindow();
-  } catch {
-    return null;
-  }
-}
 
 // Header action cluster (ADR-0052 i18n). App sits above <IntlProvider> so it
 // cannot call useIntl(); this child renders inside the provider. IDs are STATIC
@@ -271,25 +260,41 @@ export default function App() {
 
   const { shellError, setShellError } = useShellError();
 
-  // --- App-level config (ADR-0038) ----------------------------------------
-  // Resolved BEFORE the session hooks so they can receive the shell IntlShape.
-  // app-config owns theme / locale / recent files / window geometry / shell
-  // collapse prefs; its load + restore + persist effects live further down.
-  const [appConfig, setAppConfigState] = useState<AppConfig | null>(null);
-  const appConfigRef = useRef<AppConfig | null>(null);
-  const geometryRestoredRef = useRef(false);
+  // --- App-level UI state --------------------------------------------------
+  const [hasKey, setHasKey] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
-  // Locale (ADR-0052): resolved once from the persisted three-state preference
-  // (defaulting to system before app-config resolves). App sits ABOVE the
-  // <IntlProvider> rendered below for the subtree, so useIntl() is unavailable
-  // here -- a standalone IntlShape is built from the same catalog so the
-  // session hooks + switchActiveProfile can localize SessionError rejects at
-  // the shell layer (issue #119).
-  const effectiveLocale = useLocale(coerceLocalePreference(appConfig?.locale));
-  const intl = useMemo(
-    () => createIntl({ locale: effectiveLocale, messages: catalogFor(effectiveLocale) }),
-    [effectiveLocale],
-  );
+  // refreshKeyStatus: reads the active profile's keychain slot (ADR-0029) into
+  // hasKey. Fired once on mount by useAppConfigState's load effect, again after
+  // a profile switch, and on settings-close (a Save may have changed the slot).
+  // Stays in App because hasKey is App-level UI state rendered by HeaderActions;
+  // the hook consumes it as a dep.
+  const refreshKeyStatus = useCallback(async () => {
+    try {
+      setHasKey((await getProviderConfig()).has_key);
+    } catch {
+      // keep the previous indicator; the ask path surfaces real failures.
+    }
+  }, []);
+
+  // --- App-level config (ADR-0038, issue #196) ----------------------------
+  // Delegated to useAppConfigState (see that hook for the ADR-0068/0052
+  // contract + restore / persist effects). App injects setShellError
+  // (switchActiveProfile reject path) + refreshKeyStatus (mount + post-switch
+  // kick + settings-close) as deps; reads back AppConfig state + the derived
+  // effectiveLocale / intl + the two collapse toggles. hasKey + settingsOpen
+  // are App-local UI state (below).
+  const {
+    appConfig,
+    effectiveLocale,
+    intl,
+    commitAppConfig,
+    switchActiveProfile,
+    sidebarCollapsed,
+    railCollapsed,
+    toggleSidebarCollapse,
+    toggleRailCollapse,
+  } = useAppConfigState({ setShellError, refreshKeyStatus });
 
   // --- Session shell (issue #195) -----------------------------------------
   // usePersistedSessions: the disk-derived sidebar list (ADR-0061 cold start;
@@ -318,129 +323,16 @@ export default function App() {
     handleOpenDuck,
   } = useShellSessions({ intl, queryClient, refreshSessions, setShellError });
 
-  // --- App-level UI state --------------------------------------------------
-  const [hasKey, setHasKey] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  // ADR-0054 shell collapse (issue #84): two independent manual levels --
-  // session sidebar (full hide + topbar call-out) and thread rail (workspace
-  // goes full-width). Both default expanded; both restore from app-config once
-  // on the first resolve (ADR-0038) and persist on every toggle.
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [railCollapsed, setRailCollapsed] = useState(false);
-  const collapseRestoredRef = useRef(false);
-
   // ADR-0060 soft cap: a non-blocking badge in the top bar (not the sidebar)
   // signals memory pressure once the open keep-alive set reaches the cap; it
   // never forces a close.
   const atSoftCap = openSessions.length >= SOFT_CAP_OPEN_SESSIONS;
 
-  const refreshKeyStatus = useCallback(async () => {
-    try {
-      setHasKey((await getProviderConfig()).has_key);
-    } catch {
-      // keep the previous indicator; the ask path surfaces real failures.
-    }
-  }, []);
-
-  // Load app-config once on mount (theme/locale/recent files/geometry).
-  useEffect(() => {
-    let cancelled = false;
-    // External system -> state: a legitimate one-shot fetch (provider config +
-    // app-config land once on mount). refreshKeyStatus setState-in-effect is
-    // intentional here.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void refreshKeyStatus();
-    void getAppConfig()
-      .then((cfg) => {
-        if (cancelled) return;
-        appConfigRef.current = cfg;
-        setAppConfigState(cfg);
-      })
-      .catch(() => {
-        // Keep null; theme defaults to "system".
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshKeyStatus]);
-
-  const commitAppConfig = useCallback(async (cfg: AppConfig): Promise<void> => {
-    appConfigRef.current = cfg;
-    setAppConfigState(cfg);
-    await setAppConfig(cfg);
-  }, []);
-
-  // Switch the active profile from the top-bar quick switcher (issue #154,
-  // ADR-0065). There is no separate set-active IPC: active_profile lives in
-  // app-config (ADR-0038/0064), so the switch is one commitAppConfig write of
-  // provider.active_profile -- the SAME persistence layer the settings Save
-  // uses (#153 SettingsView.save -> onCommitAppConfig). The CONTRACT differs
-  // from #153: settings stages the change in a draft and commits on Save
-  // (batched with theme/locale/engine), while the top-bar switcher commits
-  // IMMEDIATELY (a one-profile swap, no draft) so the next ask picks it up.
-  // live_config reads active_profile fresh each turn (ADR-0064 -- the
-  // ProviderConfigSource impl does a disk read per call, no caching), so the
-  // next ask uses the new profile's endpoint + keychain slot. The active
-  // profile changed -> refresh the header key indicator (hasKey reflects the
-  // NEW active profile's keychain slot, ADR-0029 boolean). commitAppConfig is
-  // optimistic (state flips before the IPC awaits); a write failure surfaces
-  // the error but does NOT roll back, mirroring SettingsView Save --
-  // live_config still reads disk truth, so a failed write leaves the next ask
-  // on the OLD profile.
-  const switchActiveProfile = useCallback(
-    async (id: string): Promise<void> => {
-      if (!appConfig) return;
-      if (id === appConfig.provider.active_profile) return;
-      try {
-        await commitAppConfig({
-          ...appConfig,
-          provider: { ...appConfig.provider, active_profile: id },
-        });
-        void refreshKeyStatus();
-      } catch (e) {
-        setShellError(describeReject(e, intl, "shell"));
-      }
-    },
-    [appConfig, commitAppConfig, refreshKeyStatus, intl, setShellError],
-  );
-
-  // Commit the two shell collapse prefs as one app-config write (ADR-0038/0054,
-  // issue #84). No-op before app-config resolves (appConfigRef null) -- the
-  // restore effect's one-shot then applies the persisted value on first load.
-  const commitShellPrefs = useCallback(
-    (next: { sidebar: boolean; rail: boolean }): void => {
-      const base = appConfigRef.current;
-      if (!base) return;
-      void commitAppConfig({
-        ...base,
-        shell: { sidebar_collapsed: next.sidebar, rail_collapsed: next.rail },
-      }).catch((e) => {
-        // IPC write failed -- the UI already flipped optimistically (state is
-        // set before the commit), so the only consequence is the pref not
-        // surviving a restart. Mirror the geometry persist handler: log to
-        // devtools, not a user toast (the toggle's visible effect landed).
-        log.warn("shell", "collapse persist failed", e);
-      });
-    },
-    [commitAppConfig],
-  );
-
-  const toggleSidebarCollapse = useCallback(() => {
-    const next = !sidebarCollapsed;
-    setSidebarCollapsed(next);
-    commitShellPrefs({ sidebar: next, rail: railCollapsed });
-  }, [sidebarCollapsed, railCollapsed, commitShellPrefs]);
-
-  const toggleRailCollapse = useCallback(() => {
-    const next = !railCollapsed;
-    setRailCollapsed(next);
-    commitShellPrefs({ sidebar: sidebarCollapsed, rail: next });
-  }, [sidebarCollapsed, railCollapsed, commitShellPrefs]);
-
   // Theme (ADR-0050): applied to <html>, follows the persisted three-state
   // preference (defaulting to system before app-config resolves). The Vega
-  // bridge listens to the theme-change event this fires. effectiveLocale is
-  // resolved earlier (where the shell's IntlShape is built, above).
+  // bridge listens to the theme-change event this fires. effectiveLocale +
+  // intl are resolved inside useAppConfigState (where the owned appConfig
+  // lives); the IntlProvider subtree + document.lang consume them here.
   useTheme(appConfig?.theme ?? "system");
 
   useEffect(() => {
@@ -448,77 +340,6 @@ export default function App() {
       document.documentElement.lang = effectiveLocale;
     }
   }, [effectiveLocale]);
-
-  // Restore window geometry ONCE on the first app-config load (ADR-0038).
-  useEffect(() => {
-    if (!appConfig || geometryRestoredRef.current) return;
-    const win = safeMainWindow();
-    if (!win) return;
-    geometryRestoredRef.current = true;
-    const { width, height, x, y, maximized } = appConfig.window;
-    if (maximized) {
-      void win.maximize().catch(() => {});
-    } else {
-      void win
-        .setSize(new LogicalSize(width, height))
-        .then(async () => {
-          if (x !== null && y !== null) {
-            await win.setPosition(new LogicalPosition(x, y)).catch(() => {});
-          }
-        })
-        .catch(() => {});
-    }
-  }, [appConfig]);
-
-  // Restore shell collapse prefs ONCE on the first app-config load (ADR-0038 /
-  // 0054, issue #84). Mirrors geometryRestoredRef: a one-shot so a later
-  // app-config write (e.g. a toggle's own commit) does not re-clobber the
-  // user's in-session state with the persisted value.
-  useEffect(() => {
-    if (!appConfig || collapseRestoredRef.current) return;
-    collapseRestoredRef.current = true;
-    setSidebarCollapsed(appConfig.shell.sidebar_collapsed);
-    setRailCollapsed(appConfig.shell.rail_collapsed);
-  }, [appConfig]);
-
-  // Persist window geometry on resize/move, debounced (ADR-0038).
-  useEffect(() => {
-    const win = safeMainWindow();
-    if (!win) return;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const flush = () => {
-      timer = null;
-      Promise.all([win.innerSize(), win.outerPosition(), win.isMaximized()])
-        .then(([size, pos, maximized]) => {
-          const base = appConfigRef.current;
-          if (!base) return;
-          void commitAppConfig({
-            ...base,
-            window: {
-              width: size.width,
-              height: size.height,
-              x: pos.x,
-              y: pos.y,
-              maximized,
-            },
-          }).catch((e) => {
-            log.warn("geometry", "persist failed", e);
-          });
-        })
-        .catch(() => {});
-    };
-    const schedule = () => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(flush, 500);
-    };
-    const unresizedP = win.onResized(schedule).catch(() => () => {});
-    const unmovedP = win.onMoved(schedule).catch(() => () => {});
-    return () => {
-      if (timer) clearTimeout(timer);
-      void unresizedP.then((un) => un()).catch(() => {});
-      void unmovedP.then((un) => un()).catch(() => {});
-    };
-  }, [commitAppConfig]);
 
   return (
     <QueryClientProvider client={queryClient}>
