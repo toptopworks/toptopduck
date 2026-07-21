@@ -1357,10 +1357,18 @@ describe("App top-bar active profile switcher (issue #154, ADR-0065)", () => {
     await waitFor(() => expect(screen.getByText("Anthropic")).toBeInTheDocument());
     // Open the dropdown via its trigger.
     fireEvent.click(screen.getByRole("button", { name: /活跃接入档案/ }));
-    // Both profiles render as items; their key-status badges are visible.
-    expect(screen.getByText("GLM")).toBeInTheDocument();
-    expect(screen.getByText("已设 key")).toBeInTheDocument(); // anthropic has key
-    expect(screen.getByText("无 key")).toBeInTheDocument(); // glm has no key
+    // Both profiles render as items; their key-status badges are visible. The
+    // has_key overlay comes from listProviderProfiles, which resolves ASYNC on
+    // ProfileSwitcher mount -- the item names "Anthropic" / "GLM" are sync from
+    // app-config, but the badges are not. The badges are awaited rather than
+    // asserted synchronously: a sync getByText races the promise on a slow CI
+    // runner (the overlay lands a microtask after the awaited trigger name, so
+    // anthropic's badge briefly reads the default "无 key" before resolve).
+    await waitFor(() => {
+      expect(screen.getByText("GLM")).toBeInTheDocument();
+      expect(screen.getByText("已设 key")).toBeInTheDocument(); // anthropic has key
+      expect(screen.getByText("无 key")).toBeInTheDocument(); // glm has no key
+    });
   });
 
   it("selecting a profile commits the new active id via setAppConfig (live next turn)", async () => {
