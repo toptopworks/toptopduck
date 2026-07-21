@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createIntl, FormattedMessage, IntlProvider, useIntl } from "react-intl";
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { LogicalPosition, LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { SessionPane } from "./session/SessionPane";
 import { SessionSidebar } from "./session/SessionSidebar";
 import { useShellError } from "./shell/useShellError";
+import { usePersistedSessions } from "./shell/usePersistedSessions";
+import { useShellSessions, type ResumeStatus } from "./shell/useShellSessions";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { DegradeCard, ErrorBoundary } from "./components/ErrorBoundary";
 import { ProfileSwitcher } from "./components/ProfileSwitcher";
@@ -19,26 +19,8 @@ import { log } from "./lib/log";
 import { createQueryClient } from "./lib/queryClient";
 import { catalogFor, coerceLocalePreference, useLocale } from "./i18n";
 import { useTheme } from "./theme/useTheme";
-import {
-  closeSession,
-  closeSessionAndWaitRelease,
-  createSession,
-  deleteSession,
-  describeReject,
-  fmtError,
-  getAppConfig,
-  getProviderConfig,
-  listSessions,
-  onResumeProgress,
-  openDuck,
-  recordRecentFile,
-  renamePersistedSession,
-  renameSession,
-  saveAsDuck,
-  setAppConfig,
-} from "./api";
-import type { AppConfig, SessionMetadata } from "./types";
-import type { OpenSession } from "./session/sidebarModel";
+import { describeReject, getAppConfig, getProviderConfig, setAppConfig } from "./api";
+import type { AppConfig } from "./types";
 
 // The Chat-style three-column shell (ADR-0045/0060/0062, issue #81). App owns
 // APP-level state: the OPEN-session set + active id (ADR-0060 multi-session),
@@ -235,16 +217,12 @@ function RailToggle({
   );
 }
 
-// Resume progress status (ADR-0034). A structured discriminated union, not a
-// pre-baked string: App sits above <IntlProvider> and cannot format messages
-// itself, so ResumeProgress (a child inside the provider) renders the union
-// into the active locale. Each intl.formatMessage id is a STATIC literal so
-// @formatjs/cli extract resolves them.
-type ResumeStatus =
-  | { kind: "opening" }
-  | { kind: "source"; index: number; total: number; name: string }
-  | { kind: "replay"; index: number; total: number; name: string };
-
+// Resume progress status (ADR-0034). ResumeStatus is a structured discriminated
+// union produced by useShellSessions (openPersisted's Source/Replay events) --
+// not a pre-baked string. App sits above <IntlProvider> and cannot format
+// messages itself, so ResumeProgress (a child inside the provider) renders the
+// union into the active locale. Each intl.formatMessage id is a STATIC literal
+// so @formatjs/cli extract resolves them.
 function ResumeProgress({ status }: { status: ResumeStatus }) {
   const intl = useIntl();
   const text = (() => {
@@ -291,30 +269,12 @@ export default function App() {
   // share cache.
   const [queryClient] = useState(() => createQueryClient());
 
-  // --- Multi-session shell (ADR-0060/0051) --------------------------------
-  // openSessions: every session with a live in-memory instance, each rendered
-  // as a keep-alive SessionPane. activeSessionId: the visible one (null = cold
-  // hero). A close drops the entry + removeQueries its cache (ADR-0055).
-  const [openSessions, setOpenSessions] = useState<OpenSession[]>([]);
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  // Bumped to re-fetch list_sessions after a save/delete/rename (the persisted
-  // sidebar list is advisory state held in React, not TanStack Query, mirroring
-  // how app-config is fetched).
-  const [sessionsEpoch, setSessionsEpoch] = useState(0);
-  const [sessions, setSessions] = useState<SessionMetadata[]>([]);
-  const [sessionsError, setSessionsError] = useState<string | null>(null);
-  // Shell-level IPC reject (issue #194): useShellError owns the single AppError
-  // surfaced at the shell layer (createSession / openDuck / save / delete /
-  // rename persisted / profile switch), tagged kind "shell". The close-wait
-  // timeout / resume / save reject detail rides the TechnicalDetailsFold under
-  // the banner. ADR-0058 L1 is documented at src/shell/useShellError.ts.
   const { shellError, setShellError } = useShellError();
-  // Resume / open-busy indicator (ADR-0034). Resume blocks the open action; the
-  // indicator shows globally while the clicked session is opening.
-  const [resumeStatus, setResumeStatus] = useState<ResumeStatus | null>(null);
-  const [persistenceBusy, setPersistenceBusy] = useState(false);
 
   // --- App-level config (ADR-0038) ----------------------------------------
+  // Resolved BEFORE the session hooks so they can receive the shell IntlShape.
+  // app-config owns theme / locale / recent files / window geometry / shell
+  // collapse prefs; its load + restore + persist effects live further down.
   const [appConfig, setAppConfigState] = useState<AppConfig | null>(null);
   const appConfigRef = useRef<AppConfig | null>(null);
   const geometryRestoredRef = useRef(false);
@@ -322,13 +282,41 @@ export default function App() {
   // Locale (ADR-0052): resolved once from the persisted three-state preference
   // (defaulting to system before app-config resolves). App sits ABOVE the
   // <IntlProvider> rendered below for the subtree, so useIntl() is unavailable
-  // here -- a standalone IntlShape is built from the same catalog so fmtError
-  // can localize SessionError rejects at the shell layer (issue #119).
+  // here -- a standalone IntlShape is built from the same catalog so the
+  // session hooks + switchActiveProfile can localize SessionError rejects at
+  // the shell layer (issue #119).
   const effectiveLocale = useLocale(coerceLocalePreference(appConfig?.locale));
   const intl = useMemo(
     () => createIntl({ locale: effectiveLocale, messages: catalogFor(effectiveLocale) }),
     [effectiveLocale],
   );
+
+  // --- Session shell (issue #195) -----------------------------------------
+  // usePersistedSessions: the disk-derived sidebar list (ADR-0061 cold start;
+  // ADR-0068 advisory state -- React useState + sessionsEpoch manual invalidate,
+  // NOT TanStack Query). useShellSessions: the runtime OPEN set + active id +
+  // every mutating action (open / close / drop / rename / save / delete) + the
+  // resume + persistence-busy gates + the single webview drop router (#81).
+  // useShellSessions also takes the QueryClient seam (ADR-0051/0055 cache drop
+  // on unmount) + refreshSessions (save/delete/rename re-fetch) + setShellError
+  // (shell-layer AppError surface, issue #194).
+  const { sessions, sessionsError, refreshSessions } = usePersistedSessions({ intl });
+  const {
+    openSessions,
+    activeSessionId,
+    activeSession,
+    activateSession,
+    busy,
+    resumeStatus,
+    openNew,
+    openPersisted,
+    clearPendingIngest,
+    closeOpen,
+    deletePersisted,
+    renameEntry,
+    handleSaveAs,
+    handleOpenDuck,
+  } = useShellSessions({ intl, queryClient, refreshSessions, setShellError });
 
   // --- App-level UI state --------------------------------------------------
   const [hasKey, setHasKey] = useState(false);
@@ -341,35 +329,10 @@ export default function App() {
   const [railCollapsed, setRailCollapsed] = useState(false);
   const collapseRestoredRef = useRef(false);
 
-  const busy = persistenceBusy || resumeStatus !== null;
-  const activeSession =
-    openSessions.find((s) => s.sid === activeSessionId) ?? null;
   // ADR-0060 soft cap: a non-blocking badge in the top bar (not the sidebar)
   // signals memory pressure once the open keep-alive set reaches the cap; it
   // never forces a close.
   const atSoftCap = openSessions.length >= SOFT_CAP_OPEN_SESSIONS;
-
-  // ADR-0061 cold start: load list_sessions on mount (and after a save/delete/
-  // rename bumps sessionsEpoch). NOT createSession -- zero instances until the
-  // user acts.
-  useEffect(() => {
-    let cancelled = false;
-    listSessions()
-      .then((list) => {
-        if (cancelled) return;
-        setSessions(list);
-        setSessionsError(null);
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        setSessionsError(fmtError(e, intl));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [intl, sessionsEpoch]);
-
-  const refreshSessions = useCallback(() => setSessionsEpoch((e) => e + 1), []);
 
   const refreshKeyStatus = useCallback(async () => {
     try {
@@ -557,314 +520,6 @@ export default function App() {
     };
   }, [commitAppConfig]);
 
-  // --- Multi-session actions ----------------------------------------------
-
-  /** Add a freshly-minted session to the open set and activate it. The caller
-   *  hands the createSession result + an optional bound path/name (resume). */
-  const registerOpen = useCallback((entry: OpenSession) => {
-    setOpenSessions((prev) =>
-      prev.some((s) => s.sid === entry.sid) ? prev : [...prev, entry],
-    );
-    setActiveSessionId(entry.sid);
-  }, []);
-
-  // "+ New session" (ADR-0061): mint an empty session and enter its empty state.
-  const openNew = useCallback(async () => {
-    try {
-      const sid = await createSession();
-      // name starts empty; the display layer renders a localized "New session"
-      // placeholder until the user saves-as or renames (data, not chrome).
-      registerOpen({ sid, name: "", path: null, pendingIngestPath: null });
-    } catch (e) {
-      setShellError(describeReject(e, intl, "shell"));
-    }
-  }, [intl, registerOpen, setShellError]);
-
-  // Drop-to-create on the cold-start hero (ADR-0061, #81 A1): mint a session
-  // and hand the dropped path to the new SessionPane as pendingIngestPath. The
-  // pane consumes it via handleIngest (the only path that can surface an xlsx
-  // NeedsGuidance dialog); the shell never ingests directly. droppingRef guards
-  // a second drop landing while the first createSession is still in flight.
-  const droppingRef = useRef(false);
-  const dropFile = useCallback(
-    async (path: string) => {
-      if (droppingRef.current) return;
-      droppingRef.current = true;
-      try {
-        const sid = await createSession();
-        registerOpen({ sid, name: "", path: null, pendingIngestPath: path });
-      } catch (e) {
-        setShellError(describeReject(e, intl, "shell"));
-      } finally {
-        droppingRef.current = false;
-      }
-    },
-    [intl, registerOpen, setShellError],
-  );
-
-  // Single webview-level drop router (#81): Tauri's onDragDropEvent is a
-  // window-level signal with no hit-test, so exactly one listener (here, in the
-  // shell) routes each drop -- cold start mints a new session, otherwise the
-  // file lands on the ACTIVE session's ingest via the pendingIngestPath pipe
-  // (#81 A1). This replaces the per-SessionPane FileDropzone listeners, which
-  // stacked 1:1 with keep-alive panes and fired N ingests per single drop.
-  const onWebviewDrop = useCallback(
-    (path: string) => {
-      if (activeSessionId === null) {
-        void dropFile(path);
-        return;
-      }
-      setOpenSessions((prev) =>
-        prev.map((o) =>
-          o.sid === activeSessionId ? { ...o, pendingIngestPath: path } : o,
-        ),
-      );
-    },
-    [activeSessionId, dropFile],
-  );
-  useEffect(() => {
-    if (busy) return;
-    const app = getCurrentWebviewWindow();
-    const unlisten = app.onDragDropEvent((event) => {
-      if (event.payload.type === "drop" && event.payload.paths.length > 0) {
-        onWebviewDrop(event.payload.paths[0]);
-      }
-    });
-    return () => {
-      void unlisten.then((u) => u());
-    };
-  }, [busy, onWebviewDrop]);
-
-  // Clear a consumed drop-on-cold-start path (#81 A1): once the SessionPane has
-  // kicked off ingest, OpenSession.pendingIngestPath is dropped so a remount
-  // cannot re-ingest.
-  const clearPendingIngest = useCallback((sid: string) => {
-    setOpenSessions((prev) =>
-      prev.map((o) => (o.sid === sid ? { ...o, pendingIngestPath: null } : o)),
-    );
-  }, []);
-
-  // Resume a persisted .duck into a fresh runtime instance (ADR-0061/0034).
-  // open_duck reuses the id (ADR-0056), so createSession mints it first, then
-  // openDuck loads the recipe + replays the chain into that id. If the same
-  // path is already open, just switch to it (no second instance, keep-alive).
-  const openPersisted = useCallback(
-    async (path: string, name: string) => {
-      const existing = openSessions.find((s) => s.path === path);
-      if (existing) {
-        setActiveSessionId(existing.sid);
-        return;
-      }
-      setResumeStatus({ kind: "opening" });
-      // ADR-0056 / issue #76: resume-progress is a global Tauri broadcast keyed
-      // by session_id. The listener registers BEFORE createSession mints the id,
-      // so targetSid starts null and is assigned the instant the id lands; every
-      // event is then filtered to the session THIS resume opened. An event for a
-      // different session (a concurrent resume path, or a stray broadcast) is
-      // dropped before it can move our status indicator. #83 R5: this filter is
-      // the multi-session seam -- without it a sibling resume's Source/Replay
-      // ticks would hijack this opener's progress strip.
-      let targetSid: string | null = null;
-      const unlisten = await onResumeProgress((ev) => {
-        if (ev.session_id !== targetSid) return;
-        const { event } = ev;
-        if ("Source" in event) {
-          setResumeStatus({
-            kind: "source",
-            index: event.Source.index,
-            total: event.Source.total,
-            name: event.Source.reference_name,
-          });
-        } else if ("Replay" in event) {
-          setResumeStatus({
-            kind: "replay",
-            index: event.Replay.index,
-            total: event.Replay.total,
-            name: event.Replay.reference_name,
-          });
-        }
-      });
-      try {
-        const sid = await createSession();
-        targetSid = sid;
-        await openDuck(sid, path);
-        await queryClient.invalidateQueries({ queryKey: ["session", sid] });
-        registerOpen({ sid, name, path, pendingIngestPath: null });
-        setResumeStatus(null);
-      } catch (e) {
-        setShellError(describeReject(e, intl, "shell"));
-        setResumeStatus(null);
-      } finally {
-        void unlisten();
-      }
-    },
-    [intl, openSessions, queryClient, registerOpen, setShellError],
-  );
-
-  // Synchronous UI teardown for an open session: drop the cache + open-set
-  // entry + active id. Shared by closeOpen (ADR-0055, runs BEFORE the
-  // background close fires) and deletePersisted (ADR-0063, runs AFTER the
-  // wait-release variant resolves). The active-id decision runs as a SEPARATE
-  // setState -- calling it inside a state updater violates React's purity
-  // contract (updaters may double-fire in StrictMode / concurrent mode,
-  // enqueueing the nested setter twice); `next` is computed inside the updater
-  // (the source of truth for the latest prev) and read out after.
-  const unmountOpen = useCallback(
-    (sid: string): void => {
-      queryClient.removeQueries({ queryKey: ["session", sid] });
-      let next: OpenSession[] = [];
-      setOpenSessions((prev) => {
-        next = prev.filter((s) => s.sid !== sid);
-        return next;
-      });
-      setActiveSessionId((cur) => (cur === sid ? next[0]?.sid ?? null : cur));
-    },
-    [queryClient],
-  );
-
-  // Close an open session (ADR-0055/0060). The user's view must disappear with
-  // ZERO wait even when a turn is in-flight: unmount the pane SYNCHRONOUSLY,
-  // THEN fire closeSession in the background. closeSession (cancel + mark
-  // closing + drop the handle) returns immediately on the backend too -- it
-  // does NOT wait for an in-flight ask; the ask's post-turn check sees closing
-  // and discards (no thread append, no recipe entry). The orphan ask promise
-  // resolves against an absent cache (TanStack setQueryData on a removed key
-  // is a no-op) and the turn-progress listener cleanup runs in the pane's
-  // unmount effect. The .duck stays on disk and remains in the sidebar
-  // (re-openable). NOT delete -- the delete path uses the wait-release variant
-  // (see deletePersisted), not this fire-and-forget close.
-  const closeOpen = useCallback(
-    (sid: string): Promise<void> => {
-      unmountOpen(sid);
-      // ADR-0055: the UI is already gone; cancel + mark closing only reaches
-      // backend bookkeeping. The promise is RETURNED, not awaited here --
-      // fire-cancel-don't-wait. Best-effort: NotFound is the expected idempotent
-      // path (already dropped); other failures log to devtools so IPC/panic
-      // stay observable. NOT a user toast -- pane is gone.
-      return closeSession(sid).catch((e) => {
-        log.warn("closeSession", "background close failed", fmtError(e, intl));
-      });
-    },
-    [intl, unmountOpen],
-  );
-
-  // Delete a persisted .duck (ADR-0060/0063, irreversible). If the session is
-  // open, close it via the WAIT-RELEASE variant: the UI pane STAYS mounted
-  // during the wait (delete is an explicit user intent -- it does NOT get
-  // close's zero-wait contract, ADR-0063 Decision 2), and only unmounts after
-  // the canonical single-writer key is released. This guarantees deleteSession's
-  // try_acquire gate sees the key free (no misleading "请先关闭" on an entry the
-  // user is already deleting). On wait timeout the entry survives so the user
-  // can retry. persistenceBusy gates the UI for the potentially long wait.
-  const deletePersisted = useCallback(
-    async (path: string, sid: string | null) => {
-      setPersistenceBusy(true);
-      try {
-        if (sid) {
-          try {
-            await closeSessionAndWaitRelease(sid);
-          } catch (e) {
-            // Close-wait failed (timeout, or the backend already detached
-            // the session). Unmount the pane so the entry falls back to the
-            // cold sidebar (sid=null); a retry then takes the pure
-            // deleteSession(path) path -- if the canonical key is now free
-            // the gate succeeds, otherwise the user sees the real gate error.
-            // Without this, the pane stays mounted on a sid the backend no
-            // longer knows and every retry hits NotFound (dead loop).
-            unmountOpen(sid);
-            setShellError(describeReject(e, intl, "shell"));
-            return;
-          }
-          // The wait resolved -- canonical key is free, Session::Drop ran.
-          // NOW unmount the pane (ADR-0063: UI teardown after the wait, not
-          // before).
-          unmountOpen(sid);
-        }
-        try {
-          await deleteSession(path);
-        } catch (e) {
-          setShellError(describeReject(e, intl, "shell"));
-          return;
-        }
-        refreshSessions();
-      } finally {
-        setPersistenceBusy(false);
-      }
-    },
-    [intl, unmountOpen, refreshSessions, setShellError],
-  );
-
-  // Rename a sidebar entry (ADR-0060, single entry point). An OPEN session
-  // renames in-memory + re-persists via its sid; a CLOSED .duck rewrites the
-  // recipe header in place by path. The bound path is untouched either way.
-  const renameEntry = useCallback(
-    async (sid: string | null, path: string | null, newName: string) => {
-      const trimmed = newName.trim();
-      if (!trimmed) return;
-      try {
-        if (sid) {
-          const landed = await renameSession(sid, trimmed);
-          setOpenSessions((prev) =>
-            prev.map((s) => (s.sid === sid ? { ...s, name: landed } : s)),
-          );
-        } else if (path) {
-          await renamePersistedSession(path, trimmed);
-        }
-      } catch (e) {
-        setShellError(describeReject(e, intl, "shell"));
-        return;
-      }
-      refreshSessions();
-    },
-    [intl, refreshSessions, setShellError],
-  );
-
-  // --- Save / Open .duck (ADR-0034/0036) ----------------------------------
-  const handleSaveAs = useCallback(async () => {
-    if (!activeSession) return;
-    setPersistenceBusy(true);
-    try {
-      const path = await saveDialog({
-        filters: [{ name: "toptopduck", extensions: ["duck"] }],
-      });
-      if (!path) return;
-      const stem =
-        path.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? "session";
-      await saveAsDuck(activeSession.sid, path, stem);
-      // Bind the path + name on the open entry; the sidebar list refreshes.
-      setOpenSessions((prev) =>
-        prev.map((s) =>
-          s.sid === activeSession.sid ? { ...s, path, name: stem } : s,
-        ),
-      );
-      void recordRecentFile(path).then(() => void refreshSessions());
-    } catch (e) {
-      setShellError(describeReject(e, intl, "shell"));
-    } finally {
-      setPersistenceBusy(false);
-    }
-  }, [intl, activeSession, refreshSessions, setShellError]);
-
-  const handleOpenDuck = useCallback(async () => {
-    setPersistenceBusy(true);
-    try {
-      const selected = await openDialog({
-        filters: [{ name: "toptopduck", extensions: ["duck"] }],
-        multiple: false,
-      });
-      const path = typeof selected === "string" ? selected : null;
-      if (!path) return;
-      const stem =
-        path.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? "session";
-      await openPersisted(path, stem);
-      void recordRecentFile(path).then(() => void refreshSessions());
-    } catch (e) {
-      setShellError(describeReject(e, intl, "shell"));
-    } finally {
-      setPersistenceBusy(false);
-    }
-  }, [intl, openPersisted, refreshSessions, setShellError]);
-
   return (
     <QueryClientProvider client={queryClient}>
       {/* TooltipProvider (ADR-0050/0054, issue #106): one ancestor high in the
@@ -918,7 +573,7 @@ export default function App() {
                 disabled={busy}
                 loadError={sessionsError}
                 onNew={() => void openNew()}
-                onActivate={(sid) => setActiveSessionId(sid)}
+                onActivate={activateSession}
                 onOpenPersisted={(path, name) => void openPersisted(path, name)}
                 onClose={(sid) => void closeOpen(sid)}
                 onDelete={(path, sid) => void deletePersisted(path, sid)}
