@@ -47,10 +47,15 @@ export type {
   TurnFailure,
   TurnOutcome,
   TurnRecord,
-  SourceLifecycleKind,
-  SourceLifecycleEvent,
   ThreadEntry,
 } from "./types/thread";
+
+// Source lifecycle shared kernel (issue #200): moved out of types/thread so
+// dataset and thread no longer import-cycle through these names.
+export type {
+  SourceLifecycleKind,
+  SourceLifecycleEvent,
+} from "./types/lifecycle";
 
 export type {
   Protocol,

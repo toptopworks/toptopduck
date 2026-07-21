@@ -4,6 +4,10 @@
 // source lifecycle events, ADR-0040).
 
 import type { DatasetDescriptor } from "./dataset";
+// SourceLifecycleEvent moved to the shared lifecycle kernel (issue #200); the
+// inline definition forced dataset.ts to back-import SourceLifecycleKind,
+// closing a dataset <-> thread cycle.
+import type { SourceLifecycleEvent } from "./lifecycle";
 
 // Which kind of non-SQL textual response the provider returned (ADR-0009
 // textual branch): a disambiguation question (ADR-0018) or an out-of-scope
@@ -83,24 +87,8 @@ export interface TurnRecord {
   outcome: TurnOutcome;
 }
 
-// Which kind of source lifecycle mutation produced an event (ADR-0040/0025).
-// Mirrors the Rust SourceLifecycleKind as a bare variant string (like TextKind).
-// Added = every ingest; Deleted = remove (issue #38); Replaced = re-upload
-// under an existing reference name (issue #41, ADR-0025).
-export type SourceLifecycleKind = "Added" | "Deleted" | "Replaced";
-
-// A source lifecycle event (ADR-0040): a user-driven mutation of the working
-// set's source membership. First-class in the thread (always visible, occupies a
-// timeline slot) but NOT a turn -- never enters the LLM window or advances
-// result_N. Mirrors the Rust SourceLifecycleEvent.
-export interface SourceLifecycleEvent {
-  kind: SourceLifecycleKind;
-  // Stable reference name (the identity SQL / recipe / active pointer use).
-  reference_name: string;
-  // Readable label captured at event time, so the thread still names a dataset
-  // after it's removed (a Deleted event shows what was deleted).
-  display_name: string;
-}
+// SourceLifecycleKind + SourceLifecycleEvent now live in ./lifecycle.ts (issue
+// #200); ThreadEntry.Source below uses the import at the top of this file.
 
 // One entry of the unified conversation timeline (ADR-0040): a Turn (question +
 // outcome) OR a source lifecycle event. Adjacently-tagged (`{entry, data}`) so
