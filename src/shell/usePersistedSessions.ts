@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { IntlShape } from "react-intl";
 import { fmtError, listSessions } from "../api";
+import { log } from "../lib/log";
 import type { SessionMetadata } from "../types";
 
 export interface UsePersistedSessionsDeps {
@@ -47,7 +48,15 @@ export function usePersistedSessions({ intl }: UsePersistedSessionsDeps): {
         setSessionsError(null);
       })
       .catch((e) => {
-        if (cancelled) return;
+        if (cancelled) {
+          // Rejected AFTER unmount: setSessionsError would be a setState on a
+          // gone component (fail-open), but a deterministic list_sessions
+          // failure (DuckDB reader break, etc.) would otherwise stay invisible
+          // until the next app open. Log it so the dropped reject is still
+          // observable in devtools (issue #203).
+          log.warn("listSessions", "reject dropped after unmount", fmtError(e, intl));
+          return;
+        }
         setSessionsError(fmtError(e, intl));
       });
     return () => {

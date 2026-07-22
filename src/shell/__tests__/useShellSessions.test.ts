@@ -39,7 +39,28 @@ vi.mock("../../api", async (importOriginal) => {
   };
 });
 
-import { closeSession, createSession } from "../../api";
+// The hook logs closeOpen / recordRecentFile / onResumeProgress outcomes through
+// the structured sink; mock it so the closeOpen kind-triage and the recents /
+// resume defensive catches are assertable (issue #203).
+vi.mock("../../lib/log", () => ({
+  log: {
+    trace: vi.fn(),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+
+import {
+  closeSession,
+  createSession,
+  openDuck,
+  onResumeProgress,
+  recordRecentFile,
+} from "../../api";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { log } from "../../lib/log";
 import { useShellSessions } from "../useShellSessions";
 
 const intl = createIntl({ locale: "en-US", messages: catalogFor("en-US") });
@@ -159,5 +180,129 @@ describe("useShellSessions", () => {
     });
     expect(closeSession).toHaveBeenCalledWith("s1");
     expect(result.current.openSessions).toEqual([]);
+  });
+
+  // --- Issue #203: silent-failure chain in the session hooks ----------------
+
+  it("closeOpen logs debug (not error) on a NotFound reject -- the idempotent path (#203)", async () => {
+    // NotFound is the expected outcome when the session already dropped (a
+    // double-close, or a close racing a delete's wait-release): debug-level, and
+    // NOT an error, so the idempotent path stays quiet in devtools.
+    vi.mocked(createSession).mockResolvedValueOnce("s1");
+    vi.mocked(closeSession).mockRejectedValueOnce({ kind: "NotFound" });
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.openNew();
+    });
+    await act(async () => {
+      await result.current.closeOpen("s1");
+    });
+    expect(log.debug).toHaveBeenCalledWith(
+      "closeSession",
+      expect.any(String),
+      "s1",
+    );
+    expect(log.error).not.toHaveBeenCalled();
+  });
+
+  it("closeOpen logs error with sid + kind on a non-NotFound reject (panic / lock leak, #203)", async () => {
+    // A non-NotFound reject (panic, lock poison, canonical single-writer leak)
+    // must surface at error level with the sid + raw kind so the cause of a
+    // later deletePersisted try_acquire gate miss stays diagnosable.
+    vi.mocked(createSession).mockResolvedValueOnce("s1");
+    vi.mocked(closeSession).mockRejectedValueOnce({
+      kind: "Engine",
+      data: "lock poison",
+    });
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.openNew();
+    });
+    await act(async () => {
+      await result.current.closeOpen("s1");
+    });
+    expect(log.error).toHaveBeenCalledWith(
+      "closeSession",
+      expect.any(String),
+      "s1",
+      "Engine",
+      expect.any(String),
+      "lock poison",
+    );
+    expect(log.debug).not.toHaveBeenCalled();
+  });
+
+  it("handleSaveAs refreshes sessions + warns even when recordRecentFile rejects (#203)", async () => {
+    // The recents IPC is best-effort: a reject must NOT block the sidebar
+    // refresh or escape as an unhandled rejection. refreshSessions fires via
+    // .finally regardless, and the reject is logged at warn.
+    vi.mocked(createSession).mockResolvedValueOnce("s1");
+    vi.mocked(saveDialog).mockResolvedValueOnce("/x/a.duck");
+    vi.mocked(recordRecentFile).mockRejectedValueOnce(
+      new Error("recents IPC down"),
+    );
+    const { result, refreshSessions } = renderSessions();
+    await act(async () => {
+      await result.current.openNew();
+    });
+    await act(async () => {
+      await result.current.handleSaveAs();
+    });
+    expect(refreshSessions).toHaveBeenCalledTimes(1);
+    expect(log.warn).toHaveBeenCalledWith(
+      "recordRecentFile",
+      expect.any(String),
+      expect.anything(),
+    );
+  });
+
+  it("handleOpenDuck refreshes sessions + warns even when recordRecentFile rejects (#203)", async () => {
+    vi.mocked(openDialog).mockResolvedValueOnce("/x/a.duck");
+    vi.mocked(createSession).mockResolvedValueOnce("o1");
+    vi.mocked(openDuck).mockResolvedValueOnce();
+    vi.mocked(recordRecentFile).mockRejectedValueOnce(
+      new Error("recents IPC down"),
+    );
+    const { result, refreshSessions } = renderSessions();
+    await act(async () => {
+      await result.current.handleOpenDuck();
+    });
+    expect(refreshSessions).toHaveBeenCalledTimes(1);
+    expect(log.warn).toHaveBeenCalledWith(
+      "recordRecentFile",
+      expect.any(String),
+      expect.anything(),
+    );
+  });
+
+  it("openPersisted survives a throw inside the onResumeProgress listener (defensive try/catch, #203)", async () => {
+    // Capture the listener Tauri would invoke, then fire a malformed event whose
+    // body access throws (null event -> "Source" in null raises a TypeError).
+    // The defensive catch MUST swallow it -- no throw escapes and log.error
+    // records it -- or the shell soft-locks with busy stuck true (#203 AC3).
+    let resumeCb: ((ev: unknown) => void) | null = null;
+    vi.mocked(onResumeProgress).mockImplementationOnce(async (cb) => {
+      resumeCb = cb as unknown as (ev: unknown) => void;
+      return () => {};
+    });
+    vi.mocked(createSession).mockResolvedValueOnce("r1");
+    vi.mocked(openDuck).mockResolvedValueOnce();
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.openPersisted("/x/a.duck", "a");
+    });
+    // Happy path completed: session registered, resume cleared (no soft-lock).
+    expect(result.current.activeSessionId).toBe("r1");
+    expect(result.current.resumeStatus).toBeNull();
+    // Fire the malformed event: the catch swallows the throw (no escape).
+    expect(resumeCb).not.toBeNull();
+    await act(async () => {
+      expect(() => resumeCb!({ session_id: "r1", event: null })).not.toThrow();
+    });
+    expect(log.error).toHaveBeenCalledWith(
+      "onResumeProgress",
+      expect.any(String),
+      expect.anything(),
+    );
   });
 });

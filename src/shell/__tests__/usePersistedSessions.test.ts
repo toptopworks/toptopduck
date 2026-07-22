@@ -15,7 +15,20 @@ vi.mock("../../api", async (importOriginal) => {
   return { ...actual, listSessions: vi.fn() };
 });
 
+// The hook logs an unmount-race reject through the structured sink; mock it so
+// the fail-open log.warn is assertable (issue #203).
+vi.mock("../../lib/log", () => ({
+  log: {
+    trace: vi.fn(),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+
 import { listSessions } from "../../api";
+import { log } from "../../lib/log";
 import { usePersistedSessions } from "../usePersistedSessions";
 
 const intl = createIntl({ locale: "en-US", messages: catalogFor("en-US") });
@@ -90,5 +103,28 @@ describe("usePersistedSessions", () => {
     expect(result.current.sessions).toEqual([SESSION_A]);
     resolveSecond([]);
     await waitFor(() => expect(result.current.sessions).toEqual([]));
+  });
+
+  it("logs a list_sessions reject that lands after unmount (fail-open stays observable, #203)", async () => {
+    // The cancelled flag correctly skips setSessionsError after unmount, but the
+    // reject itself must not vanish silently -- a deterministic reader failure
+    // (DuckDB reader break, etc.) would otherwise stay hidden until the next app
+    // open. The fail-open branch logs at warn so the dropped reject is still
+    // observable in devtools.
+    let rejectList: (e: unknown) => void = () => {};
+    vi.mocked(listSessions).mockImplementation(
+      () => new Promise((_resolve, reject) => { rejectList = reject; }),
+    );
+    const { unmount } = renderHook(() => usePersistedSessions({ intl }));
+    await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(1));
+    unmount();
+    await act(async () => {
+      rejectList(new Error("reader broke"));
+    });
+    expect(log.warn).toHaveBeenCalledWith(
+      "listSessions",
+      expect.any(String),
+      expect.anything(),
+    );
   });
 });

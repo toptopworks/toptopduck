@@ -30,6 +30,7 @@ import {
   createSession,
   deleteSession,
   describeReject,
+  errorDetail,
   fmtError,
   onResumeProgress,
   openDuck,
@@ -219,22 +220,33 @@ export function useShellSessions({
       // ticks would hijack this opener's progress strip.
       let targetSid: string | null = null;
       const unlisten = await onResumeProgress((ev) => {
-        if (ev.session_id !== targetSid) return;
-        const { event } = ev;
-        if ("Source" in event) {
-          setResumeStatus({
-            kind: "source",
-            index: event.Source.index,
-            total: event.Source.total,
-            name: event.Source.reference_name,
-          });
-        } else if ("Replay" in event) {
-          setResumeStatus({
-            kind: "replay",
-            index: event.Replay.index,
-            total: event.Replay.total,
-            name: event.Replay.reference_name,
-          });
+        // Defensive try/catch: this callback runs on the Tauri event loop's
+        // microtask, so a throw escapes PAST openPersisted's outer try/catch --
+        // it surfaces as an unhandled rejection, busy sticks true (soft-lock),
+        // and the listener leaks. Log and bail; the outer flow still clears
+        // resumeStatus when openDuck resolves/rejects. #83 R5: the targetSid
+        // filter below is the multi-session isolation seam and is unchanged
+        // (issue #203).
+        try {
+          if (ev.session_id !== targetSid) return;
+          const { event } = ev;
+          if ("Source" in event) {
+            setResumeStatus({
+              kind: "source",
+              index: event.Source.index,
+              total: event.Source.total,
+              name: event.Source.reference_name,
+            });
+          } else if ("Replay" in event) {
+            setResumeStatus({
+              kind: "replay",
+              index: event.Replay.index,
+              total: event.Replay.total,
+              name: event.Replay.reference_name,
+            });
+          }
+        } catch (e) {
+          log.error("onResumeProgress", "listener threw", fmtError(e, intl));
         }
       });
       try {
@@ -294,8 +306,36 @@ export function useShellSessions({
       // fire-cancel-don't-wait. Best-effort: NotFound is the expected idempotent
       // path (already dropped); other failures log to devtools so IPC/panic
       // stay observable. NOT a user toast -- pane is gone.
-      return closeSession(sid).catch((e) => {
-        log.warn("closeSession", "background close failed", fmtError(e, intl));
+      return closeSession(sid).catch((e: unknown) => {
+        // ADR-0055: the UI is already gone, so neither branch is a user toast.
+        // Split by SessionError kind. NotFound is the expected idempotent path
+        // (the session already dropped -- a double-close, or a close racing a
+        // delete's wait-release); debug-level only. Everything else -- panic,
+        // lock poison, IPC contract break, canonical single-writer leak -- is a
+        // real failure that log.error keeps observable in devtools, so the cause
+        // of a later deletePersisted try_acquire gate miss stays diagnosable. The
+        // raw kind is logged so a non-SessionError panic (kind "unknown") is
+        // distinguishable from a typed SessionError::Engine (issue #203).
+        if (
+          typeof e === "object" &&
+          e !== null &&
+          (e as { kind?: unknown }).kind === "NotFound"
+        ) {
+          log.debug("closeSession", "background close: session already gone", sid);
+          return;
+        }
+        const kind =
+          typeof e === "object" && e !== null && "kind" in e
+            ? String((e as { kind: unknown }).kind)
+            : "unknown";
+        log.error(
+          "closeSession",
+          "background close failed",
+          sid,
+          kind,
+          fmtError(e, intl),
+          errorDetail(e),
+        );
       });
     },
     [intl, unmountOpen],
@@ -390,7 +430,18 @@ export function useShellSessions({
           s.sid === activeSession.sid ? { ...s, path, name: stem } : s,
         ),
       );
-      void recordRecentFile(path).then(() => void refreshSessions());
+      // recordRecentFile is best-effort recents bookkeeping. A reject MUST NOT
+      // block the sidebar refresh or surface as an unhandled rejection: the .duck
+      // is already on disk, and the sidebar list is re-derived from list_sessions
+      // (ADR-0068), NOT from recents landing. Log the IPC failure, then refresh
+      // regardless via .finally (issue #203).
+      void recordRecentFile(path)
+        .catch((e) => {
+          log.warn("recordRecentFile", "recents record failed", fmtError(e, intl));
+        })
+        .finally(() => {
+          refreshSessions();
+        });
     } catch (e) {
       setShellError(describeReject(e, intl, "shell"));
     } finally {
@@ -410,7 +461,16 @@ export function useShellSessions({
       const stem =
         path.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? "session";
       await openPersisted(path, stem);
-      void recordRecentFile(path).then(() => void refreshSessions());
+      // See handleSaveAs: recents are best-effort, the sidebar derives from
+      // list_sessions, so refresh regardless of the recents IPC outcome and log
+      // any reject instead of letting it surface unhandled (issue #203).
+      void recordRecentFile(path)
+        .catch((e) => {
+          log.warn("recordRecentFile", "recents record failed", fmtError(e, intl));
+        })
+        .finally(() => {
+          refreshSessions();
+        });
     } catch (e) {
       setShellError(describeReject(e, intl, "shell"));
     } finally {
