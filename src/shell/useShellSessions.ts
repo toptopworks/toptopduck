@@ -171,6 +171,21 @@ export function useShellSessions({
     [],
   );
 
+  // Pure list / field update that never touches activeId (issue #205). For
+  // transitions that only mutate a session entry (rename / clear-pending /
+  // save-as bind / drop-onto-active), the active id is unaffected, so there is
+  // nothing to reconcile. Routing these through `apply` would redundantly
+  // re-validate activeId and force each caller to echo `activeId: prev.activeId`
+  // boilerplate. mapSessions takes only the sessions array and preserves
+  // activeId verbatim, so reconciliation stays exclusive to the add / remove /
+  // activate paths that can actually invalidate activeId.
+  const mapSessions = useCallback(
+    (fn: (prev: OpenSession[]) => OpenSession[]): void => {
+      setState((prev) => ({ sessions: fn(prev.sessions), activeId: prev.activeId }));
+    },
+    [],
+  );
+
   const openSessions = state.sessions;
   const activeSessionId = state.activeId;
   const activeSession =
@@ -186,7 +201,16 @@ export function useShellSessions({
   // sid (not in sessions) falls back to the first entry rather than dangling.
   const activateSession = useCallback(
     (sid: string): void => {
-      apply((prev) => ({ sessions: prev.sessions, activeId: sid }));
+      // A stale sid (not in sessions -- a sidebar click racing a close) is a
+      // no-op: keep the current active id rather than silently jumping to the
+      // first session, so a failed switch never activates a session the user
+      // did not click (issue #205). `apply` still guarantees activeId ∈
+      // sessions on the valid-sid path.
+      apply((prev) =>
+        prev.sessions.some((s) => s.sid === sid)
+          ? { sessions: prev.sessions, activeId: sid }
+          : prev,
+      );
     },
     [apply],
   );
@@ -248,14 +272,19 @@ export function useShellSessions({
         void dropFile(path);
         return;
       }
-      apply((prev) => ({
-        sessions: prev.sessions.map((o) =>
-          o.sid === prev.activeId ? { ...o, pendingIngestPath: path } : o,
+      // Route onto the active session's ingest. The guard above and this body
+      // both key off the same closure activeSessionId -- a single source of
+      // truth for "which session is active right now". If a close races the drop
+      // and the target sid is no longer in the set, the map matches nothing and
+      // the drop is a no-op rather than landing on a different session
+      // (issue #205).
+      mapSessions((sessions) =>
+        sessions.map((o) =>
+          o.sid === activeSessionId ? { ...o, pendingIngestPath: path } : o,
         ),
-        activeId: prev.activeId,
-      }));
+      );
     },
-    [activeSessionId, apply, dropFile],
+    [activeSessionId, mapSessions, dropFile],
   );
   useEffect(() => {
     if (busy) return;
@@ -275,14 +304,11 @@ export function useShellSessions({
   // cannot re-ingest.
   const clearPendingIngest = useCallback(
     (sid: string) => {
-      apply((prev) => ({
-        sessions: prev.sessions.map((o) =>
-          o.sid === sid ? { ...o, pendingIngestPath: null } : o,
-        ),
-        activeId: prev.activeId,
-      }));
+      mapSessions((sessions) =>
+        sessions.map((o) => (o.sid === sid ? { ...o, pendingIngestPath: null } : o)),
+      );
     },
-    [apply],
+    [mapSessions],
   );
 
   // Resume a persisted .duck into a fresh runtime instance (ADR-0061/0034).
@@ -487,12 +513,9 @@ export function useShellSessions({
       try {
         if (sid) {
           const landed = await renameSession(sid, trimmed);
-          apply((prev) => ({
-            sessions: prev.sessions.map((s) =>
-              s.sid === sid ? { ...s, name: landed } : s,
-            ),
-            activeId: prev.activeId,
-          }));
+          mapSessions((sessions) =>
+            sessions.map((s) => (s.sid === sid ? { ...s, name: landed } : s)),
+          );
         } else if (path) {
           await renamePersistedSession(path, trimmed);
         }
@@ -502,7 +525,7 @@ export function useShellSessions({
       }
       refreshSessions();
     },
-    [intl, apply, refreshSessions, setShellError],
+    [intl, mapSessions, refreshSessions, setShellError],
   );
 
   // --- Save / Open .duck (ADR-0034/0036) ----------------------------------
@@ -518,12 +541,11 @@ export function useShellSessions({
         path.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? "session";
       await saveAsDuck(activeSession.sid, path, stem);
       // Bind the path + name on the open entry; the sidebar list refreshes.
-      apply((prev) => ({
-        sessions: prev.sessions.map((s) =>
+      mapSessions((sessions) =>
+        sessions.map((s) =>
           s.sid === activeSession.sid ? { ...s, path, name: stem } : s,
         ),
-        activeId: prev.activeId,
-      }));
+      );
       // Best-effort recents record + sidebar refresh (see recordRecentAndRefresh).
       recordRecentAndRefresh(path, intl, refreshSessions);
     } catch (e) {
@@ -531,7 +553,7 @@ export function useShellSessions({
     } finally {
       setPersistenceBusy(false);
     }
-  }, [intl, activeSession, apply, refreshSessions, setShellError]);
+  }, [intl, activeSession, mapSessions, refreshSessions, setShellError]);
 
   const handleOpenDuck = useCallback(async () => {
     setPersistenceBusy(true);

@@ -12,8 +12,9 @@ import type { ResumeStatus } from "./useShellSessions";
 // Issue #205: the prop narrows to the non-idle variants. The `idle` resting
 // state is the ADT's first-class "nothing happening" (replacing the old
 // `| null`); App gates the render on `resumeStatus.kind !== "idle"`, so `idle`
-// never reaches this component and the switch below is exhaustive over what
-// can.
+// never reaches this component. The switch below is exhaustive over the
+// remaining variants and ends in a `default: never` guard so a future variant
+// fails at compile time instead of silently rendering empty.
 export function ResumeProgress({
   status,
 }: {
@@ -34,6 +35,15 @@ export function ResumeProgress({
           { id: "resume.replay", defaultMessage: "Replaying {index}/{total}: {name}" },
           { index: status.index, total: status.total, name: status.name },
         );
+      default: {
+        // Exhaustiveness guard: `status` narrows to `never` here. tsconfig
+        // strict does not enable noImplicitReturns (see loadErrorDisplay/api.ts
+        // precedent), so without this a future non-idle ResumeStatus variant
+        // would flow through the Exclude prop and silently render an empty
+        // Alert instead of failing at compile time (issue #205).
+        const unhandled: never = status;
+        throw new Error(`Unhandled ResumeStatus: ${JSON.stringify(unhandled)}`);
+      }
     }
   })();
   // ADR-0067 (issue #182): the .resume-progress bespoke tint (hardcoded

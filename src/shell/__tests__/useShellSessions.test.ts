@@ -568,4 +568,38 @@ describe("useShellSessions", () => {
     expect(result.current.activeSessionId).toBe("s2");
     expect(result.current.activeSession?.sid).toBe("s2");
   });
+
+  it("activateSession switches on a valid sid and no-ops on a stale sid (reconciler invariant, #205)", async () => {
+    // activateSession is the only public standalone active-id mutator, and the
+    // sole route onto the reconciler's stale-id branch (next.activeId !== null
+    // && !sessions.some(...)). A valid sid switches; a stale sid (a sidebar
+    // click racing a close, or a sid never in the set) is a no-op that keeps
+    // the current active id rather than silently jumping to sessions[0]. This
+    // pins the merged-state contract the refactor introduced.
+    vi.mocked(createSession).mockResolvedValueOnce("s1").mockResolvedValueOnce("s2");
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.openNew();
+    });
+    await act(async () => {
+      await result.current.openNew();
+    });
+    expect(result.current.activeSessionId).toBe("s2");
+    // Valid sid -> switch.
+    act(() => {
+      result.current.activateSession("s1");
+    });
+    expect(result.current.activeSessionId).toBe("s1");
+    expect(result.current.activeSession?.sid).toBe("s1");
+    // Stale sid -> no-op; active id stays on s1 (not "ghost", not sessions[0]).
+    act(() => {
+      result.current.activateSession("ghost");
+    });
+    expect(result.current.activeSessionId).toBe("s1");
+    expect(result.current.activeSession?.sid).toBe("s1");
+    // Invariant holds: activeId ∈ sessions.
+    expect(
+      result.current.openSessions.some((s) => s.sid === result.current.activeSessionId),
+    ).toBe(true);
+  });
 });
