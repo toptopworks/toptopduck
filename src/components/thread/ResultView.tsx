@@ -6,7 +6,9 @@ import { ErrorBanner } from "../common/ErrorBanner";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
 import { VegaChart } from "../viz/VegaChart";
-import type { AppError, ColumnSchema, StaleAnchor, VizSpec } from "../../types";
+import type { AppError } from "../../types/error";
+import type { ColumnSchema, StaleAnchor } from "../../types/dataset";
+import type { VizSpec } from "../../types/thread";
 
 const DEFAULT_PAGE_SIZE = 100;
 

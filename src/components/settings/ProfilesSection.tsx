@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 
 import { clearProfileKey, fmtError, listProviderProfiles, setProfileKey } from "../../api";
-import type { Protocol, ProviderConfig, ProviderProfile } from "../../types";
+import type { Protocol, ProviderConfig, ProviderProfile } from "../../types/provider";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";

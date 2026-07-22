@@ -12,7 +12,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { IntlShape } from "react-intl";
 import { fmtError, listSessions } from "../api";
 import { log } from "../lib/log";
-import type { SessionMetadata } from "../types";
+import type { SessionMetadata } from "../types/session";
 
 export interface UsePersistedSessionsDeps {
   /** Shell-level IntlShape (App sits above <IntlProvider>, built via createIntl)

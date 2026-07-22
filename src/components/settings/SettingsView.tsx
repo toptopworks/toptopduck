@@ -7,10 +7,9 @@ import type {
   AppConfig,
   EngineDefaults,
   LocalePreference,
-  ProviderConfig,
-  ProviderProfile,
   Theme,
-} from "../../types";
+} from "../../types/app-config";
+import type { ProviderConfig, ProviderProfile } from "../../types/provider";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { EngineSection } from "./EngineSection";

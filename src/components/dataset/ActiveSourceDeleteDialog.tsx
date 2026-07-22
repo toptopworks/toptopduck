@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { FormattedMessage } from "react-intl";
-import type { DatasetDescriptor } from "../../types";
+import type { DatasetDescriptor } from "../../types/dataset";
 import {
   AlertDialog,
   AlertDialogAction,

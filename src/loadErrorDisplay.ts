@@ -1,5 +1,5 @@
 import type { IntlShape } from "react-intl";
-import type { LoadError } from "./types";
+import type { LoadError } from "./types/dataset";
 
 // Map an ingest LoadError to a user-facing display. The primary `message` is
 // always a fixed catalog string -- the backend `detail` never interpolates into

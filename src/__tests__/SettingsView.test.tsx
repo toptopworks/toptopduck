@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { AppConfig } from "../types";
+import type { AppConfig } from "../types/app-config";
 
 // Black-box App seam tests for the in-app settings overlay (ADR-0065, issue
 // #151 ACs). Drives the rendered App like a user: topbar gear opens the view,

@@ -27,18 +27,16 @@ import {
   type ViewedResult,
   type WorkspaceContent,
 } from "./workspace";
+import type { AppError, SessionFlowKind } from "../types/error";
 import type {
-  AppError,
   DatasetDescriptor,
   DatasetPrivacy,
   GuidanceRequest,
-  SaveError,
-  SessionFlowKind,
   SheetGuidance,
   StaleAnchor,
-  ThreadEntry,
-  TurnPhase,
-} from "../types";
+} from "../types/dataset";
+import type { SaveError, TurnPhase } from "../types/session";
+import type { ThreadEntry } from "../types/thread";
 
 // Per-session state + actions (ADR-0051). The shell (<App>) creates the
 // session id and renders <SessionPane key={sid} sessionId={sid} />; this hook

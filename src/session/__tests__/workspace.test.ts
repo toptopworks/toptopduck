@@ -5,7 +5,8 @@ import {
   isNonMaterialized,
   lastTurnEntry,
 } from "../workspace";
-import type { DatasetDescriptor, ThreadEntry, TurnRecord } from "../../types";
+import type { DatasetDescriptor } from "../../types/dataset";
+import type { ThreadEntry, TurnRecord } from "../../types/thread";
 
 // Unit tests for the pure workspace-derivation helpers (ADR-0051 / ADR-0062
 // R2). These are the architectural invariants the shell's "what does the

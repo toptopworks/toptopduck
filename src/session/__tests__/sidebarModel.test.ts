@@ -4,7 +4,7 @@ import {
   timeGroupKind,
   type OpenSession,
 } from "../sidebarModel";
-import type { SessionMetadata } from "../../types";
+import type { SessionMetadata } from "../../types/session";
 
 // Pure sidebar-model tests (ADR-0060/0061, issue #81): the merge + Chat-style
 // time grouping + last-modified-descending order, with a fixed `now` so the

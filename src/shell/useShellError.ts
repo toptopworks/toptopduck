@@ -9,7 +9,7 @@
 // would lose the locale message + typed-detail fold). The close-wait timeout /
 // resume / save reject detail rides the TechnicalDetailsFold under the banner.
 import { useState } from "react";
-import type { AppError } from "../types";
+import type { AppError } from "../types/error";
 
 /** The shell error state + setter. setShellError(null) clears the banner; the
  *  setter is the raw useState dispatcher (stable identity, no wrapper needed).

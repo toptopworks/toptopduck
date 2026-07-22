@@ -9,7 +9,7 @@
 // Issue #194: the prop shape is a single `error: AppError` -- one render path,
 // no shell/session branching. kind is carried but not rendered here; it tags
 // the originating operation for upstream prefix logic.
-import type { AppError } from "../../types";
+import type { AppError } from "../../types/error";
 import { Alert, AlertDescription } from "../ui/alert";
 import { TechnicalDetailsFold } from "./TechnicalDetailsFold";
 

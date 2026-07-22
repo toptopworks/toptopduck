@@ -21,17 +21,16 @@ import { WorkingSetList } from "../components/dataset/WorkingSetList";
 import { clearProfileKey, listProviderProfiles, readRows, setProfileKey } from "../api";
 import type { OpenSession } from "../session/sidebarModel";
 import embed, { type VisualizationSpec } from "vega-embed";
+import type { AppConfig } from "../types/app-config";
 import type {
-  AppConfig,
   DatasetDescriptor,
   DatasetPrivacy,
   GuidanceRequest,
-  ProviderConfig,
-  SessionMetadata,
   StaleReason,
-  ThreadEntry,
-  TurnRecord,
-} from "../types";
+} from "../types/dataset";
+import type { ProviderConfig } from "../types/provider";
+import type { SessionMetadata } from "../types/session";
+import type { ThreadEntry, TurnRecord } from "../types/thread";
 
 // WorkingSetList's replace action opens the Tauri file dialog; stub it so the
 // tests can drive the picker without the native bridge.

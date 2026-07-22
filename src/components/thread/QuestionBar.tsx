@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useIntl, FormattedMessage, type IntlShape } from "react-intl";
-import type { TurnPhase } from "../../types";
+import type { TurnPhase } from "../../types/session";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 

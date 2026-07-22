@@ -1,7 +1,7 @@
 import { createIntl } from "react-intl";
 import { describe, expect, it } from "vitest";
 import { describeReject, errorDetail, fmtError } from "../api";
-import type { AppErrorKind } from "../types";
+import type { AppErrorKind } from "../types/error";
 
 // Issue #194: describeReject returns an AppError tagged with the caller's
 // kind. message/detail come from fmtError + errorDetail; the kind is carried

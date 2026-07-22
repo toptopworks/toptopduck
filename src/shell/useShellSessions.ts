@@ -40,7 +40,7 @@ import {
   saveAsDuck,
 } from "../api";
 import { log } from "../lib/log";
-import type { AppError } from "../types";
+import type { AppError } from "../types/error";
 import type { OpenSession } from "../session/sidebarModel";
 
 /** Resume / open-busy status (ADR-0034). A structured discriminated union, not

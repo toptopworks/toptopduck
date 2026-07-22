@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { IntlProvider } from "react-intl";
 import type { ReactNode } from "react";
-import type { DatasetDescriptor } from "../types";
+import type { DatasetDescriptor } from "../types/dataset";
 
 // FileDropzone touches Tauri APIs that don't exist under jsdom; stub them first.
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
@@ -49,7 +49,7 @@ vi.mock("../api", async (importOriginal) => {
 
 import { open } from "@tauri-apps/plugin-dialog";
 import { SessionPane } from "../session/SessionPane";
-import type { SessionFlowKind } from "../types";
+import type { SessionFlowKind } from "../types/error";
 import { catalogFor, type CatalogKey, type EffectiveLocale } from "../i18n";
 import {
   activeDataset,

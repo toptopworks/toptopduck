@@ -2,34 +2,31 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { IntlShape } from "react-intl";
+import type { AppConfig } from "./types/app-config";
+import type { AppError, AppErrorKind } from "./types/error";
 import type {
-  AppConfig,
-  AppError,
-  AppErrorKind,
   DatasetDescriptor,
   DatasetPrivacy,
-  DuckLoadError,
   LoadOutcome,
+  RowPage,
+  SheetGuidance,
+} from "./types/dataset";
+import type {
+  DuckLoadError,
   MigrationError,
-  ProfileKeyStatus,
-  ProviderConfig,
-  ProviderConfigView,
   RemoveSourceError,
   RenameError,
   ResumeError,
   ResumeProgress,
-  RowPage,
   SaveError,
   SessionError,
   SessionMetadata,
-  SheetGuidance,
   StoreCommandError,
-  ThreadEntry,
   TurnError,
-  TurnFailure,
-  TurnOutcome,
   TurnProgress,
-} from "./types";
+} from "./types/session";
+import type { ProfileKeyStatus, ProviderConfig, ProviderConfigView } from "./types/provider";
+import type { ThreadEntry, TurnFailure, TurnOutcome } from "./types/thread";
 
 // Multi-session addressing (ADR-0056): every session-scoped function takes
 // `sessionId` as its first parameter -- the backend looks up the target

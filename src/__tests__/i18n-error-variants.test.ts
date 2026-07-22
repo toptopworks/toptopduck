@@ -39,7 +39,7 @@ import snapshot from "../../src-tauri/tests/error_variant_kinds.json";
 // maintained by hand and backstopped indirectly -- a switch's id is also a
 // formatjs extract, so check-i18n.mjs (extract == en-US) flags a catalog id the
 // switch stops using, and the TS `never` guard flags a missing case once
-// types.ts mirrors the variant.
+// the mirroring TS type adds the variant.
 const CATALOG_IDS: Readonly<Record<string, Readonly<Record<string, string | null>>>> = {
   TurnFailure: {
     Execute: "error.turn.execute",

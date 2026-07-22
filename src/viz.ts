@@ -8,7 +8,7 @@
 // degradation. Keeping the decision in a pure function makes the degradation
 // behavior unit-testable without Vega's canvas-dependent renderer.
 
-import type { VizSpec } from "./types";
+import type { VizSpec } from "./types/thread";
 
 // The Vega-Lite marks the v1 chart whitelist (ADR-0016) maps onto. v1 ships
 // table / bar / line / scatter / area / pie only; a spec that draws anything

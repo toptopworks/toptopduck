@@ -1,6 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import type { AppError } from "../../types";
+import type { AppError } from "../../types/error";
 import { useShellError } from "../useShellError";
 
 // Issue #194: useShellError owns the shell-layer AppError state, extracted from
