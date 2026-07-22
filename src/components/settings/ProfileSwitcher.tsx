@@ -4,7 +4,7 @@ import { ChevronDown } from "lucide-react";
 import { FormattedMessage, useIntl } from "react-intl";
 
 import { fmtError, listProviderProfiles } from "../../api";
-import type { ProviderConfig } from "../../types";
+import type { ProviderConfig } from "../../types/provider";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 

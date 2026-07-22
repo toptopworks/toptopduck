@@ -14,16 +14,9 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import type {
-  DatasetDescriptor,
-  SourceLifecycleEvent,
-  SourceLifecycleKind,
-  StaleAnchor,
-  StaleReason,
-  ThreadEntry,
-  TurnOutcome,
-  TurnRecord,
-} from "../../types";
+import type { DatasetDescriptor, StaleAnchor, StaleReason } from "../../types/dataset";
+import type { SourceLifecycleEvent, SourceLifecycleKind } from "../../types/lifecycle";
+import type { ThreadEntry, TurnOutcome, TurnRecord } from "../../types/thread";
 import { formatTurnFailure, turnFailureDetail } from "../../api";
 import { TechnicalDetailsFold } from "../common/TechnicalDetailsFold";
 

@@ -2,7 +2,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { createIntl } from "react-intl";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { catalogFor } from "../../i18n";
-import type { SessionMetadata } from "../../types";
+import type { SessionMetadata } from "../../types/session";
 
 // Issue #195: usePersistedSessions owns the list_sessions advisory state
 // (ADR-0068 -- React useState + sessionsEpoch, NOT TanStack Query). The hook

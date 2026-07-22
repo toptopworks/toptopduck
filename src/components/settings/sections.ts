@@ -5,7 +5,7 @@
 // resolves ids statically, and a helper returning {id} would break the
 // i18n:check CI gate (ADR-0052).
 
-import type { EngineDefaults, LocalePreference, Theme } from "../../types";
+import type { EngineDefaults, LocalePreference, Theme } from "../../types/app-config";
 
 /** The four settings panes (ADR-0065): General / Profiles / Engine / Privacy. */
 export type SettingsSection = "general" | "profiles" | "engine" | "privacy";

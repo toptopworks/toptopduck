@@ -10,7 +10,7 @@
 // a .duck carries that path; a never-saved new session has path = null and only
 // exists in the open set.
 
-import type { SessionMetadata } from "../types";
+import type { SessionMetadata } from "../types/session";
 
 /** A runtime-open session tracked by the shell (ADR-0060/0051 keep-alive). */
 export interface OpenSession {

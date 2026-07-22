@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { Theme } from "../types";
+import type { Theme } from "../types/app-config";
 
 // Three-state theme module (ADR-0050). The hook resolves the persisted
 // preference to an effective appearance, applies it to <html> via the .dark

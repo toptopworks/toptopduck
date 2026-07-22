@@ -17,11 +17,8 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { WorkingSetList } from "../components/dataset/WorkingSetList";
 import { cn } from "@/lib/utils";
-import type {
-  DatasetDescriptor,
-  DatasetPrivacy,
-  ThreadEntry,
-} from "../types";
+import type { DatasetDescriptor, DatasetPrivacy } from "../types/dataset";
+import type { ThreadEntry } from "../types/thread";
 import type { NonMaterializedTurn, WorkspaceContent } from "./workspace";
 import { sessionKeys } from "./queryKeys";
 

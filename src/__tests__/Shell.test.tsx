@@ -1,14 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
-import type {
-  DatasetDescriptor,
-  ResumeProgress,
-  RowPage,
-  ThreadEntry,
-  TurnOutcome,
-  TurnProgress,
-} from "../types";
+import type { DatasetDescriptor, RowPage } from "../types/dataset";
+import type { ResumeProgress, TurnProgress } from "../types/session";
+import type { ThreadEntry, TurnOutcome } from "../types/thread";
 
 // Black-box shell tests (issue #79 ACs). Drives the rendered three-column App
 // like a user and asserts VISIBLE DOM / structure signals -- never the Query
@@ -113,7 +108,7 @@ import {
   renameSession,
   setAppConfig,
 } from "../api";
-import type { AppConfig } from "../types";
+import type { AppConfig } from "../types/app-config";
 
 // ADR-0061 cold start: <App/> renders no session on mount, so a session-internal
 // assertion first opens one via the sidebar "+ 新建会话" button (scoped by class

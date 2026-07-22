@@ -1,7 +1,7 @@
 import { FormattedMessage } from "react-intl";
 import { Monitor, Moon, Sun } from "lucide-react";
 
-import type { LocalePreference, Theme } from "../../types";
+import type { LocalePreference, Theme } from "../../types/app-config";
 import { Label } from "../ui/label";
 import { RadioGroup, RadioGroupItem } from "../ui/radio-group";
 import type { SettingsForm } from "./sections";

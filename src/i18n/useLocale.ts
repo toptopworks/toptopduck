@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { LocalePreference } from "../types";
+import type { LocalePreference } from "../types/app-config";
 
 // Three-state locale module (ADR-0052, issue #78). Mirrors useTheme (ADR-0050):
 // resolves the persisted preference (ADR-0038) to an effective Intl locale the

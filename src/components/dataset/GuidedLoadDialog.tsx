@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import type { GuidanceRequest, SheetGuidance, SheetRectify } from "../../types";
+import type { GuidanceRequest, SheetGuidance, SheetRectify } from "../../types/dataset";
 import {
   Dialog,
   DialogContent,

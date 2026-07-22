@@ -1,5 +1,5 @@
 import { FormattedMessage, useIntl } from "react-intl";
-import type { DatasetDescriptor, DatasetPrivacy } from "../../types";
+import type { DatasetDescriptor, DatasetPrivacy } from "../../types/dataset";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
 
 interface PrivacyControlsProps {

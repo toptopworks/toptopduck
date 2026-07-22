@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import type { AppConfig, Theme } from "../types";
+import type { AppConfig, Theme } from "../types/app-config";
 
 // Black-box theme tests (ADR-0050, issue #77 AC6). Drives the rendered shell
 // like a user and asserts the VISIBLE DOM signal -- the .dark class on <html> --

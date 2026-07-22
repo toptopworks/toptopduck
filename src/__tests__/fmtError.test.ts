@@ -2,7 +2,12 @@ import { createIntl } from "react-intl";
 import { describe, expect, it } from "vitest";
 
 import { errorDetail, fmtError } from "../api";
-import type { ResumeError, SaveError, SessionError, StoreCommandError } from "../types";
+import type {
+  ResumeError,
+  SaveError,
+  SessionError,
+  StoreCommandError,
+} from "../types/session";
 
 // An IntlShape carrying the typed-error message ids (mirroring the locale
 // files) so fmtError resolves kind -> catalog wording. This pins the kind ->

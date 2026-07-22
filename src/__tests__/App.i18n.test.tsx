@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import type { AppConfig } from "../types";
+import type { AppConfig } from "../types/app-config";
 
 // Black-box i18n tests (ADR-0052, issue #78 AC). Drives the rendered shell like
 // a user and asserts the VISIBLE DOM signal -- translated chrome text -- never

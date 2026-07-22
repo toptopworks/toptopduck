@@ -11,13 +11,13 @@
 //    (stale / columns / rows / privacy). The stale anchor on a viewed result
 //    is read from the descriptor by the caller, never from the thread snapshot.
 
+import type { StaleAnchor } from "../types/dataset";
 import type {
-  StaleAnchor,
   ThreadEntry,
   TurnOutcome,
   TurnRecord,
   VizSpec,
-} from "../types";
+} from "../types/thread";
 
 /** The user's workspace view selection (ADR-0051): a thin reference to the
  * Materialized result pane the user is looking at. NEVER the active dataset

@@ -35,7 +35,8 @@ import { describeReject, getAppConfig, setAppConfig } from "../api";
 import { catalogFor, coerceLocalePreference, useLocale } from "../i18n";
 import type { EffectiveLocale } from "../i18n";
 import { log } from "../lib/log";
-import type { AppConfig, AppError } from "../types";
+import type { AppConfig } from "../types/app-config";
+import type { AppError } from "../types/error";
 
 /** Acquire the main window, or null when the Tauri bridge is absent (jsdom
  *  tests). Every window-geometry call site is a no-op without it. */

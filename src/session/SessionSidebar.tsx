@@ -6,7 +6,7 @@ import {
   type SidebarEntry,
   type SidebarGroupKind,
 } from "./sidebarModel";
-import type { SessionMetadata } from "../types";
+import type { SessionMetadata } from "../types/session";
 import {
   AlertDialog,
   AlertDialogAction,
