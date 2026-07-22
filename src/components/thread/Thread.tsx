@@ -313,7 +313,7 @@ function SourceMarker({
 // ADR-0052 i18n). The verb + display name ride one ICU message so the quoting
 // convention (zh 「」 vs en ") follows the locale. Exhaustiveness guard
 // mirroring Rust's compile-time match on `SourceLifecycleKind`: a future variant
-// must add a branch here. `types.ts` is the hand-maintained mirror of the Rust
+// must add a branch here. `types/lifecycle.ts` is the hand-maintained mirror of the Rust
 // enum, so the TS compiler won't catch a missing branch without this `never`
 // check.
 function sourceMarkerText(
@@ -470,7 +470,7 @@ function findMentionedDataset(
 // invalidating event follows the turn; "nearest one" resolves same-source
 // repeated lifecycles. No event_id is stored (ADR-0047 YAGNI) -- the match is
 // derived from the existing thread. StaleReason is now the invalidating subset
-// of SourceLifecycleKind (types.ts), so anchor.reason compares to entry.data.kind
+// of SourceLifecycleKind (types/lifecycle.ts), so anchor.reason compares to entry.data.kind
 // directly with no conversion function. Returns null when no event follows
 // (resume / stale-map inconsistency); the caller renders the chip disabled then.
 function findStaleSourceIdx(
@@ -820,7 +820,7 @@ function TurnBody({
       );
     default: {
       // Exhaustiveness guard: a future TurnOutcome variant must add a case here,
-      // mirroring Rust's compile-time match exhaustiveness. types.ts is the
+      // mirroring Rust's compile-time match exhaustiveness. `types/thread.ts` is the
       // hand-maintained mirror, so the TS compiler won't catch a missing branch
       // without this `never` check.
       const unhandled: never = record.outcome;
