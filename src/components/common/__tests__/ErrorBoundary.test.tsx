@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { useEffect, type ReactNode } from "react";
-import { ErrorBoundary, DegradeCard } from "../components/common/ErrorBoundary";
-import { catalogFor } from "../i18n";
+import { ErrorBoundary, DegradeCard } from "../ErrorBoundary";
+import { catalogFor } from "../../../i18n";
 
 // Unit tests for the ADR-0058 ErrorBoundary + DegradeCard. The partition /
 // session-isolation behavior is exercised end-to-end in Shell.test.tsx; these

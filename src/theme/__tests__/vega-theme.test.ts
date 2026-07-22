@@ -4,8 +4,8 @@ import {
   CATEGORY_PALETTE,
   onThemeChange,
   primaryColor,
-} from "../theme/vega-theme";
-import { THEME_CHANGE_EVENT } from "../theme/useTheme";
+} from "../vega-theme";
+import { THEME_CHANGE_EVENT } from "../useTheme";
 
 // A fake CssVarReader: returns the value for a known token, "" for unset. Mirrors
 // getComputedStyle, which yields "" for an undefined custom property.

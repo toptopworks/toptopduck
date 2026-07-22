@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import zhCN from "../locales/zh-CN.json";
-import enUS from "../locales/en-US.json";
+import zhCN from "../../locales/zh-CN.json";
+import enUS from "../../locales/en-US.json";
 
 // Catalog key alignment (ADR-0052, issue #78 AC). The two catalogs MUST carry
 // the same key set so no <FormattedMessage> renders a missing-translation

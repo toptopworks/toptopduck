@@ -4,8 +4,8 @@ import {
   resolveEffective,
   THEME_CHANGE_EVENT,
   useTheme,
-} from "../theme/useTheme";
-import type { Theme } from "../types/app-config";
+} from "../useTheme";
+import type { Theme } from "../../types/app-config";
 
 // jsdom ships no matchMedia. Install a controllable stub so the system-mode
 // tests can script the OS preference and its change events. Returns a handle to
