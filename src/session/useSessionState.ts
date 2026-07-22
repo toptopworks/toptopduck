@@ -19,7 +19,7 @@ import {
   setDatasetPrivacy,
   takePersistError,
 } from "../api";
-import { loadErrorDisplay } from "../loadErrorDisplay";
+import { loadErrorDisplay } from "../lib/loadErrorDisplay";
 import { sessionKeys } from "./queryKeys";
 import {
   deriveWorkspaceContent,

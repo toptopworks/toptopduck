@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decodeViz } from "../viz";
+import { decodeViz } from "../components/viz/viz";
 import type { ChartKind, VizSpec } from "../types/thread";
 
 // Build a VizSpec with a given spec JSON string; the kind is decorative for

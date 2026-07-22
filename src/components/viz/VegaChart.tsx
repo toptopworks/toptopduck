@@ -9,7 +9,7 @@ import {
   onThemeChange,
   type VegaThemeConfig,
 } from "../../theme/vega-theme";
-import type { VizFailureReason } from "../../viz";
+import type { VizFailureReason } from "./viz";
 
 // Vega-Lite chart renderer (ADR-0016/0033/0050). Owns three concerns that the
 // old inline ResultView logic did not:
