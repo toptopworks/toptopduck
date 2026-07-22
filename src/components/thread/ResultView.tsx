@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import { describeReject, readRows } from "../../api";
-import { decodeViz, type VizFailureReason } from "../../viz";
+import { decodeViz, type VizFailureReason } from "../viz/viz";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";

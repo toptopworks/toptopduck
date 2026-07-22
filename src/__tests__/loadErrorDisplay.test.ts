@@ -1,7 +1,7 @@
 import { createIntl } from "react-intl";
 import { describe, expect, it } from "vitest";
 
-import { loadErrorDisplay } from "../loadErrorDisplay";
+import { loadErrorDisplay } from "../lib/loadErrorDisplay";
 import type { LoadError } from "../types/dataset";
 
 // An IntlShape carrying the ingest LoadError message ids (mirroring the locale
