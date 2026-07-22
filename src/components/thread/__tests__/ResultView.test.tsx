@@ -1,8 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { IntlProvider } from "react-intl";
-import type { ReactElement } from "react";
-import { catalogFor } from "../../../i18n";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { renderI18n, withIntl } from "../../common/__tests__/helpers";
 import { COLUMN_DISCLOSURE_THRESHOLD, ResultView, ROW_DISCLOSURE_THRESHOLD } from "../ResultView";
 import { readRows } from "../../../api";
 import embed from "vega-embed";
@@ -22,21 +20,6 @@ vi.mock("../../../api", async (importOriginal) => {
 // branches -- the mock lets each test script a successful embed or a rejected
 // one to exercise the degradation path (ADR-0033).
 vi.mock("vega-embed", () => ({ default: vi.fn() }));
-
-// ResultView routes its chrome through react-intl (ADR-0052). withIntl wraps a
-// node for a rerender call (RTL's rerender replaces the whole tree, so it must
-// re-provide the provider); renderI18n is the render-time convenience. zh-CN
-// keeps the Chinese chrome assertions holding.
-function withIntl(ui: ReactElement) {
-  return (
-    <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-      {ui}
-    </IntlProvider>
-  );
-}
-function renderI18n(ui: ReactElement) {
-  return render(withIntl(ui));
-}
 
 describe("ResultView", () => {
   beforeEach(() => {

@@ -167,7 +167,7 @@ describe("ErrorBoundary (ADR-0058)", () => {
   // utility classes so a silent revert (raw <button> / raw <div> / dropped
   // border-l-* accent) is caught at the build level. jsdom has no layout
   // engine, so these are class-list assertions, not visual assertions --
-  // mirroring the border-l-* tone pin in components.test.tsx (issue #169).
+  // mirroring the border-l-* tone pin in Thread.test.tsx (issue #169).
   it("DegradeCard: Card destructive accent + Button default/outline variants ride the token utilities (issue #181)", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     render(

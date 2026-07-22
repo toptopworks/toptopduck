@@ -1,8 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, waitFor } from "@testing-library/react";
-import { IntlProvider } from "react-intl";
-import type { ReactElement } from "react";
-import { catalogFor } from "../../../i18n";
+import { waitFor } from "@testing-library/react";
+import { renderI18n, withIntl } from "../../common/__tests__/helpers";
 import { VegaChart } from "../VegaChart";
 import embed, { type VisualizationSpec } from "vega-embed";
 
@@ -10,17 +8,6 @@ import embed, { type VisualizationSpec } from "vega-embed";
 // test scripts a successful embed (finalize on unmount/spec change) or a rejected
 // one (onError path) -- ADR-0033.
 vi.mock("vega-embed", () => ({ default: vi.fn() }));
-
-function withIntl(ui: ReactElement) {
-  return (
-    <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-      {ui}
-    </IntlProvider>
-  );
-}
-function renderI18n(ui: ReactElement) {
-  return render(withIntl(ui));
-}
 
 describe("VegaChart (ADR-0016/0033/0050)", () => {
   // VegaChart owns the embed lifecycle: it renders one decoded spec, finalizes

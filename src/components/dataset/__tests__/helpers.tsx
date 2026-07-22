@@ -3,8 +3,6 @@ import type { DatasetDescriptor, DatasetPrivacy } from "../../../types/dataset";
 // Shared dataset-domain test fixtures (ADR-0011 defaults). The zh-CN
 // IntlProvider wrapper used by the dataset component tests lives in the common
 // test helpers (../../common/__tests__/helpers) and is imported per test file.
-// Formerly lived at the top of src/__tests__/components.test.tsx; extracted when
-// that file was split per-domain (issue #216).
 
 export const mockDataset: DatasetDescriptor = {
   reference_name: "people",
