@@ -106,7 +106,7 @@ describe("useShellSessions", () => {
     expect(result.current.activeSessionId).toBeNull();
     expect(result.current.activeSession).toBeNull();
     expect(result.current.busy).toBe(false);
-    expect(result.current.resumeStatus).toBeNull();
+    expect(result.current.resumeStatus).toEqual({ kind: "idle" });
   });
 
   it("openNew mints + registers + activates a session", async () => {
@@ -311,7 +311,7 @@ describe("useShellSessions", () => {
     });
     // Happy path completed: session registered, resume cleared (no soft-lock).
     expect(result.current.activeSessionId).toBe("r1");
-    expect(result.current.resumeStatus).toBeNull();
+    expect(result.current.resumeStatus).toEqual({ kind: "idle" });
     // Fire the malformed event: the catch swallows the throw (no escape).
     expect(resumeCb).not.toBeNull();
     await act(async () => {
@@ -500,5 +500,106 @@ describe("useShellSessions", () => {
     });
     expect(result.current.openSessions).toHaveLength(2);
     expect(result.current.activeSessionId).toBe("s1");
+  });
+
+  // --- Issue #205: type-invariant tightening -------------------------------
+  // These pin the domain decision + the merged-state invariant the refactor
+  // introduced, on paths the earlier black-box-style tests do not exercise.
+
+  it("onWebviewDrop routes a drop onto an active PERSISTED session -- path + pendingIngestPath coexist (#205)", async () => {
+    // Domain decision (issue #205): a drop onto an ALREADY-active session
+    // routes to that session's ingest even when the session is resumed /
+    // .duck-bound (path !== null). `path` and `pendingIngestPath` are
+    // independent -- the resumed + pending-drop combination is legal, not a
+    // type error. This pins the decision so a future "tighten OpenSession into
+    // a discriminated union" refactor cannot silently break the active-session
+    // drop route (#81 A1).
+    vi.mocked(createSession).mockResolvedValueOnce("p1");
+    vi.mocked(openDuck).mockResolvedValueOnce();
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.openPersisted("/x/a.duck", "a");
+    });
+    expect(result.current.activeSessionId).toBe("p1");
+    expect(result.current.openSessions[0]).toMatchObject({
+      sid: "p1",
+      path: "/x/a.duck",
+      pendingIngestPath: null,
+    });
+    const mintsBefore = vi.mocked(createSession).mock.calls.length;
+    // Drop while the persisted p1 is active -> routes to p1's ingest pipe, no
+    // new mint, and pendingIngestPath now coexists with a bound path.
+    act(() => {
+      result.current.onWebviewDrop("/x/drop.csv");
+    });
+    expect(vi.mocked(createSession).mock.calls.length).toBe(mintsBefore);
+    expect(result.current.openSessions[0]).toMatchObject({
+      sid: "p1",
+      path: "/x/a.duck",
+      pendingIngestPath: "/x/drop.csv",
+    });
+  });
+
+  it("closeOpen on a NON-active session leaves the active id unchanged (merged-state invariant, #205)", async () => {
+    // The merged { sessions, activeId } state enforces activeId ∈ sessions at
+    // the single `apply` chokepoint. Closing a session that is NOT the active
+    // one must keep the active id exactly as-is (not flip, not dangle, not fall
+    // back). This is the path the active-close fallback test above does NOT
+    // cover, and the most likely regression vector for the unmountOpen
+    // refactor's reconciliation.
+    vi.mocked(createSession)
+      .mockResolvedValueOnce("s1")
+      .mockResolvedValueOnce("s2");
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.openNew();
+    });
+    await act(async () => {
+      await result.current.openNew();
+    });
+    expect(result.current.activeSessionId).toBe("s2");
+    // Close the NON-active s1 -> active id stays on s2.
+    await act(async () => {
+      await result.current.closeOpen("s1");
+    });
+    expect(closeSession).toHaveBeenCalledWith("s1");
+    expect(result.current.openSessions).toHaveLength(1);
+    expect(result.current.openSessions[0].sid).toBe("s2");
+    expect(result.current.activeSessionId).toBe("s2");
+    expect(result.current.activeSession?.sid).toBe("s2");
+  });
+
+  it("activateSession switches on a valid sid and no-ops on a stale sid (reconciler invariant, #205)", async () => {
+    // activateSession is the only public standalone active-id mutator, and the
+    // sole route onto the reconciler's stale-id branch (next.activeId !== null
+    // && !sessions.some(...)). A valid sid switches; a stale sid (a sidebar
+    // click racing a close, or a sid never in the set) is a no-op that keeps
+    // the current active id rather than silently jumping to sessions[0]. This
+    // pins the merged-state contract the refactor introduced.
+    vi.mocked(createSession).mockResolvedValueOnce("s1").mockResolvedValueOnce("s2");
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.openNew();
+    });
+    await act(async () => {
+      await result.current.openNew();
+    });
+    expect(result.current.activeSessionId).toBe("s2");
+    // Valid sid -> switch.
+    act(() => {
+      result.current.activateSession("s1");
+    });
+    expect(result.current.activeSessionId).toBe("s1");
+    expect(result.current.activeSession?.sid).toBe("s1");
+    // Stale sid -> no-op; active id stays on s1 (not "ghost", not sessions[0]).
+    act(() => {
+      result.current.activateSession("ghost");
+    });
+    expect(result.current.activeSessionId).toBe("s1");
+    expect(result.current.activeSession?.sid).toBe("s1");
+    // Invariant holds: activeId ∈ sessions.
+    expect(
+      result.current.openSessions.some((s) => s.sid === result.current.activeSessionId),
+    ).toBe(true);
   });
 });

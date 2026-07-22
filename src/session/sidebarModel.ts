@@ -22,11 +22,16 @@ export interface OpenSession {
   /** Bound `.duck` path (SessionMetadata.session_id shape), or null for a
    *  never-saved new session. */
   path: string | null;
-  /** A data-file path dropped on the cold-start hero (ADR-0061, #81 A1). The
-   *  SessionPane consumes it once on mount via handleIngest -- the only path
-   *  that can surface an xlsx NeedsGuidance result into the guidance dialog --
-   *  then clears it through onIngestConsumed. null once consumed or when the
-   *  session was opened by a non-drop action. */
+  /** A pending data-file drop routed to this session's ingest but not yet
+   *  kicked off (ADR-0061, #81 A1; issue #205). Two routes set it: a cold-start
+   *  drop mints a new session carrying the path, and a drop onto an
+   *  ALREADY-active session (new or resumed / .duck-bound) routes the file
+   *  there via the shell's single webview-level drop router -- so a non-null
+   *  pendingIngestPath can coexist with a non-null `path` (the resumed + drop
+   *  combination is legal). The SessionPane consumes it via handleIngest --
+   *  the only path that can surface an xlsx NeedsGuidance result into the
+   *  guidance dialog -- then clears it through onIngestConsumed. null once
+   *  consumed or when the session was opened by a non-drop action. */
   pendingIngestPath: string | null;
 }
 
