@@ -14,12 +14,24 @@ import { catalogFor } from "../../i18n";
 // / fmtError) real while the Tauri invoke wrappers are stubbed.
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
+
+// The drop-listener effect registers onDragDropEvent on mount (busy=false) and
+// tears it down when busy flips true (issue #204 busy-gate). The hoisted slot
+// captures the registered callback + clears it on unlisten so a test can assert
+// listener (un)registration and fire a synthetic drop payload. Other tests
+// exercise routing via onWebviewDrop directly and ignore the slot.
+type DragDropEvent = { payload: { type: string; paths: string[] } };
+const dropListener = vi.hoisted(() => ({
+  current: null as ((event: DragDropEvent) => void) | null,
+}));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
-  // The drop-listener effect registers on mount (busy=false). A no-op unlisten
-  // keeps jsdom off the real Tauri event bus; the routing logic is exercised
-  // by calling onWebviewDrop directly.
   getCurrentWebviewWindow: () => ({
-    onDragDropEvent: () => Promise.resolve(() => {}),
+    onDragDropEvent: (cb: (event: DragDropEvent) => void) => {
+      dropListener.current = cb;
+      return Promise.resolve(() => {
+        dropListener.current = null;
+      });
+    },
   }),
 }));
 vi.mock("../../api", async (importOriginal) => {
@@ -58,6 +70,9 @@ import {
   openDuck,
   onResumeProgress,
   recordRecentFile,
+  renamePersistedSession,
+  renameSession,
+  saveAsDuck,
 } from "../../api";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { log } from "../../lib/log";
@@ -80,6 +95,9 @@ function renderSessions() {
 describe("useShellSessions", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // RTL auto-cleanup unmounts the prior hook (clearing the slot via the
+    // listener's unlisten), but reset defensively so a test starts from null.
+    dropListener.current = null;
   });
 
   it("starts cold: empty open set, null active id, not busy", () => {
@@ -304,5 +322,183 @@ describe("useShellSessions", () => {
       expect.any(String),
       expect.anything(),
     );
+  });
+
+  // --- Issue #204: hook-level coverage gaps --------------------------------
+  // These pin the concurrency + branch contracts a regression would silently
+  // break (no black-box signal): the busy-gated drop listener, the in-flight
+  // double-drop guard, the renameEntry closed / reject / blank branches, the
+  // dialog-cancel paths, and the multi-session active-id fallback.
+
+  it("suppresses a webview drop while busy and routes it once busy clears (#204)", async () => {
+    // The drop-listener effect early-returns while busy, so a drop during a
+    // persistence wait cannot mint a session; the effect re-binds on clear so a
+    // later drop routes normally. Drive both halves through the bound Tauri
+    // listener (the real event seam) and assert on the observable mint, not on
+    // listener bookkeeping.
+    let resolveDialog: (v: string | null) => void = () => {};
+    vi.mocked(openDialog).mockImplementation(
+      () => new Promise<string | null>((resolve) => { resolveDialog = resolve; }),
+    );
+    vi.mocked(createSession).mockResolvedValue("drop-sid");
+    const { result } = renderSessions();
+    // Enter busy: handleOpenDuck holds persistenceBusy true while openDialog
+    // is pending (cold start -> activeSessionId null -> a routed drop mints).
+    act(() => {
+      void result.current.handleOpenDuck();
+    });
+    await waitFor(() => expect(result.current.busy).toBe(true));
+    // While busy the listener is unbound, so a drop payload has nowhere to
+    // route -- the cold-start mint never fires (the suppress half).
+    await waitFor(() => expect(dropListener.current).toBeNull());
+    expect(createSession).not.toHaveBeenCalled();
+    // Cancel the dialog -> busy clears -> the effect re-binds the listener.
+    await act(async () => {
+      resolveDialog(null);
+    });
+    await waitFor(() => expect(result.current.busy).toBe(false));
+    // The re-bound listener now routes a drop to dropFile -> createSession
+    // (the re-bind half): fire the payload through the bound seam.
+    await waitFor(() => expect(dropListener.current).not.toBeNull());
+    await act(async () => {
+      dropListener.current!({ payload: { type: "drop", paths: ["/x/a.csv"] } });
+    });
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+    expect(result.current.activeSessionId).toBe("drop-sid");
+  });
+
+  it("ignores a second drop while createSession is in flight and re-arms after it resolves (#204)", async () => {
+    // A second cold-start drop while the first createSession is still in flight
+    // is ignored (no second mint); the guard re-arms once the first mint
+    // resolves, so a later drop mints again.
+    let resolveCreate: (sid: string) => void = () => {};
+    vi.mocked(createSession).mockImplementation(
+      () => new Promise<string>((resolve) => { resolveCreate = resolve; }),
+    );
+    const { result } = renderSessions();
+    // First drop: createSession pending, droppingRef held true.
+    act(() => {
+      void result.current.dropFile("/a");
+    });
+    // Second drop while the first is in flight: guarded, no second mint.
+    act(() => {
+      void result.current.dropFile("/b");
+    });
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+    // Resolve the first mint: droppingRef releases in the finally block.
+    await act(async () => {
+      resolveCreate("s1");
+    });
+    await waitFor(() => expect(result.current.activeSessionId).toBe("s1"));
+    // The guard has re-armed: a subsequent drop mints again.
+    vi.mocked(createSession).mockResolvedValueOnce("s2");
+    await act(async () => {
+      await result.current.dropFile("/c");
+    });
+    expect(createSession).toHaveBeenCalledTimes(2);
+    expect(result.current.openSessions).toHaveLength(2);
+  });
+
+  it("renameEntry rewrites a closed .duck header via renamePersistedSession + refreshes (closed branch, #204)", async () => {
+    // The closed branch (sid=null, path set) rewrites the recipe header in place
+    // by path, then refreshes the sidebar so list_sessions re-derives the name.
+    vi.mocked(renamePersistedSession).mockResolvedValueOnce();
+    const { result, refreshSessions, setShellError } = renderSessions();
+    await act(async () => {
+      await result.current.renameEntry(null, "/x/foo.duck", "new");
+    });
+    expect(renamePersistedSession).toHaveBeenCalledWith("/x/foo.duck", "new");
+    expect(refreshSessions).toHaveBeenCalledTimes(1);
+    expect(setShellError).not.toHaveBeenCalled();
+  });
+
+  it("renameEntry surfaces a renamePersistedSession reject via setShellError and skips refresh (closed branch, #204)", async () => {
+    // The catch returns BEFORE refreshSessions fires, so the sidebar never lists
+    // a name the backend just rejected -- the next list_sessions re-derives the
+    // on-disk truth instead.
+    vi.mocked(renamePersistedSession).mockRejectedValueOnce(
+      new Error("rename rejected"),
+    );
+    const { result, refreshSessions, setShellError } = renderSessions();
+    await act(async () => {
+      await result.current.renameEntry(null, "/x/foo.duck", "new");
+    });
+    expect(renamePersistedSession).toHaveBeenCalledWith("/x/foo.duck", "new");
+    expect(setShellError).toHaveBeenCalledTimes(1);
+    expect(refreshSessions).not.toHaveBeenCalled();
+  });
+
+  it("renameEntry trims input and bails on whitespace-only (no IPC, no refresh, #204)", async () => {
+    // The trim guard runs before either branch: a blank name skips
+    // renameSession / renamePersistedSession AND refreshSessions, so an
+    // accidental empty rename cannot trigger a spurious sidebar re-fetch.
+    const { result, refreshSessions, setShellError } = renderSessions();
+    await act(async () => {
+      await result.current.renameEntry("s1", null, "   ");
+    });
+    expect(renameSession).not.toHaveBeenCalled();
+    expect(renamePersistedSession).not.toHaveBeenCalled();
+    expect(refreshSessions).not.toHaveBeenCalled();
+    expect(setShellError).not.toHaveBeenCalled();
+  });
+
+  it("handleSaveAs bails on a cancelled save dialog (null path): no save, no recents, no refresh, busy clears (#204)", async () => {
+    // saveDialog returning null is the cancel path: the hook returns inside the
+    // try, the finally still clears persistenceBusy, and none of saveAsDuck /
+    // recordRecentFile / refreshSessions fire.
+    vi.mocked(createSession).mockResolvedValueOnce("s1");
+    vi.mocked(saveDialog).mockResolvedValueOnce(null);
+    const { result, refreshSessions } = renderSessions();
+    // handleSaveAs early-returns when there is no active session, so open one.
+    await act(async () => {
+      await result.current.openNew();
+    });
+    await act(async () => {
+      await result.current.handleSaveAs();
+    });
+    expect(saveAsDuck).not.toHaveBeenCalled();
+    expect(recordRecentFile).not.toHaveBeenCalled();
+    expect(refreshSessions).not.toHaveBeenCalled();
+    expect(result.current.busy).toBe(false);
+  });
+
+  it("handleOpenDuck bails on a cancelled open dialog (null path): no open, no recents, no refresh, busy clears (#204)", async () => {
+    vi.mocked(openDialog).mockResolvedValueOnce(null);
+    const { result, refreshSessions } = renderSessions();
+    await act(async () => {
+      await result.current.handleOpenDuck();
+    });
+    expect(openDuck).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
+    expect(recordRecentFile).not.toHaveBeenCalled();
+    expect(refreshSessions).not.toHaveBeenCalled();
+    expect(result.current.busy).toBe(false);
+  });
+
+  it("closeOpen falls back to the FIRST remaining session when the active one closes (multi-session, #204)", async () => {
+    // Closing the ACTIVE session falls back to the first remaining entry
+    // (next[0]?.sid) -- NOT null and NOT the last entry. The single-session
+    // closeOpen test above only covers the -> null path; three sessions pin the
+    // first-entry semantics so a regression to next[last] is caught (ADR-0060).
+    vi.mocked(createSession)
+      .mockResolvedValueOnce("s1")
+      .mockResolvedValueOnce("s2")
+      .mockResolvedValueOnce("s3");
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.openNew();
+    });
+    await act(async () => {
+      await result.current.openNew();
+    });
+    await act(async () => {
+      await result.current.openNew();
+    });
+    expect(result.current.activeSessionId).toBe("s3");
+    await act(async () => {
+      await result.current.closeOpen("s3");
+    });
+    expect(result.current.openSessions).toHaveLength(2);
+    expect(result.current.activeSessionId).toBe("s1");
   });
 });
