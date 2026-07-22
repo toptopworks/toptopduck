@@ -64,6 +64,26 @@ export interface UseShellSessionsDeps {
   setShellError: (error: AppError | null) => void;
 }
 
+/** Record a recent file (best-effort) then refresh the sidebar regardless of the
+ *  recents IPC outcome. recordRecentFile is advisory bookkeeping: the .duck is
+ *  already on disk and the sidebar list re-derives from list_sessions (ADR-0068),
+ *  NOT from recents landing. A reject is logged (never blocks the refresh, never
+ *  surfaces as an unhandled rejection) so a recents IPC failure stays observable
+ *  without breaking the save/open flow (issue #203). */
+function recordRecentAndRefresh(
+  path: string,
+  intl: IntlShape,
+  refresh: () => void,
+): void {
+  void recordRecentFile(path)
+    .catch((e) => {
+      log.warn("recordRecentFile", "recents record failed", fmtError(e, intl));
+    })
+    .finally(() => {
+      refresh();
+    });
+}
+
 export function useShellSessions({
   intl,
   queryClient,
@@ -319,14 +339,15 @@ export function useShellSessions({
         if (
           typeof e === "object" &&
           e !== null &&
-          (e as { kind?: unknown }).kind === "NotFound"
+          "kind" in e &&
+          e.kind === "NotFound"
         ) {
           log.debug("closeSession", "background close: session already gone", sid);
           return;
         }
         const kind =
           typeof e === "object" && e !== null && "kind" in e
-            ? String((e as { kind: unknown }).kind)
+            ? String(e.kind)
             : "unknown";
         log.error(
           "closeSession",
@@ -430,18 +451,8 @@ export function useShellSessions({
           s.sid === activeSession.sid ? { ...s, path, name: stem } : s,
         ),
       );
-      // recordRecentFile is best-effort recents bookkeeping. A reject MUST NOT
-      // block the sidebar refresh or surface as an unhandled rejection: the .duck
-      // is already on disk, and the sidebar list is re-derived from list_sessions
-      // (ADR-0068), NOT from recents landing. Log the IPC failure, then refresh
-      // regardless via .finally (issue #203).
-      void recordRecentFile(path)
-        .catch((e) => {
-          log.warn("recordRecentFile", "recents record failed", fmtError(e, intl));
-        })
-        .finally(() => {
-          refreshSessions();
-        });
+      // Best-effort recents record + sidebar refresh (see recordRecentAndRefresh).
+      recordRecentAndRefresh(path, intl, refreshSessions);
     } catch (e) {
       setShellError(describeReject(e, intl, "shell"));
     } finally {
@@ -461,16 +472,8 @@ export function useShellSessions({
       const stem =
         path.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? "session";
       await openPersisted(path, stem);
-      // See handleSaveAs: recents are best-effort, the sidebar derives from
-      // list_sessions, so refresh regardless of the recents IPC outcome and log
-      // any reject instead of letting it surface unhandled (issue #203).
-      void recordRecentFile(path)
-        .catch((e) => {
-          log.warn("recordRecentFile", "recents record failed", fmtError(e, intl));
-        })
-        .finally(() => {
-          refreshSessions();
-        });
+      // Best-effort recents record + sidebar refresh (see recordRecentAndRefresh).
+      recordRecentAndRefresh(path, intl, refreshSessions);
     } catch (e) {
       setShellError(describeReject(e, intl, "shell"));
     } finally {
