@@ -47,8 +47,14 @@ import type { OpenSession } from "../session/sidebarModel";
  *  a pre-baked string: App sits above <IntlProvider> and cannot format messages
  *  itself, so the ResumeProgress child (inside the provider) renders the union
  *  into the active locale. Produced by openPersisted (Source / Replay events
- *  from onResumeProgress) and consumed by ResumeProgress in App.tsx. */
+ *  from onResumeProgress) and consumed by ResumeProgress in App.tsx.
+ *
+ *  `idle` is the first-class resting state (issue #205): it replaces the old
+ *  `| null` escape hatch so `busy` and every consumer discriminate via `kind`
+ *  inside the ADT instead of truthiness-coercing a nullable. openPersisted
+ *  leaves `idle` on both its success and reject tails. */
 export type ResumeStatus =
+  | { kind: "idle" }
   | { kind: "opening" }
   | { kind: "source"; index: number; total: number; name: string }
   | { kind: "replay"; index: number; total: number; name: string };
@@ -84,6 +90,15 @@ function recordRecentAndRefresh(
     });
 }
 
+/** Merged open-set state (issue #205): the session list + the active id move as
+ *  one value so the invariant `activeId !== null => activeId ∈ sessions` is
+ *  enforced at a single transition chokepoint (see `apply` in the hook) instead
+ *  of re-derived across two independent useStates. */
+type SessionsState = {
+  sessions: OpenSession[];
+  activeId: string | null;
+};
+
 export function useShellSessions({
   intl,
   queryClient,
@@ -98,7 +113,7 @@ export function useShellSessions({
    *  resume in flight. Drives the sidebar / topbar / hero disabled states and
    *  suspends the webview drop listener while busy. */
   busy: boolean;
-  resumeStatus: ResumeStatus | null;
+  resumeStatus: ResumeStatus;
   openNew: () => Promise<void>;
   openPersisted: (path: string, name: string) => Promise<void>;
   dropFile: (path: string) => Promise<void>;
@@ -110,39 +125,84 @@ export function useShellSessions({
   handleSaveAs: () => Promise<void>;
   handleOpenDuck: () => Promise<void>;
 } {
-  // openSessions: every session with a live in-memory instance, each rendered
-  // as a keep-alive SessionPane. activeSessionId: the visible one (null = cold
-  // hero). A close drops the entry + removeQueries its cache (ADR-0055).
-  const [openSessions, setOpenSessions] = useState<OpenSession[]>([]);
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  // Resume / open-busy indicator (ADR-0034). Resume blocks the open action; the
-  // indicator shows globally while the clicked session is opening.
-  const [resumeStatus, setResumeStatus] = useState<ResumeStatus | null>(null);
+  // The open set + active id live in ONE state object (issue #205) so the
+  // invariant "activeId !== null => activeId ∈ sessions" is enforced at a
+  // single transition chokepoint (apply) instead of re-derived across two
+  // separate useStates. sessions: every session with a live in-memory
+  // instance, each rendered as a keep-alive SessionPane. activeId: the visible
+  // one (null = cold hero). A close drops the entry + removeQueries its cache
+  // (ADR-0055).
+  const [state, setState] = useState<SessionsState>({
+    sessions: [],
+    activeId: null,
+  });
+  // Resume / open-busy indicator (ADR-0034). `idle` is the resting state
+  // (issue #205); Resume blocks the open action + the indicator shows globally
+  // while the clicked session is opening.
+  const [resumeStatus, setResumeStatus] = useState<ResumeStatus>({
+    kind: "idle",
+  });
   const [persistenceBusy, setPersistenceBusy] = useState(false);
 
-  const busy = persistenceBusy || resumeStatus !== null;
+  const busy = persistenceBusy || resumeStatus.kind !== "idle";
+
+  // Single pure transition into the merged open-set state (issue #205). Each
+  // caller hands back the intended next { sessions, activeId }; apply() then
+  // RECONCILES activeId against the resulting sessions so the invariant
+  // (activeId !== null => activeId ∈ sessions) can never be broken -- a
+  // transition that drops the active session without naming a successor falls
+  // back to the first remaining entry, then null. This replaces unmountOpen's
+  // old closure-write of `next` plus a separate setActiveId setter: nesting a
+  // setter inside another's updater violates React's purity contract (updaters
+  // may double-fire in StrictMode / concurrent mode), so both fields move as
+  // one pure function of `prev`.
+  const apply = useCallback(
+    (transform: (prev: SessionsState) => SessionsState): void => {
+      setState((prev) => {
+        const next = transform(prev);
+        const activeId =
+          next.activeId !== null &&
+          next.sessions.some((s) => s.sid === next.activeId)
+            ? next.activeId
+            : (next.sessions[0]?.sid ?? null);
+        return { sessions: next.sessions, activeId };
+      });
+    },
+    [],
+  );
+
+  const openSessions = state.sessions;
+  const activeSessionId = state.activeId;
   const activeSession =
     openSessions.find((s) => s.sid === activeSessionId) ?? null;
 
-  // Switch the active session by id (sidebar click). Semantic action -- the
-  // raw setActiveSessionId setter stays internal: registerOpen / openPersisted
-  // / unmountOpen all adjust the active id as a side effect of their own
-  // mutation, and THIS is the only public way to flip it standalone. The hook
-  // contract narrows the arg to a non-null string so an outside caller cannot
-  // null-out the active id from outside the open/close lifecycle, and drops
-  // the updater-function form the raw Dispatch exposes (no consumer needs it).
-  const activateSession = useCallback((sid: string): void => {
-    setActiveSessionId(sid);
-  }, []);
+  // Switch the active session by id (sidebar click). Semantic action -- there
+  // is no standalone activeId setter: the merged open-set state moves only
+  // through `apply`, and registerOpen / openPersisted / unmountOpen adjust the
+  // active id as a side effect of their own transition. THIS is the only
+  // public way to flip the active id standalone. The hook contract narrows the
+  // arg to a non-null string so an outside caller cannot null-out the active
+  // id from outside the open/close lifecycle; `apply` reconciles, so a stale
+  // sid (not in sessions) falls back to the first entry rather than dangling.
+  const activateSession = useCallback(
+    (sid: string): void => {
+      apply((prev) => ({ sessions: prev.sessions, activeId: sid }));
+    },
+    [apply],
+  );
 
   /** Add a freshly-minted session to the open set and activate it. The caller
    *  hands the createSession result + an optional bound path/name (resume). */
-  const registerOpen = useCallback((entry: OpenSession) => {
-    setOpenSessions((prev) =>
-      prev.some((s) => s.sid === entry.sid) ? prev : [...prev, entry],
-    );
-    setActiveSessionId(entry.sid);
-  }, []);
+  const registerOpen = useCallback(
+    (entry: OpenSession) => {
+      apply((prev) =>
+        prev.sessions.some((s) => s.sid === entry.sid)
+          ? { sessions: prev.sessions, activeId: entry.sid }
+          : { sessions: [...prev.sessions, entry], activeId: entry.sid },
+      );
+    },
+    [apply],
+  );
 
   // "+ New session" (ADR-0061): mint an empty session and enter its empty state.
   const openNew = useCallback(async () => {
@@ -188,13 +248,14 @@ export function useShellSessions({
         void dropFile(path);
         return;
       }
-      setOpenSessions((prev) =>
-        prev.map((o) =>
-          o.sid === activeSessionId ? { ...o, pendingIngestPath: path } : o,
+      apply((prev) => ({
+        sessions: prev.sessions.map((o) =>
+          o.sid === prev.activeId ? { ...o, pendingIngestPath: path } : o,
         ),
-      );
+        activeId: prev.activeId,
+      }));
     },
-    [activeSessionId, dropFile],
+    [activeSessionId, apply, dropFile],
   );
   useEffect(() => {
     if (busy) return;
@@ -212,11 +273,17 @@ export function useShellSessions({
   // Clear a consumed drop-on-cold-start path (#81 A1): once the SessionPane has
   // kicked off ingest, OpenSession.pendingIngestPath is dropped so a remount
   // cannot re-ingest.
-  const clearPendingIngest = useCallback((sid: string) => {
-    setOpenSessions((prev) =>
-      prev.map((o) => (o.sid === sid ? { ...o, pendingIngestPath: null } : o)),
-    );
-  }, []);
+  const clearPendingIngest = useCallback(
+    (sid: string) => {
+      apply((prev) => ({
+        sessions: prev.sessions.map((o) =>
+          o.sid === sid ? { ...o, pendingIngestPath: null } : o,
+        ),
+        activeId: prev.activeId,
+      }));
+    },
+    [apply],
+  );
 
   // Resume a persisted .duck into a fresh runtime instance (ADR-0061/0034).
   // open_duck reuses the id (ADR-0056), so createSession mints it first, then
@@ -226,7 +293,7 @@ export function useShellSessions({
     async (path: string, name: string) => {
       const existing = openSessions.find((s) => s.path === path);
       if (existing) {
-        setActiveSessionId(existing.sid);
+        apply((prev) => ({ sessions: prev.sessions, activeId: existing.sid }));
         return;
       }
       setResumeStatus({ kind: "opening" });
@@ -275,36 +342,38 @@ export function useShellSessions({
         await openDuck(sid, path);
         await queryClient.invalidateQueries({ queryKey: ["session", sid] });
         registerOpen({ sid, name, path, pendingIngestPath: null });
-        setResumeStatus(null);
+        setResumeStatus({ kind: "idle" });
       } catch (e) {
         setShellError(describeReject(e, intl, "shell"));
-        setResumeStatus(null);
+        setResumeStatus({ kind: "idle" });
       } finally {
         void unlisten();
       }
     },
-    [intl, openSessions, queryClient, registerOpen, setShellError],
+    [intl, openSessions, apply, queryClient, registerOpen, setShellError],
   );
 
   // Synchronous UI teardown for an open session: drop the cache + open-set
   // entry + active id. Shared by closeOpen (ADR-0055, runs BEFORE the
   // background close fires) and deletePersisted (ADR-0063, runs AFTER the
-  // wait-release variant resolves). The active-id decision runs as a SEPARATE
-  // setState -- calling it inside a state updater violates React's purity
-  // contract (updaters may double-fire in StrictMode / concurrent mode,
-  // enqueueing the nested setter twice); `next` is computed inside the updater
-  // (the source of truth for the latest prev) and read out after.
+  // wait-release variant resolves). Issue #205: the session filter + the
+  // active-id fallback are now ONE pure transition through `apply` -- the old
+  // shape read `next` out of an updater closure and ran a second setState for
+  // the active id, nesting a setter inside another's updater (a React purity
+  // violation: updaters may double-fire in StrictMode / concurrent mode).
+  // Setting activeId to null when the removed sid was active lets `apply`'s
+  // reconciler pick the first remaining entry (then null), matching the old
+  // next[0]?.sid ?? null fallback.
   const unmountOpen = useCallback(
     (sid: string): void => {
       queryClient.removeQueries({ queryKey: ["session", sid] });
-      let next: OpenSession[] = [];
-      setOpenSessions((prev) => {
-        next = prev.filter((s) => s.sid !== sid);
-        return next;
+      apply((prev) => {
+        const sessions = prev.sessions.filter((s) => s.sid !== sid);
+        const activeId = prev.activeId === sid ? null : prev.activeId;
+        return { sessions, activeId };
       });
-      setActiveSessionId((cur) => (cur === sid ? next[0]?.sid ?? null : cur));
     },
-    [queryClient],
+    [queryClient, apply],
   );
 
   // Close an open session (ADR-0055/0060). The user's view must disappear with
@@ -418,9 +487,12 @@ export function useShellSessions({
       try {
         if (sid) {
           const landed = await renameSession(sid, trimmed);
-          setOpenSessions((prev) =>
-            prev.map((s) => (s.sid === sid ? { ...s, name: landed } : s)),
-          );
+          apply((prev) => ({
+            sessions: prev.sessions.map((s) =>
+              s.sid === sid ? { ...s, name: landed } : s,
+            ),
+            activeId: prev.activeId,
+          }));
         } else if (path) {
           await renamePersistedSession(path, trimmed);
         }
@@ -430,7 +502,7 @@ export function useShellSessions({
       }
       refreshSessions();
     },
-    [intl, refreshSessions, setShellError],
+    [intl, apply, refreshSessions, setShellError],
   );
 
   // --- Save / Open .duck (ADR-0034/0036) ----------------------------------
@@ -446,11 +518,12 @@ export function useShellSessions({
         path.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? "session";
       await saveAsDuck(activeSession.sid, path, stem);
       // Bind the path + name on the open entry; the sidebar list refreshes.
-      setOpenSessions((prev) =>
-        prev.map((s) =>
+      apply((prev) => ({
+        sessions: prev.sessions.map((s) =>
           s.sid === activeSession.sid ? { ...s, path, name: stem } : s,
         ),
-      );
+        activeId: prev.activeId,
+      }));
       // Best-effort recents record + sidebar refresh (see recordRecentAndRefresh).
       recordRecentAndRefresh(path, intl, refreshSessions);
     } catch (e) {
@@ -458,7 +531,7 @@ export function useShellSessions({
     } finally {
       setPersistenceBusy(false);
     }
-  }, [intl, activeSession, refreshSessions, setShellError]);
+  }, [intl, activeSession, apply, refreshSessions, setShellError]);
 
   const handleOpenDuck = useCallback(async () => {
     setPersistenceBusy(true);

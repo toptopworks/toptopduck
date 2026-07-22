@@ -33,8 +33,10 @@ import { sessionKeys } from "./queryKeys";
 
 interface SessionPaneProps {
   sessionId: string;
-  /** A drop-on-cold-start path to ingest once on mount (ADR-0061, #81 A1).
-   *  null for sessions opened by a non-drop action. */
+  /** A pending data-file drop routed to this session's ingest (ADR-0061,
+   *  #81 A1; issue #205). Set by a cold-start drop (ingested once on mount) OR
+   *  by a drop onto an already-active session (ingested when the prop changes).
+   *  null once consumed or for sessions opened by a non-drop action. */
   pendingIngestPath: string | null;
   /** Shell callback after the pending ingest is kicked off, so OpenSession is
    *  cleared and a remount cannot re-ingest (#81 A1). */

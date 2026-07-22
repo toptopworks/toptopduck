@@ -8,7 +8,17 @@ import type { ResumeStatus } from "./useShellSessions";
 // messages itself, so ResumeProgress (a child inside the provider) renders the
 // union into the active locale. Each intl.formatMessage id is a STATIC literal
 // so @formatjs/cli extract resolves them.
-export function ResumeProgress({ status }: { status: ResumeStatus }) {
+//
+// Issue #205: the prop narrows to the non-idle variants. The `idle` resting
+// state is the ADT's first-class "nothing happening" (replacing the old
+// `| null`); App gates the render on `resumeStatus.kind !== "idle"`, so `idle`
+// never reaches this component and the switch below is exhaustive over what
+// can.
+export function ResumeProgress({
+  status,
+}: {
+  status: Exclude<ResumeStatus, { kind: "idle" }>;
+}) {
   const intl = useIntl();
   const text = (() => {
     switch (status.kind) {

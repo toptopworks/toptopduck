@@ -255,8 +255,11 @@ export default function App() {
                 />
               </header>
 
-              {/* Resume progress strip (ADR-0034). Absent unless an open/resume runs. */}
-              {resumeStatus && <ResumeProgress status={resumeStatus} />}
+              {/* Resume progress strip (ADR-0034). Absent unless an open/resume
+                  runs -- `idle` is the ADT's resting state (issue #205), so the
+                  gate discriminates on `kind` instead of truthiness-coercing a
+                  nullable. */}
+              {resumeStatus.kind !== "idle" && <ResumeProgress status={resumeStatus} />}
 
               {/* Row 3 (cols 2+): the session pane host. Every open session renders
               a keep-alive SessionPane; non-active panes are CSS `hidden` (mounted
