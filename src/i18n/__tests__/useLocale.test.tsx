@@ -6,7 +6,7 @@ import {
   resolveEffectiveLocale,
   resolveLocaleTag,
   useLocale,
-} from "../i18n/useLocale";
+} from "../useLocale";
 
 // useLocale + locale-resolution tests (ADR-0052, issue #78). Mirrors the
 // useTheme test shape: pure-function coverage (resolveEffectiveLocale /

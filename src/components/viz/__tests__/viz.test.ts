@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { decodeViz } from "../components/viz/viz";
-import type { ChartKind, VizSpec } from "../types/thread";
+import { decodeViz } from "../viz";
+import type { ChartKind, VizSpec } from "../../../types/thread";
 
 // Build a VizSpec with a given spec JSON string; the kind is decorative for
 // decodeViz (it reads only `spec`), but we pass the matching whitelist kind so

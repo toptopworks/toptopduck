@@ -1,8 +1,8 @@
 import { render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { describe, expect, it } from "vitest";
-import { ErrorBanner } from "../components/common/ErrorBanner";
-import type { AppError } from "../types/error";
+import { ErrorBanner } from "../ErrorBanner";
+import type { AppError } from "../../../types/error";
 
 // Issue #194: ErrorBanner takes a single `error: AppError` prop -- one render
 // path, no shell/session branching. Only message + detail are rendered; kind

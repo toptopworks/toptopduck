@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import type { ReactElement } from "react";
-import { DeleteSessionDialog, RenameSessionDialog } from "../session/SessionSidebar";
+import { DeleteSessionDialog, RenameSessionDialog } from "../SessionSidebar";
 
 // Both dialogs route their chrome through react-intl (ADR-0052). Rendered inside
 // an empty-catalog English IntlProvider so FormattedMessage falls back to its
