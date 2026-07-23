@@ -1,14 +1,24 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import { describeReject, readRows } from "../../api";
 import { decodeViz, type VizFailureReason } from "../viz/viz";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
-import { VegaChart } from "../viz/VegaChart";
 import type { AppError } from "../../types/error";
 import type { ColumnSchema, StaleAnchor } from "../../types/dataset";
 import type { VizSpec } from "../../types/thread";
+
+// VegaChart is lazy-loaded (issue #218): vega-embed + vega-lite are hundred-KB
+// deps only needed when a session turns up a viz result. Deferring them out of
+// the static ResultView -> SessionPane -> main bundle keeps the cold-start hero
+// and plain-table turns off the vega parse/exec path. VegaChart is a named
+// export, so the dynamic import is reshaped to a default for React.lazy. The
+// component's own render / theme-bridge / resize-on-unhide / finalize logic is
+// untouched -- lazy only shifts the module load time, not behavior.
+const VegaChart = lazy(() =>
+  import("../viz/VegaChart").then((m) => ({ default: m.VegaChart })),
+);
 
 const DEFAULT_PAGE_SIZE = 100;
 
@@ -292,7 +302,19 @@ export function ResultView({
         stacked item). A null viz (plain table turn) renders neither.
       */}
       {showChart && decoded?.ok && (
-        <VegaChart spec={decoded.spec} onError={setRenderError} />
+        // Suspense boundary (issue #218): the fallback reuses the real chart's
+        // .viz-chart class so the slot's margins match the loaded chart -- the
+        // surrounding result-area layout stays put while the vega chunk loads.
+        // The chart height itself is not reserved (vega-embed injects the
+        // canvas, so the slot grows from 0 to the spec height on resolve; a
+        // brief transient in a desktop app where the chunk is local and cached
+        // after the first view). aria-hidden keeps the empty placeholder out of
+        // the a11y tree. This load state is a separate layer from the
+        // render-failure degrade path below -- a Vega rejection still routes
+        // through onError and swaps in the disclosure.
+        <Suspense fallback={<div className="viz-chart" aria-hidden="true" />}>
+          <VegaChart spec={decoded.spec} onError={setRenderError} />
+        </Suspense>
       )}
       {degradedReason && (
         // ADR-0033: an emitted viz that failed to decode/render REPLACES the
