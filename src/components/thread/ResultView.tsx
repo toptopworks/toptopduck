@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
-import { describeReject, readRows } from "../../api";
+import { readRows } from "../../api";
+import { toAppError } from "../../lib/error-presentation";
 import { decodeViz, type VizFailureReason } from "../viz/viz";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Alert, AlertDescription } from "../ui/alert";
@@ -155,8 +156,8 @@ export function ResultView({
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(false);
   // Issue #194: readRows reject typed as AppError, kind "read" (a readRows
-  // reject is the read phase of a turn; describeReject applies no verb prefix,
-  // and ErrorBanner renders only message + detail, not kind).
+  // reject is the read phase of a turn; toAppError applies no verb prefix on the
+  // read kind, and ErrorBanner renders only message + detail, not kind).
   const [error, setError] = useState<AppError | null>(null);
 
   // Stable id linking the table to its heading so the heading text is the
@@ -181,7 +182,7 @@ export function ResultView({
         setOffset(off);
       } catch (e) {
         if (seq !== seqRef.current) return;
-        setError(describeReject(e, intl, "read"));
+        setError(toAppError(e, intl, "read"));
       } finally {
         if (seq === seqRef.current) setLoading(false);
       }

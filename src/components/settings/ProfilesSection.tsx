@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 
-import { clearProfileKey, fmtError, listProviderProfiles, setProfileKey } from "../../api";
+import { clearProfileKey, listProviderProfiles, setProfileKey } from "../../api";
+import { fmtError } from "../../lib/error-presentation";
 import type { Protocol, ProviderConfig, ProviderProfile } from "../../types/provider";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";

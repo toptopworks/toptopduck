@@ -1,10 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
-import type { IntlShape } from "react-intl";
-import { toAppError } from "./lib/error-presentation";
 import type { AppConfig } from "./types/app-config";
-import type { AppError, AppErrorKind } from "./types/error";
 import type {
   DatasetDescriptor,
   DatasetPrivacy,
@@ -148,40 +145,6 @@ export async function readRows(
   limit: number,
 ): Promise<RowPage> {
   return invoke<RowPage>("read_rows", { sessionId, referenceName, offset, limit });
-}
-
-// --- Error presentation (ADR-0069, issue #225 slice 1) ---------------------
-//
-// The IPC-reject -> AppError presentation lives in the error-presentation deep
-// module (src/lib/error-presentation/): the 9 type guards, 7 sub-formatters,
-// 4 detail extractors, fmtError / errorDetail / formatTurnFailure /
-// turnFailureDetail, and the kind-driven toAppError assembler. api.ts re-
-// exports the four format functions so the ~15 existing consumers
-// (ProfilesSection / ProfileSwitcher / SettingsView / SessionPane / Thread /
-// usePersistedSessions / useShellSessions) keep their import paths. The verb
-// prefix strategy now lives in toAppError; describeReject stays below as a
-// thin compatibility shim that delegates to it.
-
-export {
-  errorDetail,
-  fmtError,
-  formatTurnFailure,
-  turnFailureDetail,
-} from "./lib/error-presentation";
-
-// Describe an IPC reject for an error banner (issue #194). Compatibility shim
-// (ADR-0069, issue #225 slice 1): delegates to toAppError, which applies the
-// kind-driven prefix strategy. describeReject's only callers pass kind "shell"
-// (useShellSessions / useAppConfigState) or "read" (ResultView) -- both render
-// the bare message with no verb prefix -- so the delegation is behavior-
-// equivalent. Slice 2 migrates these callers to toAppError and deletes this
-// shim.
-export function describeReject(
-  e: unknown,
-  intl: IntlShape,
-  kind: AppErrorKind,
-): AppError {
-  return toAppError(e, intl, kind);
 }
 
 // --- LLM provider key + config (issue #29, ADR-0007/0019/0029) -------------

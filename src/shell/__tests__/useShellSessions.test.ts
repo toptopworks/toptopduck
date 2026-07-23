@@ -10,8 +10,9 @@ import { catalogFor } from "../../i18n";
 // (cold-start vs active), clearPendingIngest, and closeOpen's synchronous
 // unmount + background closeSession. The deps (intl, queryClient,
 // refreshSessions, setShellError) are injected, so the hook is exercised in
-// isolation from <App>. importOriginal keeps the pure helpers (describeReject
-// / fmtError) real while the Tauri invoke wrappers are stubbed.
+// isolation from <App>. The api mock stubs the Tauri invoke wrappers; the
+// reject path runs the real toAppError + fmtError (imported from
+// lib/error-presentation, outside the api mock).
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 

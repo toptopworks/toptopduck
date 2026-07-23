@@ -3,7 +3,8 @@ import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { ChevronDown } from "lucide-react";
 import { FormattedMessage, useIntl } from "react-intl";
 
-import { fmtError, listProviderProfiles } from "../../api";
+import { listProviderProfiles } from "../../api";
+import { fmtError } from "../../lib/error-presentation";
 import type { ProviderConfig } from "../../types/provider";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";

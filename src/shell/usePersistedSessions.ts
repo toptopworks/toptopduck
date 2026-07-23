@@ -10,7 +10,8 @@
 // re-runs the list_sessions effect, mirroring how app-config is fetched.
 import { useCallback, useEffect, useState } from "react";
 import type { IntlShape } from "react-intl";
-import { fmtError, listSessions } from "../api";
+import { listSessions } from "../api";
+import { fmtError } from "../lib/error-presentation";
 import { log } from "../lib/log";
 import type { SessionMetadata } from "../types/session";
 

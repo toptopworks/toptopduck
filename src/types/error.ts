@@ -6,7 +6,7 @@
 /** The session-flow operation kinds that carry a locale verb prefix (issue
  *  #139). A rename rejection renders "{verb} failed: ..."; a load rejection
  *  renders "{verb} failed: ..."; etc. The non-verb kinds ("shell" and "read" --
- *  see AppErrorKind) surface via describeReject as a bare fmtError message, so
+ *  see AppErrorKind) surface via toAppError as a bare fmtError message, so
  *  they are intentionally excluded from this verb-bearing set. Typing the verb
  *  logic over SessionFlowKind (not the full AppErrorKind) makes the exclusion a
  *  compile-time invariant, not a runtime default-arm hope. */
@@ -22,7 +22,7 @@ export type SessionFlowKind =
  *  mutation/query reject (verb-prefixed banner); "shell" tags a shell-layer IPC
  *  reject (createSession / openDuck / save / delete / rename persisted /
  *  profile switch); "read" tags a ResultView readRows reject. "shell" and
- *  "read" both render via describeReject without a verb prefix. */
+ *  "read" both render via toAppError without a verb prefix. */
 export type AppErrorKind = SessionFlowKind | "shell" | "read";
 
 /** An error tagged by the operation that produced it, so the displayed prefix
@@ -32,6 +32,10 @@ export type AppErrorKind = SessionFlowKind | "shell" | "read";
  *  Only `message` and `detail` are rendered by ErrorBanner; `kind` tags the
  *  operation for upstream prefix logic. */
 export interface AppError {
+  /** The locale-rendered banner text. Guaranteed non-empty on the shell/read
+   *  kinds (toAppError applies the Engine fallback); on SessionFlowKind kinds
+   *  it is the composed "{verb} failed: {message}" template, so an empty bare
+   *  reject renders "{verb} failed:". */
   message: string;
   kind: AppErrorKind;
   /** Technical detail from a typed error reject (SessionError / ResumeError /

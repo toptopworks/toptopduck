@@ -1,6 +1,6 @@
 // A user-facing error banner with an optional collapsed "Technical details"
 // fold (issue #119). The primary `message` is locale-rendered upstream (via
-// fmtError / describeReject); the Engine technical detail surfaces only when
+// fmtError / toAppError); the Engine technical detail surfaces only when
 // present, reusing the shared errorBoundary.details locale key. Shared by the
 // shell, the session pane, and the result view so all three surface Engine.data
 // consistently -- a close-wait timeout reject carries its actionable "retry

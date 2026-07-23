@@ -10,9 +10,11 @@ import type { AppConfig } from "../../types/app-config";
 // (Shell.test.tsx): optimistic commitAppConfig, the switchActiveProfile no-op
 // guards + refreshKeyStatus kick, the two independent collapse toggles writing
 // through commitShellPrefs, and the one-shot collapse restore from persisted
-// prefs. importOriginal keeps describeReject real while getAppConfig /
-// setAppConfig are stubbed. safeMainWindow() returns null in jsdom
-// (getCurrentWindow throws synchronously), so the geometry effects no-op.
+// prefs. The api mock stubs getAppConfig / setAppConfig; the
+// switchActiveProfile reject path runs the real toAppError (imported from
+// lib/error-presentation, outside the api mock). safeMainWindow() returns null
+// in jsdom (getCurrentWindow throws synchronously), so the geometry effects
+// no-op.
 
 vi.mock("../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api")>();

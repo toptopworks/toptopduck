@@ -17,7 +17,7 @@ import { cn } from "@/lib/utils";
 import type { DatasetDescriptor, StaleAnchor, StaleReason } from "../../types/dataset";
 import type { SourceLifecycleEvent, SourceLifecycleKind } from "../../types/lifecycle";
 import type { ThreadEntry, TurnOutcome, TurnRecord } from "../../types/thread";
-import { formatTurnFailure, turnFailureDetail } from "../../api";
+import { formatTurnFailure, turnFailureDetail } from "../../lib/error-presentation";
 import { TechnicalDetailsFold } from "../common/TechnicalDetailsFold";
 
 // A compact label slice for the active-chip match (ADR-0047): the thread only
