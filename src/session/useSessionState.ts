@@ -19,6 +19,8 @@ import {
   setDatasetPrivacy,
   takePersistError,
 } from "../api";
+import { toAppError } from "../lib/error-presentation";
+import { refreshFailedMessage } from "../lib/error-presentation/app-error";
 import { loadErrorDisplay } from "../lib/loadErrorDisplay";
 import { sessionKeys } from "./queryKeys";
 import {
@@ -47,91 +49,19 @@ import type { ThreadEntry } from "../types/thread";
 // keyed caches stay isolated by the `['session', sid, ...]` prefix.
 
 // AppError / AppErrorKind / SessionFlowKind live in ../types/error (issue
-// #194). The verb logic below is typed over SessionFlowKind (not the full
-// AppErrorKind); see types/error.ts for why "shell" and "read" are excluded
-// from the verb-bearing set.
+// #194). The verb prefix logic ("{verb} failed:" / "{verb} saved, but
+// refreshing ...") moved to the error-presentation module (ADR-0069, issue #225
+// slice 1): toAppError is the kind-driven assembler; refreshFailedMessage stays
+// reachable for the two inline refresh-reject sites below (refreshServerState +
+// handleAsk) until slice 2 migrates them to toAppError(e, intl, kind, {
+// refreshFailed: true }).
 
-/** The locale verb for an error kind (ADR-0052, issue #139). Catalog-backed so
- * the verb tracks the active locale -- the prior ERROR_VERB map hard-coded
- * Chinese verbs and wrapped an English catalog message in a Chinese prefix,
- * breaking locale consistency under en-US. Each arm carries a literal id +
- * defaultMessage so @formatjs/cli extract recovers it for the catalog guard. */
-function errorVerb(intl: IntlShape, kind: SessionFlowKind): string {
-  switch (kind) {
-    case "load":
-      return intl.formatMessage({ id: "error.verb.load", defaultMessage: "Load" });
-    case "rename":
-      return intl.formatMessage({ id: "error.verb.rename", defaultMessage: "Rename" });
-    case "replace":
-      return intl.formatMessage({
-        id: "error.verb.replace",
-        defaultMessage: "Replace source",
-      });
-    case "delete":
-      return intl.formatMessage({
-        id: "error.verb.delete",
-        defaultMessage: "Delete source",
-      });
-    case "privacy":
-      return intl.formatMessage({
-        id: "error.verb.privacy",
-        defaultMessage: "Privacy update",
-      });
-    case "ask":
-      return intl.formatMessage({ id: "error.verb.ask", defaultMessage: "Ask" });
-    default: {
-      // Exhaustiveness guard (issue #139): a new SessionFlowKind member without
-      // a case would fall through and return undefined, rendering a malformed
-      // " failed: ..." banner (verb lost). The `default: never` throw enforces
-      // this regardless of tsconfig flags -- mirror the guard used by
-      // loadErrorDisplay + api.ts formatters.
-      const unhandled: never = kind;
-      throw new Error(`unhandled SessionFlowKind: ${JSON.stringify(unhandled)}`);
-    }
-  }
-}
-
-/** Compose the "{verb} failed: {message}" banner for an operation reject
- * (issue #139). Both the verb and the failure template render through the
- * active locale, so the catalog message underneath is no longer wrapped in a
- * hard-coded Chinese prefix. */
-function flowFailedMessage(intl: IntlShape, kind: SessionFlowKind, message: string): string {
-  return intl.formatMessage(
-    {
-      id: "error.flow.failed",
-      defaultMessage: "{verb} failed: {message}",
-    },
-    { verb: errorVerb(intl, kind), message },
-  );
-}
-
-/** Compose the "{verb} saved, but refreshing the working set failed: {message}"
- * banner for a post-mutation refresh reject (issue #139). The operation itself
- * succeeded (its change is persisted server-side); only the cache refresh
- * failed, so the banner is tagged with the operation kind but worded as a
- * refresh failure rather than a fresh "{verb} failed". */
-function refreshFailedMessage(intl: IntlShape, kind: SessionFlowKind, message: string): string {
-  return intl.formatMessage(
-    {
-      id: "error.flow.savedRefreshFailed",
-      defaultMessage: "{verb} saved, but refreshing the working set failed: {message}",
-    },
-    { verb: errorVerb(intl, kind), message },
-  );
-}
-
-/** Build an AppError from an IPC reject: the locale message via fmtError,
- * prefixed with the operation's "{verb} failed:" template (issue #139) so the
- * banner is one locale-consistent sentence, plus the technical detail
- * (issues #119/#120) for the collapsed fold. The message is always non-null
- * (flowFailedMessage + fmtError both return strings); the detail fold is
- * omitted only when AppError.detail is null -- see the field doc. */
+/** Build an AppError from an IPC reject, tagged with the operation kind.
+ * Compatibility shim (ADR-0069, issue #225 slice 1): delegates to toAppError,
+ * which applies the "{verb} failed:" prefix via the locale catalog. Slice 2
+ * migrates the call sites to toAppError directly and deletes this shim. */
 function appErrorFrom(e: unknown, intl: IntlShape, kind: SessionFlowKind): AppError {
-  return {
-    message: flowFailedMessage(intl, kind, fmtError(e, intl)),
-    kind,
-    detail: errorDetail(e),
-  };
+  return toAppError(e, intl, kind);
 }
 
 // Module-level empty constants so `query.data ?? EMPTY` keeps a stable reference

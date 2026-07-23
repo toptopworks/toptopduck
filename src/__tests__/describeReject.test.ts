@@ -28,21 +28,20 @@ describe("describeReject (returns AppError, issue #194)", () => {
     expect(describeReject(engineReject, intl, "shell").kind).toBe("shell");
   });
 
-  it.each([
-    "load",
-    "rename",
-    "replace",
-    "delete",
-    "privacy",
-    "ask",
-    "shell",
-    "read",
-  ] as AppErrorKind[])("carries the %s kind without altering message/detail", (kind) => {
-    const out = describeReject(engineReject, intl, kind);
-    expect(out.kind).toBe(kind);
-    expect(out.message).toBe("Internal error");
-    expect(out.detail).toBe("close-wait timed out");
-  });
+  // describeReject delegates to toAppError (issue #225 slice 1 compatibility
+  // shim). Its only production callers pass "shell" or "read" -- both render
+  // the bare fmtError message with no verb prefix. The six SessionFlowKind
+  // values now carry a "{verb} failed:" prefix through toAppError; those are
+  // verified by the toAppError tests in slice 2 (issue #224), not here.
+  it.each(["shell", "read"] as AppErrorKind[])(
+    "carries the %s kind without altering message/detail",
+    (kind) => {
+      const out = describeReject(engineReject, intl, kind);
+      expect(out.kind).toBe(kind);
+      expect(out.message).toBe("Internal error");
+      expect(out.detail).toBe("close-wait timed out");
+    },
+  );
 
   it("falls back to the Engine locale message when fmtError yields empty", () => {
     // A bare throw with no message (or a minified error): fmtError returns the

@@ -1,7 +1,7 @@
 import { createIntl } from "react-intl";
 import { describe, expect, it } from "vitest";
 
-import { errorDetail, fmtError } from "../api";
+import { errorDetail, fmtError } from "../lib/error-presentation";
 import type {
   ResumeError,
   SaveError,
