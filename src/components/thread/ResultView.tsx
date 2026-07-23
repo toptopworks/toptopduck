@@ -302,12 +302,16 @@ export function ResultView({
         stacked item). A null viz (plain table turn) renders neither.
       */}
       {showChart && decoded?.ok && (
-        // Suspense boundary (issue #218): an empty .viz-chart-sized container
-        // reserves the chart slot's margins so the result-area layout does not
-        // jump while the vega chunk loads; aria-hidden keeps the transient
-        // placeholder out of the a11y tree. This load state is a separate layer
-        // from the render-failure degrade path below -- a Vega rejection still
-        // routes through onError and swaps in the disclosure.
+        // Suspense boundary (issue #218): the fallback reuses the real chart's
+        // .viz-chart class so the slot's margins match the loaded chart -- the
+        // surrounding result-area layout stays put while the vega chunk loads.
+        // The chart height itself is not reserved (vega-embed injects the
+        // canvas, so the slot grows from 0 to the spec height on resolve; a
+        // brief transient in a desktop app where the chunk is local and cached
+        // after the first view). aria-hidden keeps the empty placeholder out of
+        // the a11y tree. This load state is a separate layer from the
+        // render-failure degrade path below -- a Vega rejection still routes
+        // through onError and swaps in the disclosure.
         <Suspense fallback={<div className="viz-chart" aria-hidden="true" />}>
           <VegaChart spec={decoded.spec} onError={setRenderError} />
         </Suspense>
