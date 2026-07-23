@@ -30,6 +30,13 @@ const DEFAULT_PAGE_SIZE = 100;
 const PAGE_BTN =
   "px-3 py-1.5 cursor-pointer text-sm border border-border bg-card rounded-md disabled:opacity-50 disabled:cursor-progress";
 
+// Numeric column header + cell chrome (issue #222): the .num hook stays for
+// selector / test stability; text-right right-aligns per ADR-0057; tabular-nums
+// (font-variant-numeric) lines digits up in a column under a proportional UI
+// font so a numeric column reads as one aligned column. Shared by <th> and
+// <td> (ADR-0067 (2): Tailwind scale utility, no new token).
+const NUMERIC_CELL = "num text-right tabular-nums";
+
 // Disclosure thresholds (ADR-0057: precise values are visual iteration, not
 // architecture). A result above either threshold renders an honest banner
 // rather than silently looking lightweight. Exported so tests can pin them.
@@ -354,7 +361,7 @@ export function ResultView({
             {columns.map((c) => (
               <TableHead
                 key={c.name}
-                className={isNumericType(c.canonical_type) ? "num text-right" : undefined}
+                className={isNumericType(c.canonical_type) ? NUMERIC_CELL : undefined}
               >
                 {c.name}
               </TableHead>
@@ -382,7 +389,7 @@ export function ResultView({
                   return <TableCell key={j} className="cell-null bg-muted" />;
                 }
                 return (
-                  <TableCell key={j} className={numeric ? "num text-right" : undefined}>
+                  <TableCell key={j} className={numeric ? NUMERIC_CELL : undefined}>
                     {cell}
                   </TableCell>
                 );

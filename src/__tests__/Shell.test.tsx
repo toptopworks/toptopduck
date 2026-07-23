@@ -335,6 +335,44 @@ describe("App three-column shell (issue #79 ACs)", () => {
     expect(within(card).getByText("执行查询失败")).toBeInTheDocument(); // error.turn.execute
     expect(within(card).getByText("no_such_col")).toBeInTheDocument(); // fold detail
   });
+
+  it("elevates in-content cards (textual-card + working-set panels) with shadow-sm (issue #222)", async () => {
+    // ADR-0067 (2) + issue #222: in-content cards share one elevation language
+    // with the floating dialog (shadow-lg) / popover (shadow-md) layer above
+    // them. The workspace textual-card (full-width outcome) and the working-set
+    // master/detail panels carry the Tailwind shadow-sm utility -- no new
+    // --shadow-* token (ADR-0067 (2) rules one out). The rail turn-card
+    // (ADR-0047) stays flat (rail density should not lift) and the degrade-card
+    // stays shadow-none (its left border is the emphasis), so neither is pinned
+    // here. jsdom cannot paint a box-shadow, but it CAN assert the className,
+    // so a regression that drops shadow-sm while leaving the bg-card/border
+    // chrome stays caught (same pin shape as the SessionSidebar /
+    // ProfileSwitcher popover shadow-md tests).
+    state.workingSet = [src("result_1")];
+    state.thread = [
+      {
+        entry: "Turn",
+        data: {
+          question: "哪个名字",
+          outcome: {
+            kind: "Textual",
+            data: { text_kind: "Clarify", body: "请说明哪个名字", assumption: null },
+          },
+        },
+      },
+    ];
+    render(<App />);
+    await openSession();
+    // Result tab: the workspace textual-card carries shadow-sm.
+    await waitFor(() => expect(document.querySelector(".textual-card")).toBeInTheDocument());
+    expect(document.querySelector(".textual-card")?.className.split(/\s+/)).toContain("shadow-sm");
+    // Working set tab: both master/detail .panel sections carry shadow-sm.
+    fireEvent.click(screen.getByRole("tab", { name: /工作集/ }));
+    await waitFor(() => expect(document.querySelectorAll(".panel")).toHaveLength(2));
+    document.querySelectorAll(".panel").forEach((panel) => {
+      expect(panel.className.split(/\s+/)).toContain("shadow-sm");
+    });
+  });
 });
 
 describe("App multi-session shell (issue #81 ACs)", () => {

@@ -354,8 +354,11 @@ function WorkspaceResult({
 // (.textual-card / .textual-card.{clarify,refuse,failed,cancelled}) are kept on
 // the <article> for selector / test stability (Shell.test.tsx queries
 // .textual-card.failed); the hook doubles as the variant-utility lookup key.
+// Issue #222: shadow-sm lifts the in-content card so it shares one elevation
+// language with the floating dialog (shadow-lg) / popover (shadow-md) layer --
+// a Tailwind scale utility, not a new --shadow-* token (ADR-0067 (2)).
 const TEXTUAL_CARD_BASE =
-  "textual-card p-4 bg-card border border-border rounded-lg";
+  "textual-card p-4 bg-card border border-border rounded-lg shadow-sm";
 // The variant key set is a closed domain -- Lowercase<TextKind> ("clarify" |
 // "refuse") for the Textual arm + "failed" + "cancelled" for the other two
 // outcome kinds. A literal-union Record catches key typos at compile time and
@@ -433,6 +436,13 @@ function TextualOutcomeCard({ turn }: { turn: NonMaterializedTurn }) {
 
 // The "工作集" tab (ADR-0045): source management -- rename / replace / delete /
 // privacy. The list + detail pair moved here from the old single-column layout.
+//
+// Panel card chrome for the master/detail sections (issue #184 + #222): bg-card
+// + border + rounded-lg + p-4 carry the surface (ADR-0067 (1) .panel layout hook
+// + visual utility); shadow-sm shares the elevation language of the workspace
+// textual-card / dialog / popover (Tailwind scale, no new token, ADR-0067 (2)).
+// Shared by the list and detail sections so the pair reads as one surface.
+const PANEL_CARD_BASE = "panel bg-card border rounded-lg shadow-sm p-4";
 function WorkspaceWorkingSet({
   datasets,
   activeName,
@@ -466,12 +476,11 @@ function WorkspaceWorkingSet({
   return (
     // ADR-0067 (issue #184): the WorkspaceWorkingSet div carries the .layout
     // grid (280px/1fr two-column master-detail, ADR-0067 Decision 1); both
-    // sections carry the panel card chrome (bg-card + border + rounded-lg +
-    // p-4) as utility. The .layout / .working-set-layout / .panel class hooks
-    // stay as anchor points; per-consumer margins live on the consumer, not
-    // the shared .layout rule.
+    // sections share the PANEL_CARD_BASE chrome (defined above). The .layout /
+    // .working-set-layout / .panel class hooks stay as anchor points;
+    // per-consumer margins live on the consumer, not the shared .layout rule.
     <div className="layout working-set-layout">
-      <section className="panel bg-card border rounded-lg p-4">
+      <section className={PANEL_CARD_BASE}>
         <h2>
           <FormattedMessage id="session.workingSet.title" defaultMessage="Working set" />
         </h2>
@@ -485,7 +494,7 @@ function WorkspaceWorkingSet({
           loading={loading}
         />
       </section>
-      <section className="panel bg-card border rounded-lg p-4">
+      <section className={PANEL_CARD_BASE}>
         {shown ? (
           <DatasetDetail
             dataset={shown}

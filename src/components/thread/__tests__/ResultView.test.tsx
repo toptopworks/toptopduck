@@ -109,13 +109,16 @@ describe("ResultView", () => {
     expect(screen.getByText("1")).toBeInTheDocument();
   });
 
-  it("applies the .num class to a numeric column header + cell (ADR-0057)", async () => {
+  it("applies the .num class + tabular-nums to a numeric column header + cell (ADR-0057, issue #222)", async () => {
     // ADR-0057: numeric canonical-types right-align. ADR-0067 (issue #173):
     // the right-align retired from styles.css onto the cells as a text-right
-    // utility (alongside the .num hook, kept for selector stability). Pin the
-    // hook AND the utility on the real <th>/<td> the primitive renders -- jsdom
-    // cannot lay out text-align, but it CAN assert the className, so a
-    // regression that drops text-right but leaves the hook stays caught.
+    // utility (alongside the .num hook, kept for selector stability). Issue
+    // #222: numeric columns also carry tabular-nums (font-variant-numeric) so
+    // digits line up in a column under a proportional UI font. Pin the hook AND
+    // both utilities on the real <th>/<td> the primitive renders -- jsdom
+    // cannot lay out text-align / font-variant-numeric, but it CAN assert the
+    // className, so a regression that drops text-right / tabular-nums but
+    // leaves the hook stays caught.
     vi.mocked(readRows).mockResolvedValue({
       columns: [
         { name: "id", canonical_type: "BIGINT" },
@@ -130,12 +133,20 @@ describe("ResultView", () => {
       <ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />,
     );
     await waitFor(() => expect(readRows).toHaveBeenCalled());
-    // The BIGINT column carries .num + text-right on both its header and its
-    // cell; the VARCHAR column carries neither.
+    // The BIGINT column carries .num + text-right + tabular-nums on both its
+    // header and its cell; the VARCHAR column carries neither.
     expect(container.querySelectorAll("th.num")).toHaveLength(1);
     expect(container.querySelectorAll("td.num")).toHaveLength(1);
     expect(container.querySelector("th.num")?.className.split(/\s+/)).toContain("text-right");
     expect(container.querySelector("td.num")?.className.split(/\s+/)).toContain("text-right");
+    expect(container.querySelector("th.num")?.className.split(/\s+/)).toContain("tabular-nums");
+    expect(container.querySelector("td.num")?.className.split(/\s+/)).toContain("tabular-nums");
+    // A non-numeric column carries none of the numeric utilities. Guard
+    // existence first so the assertion cannot silently pass via ?. short-circuit
+    // if a future fixture drops the non-numeric column.
+    const nonNumericHead = container.querySelector("th:not(.num)");
+    expect(nonNumericHead).not.toBeNull();
+    expect(nonNumericHead?.className.split(/\s+/)).not.toContain("tabular-nums");
   });
 
   it("paginates backward via the previous button", async () => {
