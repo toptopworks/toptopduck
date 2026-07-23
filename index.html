@@ -1,5 +1,10 @@
 <!doctype html>
-<html lang="zh-CN">
+<!-- Neutral initial lang: aligns with react-intl defaultLocale="en-US" and the
+     en canonical catalog source, so the first frame's <html lang> matches the
+     UI language react-intl falls back to before app-config resolves. App's
+     effect (document.documentElement.lang = effectiveLocale) overrides this
+     once the persisted locale resolves. See issue #219. -->
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
