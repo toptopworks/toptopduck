@@ -2,8 +2,7 @@
 // kind-driven entry point: it computes the bare locale message + detail (via
 // the format core) and applies the prefix strategy chosen by `kind`. The verb
 // prefix logic (errorVerb / flowFailedMessage / refreshFailedMessage) is
-// module-internal -- every call site reaches it through toAppError (issue #226
-// migrated describeReject / appErrorFrom callers and deleted those shims).
+// module-internal -- every call site reaches it through toAppError.
 
 import type { IntlShape } from "react-intl";
 import type { AppError, AppErrorKind, SessionFlowKind } from "../../types/error";
@@ -12,11 +11,10 @@ import { errorDetail, fmtError } from "./format";
 // The Engine locale message, used as the never-blank fallback when fmtError
 // yields an empty string (a bare throw with no message, or a minified error).
 // Applied ONLY on the shell/read branches of toAppError: a shell/read reject
-// must never render a blank banner. The SessionFlowKind branches carry no
-// fallback -- a SessionFlowKind reject always composes "{verb} failed: {bare}"
-// (an empty bare renders "{verb} failed:"), matching the prior describeReject
-// (shell/read) and appErrorFrom (SessionFlowKind) behavior preserved through
-// both slices of ADR-0069.
+// has no verb prefix, so without a fallback an empty bare would render a blank
+// banner. The SessionFlowKind branches carry no fallback -- their "{verb}
+// failed: {bare}" template already guarantees a non-empty banner (an empty
+// bare renders "{verb} failed:").
 function engineFallback(intl: IntlShape): string {
   return intl.formatMessage({
     id: "error.session.engine",
@@ -101,20 +99,19 @@ function refreshFailedMessage(
 
 // Build an AppError from an IPC reject with a kind-driven prefix strategy
 // (ADR-0069 Decision 3). The bare locale message comes from fmtError; the
-// Engine message is a never-blank fallback ONLY on shell/read (matching the
-// prior describeReject). The prefix is then chosen by kind:
+// prefix (or lack of one) is chosen by kind:
 //   - SessionFlowKind (load/rename/replace/delete/privacy/ask): "{verb} failed:
 //     {message}", or "{verb} saved, but refreshing the working set failed:
 //     {message}" when opts.refreshFailed is set (a post-mutation refresh reject
-//     where the mutation itself succeeded). No Engine fallback here -- matches
-//     the prior appErrorFrom, which composed flowFailedMessage(intl, kind,
-//     fmtError(e)) directly (an empty fmtError rendered "{verb} failed: ").
+//     where the mutation itself succeeded). The template already guarantees a
+//     non-empty banner, so no Engine fallback -- an empty bare renders
+//     "{verb} failed:".
 //   - shell / read: the bare message (no verb prefix), with the Engine fallback
-//     so a bare throw / minified error never renders a blank banner.
+//     (see engineFallback) so a bare throw / minified error never renders a
+//     blank banner.
 //
-// The fallback's scope is preserved per-kind rather than widened: a
-// SessionFlowKind reject composes "{verb} failed: {message}", so an empty
-// bare renders "{verb} failed:" instead of a blank banner.
+// opts.refreshFailed is meaningful only for SessionFlowKind; it is ignored on
+// shell/read.
 //
 // The exhaustiveness `default: never` guard makes "verb applies only to
 // SessionFlowKind" a compile-time invariant (SessionFlowKind ⊂ AppErrorKind is

@@ -32,6 +32,10 @@ export type AppErrorKind = SessionFlowKind | "shell" | "read";
  *  Only `message` and `detail` are rendered by ErrorBanner; `kind` tags the
  *  operation for upstream prefix logic. */
 export interface AppError {
+  /** The locale-rendered banner text. Guaranteed non-empty on the shell/read
+   *  kinds (toAppError applies the Engine fallback); on SessionFlowKind kinds
+   *  it is the composed "{verb} failed: {message}" template, so an empty bare
+   *  reject renders "{verb} failed:". */
   message: string;
   kind: AppErrorKind;
   /** Technical detail from a typed error reject (SessionError / ResumeError /
