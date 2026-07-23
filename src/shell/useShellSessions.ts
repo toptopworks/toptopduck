@@ -29,9 +29,6 @@ import {
   closeSessionAndWaitRelease,
   createSession,
   deleteSession,
-  describeReject,
-  errorDetail,
-  fmtError,
   onResumeProgress,
   openDuck,
   recordRecentFile,
@@ -39,6 +36,7 @@ import {
   renameSession,
   saveAsDuck,
 } from "../api";
+import { errorDetail, fmtError, toAppError } from "../lib/error-presentation";
 import { log } from "../lib/log";
 import type { AppError } from "../types/error";
 import type { OpenSession } from "../session/sidebarModel";
@@ -236,7 +234,7 @@ export function useShellSessions({
       // placeholder until the user saves-as or renames (data, not chrome).
       registerOpen({ sid, name: "", path: null, pendingIngestPath: null });
     } catch (e) {
-      setShellError(describeReject(e, intl, "shell"));
+      setShellError(toAppError(e, intl, "shell"));
     }
   }, [intl, registerOpen, setShellError]);
 
@@ -254,7 +252,7 @@ export function useShellSessions({
         const sid = await createSession();
         registerOpen({ sid, name: "", path: null, pendingIngestPath: path });
       } catch (e) {
-        setShellError(describeReject(e, intl, "shell"));
+        setShellError(toAppError(e, intl, "shell"));
       } finally {
         droppingRef.current = false;
       }
@@ -370,7 +368,7 @@ export function useShellSessions({
         registerOpen({ sid, name, path, pendingIngestPath: null });
         setResumeStatus({ kind: "idle" });
       } catch (e) {
-        setShellError(describeReject(e, intl, "shell"));
+        setShellError(toAppError(e, intl, "shell"));
         setResumeStatus({ kind: "idle" });
       } finally {
         void unlisten();
@@ -481,7 +479,7 @@ export function useShellSessions({
             // Without this, the pane stays mounted on a sid the backend no
             // longer knows and every retry hits NotFound (dead loop).
             unmountOpen(sid);
-            setShellError(describeReject(e, intl, "shell"));
+            setShellError(toAppError(e, intl, "shell"));
             return;
           }
           // The wait resolved -- canonical key is free, Session::Drop ran.
@@ -492,7 +490,7 @@ export function useShellSessions({
         try {
           await deleteSession(path);
         } catch (e) {
-          setShellError(describeReject(e, intl, "shell"));
+          setShellError(toAppError(e, intl, "shell"));
           return;
         }
         refreshSessions();
@@ -520,7 +518,7 @@ export function useShellSessions({
           await renamePersistedSession(path, trimmed);
         }
       } catch (e) {
-        setShellError(describeReject(e, intl, "shell"));
+        setShellError(toAppError(e, intl, "shell"));
         return;
       }
       refreshSessions();
@@ -549,7 +547,7 @@ export function useShellSessions({
       // Best-effort recents record + sidebar refresh (see recordRecentAndRefresh).
       recordRecentAndRefresh(path, intl, refreshSessions);
     } catch (e) {
-      setShellError(describeReject(e, intl, "shell"));
+      setShellError(toAppError(e, intl, "shell"));
     } finally {
       setPersistenceBusy(false);
     }
@@ -570,7 +568,7 @@ export function useShellSessions({
       // Best-effort recents record + sidebar refresh (see recordRecentAndRefresh).
       recordRecentAndRefresh(path, intl, refreshSessions);
     } catch (e) {
-      setShellError(describeReject(e, intl, "shell"));
+      setShellError(toAppError(e, intl, "shell"));
     } finally {
       setPersistenceBusy(false);
     }

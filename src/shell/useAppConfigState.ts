@@ -31,7 +31,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createIntl } from "react-intl";
 import type { IntlShape } from "react-intl";
 import { LogicalPosition, LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
-import { describeReject, getAppConfig, setAppConfig } from "../api";
+import { getAppConfig, setAppConfig } from "../api";
+import { toAppError } from "../lib/error-presentation";
 import { catalogFor, coerceLocalePreference, useLocale } from "../i18n";
 import type { EffectiveLocale } from "../i18n";
 import { log } from "../lib/log";
@@ -169,7 +170,7 @@ export function useAppConfigState({
         });
         void refreshKeyStatus();
       } catch (e) {
-        setShellError(describeReject(e, intl, "shell"));
+        setShellError(toAppError(e, intl, "shell"));
       }
     },
     [appConfig, commitAppConfig, refreshKeyStatus, intl, setShellError],

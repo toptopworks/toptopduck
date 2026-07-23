@@ -1,11 +1,9 @@
 // The upper-layer AppError assembler (ADR-0069). toAppError is the single
 // kind-driven entry point: it computes the bare locale message + detail (via
 // the format core) and applies the prefix strategy chosen by `kind`. The verb
-// prefix logic (errorVerb / flowFailedMessage / refreshFailedMessage) moved
-// here from useSessionState.ts (issue #225 slice 1); it stays module-internal.
-// describeReject (api.ts) and appErrorFrom (useSessionState.ts) become thin
-// compatibility shims that delegate to toAppError -- call sites are unchanged
-// in this slice; slice 2 migrates them and deletes the shims.
+// prefix logic (errorVerb / flowFailedMessage / refreshFailedMessage) is
+// module-internal -- every call site reaches it through toAppError (issue #226
+// migrated describeReject / appErrorFrom callers and deleted those shims).
 
 import type { IntlShape } from "react-intl";
 import type { AppError, AppErrorKind, SessionFlowKind } from "../../types/error";
@@ -13,11 +11,12 @@ import { errorDetail, fmtError } from "./format";
 
 // The Engine locale message, used as the never-blank fallback when fmtError
 // yields an empty string (a bare throw with no message, or a minified error).
-// Applied ONLY on the shell/read branches of toAppError, matching the prior
-// describeReject (api.ts) which computed fmtError(e) || <Engine message>; the
-// SessionFlowKind branches carry no fallback, matching the prior appErrorFrom
-// (useSessionState.ts). Slice 1 is a behavior-equivalent refactor -- widening
-// the fallback to SessionFlowKind is a behavior change deferred to slice 2.
+// Applied ONLY on the shell/read branches of toAppError: a shell/read reject
+// must never render a blank banner. The SessionFlowKind branches carry no
+// fallback -- a SessionFlowKind reject always composes "{verb} failed: {bare}"
+// (an empty bare renders "{verb} failed:"), matching the prior describeReject
+// (shell/read) and appErrorFrom (SessionFlowKind) behavior preserved through
+// both slices of ADR-0069.
 function engineFallback(intl: IntlShape): string {
   return intl.formatMessage({
     id: "error.session.engine",
@@ -83,15 +82,10 @@ function flowFailedMessage(intl: IntlShape, kind: SessionFlowKind, message: stri
 // banner for a post-mutation refresh reject (issue #139). The operation itself
 // succeeded (its change is persisted server-side); only the cache refresh
 // failed, so the banner is tagged with the operation kind but worded as a
-// refresh failure rather than a fresh "{verb} failed".
-//
-// Exported (not module-private) for issue #225 slice 1 only: useSessionState's
-// two inline refresh-reject sites (refreshServerState + handleAsk) still call it
-// directly and are not migrated until slice 2. Slice 2 migrates those sites to
-// toAppError(e, intl, kind, { refreshFailed: true }) and privatizes this helper
-// (it is intentionally NOT re-exported through the index.ts facade, which holds
-// the stable 5-function public surface).
-export function refreshFailedMessage(
+// refresh failure rather than a fresh "{verb} failed". Module-internal --
+// reached only via toAppError(e, intl, kind, { refreshFailed: true }), the
+// single public entry for a refresh reject (ADR-0069, issue #226).
+function refreshFailedMessage(
   intl: IntlShape,
   kind: SessionFlowKind,
   message: string,
@@ -118,9 +112,9 @@ export function refreshFailedMessage(
 //   - shell / read: the bare message (no verb prefix), with the Engine fallback
 //     so a bare throw / minified error never renders a blank banner.
 //
-// Slice 1 is a behavior-equivalent refactor: the fallback's scope is preserved
-// per-kind rather than widened. Widening it to SessionFlowKind is a behavior
-// change deferred to slice 2 (issue #224).
+// The fallback's scope is preserved per-kind rather than widened: a
+// SessionFlowKind reject composes "{verb} failed: {message}", so an empty
+// bare renders "{verb} failed:" instead of a blank banner.
 //
 // The exhaustiveness `default: never` guard makes "verb applies only to
 // SessionFlowKind" a compile-time invariant (SessionFlowKind ⊂ AppErrorKind is

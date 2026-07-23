@@ -1,13 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useIntl, type IntlShape } from "react-intl";
+import { useIntl } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   activeDataset,
   askQuestion,
   cancelQuery,
   conversation,
-  errorDetail,
-  fmtError,
   ingestFile,
   ingestFileGuided,
   listWorkingSet,
@@ -20,7 +18,6 @@ import {
   takePersistError,
 } from "../api";
 import { toAppError } from "../lib/error-presentation";
-import { refreshFailedMessage } from "../lib/error-presentation/app-error";
 import { loadErrorDisplay } from "../lib/loadErrorDisplay";
 import { sessionKeys } from "./queryKeys";
 import {
@@ -50,19 +47,10 @@ import type { ThreadEntry } from "../types/thread";
 
 // AppError / AppErrorKind / SessionFlowKind live in ../types/error (issue
 // #194). The verb prefix logic ("{verb} failed:" / "{verb} saved, but
-// refreshing ...") moved to the error-presentation module (ADR-0069, issue #225
-// slice 1): toAppError is the kind-driven assembler; refreshFailedMessage stays
-// reachable for the two inline refresh-reject sites below (refreshServerState +
-// handleAsk) until slice 2 migrates them to toAppError(e, intl, kind, {
-// refreshFailed: true }).
-
-/** Build an AppError from an IPC reject, tagged with the operation kind.
- * Compatibility shim (ADR-0069, issue #225 slice 1): delegates to toAppError,
- * which applies the "{verb} failed:" prefix via the locale catalog. Slice 2
- * migrates the call sites to toAppError directly and deletes this shim. */
-function appErrorFrom(e: unknown, intl: IntlShape, kind: SessionFlowKind): AppError {
-  return toAppError(e, intl, kind);
-}
+// refreshing ...") is module-internal to error-presentation (ADR-0069): every
+// reject + the two post-mutation refresh rejects below reach it through the
+// single kind-driven toAppError entry (refresh rejects pass { refreshFailed:
+// true }).
 
 // Module-level empty constants so `query.data ?? EMPTY` keeps a stable reference
 // across renders while the query is still loading (avoids cascading re-renders
@@ -237,11 +225,7 @@ export function useSessionState(
           queryClient.invalidateQueries({ queryKey: sessionKeys.thread(sessionId) }),
         ]);
       } catch (refreshErr) {
-        setError({
-          message: refreshFailedMessage(intl, kind, fmtError(refreshErr, intl)),
-          kind,
-          detail: errorDetail(refreshErr),
-        });
+        setError(toAppError(refreshErr, intl, kind, { refreshFailed: true }));
       }
     },
     [queryClient, sessionId, intl],
@@ -262,7 +246,7 @@ export function useSessionState(
       try {
         outcome = await askQuestion(sessionId, question);
       } catch (e) {
-        setError(appErrorFrom(e, intl, "ask"));
+        setError(toAppError(e, intl, "ask"));
         setLoading(false);
         void pollPersistError();
         return;
@@ -304,11 +288,7 @@ export function useSessionState(
             queryClient.invalidateQueries({ queryKey: sessionKeys.active(sessionId) }),
           ]);
         } catch (refreshErr) {
-          setError({
-            message: refreshFailedMessage(intl, "ask", fmtError(refreshErr, intl)),
-            kind: "ask",
-            detail: errorDetail(refreshErr),
-          });
+          setError(toAppError(refreshErr, intl, "ask", { refreshFailed: true }));
         }
       }
       // Textual / Failed / Cancelled: no working-set change; the optimistic
@@ -323,7 +303,7 @@ export function useSessionState(
     try {
       await cancelQuery(sessionId);
     } catch (e) {
-      setError(appErrorFrom(e, intl, "ask"));
+      setError(toAppError(e, intl, "ask"));
     }
   }, [sessionId, intl]);
 
@@ -344,7 +324,7 @@ export function useSessionState(
           setError({ ...loadErrorDisplay(result.data, intl), kind: "load" });
         }
       } catch (e) {
-        setError(appErrorFrom(e, intl, "load"));
+        setError(toAppError(e, intl, "load"));
       } finally {
         setLoading(false);
         void pollPersistError();
@@ -398,7 +378,7 @@ export function useSessionState(
           });
         }
       } catch (e) {
-        setError(appErrorFrom(e, intl, "load"));
+        setError(toAppError(e, intl, "load"));
       } finally {
         setLoading(false);
         void pollPersistError();
@@ -418,7 +398,7 @@ export function useSessionState(
       try {
         await fn();
       } catch (e) {
-        setError(appErrorFrom(e, intl, kind));
+        setError(toAppError(e, intl, kind));
         setLoading(false);
         void pollPersistError();
         return;
@@ -469,7 +449,7 @@ export function useSessionState(
           setError({ ...loadErrorDisplay(result.data, intl), kind: "replace" });
         }
       } catch (e) {
-        setError(appErrorFrom(e, intl, "replace"));
+        setError(toAppError(e, intl, "replace"));
       } finally {
         setLoading(false);
         void pollPersistError();

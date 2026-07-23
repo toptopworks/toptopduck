@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { ArrowLeft } from "lucide-react";
 
-import { fmtError } from "../../api";
+import { fmtError } from "../../lib/error-presentation";
 import type {
   AppConfig,
   EngineDefaults,
