@@ -100,9 +100,10 @@ function verbKey(kind: SessionFlowKind): CatalogKey {
     case "privacy": return "error.verb.privacy";
     case "ask": return "error.verb.ask";
     default: {
-      // Exhaustiveness guard: mirrors errorVerb in useSessionState so a new
-      // SessionFlowKind member forces a test update here too. The `default:
-      // never` throw enforces this regardless of tsconfig flags.
+      // Exhaustiveness guard: mirrors errorVerb in lib/error-presentation/
+      // app-error so a new SessionFlowKind member forces a test update here
+      // too. The `default: never` throw enforces this regardless of tsconfig
+      // flags.
       const unhandled: never = kind;
       throw new Error(`unhandled SessionFlowKind: ${JSON.stringify(unhandled)}`);
     }
