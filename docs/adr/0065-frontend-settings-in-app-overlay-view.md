@@ -32,3 +32,4 @@
 - **i18n**：设置视图的 header / 导航 / 分类标题走 ADR-0052 catalog（`settings.*` keys），中英双语。
 - **无障碍**：覆盖视图需管理焦点（进入时焦点移到设置视图、退出时还原触发元素），借用 Radix 的 focus-trap 思路（虽不用 Dialog primitive）。
 - **与 ADR-0064 的边界**：0064 定义 profile 的后端模型与多协议；本 ADR 定义承载 profile 管理（及其他偏好）的前端视图形态。两者正交：profile CRUD 的具体交互（可展开卡片列表）属实现细节，不单独立 ADR。
+- **被 ADR-0071 校准**：top bar 因 `ProfileSwitcher`（issue #154）退役精简；日常切换 provider/model 的入口移至对话区 `QuestionBar` 边的 popover。见 ADR-0071。

@@ -37,3 +37,5 @@ ADR-0007 锁单一 Claude + 薄抽象（`Provider` trait），ADR-0019 把 v1 �
 - **app-config provider schema 形状变更**：`ProviderEndpoint{base_url,model}` → `ProviderConfig{profiles:Vec<ProviderProfile>, active_profile:ProfileId}`；`ProfileId` 稳定不可改、`display_name` 可改（对齐 ADR-0037 `reference_name` vs `display_name` 二分）；`format_version` bump v1→v2 标记形状变更，残留 v1 文件 honest-degrade 整体重置（ADR-0038），诊断从 Parse error 提升为 VersionMismatch。
 - **已知收窄风险**：弱模型（Ollama 小模型）对裸 JSON 契约遵守度差，重试率（ADR-0028）可能上升；落地后用重试率指标验证，某模型超标则针对该模型局部引入 tool-calling。
 - **canonical prompt 语言**：结构化契约的 `CAPABILITY_BOUNDARY_PROMPT`（`prompt.rs:108`）为中文 canonical（ADR-0052 layer 4）；openai 协议模型对中文 prompt 遵守度需验证，必要时提供英文 canonical 变体（留后续）。
+- **被 ADR-0070 校准**：profile 配置流程新增 preflight 环节；model 字段选择方式从手填升级为 list models 探测下拉（失败回退手填），profile schema 形状不变（model 仍是字段）。见 ADR-0070。
+- **被 ADR-0071 校准**：model 仍是 profile 字段（不独立化）；对话区切 model 写回 `profile.model`，`live_config` 读法不变；`ProfileSwitcher`（issue #154）退役，日常切换入口移至对话区。见 ADR-0071。
