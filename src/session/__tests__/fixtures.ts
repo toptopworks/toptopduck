@@ -1,0 +1,47 @@
+import type { DatasetDescriptor } from "../../types/dataset";
+import type { ThreadEntry } from "../../types/thread";
+
+// Shared thread fixtures for src/session/__tests__/* tests. Each helper mints
+// a minimal-but-real ThreadEntry / DatasetDescriptor (all required fields, no
+// hand-rolled subset) so type errors surface at compile time, not runtime.
+
+export function src(name: string): DatasetDescriptor {
+  return {
+    reference_name: name,
+    display_name: name,
+    source_path: `/x/${name}.csv`,
+    columns: [{ name: "id", canonical_type: "BIGINT" }],
+    row_count: 1,
+    sample: [["1"]],
+    fingerprint: "ff".repeat(32),
+    rectify: { kind: "NotApplicable" },
+    privacy: { send_samples: true, type_only_columns: [] },
+  };
+}
+
+export function materialized(referenceName: string): ThreadEntry {
+  return {
+    entry: "Turn",
+    data: {
+      question: `q:${referenceName}`,
+      outcome: {
+        kind: "Materialized",
+        data: { dataset: src(referenceName), viz: null, assumption: null, sql: null },
+      },
+    },
+  };
+}
+
+export function textual(body: string): ThreadEntry {
+  return {
+    entry: "Turn",
+    data: {
+      question: "q",
+      outcome: { kind: "Textual", data: { text_kind: "Clarify", body, assumption: null } },
+    },
+  };
+}
+
+export function source(kind: "Added" | "Deleted" | "Replaced", name: string): ThreadEntry {
+  return { entry: "Source", data: { kind, reference_name: name, display_name: name } };
+}
