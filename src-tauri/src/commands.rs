@@ -30,9 +30,9 @@ use tauri::{Emitter, State};
 use crate::app_config::AppConfig;
 use crate::cancel::CancelToken;
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, LoadOutcome, ProfileId, ProfileKeyStatus, ProviderConfig,
-    ProviderConfigView, RemoveSourceError, RowPage, SheetGuidance, ThreadEntry, TurnOutcome,
-    TurnProgress,
+    DatasetDescriptor, DatasetPrivacy, LoadOutcome, ProfileId, ProfileKeyStatus,
+    ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView, RemoveSourceError, RowPage,
+    SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
 };
 use crate::persistence::{list_session_metadata, SaveError, SessionMetadata};
 use crate::provider::live_config::LiveProviderConfig;
@@ -657,6 +657,36 @@ pub fn clear_profile_key(
     let id = ProfileId(profile_id);
     live.clear_profile_key(&id)
         .map_err(StoreCommandError::KeychainFailure)
+}
+
+/// Run a connection preflight against the named profile (ADR-0070, issue
+/// #236). Reads the profile's stored key from the OS keychain by `profile_id`
+/// (ADR-0029 -- the key never crosses IPC) and probes the caller-supplied
+/// endpoint (`protocol` + `base_url` + `model` = the frontend's current edit
+/// values, so a user who edits base_url and re-tests does not have to save
+/// first) via `GET /models` with a minimal-turn ping fallback. Returns the
+/// four-state [`ProfileTestOutcome`] so the frontend renders the result and
+/// feeds the listed models to the model dropdown (the list is NOT persisted --
+/// ADR-0038). Runs off the async/UI thread (the probe is two blocking HTTP
+/// calls up to the 30s ceiling); the only `Err` is a spawn-blocking join
+/// failure -- every probe verdict (including KeyRejected / EndpointUnreachable
+/// / Incompatible) is an `Ok(ProfileTestOutcome)`.
+#[tauri::command]
+pub async fn test_profile(
+    live: State<'_, LiveProviderConfig>,
+    profile_id: String,
+    protocol: Protocol,
+    base_url: String,
+    model: String,
+) -> Result<ProfileTestOutcome, String> {
+    let live = live.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let id = ProfileId(profile_id);
+        let key = live.key_for_profile(&id);
+        crate::provider::preflight::probe(key.as_deref(), protocol, &base_url, &model)
+    })
+    .await
+    .map_err(|e| format!("test_profile task failed: {e}"))
 }
 
 // --- App-level config (issue #53, ADR-0038) --------------------------------

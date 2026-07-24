@@ -3,16 +3,17 @@ import { FormattedMessage } from "react-intl";
 import type { Protocol, ProviderProfile } from "../../types/provider";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
+import { ProviderModelField } from "./ProviderModelField";
 import { RadioGroup, RadioGroupItem } from "../ui/radio-group";
 
 // Endpoint fields for a profile (issue #235, ADR-0071 Consequences): the
 // protocol RadioGroup (shown only when the endpoint is Custom -- a named preset
-// implies its protocol) + base URL + model inputs. Extracted from
+// implies its protocol) + base URL + the model field. Extracted from
 // ProfilesSection so the composer popover (#3) and cold-start guide (#5) can
-// reuse the same endpoint form. The model field is a plain Input in this slice;
-// ADR-0070's list-models dropdown (#2) will swap in at this seam -- the
-// component boundary IS the swap point, so no render-prop slot is added now
-// (YAGNI).
+// reuse the same endpoint form. The model field is the ProviderModelField atom
+// (issue #236, ADR-0070): a hand-typed input that upgrades to a list-models
+// dropdown after a "Test connection" probe, with the four-state classification
+// rendered inline. This component boundary IS the swap point #235 reserved.
 
 type ProviderEndpointFieldsProps = {
   profile: ProviderProfile;
@@ -23,6 +24,11 @@ type ProviderEndpointFieldsProps = {
   // select communicates it instead).
   showProtocolRadio: boolean;
   disabled: boolean;
+  // Mirrored down to ProviderModelField so ESC / Back / Cancel are blocked
+  // while a Test connection IPC is in flight (the returned classification must
+  // not land on an unmounted node). Optional: the field renders without it but
+  // loses the close guard.
+  onBusyChange?: (busy: boolean) => void;
 };
 
 export function ProviderEndpointFields({
@@ -30,6 +36,7 @@ export function ProviderEndpointFields({
   onUpdate,
   showProtocolRadio,
   disabled,
+  onBusyChange,
 }: ProviderEndpointFieldsProps) {
   return (
     <>
@@ -85,15 +92,12 @@ export function ProviderEndpointFields({
         />
       </Label>
 
-      <Label className="grid gap-1">
-        <FormattedMessage id="settings.profiles.model" defaultMessage="Model" />
-        <Input
-          type="text"
-          value={profile.model}
-          onChange={(e) => onUpdate({ model: e.target.value })}
-          disabled={disabled}
-        />
-      </Label>
+      <ProviderModelField
+        profile={profile}
+        onUpdate={onUpdate}
+        disabled={disabled}
+        onBusyChange={onBusyChange}
+      />
     </>
   );
 }

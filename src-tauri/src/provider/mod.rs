@@ -16,6 +16,7 @@ pub mod fake;
 pub mod keychain;
 pub mod live_config;
 pub mod openai;
+pub mod preflight;
 pub mod prompt;
 pub mod reply;
 

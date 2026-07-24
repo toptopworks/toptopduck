@@ -829,3 +829,39 @@ fn profile_key_status_serializes_as_a_flat_object() {
         r#"{"profile_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","has_key":false}"#,
     );
 }
+
+#[test]
+fn profile_test_outcome_serializes_adjacently_tagged() {
+    // ProfileTestOutcome (issue #236, ADR-0070) crosses IPC as the test_profile
+    // return value. Adjacently-tagged like the other IPC enums: Ok nests the
+    // models array under data (empty when only the ping fallback succeeded);
+    // KeyRejected / EndpointUnreachable are unit variants (no data); Incompatible
+    // carries the technical detail string under data. Pin the wire shape
+    // src/types/provider.ts mirrors so a serde drift fails here before the
+    // frontend narrows on `kind`.
+    use toptopduck_lib::ProfileTestOutcome;
+    assert_wire(
+        &ProfileTestOutcome::Ok {
+            models: vec!["claude-sonnet-4-6".into(), "claude-haiku-4-5".into()],
+        },
+        r#"{"kind":"Ok","data":{"models":["claude-sonnet-4-6","claude-haiku-4-5"]}}"#,
+    );
+    assert_wire(
+        &ProfileTestOutcome::Ok { models: vec![] },
+        r#"{"kind":"Ok","data":{"models":[]}}"#,
+    );
+    assert_wire(
+        &ProfileTestOutcome::KeyRejected,
+        r#"{"kind":"KeyRejected"}"#,
+    );
+    assert_wire(
+        &ProfileTestOutcome::EndpointUnreachable,
+        r#"{"kind":"EndpointUnreachable"}"#,
+    );
+    assert_wire(
+        &ProfileTestOutcome::Incompatible {
+            detail: "HTTP 502: bad gateway".into(),
+        },
+        r#"{"kind":"Incompatible","data":{"detail":"HTTP 502: bad gateway"}}"#,
+    );
+}

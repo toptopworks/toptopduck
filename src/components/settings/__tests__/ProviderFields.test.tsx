@@ -3,10 +3,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 
-import { clearProfileKey, setProfileKey } from "../../../api";
-import type { ProviderProfile } from "../../../types/provider";
+import { clearProfileKey, setProfileKey, testProfile } from "../../../api";
+import type { ProfileTestOutcome, ProviderProfile } from "../../../types/provider";
 import { ProviderEndpointFields } from "../ProviderEndpointFields";
 import { ProviderKeyField } from "../ProviderKeyField";
+import { ProviderModelField } from "../ProviderModelField";
 import { ProviderPresetField } from "../ProviderPresetField";
 import {
   PRESET_CUSTOM,
@@ -27,6 +28,7 @@ vi.mock("../../../api", async (importOriginal) => {
     ...actual,
     setProfileKey: vi.fn(),
     clearProfileKey: vi.fn(),
+    testProfile: vi.fn(),
   };
 });
 
@@ -431,5 +433,164 @@ describe("ProviderKeyField (issue #235, ADR-0029)", () => {
       </IntlProvider>,
     );
     expect(view.getByPlaceholderText("Paste key")).toHaveValue("");
+  });
+});
+
+describe("ProviderModelField (issue #236, ADR-0070)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("renders the hand-typed model input + Test connection before any probe", () => {
+    renderSettings(
+      <ProviderModelField profile={baseProfile} onUpdate={vi.fn()} disabled={false} />,
+    );
+    expect(screen.getByLabelText("Model")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Test connection" }),
+    ).toBeInTheDocument();
+    // No dropdown before a successful probe that lists models.
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+  });
+
+  it("Test connection calls testProfile with the current endpoint + flips to dropdown on Ok", async () => {
+    vi.mocked(testProfile).mockResolvedValue({
+      kind: "Ok",
+      data: { models: ["claude-sonnet-4-6", "claude-haiku-4-5"] },
+    });
+    renderSettings(
+      <ProviderModelField profile={baseProfile} onUpdate={vi.fn()} disabled={false} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+    await waitFor(() =>
+      expect(vi.mocked(testProfile)).toHaveBeenCalledWith(
+        "p1",
+        "anthropic",
+        "https://api.anthropic.com",
+        "claude-sonnet-4-6",
+      ),
+    );
+    // The dropdown replaces the input after the probe lists models.
+    await screen.findByRole("combobox", { name: "Model" });
+    // The hand-typed textbox is gone; only the combobox carries "Model" now
+    // (both ride the same <Label>, so distinguish by role, not by label text).
+    expect(screen.queryByRole("textbox", { name: "Model" })).not.toBeInTheDocument();
+    expect(screen.getByText(/2 models available/)).toBeInTheDocument();
+  });
+
+  it("Ok with empty models (ping fallback) keeps the hand-typed input + okPing message", async () => {
+    vi.mocked(testProfile).mockResolvedValue({ kind: "Ok", data: { models: [] } });
+    renderSettings(
+      <ProviderModelField profile={baseProfile} onUpdate={vi.fn()} disabled={false} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+    await screen.findByText(/endpoint responds/);
+    expect(screen.getByLabelText("Model")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+  });
+
+  it("KeyRejected renders the key-rejected message (ADR-0044)", async () => {
+    vi.mocked(testProfile).mockResolvedValue({ kind: "KeyRejected" });
+    renderSettings(
+      <ProviderModelField profile={baseProfile} onUpdate={vi.fn()} disabled={false} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+    await screen.findByText(/Key rejected/);
+  });
+
+  it("EndpointUnreachable renders the unreachable message", async () => {
+    vi.mocked(testProfile).mockResolvedValue({ kind: "EndpointUnreachable" });
+    renderSettings(
+      <ProviderModelField profile={baseProfile} onUpdate={vi.fn()} disabled={false} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+    await screen.findByText(/Could not reach the endpoint/);
+  });
+
+  it("Incompatible renders the summary + the folded technical detail", async () => {
+    vi.mocked(testProfile).mockResolvedValue({
+      kind: "Incompatible",
+      data: { detail: "HTTP 502: bad gateway" },
+    });
+    renderSettings(
+      <ProviderModelField profile={baseProfile} onUpdate={vi.fn()} disabled={false} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+    await screen.findByText(/Incompatible/);
+    expect(screen.getByText("HTTP 502: bad gateway")).toBeInTheDocument();
+  });
+
+  it("onBusyChange mirrors the in-flight IPC state (true during, false after)", async () => {
+    let resolve!: (v: ProfileTestOutcome) => void;
+    vi.mocked(testProfile).mockImplementation(
+      () => new Promise<ProfileTestOutcome>((r) => void (resolve = r)),
+    );
+    const onBusyChange = vi.fn();
+    renderSettings(
+      <ProviderModelField
+        profile={baseProfile}
+        onUpdate={vi.fn()}
+        disabled={false}
+        onBusyChange={onBusyChange}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+    await waitFor(() => expect(onBusyChange).toHaveBeenLastCalledWith(true));
+    resolve({ kind: "Ok", data: { models: ["m"] } });
+    await waitFor(() => expect(onBusyChange).toHaveBeenLastCalledWith(false));
+  });
+
+  it("editing base_url clears the probe result back to the hand-typed input", async () => {
+    vi.mocked(testProfile).mockResolvedValue({
+      kind: "Ok",
+      data: { models: ["claude-sonnet-4-6"] },
+    });
+    const view = render(
+      <IntlProvider locale="en" messages={{}} onError={() => {}}>
+        <ProviderModelField profile={baseProfile} onUpdate={vi.fn()} disabled={false} />
+      </IntlProvider>,
+    );
+    fireEvent.click(view.getByRole("button", { name: "Test connection" }));
+    await view.findByRole("combobox", { name: "Model" });
+    view.rerender(
+      <IntlProvider locale="en" messages={{}} onError={() => {}}>
+        <ProviderModelField
+          profile={{ ...baseProfile, base_url: "https://gw.example/v1" }}
+          onUpdate={vi.fn()}
+          disabled={false}
+        />
+      </IntlProvider>,
+    );
+    expect(view.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(view.getByLabelText("Model")).toBeInTheDocument();
+  });
+
+  it("selecting from the probed dropdown fires onUpdate({ model })", async () => {
+    vi.mocked(testProfile).mockResolvedValue({
+      kind: "Ok",
+      data: { models: ["claude-sonnet-4-6", "claude-haiku-4-5"] },
+    });
+    const onUpdate = vi.fn();
+    renderSettings(
+      <ProviderModelField profile={baseProfile} onUpdate={onUpdate} disabled={false} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+    const select = await screen.findByRole("combobox", { name: "Model" });
+    fireEvent.change(select, { target: { value: "claude-haiku-4-5" } });
+    expect(onUpdate).toHaveBeenLastCalledWith({ model: "claude-haiku-4-5" });
+  });
+
+  it("disables + flips the button label to Testing while a probe is in flight", async () => {
+    let resolve!: (v: ProfileTestOutcome) => void;
+    vi.mocked(testProfile).mockImplementation(
+      () => new Promise<ProfileTestOutcome>((r) => void (resolve = r)),
+    );
+    renderSettings(
+      <ProviderModelField profile={baseProfile} onUpdate={vi.fn()} disabled={false} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+    await screen.findByRole("button", { name: "Testing…" });
+    resolve({ kind: "Ok", data: { models: [] } });
+    await screen.findByRole("button", { name: "Test connection" });
   });
 });

@@ -341,6 +341,9 @@ export function ProfilesSection({
               // match any preset (Custom): a named preset implies its protocol.
               showProtocolRadio={derivedPreset === PRESET_CUSTOM}
               disabled={fieldsDisabled}
+              // The model field's "Test connection" IPC rides the same close
+              // guard as the key IPC (issue #236 ADR-0070 + #153).
+              onBusyChange={onBusyChange}
             />
 
             <ProviderKeyField

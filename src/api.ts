@@ -15,7 +15,13 @@ import type {
   SessionMetadata,
   TurnProgress,
 } from "./types/session";
-import type { ProfileKeyStatus, ProviderConfig, ProviderConfigView } from "./types/provider";
+import type {
+  ProfileKeyStatus,
+  ProfileTestOutcome,
+  ProviderConfig,
+  ProviderConfigView,
+  Protocol,
+} from "./types/provider";
 import type { ThreadEntry, TurnOutcome } from "./types/thread";
 
 // Multi-session addressing (ADR-0056): every session-scoped function takes
@@ -200,6 +206,22 @@ export async function setProfileKey(profileId: string, key: string): Promise<boo
 // can tell the user the key did not come out (ADR-0029 trust root).
 export async function clearProfileKey(profileId: string): Promise<boolean> {
   return invoke<boolean>("clear_profile_key", { profileId });
+}
+
+// Run a connection preflight against the named profile (issue #236, ADR-0070).
+// The backend reads the profile's stored key from the OS keychain by profileId
+// (ADR-0029 -- the key never crosses IPC) and probes the caller-supplied
+// endpoint (the edit form's CURRENT protocol/base_url/model values, so a user
+// who edits base_url and re-tests does not have to save first -- ADR-0070 Why
+// 3). Returns the four-state ProfileTestOutcome classification; the listed
+// models feed the model dropdown (NOT persisted -- ADR-0038).
+export async function testProfile(
+  profileId: string,
+  protocol: Protocol,
+  baseUrl: string,
+  model: string,
+): Promise<ProfileTestOutcome> {
+  return invoke<ProfileTestOutcome>("test_profile", { profileId, protocol, baseUrl, model });
 }
 
 // --- Cross-session persistence (issue #48, ADR-0034/0036) -----------------
