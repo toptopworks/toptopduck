@@ -306,6 +306,46 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
     expect(screen.queryByText("No key")).not.toBeInTheDocument();
   });
 
+  it("a key IPC in flight disables the Test connection button (issue #236 AC)", async () => {
+    // AC: "Test connection button disabled during keyBusy". The key field and
+    // the model field are sibling atoms; ProfilesSection lifts both busy states
+    // into ipcBusy so a key IPC disables the Test button -- otherwise the test
+    // IPC could race a key not yet in the keychain and false-report KeyRejected.
+    let resolveKey!: (v: boolean) => void;
+    vi.mocked(setProfileKey).mockImplementation(
+      () => new Promise<boolean>((r) => void (resolveKey = r)),
+    );
+    renderSettings(
+      <SettingsView
+        appConfig={baseConfig}
+        onCommitAppConfig={vi.fn()}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    await screen.findByText("No key");
+    // Before any IPC, the Test button is enabled.
+    expect(screen.getByRole("button", { name: "Test connection" })).toBeEnabled();
+    // Type a key + click Set key (the default profile is the selected one).
+    fireEvent.change(screen.getByPlaceholderText("sk-ant-api03-…"), {
+      target: { value: "sk-test-236" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Set key" }));
+    // While the key IPC is in flight, the Test button is disabled.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Test connection" }),
+      ).toBeDisabled(),
+    );
+    // Resolving the key IPC re-enables the Test button.
+    resolveKey(true);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Test connection" }),
+      ).toBeEnabled(),
+    );
+  });
+
   it("edits a profile's display name and commits it on save (issue #153)", async () => {
     // AC#3: display_name is the renamable half of the ADR-0037/0064 split
     // (ProfileId stays immutable). The edit form's Display name field patches
