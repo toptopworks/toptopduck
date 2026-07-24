@@ -79,7 +79,7 @@ export function useIngestFlow(
   // Load one source (PRD ingest entrypoint). Routes the LoadOutcome:
   // - Loaded -> generic refresh + clear viewed (a fresh source has no result).
   // - NeedsGuidance -> open the guidance dialog (this hook's state).
-  // - Error -> loadErrorDisplay (ADR-0069 locale catalog), tagged "load".
+  // - Error -> loadErrorDisplay, tagged "load".
   const handleIngest = useCallback(
     async (path: string) => {
       setLoading(true);
@@ -92,8 +92,14 @@ export function useIngestFlow(
           clearForNewSource();
         } else if (result.kind === "NeedsGuidance") {
           setGuidance({ request: result.data, path });
-        } else {
+        } else if (result.kind === "Error") {
           setError({ ...loadErrorDisplay(result.data, intl), kind: "load" });
+        } else {
+          // Exhaustiveness guard: LoadOutcome crosses IPC unchecked, so a
+          // future backend variant must throw at the boundary rather than
+          // silently fall through (mirrors loadErrorDisplay / toAppError).
+          const unhandled: never = result;
+          throw new Error(`unhandled LoadOutcome kind: ${JSON.stringify(unhandled)}`);
         }
       } catch (e) {
         setError(toAppError(e, intl, "load"));
@@ -139,7 +145,7 @@ export function useIngestFlow(
           clearForNewSource();
         } else if (result.kind === "Error") {
           setError({ ...loadErrorDisplay(result.data, intl), kind: "load" });
-        } else {
+        } else if (result.kind === "NeedsGuidance") {
           // NeedsGuidance should not recur after an explicit header pick.
           setError({
             message: intl.formatMessage({
@@ -150,6 +156,10 @@ export function useIngestFlow(
             kind: "load",
             detail: null,
           });
+        } else {
+          // Exhaustiveness guard (see handleIngest above).
+          const unhandled: never = result;
+          throw new Error(`unhandled LoadOutcome kind: ${JSON.stringify(unhandled)}`);
         }
       } catch (e) {
         setError(toAppError(e, intl, "load"));

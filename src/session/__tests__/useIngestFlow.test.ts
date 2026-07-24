@@ -1,4 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
+import { createElement, StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { IntlShape } from "react-intl";
 import { useIngestFlow } from "../useIngestFlow";
@@ -233,6 +234,22 @@ describe("useIngestFlow", () => {
 
       expect(ingestFile).not.toHaveBeenCalled();
       expect(onIngestConsumed).not.toHaveBeenCalled();
+    });
+
+    it("ingests a pending path exactly once under React.StrictMode (dev remount)", async () => {
+      const { deps } = setup();
+      vi.mocked(ingestFile).mockResolvedValue(loaded("result_1"));
+      const onIngestConsumed = vi.fn();
+      // StrictMode dev-only double-invokes effects (mount -> cleanup -> re-run
+      // on the same instance, so useRef state survives). The path-based dedup
+      // must hold across the re-run so the dropped file ingests exactly once.
+      renderHook(({ path }) => useIngestFlow(SID, path, onIngestConsumed, deps), {
+        initialProps: { path: "/drop.csv" as string | null },
+        wrapper: ({ children }) => createElement(StrictMode, null, children),
+      });
+
+      await waitFor(() => expect(ingestFile).toHaveBeenCalledTimes(1));
+      expect(onIngestConsumed).toHaveBeenCalledTimes(1);
     });
   });
 
