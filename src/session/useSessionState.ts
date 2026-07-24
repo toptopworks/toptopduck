@@ -1,11 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useIntl } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   activeDataset,
   conversation,
-  ingestFile,
-  ingestFileGuided,
   listWorkingSet,
   removeActiveSource,
   removeSource,
@@ -17,6 +15,7 @@ import {
 import { toAppError } from "../lib/error-presentation";
 import { loadErrorDisplay } from "../lib/loadErrorDisplay";
 import { sessionKeys } from "./queryKeys";
+import { useIngestFlow } from "./useIngestFlow";
 import { useTurnFlow } from "./useTurnFlow";
 import { useViewedResult } from "./useViewedResult";
 import {
@@ -141,7 +140,6 @@ export function useSessionState(
   } = useViewedResult(thread);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<AppError | null>(null);
-  const [guidance, setGuidance] = useState<{ request: GuidanceRequest; path: string } | null>(null);
   const [pendingActiveDelete, setPendingActiveDelete] =
     useState<DatasetDescriptor | null>(null);
   const [persistError, setPersistError] = useState<SaveError | null>(null);
@@ -201,85 +199,26 @@ export function useSessionState(
     viewed: { markProduced, suppressInit },
   });
 
-  const handleIngest = useCallback(
-    async (path: string) => {
-      setLoading(true);
-      setError(null);
-      try {
-        const result = await ingestFile(sessionId, path);
-        if (result.kind === "Loaded") {
-          await refreshServerState("load");
-          // A freshly-added source has no result yet -> hero / active default.
-          clearForNewSource();
-        } else if (result.kind === "NeedsGuidance") {
-          setGuidance({ request: result.data, path });
-        } else {
-          setError({ ...loadErrorDisplay(result.data, intl), kind: "load" });
-        }
-      } catch (e) {
-        setError(toAppError(e, intl, "load"));
-      } finally {
-        setLoading(false);
-        void pollPersistError();
-      }
+  // Ingest orchestration (handleIngest + handleGuidedSubmit + handleGuidedCancel
+  // + guidance dialog state + cold-start drop consumption) lives in useIngestFlow
+  // (issue #231) -- the ingest domain goes through the GENERIC refreshServerState
+  // on a Loaded outcome (no optimistic thread append, so thread refresh is
+  // harmless), the inverse of useTurnFlow above which must leave thread
+  // un-invalidated. Driven through injected deps; this hook never reaches for
+  // the raw guidance setter or the viewed setter for ingest work.
+  const { guidance, handleIngest, handleGuidedSubmit, handleGuidedCancel } = useIngestFlow(
+    sessionId,
+    pendingIngestPath,
+    onIngestConsumed,
+    {
+      intl,
+      setLoading,
+      setError,
+      refreshServerState,
+      pollPersistError,
+      viewed: { clearForNewSource },
     },
-    [sessionId, refreshServerState, pollPersistError, intl, clearForNewSource],
   );
-
-  // Consume a drop-on-cold-start file (ADR-0061, #81 A1). The shell mints the
-  // session on drop but defers the actual ingest to here -- handleIngest is the
-  // only path that can route a NeedsGuidance (xlsx) result into the guidance
-  // dialog this hook owns. Dedup by path so each distinct dropped file ingests
-  // exactly once while a repeat of the SAME path (a React StrictMode dev
-  // double-invoke, or a remount before the shell clears the prop) is a no-op.
-  // The shell clears the prop via onIngestConsumed once ingest kicks off.
-  const consumedRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!pendingIngestPath) return;
-    if (consumedRef.current === pendingIngestPath) return;
-    consumedRef.current = pendingIngestPath;
-    const path = pendingIngestPath;
-    onIngestConsumed();
-    void handleIngest(path);
-  }, [pendingIngestPath, handleIngest, onIngestConsumed]);
-
-  const handleGuidedSubmit = useCallback(
-    async (sheetGuidance: SheetGuidance[]) => {
-      if (!guidance) return;
-      const { path } = guidance;
-      setLoading(true);
-      setError(null);
-      try {
-        const result = await ingestFileGuided(sessionId, path, sheetGuidance);
-        if (result.kind === "Loaded") {
-          setGuidance(null);
-          await refreshServerState("load");
-          clearForNewSource();
-        } else if (result.kind === "Error") {
-          setError({ ...loadErrorDisplay(result.data, intl), kind: "load" });
-        } else {
-          // NeedsGuidance should not recur after an explicit header pick.
-          setError({
-            message: intl.formatMessage({
-              id: "error.flow.guidedStillNeedsGuidance",
-              defaultMessage:
-                "The worksheet still cannot be rectified; adjust the header selection and retry",
-            }),
-            kind: "load",
-            detail: null,
-          });
-        }
-      } catch (e) {
-        setError(toAppError(e, intl, "load"));
-      } finally {
-        setLoading(false);
-        void pollPersistError();
-      }
-    },
-    [guidance, sessionId, refreshServerState, pollPersistError, intl, clearForNewSource],
-  );
-
-  const handleGuidedCancel = useCallback(() => setGuidance(null), []);
 
   // Rename / privacy / delete share the simple mutation shape: call the API,
   // then refresh. Tagged per-kind so a refusal carries the right prefix.
