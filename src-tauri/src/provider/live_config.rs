@@ -126,6 +126,18 @@ impl LiveProviderConfig {
         Ok(self.keychain.has_key_for(profile_id))
     }
 
+    /// The stored key for the named profile, or `None` when nothing is stored.
+    /// Rust-internal accessor for the connection preflight (ADR-0070): the
+    /// `test_profile` IPC reads the key here (by profile id, never crossing IPC
+    /// -- ADR-0029 invariant 3) and hands it to `provider::preflight::probe`,
+    /// which attaches it to the LLM HTTP call placed from the Rust core. Mirrors
+    /// the active-profile read on `ProviderConfigSource::api_key` but targets
+    /// ANY profile id (the edit form tests the profile being edited, not
+    /// necessarily the active one).
+    pub fn key_for_profile(&self, profile_id: &ProfileId) -> Option<String> {
+        self.keychain.fetch_key_for(profile_id)
+    }
+
     // --- App-config (preferences + endpoint, ADR-0038) -----------------------
 
     /// Load the app-config. On the FIRST launch after the ADR-0038 move (the

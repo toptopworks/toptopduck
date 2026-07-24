@@ -1006,6 +1006,48 @@ pub struct ProfileKeyStatus {
     pub has_key: bool,
 }
 
+/// One connection-preflight outcome (ADR-0070). Returned by the `test_profile`
+/// IPC when the user clicks "Test connection" in the Profiles edit form, after
+/// the Rust core reads the profile's stored key from the OS keychain and probes
+/// the endpoint. Four states along the ADR-0044 axis:
+///
+/// - [`ProfileTestOutcome::Ok`]: the probe succeeded; `models` carries the
+///   model ids listed by `GET /models` (fed to the model dropdown). Empty when
+///   the endpoint answered a minimal turn (ping fallback) but does not implement
+///   `/models` -- the dropdown then falls back to a hand-typed input.
+/// - [`ProfileTestOutcome::KeyRejected`]: no key is stored for the profile, or
+///   the endpoint rejected it (HTTP 401/403). Permanent for the profile -- the
+///   user must configure a valid key (ADR-0044 NotWired).
+/// - [`ProfileTestOutcome::EndpointUnreachable`]: a transport failure (DNS /
+///   TCP / TLS / timeout) -- the endpoint could not be reached at all.
+/// - [`ProfileTestOutcome::Incompatible`]: the endpoint responded (HTTP non-auth
+///   status, or a 200 body that is not a model list) AND a minimal turn ping
+///   also failed for a non-key, non-transport reason -- the endpoint is alive
+///   but does not serve a usable chat/messages contract.
+///
+/// Adjacently-tagged (`#[serde(tag = "kind", content = "data")]`) like the other
+/// IPC enums; the `detail` on `Incompatible` is a technical English string for
+/// the frontend's details fold -- intentionally NOT localized (it stays out of
+/// the ADR-0052 translation catalog; the user-facing label is the locale id).
+/// Mirrored by `src/types/provider.ts` -- the wire shape is pinned by
+/// `tests/ipc_contract.rs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data")]
+pub enum ProfileTestOutcome {
+    /// The probe succeeded. `models` feeds the model dropdown (ADR-0070); empty
+    /// when only the ping fallback succeeded (the endpoint runs turns but does
+    /// not implement `/models`).
+    Ok { models: Vec<String> },
+    /// No key stored, or the endpoint rejected it (HTTP 401/403).
+    KeyRejected,
+    /// Transport failure (DNS / TCP / TLS / timeout) -- endpoint unreachable.
+    EndpointUnreachable,
+    /// The endpoint responded but is not compatible (non-auth HTTP error whose
+    /// body or a failed ping shows it cannot serve the chat/messages contract).
+    /// `detail` is a technical English string for the details fold.
+    Incompatible { detail: String },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

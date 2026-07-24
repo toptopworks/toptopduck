@@ -100,6 +100,17 @@ export function ProfilesSection({
   // The profile id whose delete AlertDialog is open (null = none).
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
+  // Per-profile IPC in-flight state, lifted from the two field atoms so a key
+  // IPC disables the Test button AND a test IPC disables the key buttons
+  // (issue #236 AC: "Test connection button disabled during keyBusy" + the
+  // symmetric guard). The atoms still own their local busy state for their own
+  // UI (button labels, self-disable); this is the cross-atom coordination
+  // layer. Two independent flags -- not one merged setter -- so one atom going
+  // idle cannot clobber the other's still-in-flight state.
+  const [keyBusy, setKeyBusy] = useState(false);
+  const [testBusy, setTestBusy] = useState(false);
+  const ipcBusy = keyBusy || testBusy;
+
   // Stable ref to intl so the mount-time fetch effect can run once ([] deps)
   // instead of re-firing on an intl identity change. useIntl()'s intl is stable
   // per locale, but a locale flip while Settings is open would otherwise refetch
@@ -131,6 +142,16 @@ export function ProfilesSection({
       cancelled = true;
     };
   }, []);
+
+  // Lift the merged IPC in-flight state to the parent's close guard (ESC / Back
+  // / Cancel must not unmount this pane while a key or test IPC is in flight --
+  // the returned result would land on an unmounted node, ADR-0029 trust root).
+  // Each atom reports its own busy state via onBusyChange; this effect merges
+  // them upward. onBusyChange is stable (the parent passes a useCallback), so
+  // this does not churn.
+  useEffect(() => {
+    onBusyChange?.(ipcBusy);
+  }, [ipcBusy, onBusyChange]);
 
   // Keep selectedId valid as the profiles list mutates (create/delete). If the
   // selected id was deleted (or is null once profiles exist), fall back to the
@@ -172,7 +193,11 @@ export function ProfilesSection({
     setConfirmDeleteId(null);
   }
 
-  const fieldsDisabled = saving;
+  // Fields disable on Save (parent commit) OR while any per-profile IPC is in
+  // flight (keyBusy disables the Test button per issue #236 AC; testBusy
+  // symmetrically disables the key buttons). Editing an endpoint mid-IPC would
+  // race the in-flight probe, and the close guard already blocks unmount.
+  const fieldsDisabled = saving || ipcBusy;
   const unnamed = intl.formatMessage({
     id: "settings.profiles.unnamed",
     defaultMessage: "Unnamed profile",
@@ -341,6 +366,10 @@ export function ProfilesSection({
               // match any preset (Custom): a named preset implies its protocol.
               showProtocolRadio={derivedPreset === PRESET_CUSTOM}
               disabled={fieldsDisabled}
+              // The model field's "Test connection" IPC reports its busy state
+              // here (testBusy) so it feeds both the cross-atom disable above
+              // and the merged close guard (issue #236 ADR-0070 + #153).
+              onBusyChange={setTestBusy}
             />
 
             <ProviderKeyField
@@ -354,8 +383,11 @@ export function ProfilesSection({
               // the atom's inline badge here to avoid stating the same fact
               // twice on one screen.
               showBadge={false}
-              disabled={saving}
-              onBusyChange={onBusyChange}
+              // fieldsDisabled (saving || ipcBusy) so a test IPC in flight also
+              // disables the key buttons -- symmetric with keyBusy disabling
+              // Test (issue #236). The atom's own keyBusy still self-disables.
+              disabled={fieldsDisabled}
+              onBusyChange={setKeyBusy}
             />
 
             {selected.id === provider.active_profile ? (
