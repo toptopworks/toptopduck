@@ -227,7 +227,7 @@ export function useSessionState(
   // Ask one question (PRD #1): run one turn -> one ADR-0028 outcome. On
   // success the new turn is optimistically appended to the thread cache
   // (ADR-0051) so the user sees it before the background refetch reconciles;
-  // a Materialized outcome additionally moves viewedResult (产出即选中) and
+  // a Materialized outcome additionally moves viewedResult (auto-selects) and
   // invalidates workingSet + active (a new result_N registered server-side).
   const handleAsk = useCallback(
     async (question: string) => {
@@ -260,7 +260,7 @@ export function useSessionState(
       suppressInit(); // the user has acted; the R5 init is moot.
       if (outcome.kind === "Materialized") {
         const referenceName = outcome.data.dataset.reference_name;
-        // 产出即选中 + pin resets (ADR-0062 R2 "新轮产出 -> pinned=false"):
+        // Auto-selects + pin resets (ADR-0062 R2 "new-turn produce -> pinned=false"):
         // the pin rule is encapsulated in useViewedResult (issue #229).
         markProduced(referenceName);
         // ADR-0051: the optimistic thread append IS the thread truth (the

@@ -5,7 +5,7 @@ import {
   isNonMaterialized,
   lastTurnEntry,
 } from "../workspace";
-import type { DatasetDescriptor } from "../../types/dataset";
+import { materialized, source, src, textual } from "./fixtures";
 import type { ThreadEntry, TurnRecord } from "../../types/thread";
 
 // Unit tests for the pure workspace-derivation helpers (ADR-0051 / ADR-0062
@@ -13,47 +13,6 @@ import type { ThreadEntry, TurnRecord } from "../../types/thread";
 // workspace show right now?" decision hinges on -- testing them in isolation
 // (without React / the IPC mock layer) pins the three-state rule + the truth-
 // source split (thread = turn payload truth) precisely.
-
-function src(name: string): DatasetDescriptor {
-  return {
-    reference_name: name,
-    display_name: name,
-    source_path: `/x/${name}.csv`,
-    columns: [{ name: "id", canonical_type: "BIGINT" }],
-    row_count: 1,
-    sample: [["1"]],
-    fingerprint: "ff".repeat(32),
-    rectify: { kind: "NotApplicable" },
-    privacy: { send_samples: true, type_only_columns: [] },
-  };
-}
-
-function materialized(referenceName: string): ThreadEntry {
-  return {
-    entry: "Turn",
-    data: {
-      question: `q:${referenceName}`,
-      outcome: {
-        kind: "Materialized",
-        data: { dataset: src(referenceName), viz: null, assumption: null, sql: null },
-      },
-    },
-  };
-}
-
-function textual(body: string): ThreadEntry {
-  return {
-    entry: "Turn",
-    data: {
-      question: "q",
-      outcome: { kind: "Textual", data: { text_kind: "Clarify", body, assumption: null } },
-    },
-  };
-}
-
-function source(kind: "Added" | "Deleted" | "Replaced", name: string): ThreadEntry {
-  return { entry: "Source", data: { kind, reference_name: name, display_name: name } };
-}
 
 describe("lastTurnEntry / isNonMaterialized", () => {
   it("returns null for an empty thread", () => {

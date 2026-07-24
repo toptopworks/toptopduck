@@ -26,7 +26,7 @@ export interface UseViewedResult {
   pinnedToHistory: boolean;
   /** Rail click on a Materialized result (ADR-0047 + ADR-0062 R2 pin rule). */
   selectResult: (referenceName: string) => void;
-  /** Turn Materialized "产出即选中": view follows, pin resets to false (ADR-0062 R2). */
+  /** Turn Materialized auto-selects: view follows, pin resets to false (ADR-0062 R2). */
   markProduced: (referenceName: string) => void;
   /** Ingest / guided Loaded: a fresh source has no result yet -> hero (ADR-0062 R2). */
   clearForNewSource: () => void;
@@ -76,7 +76,7 @@ export function useViewedResult(thread: ThreadEntry[]): UseViewedResult {
     [thread],
   );
 
-  // Turn Materialized "产出即选中" (ADR-0062 R2 "新轮产出 -> pinned=false"): the
+  // Turn Materialized auto-selects (ADR-0062 R2 "new-turn produce -> pinned=false"): the
   // just-produced result becomes the viewed result and pin resets, so a prior
   // pinned history view never outlives a new turn.
   const markProduced = useCallback((referenceName: string) => {
@@ -85,7 +85,7 @@ export function useViewedResult(thread: ThreadEntry[]): UseViewedResult {
   }, []);
 
   // A freshly added source has no result yet -> hero / active default (ADR-0062
-  // R2 "源已加载未提问" hero extension). Pin resets so a stale history pin does
+  // R2 "source loaded, not yet asked" hero extension). Pin resets so a stale history pin does
   // not survive a source load.
   const clearForNewSource = useCallback(() => {
     setViewedResult(null);

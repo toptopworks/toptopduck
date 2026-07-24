@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { useViewedResult } from "../useViewedResult";
-import type { DatasetDescriptor } from "../../types/dataset";
+import { materialized, textual } from "./fixtures";
 import type { ThreadEntry } from "../../types/thread";
 
 // Issue #229: useViewedResult owns the viewedResult domain -- the state, the
@@ -12,43 +12,6 @@ import type { ThreadEntry } from "../../types/thread";
 // These tests pin the three behaviors the parent used to inline -- R5 resume
 // landing, the selectResult pin rule, and the pin=false resets -- in isolation
 // from react-query / intl (the hook takes the thread as a plain argument).
-
-function src(name: string): DatasetDescriptor {
-  return {
-    reference_name: name,
-    display_name: name,
-    source_path: `/x/${name}.csv`,
-    columns: [{ name: "id", canonical_type: "BIGINT" }],
-    row_count: 1,
-    sample: [["1"]],
-    fingerprint: "ff".repeat(32),
-    rectify: { kind: "NotApplicable" },
-    privacy: { send_samples: true, type_only_columns: [] },
-  };
-}
-
-function materialized(referenceName: string): ThreadEntry {
-  return {
-    entry: "Turn",
-    data: {
-      question: `q:${referenceName}`,
-      outcome: {
-        kind: "Materialized",
-        data: { dataset: src(referenceName), viz: null, assumption: null, sql: null },
-      },
-    },
-  };
-}
-
-function textual(body: string): ThreadEntry {
-  return {
-    entry: "Turn",
-    data: {
-      question: "q",
-      outcome: { kind: "Textual", data: { text_kind: "Clarify", body, assumption: null } },
-    },
-  };
-}
 
 describe("useViewedResult", () => {
   describe("R5 resume init (ADR-0062 R5)", () => {
@@ -119,7 +82,7 @@ describe("useViewedResult", () => {
   });
 
   describe("markProduced / clearForNewSource (pin resets to false)", () => {
-    it("markProduced selects the just-produced result with pin=false (产出即选中)", () => {
+    it("markProduced selects the just-produced result with pin=false", () => {
       // Start pinned: select a non-last Materialized so pinnedToHistory=true.
       const { result } = renderHook(() =>
         useViewedResult([materialized("result_1"), materialized("result_2")]),
@@ -133,7 +96,7 @@ describe("useViewedResult", () => {
       expect(result.current.pinnedToHistory).toBe(false);
     });
 
-    it("clearForNewSource resets viewedResult to null with pin=false (源已加载未提问 -> hero)", () => {
+    it("clearForNewSource resets viewedResult to null with pin=false", () => {
       const { result } = renderHook(() =>
         useViewedResult([materialized("result_1"), textual("q")]),
       );
