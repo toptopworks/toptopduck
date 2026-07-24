@@ -333,6 +333,80 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
     expect(committed.provider.profiles[0].id).toBe("default");
   });
 
+  it("selecting a provider preset writes its endpoint onto the profile (issue #235, ADR-0038)", async () => {
+    // The preset dropdown is a derived view of the endpoint, but selecting a
+    // named preset is the one direction that WRITES: onSelectPreset applies the
+    // preset's protocol + base_url + default_model to the selected profile via
+    // updateProfile. Pins the ProfilesSection orchestration the atom test only
+    // stubs -- a regression that drops a field (e.g. forgets model) would leave
+    // the input showing the old value.
+    renderSettings(
+      <SettingsView
+        appConfig={baseConfig}
+        onCommitAppConfig={vi.fn()}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    // The default profile (Anthropic) is selected; its endpoint matches the
+    // anthropic preset so the protocol RadioGroup is hidden (a named preset
+    // implies its protocol).
+    await screen.findByLabelText("Base URL");
+    expect(
+      screen.queryByRole("radio", { name: /Anthropic \(Messages API/ }),
+    ).not.toBeInTheDocument();
+    // Switch to the GLM preset; its endpoint lands on the profile.
+    fireEvent.change(screen.getByRole("combobox", { name: "Provider preset" }), {
+      target: { value: "glm" },
+    });
+    expect(screen.getByLabelText("Base URL")).toHaveValue(
+      "https://open.bigmodel.cn/api/paas/v4",
+    );
+    expect(screen.getByLabelText("Model")).toHaveValue("glm-4");
+    // The RadioGroup stays hidden: GLM is a named preset, so derivation still
+    // resolves (protocol flipped to openai AND base_url matches -- derivePresetId
+    // matches both axes together).
+    expect(
+      screen.queryByRole("radio", { name: /Anthropic \(Messages API/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hand-editing base URL flips the readout to Custom + reveals the protocol RadioGroup (issue #235, ADR-0038)", async () => {
+    // The reverse direction of derivation: editing base URL away from any preset
+    // value makes derivePresetId return Custom, which both switches the combobox
+    // readout to "Custom" AND shows the protocol RadioGroup (a custom endpoint
+    // needs its protocol picked by hand). Pins the ADR-0038 invariant that the
+    // dropdown is a DERIVED view (no stored preset_id) at the composition layer
+    // the pure-function test cannot reach.
+    renderSettings(
+      <SettingsView
+        appConfig={baseConfig}
+        onCommitAppConfig={vi.fn()}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    await screen.findByLabelText("Base URL");
+    // The default profile starts on the anthropic preset (named -> no RadioGroup).
+    expect(
+      screen.queryByRole("radio", { name: /Anthropic \(Messages API/ }),
+    ).not.toBeInTheDocument();
+    // Edit base URL to a non-preset endpoint; the combobox reads Custom + the
+    // protocol RadioGroup appears so the user picks the wire protocol.
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "https://my-gw.example/v1" },
+    });
+    expect(screen.getByRole("combobox", { name: "Provider preset" })).toHaveValue(
+      "custom",
+    );
+    expect(
+      screen.getByRole("radio", { name: /Anthropic \(Messages API/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: /OpenAI \(Chat Completions/ }),
+    ).toBeInTheDocument();
+  });
+
   it("clear key calls clearProfileKey and flips the badge to No key (issue #153)", async () => {
     // AC#4: clear is the symmetric immediate per-profile IPC (ADR-0029 one-shot);
     // the returned bool (false on success) flips the has_key overlay so the badge

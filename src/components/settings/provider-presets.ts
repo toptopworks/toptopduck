@@ -47,7 +47,7 @@ export interface ProviderPreset {
   key_placeholder: string;
 }
 
-// The seven provider presets (issue #235 AC#1). Order is the display order of
+// The seven provider presets (issue #235). Order is the display order of
 // the dropdown options. Anthropic first (the project's default-protocol
 // provider), then the openai-compatible clouds, then the Ollama loopback last.
 export const PROVIDER_PRESETS: readonly ProviderPreset[] = [

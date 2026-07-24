@@ -177,6 +177,13 @@ export function ProfilesSection({
     id: "settings.profiles.unnamed",
     defaultMessage: "Unnamed profile",
   });
+  // The profile targeted by the open delete AlertDialog (undefined when no
+  // confirm is open). Pre-computed so the confirm body reads a plain name
+  // instead of a JSX IIFE at the render site.
+  const deleteTarget = confirmDeleteId
+    ? provider.profiles.find((p) => p.id === confirmDeleteId)
+    : undefined;
+  const deleteTargetName = deleteTarget?.display_name.trim() || unnamed;
 
   return (
     <div className="profiles-master-detail gap-6">
@@ -396,17 +403,11 @@ export function ProfilesSection({
                 />
               </AlertDialogTitle>
               <AlertDialogDescription>
-                {(() => {
-                  const target = provider.profiles.find((p) => p.id === confirmDeleteId);
-                  const name = target?.display_name.trim() || unnamed;
-                  return (
-                    <FormattedMessage
-                      id="settings.profiles.deleteConfirm.body"
-                      defaultMessage="This removes “{name}” from the profile list. The change takes effect when you save settings."
-                      values={{ name }}
-                    />
-                  );
-                })()}
+                <FormattedMessage
+                  id="settings.profiles.deleteConfirm.body"
+                  defaultMessage="This removes “{name}” from the profile list. The change takes effect when you save settings."
+                  values={{ name: deleteTargetName }}
+                />
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>

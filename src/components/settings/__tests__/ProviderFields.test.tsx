@@ -65,7 +65,7 @@ function KeyFieldHarness({
   );
 }
 
-describe("provider-presets catalog (issue #235 AC#1)", () => {
+describe("provider-presets catalog (issue #235)", () => {
   it("has exactly 7 presets in the spec order", () => {
     expect(PROVIDER_PRESETS.map((p) => p.id)).toEqual([
       "anthropic",
