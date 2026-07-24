@@ -129,11 +129,8 @@ export function useSessionState(
   const thread = threadQuery.data ?? EMPTY_THREAD;
 
   // --- Client UI state -----------------------------------------------------
-  // viewedResult domain (state + ADR-0062 R5 resume init + R2 pin rule) lives
-  // in useViewedResult (issue #229): the parent drives it through semantic
-  // methods (markProduced / clearForNewSource / selectResult / suppressInit)
-  // and never touches a raw setter; the pin rule reads from one module. The
-  // workspaceContent derivation stays here (cross-domain view fusion below).
+  // viewedResult domain lives in useViewedResult (issue #229) -- see its header
+  // for the boundary. workspaceContent derivation stays here (fusion below).
   const {
     viewedResult,
     pinnedToHistory,

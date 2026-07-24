@@ -69,7 +69,7 @@ describe("deriveWorkspaceContent (ADR-0062 R2 three-state)", () => {
   it("shows hero when there is no viewed result and no non-materialized last turn", () => {
     expect(deriveWorkspaceContent([], null, false, new Map())).toEqual({ kind: "hero" });
     // A last Materialized turn with viewedResult null also -> hero (the user
-    // has not opened the result pane; R2 "末轮 A 未产出" leg).
+    // has not opened the result pane; R2 "last-turn Materialized, no view" leg).
     expect(deriveWorkspaceContent([materialized("result_1")], null, false, new Map())).toEqual({
       kind: "hero",
     });
@@ -86,8 +86,8 @@ describe("deriveWorkspaceContent (ADR-0062 R2 three-state)", () => {
 
   it("overrides the last-turn text when the user pins to a history result", () => {
     // Last turn is a Clarify (would show textual card), but the user pinned to
-    // result_1 -> the viewed result wins (ADR-0062 R2 "末轮 B/C/D 时 pin 让
-    // viewedResult 压过末轮文本").
+    // result_1 -> the viewed result wins (ADR-0062 R2: a pin during a B/C/D
+    // last turn lets viewedResult override the textual card).
     const thread = [materialized("result_1"), textual("which name?")];
     const content = deriveWorkspaceContent(
       thread,

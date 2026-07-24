@@ -4,14 +4,11 @@ import { useViewedResult } from "../useViewedResult";
 import { materialized, textual } from "./fixtures";
 import type { ThreadEntry } from "../../types/thread";
 
-// Issue #229: useViewedResult owns the viewedResult domain -- the state, the
-// ADR-0062 R5 resume init, and the R2 pin rule -- collapsed out of
-// useSessionState so the parent's turn/ingest flows drive it through semantic
-// methods (markProduced / clearForNewSource / selectResult / suppressInit)
-// instead of raw setViewedResult / setPinnedToHistory / a shared viewedInitRef.
-// These tests pin the three behaviors the parent used to inline -- R5 resume
-// landing, the selectResult pin rule, and the pin=false resets -- in isolation
-// from react-query / intl (the hook takes the thread as a plain argument).
+// Tests for useViewedResult (issue #229) -- see useViewedResult.ts for the
+// domain boundary. These pin the three behaviors the parent used to inline --
+// R5 resume landing, the selectResult pin rule, and the pin=false resets -- in
+// isolation from react-query / intl (the hook takes the thread as a plain
+// argument).
 
 describe("useViewedResult", () => {
   describe("R5 resume init (ADR-0062 R5)", () => {

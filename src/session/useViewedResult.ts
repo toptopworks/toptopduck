@@ -2,24 +2,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { lastTurnEntry, type ViewedResult } from "./workspace";
 import type { ThreadEntry } from "../types/thread";
 
-// The viewedResult domain, collapsed out of useSessionState (issue #229, first
-// slice of the three-cut deepening). Owning the state + the ADR-0062 R5 resume
-// init + the R2 pin rule in ONE module means the parent's turn / ingest flows
-// drive it through SEMANTIC methods (markProduced / clearForNewSource /
-// selectResult / suppressInit) and never touch a raw setViewedResult /
-// setPinnedToHistory / the shared viewedInitRef. The pin rule (ADR-0062 R2 --
-// "non-last Materialized pins, last Materialized unpins, new turn resets")
-// reads from exactly one place now instead of being scattered across three
-// call sites. The boundary is chosen by STATE OWNERSHIP (viewedResult +
-// pinnedToHistory travel together), not by action domain -- this keeps the
-// shared viewedInitRef (R5 init + handleAsk suppress) inside one hook instead
-// of severing the share.
+// The viewedResult domain (state + ADR-0062 R5 resume init + R2 pin rule),
+// extracted from useSessionState (issue #229). The parent drives it through
+// the four semantic methods below and never touches the raw setters or
+// viewedInitRef, so the pin rule reads from one module, not three call sites.
+// Boundary is STATE OWNERSHIP (viewedResult + pinnedToHistory travel
+// together), not action domain -- the shared viewedInitRef (R5 init +
+// handleAsk suppress) stays inside one hook.
 //
-// Injected dependency: `thread` -- both R5 (scan for the last Materialized on
-// resume) and the selectResult pin test (is the clicked ref the last
-// Materialized?) read the thread. The cross-domain workspaceContent derivation
-// stays in the parent (it fuses thread + viewed + the working-set stale map),
-// so this hook does not take staleByReference.
+// `thread` is injected: R5 scans it for the last Materialized on resume, and
+// selectResult tests "is the clicked ref the last Materialized?" against it.
+// The workspaceContent derivation stays in the parent (it fuses thread +
+// viewed + the working-set stale map), so this hook takes no staleByReference.
 
 export interface UseViewedResult {
   viewedResult: ViewedResult | null;
