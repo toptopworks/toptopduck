@@ -200,6 +200,102 @@ describe("useAppConfigState", () => {
     expect(result.current.appConfig?.provider.active_profile).toBe("other");
   });
 
+  // --- switchActiveProfileModel (issue #238, ADR-0071) ---------------------
+  // Sibling action to switchActiveProfile: writes profile.model onto the ACTIVE
+  // profile via commitAppConfig (model is per-profile, not a global -- ADR-0064).
+  // No refreshKeyStatus kick: the profile id is unchanged, so the keychain slot
+  // the header indicator reads is unchanged (ADR-0029).
+
+  it("switchActiveProfileModel is a no-op before app-config resolves (null guard)", async () => {
+    const { result, refreshKeyStatus } = renderAppConfigState();
+    expect(result.current.appConfig).toBeNull();
+    await act(async () => {
+      await result.current.switchActiveProfileModel("any-model");
+    });
+    expect(setAppConfig).not.toHaveBeenCalled();
+    expect(refreshKeyStatus).toHaveBeenCalledTimes(1); // mount-only
+  });
+
+  it("switchActiveProfileModel is a no-op when the model matches", async () => {
+    const cfg = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
+    vi.mocked(getAppConfig).mockResolvedValue(cfg);
+    const { result, refreshKeyStatus } = renderAppConfigState();
+    await waitFor(() => expect(result.current.appConfig).toBe(cfg));
+    // The active profile "default" already has model "claude-sonnet-4-6".
+    await act(async () => {
+      await result.current.switchActiveProfileModel("claude-sonnet-4-6");
+    });
+    expect(setAppConfig).not.toHaveBeenCalled();
+    expect(refreshKeyStatus).toHaveBeenCalledTimes(1); // mount-only
+  });
+
+  it("switchActiveProfileModel patches only the active profile's model (ADR-0071)", async () => {
+    // Two profiles so the immutability + active-only assertions are meaningful:
+    // only "default" (active) gets the new model; "glm" is untouched, and the
+    // active pointer does NOT move (ADR-0064: model is per-profile).
+    const cfg = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
+    const twoProfileCfg: AppConfig = {
+      ...cfg,
+      provider: {
+        active_profile: "default",
+        profiles: [
+          cfg.provider.profiles[0],
+          {
+            id: "glm",
+            display_name: "GLM",
+            protocol: "openai",
+            base_url: "https://open.bigmodel.cn/api/paas/v4",
+            model: "glm-4",
+          },
+        ],
+      },
+    };
+    vi.mocked(getAppConfig).mockResolvedValue(twoProfileCfg);
+    const { result, refreshKeyStatus } = renderAppConfigState();
+    await waitFor(() => expect(result.current.appConfig).toBe(twoProfileCfg));
+
+    await act(async () => {
+      await result.current.switchActiveProfileModel("claude-haiku-4-5");
+    });
+
+    expect(setAppConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: expect.objectContaining({
+          active_profile: "default", // unchanged
+          profiles: [
+            expect.objectContaining({ id: "default", model: "claude-haiku-4-5" }),
+            expect.objectContaining({ id: "glm", model: "glm-4" }), // untouched
+          ],
+        }),
+      }),
+    );
+    // The optimistic state flipped to the new model on the active profile.
+    const written = vi.mocked(setAppConfig).mock.calls.at(-1)?.[0];
+    expect(written?.provider.profiles).toHaveLength(2);
+    // A model swap does NOT touch the keychain slot -> no refreshKeyStatus kick
+    // beyond the mount-only one (contrast switchActiveProfile's 2-kick happy path).
+    expect(refreshKeyStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("switchActiveProfileModel surfaces a reject via setShellError (no rollback)", async () => {
+    const cfg = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
+    vi.mocked(getAppConfig).mockResolvedValue(cfg);
+    vi.mocked(setAppConfig).mockRejectedValueOnce(new Error("ipc down"));
+    const { result, setShellError } = renderAppConfigState();
+    await waitFor(() => expect(result.current.appConfig).toBe(cfg));
+
+    await act(async () => {
+      await result.current.switchActiveProfileModel("claude-haiku-4-5");
+    });
+
+    expect(setShellError).toHaveBeenCalledTimes(1);
+    // Optimistic write does NOT roll back (ADR-0068): the active profile keeps
+    // the new model even though the IPC failed.
+    expect(result.current.appConfig?.provider.profiles[0].model).toBe(
+      "claude-haiku-4-5",
+    );
+  });
+
   it("toggleSidebarCollapse flips sidebar state + persists both shell prefs (ADR-0054)", async () => {
     const cfg = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
     vi.mocked(getAppConfig).mockResolvedValue(cfg);

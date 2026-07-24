@@ -77,6 +77,7 @@ export default function App() {
     intl,
     commitAppConfig,
     switchActiveProfile,
+    switchActiveProfileModel,
     sidebarCollapsed,
     railCollapsed,
     toggleSidebarCollapse,
@@ -292,6 +293,23 @@ export default function App() {
                         sessionId={s.sid}
                         pendingIngestPath={s.pendingIngestPath}
                         onIngestConsumed={() => clearPendingIngest(s.sid)}
+                        providerPicker={
+                          // ADR-0071 (issue #238): the composer provider/model
+                          // picker is app-level state (active profile + writes +
+                          // the settings-open path) rendered at each session's
+                          // QuestionBar edge. Absent until app-config resolves;
+                          // the picker renders only in the visible pane but is
+                          // mounted per keep-alive session like QuestionBar.
+                          appConfig
+                            ? {
+                                provider: appConfig.provider,
+                                onSwitchActive: (id) => void switchActiveProfile(id),
+                                onSwitchModel: (model) =>
+                                  void switchActiveProfileModel(model),
+                                onOpenSettings: () => setSettingsOpen(true),
+                              }
+                            : undefined
+                        }
                       />
                     </ErrorBoundary>
                   </div>

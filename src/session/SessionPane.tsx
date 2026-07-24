@@ -10,6 +10,10 @@ import { ErrorBoundary } from "../components/common/ErrorBoundary";
 import { FileDropzone } from "../components/dataset/FileDropzone";
 import { GuidedLoadDialog } from "../components/dataset/GuidedLoadDialog";
 import { QuestionBar } from "../components/thread/QuestionBar";
+import {
+  ComposerProviderPicker,
+  type ComposerProviderPickerProps,
+} from "../components/thread/ComposerProviderPicker";
 import { ResultView } from "../components/thread/ResultView";
 import { TechnicalDetailsFold } from "../components/common/TechnicalDetailsFold";
 import { Thread } from "../components/thread/Thread";
@@ -38,9 +42,15 @@ interface SessionPaneProps {
   /** Shell callback after the pending ingest is kicked off, so OpenSession is
    *  cleared and a remount cannot re-ingest (#81 A1). */
   onIngestConsumed: () => void;
+  /** App-level provider/model picker rendered at the QuestionBar edge
+   *  (ADR-0071, issue #238). Optional because it depends on app-config having
+   *  resolved (App passes it only when appConfig is non-null); absent, the
+   *  QuestionBar renders alone. Bundled as one slot so the all-or-nothing
+   *  render stays a single guard. */
+  providerPicker?: ComposerProviderPickerProps;
 }
 
-export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: SessionPaneProps) {
+export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, providerPicker }: SessionPaneProps) {
   const s = useSessionState(sessionId, pendingIngestPath, onIngestConsumed);
   const intl = useIntl();
   const persistDetail = s.persistError ? errorDetail(s.persistError) : null;
@@ -235,13 +245,22 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed }: 
       </section>
 
       {/* --- QuestionBar (ADR-0062 R1: spans rail + workspace only) --------- */}
-      <div className="session-questionbar">
-        <QuestionBar
-          onSubmit={s.handleAsk}
-          onCancel={s.handleCancel}
-          loading={s.loading}
-          phase={s.phase}
-        />
+      {/* ADR-0071 (issue #238): the composer provider/model picker sits at the
+          QuestionBar edge. It is app-level state rendered per-session (only the
+          active pane is visible); the bundle is undefined until app-config
+          resolves, in which case the QuestionBar renders alone. The row is a
+          flex (utility on the grid-placement chrome) so the fixed-width trigger
+          sits beside the flex-1 QuestionBar. */}
+      <div className="session-questionbar flex items-center gap-2">
+        {providerPicker && <ComposerProviderPicker {...providerPicker} />}
+        <div className="flex-1 min-w-0">
+          <QuestionBar
+            onSubmit={s.handleAsk}
+            onCancel={s.handleCancel}
+            loading={s.loading}
+            phase={s.phase}
+          />
+        </div>
       </div>
 
       {/* --- Dialogs (guidance + active-source delete) ---------------------- */}
