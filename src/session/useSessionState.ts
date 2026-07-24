@@ -81,8 +81,10 @@ export interface UseSessionState {
   guidance: { request: GuidanceRequest; path: string } | null;
   pendingActiveDelete: DatasetDescriptor | null;
   // Actions.
-  handleAsk: (question: string) => void;
-  handleCancel: () => void;
+  // Mirrors UseTurnFlow (async -> Promise<void>, honest + awaitable); the
+  // QuestionBar consumer accepts it via void-return covariance.
+  handleAsk: (question: string) => Promise<void>;
+  handleCancel: () => Promise<void>;
   handleIngest: (path: string) => void;
   handleGuidedSubmit: (sheetGuidance: SheetGuidance[]) => void;
   handleGuidedCancel: () => void;

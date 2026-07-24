@@ -43,8 +43,12 @@ export interface UseTurnFlow {
   /** The in-flight turn's discrete phase (ADR-0059): Thinking/Querying with a
    *  1-based attempt. null when no turn is running. Client UI state only. */
   phase: TurnPhase | null;
-  handleAsk: (question: string) => void;
-  handleCancel: () => void;
+  // Declared Promise<void> (not void) so the contract reflects the async
+  // implementation: callers can await/.catch to chain post-ask work. Fire-
+  // and-forget callers (QuestionBar onSubmit/onCancel) still accept it via
+  // TypeScript's void-return covariance.
+  handleAsk: (question: string) => Promise<void>;
+  handleCancel: () => Promise<void>;
 }
 
 export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFlow {
@@ -124,23 +128,22 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
         // Auto-selects + pin resets (ADR-0062 R2 "new-turn produce -> pinned=false"):
         // the pin rule is encapsulated in useViewedResult (issue #229).
         markProduced(referenceName);
-        // ADR-0051: the optimistic thread append IS the thread truth (the
-        // outcome object is the same shape the backend recorded), so the thread
-        // query is NOT invalidated -- invalidating would wipe the appended entry
-        // against a stale/empty refetch. Only workingSet + active change (a new
-        // result_N registered server-side + active may have moved).
-        // Guarded so a refresh failure surfaces as a tagged error instead of
-        // skipping setLoading(false) below (which would lock QuestionBar
-        // forever). Mirrors refreshServerState's "saved but refresh failed"
-        // contract; thread stays un-invalidated to preserve the optimistic
-        // append.
+        // Only workingSet + active change here (a new result_N registered
+        // server-side + active may have moved); thread stays un-invalidated
+        // (ADR-0051) -- see the hook header for the why. The try/catch guard
+        // surfaces a refresh failure as a tagged error instead of skipping
+        // setLoading(false) below (would lock QuestionBar forever); mirrors
+        // refreshServerState's "saved but refresh failed" contract.
         try {
           await Promise.all([
             queryClient.invalidateQueries({ queryKey: sessionKeys.workingSet(sessionId) }),
             queryClient.invalidateQueries({ queryKey: sessionKeys.active(sessionId) }),
           ]);
-        } catch (refreshErr) {
-          setError(toAppError(refreshErr, intl, "ask", { refreshFailed: true }));
+        } catch (invalidateErr) {
+          // invalidateErr because this try wraps invalidateQueries (workingSet +
+          // active); the refreshFailed option stays -- it selects toAppError's
+          // user-facing "saved but refreshing..." prefix (ADR-0069), not the impl.
+          setError(toAppError(invalidateErr, intl, "ask", { refreshFailed: true }));
         }
       }
       // Textual / Failed / Cancelled: no working-set change; the optimistic
@@ -157,6 +160,11 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
     try {
       await cancelQuery(sessionId);
     } catch (e) {
+      // Cancel owns only the error surface, not phase/loading. Those clear via
+      // handleAsk's lifecycle once the in-flight ask settles: a successful cancel
+      // lands a Cancelled outcome -> handleAsk's finally clears phase + its tail
+      // clears loading. A cancel REJECT means the turn may still be running, so
+      // leaving loading=true is the honest state, not a stuck bug.
       setError(toAppError(e, intl, "ask"));
     }
   }, [sessionId, intl, setError]);

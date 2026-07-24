@@ -166,6 +166,24 @@ describe("useTurnFlow", () => {
       });
     });
 
+    it("appends even when the thread cache has no prior entry (first ask, old===undefined)", async () => {
+      const { queryClient, deps } = setup();
+      // No setQueryData seed: the thread query has not resolved yet (first ask
+      // on a cold session), so setQueryData's updater receives undefined. The
+      // append must mint the initial [newEntry] array via the `old ? ... :`
+      // branch, not crash reading old.length.
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      vi.mocked(askQuestion).mockResolvedValue(textualOutcome("answer"));
+
+      await act(async () => {
+        await result.current.handleAsk("q");
+      });
+
+      const thread = queryClient.getQueryData<unknown[]>(sessionKeys.thread(SID));
+      expect(thread).toHaveLength(1);
+      expect(thread?.[0]).toMatchObject({ entry: "Turn" });
+    });
+
     it("invalidates workingSet + active on a Materialized outcome", async () => {
       const { invalidateSpy, deps } = setup();
       const { result } = renderHook(() => useTurnFlow(SID, deps));
