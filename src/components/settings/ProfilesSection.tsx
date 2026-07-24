@@ -1,15 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 
-import { clearProfileKey, listProviderProfiles, setProfileKey } from "../../api";
+import { listProviderProfiles } from "../../api";
 import { fmtError } from "../../lib/error-presentation";
-import type { Protocol, ProviderConfig, ProviderProfile } from "../../types/provider";
+import type { ProviderConfig, ProviderProfile } from "../../types/provider";
 import { cn } from "../../lib/utils";
-import { Badge } from "../ui/badge";
-import { Button } from "../ui/button";
-import { Input } from "../ui/input";
-import { Label } from "../ui/label";
-import { RadioGroup, RadioGroupItem } from "../ui/radio-group";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -20,15 +15,25 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../ui/alert-dialog";
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { Input } from "../ui/input";
+import { Label } from "../ui/label";
+import { ProviderEndpointFields } from "./ProviderEndpointFields";
+import { ProviderKeyField } from "./ProviderKeyField";
+import { ProviderPresetField } from "./ProviderPresetField";
+import { PRESET_CUSTOM, derivePresetId, findPreset } from "./provider-presets";
 
 // Profiles pane (issue #153, ADR-0064/0065). Master-detail: the left column
 // lists every profile (display name + active badge + has_key badge), the right
-// column is the selected profile's edit form (protocol / display_name /
-// base_url / model + per-profile key set/clear). CRUD mutates the `provider`
-// config held by the parent (SettingsView) -- those changes land on Save as one
-// atomic app-config write. Key set/clear is IMMEDIATE (a one-shot IPC into the
-// OS keychain, ADR-0029) -- it never rides the app-config write, since the key
-// must never enter app-config. The frontend learns only booleans.
+// column is the selected profile's edit form. The form is composed of three DRY
+// field atoms (issue #235, ADR-0071 Consequences): ProviderPresetField (the
+// endpoint template picker) + ProviderEndpointFields (protocol/base_url/model)
+// + ProviderKeyField (key input + set/clear + badge). CRUD mutates the
+// `provider` config held by the parent (SettingsView) -- those changes land on
+// Save as one atomic app-config write. Key set/clear is IMMEDIATE (a one-shot
+// IPC into the OS keychain, ADR-0029) -- it never rides the app-config write,
+// since the key must never enter app-config. The frontend learns only booleans.
 //
 // ProfileId stability (ADR-0064): the id is minted client-side (UUID, in the
 // parent's createProfile) and never edited here -- only display_name + the
@@ -40,7 +45,7 @@ import {
 
 /** The prop slice the Profiles pane receives from SettingsView. The provider
  *  config + its mutators come from the parent (one atomic Save commits them);
- *  the key overlay + key IPC live inside this component (key never enters the
+ *  the key overlay + key IPC live inside the key field atom (key never enters the
  *  shared form state, ADR-0029/0038). */
 export interface ProfilesSectionProps {
   provider: ProviderConfig;
@@ -76,8 +81,10 @@ export function ProfilesSection({
 
   // Per-profile has_key overlay (issue #153). Fetched once on mount via the
   // list_provider_profiles IPC; thereafter updated locally after each set/clear
-  // (the IPC returns the new bool, so no re-fetch). Missing ids (a freshly-
-  // minted, unsaved profile) default to false until set_profile_key returns true.
+  // inside ProviderKeyField (the IPC returns the new bool, reported upward via
+  // onKeyStatusChange, so no re-fetch). Missing ids (a freshly-minted, unsaved
+  // profile) default to false until set_profile_key returns true. This overlay
+  // drives BOTH the list-level badges and the key field's has_key prop.
   const [profileKeys, setProfileKeys] = useState<Record<string, boolean>>({});
   const [keysLoading, setKeysLoading] = useState(true);
   const [keysError, setKeysError] = useState<string | null>(null);
@@ -90,11 +97,6 @@ export function ProfilesSection({
     provider.profiles[0]?.id ??
     null,
   );
-  // The key input is per-selected-profile ephemeral state; switching the
-  // selection resets it (each profile has its own key).
-  const [keyInput, setKeyInput] = useState("");
-  const [keyBusy, setKeyBusy] = useState(false);
-  const [keyError, setKeyError] = useState<string | null>(null);
   // The profile id whose delete AlertDialog is open (null = none).
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
@@ -130,14 +132,6 @@ export function ProfilesSection({
     };
   }, []);
 
-  // Mirror keyBusy to the parent so ESC / Back / Cancel are blocked while a key
-  // IPC is in flight (issue #153 review): a mid-flight set/clear must not be
-  // torn by an unmount -- the returned has_key would land on an unmounted
-  // component and a failure would never reach the user (ADR-0029 trust root).
-  useEffect(() => {
-    onBusyChange?.(keyBusy);
-  }, [keyBusy, onBusyChange]);
-
   // Keep selectedId valid as the profiles list mutates (create/delete). If the
   // selected id was deleted (or is null once profiles exist), fall back to the
   // active profile then the first. Adjusting state during render (not in an
@@ -157,17 +151,15 @@ export function ProfilesSection({
     }
   }
 
-  // Reset the key input + its error when the edited profile changes. Each
-  // profile owns its own key, so a typed-but-unset value must not leak across.
-  // Same render-time "adjust state when a value changes" pattern as above.
-  const [keyInputForId, setKeyInputForId] = useState(selectedId);
-  if (selectedId !== keyInputForId) {
-    setKeyInputForId(selectedId);
-    setKeyInput("");
-    setKeyError(null);
-  }
-
   const selected = provider.profiles.find((p) => p.id === selectedId) ?? null;
+
+  // Derive the preset the selected profile's endpoint currently reflects, plus
+  // its get-key link / key placeholder (Custom yields null / generic). The
+  // preset id is a DERIVED view of the endpoint -- never stored (ADR-0038) -- so
+  // the dropdown tracks field edits for free.
+  const derivedPreset = selected ? derivePresetId(selected) : PRESET_CUSTOM;
+  const activePreset = findPreset(derivedPreset);
+  const selectedHasKey = selected ? profileKeys[selected.id] ?? false : false;
 
   function handleCreate() {
     // Auto-select the new profile so the user lands in its edit form.
@@ -180,40 +172,7 @@ export function ProfilesSection({
     setConfirmDeleteId(null);
   }
 
-  async function handleSetKey() {
-    if (!selected) return;
-    const trimmed = keyInput.trim();
-    if (!trimmed) return;
-    setKeyBusy(true);
-    setKeyError(null);
-    try {
-      const hasKey = await setProfileKey(selected.id, trimmed);
-      setProfileKeys((prev) => ({ ...prev, [selected.id]: hasKey }));
-      setKeyInput("");
-    } catch (e) {
-      setKeyError(fmtError(e, intl));
-    } finally {
-      setKeyBusy(false);
-    }
-  }
-
-  async function handleClearKey() {
-    if (!selected) return;
-    setKeyBusy(true);
-    setKeyError(null);
-    try {
-      const hasKey = await clearProfileKey(selected.id);
-      setProfileKeys((prev) => ({ ...prev, [selected.id]: hasKey }));
-    } catch (e) {
-      setKeyError(fmtError(e, intl));
-    } finally {
-      setKeyBusy(false);
-    }
-  }
-
-  const selectedHasKey = selected ? (profileKeys[selected.id] ?? false) : false;
   const fieldsDisabled = saving;
-  const keyDisabled = saving || keyBusy;
   const unnamed = intl.formatMessage({
     id: "settings.profiles.unnamed",
     defaultMessage: "Unnamed profile",
@@ -341,50 +300,12 @@ export function ProfilesSection({
         {keysError && <p className="text-destructive text-sm">{keysError}</p>}
       </div>
 
-      {/* Right: edit form (detail). */}
+      {/* Right: edit form (detail). Composed of the three DRY field atoms
+          (issue #235): preset picker → endpoint fields → key field. The
+          display-name Input stays inline (it is identity, not endpoint). */}
       <div className="profiles-edit min-w-0">
         {selected ? (
           <div className="grid gap-4">
-            <fieldset className="grid gap-2 border-0 p-0 m-0">
-              <legend className="text-sm font-medium">
-                <FormattedMessage
-                  id="settings.profiles.protocol.legend"
-                  defaultMessage="Protocol"
-                />
-              </legend>
-              <RadioGroup
-                value={selected.protocol}
-                onValueChange={(v) => updateProfile(selected.id, { protocol: v as Protocol })}
-                disabled={fieldsDisabled}
-                className="gap-2"
-              >
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem id={`proto-anthropic-${selected.id}`} value="anthropic" />
-                  <Label htmlFor={`proto-anthropic-${selected.id}`} className="font-normal">
-                    <FormattedMessage
-                      id="settings.profiles.protocol.anthropic"
-                      defaultMessage="Anthropic (Messages API, x-api-key auth)"
-                    />
-                  </Label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem id={`proto-openai-${selected.id}`} value="openai" />
-                  <Label htmlFor={`proto-openai-${selected.id}`} className="font-normal">
-                    <FormattedMessage
-                      id="settings.profiles.protocol.openai"
-                      defaultMessage="OpenAI (Chat Completions, Bearer auth)"
-                    />
-                  </Label>
-                </div>
-              </RadioGroup>
-              <p className="text-muted-foreground text-sm">
-                <FormattedMessage
-                  id="settings.profiles.protocol.hint"
-                  defaultMessage="OpenAI covers OpenAI direct / DeepSeek / GLM / Qwen / Ollama compatible endpoints. Put the endpoint (including its /v1 path) in base URL; the adapter appends /chat/completions."
-                />
-              </p>
-            </fieldset>
-
             <Label className="grid gap-1">
               <FormattedMessage id="settings.profiles.displayName" defaultMessage="Display name" />
               <Input
@@ -395,92 +316,40 @@ export function ProfilesSection({
               />
             </Label>
 
-            <Label className="grid gap-1">
-              <FormattedMessage id="settings.profiles.baseUrl" defaultMessage="Base URL" />
-              <Input
-                type="text"
-                value={selected.base_url}
-                onChange={(e) => updateProfile(selected.id, { base_url: e.target.value })}
-                disabled={fieldsDisabled}
-              />
-            </Label>
+            <ProviderPresetField
+              presetId={derivedPreset}
+              onSelectPreset={(p) =>
+                updateProfile(selected.id, {
+                  protocol: p.protocol,
+                  base_url: p.base_url,
+                  model: p.default_model,
+                })}
+              disabled={fieldsDisabled}
+            />
 
-            <Label className="grid gap-1">
-              <FormattedMessage id="settings.profiles.model" defaultMessage="Model" />
-              <Input
-                type="text"
-                value={selected.model}
-                onChange={(e) => updateProfile(selected.id, { model: e.target.value })}
-                disabled={fieldsDisabled}
-              />
-            </Label>
+            <ProviderEndpointFields
+              profile={selected}
+              onUpdate={(patch) => updateProfile(selected.id, patch)}
+              // The protocol RadioGroup shows only when the endpoint does not
+              // match any preset (Custom): a named preset implies its protocol.
+              showProtocolRadio={derivedPreset === PRESET_CUSTOM}
+              disabled={fieldsDisabled}
+            />
 
-            {/* Key management (ADR-0029 one-shot transfer). The field is blank
-                after a set; an empty Update is a no-op (leave-as-is). Clear is
-                available only when a key is stored. */}
-            <fieldset className="grid gap-2 border-0 p-0 m-0">
-              <legend className="text-sm font-medium">
-                <FormattedMessage
-                  id="settings.profiles.key.legend"
-                  defaultMessage="API key (stored only in this machine's OS keychain)"
-                />
-              </legend>
-              <Input
-                type="password"
-                value={keyInput}
-                onChange={(e) => setKeyInput(e.target.value)}
-                placeholder={
-                  selectedHasKey
-                    ? intl.formatMessage({
-                        id: "settings.profiles.key.placeholderSet",
-                        defaultMessage: "Saved (leave blank to keep as-is)",
-                      })
-                    : intl.formatMessage({
-                        id: "settings.profiles.key.placeholderUnset",
-                        defaultMessage: "Paste key",
-                      })
-                }
-                disabled={keyDisabled}
-                autoComplete="off"
-              />
-              <div className="flex gap-2">
-                <Button
-                  type="button"
-                  onClick={handleSetKey}
-                  disabled={keyDisabled || !keyInput.trim()}
-                >
-                  {selectedHasKey ? (
-                    <FormattedMessage id="settings.profiles.key.update" defaultMessage="Update key" />
-                  ) : (
-                    <FormattedMessage id="settings.profiles.key.set" defaultMessage="Set key" />
-                  )}
-                </Button>
-                {selectedHasKey && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={handleClearKey}
-                    disabled={keyDisabled}
-                  >
-                    <FormattedMessage id="settings.profiles.key.clear" defaultMessage="Clear key" />
-                  </Button>
-                )}
-              </div>
-              <p className="text-muted-foreground text-sm">
-                {selectedHasKey ? (
-                  <FormattedMessage
-                    id="settings.profiles.key.hintSet"
-                    defaultMessage="A key is saved for this profile. Use “Clear key” to remove it; the key never leaves the OS keychain."
-                  />
-                ) : (
-                  <FormattedMessage
-                    id="settings.profiles.key.hintUnset"
-                    defaultMessage="No key saved for this profile — asking with this profile active will return a “not configured” failure."
-                  />
-                )}
-              </p>
-              {keyError && <p className="text-destructive text-sm">{keyError}</p>}
-            </fieldset>
+            <ProviderKeyField
+              profileId={selected.id}
+              hasKey={selectedHasKey}
+              onKeyStatusChange={(hasKey) =>
+                setProfileKeys((prev) => ({ ...prev, [selected.id]: hasKey }))}
+              getKeyLink={activePreset?.get_key_link ?? null}
+              keyPlaceholder={activePreset?.key_placeholder ?? ""}
+              // The master list already shows the per-profile key badge; hide
+              // the atom's inline badge here to avoid stating the same fact
+              // twice on one screen.
+              showBadge={false}
+              disabled={saving}
+              onBusyChange={onBusyChange}
+            />
 
             {selected.id === provider.active_profile ? (
               <p className="text-muted-foreground text-sm">

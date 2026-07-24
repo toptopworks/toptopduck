@@ -256,7 +256,14 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
-    await screen.findByText("GLM");
+    // Scope GLM to the list: the preset dropdown also exposes a "GLM" option, so
+    // a global text query is ambiguous once the edit form mounts. findByRole
+    // waits for the list to mount (the pane shows "Reading…" until the
+    // key-status overlay IPC resolves).
+    const profilesList = await screen.findByRole("list", {
+      name: "Active profile",
+    });
+    await within(profilesList).findByText("GLM");
     // Open the delete confirm for the second profile.
     const deleteButtons = screen.getAllByRole("button", { name: "Delete" });
     fireEvent.click(deleteButtons[1]);
@@ -268,8 +275,9 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
     await waitFor(() =>
       expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
     );
-    // The profile is gone from the list.
-    expect(screen.queryByText("GLM")).not.toBeInTheDocument();
+    // The profile is gone from the list (the preset dropdown still carries a
+    // GLM option, so the assertion must scope to the list).
+    expect(within(profilesList).queryByText("GLM")).not.toBeInTheDocument();
   });
 
   it("set key calls setProfileKey and flips the badge to Key set (issue #153)", async () => {
@@ -286,7 +294,7 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
     await screen.findByText("No key");
     // Type a key + click Set key (the default profile is the selected one).
-    fireEvent.change(screen.getByPlaceholderText("Paste key"), {
+    fireEvent.change(screen.getByPlaceholderText("sk-ant-api03-…"), {
       target: { value: "sk-test-153" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Set key" }));
@@ -366,7 +374,7 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
     await screen.findByText("No key");
-    fireEvent.change(screen.getByPlaceholderText("Paste key"), {
+    fireEvent.change(screen.getByPlaceholderText("sk-ant-api03-…"), {
       target: { value: "sk-test-153" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Set key" }));
