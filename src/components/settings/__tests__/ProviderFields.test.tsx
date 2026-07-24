@@ -565,6 +565,35 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
     expect(view.getByLabelText("Model")).toBeInTheDocument();
   });
 
+  it("editing protocol clears the probe result back to the hand-typed input", async () => {
+    // Protocol flip is the riskier stale-list case than base_url: an anthropic
+    // model list fed to an openai endpoint would let the user pick a model the
+    // new endpoint rejects. The render-time reset clears it (same guard as the
+    // base_url case above).
+    vi.mocked(testProfile).mockResolvedValue({
+      kind: "Ok",
+      data: { models: ["claude-sonnet-4-6"] },
+    });
+    const view = render(
+      <IntlProvider locale="en" messages={{}} onError={() => {}}>
+        <ProviderModelField profile={baseProfile} onUpdate={vi.fn()} disabled={false} />
+      </IntlProvider>,
+    );
+    fireEvent.click(view.getByRole("button", { name: "Test connection" }));
+    await view.findByRole("combobox", { name: "Model" });
+    view.rerender(
+      <IntlProvider locale="en" messages={{}} onError={() => {}}>
+        <ProviderModelField
+          profile={{ ...baseProfile, protocol: "openai" }}
+          onUpdate={vi.fn()}
+          disabled={false}
+        />
+      </IntlProvider>,
+    );
+    expect(view.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(view.getByLabelText("Model")).toBeInTheDocument();
+  });
+
   it("selecting from the probed dropdown fires onUpdate({ model })", async () => {
     vi.mocked(testProfile).mockResolvedValue({
       kind: "Ok",

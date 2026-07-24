@@ -1027,7 +1027,8 @@ pub struct ProfileKeyStatus {
 ///
 /// Adjacently-tagged (`#[serde(tag = "kind", content = "data")]`) like the other
 /// IPC enums; the `detail` on `Incompatible` is a technical English string for
-/// the frontend's details fold, never user wording (ADR-0052 layer 2 catalog).
+/// the frontend's details fold -- intentionally NOT localized (it stays out of
+/// the ADR-0052 translation catalog; the user-facing label is the locale id).
 /// Mirrored by `src/types/provider.ts` -- the wire shape is pinned by
 /// `tests/ipc_contract.rs`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

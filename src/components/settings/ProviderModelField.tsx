@@ -95,8 +95,8 @@ export function ProviderModelField({
 
   // Dropdown shows only when the probe listed at least one model. An Ok with an
   // empty list (the ping fallback succeeded but /models is unimplemented) falls
-  // back to the hand-typed input -- the #1 shape (ADR-0070: "list failure or
-  // not-yet-probed -> hand-typed").
+  // back to the hand-typed input (ADR-0070: "list failure or not-yet-probed ->
+  // hand-typed").
   const okResult = testResult?.kind === "Ok" ? testResult : null;
   const hasDropdown = okResult !== null && okResult.data.models.length > 0;
   // The dropdown lists the probed models, always keeping the current model

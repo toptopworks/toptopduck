@@ -24,9 +24,11 @@
 //! plain prose masquerade as "incompatible". The preflight only cares whether
 //! the endpoint is reachable + the key is valid + the chat/messages shape is
 //! served -- it must not couple to the SQL contract, so it owns its own minimal
-//! HTTP exchange. The path/auth/header conventions mirror the anthropic and
-//! openai adapters verbatim (same `base_url` join, same auth headers, same
-//! `/models` + `/chat/completions` + `/v1/messages` paths).
+//! HTTP exchange. The POST paths (`/v1/messages`, `/chat/completions`), the
+//! per-protocol auth headers (`x-api-key` + `anthropic-version` vs `Bearer`),
+//! and the `base_url` join mirror the anthropic and openai adapters verbatim;
+//! the `/models` GET path is preflight-only (neither adapter lists models -- it
+//! is the ADR-0070 "list models main path" probe added by this module).
 
 use std::time::Duration;
 
@@ -185,9 +187,10 @@ fn is_auth_rejected(status: u16) -> bool {
     status == 401 || status == 403
 }
 
-/// The models-list path per protocol (mirrors the adapter conventions):
-/// anthropic appends `/v1/models` (base_url has no version segment); openai
-/// appends `/models` (base_url carries `/v1` per OpenAI SDK convention).
+/// The models-list path per protocol (preflight-only -- neither adapter lists
+/// models; this is the ADR-0070 "list models main path" probe): anthropic
+/// appends `/v1/models` (base_url has no version segment); openai appends
+/// `/models` (base_url carries `/v1` per OpenAI SDK convention).
 fn models_path(protocol: Protocol) -> &'static str {
     match protocol {
         Protocol::Anthropic => "v1/models",
@@ -228,14 +231,6 @@ fn ping_body(protocol: Protocol, model: &str) -> serde_json::Value {
             "messages": messages,
         }),
     }
-}
-
-/// Whether an HTTP status code is a 2xx success. (`ureq::RequestBuilder::call`
-/// already returns non-2xx as `Err(Status)`, so the `Ok` branch is always 2xx;
-/// this helper exists only for test clarity when asserting mock statuses.)
-#[cfg(test)]
-fn is_success(status: u16) -> bool {
-    (200..300).contains(&status)
 }
 
 /// Minimal `/models` response shape -- the `data` array of `{id}` entries that
@@ -420,6 +415,8 @@ mod tests {
             .create();
         let ping = server
             .mock("POST", "/v1/messages")
+            .match_header("x-api-key", "sk-test")
+            .match_header("anthropic-version", "2023-06-01")
             .with_status(200)
             .with_body(anthropic_reply())
             .create();
@@ -443,13 +440,18 @@ mod tests {
             .with_status(404)
             .with_body(r#"{"error":"not found"}"#)
             .create();
-        server
+        let ping = server
             .mock("POST", "/chat/completions")
+            .match_header("authorization", "Bearer sk-test")
             .with_status(200)
             .with_body(openai_reply())
             .create();
         let outcome = probe(Some("sk-test"), Protocol::Openai, &server.url(), "gpt-4o");
         assert_eq!(outcome, ProfileTestOutcome::Ok { models: vec![] });
+        // Pin the ping auth (mirrors the /models GET test rigor): an OpenAI
+        // endpoint must receive Bearer on the fallback path, not the anthropic
+        // x-api-key header.
+        ping.assert();
     }
 
     #[test]
@@ -558,14 +560,5 @@ mod tests {
             join_url("https://api.anthropic.com", "v1/models"),
             "https://api.anthropic.com/v1/models"
         );
-    }
-
-    #[test]
-    fn is_success_classifies_2xx() {
-        // Test-clarity helper: pins the 2xx range used to assert mock statuses.
-        assert!(is_success(200));
-        assert!(is_success(204));
-        assert!(!is_success(401));
-        assert!(!is_success(500));
     }
 }
