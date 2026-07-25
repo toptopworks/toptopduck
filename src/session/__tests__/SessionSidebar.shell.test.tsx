@@ -361,11 +361,11 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
 
     fireEvent.click(toggles[0] as HTMLButtonElement);
 
-    // Two menuitemradio options render in the Radix Popover portal. The flat
-    // option carries aria-checked=true (the current mode) and the trailing
-    // Check glyph; the time option is unchecked with no Check.
-    const flat = screen.getByRole("menuitemradio", { name: /In a list/i });
-    const time = screen.getByRole("menuitemradio", { name: /By time/i });
+    // Two radio options render in the Radix Popover portal (mutually-exclusive
+    // modes -> radio semantics). The flat option carries aria-checked=true (the
+    // current mode) and the trailing Check glyph; the time option is unchecked.
+    const flat = screen.getByRole("radio", { name: /In a list/i });
+    const time = screen.getByRole("radio", { name: /By time/i });
     expect(flat).toHaveAttribute("aria-checked", "true");
     expect(time).toHaveAttribute("aria-checked", "false");
     expect(flat.querySelector("svg.lucide-check")).not.toBeNull();
@@ -397,10 +397,100 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
       />,
     );
     fireEvent.click(container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement);
-    const flat = screen.getByRole("menuitemradio", { name: /In a list/i });
-    const time = screen.getByRole("menuitemradio", { name: /By time/i });
+    const flat = screen.getByRole("radio", { name: /In a list/i });
+    const time = screen.getByRole("radio", { name: /By time/i });
     expect(flat).toHaveAttribute("aria-checked", "false");
     expect(time).toHaveAttribute("aria-checked", "true");
     expect(time.querySelector("svg.lucide-check")).not.toBeNull();
+  });
+
+  it("carries a focus-visible outline + weak default opacity so keyboard/touch users can discover it (issue #251 review)", () => {
+    // The prior opacity-0 + group-hover-only pattern hid the trigger from
+    // non-mouse users; opacity-60 keeps it weakly visible. `[all:unset]` strips
+    // the native focus ring, so focus-visible:outline-ring re-adds one (the
+    // --ring token is the project focus-indicator standard).
+    const { container } = renderShell(
+      <SessionSidebar
+        sessions={[onePersisted()]}
+        openSessions={[]}
+        activeSessionId={null}
+        disabled={false}
+        loadError={null}
+        grouping="flat"
+        onNew={() => {}}
+        onActivate={() => {}}
+        onOpenPersisted={() => {}}
+        onClose={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onSwitchGrouping={() => {}}
+      />,
+    );
+    const trigger = container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement;
+    const classes = trigger.className.split(/\s+/);
+    expect(classes).toContain("opacity-60");
+    expect(classes).toContain("focus-visible:outline-2");
+    expect(classes).toContain("focus-visible:outline-ring");
+    expect(classes).toContain("focus-visible:outline-offset-2");
+    expect(classes).not.toContain("opacity-0");
+  });
+
+  it("disables the trigger and refuses to open the popover when the shell is busy (issue #251 review)", () => {
+    // busy shell -> disabled propagates to the trigger (button disabled) AND
+    // the popover must not open (Radix does not activate a disabled trigger).
+    // Matches the New button / context-menu disabled contract.
+    const onSwitchGrouping = vi.fn();
+    const { container } = renderShell(
+      <SessionSidebar
+        sessions={[onePersisted()]}
+        openSessions={[]}
+        activeSessionId={null}
+        disabled={true}
+        loadError={null}
+        grouping="flat"
+        onNew={() => {}}
+        onActivate={() => {}}
+        onOpenPersisted={() => {}}
+        onClose={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onSwitchGrouping={onSwitchGrouping}
+      />,
+    );
+    const trigger = container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement;
+    expect(trigger).toBeDisabled();
+    fireEvent.click(trigger);
+    expect(screen.queryByRole("radio", { name: /In a list/i })).toBeNull();
+    expect(onSwitchGrouping).not.toHaveBeenCalled();
+  });
+
+  it("closes the popover on Escape (keyboard dismiss, issue #251 review)", () => {
+    // Radix Popover's onOpenChange(false) fires on Escape; this is the keyboard
+    // dismiss path for AT users. fireEvent.keyDown mirrors the alert-dialog
+    // Escape precedent (userEvent is not installed in this repo).
+    const { container } = renderShell(
+      <SessionSidebar
+        sessions={[onePersisted()]}
+        openSessions={[]}
+        activeSessionId={null}
+        disabled={false}
+        loadError={null}
+        grouping="flat"
+        onNew={() => {}}
+        onActivate={() => {}}
+        onOpenPersisted={() => {}}
+        onClose={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onSwitchGrouping={() => {}}
+      />,
+    );
+    const trigger = container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement;
+    fireEvent.click(trigger);
+    const flat = screen.getByRole("radio", { name: /In a list/i });
+    expect(flat).toBeInTheDocument();
+
+    fireEvent.keyDown(flat, { key: "Escape" });
+    expect(screen.queryByRole("radio", { name: /In a list/i })).toBeNull();
   });
 });

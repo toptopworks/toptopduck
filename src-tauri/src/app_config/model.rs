@@ -779,4 +779,20 @@ mod tests {
         assert!(!cfg.shell.rail_collapsed); // absent -> default false
         assert_eq!(cfg.shell.sidebar_grouping, SidebarGrouping::Flat); // absent -> Flat
     }
+
+    #[test]
+    fn unknown_sidebar_grouping_value_rejects_the_whole_document() {
+        // ADR-0072: SidebarGrouping has NO #[serde(other)] fallback. A typo'd
+        // or forward-incompatible value ("recent" / "Flat" / 1) makes serde
+        // reject the whole AppConfig, and the read path honest-degrades to
+        // defaults. Pin this so adding #[serde(other)] later is a deliberate
+        // decision (it would silently shift the degrade semantics from
+        // document-level to field-level), not a silent drift.
+        let json = r#"{"format_version":2,"shell":{"sidebar_grouping":"recent"}}"#;
+        let result: Result<AppConfig, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "unknown sidebar_grouping value must reject, not silently default"
+        );
+    }
 }

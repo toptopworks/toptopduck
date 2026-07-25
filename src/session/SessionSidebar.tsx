@@ -267,12 +267,23 @@ export function SessionSidebar({
 const sessionMenuItemBase =
   "[all:unset] cursor-pointer block w-full py-1 px-2 rounded-md text-sm hover:bg-accent";
 
-// The flat/time grouping toggle (ADR-0072, issue #251). Triggered by a hover-
-// revealed `⋯` on the first group-title row (one entry point regardless of
-// mode, hidden on an empty sidebar). The Popover offers the two modes as
-// menuitemradio items; the selected mode carries a trailing Check. A pick
-// commits immediately via onSwitch (the hook routes through commitShellPrefs,
-// same immediate-persist contract as the collapse toggles).
+// The flat/time grouping toggle (ADR-0072, issue #251). Triggered by a weakly-
+// visible `⋯` on the first group-title row (one entry point regardless of
+// mode, hidden on an empty sidebar). The Popover offers the two modes as a
+// radio group (mutually exclusive -> radio semantics, not menu); the selected
+// mode carries a trailing Check. A pick commits immediately via onSwitch (the
+// hook routes through commitShellPrefs, same immediate-persist contract as the
+// collapse toggles).
+//
+// a11y (issue #251 review):
+// - The trigger rides opacity-60 by default (not opacity-0 + hover-only) so
+//   keyboard, touch, and AT users can discover it without hovering; it
+//   brightens on hover/focus/open.
+// - `[all:unset]` on the trigger/options strips native chrome including the
+//   focus ring, so focus-visible:outline-ring re-adds one (the --ring token
+//   is the project focus-indicator standard).
+// - `disabled` propagates to both radio options, not just the trigger: a busy
+//   shell must block a pick mid-popover (New button / context-menu parity).
 function GroupingToggle({
   grouping,
   disabled,
@@ -290,8 +301,15 @@ function GroupingToggle({
     onSwitch(mode);
   };
 
-  const optionClass =
-    "[all:unset] cursor-pointer flex w-full items-center justify-between gap-2 rounded-md py-1 pl-2 pr-1.5 text-sm text-foreground hover:bg-accent";
+  // Shared option styling. `[all:unset]` resets inherited/native button chrome;
+  // the focus-visible outline is re-added explicitly (all:unset would otherwise
+  // leave keyboard users without a focus indicator on the radio options).
+  const optionClass = cn(
+    "[all:unset] cursor-pointer flex w-full items-center justify-between gap-2 rounded-md py-1 pl-2 pr-1.5 text-sm text-foreground",
+    "hover:bg-accent",
+    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+    "disabled:cursor-progress disabled:opacity-50",
+  );
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -305,9 +323,13 @@ function GroupingToggle({
           })}
           className={cn(
             "sidebar-grouping-toggle [all:unset] cursor-pointer rounded-md px-1.5 text-base leading-none text-muted-foreground",
-            // Hover-reveal on the title row; stay visible while focused or open.
-            "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100",
-            "hover:bg-accent hover:text-foreground disabled:cursor-progress disabled:opacity-50",
+            // Weakly visible by default (opacity-60) so keyboard / touch / AT
+            // users can discover the entry point without hovering; brightens on
+            // hover, focus, or while the popover is open.
+            "opacity-60 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100",
+            "hover:bg-accent hover:text-foreground",
+            "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+            "disabled:cursor-progress disabled:opacity-50",
           )}
         >
           ⋯
@@ -317,31 +339,44 @@ function GroupingToggle({
         align="end"
         sideOffset={4}
         className="sidebar-grouping-menu w-44 p-1"
-        role="menu"
       >
         <div className="px-2 py-1 text-xs text-muted-foreground">
           <FormattedMessage id="sidebar.grouping.label" defaultMessage="Group by" />
         </div>
-        <button
-          type="button"
-          role="menuitemradio"
-          aria-checked={grouping === "flat"}
-          onClick={() => pick("flat")}
-          className={optionClass}
+        {/* Mutually-exclusive modes -> radio semantics. Tab cycles between the
+            two options (a legal radiogroup keyboard model); arrow-key roving
+            is not required. aria-checked carries the selected state; a trailing
+            Check mirrors the selection visually. */}
+        <div
+          role="radiogroup"
+          aria-label={intl.formatMessage({
+            id: "sidebar.grouping.label",
+            defaultMessage: "Group by",
+          })}
         >
-          <FormattedMessage id="sidebar.grouping.flat" defaultMessage="In a list" />
-          {grouping === "flat" && <Check className="size-4 shrink-0" aria-hidden />}
-        </button>
-        <button
-          type="button"
-          role="menuitemradio"
-          aria-checked={grouping === "time"}
-          onClick={() => pick("time")}
-          className={optionClass}
-        >
-          <FormattedMessage id="sidebar.grouping.time" defaultMessage="By time" />
-          {grouping === "time" && <Check className="size-4 shrink-0" aria-hidden />}
-        </button>
+          <button
+            type="button"
+            role="radio"
+            aria-checked={grouping === "flat"}
+            disabled={disabled}
+            onClick={() => pick("flat")}
+            className={optionClass}
+          >
+            <FormattedMessage id="sidebar.grouping.flat" defaultMessage="In a list" />
+            {grouping === "flat" && <Check className="size-4 shrink-0" aria-hidden />}
+          </button>
+          <button
+            type="button"
+            role="radio"
+            aria-checked={grouping === "time"}
+            disabled={disabled}
+            onClick={() => pick("time")}
+            className={optionClass}
+          >
+            <FormattedMessage id="sidebar.grouping.time" defaultMessage="By time" />
+            {grouping === "time" && <Check className="size-4 shrink-0" aria-hidden />}
+          </button>
+        </div>
       </PopoverContent>
     </Popover>
   );

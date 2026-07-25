@@ -164,6 +164,19 @@ describe("buildSidebarGroups", () => {
     expect(buildSidebarGroups([], [], null, NOW, "flat")).toEqual([]);
     expect(buildSidebarGroups([], [], null, NOW, "time")).toEqual([]);
   });
+
+  it("flat/time groups carry their mode discriminant (SidebarGroup invariant pin)", () => {
+    // SidebarGroup is a discriminated union on `mode`; this pins the runtime
+    // side so a future constructor drift (e.g. flat branch returning a time
+    // kind) fails here too, not just at the type level.
+    const flatGroups = buildSidebarGroups([meta("/a.duck", "a", 0)], [], null, NOW, "flat");
+    expect(flatGroups[0].mode).toBe("flat");
+    expect(flatGroups[0].kind).toBe("recent");
+
+    const timeGroups = buildSidebarGroups([meta("/a.duck", "a", 0)], [], null, NOW, "time");
+    expect(timeGroups[0].mode).toBe("time");
+    expect(timeGroups[0].kind).toBe("today");
+  });
 });
 
 describe("formatLastModified (ADR-0072, issue #251)", () => {

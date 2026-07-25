@@ -42,9 +42,15 @@ export interface OpenSession {
   pendingIngestPath: string | null;
 }
 
-/** A sidebar time-group (ADR-0060 Chat-style: Today / Yesterday / Previous 7 days / Older),
- *  plus `recent` for the ADR-0072 flat mode (single group sorted by mtime descending). */
-export type SidebarGroupKind = "today" | "yesterday" | "last7" | "older" | "recent";
+/** The four ADR-0060 Chat-style time buckets (Today / Yesterday / Previous 7
+ *  days / Older). */
+export type TimeGroupKind = "today" | "yesterday" | "last7" | "older";
+
+/** Every renderable sidebar group heading: the four time buckets plus
+ *  `recent` for ADR-0072's flat mode (single group sorted by mtime descending).
+ *  The per-mode correspondence (flat -> `recent`, time -> `TimeGroupKind`) is a
+ *  type-level invariant on SidebarGroup's discriminated union, not this union. */
+export type SidebarGroupKind = TimeGroupKind | "recent";
 
 /** A single merged sidebar entry (persisted, open, or both). */
 export interface SidebarEntry {
@@ -69,11 +75,14 @@ export interface SidebarEntry {
   lastModifiedAt: number;
 }
 
-/** A rendered time group: heading kind + its entries (already sorted). */
-export interface SidebarGroup {
-  kind: SidebarGroupKind;
-  entries: SidebarEntry[];
-}
+/** A rendered sidebar group: heading kind + its entries (already sorted). The
+ *  `mode` discriminant makes the kind/mode correspondence a type-level
+ *  invariant -- a flat-mode group only ever carries kind="recent"; a time-mode
+ *  group only carries a TimeGroupKind. buildSidebarGroups is the sole
+ *  constructor; consumers narrow on `mode` when they need the guarantee. */
+export type SidebarGroup =
+  | { mode: "flat"; kind: "recent"; entries: SidebarEntry[] }
+  | { mode: "time"; kind: TimeGroupKind; entries: SidebarEntry[] };
 
 const MS_PER_DAY = 86_400_000;
 
@@ -87,7 +96,7 @@ function startOfCalendarDay(ms: number): number {
  *  caller passes `now` so tests are deterministic. The buckets match the
  *  Chat-style grouping in ADR-0060 (Today / Yesterday / Previous 7 days / Older). Day boundaries
  *  are local calendar days (midnight rollover), not 24h windows. */
-export function timeGroupKind(lastModifiedAt: number, now: number): SidebarGroupKind {
+export function timeGroupKind(lastModifiedAt: number, now: number): TimeGroupKind {
   const today = startOfCalendarDay(now);
   const entry = startOfCalendarDay(lastModifiedAt);
   if (entry >= today) return "today";
@@ -192,19 +201,29 @@ export function buildSidebarGroups(
 
   if (grouping === "flat") {
     // ADR-0072 flat mode: a single Recent group, already sorted by mtime desc.
-    return [{ kind: "recent", entries }];
+    return [{ mode: "flat", kind: "recent", entries }];
   }
 
-  // ADR-0060 time mode: Chat-style Today / Yesterday / Previous 7 days / Older,
-  // each omitted when empty.
-  const groups: SidebarGroup[] = [];
-  for (const kind of ["today", "yesterday", "last7", "older"] as const) {
-    const groupEntries = entries.filter(
-      (e) => timeGroupKind(e.lastModifiedAt, now) === kind,
-    );
-    if (groupEntries.length > 0) {
-      groups.push({ kind, entries: groupEntries });
+  if (grouping === "time") {
+    // ADR-0060 time mode: Chat-style Today / Yesterday / Previous 7 days /
+    // Older, each omitted when empty.
+    const groups: SidebarGroup[] = [];
+    for (const kind of ["today", "yesterday", "last7", "older"] as const) {
+      const groupEntries = entries.filter(
+        (e) => timeGroupKind(e.lastModifiedAt, now) === kind,
+      );
+      if (groupEntries.length > 0) {
+        groups.push({ mode: "time", kind, entries: groupEntries });
+      }
     }
+    return groups;
   }
-  return groups;
+
+  // Exhaustive guard: a future third SidebarGrouping variant must add a branch
+  // above, not silently fall through to time buckets. tsconfig strict lacks
+  // noImplicitReturns, so without this the implicit `return undefined` would
+  // slip; the never assignment fails tsc if a variant is added without a
+  // branch (mirrors the loadErrorDisplay/api.ts default:never+throw pattern).
+  const _exhaustive: never = grouping;
+  return _exhaustive;
 }
