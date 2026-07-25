@@ -66,6 +66,32 @@ export interface ProfilesSectionProps {
    *  reach the user (ADR-0029 trust root). Optional: the pane renders without
    *  it but loses the close guard. */
   onBusyChange?: (busy: boolean) => void;
+  /** One-shot entry hint (issue #239): when Settings is opened from the
+   *  ColdStartHero "no key" state, the active profile should be pre-selected
+   *  for editing so the user lands on its key field. Consumed only at mount;
+   *  if the id is absent or no longer matches a profile, the active profile
+   *  (then the first) is picked instead. Omitted on subsequent remounts. */
+  initialEditProfileId?: string;
+}
+
+/** Pick the profile id to show in the edit form on mount. The entry hint
+ *  (issue #239 ColdStartHero "no key" CTA) wins when it matches a real profile;
+ *  otherwise the active profile, then the first, then null. Reused (without the
+ *  hint) by the re-validation block when the selected id becomes stale after a
+ *  provider mutation -- the hint is mount-only, so the fallback path passes no
+ *  second argument. */
+function pickInitialSelectedId(
+  provider: ProviderConfig,
+  initialEditProfileId?: string,
+): string | null {
+  if (initialEditProfileId && provider.profiles.some((p) => p.id === initialEditProfileId)) {
+    return initialEditProfileId;
+  }
+  return (
+    provider.profiles.find((p) => p.id === provider.active_profile)?.id ??
+    provider.profiles[0]?.id ??
+    null
+  );
 }
 
 export function ProfilesSection({
@@ -76,6 +102,7 @@ export function ProfilesSection({
   setActiveProfile,
   saving,
   onBusyChange,
+  initialEditProfileId,
 }: ProfilesSectionProps) {
   const intl = useIntl();
 
@@ -91,11 +118,11 @@ export function ProfilesSection({
 
   // The profile currently shown in the edit form (null when the list is empty).
   // Independent of `active_profile`: selecting for editing does not switch the
-  // active profile (the user manages both explicitly).
+  // active profile (the user manages both explicitly). On mount the entry hint
+  // (issue #239 ColdStartHero "no key" CTA) may pre-select the active profile
+  // for key editing; see pickInitialSelectedId.
   const [selectedId, setSelectedId] = useState<string | null>(
-    provider.profiles.find((p) => p.id === provider.active_profile)?.id ??
-    provider.profiles[0]?.id ??
-    null,
+    pickInitialSelectedId(provider, initialEditProfileId),
   );
   // The profile id whose delete AlertDialog is open (null = none).
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -164,11 +191,9 @@ export function ProfilesSection({
   if (provider !== validatedFor) {
     setValidatedFor(provider);
     if (!selectedId || !provider.profiles.some((p) => p.id === selectedId)) {
-      setSelectedId(
-        provider.profiles.find((p) => p.id === provider.active_profile)?.id ??
-        provider.profiles[0]?.id ??
-        null,
-      );
+      // No entry hint here: initialEditProfileId is mount-only. The helper's
+      // no-hint fallback path picks the active profile then the first.
+      setSelectedId(pickInitialSelectedId(provider));
     }
   }
 

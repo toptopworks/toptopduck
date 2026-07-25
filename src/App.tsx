@@ -16,6 +16,7 @@ import { ErrorBanner } from "./components/common/ErrorBanner";
 import { DegradeCard, ErrorBoundary } from "./components/common/ErrorBoundary";
 import { ProfileSwitcher } from "./components/settings/ProfileSwitcher";
 import { SettingsView } from "./components/settings/SettingsView";
+import type { SettingsSection } from "./components/settings/sections";
 import { Alert } from "./components/ui/alert";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { log } from "./lib/log";
@@ -40,6 +41,13 @@ import { getProviderConfig } from "./api";
  *  badge). Reaching it surfaces a sidebar badge; it never forces a close. */
 const SOFT_CAP_OPEN_SESSIONS = 8;
 
+/** Entry hint for the settings overlay (issue #239): which section to land on
+ *  when it opens, and (for the Profiles section) which profile to pre-select
+ *  for editing. Consumed by SettingsView/ProfilesSection at mount; reset to
+ *  the default on close so a later topbar-gear open does not re-target a stale
+ *  profile. */
+type SettingsEntry = { section: SettingsSection; editProfileId?: string };
+
 export default function App() {
   // QueryClient (ADR-0051): lazy-init once per App mount so test renders never
   // share cache.
@@ -49,7 +57,28 @@ export default function App() {
 
   // --- App-level UI state --------------------------------------------------
   const [hasKey, setHasKey] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  // settingsView (ADR-0065): the in-app settings overlay state. `open` gates
+  // the render + the .settings-mode CSS class; `section` + `editProfileId` are
+  // one-shot ENTRY hints consumed at mount (issue #239: the ColdStartHero CTAs
+  // land on the Profiles tab, optionally with the active profile pre-selected
+  // for key editing). openSettings() defaults to the topbar-gear path (general,
+  // no edit target); the hero passes { section: "profiles", editProfileId? }.
+  const [settingsView, setSettingsView] = useState<{ open: boolean } & SettingsEntry>({
+    open: false,
+    section: "general",
+  });
+  function openSettings(entry: SettingsEntry = { section: "general" }) {
+    setSettingsView({ open: true, ...entry });
+  }
+
+  // ColdStartHero CTAs (issue #239): open Settings on the Profiles tab. The
+  // "no key" path forwards the active profile id so ProfilesSection lands on
+  // its edit form; the "no profile" path omits it (there is nothing to edit).
+  function openSettingsProfiles(editProfileId?: string) {
+    openSettings(
+      editProfileId ? { section: "profiles", editProfileId } : { section: "profiles" },
+    );
+  }
   // Invalidation counter for the composer picker's per-profile has_key overlay
   // (issue #238). Bumped on settings-close so the picker refetches its overlay
   // after a Save that may have changed a keychain slot -- ADR-0019 honest gate:
@@ -77,7 +106,7 @@ export default function App() {
   // contract + restore / persist effects). App injects setShellError
   // (switchActiveProfile reject path) + refreshKeyStatus (mount + post-switch
   // kick + settings-close) as deps; reads back AppConfig state + the derived
-  // effectiveLocale / intl + the two collapse toggles. hasKey + settingsOpen
+  // effectiveLocale / intl + the two collapse toggles. hasKey + settingsView
   // are App-local UI state (below).
   const {
     appConfig,
@@ -179,7 +208,7 @@ export default function App() {
             )}
           >
             <div
-              className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${railCollapsed ? " rail-collapsed" : ""}${settingsOpen ? " settings-mode" : ""}`}
+              className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${railCollapsed ? " rail-collapsed" : ""}${settingsView.open ? " settings-mode" : ""}`}
             >
               {/* Col 1: session sidebar (ADR-0060) -- full height, independent
               column (R1: QuestionBar does NOT span over it). */}
@@ -259,7 +288,7 @@ export default function App() {
                   hasKey={hasKey}
                   onOpenDuck={() => void handleOpenDuck()}
                   onSaveAs={() => void handleSaveAs()}
-                  onOpenSettings={() => setSettingsOpen(true)}
+                  onOpenSettings={() => openSettings()}
                   settingsDisabled={!appConfig}
                 />
               </header>
@@ -276,7 +305,13 @@ export default function App() {
               No active session = the cold-start hero (ADR-0061). */}
               <main className="session-pane-host">
                 {activeSessionId === null && (
-                  <ColdStartHero disabled={busy} onNew={() => void openNew()} />
+                  <ColdStartHero
+                    disabled={busy}
+                    provider={appConfig?.provider ?? null}
+                    profileKeyEpoch={profileKeyEpoch}
+                    onNew={() => void openNew()}
+                    onOpenSettingsProfiles={openSettingsProfiles}
+                  />
                 )}
                 {openSessions.map((s) => (
                   <div
@@ -314,7 +349,7 @@ export default function App() {
                                 onSwitchActive: (id) => void switchActiveProfile(id),
                                 onSwitchModel: (model) =>
                                   void switchActiveProfileModel(model),
-                                onOpenSettings: () => setSettingsOpen(true),
+                                onOpenSettings: () => openSettings(),
                                 profileKeyEpoch,
                               }
                             : undefined
@@ -329,16 +364,19 @@ export default function App() {
                 <ErrorBanner className="shell-error" error={shellError} />
               )}
 
-              {settingsOpen && appConfig && (
+              {settingsView.open && appConfig && (
                 <SettingsView
                   appConfig={appConfig}
+                  initialSection={settingsView.section}
+                  initialEditProfileId={settingsView.editProfileId}
                   onCommitAppConfig={(cfg) => void commitAppConfig(cfg)}
                   onClose={() => {
-                    setSettingsOpen(false);
+                    setSettingsView({ open: false, section: "general" });
                     void refreshKeyStatus();
                     // A Settings Save may have changed a keychain slot; bump
-                    // the epoch so each keep-alive picker refetches its overlay
-                    // (ADR-0019 honest gate, issue #238).
+                    // the epoch so each keep-alive picker + the ColdStartHero
+                    // refetch their overlays (ADR-0019 honest gate, issue #238;
+                    // issue #239 extends the epoch to the hero).
                     setProfileKeyEpoch((n) => n + 1);
                   }}
                 />
