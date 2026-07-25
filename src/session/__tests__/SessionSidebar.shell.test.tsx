@@ -210,4 +210,75 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     expect(danger).not.toBeNull();
     expect(danger?.className.split(/\s+/)).toContain("text-destructive");
   });
+
+  // ADR-0072 (issue #250): brand title row (product name left + circular
+  // search magnifier right) + fused bg-secondary New icon button replace the
+  // ADR-0060 full-width solid teal New button.
+  it("sidebar-brand-row shows TOPTOPDuck brand + disabled circular search button (ADR-0072, issue #250)", () => {
+    const { container } = renderShell(
+      <SessionSidebar
+        sessions={[]}
+        openSessions={[]}
+        activeSessionId={null}
+        disabled={false}
+        loadError={null}
+        onNew={() => {}}
+        onActivate={() => {}}
+        onOpenPersisted={() => {}}
+        onClose={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    const brandRow = container.querySelector(".sidebar-brand-row");
+    expect(brandRow).not.toBeNull();
+    // Brand name on the left (FormattedMessage -> TOPTOPDuck).
+    const brand = brandRow?.querySelector(".sidebar-brand");
+    expect(brand).not.toBeNull();
+    expect(brand).toHaveTextContent("TOPTOPDuck");
+    // Circular search button on the right; disabled until its modal is wired.
+    const searchBtn = brandRow?.querySelector(".sidebar-search-button");
+    expect(searchBtn).not.toBeNull();
+    expect(searchBtn?.tagName).toBe("BUTTON");
+    expect(searchBtn).toBeDisabled();
+    expect(searchBtn?.className.split(/\s+/)).toContain("rounded-full");
+    const searchIcon = searchBtn?.querySelector("svg");
+    expect(searchIcon).not.toBeNull();
+    expect(searchIcon).toHaveClass("lucide-search");
+    expect(searchIcon).toHaveAttribute("aria-hidden", "true");
+  });
+
+  it("sidebar-new-button is a fused bg-secondary Pencil + text button, not solid primary (ADR-0072, issue #250)", () => {
+    const { container } = renderShell(
+      <SessionSidebar
+        sessions={[]}
+        openSessions={[]}
+        activeSessionId={null}
+        disabled={false}
+        loadError={null}
+        onNew={() => {}}
+        onActivate={() => {}}
+        onOpenPersisted={() => {}}
+        onClose={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    const newBtn = container.querySelector(".sidebar-new-button");
+    expect(newBtn).not.toBeNull();
+    const classes = newBtn?.className.split(/\s+/);
+    // ADR-0072 retires the ADR-0060 solid primary look: fused bg-secondary
+    // (no border, no primary fill) + hover:bg-accent.
+    expect(classes).toContain("bg-secondary");
+    expect(classes).toContain("hover:bg-accent");
+    expect(classes).not.toContain("bg-primary");
+    expect(classes).not.toContain("text-primary-foreground");
+    expect(classes).not.toContain("border-primary");
+    // Pencil leading icon + the "New session" label text.
+    const icon = newBtn?.querySelector("svg");
+    expect(icon).not.toBeNull();
+    expect(icon).toHaveClass("lucide-pencil");
+    expect(icon).toHaveAttribute("aria-hidden", "true");
+    expect(newBtn).toHaveTextContent("New session");
+  });
 });
