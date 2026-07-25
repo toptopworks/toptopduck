@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
+import { MessageSquare } from "lucide-react";
 import {
   buildSidebarGroups,
   type OpenSession,
@@ -240,13 +241,16 @@ function SidebarRow({
   onDelete: () => void;
 }) {
   const intl = useIntl();
-  // The entry states (ADR-0060) ride inline utilities over the ADR-0050
-  // token: default = bg-transparent text-foreground; hover = bg-accent; active
-  // (the visible session) = bg-primary text-primary-foreground font-semibold
-  // (full-row fill selection signal); open-but-not-active = a 2px left inset accent
-  // shadow so an open background session still leaves a trace. The active/open
-  // modifiers stay as classes on the parent .session-entry hook for selector
-  // compatibility, and the same booleans compose the entry-main utilities.
+  // The entry states (ADR-0060, refined by ADR-0072 issue #249) ride inline
+  // utilities over the ADR-0050 token: default = bg-transparent text-foreground;
+  // hover = bg-accent; active (the visible session) = a light accent tint
+  // (bg-accent text-accent-foreground) + the 2px left bar; open-but-not-active =
+  // just the 2px left inset bar so an open background session still leaves a
+  // trace. The bar rides on entry.sid (every open row, active or not); the tint
+  // is active-only. ADR-0072 retires the ADR-0060 full-row teal fill (bg-primary
+  // + text-primary-foreground + font-semibold). The active/open modifiers also
+  // stay as classes on the parent .session-entry hook for selector / test
+  // stability, and the same booleans compose the entry-main utilities.
   return (
     <li
       className={cn(
@@ -258,27 +262,30 @@ function SidebarRow({
       <button
         type="button"
         className={cn(
-          "session-entry-main [all:unset] cursor-pointer flex-1 flex flex-col min-w-0 py-1.5 px-2 rounded-md text-foreground",
+          "session-entry-main [all:unset] cursor-pointer flex-1 flex flex-row items-center gap-1.5 min-w-0 py-1.5 px-2 rounded-md text-foreground",
           "hover:bg-accent disabled:opacity-50 disabled:cursor-progress",
-          entry.active && "bg-primary text-primary-foreground font-semibold",
-          // The open accent only shows when the row is NOT active (the
-          // active fill already signals it).
-          entry.sid && !entry.active && "shadow-[inset_2px_0_var(--primary)]",
+          entry.sid && "shadow-[inset_2px_0_var(--primary)]",
+          entry.active && "bg-accent text-accent-foreground",
         )}
         aria-current={entry.active ? "true" : undefined}
         disabled={disabled}
         onClick={onActivate}
         title={entry.path ?? undefined}
       >
-        <span className="session-name text-sm truncate">{displayName}</span>
-        <span className="session-subline text-muted-foreground text-xs font-normal opacity-85">
-          {entry.firstSourceName ?? "—"}
-          {" · "}
-          <FormattedMessage
-            id="sidebar.turns"
-            defaultMessage="{count, plural, =0 {no turns} one {# turn} other {# turns}}"
-            values={{ count: entry.turnCount }}
-          />
+        {/* ADR-0072 (issue #249): unified leading chat-bubble glyph on every
+            row, replacing the persisted/not Database/CircleDot split. */}
+        <MessageSquare className="size-4 shrink-0" aria-hidden />
+        <span className="flex-1 min-w-0 flex flex-col">
+          <span className="session-name text-sm truncate">{displayName}</span>
+          <span className="session-subline text-muted-foreground text-xs font-normal opacity-85">
+            {entry.firstSourceName ?? "—"}
+            {" · "}
+            <FormattedMessage
+              id="sidebar.turns"
+              defaultMessage="{count, plural, =0 {no turns} one {# turn} other {# turns}}"
+              values={{ count: entry.turnCount }}
+            />
+          </span>
         </span>
       </button>
       <button
