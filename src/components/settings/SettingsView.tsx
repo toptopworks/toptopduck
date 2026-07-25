@@ -108,6 +108,8 @@ export function SettingsView({
   appConfig,
   onCommitAppConfig,
   onClose,
+  initialSection = "general",
+  initialEditProfileId,
 }: {
   // The current app-config (loaded by the parent). Edited locally and committed
   // as one atomic write on save.
@@ -115,12 +117,22 @@ export function SettingsView({
   // Persist the edited app-config. The parent keeps its state + the disk in
   // sync; this view does not call setAppConfig directly.
   onCommitAppConfig: (cfg: AppConfig) => Promise<void> | void;
-  // Called on ‹ Back / Cancel / Save / ESC. The parent uses it to both unmount
+  // Called on ‹ Back / Save / Cancel / ESC. The parent uses it to both unmount
   // the view and refresh its key-status indicator.
   onClose: () => void;
+  /** Entry hint (issue #239): which section to land on when the overlay opens.
+   *  Defaults to "general" (the topbar-gear path); the ColdStartHero CTAs pass
+   *  "profiles" to drop the user directly on profile / key setup. Consumed only
+   *  at mount (the view unmounts on close, so each open re-seeds). */
+  initialSection?: SettingsSection;
+  /** Entry hint (issue #239): pre-select this profile id for editing when
+   *  initialSection is "profiles". Used by the ColdStartHero "no key" CTA to
+   *  land on the active profile's key field. Forwarded to ProfilesSection,
+   *  which ignores it if the id no longer matches a profile. */
+  initialEditProfileId?: string;
 }) {
   const intl = useIntl();
-  const [section, setSection] = useState<SettingsSection>("general");
+  const [section, setSection] = useState<SettingsSection>(initialSection);
   // Local editable copies seeded from the app-config prop. A save commits them
   // as one atomic write; a cancel discards them.
   const [theme, setTheme] = useState<Theme>(appConfig.theme);
@@ -270,6 +282,7 @@ export function SettingsView({
     setActiveProfile,
     saving,
     onBusyChange: handleProfilesBusyChange,
+    initialEditProfileId,
   };
 
   const busy = saving;
