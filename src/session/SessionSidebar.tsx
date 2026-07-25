@@ -75,6 +75,11 @@ interface SessionSidebarProps {
   onDelete: (path: string, sid: string | null) => void;
   onRename: (sid: string | null, path: string | null, newName: string) => void;
   onSwitchGrouping: (mode: SidebarGrouping) => void;
+  // Open the Ctrl/⌘+K search modal (ADR-0072 Decision 1, issue #252). The
+  // shell owns the open state so the global keydown + this button share one
+  // entry point; the button is the always-visible affordance for the same
+  // shortcut.
+  onOpenSearch: () => void;
 }
 
 // The context-menu action the user picked, driving which dialog opens.
@@ -96,6 +101,7 @@ export function SessionSidebar({
   onDelete,
   onRename,
   onSwitchGrouping,
+  onOpenSearch,
 }: SessionSidebarProps) {
   const intl = useIntl();
   // Which entry's context menu is open (entry key); null = none. Only one menu
@@ -131,16 +137,18 @@ export function SessionSidebar({
       {/* ADR-0072 (issue #250): brand title row (product name left + circular
           search magnifier right) replaces the ADR-0060 full-width solid teal
           New button; the New button trades the solid primary fill for a fused
-          bg-secondary. The search magnifier is disabled until its Ctrl/⌘+K
-          modal is wired (ADR-0072 search slice). */}
+          bg-secondary. ADR-0072 Decision 1 (issue #252) wires the magnifier to
+          the Ctrl/⌘+K search modal -- this click + the global keydown route to
+          the same shell-owned open state. */}
       <header className="sidebar-brand-row mb-2 flex items-center justify-between">
         <span className="sidebar-brand text-sm font-semibold text-foreground">
           <FormattedMessage id="sidebar.brand" defaultMessage="TOPTOPDuck" />
         </span>
         <button
           type="button"
-          disabled
-          className="sidebar-search-button inline-flex size-7 cursor-not-allowed items-center justify-center rounded-full text-muted-foreground opacity-50"
+          disabled={disabled}
+          onClick={onOpenSearch}
+          className="sidebar-search-button inline-flex size-7 cursor-pointer items-center justify-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-progress disabled:opacity-50"
           aria-label={intl.formatMessage({
             id: "sidebar.search.ariaLabel",
             defaultMessage: "Search sessions",

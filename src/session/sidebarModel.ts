@@ -127,6 +127,72 @@ export function formatLastModified(lastModifiedAt: number, now: number): LastMod
   return { kind: "date", date: new Date(lastModifiedAt) };
 }
 
+/** Build the flat, filtered, mtime-descending entry list for the Ctrl/⌘+K search
+ *  modal (ADR-0072 Decision 1, issue #252). Pure in
+ *  (persisted, open, activeSessionId, query): the caller supplies the raw
+ *  `list_sessions` result + the open set + the active id + the query string;
+ *  this function does the rest. Kept alongside `buildSidebarGroups` because the
+ *  per-row shape + the persisted/open merge contract are shared with the sidebar
+ *  (a row that is open in this shell carries its runtime sid, so the modal can
+ *  activate-by-sid instead of re-resuming).
+ *
+ *  Scope (ADR-0072 Decision 1): only PERSISTED sessions are searchable -- the
+ *  `list_sessions` result. An unsaved new session (no .duck) is NOT in
+ *  list_sessions and never appears here, even when it is the active session
+ *  (the sidebar still lists it; the modal is a persisted-session jump surface).
+ *
+ *  Filter: case-insensitive substring over `display_name` + the first source's
+ *  name. An empty / whitespace-only query returns every session (Ctrl/⌘+K is
+ *  also a browse/jump entry point). Sorted mtime desc with a name tiebreaker
+ *  for deterministic rendering, matching `buildSidebarGroups`.
+ *
+ *  Unlike `buildSidebarGroups`, no `now` parameter: the modal is a single flat
+ *  list (no time buckets) and the sub-line's relative-day label is resolved in
+ *  the component via `formatLastModified` (a React-layer concern -- it needs
+ *  the localized heading text). */
+export function buildSearchEntries(
+  persisted: SessionMetadata[],
+  open: OpenSession[],
+  activeSessionId: string | null,
+  query: string,
+): SidebarEntry[] {
+  // Index open sessions by their bound path so a persisted row can pick up its
+  // runtime sid + latest name in one lookup. Unsaved open sessions are skipped
+  // (no path -> not in list_sessions -> out of scope for the modal).
+  const openByPath = new Map<string, OpenSession>();
+  for (const o of open) {
+    if (o.path) openByPath.set(o.path, o);
+  }
+
+  const q = query.trim().toLowerCase();
+  const entries: SidebarEntry[] = [];
+  for (const m of persisted) {
+    // Compose a single haystack so the substring test runs once per row; the
+    // space keeps a name that ends with the source's prefix from bridging into
+    // a false positive at the boundary.
+    const hay = `${m.display_name} ${m.source_summary.first_source_name ?? ""}`.toLowerCase();
+    if (q && !hay.includes(q)) continue;
+    const bound = openByPath.get(m.session_id) ?? null;
+    entries.push({
+      key: m.session_id,
+      name: bound?.name ?? m.display_name,
+      sid: bound?.sid ?? null,
+      path: m.session_id,
+      active: bound !== null && bound.sid === activeSessionId,
+      firstSourceName: m.source_summary.first_source_name,
+      turnCount: m.source_summary.turn_count,
+      lastModifiedAt: m.last_modified_at,
+    });
+  }
+
+  // Sort last-modified descending. Ties (same mtime) fall back to name so the
+  // render is deterministic across renders -- matches `buildSidebarGroups`.
+  entries.sort(
+    (a, b) => b.lastModifiedAt - a.lastModifiedAt || a.name.localeCompare(b.name),
+  );
+  return entries;
+}
+
 /** Build the merged, grouped, last-modified-descending sidebar model. Pure in
  *  (persisted, open, activeSessionId, now, grouping) -- the component supplies
  *  the raw list_sessions result + the open set + the user's grouping choice;

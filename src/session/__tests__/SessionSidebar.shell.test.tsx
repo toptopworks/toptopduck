@@ -46,6 +46,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onRename={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
+        onOpenSearch={() => {}}
       />,
     );
     const active = container.querySelector(".session-entry.active .session-entry-main");
@@ -77,6 +78,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onRename={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
+        onOpenSearch={() => {}}
       />,
     );
     const bg = container.querySelector(".session-entry.open:not(.active) .session-entry-main");
@@ -106,6 +108,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onRename={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
+        onOpenSearch={() => {}}
       />,
     );
     const rows = container.querySelectorAll(".session-entry-main");
@@ -146,6 +149,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onRename={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
+        onOpenSearch={() => {}}
       />,
     );
     const main = container.querySelector(".session-entry-main");
@@ -179,6 +183,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onRename={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
+        onOpenSearch={() => {}}
       />,
     );
     fireEvent.click(container.querySelector(".session-entry-menu") as HTMLButtonElement);
@@ -215,6 +220,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onRename={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
+        onOpenSearch={() => {}}
       />,
     );
     fireEvent.click(container.querySelector(".session-entry-menu") as HTMLButtonElement);
@@ -225,8 +231,10 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
 
   // ADR-0072 (issue #250): brand title row (product name left + circular
   // search magnifier right) + fused bg-secondary New icon button replace the
-  // ADR-0060 full-width solid teal New button.
-  it("sidebar-brand-row shows TOPTOPDuck brand + disabled circular search button (ADR-0072, issue #250)", () => {
+  // ADR-0060 full-width solid teal New button. ADR-0072 Decision 1 (issue
+  // #252) wires the magnifier to the Ctrl/⌘+K modal.
+  it("sidebar-brand-row shows TOPTOPDuck brand + circular search button that opens the modal on click (ADR-0072, issue #250/#252)", () => {
+    const onOpenSearch = vi.fn();
     const { container } = renderShell(
       <SessionSidebar
         sessions={[]}
@@ -242,6 +250,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onRename={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
+        onOpenSearch={onOpenSearch}
       />,
     );
     const brandRow = container.querySelector(".sidebar-brand-row");
@@ -250,16 +259,49 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     const brand = brandRow?.querySelector(".sidebar-brand");
     expect(brand).not.toBeNull();
     expect(brand).toHaveTextContent("TOPTOPDuck");
-    // Circular search button on the right; disabled until its modal is wired.
+    // Circular search button on the right; enabled (modal is wired). Clicking
+    // fires onOpenSearch -- the same shell-owned open state the global Ctrl/⌘+K
+    // keydown routes to (ADR-0072 Decision 1).
     const searchBtn = brandRow?.querySelector(".sidebar-search-button");
     expect(searchBtn).not.toBeNull();
     expect(searchBtn?.tagName).toBe("BUTTON");
-    expect(searchBtn).toBeDisabled();
+    expect(searchBtn).not.toBeDisabled();
     expect(searchBtn?.className.split(/\s+/)).toContain("rounded-full");
+    fireEvent.click(searchBtn as HTMLButtonElement);
+    expect(onOpenSearch).toHaveBeenCalledOnce();
     const searchIcon = searchBtn?.querySelector("svg");
     expect(searchIcon).not.toBeNull();
     expect(searchIcon).toHaveClass("lucide-search");
     expect(searchIcon).toHaveAttribute("aria-hidden", "true");
+  });
+
+  it("sidebar-search-button is disabled when the shell is busy (issue #252)", () => {
+    // busy shell -> disabled propagates to the search button (parity with the
+    // New button / context-menu / grouping toggle): the modal must not open
+    // mid-resume / mid-save.
+    const onOpenSearch = vi.fn();
+    const { container } = renderShell(
+      <SessionSidebar
+        sessions={[]}
+        openSessions={[]}
+        activeSessionId={null}
+        disabled={true}
+        loadError={null}
+        onNew={() => {}}
+        onActivate={() => {}}
+        onOpenPersisted={() => {}}
+        onClose={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        grouping="flat"
+        onSwitchGrouping={() => {}}
+        onOpenSearch={onOpenSearch}
+      />,
+    );
+    const searchBtn = container.querySelector(".sidebar-search-button") as HTMLButtonElement;
+    expect(searchBtn).toBeDisabled();
+    fireEvent.click(searchBtn);
+    expect(onOpenSearch).not.toHaveBeenCalled();
   });
 
   it("sidebar-new-button is a fused bg-secondary Pencil + text button, not solid primary (ADR-0072, issue #250)", () => {
@@ -278,6 +320,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onRename={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
+        onOpenSearch={() => {}}
       />,
     );
     const newBtn = container.querySelector(".sidebar-new-button");
@@ -330,6 +373,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onDelete={() => {}}
         onRename={() => {}}
         onSwitchGrouping={() => {}}
+        onOpenSearch={() => {}}
       />,
     );
     expect(container.querySelector(".sidebar-grouping-toggle")).toBeNull();
@@ -352,6 +396,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onDelete={() => {}}
         onRename={() => {}}
         onSwitchGrouping={onSwitchGrouping}
+        onOpenSearch={() => {}}
       />,
     );
     // Exactly one toggle (on the first group title); flat mode renders one
@@ -394,6 +439,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onDelete={() => {}}
         onRename={() => {}}
         onSwitchGrouping={() => {}}
+        onOpenSearch={() => {}}
       />,
     );
     fireEvent.click(container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement);
@@ -424,6 +470,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onDelete={() => {}}
         onRename={() => {}}
         onSwitchGrouping={() => {}}
+        onOpenSearch={() => {}}
       />,
     );
     const trigger = container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement;
@@ -455,6 +502,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onDelete={() => {}}
         onRename={() => {}}
         onSwitchGrouping={onSwitchGrouping}
+        onOpenSearch={() => {}}
       />,
     );
     const trigger = container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement;
@@ -483,6 +531,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onDelete={() => {}}
         onRename={() => {}}
         onSwitchGrouping={() => {}}
+        onOpenSearch={() => {}}
       />,
     );
     const trigger = container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement;

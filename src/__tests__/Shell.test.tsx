@@ -1428,3 +1428,117 @@ describe("App topbar header actions + key-state badge (issue #182)", () => {
     });
   });
 });
+
+describe("App Ctrl/⌘+K session-search modal (ADR-0072 Decision 1, issue #252)", () => {
+  // Two persisted sessions feed the modal: alpha (fresher) + beta. The default
+  // listSessions mock returns []; these tests override per-render.
+  function twoSessions() {
+    return [
+      {
+        session_id: "/x/alpha.duck",
+        display_name: "alpha session",
+        last_modified_at: 2000,
+        source_summary: { first_source_name: "alpha_src", source_count: 1, turn_count: 3 },
+        format_version: 2,
+      },
+      {
+        session_id: "/x/beta.duck",
+        display_name: "beta session",
+        last_modified_at: 1000,
+        source_summary: { first_source_name: "beta_src", source_count: 1, turn_count: 7 },
+        format_version: 2,
+      },
+    ];
+  }
+
+  it("does not render the search modal on cold start", () => {
+    render(<App />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("Ctrl+K opens the search modal (Win/Linux) + lists persisted sessions", async () => {
+    vi.mocked(listSessions).mockResolvedValue(twoSessions());
+    render(<App />);
+    // Wait for the cold-start list_sessions fetch to land so the modal sees the
+    // sessions on open.
+    await waitFor(() => expect(listSessions).toHaveBeenCalled());
+    // jsdom does NOT bubble DOM keydown to window-level listeners, so dispatch
+    // on window directly (wrapped in act for the state toggle).
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }));
+    });
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toBeInTheDocument();
+    // Both persisted sessions render as options (alpha fresher -> first).
+    const options = within(dialog).getAllByRole("option");
+    expect(options).toHaveLength(2);
+    expect(options[0]).toHaveTextContent("alpha session");
+  });
+
+  it("⌘+K opens the search modal (macOS metaKey)", async () => {
+    vi.mocked(listSessions).mockResolvedValue(twoSessions());
+    render(<App />);
+    await waitFor(() => expect(listSessions).toHaveBeenCalled());
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true }));
+    });
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("clicking the sidebar search button opens the same modal (issue #250 button)", async () => {
+    vi.mocked(listSessions).mockResolvedValue(twoSessions());
+    render(<App />);
+    await waitFor(() => expect(listSessions).toHaveBeenCalled());
+    fireEvent.click(document.querySelector(".sidebar-search-button") as HTMLButtonElement);
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("typing filters the result list (case-insensitive on name + source)", async () => {
+    vi.mocked(listSessions).mockResolvedValue(twoSessions());
+    render(<App />);
+    await waitFor(() => expect(listSessions).toHaveBeenCalled());
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }));
+    });
+    const dialog = await screen.findByRole("dialog");
+    const input = within(dialog).getByRole("combobox");
+    // "ALPHA_SRC" hits alpha via its first_source_name.
+    fireEvent.change(input, { target: { value: "ALPHA_SRC" } });
+    expect(within(dialog).getAllByRole("option").map((o) => o.textContent)).toEqual([
+      expect.stringContaining("alpha session"),
+    ]);
+  });
+
+  it("Enter on the highlighted option opens the persisted session", async () => {
+    vi.mocked(listSessions).mockResolvedValue(twoSessions());
+    render(<App />);
+    await waitFor(() => expect(listSessions).toHaveBeenCalled());
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }));
+    });
+    const dialog = await screen.findByRole("dialog");
+    const input = within(dialog).getByRole("combobox");
+    // Default selection is alpha (fresher); Enter resumes it via openPersisted
+    // -> openDuck(sid, path). The IPC hop is async, so waitFor for the call to
+    // land. openDuck takes the freshly-minted sid + the path; only the path
+    // matters for this assertion (the sid is an internal correlation id).
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() =>
+      expect(openDuck).toHaveBeenCalledWith(expect.any(String), "/x/alpha.duck"),
+    );
+  });
+
+  it("ESC closes the modal (Radix Dialog onOpenChange→false)", async () => {
+    vi.mocked(listSessions).mockResolvedValue(twoSessions());
+    render(<App />);
+    await waitFor(() => expect(listSessions).toHaveBeenCalled());
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }));
+    });
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).toBeNull(),
+    );
+  });
+});

@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { FormattedMessage, IntlProvider } from "react-intl";
 import { SessionPane } from "./session/SessionPane";
+import { SessionSearchDialog } from "./session/SessionSearchDialog";
 import { SessionSidebar } from "./session/SessionSidebar";
 import { useShellError } from "./shell/useShellError";
 import { usePersistedSessions } from "./shell/usePersistedSessions";
@@ -87,6 +88,13 @@ export default function App() {
   // its own profileKeys snapshot, separate from hasKey).
   const [profileKeyEpoch, setProfileKeyEpoch] = useState(0);
 
+  // Ctrl/⌘+K session-search modal open state (ADR-0072 Decision 1, issue #252).
+  // The shell owns the single open state so the global keydown + the sidebar's
+  // search button (#250) route to the same dialog. Toggled false by the dialog
+  // itself on choose / ESC / overlay-click via onOpenChange.
+  const [searchOpen, setSearchOpen] = useState(false);
+  const openSearch = useCallback(() => setSearchOpen(true), []);
+
   // refreshKeyStatus: reads the active profile's keychain slot (ADR-0029) into
   // hasKey. Fired once on mount by useAppConfigState's load effect, again after
   // a profile switch, and on settings-close (a Save may have changed the slot).
@@ -153,6 +161,27 @@ export default function App() {
   // signals memory pressure once the open keep-alive set reaches the cap; it
   // never forces a close.
   const atSoftCap = openSessions.length >= SOFT_CAP_OPEN_SESSIONS;
+
+  // Global Ctrl/⌘+K keydown -> open the search modal (ADR-0072 Decision 1,
+  // issue #252). The listener binds once on mount; a ref carries the latest
+  // busy gate so a busy shell blocks the open without re-binding on every busy
+  // toggle (same shape as SettingsView's Escape listener). preventDefault stops
+  // the browser's native ⌘K page-searcher intercept so the modal is the only
+  // consumer. metaKey covers macOS (⌘), ctrlKey covers Win/Linux (Ctrl).
+  const busyRef = useRef(false);
+  useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        if (!busyRef.current) setSearchOpen(true);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // Theme (ADR-0050): applied to <html>, follows the persisted three-state
   // preference (defaulting to system before app-config resolves). The Vega
@@ -227,6 +256,7 @@ export default function App() {
                 onDelete={(path, sid) => void deletePersisted(path, sid)}
                 onRename={(sid, path, newName) => void renameEntry(sid, path, newName)}
                 onSwitchGrouping={switchSidebarGrouping}
+                onOpenSearch={openSearch}
               />
 
               {/* Row 1 (cols 2+): thin top bar (ADR-0060/0062 R1). The session name
@@ -369,6 +399,22 @@ export default function App() {
                   }}
                 />
               )}
+
+              {/* Ctrl/⌘+K session-search modal (ADR-0072 Decision 1, issue
+                  #252). Rendered unconditionally (Radix mounts the content
+                  lazily on open); shares the shell-owned searchOpen state with
+                  the global keydown + the sidebar search button. Reuses the
+                  sessions / openSessions / activate handlers already in App --
+                  zero new IPC, zero new persistence (ADR-0072 slice scope). */}
+              <SessionSearchDialog
+                open={searchOpen}
+                onOpenChange={setSearchOpen}
+                sessions={sessions}
+                openSessions={openSessions}
+                activeSessionId={activeSessionId}
+                onActivate={activateSession}
+                onOpenPersisted={(path, name) => void openPersisted(path, name)}
+              />
             </div>
           </ErrorBoundary>
         </IntlProvider>

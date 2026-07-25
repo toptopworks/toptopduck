@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildSearchEntries,
   buildSidebarGroups,
   formatLastModified,
   timeGroupKind,
@@ -204,5 +205,87 @@ describe("formatLastModified (ADR-0072, issue #251)", () => {
     const earlyYesterday = new Date("2026-07-09T00:01:00").getTime();
     const yLabel = formatLastModified(earlyYesterday, NOW);
     expect(yLabel.kind).toBe("yesterday");
+  });
+});
+
+describe("buildSearchEntries (ADR-0072, issue #252)", () => {
+  // Two persisted sessions: alpha (today, src "alpha_src") and beta (3 days old,
+  // src "beta_src").NOW = 2026-07-10; beta's mtime = 2026-07-07.
+  function twoPersisted(): SessionMetadata[] {
+    return [
+      meta("/a.duck", "alpha", 0, { source_summary: { first_source_name: "alpha_src", source_count: 1, turn_count: 4 } }),
+      meta("/b.duck", "beta", 3, { source_summary: { first_source_name: "beta_src", source_count: 2, turn_count: 12 } }),
+    ];
+  }
+
+  it("returns every persisted session (mtime desc) when the query is empty", () => {
+    // ⌘K is also a browse/jump entry point: an empty query lists everything,
+    // freshest first.
+    const entries = buildSearchEntries(twoPersisted(), [], null, "");
+    expect(entries.map((e) => e.name)).toEqual(["alpha", "beta"]);
+  });
+
+  it("treats a whitespace-only query as empty", () => {
+    // The query is trimmed before matching, so "   " behaves like "".
+    const entries = buildSearchEntries(twoPersisted(), [], null, "   ");
+    expect(entries.map((e) => e.name)).toEqual(["alpha", "beta"]);
+  });
+
+  it("matches display_name as a case-insensitive substring", () => {
+    // "ALP" hits alpha only; beta is dropped.
+    const entries = buildSearchEntries(twoPersisted(), [], null, "ALP");
+    expect(entries.map((e) => e.name)).toEqual(["alpha"]);
+  });
+
+  it("matches first_source_name as a case-insensitive substring", () => {
+    // The first source's name is in scope: "BETA_SRC" hits beta only.
+    const entries = buildSearchEntries(twoPersisted(), [], null, "BETA_SRC");
+    expect(entries.map((e) => e.name)).toEqual(["beta"]);
+  });
+
+  it("drops entries that match neither display_name nor first_source_name", () => {
+    expect(buildSearchEntries(twoPersisted(), [], null, "gamma")).toEqual([]);
+  });
+
+  it("merges an open binding into the persisted row (sid set) and flags active", () => {
+    // The search list mirrors the sidebar's merge contract: a persisted row
+    // that is open in this shell carries its runtime sid (so the modal can
+    // activate-by-sid instead of re-resuming) and reflects the in-memory name
+    // (a rename mid-flight lands without waiting for list_sessions to refresh).
+    const open: OpenSession[] = [
+      { sid: "uuid-b", name: "beta renamed", path: "/b.duck", pendingIngestPath: null },
+    ];
+    const entries = buildSearchEntries(twoPersisted(), open, "uuid-b", "");
+    const beta = entries.find((e) => e.path === "/b.duck");
+    expect(beta?.sid).toBe("uuid-b");
+    expect(beta?.name).toBe("beta renamed");
+    expect(beta?.active).toBe(true);
+    // alpha stays a cold row (sid null, not active).
+    const alpha = entries.find((e) => e.path === "/a.duck");
+    expect(alpha?.sid).toBeNull();
+    expect(alpha?.active).toBe(false);
+  });
+
+  it("excludes never-saved open sessions (search scope = list_sessions only)", () => {
+    // ADR-0072 Decision 1: the ⌘K modal filters the list_sessions result -- an
+    // unsaved new session (no .duck) is not in list_sessions, so it never
+    // appears here even when it is the active session. The sidebar still lists
+    // it; the modal is a persisted-session jump surface.
+    const open: OpenSession[] = [
+      { sid: "uuid-new", name: "unsaved", path: null, pendingIngestPath: null },
+    ];
+    const entries = buildSearchEntries(twoPersisted(), open, "uuid-new", "");
+    expect(entries.map((e) => e.name)).toEqual(["alpha", "beta"]);
+  });
+
+  it("sorts mtime desc with a name tiebreaker for deterministic render", () => {
+    // Same mtime -> alphabetical; matches buildSidebarGroups' tiebreaker.
+    const sameMtime: SessionMetadata[] = [
+      { ...meta("/z.duck", "zulu", 1), last_modified_at: 1000 },
+      { ...meta("/m.duck", "mike", 1), last_modified_at: 1000 },
+      { ...meta("/a.duck", "alpha", 1), last_modified_at: 1000 },
+    ];
+    const entries = buildSearchEntries(sameMtime, [], null, "");
+    expect(entries.map((e) => e.name)).toEqual(["alpha", "mike", "zulu"]);
   });
 });
