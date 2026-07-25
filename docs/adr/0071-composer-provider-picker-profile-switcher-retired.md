@@ -1,4 +1,4 @@
-# provider/model 选择入口移至对话区；ProfileSwitcher 退役
+# provider/model 选择入口:移至对话区 QuestionBar 边,ProfileSwitcher 退役
 
 ## Decision
 
