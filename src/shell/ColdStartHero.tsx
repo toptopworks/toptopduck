@@ -96,19 +96,25 @@ export function ColdStartHero({
   const [profileKeys, setProfileKeys] = useState<Record<string, boolean>>({});
   const [keysLoading, setKeysLoading] = useState(true);
 
-  // Fetch on mount + whenever App bumps profileKeyEpoch (settings-close). With
-  // zero profiles the mode is "no-profile" regardless of key status, so the
-  // fetch is skipped (one less cold-start IPC, no loading flash on that path).
-  // provider is read at effect-run time; its identity changes coincide with
-  // epoch bumps in practice (the only mutation path is a settings Save, which
-  // closes settings and bumps the epoch), so it is intentionally absent from
-  // deps to avoid a redundant fetch on every app-config re-render.
+  // profilesLen drives the fetch decision: 0 (provider null OR no profiles)
+  // -> skip; N -> fetch. Coupling to the COUNT rather than provider identity
+  // is deliberate -- a switch / model edit / base_url edit changes the provider
+  // reference but NOT the keys (ADR-0065 per-profile key invariant), so it
+  // must not trigger a re-fetch (Shell.test.tsx asserts this). The
+  // null -> resolved transition (useAppConfigState loads app-config via an
+  // async getAppConfig IPC, so the hero often mounts with provider=null) shows
+  // up as 0 -> N, covering the issue #239 honest-gate mount-order gap: without
+  // this dep the effect would short-circuit on null and never re-run, leaving
+  // the hero stuck on the "ready" appearance even when the active profile has
+  // no key. Adding / removing a profile also flips the count, correctly
+  // refetching to pick up the new profile's key status.
+  const profilesLen = provider?.profiles.length ?? 0;
   useEffect(() => {
     // The render-time mode computation short-circuits to "no-profile" whenever
     // profiles is empty, so the overlay is not needed in that case -- skip the
     // fetch entirely (one less cold-start IPC, and no setState in the effect
     // body: keysLoading / profileKeys are simply not consulted on that path).
-    if (!provider || provider.profiles.length === 0) {
+    if (profilesLen === 0) {
       return;
     }
     let cancelled = false;
@@ -131,8 +137,7 @@ export function ColdStartHero({
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profileKeyEpoch]);
+  }, [profileKeyEpoch, profilesLen]);
 
   // Resolve the three-state mode. provider null (app-config pending) and
   // keysLoading both defer to "ready" so the hero never guesses no-key before
@@ -145,7 +150,7 @@ export function ColdStartHero({
     ? profileKeys[activeProfile.id] ?? false
     : false;
   const mode: ColdStartHeroMode =
-    provider !== null && provider.profiles.length === 0
+    provider !== null && profilesLen === 0
       ? "no-profile"
       : provider !== null && !keysLoading && !activeHasKey
         ? "no-key"

@@ -1464,17 +1464,21 @@ describe("App top-bar active profile switcher (issue #154, ADR-0065)", () => {
   });
 
   it("does not refetch the key overlay after a switch (per-profile key is invariant)", async () => {
-    // The has_key overlay is fetched once on mount; a switch moves the active
-    // pointer, not the keys, so listProviderProfiles is NOT re-called. Pins the
-    // mount-once contract so a regression that refetches on every switch (extra
-    // IPC churn) is caught.
+    // The has_key overlay is fetched on mount by BOTH the header
+    // ProfileSwitcher and the ColdStartHero (the hero refetches once app-config
+    // resolves, since App mounts it while app-config is still loading -- issue
+    // #239). A switch moves the active pointer, not the keys, so
+    // listProviderProfiles is NOT re-called. Pins the per-profile key invariant
+    // so a regression that refetches on every switch (extra IPC churn) is caught.
     vi.mocked(getAppConfig).mockResolvedValue(twoProfileConfig());
     vi.mocked(listProviderProfiles).mockResolvedValue([
       { profile_id: "anthropic", has_key: true },
       { profile_id: "glm", has_key: false },
     ]);
     render(<App />);
-    await waitFor(() => expect(listProviderProfiles).toHaveBeenCalledTimes(1));
+    // Two fetches after mount: ProfileSwitcher (mount) + ColdStartHero
+    // (profilesLen 0 -> N once app-config resolves).
+    await waitFor(() => expect(listProviderProfiles).toHaveBeenCalledTimes(2));
     fireEvent.click(screen.getByRole("button", { name: /活跃接入档案/ }));
     fireEvent.click(screen.getByRole("menuitemradio", { name: /切换到.*GLM/ }));
     await waitFor(() =>
@@ -1484,8 +1488,8 @@ describe("App top-bar active profile switcher (issue #154, ADR-0065)", () => {
         }),
       ),
     );
-    // Still exactly one fetch -- the switch did not trigger a re-fetch.
-    expect(listProviderProfiles).toHaveBeenCalledTimes(1);
+    // Still exactly two fetches -- the switch did not trigger a re-fetch.
+    expect(listProviderProfiles).toHaveBeenCalledTimes(2);
   });
 });
 

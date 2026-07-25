@@ -223,4 +223,47 @@ describe("ColdStartHero three-state guide (issue #239)", () => {
     expect(await screen.findByRole("heading", { name: "Start an analysis" })).toBeInTheDocument();
     expect(listProviderProfiles).toHaveBeenCalledTimes(2);
   });
+
+  it("null provider -> resolved refetches the overlay (app-config async resolve)", async () => {
+    // App mounts ColdStartHero while app-config is still loading
+    // (useAppConfigState resolves it via an async getAppConfig IPC), so the hero
+    // often first renders with provider=null. The overlay MUST refetch once
+    // provider resolves, or the hero stays stuck on the "ready" appearance even
+    // when the active profile has no key -- defeating the issue #239 honest-gate
+    // AC (the whole point of the three-state refactor).
+    vi.mocked(listProviderProfiles).mockResolvedValue([
+      { profile_id: "p1", has_key: false },
+    ]);
+    const onNew = vi.fn();
+    const onOpenSettingsProfiles = vi.fn<(editProfileId?: string) => void>();
+    const { rerender } = renderShell(
+      <ColdStartHero
+        disabled={false}
+        provider={null}
+        profileKeyEpoch={0}
+        onNew={onNew}
+        onOpenSettingsProfiles={onOpenSettingsProfiles}
+      />,
+    );
+    // provider null -> effect short-circuits (no fetch); mode renders "ready".
+    expect(screen.getByRole("heading", { name: "Start an analysis" })).toBeInTheDocument();
+    expect(listProviderProfiles).not.toHaveBeenCalled();
+
+    rerender(
+      <IntlProvider locale="en" messages={{}} onError={() => {}}>
+        <ColdStartHero
+          disabled={false}
+          provider={makeProvider()}
+          profileKeyEpoch={0}
+          onNew={onNew}
+          onOpenSettingsProfiles={onOpenSettingsProfiles}
+        />
+      </IntlProvider>,
+    );
+    // provider resolved -> overlay refetches -> active profile has no key ->
+    // "no-key" CTA (not stuck on "ready").
+    expect(await screen.findByRole("heading", { name: "Add an API key" })).toBeInTheDocument();
+    expect(listProviderProfiles).toHaveBeenCalledTimes(1);
+    expect(onNew).not.toHaveBeenCalled();
+  });
 });
