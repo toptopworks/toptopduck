@@ -8,7 +8,7 @@ import { listProviderProfiles } from "../../api";
 import type { ProviderConfig, ProviderProfile } from "../../types/provider";
 
 // ColdStartHero fetches the per-profile has_key overlay on mount via the SAME
-// IPC ProfileSwitcher / ProfilesSection use (issue #239 AC). Mock it so the
+// IPC ProfilesSection uses (issue #239 AC). Mock it so the
 // view never hits Tauri (ADR-0029 one-shot keychain surface; jsdom has no IPC).
 vi.mock("../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api")>();
