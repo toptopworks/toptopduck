@@ -50,6 +50,14 @@ export default function App() {
   // --- App-level UI state --------------------------------------------------
   const [hasKey, setHasKey] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Invalidation counter for the composer picker's per-profile has_key overlay
+  // (issue #238). Bumped on settings-close so the picker refetches its overlay
+  // after a Save that may have changed a keychain slot -- ADR-0019 honest gate:
+  // the popover must not keep showing "No key" after the user just configured
+  // one. The header hasKey indicator refreshes via refreshKeyStatus on the same
+  // close; this counter does the same for the picker's own overlay (which has
+  // its own profileKeys snapshot, separate from hasKey).
+  const [profileKeyEpoch, setProfileKeyEpoch] = useState(0);
 
   // refreshKeyStatus: reads the active profile's keychain slot (ADR-0029) into
   // hasKey. Fired once on mount by useAppConfigState's load effect, again after
@@ -77,6 +85,7 @@ export default function App() {
     intl,
     commitAppConfig,
     switchActiveProfile,
+    switchActiveProfileModel,
     sidebarCollapsed,
     railCollapsed,
     toggleSidebarCollapse,
@@ -292,6 +301,24 @@ export default function App() {
                         sessionId={s.sid}
                         pendingIngestPath={s.pendingIngestPath}
                         onIngestConsumed={() => clearPendingIngest(s.sid)}
+                        providerPicker={
+                          // ADR-0071 (issue #238): the composer provider/model
+                          // picker is app-level state (active profile + writes +
+                          // the settings-open path) rendered at each session's
+                          // QuestionBar edge. Absent until app-config resolves;
+                          // the picker renders only in the visible pane but is
+                          // mounted per keep-alive session like QuestionBar.
+                          appConfig
+                            ? {
+                                provider: appConfig.provider,
+                                onSwitchActive: (id) => void switchActiveProfile(id),
+                                onSwitchModel: (model) =>
+                                  void switchActiveProfileModel(model),
+                                onOpenSettings: () => setSettingsOpen(true),
+                                profileKeyEpoch,
+                              }
+                            : undefined
+                        }
                       />
                     </ErrorBoundary>
                   </div>
@@ -309,6 +336,10 @@ export default function App() {
                   onClose={() => {
                     setSettingsOpen(false);
                     void refreshKeyStatus();
+                    // A Settings Save may have changed a keychain slot; bump
+                    // the epoch so each keep-alive picker refetches its overlay
+                    // (ADR-0019 honest gate, issue #238).
+                    setProfileKeyEpoch((n) => n + 1);
                   }}
                 />
               )}

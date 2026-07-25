@@ -80,6 +80,7 @@ export function useAppConfigState({
   intl: IntlShape;
   commitAppConfig: (cfg: AppConfig) => Promise<void>;
   switchActiveProfile: (id: string) => Promise<void>;
+  switchActiveProfileModel: (model: string) => Promise<void>;
   sidebarCollapsed: boolean;
   railCollapsed: boolean;
   toggleSidebarCollapse: () => void;
@@ -174,6 +175,44 @@ export function useAppConfigState({
       }
     },
     [appConfig, commitAppConfig, refreshKeyStatus, intl, setShellError],
+  );
+
+  // Switch the active profile's model from the composer popover (issue #238,
+  // ADR-0071). Sibling to switchActiveProfile: there is no separate set-model
+  // IPC -- model is a field of the active profile in app-config (ADR-0064:
+  // model is per-profile, NOT a global -- different providers support
+  // different model sets, so a global active model is meaningless). The
+  // switch is one commitAppConfig write that patches ONLY the active
+  // profile's model field (immutable map over profiles), so live_config
+  // reads the new model on the next turn without touching the keychain slot
+  // (the profile id is unchanged -> ADR-0029 key indicator stays). The
+  // contract is commitAppConfig's (optimistic + no-rollback); a reject is
+  // caught into setShellError, mirroring switchActiveProfile. No draft -- the
+  // composer commit is immediate (a one-field swap), so the next ask picks it
+  // up; the Settings stage + Save remains the bulk-edit path.
+  const switchActiveProfileModel = useCallback(
+    async (model: string): Promise<void> => {
+      if (!appConfig) return;
+      const { provider } = appConfig;
+      const active = provider.profiles.find((p) => p.id === provider.active_profile);
+      // No active profile (a malformed config normalize repairs on the next
+      // store) OR a no-op model: skip the pointless write.
+      if (!active || model === active.model) return;
+      try {
+        await commitAppConfig({
+          ...appConfig,
+          provider: {
+            ...provider,
+            profiles: provider.profiles.map((p) =>
+              p.id === active.id ? { ...p, model } : p,
+            ),
+          },
+        });
+      } catch (e) {
+        setShellError(toAppError(e, intl, "shell"));
+      }
+    },
+    [appConfig, commitAppConfig, intl, setShellError],
   );
 
   // Commit the two shell collapse prefs as one app-config write (ADR-0038/0054,
@@ -298,6 +337,7 @@ export function useAppConfigState({
     intl,
     commitAppConfig,
     switchActiveProfile,
+    switchActiveProfileModel,
     sidebarCollapsed,
     railCollapsed,
     toggleSidebarCollapse,
