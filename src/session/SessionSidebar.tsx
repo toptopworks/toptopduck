@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { MessageSquare } from "lucide-react";
+import { MessageSquare, Pencil, Search } from "lucide-react";
 import {
   buildSidebarGroups,
   type OpenSession,
@@ -114,12 +114,34 @@ export function SessionSidebar({
       className="session-sidebar bg-muted border-r border-border p-2"
       aria-label={intl.formatMessage({ id: "sidebar.ariaLabel", defaultMessage: "Sessions" })}
     >
+      {/* ADR-0072 (issue #250): the top is rebuilt into a brand title row + a
+          New icon button row, retiring the ADR-0060 full-width solid teal New
+          button. Brand title row = product name left + circular search
+          magnifier right (placeholder; the search modal arrives in a later
+          slice). The New button drops the solid primary fill for a fused
+          bg-secondary, matching the row tint visual language. */}
+      <div className="sidebar-brand-row mb-2 flex items-center justify-between">
+        <span className="sidebar-brand text-sm font-semibold text-foreground">
+          <FormattedMessage id="sidebar.brand" defaultMessage="TOPTOPDuck" />
+        </span>
+        <button
+          type="button"
+          className="sidebar-search-button inline-flex size-7 items-center justify-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground"
+          aria-label={intl.formatMessage({
+            id: "sidebar.search.ariaLabel",
+            defaultMessage: "Search sessions",
+          })}
+        >
+          <Search className="size-4" aria-hidden />
+        </button>
+      </div>
       <button
         type="button"
-        className="sidebar-new-button w-full mb-2 p-2 cursor-pointer border border-primary bg-primary text-primary-foreground rounded-md text-sm disabled:opacity-60 disabled:cursor-progress"
+        className="sidebar-new-button mb-2 flex w-full cursor-pointer items-center gap-1.5 rounded-md bg-secondary p-2 text-sm text-secondary-foreground hover:bg-accent disabled:opacity-60 disabled:cursor-progress"
         disabled={disabled}
         onClick={onNew}
       >
+        <Pencil className="size-4 shrink-0" aria-hidden />
         <FormattedMessage id="sidebar.newSession" defaultMessage="New session" />
       </button>
 
