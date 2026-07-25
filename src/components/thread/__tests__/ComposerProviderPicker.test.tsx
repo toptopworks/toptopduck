@@ -243,6 +243,39 @@ describe("ComposerProviderPicker (issue #238, ADR-0071)", () => {
     expect(await screen.findByDisplayValue("claude-opus")).toBeInTheDocument();
   });
 
+  it("refetches the key overlay when profileKeyEpoch bumps (settings-close)", async () => {
+    // App bumps profileKeyEpoch on settings-close so a Save that changed a
+    // keychain slot is reflected without a remount (ADR-0019 honest gate, #238).
+    vi.mocked(listProviderProfiles).mockResolvedValue([]);
+    const { rerender } = renderPicker(
+      <ComposerProviderPicker
+        provider={pickerProvider()}
+        onSwitchActive={() => {}}
+        onSwitchModel={() => {}}
+        onOpenSettings={() => {}}
+        profileKeyEpoch={0}
+      />,
+    );
+    // Mount-time fetch.
+    await waitFor(() => expect(listProviderProfiles).toHaveBeenCalledTimes(1));
+
+    // A settings-close bumps the epoch -> the overlay refetches.
+    rerender(
+      <IntlProvider locale="en" messages={{}} onError={() => {}}>
+        <TooltipProvider delayDuration={0}>
+          <ComposerProviderPicker
+            provider={pickerProvider()}
+            onSwitchActive={() => {}}
+            onSwitchModel={() => {}}
+            onOpenSettings={() => {}}
+            profileKeyEpoch={1}
+          />
+        </TooltipProvider>
+      </IntlProvider>,
+    );
+    await waitFor(() => expect(listProviderProfiles).toHaveBeenCalledTimes(2));
+  });
+
   it("shows the honest no-key badge + warning when the active profile has no key", async () => {
     vi.mocked(listProviderProfiles).mockResolvedValue(
       keyStatus([

@@ -32,8 +32,11 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 //
 // State ownership mirrors ProfileSwitcher: the profile RECORDS come from the
 // parent's provider prop (single source of truth, app-config); the per-profile
-// has_key overlay is fetched once on mount via listProviderProfiles (a switch
-// moves the active pointer, not the keys, so it is never refetched). Writes
+// has_key overlay is fetched on mount via listProviderProfiles AND on a
+// profileKeyEpoch bump from the parent (a switch moves the active pointer, not
+// the keys, so it is never refetched on a switch -- but a Settings Save may
+// change a slot, so App bumps the epoch on settings-close to refetch without a
+// remount; ADR-0019 honest gate). Writes
 // route through the parent: onSwitchActive -> active_profile; onSwitchModel ->
 // the active profile's model field (ADR-0064: model is per-profile; the
 // composer commits via commitAppConfig, live_config reads it fresh next turn).
@@ -54,6 +57,14 @@ export type ComposerProviderPickerProps = {
   onSwitchModel: (model: string) => void;
   // Open the Settings overlay (ADR-0065). The popover closes first.
   onOpenSettings: () => void;
+  // Invalidation counter for the per-profile has_key overlay. Bumped by the
+  // parent (App) on settings-close -- a Settings Save may have changed a
+  // keychain slot, so the mount-time fetch effect re-runs on a bump and the
+  // badge does not show a stale "No key" after the user just configured one
+  // (ADR-0019 honest gate). Undefined = mount-only fetch (the original
+  // ProfileSwitcher mirror contract, retained for tests that exercise the
+  // picker in isolation).
+  profileKeyEpoch?: number;
 };
 
 export function ComposerProviderPicker({
@@ -61,14 +72,17 @@ export function ComposerProviderPicker({
   onSwitchActive,
   onSwitchModel,
   onOpenSettings,
+  profileKeyEpoch,
 }: ComposerProviderPickerProps) {
   const intl = useIntl();
   const [open, setOpen] = useState(false);
 
-  // Per-profile has_key overlay (issue #154 / ADR-0029). Fetched once on mount;
-  // never refetched -- a switch moves the active pointer, not the keys (mirrors
-  // ProfileSwitcher). A settings Save that changes a slot is reflected on the
-  // next mount; this slice does not refetch on settings-close.
+  // Per-profile has_key overlay (issue #154 / ADR-0029). Fetched on mount AND
+  // on a profileKeyEpoch bump -- App bumps the epoch on settings-close so a
+  // Settings Save that changed a keychain slot is reflected without a remount
+  // (ADR-0019 honest gate: the popover must not keep showing "No key" after the
+  // user just configured one). A profile switch never refetches -- it moves the
+  // active pointer, not the keys (mirrors ProfileSwitcher).
   const [profileKeys, setProfileKeys] = useState<Record<string, boolean>>({});
   const [keysError, setKeysError] = useState<string | null>(null);
 
@@ -94,7 +108,7 @@ export function ComposerProviderPicker({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [profileKeyEpoch]);
 
   const activeProfile = provider.profiles.find(
     (p) => p.id === provider.active_profile,
