@@ -39,7 +39,7 @@ const { appConfigWith } = vi.hoisted(() => {
       export: { last_dir: null, default_format: "csv" },
       tunables: { retry_budget: 3, window_turns: 6, far_window: 12 },
       recent_files: [] as string[],
-      shell: { sidebar_collapsed: false, rail_collapsed: false },
+      shell: { sidebar_collapsed: false, rail_collapsed: false, sidebar_grouping: "flat" },
     };
   }
   return { appConfigWith };

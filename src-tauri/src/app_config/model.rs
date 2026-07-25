@@ -173,6 +173,22 @@ fn default_export_format() -> String {
     "csv".to_string()
 }
 
+/// Session sidebar grouping mode (ADR-0072, issue #251). `Flat` renders every
+/// session in a single "Recent" group sorted by mtime descending; `Time`
+/// preserves the ADR-0060 Chat-style Today / Yesterday / Previous 7 days / Older
+/// buckets. The default is `Flat` (the "by recent" browse default); the user
+/// toggles between the two from the sidebar's group-title Popover, persisting
+/// alongside the two collapse prefs. The variant names avoid `recent` to stay
+/// clear of the `recent_files` MRU-list sense (ADR-0072).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SidebarGrouping {
+    #[default]
+    #[serde(rename = "flat")]
+    Flat,
+    #[serde(rename = "time")]
+    Time,
+}
+
 /// Shell collapse preferences (ADR-0054, issue #84). The two manual collapse
 /// levels that are UI state (NOT the third -- Tauri minWidth/minHeight, which is
 /// a native window config, not a preference): the session sidebar (full hide +
@@ -180,6 +196,10 @@ fn default_export_format() -> String {
 /// default expanded; both persist across restarts via app-config (ADR-0038),
 /// alongside theme / locale / window geometry. The two stack -- a user may
 /// collapse either, both, or neither independently.
+///
+/// `sidebar_grouping` (ADR-0072, issue #251) extends the same shell-chrome
+/// preference surface: the sidebar's flat/time render mode persists + restores
+/// with the two collapse prefs.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ShellPrefs {
     /// Session sidebar collapsed (ADR-0054/0060). Fully hidden; the topbar
@@ -190,6 +210,11 @@ pub struct ShellPrefs {
     /// the QuestionBar still spans it (ADR-0062 R1).
     #[serde(default)]
     pub rail_collapsed: bool,
+    /// Session sidebar grouping mode (ADR-0072, issue #251). Forward-compat: a
+    /// pre-#251 file has no `sidebar_grouping` key, so serde(default) fills
+    /// `Flat` rather than rejecting the whole document.
+    #[serde(default)]
+    pub sidebar_grouping: SidebarGrouping,
 }
 
 /// Tunable defaults (ADR-0013/0023/0028). Persisted so a user's tuned values
@@ -686,6 +711,33 @@ mod tests {
         let shell = ShellPrefs::default();
         assert!(!shell.sidebar_collapsed);
         assert!(!shell.rail_collapsed);
+        // ADR-0072 (#251): the grouping mode defaults to Flat (the "by recent"
+        // browse default), persisting alongside the two collapse prefs.
+        assert_eq!(shell.sidebar_grouping, SidebarGrouping::Flat);
+    }
+
+    #[test]
+    fn sidebar_grouping_serializes_as_lowercase_variant() {
+        // Crosses IPC as the bare lowercase name, mirroring Theme. The TS union
+        // `SidebarGrouping = "flat" | "time"` mirrors this exact spelling.
+        assert_eq!(
+            serde_json::to_string(&SidebarGrouping::Flat).unwrap(),
+            r#""flat""#
+        );
+        assert_eq!(
+            serde_json::to_string(&SidebarGrouping::Time).unwrap(),
+            r#""time""#
+        );
+    }
+
+    #[test]
+    fn sidebar_grouping_round_trips_through_shell_prefs() {
+        // A user who switched to Time reopens in Time; Flat likewise.
+        let mut cfg = AppConfig::defaults();
+        cfg.shell.sidebar_grouping = SidebarGrouping::Time;
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: AppConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.shell.sidebar_grouping, SidebarGrouping::Time);
     }
 
     #[test]
@@ -717,13 +769,14 @@ mod tests {
 
     #[test]
     fn shell_prefs_partial_deserialize_fills_missing_collapse() {
-        // A partial `shell` object (one key present, the other absent) must fill
-        // the missing collapse from default, not reject. Each field carries its
-        // own #[serde(default)], so a future addition to ShellPrefs is also
+        // A partial `shell` object (one key present, the others absent) must
+        // fill the missing fields from default, not reject. Each field carries
+        // its own #[serde(default)], so a future addition to ShellPrefs is also
         // forward-compat at the field level.
         let json = r#"{"format_version":1,"shell":{"sidebar_collapsed":true}}"#;
         let cfg: AppConfig = serde_json::from_str(json).expect("partial shell deserialize");
         assert!(cfg.shell.sidebar_collapsed);
         assert!(!cfg.shell.rail_collapsed); // absent -> default false
+        assert_eq!(cfg.shell.sidebar_grouping, SidebarGrouping::Flat); // absent -> Flat
     }
 }

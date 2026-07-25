@@ -9,8 +9,15 @@
 // identity is its ephemeral UUID (createSession). An open session that has bound
 // a .duck carries that path; a never-saved new session has path = null and only
 // exists in the open set.
+//
+// Grouping mode (ADR-0072, issue #251): the user toggles between `flat` (a
+// single Recent group sorted by mtime descending, the default) and `time` (the
+// ADR-0060 Chat-style Today/Yesterday/Previous 7 days/Older buckets). The mode
+// rides the shell-chrome prefs; buildSidebarGroups takes it as a parameter so
+// the component is a thin caller.
 
 import type { SessionMetadata } from "../types/session";
+import type { SidebarGrouping } from "../types/app-config";
 
 /** A runtime-open session tracked by the shell (ADR-0060/0051 keep-alive). */
 export interface OpenSession {
@@ -35,8 +42,9 @@ export interface OpenSession {
   pendingIngestPath: string | null;
 }
 
-/** A sidebar time-group (ADR-0060 Chat-style: Today / Yesterday / Previous 7 days / Older). */
-export type SidebarGroupKind = "today" | "yesterday" | "last7" | "older";
+/** A sidebar time-group (ADR-0060 Chat-style: Today / Yesterday / Previous 7 days / Older),
+ *  plus `recent` for the ADR-0072 flat mode (single group sorted by mtime descending). */
+export type SidebarGroupKind = "today" | "yesterday" | "last7" | "older" | "recent";
 
 /** A single merged sidebar entry (persisted, open, or both). */
 export interface SidebarEntry {
@@ -88,17 +96,45 @@ export function timeGroupKind(lastModifiedAt: number, now: number): SidebarGroup
   return "older";
 }
 
-/** Build the merged, time-grouped, last-modified-descending sidebar model. Pure
- *  in (persisted, open, activeSessionId, now) -- the component supplies the raw
- *  list_sessions result + the open set, this function does the rest. A persisted
- *  session that is also open merges into one entry (open = true, sid set); an
- *  open never-saved session becomes its own entry; every entry carries the
- *  display fields the row renders. */
+/** A dynamic-format classification of an mtime for sub-line display (ADR-0072
+ *  search slice, issue #251 prefactor). Pure in (lastModifiedAt, now): returns
+ *  `today` / `yesterday` for the past two local calendar days (the caller
+ *  localizes via intl), else a `date` arm carrying the Date so the caller can
+ *  format with Intl.DateTimeFormat -- year-included when the mtime predates the
+ *  current year, month/day otherwise. Day boundaries are local calendar days
+ *  (midnight rollover), matching `timeGroupKind`. */
+export type LastModifiedLabel =
+  | { kind: "today" }
+  | { kind: "yesterday" }
+  | { kind: "date"; date: Date };
+
+/** Classify an mtime for sub-line display (ADR-0072, issue #251). See
+ *  {@link LastModifiedLabel}. */
+export function formatLastModified(lastModifiedAt: number, now: number): LastModifiedLabel {
+  const today = startOfCalendarDay(now);
+  const entry = startOfCalendarDay(lastModifiedAt);
+  if (entry >= today) return { kind: "today" };
+  if (entry >= today - MS_PER_DAY) return { kind: "yesterday" };
+  return { kind: "date", date: new Date(lastModifiedAt) };
+}
+
+/** Build the merged, grouped, last-modified-descending sidebar model. Pure in
+ *  (persisted, open, activeSessionId, now, grouping) -- the component supplies
+ *  the raw list_sessions result + the open set + the user's grouping choice;
+ *  this function does the rest. A persisted session that is also open merges
+ *  into one entry (open = true, sid set); an open never-saved session becomes
+ *  its own entry; every entry carries the display fields the row renders.
+ *
+ *  Grouping (ADR-0072, issue #251): `flat` -> a single `recent` group sorted by
+ *  mtime descending (the "Recent" title); `time` -> the ADR-0060 Chat-style
+ *  Today / Yesterday / Previous 7 days / Older buckets. An empty sidebar yields
+ *  an empty group list in either mode. */
 export function buildSidebarGroups(
   persisted: SessionMetadata[],
   open: OpenSession[],
   activeSessionId: string | null,
   now: number,
+  grouping: SidebarGrouping,
 ): SidebarGroup[] {
   // Index open sessions by their bound path so a persisted row can pick up its
   // runtime sid + latest name in one lookup.
@@ -143,12 +179,24 @@ export function buildSidebarGroups(
     });
   }
 
-  // Sort last-modified descending, then group. Ties (same mtime) fall back to
-  // name so the render is deterministic across renders.
+  // No entries -> no groups (ADR-0072: an empty sidebar renders no group title,
+  // so the grouping toggle's hover affordance is hidden too).
+  if (entries.length === 0) return [];
+
+  // Sort last-modified descending. Ties (same mtime) fall back to name so the
+  // render is deterministic across renders. Both grouping modes consume the
+  // same sorted order.
   entries.sort(
     (a, b) => b.lastModifiedAt - a.lastModifiedAt || a.name.localeCompare(b.name),
   );
 
+  if (grouping === "flat") {
+    // ADR-0072 flat mode: a single Recent group, already sorted by mtime desc.
+    return [{ kind: "recent", entries }];
+  }
+
+  // ADR-0060 time mode: Chat-style Today / Yesterday / Previous 7 days / Older,
+  // each omitted when empty.
   const groups: SidebarGroup[] = [];
   for (const kind of ["today", "yesterday", "last7", "older"] as const) {
     const groupEntries = entries.filter(

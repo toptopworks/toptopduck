@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { MessageSquare, Pencil, Search } from "lucide-react";
+import { Check, MessageSquare, Pencil, Search } from "lucide-react";
 import {
   buildSidebarGroups,
   type OpenSession,
@@ -8,6 +8,7 @@ import {
   type SidebarGroupKind,
 } from "./sidebarModel";
 import type { SessionMetadata } from "../types/session";
+import type { SidebarGrouping } from "../types/app-config";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -28,13 +29,21 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 
-// Group heading (ADR-0060 Chat-style Today/Yesterday/Previous-7-days/Older). Each branch is a
-// STATIC-literal <FormattedMessage> call site so @formatjs/cli extract resolves
-// the id (a template-literal id would break the i18n:check CI gate).
+// Group heading (ADR-0060 Chat-style Today/Yesterday/Previous-7-days/Older, or
+// `recent` for ADR-0072's flat mode). Each branch is a STATIC-literal
+// <FormattedMessage> call site so @formatjs/cli extract resolves the id (a
+// template-literal id would break the i18n:check CI gate).
 function GroupTitle({ kind }: { kind: SidebarGroupKind }) {
   switch (kind) {
+    case "recent":
+      return <FormattedMessage id="sidebar.group.recent" defaultMessage="Recent" />;
     case "today":
       return <FormattedMessage id="sidebar.group.today" defaultMessage="Today" />;
     case "yesterday":
@@ -58,12 +67,14 @@ interface SessionSidebarProps {
   activeSessionId: string | null;
   disabled: boolean;
   loadError: string | null;
+  grouping: SidebarGrouping;
   onNew: () => void;
   onActivate: (sid: string) => void;
   onOpenPersisted: (path: string, name: string) => void;
   onClose: (sid: string) => void;
   onDelete: (path: string, sid: string | null) => void;
   onRename: (sid: string | null, path: string | null, newName: string) => void;
+  onSwitchGrouping: (mode: SidebarGrouping) => void;
 }
 
 // The context-menu action the user picked, driving which dialog opens.
@@ -77,12 +88,14 @@ export function SessionSidebar({
   activeSessionId,
   disabled,
   loadError,
+  grouping,
   onNew,
   onActivate,
   onOpenPersisted,
   onClose,
   onDelete,
   onRename,
+  onSwitchGrouping,
 }: SessionSidebarProps) {
   const intl = useIntl();
   // Which entry's context menu is open (entry key); null = none. Only one menu
@@ -99,6 +112,7 @@ export function SessionSidebar({
     openSessions,
     activeSessionId,
     now,
+    grouping,
   );
   const displayName = (name: string): string =>
     name || intl.formatMessage({ id: "session.defaultName", defaultMessage: "New session" });
@@ -155,11 +169,26 @@ export function SessionSidebar({
       )}
 
       <ul className="session-list">
-        {groups.map((group) => (
+        {groups.map((group, groupIndex) => (
           <li key={group.kind} className="session-group mt-1.5 mb-0.5">
-            <h3 className="session-group-title mb-0.5 px-1 text-xs uppercase tracking-wider text-muted-foreground">
-              <GroupTitle kind={group.kind} />
-            </h3>
+            {/* ADR-0072 (#251): the grouping toggle rides the FIRST group's
+                title row -- one entry point regardless of mode, and naturally
+                hidden on an empty sidebar (no groups render). The trigger is
+                hover-revealed (group-hover) but stays focus-visible for AT
+                users; the open popover also pins it visible via
+                data-[state=open]. */}
+            <div className="session-group-title-row group relative mb-0.5 flex items-center justify-between px-1">
+              <h3 className="session-group-title text-xs uppercase tracking-wider text-muted-foreground">
+                <GroupTitle kind={group.kind} />
+              </h3>
+              {groupIndex === 0 && (
+                <GroupingToggle
+                  grouping={grouping}
+                  disabled={disabled}
+                  onSwitch={onSwitchGrouping}
+                />
+              )}
+            </div>
             <ul className="session-group-list list-none m-0 p-0">
               {group.entries.map((entry) => (
                 <SidebarRow
@@ -237,6 +266,86 @@ export function SessionSidebar({
 // without copy-paste drift across the three items.
 const sessionMenuItemBase =
   "[all:unset] cursor-pointer block w-full py-1 px-2 rounded-md text-sm hover:bg-accent";
+
+// The flat/time grouping toggle (ADR-0072, issue #251). Triggered by a hover-
+// revealed `⋯` on the first group-title row (one entry point regardless of
+// mode, hidden on an empty sidebar). The Popover offers the two modes as
+// menuitemradio items; the selected mode carries a trailing Check. A pick
+// commits immediately via onSwitch (the hook routes through commitShellPrefs,
+// same immediate-persist contract as the collapse toggles).
+function GroupingToggle({
+  grouping,
+  disabled,
+  onSwitch,
+}: {
+  grouping: SidebarGrouping;
+  disabled: boolean;
+  onSwitch: (mode: SidebarGrouping) => void;
+}) {
+  const intl = useIntl();
+  const [open, setOpen] = useState(false);
+
+  const pick = (mode: SidebarGrouping) => {
+    setOpen(false);
+    onSwitch(mode);
+  };
+
+  const optionClass =
+    "[all:unset] cursor-pointer flex w-full items-center justify-between gap-2 rounded-md py-1 pl-2 pr-1.5 text-sm text-foreground hover:bg-accent";
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          disabled={disabled}
+          aria-label={intl.formatMessage({
+            id: "sidebar.grouping.toggle.ariaLabel",
+            defaultMessage: "Change session grouping",
+          })}
+          className={cn(
+            "sidebar-grouping-toggle [all:unset] cursor-pointer rounded-md px-1.5 text-base leading-none text-muted-foreground",
+            // Hover-reveal on the title row; stay visible while focused or open.
+            "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100",
+            "hover:bg-accent hover:text-foreground disabled:cursor-progress disabled:opacity-50",
+          )}
+        >
+          ⋯
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="end"
+        sideOffset={4}
+        className="sidebar-grouping-menu w-44 p-1"
+        role="menu"
+      >
+        <div className="px-2 py-1 text-xs text-muted-foreground">
+          <FormattedMessage id="sidebar.grouping.label" defaultMessage="Group by" />
+        </div>
+        <button
+          type="button"
+          role="menuitemradio"
+          aria-checked={grouping === "flat"}
+          onClick={() => pick("flat")}
+          className={optionClass}
+        >
+          <FormattedMessage id="sidebar.grouping.flat" defaultMessage="In a list" />
+          {grouping === "flat" && <Check className="size-4 shrink-0" aria-hidden />}
+        </button>
+        <button
+          type="button"
+          role="menuitemradio"
+          aria-checked={grouping === "time"}
+          onClick={() => pick("time")}
+          className={optionClass}
+        >
+          <FormattedMessage id="sidebar.grouping.time" defaultMessage="By time" />
+          {grouping === "time" && <Check className="size-4 shrink-0" aria-hidden />}
+        </button>
+      </PopoverContent>
+    </Popover>
+  );
+}
 
 // One sidebar row: the session name (click to activate/open) + a sub-line
 // (first source + turn count) + a context-menu toggle. The menu is the single

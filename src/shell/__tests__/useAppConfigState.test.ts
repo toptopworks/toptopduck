@@ -32,7 +32,7 @@ vi.mock("../../api", async (importOriginal) => {
 import { getAppConfig, setAppConfig } from "../../api";
 import { useAppConfigState } from "../useAppConfigState";
 
-function baseAppConfig(shell: AppConfig["shell"]): AppConfig {
+function baseAppConfig(shell: Omit<AppConfig["shell"], "sidebar_grouping">): AppConfig {
   return {
     format_version: 1,
     theme: "system",
@@ -55,7 +55,10 @@ function baseAppConfig(shell: AppConfig["shell"]): AppConfig {
     export: { last_dir: null, default_format: "csv" },
     tunables: { retry_budget: 3, window_turns: 6, far_window: 12 },
     recent_files: [],
-    shell,
+    // The helper fills `sidebar_grouping: "flat"` (the serde default) so callers
+    // stay focused on the collapse prefs they actually exercise. Grouping-specific
+    // tests build their own AppConfig literal with the mode under test.
+    shell: { ...shell, sidebar_grouping: "flat" },
   };
 }
 
@@ -82,11 +85,14 @@ describe("useAppConfigState", () => {
     vi.mocked(setAppConfig).mockImplementation(async (cfg: AppConfig) => cfg);
   });
 
-  it("starts cold: null appConfig, both collapse levels expanded", () => {
+  it("starts cold: null appConfig, both collapse levels expanded, grouping flat", () => {
     const { result } = renderAppConfigState();
     expect(result.current.appConfig).toBeNull();
     expect(result.current.sidebarCollapsed).toBe(false);
     expect(result.current.railCollapsed).toBe(false);
+    // ADR-0072 (#251): grouping defaults to flat until the persisted pref
+    // resolves (the restore effect's one-shot then applies the stored value).
+    expect(result.current.sidebarGrouping).toBe("flat");
   });
 
   it("loads app-config once on mount and surfaces it (ADR-0038)", async () => {
@@ -310,7 +316,10 @@ describe("useAppConfigState", () => {
     expect(result.current.railCollapsed).toBe(false); // rail untouched
     expect(setAppConfig).toHaveBeenCalledWith(
       expect.objectContaining({
-        shell: { sidebar_collapsed: true, rail_collapsed: false },
+        // Nested objectContaining: the commit also carries the current
+        // sidebar_grouping (#251), which these collapse-only tests stay
+        // agnostic to.
+        shell: expect.objectContaining({ sidebar_collapsed: true, rail_collapsed: false }),
       }),
     );
   });
@@ -329,7 +338,7 @@ describe("useAppConfigState", () => {
     expect(result.current.sidebarCollapsed).toBe(false); // sidebar untouched
     expect(setAppConfig).toHaveBeenCalledWith(
       expect.objectContaining({
-        shell: { sidebar_collapsed: false, rail_collapsed: true },
+        shell: expect.objectContaining({ sidebar_collapsed: false, rail_collapsed: true }),
       }),
     );
   });
@@ -357,5 +366,103 @@ describe("useAppConfigState", () => {
       expect(result.current.sidebarCollapsed).toBe(true);
       expect(result.current.railCollapsed).toBe(true);
     });
+  });
+
+  // --- sidebarGrouping (ADR-0072, issue #251) ------------------------------
+  // Sibling surface to the two collapse prefs: the flat/time mode persists +
+  // restores via the same one-shot effect, and switchSidebarGrouping commits
+  // immediately through commitShellPrefs (single IPC write of all three shell
+  // prefs). The optimistic + no-rollback contract is commitAppConfig's.
+
+  it("switchSidebarGrouping is a no-op persist before app-config resolves (ref null)", async () => {
+    const { result } = renderAppConfigState();
+    expect(result.current.appConfig).toBeNull();
+
+    act(() => {
+      result.current.switchSidebarGrouping("time");
+    });
+
+    // UI state flips (the visible effect lands), but the ref guard short-
+    // circuits the IPC write -- mirrors toggleSidebarCollapse's pre-resolve
+    // contract.
+    expect(result.current.sidebarGrouping).toBe("time");
+    expect(setAppConfig).not.toHaveBeenCalled();
+  });
+
+  it("switchSidebarGrouping is a no-op when the mode matches", async () => {
+    const cfg = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
+    vi.mocked(getAppConfig).mockResolvedValue(cfg);
+    const { result } = renderAppConfigState();
+    await waitFor(() => expect(result.current.appConfig).toBe(cfg));
+    // The persisted default is flat; switching to flat is a no-op.
+    expect(result.current.sidebarGrouping).toBe("flat");
+
+    act(() => {
+      result.current.switchSidebarGrouping("flat");
+    });
+
+    expect(setAppConfig).not.toHaveBeenCalled();
+  });
+
+  it("switchSidebarGrouping flips grouping + persists all three shell prefs (ADR-0072)", async () => {
+    const cfg = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
+    vi.mocked(getAppConfig).mockResolvedValue(cfg);
+    const { result } = renderAppConfigState();
+    await waitFor(() => expect(result.current.appConfig).toBe(cfg));
+
+    act(() => {
+      result.current.switchSidebarGrouping("time");
+    });
+
+    expect(result.current.sidebarGrouping).toBe("time");
+    // Single IPC write of all three shell prefs: collapse prefs unchanged, the
+    // new mode carried alongside (ADR-0072 Consequences).
+    expect(setAppConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        shell: expect.objectContaining({
+          sidebar_collapsed: false,
+          rail_collapsed: false,
+          sidebar_grouping: "time",
+        }),
+      }),
+    );
+  });
+
+  it("toggleSidebarCollapse carries the current grouping into the shell write (ADR-0072)", async () => {
+    const cfg = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
+    vi.mocked(getAppConfig).mockResolvedValue(cfg);
+    const { result } = renderAppConfigState();
+    await waitFor(() => expect(result.current.appConfig).toBe(cfg));
+
+    act(() => {
+      result.current.switchSidebarGrouping("time");
+    });
+    act(() => {
+      result.current.toggleSidebarCollapse();
+    });
+
+    expect(result.current.sidebarCollapsed).toBe(true);
+    // The collapse-toggle's commit must carry the grouping the user just
+    // switched to (single IPC write of all three prefs -- the grouping does
+    // not silently revert to flat on a collapse toggle).
+    expect(setAppConfig).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        shell: expect.objectContaining({
+          sidebar_collapsed: true,
+          rail_collapsed: false,
+          sidebar_grouping: "time",
+        }),
+      }),
+    );
+  });
+
+  it("restores persisted grouping once on the first app-config resolve (ADR-0038/0072)", async () => {
+    const cfg: AppConfig = {
+      ...baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+      shell: { sidebar_collapsed: false, rail_collapsed: false, sidebar_grouping: "time" },
+    };
+    vi.mocked(getAppConfig).mockResolvedValue(cfg);
+    const { result } = renderAppConfigState();
+    await waitFor(() => expect(result.current.sidebarGrouping).toBe("time"));
   });
 });

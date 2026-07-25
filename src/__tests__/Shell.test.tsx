@@ -1099,8 +1099,12 @@ describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
 });
 
 // A minimal valid AppConfig for the #84 persistence tests (the shell prefs are
-// the only field under test; the rest are just-shape defaults).
-function baseAppConfig(shell: AppConfig["shell"]): AppConfig {
+// the only field under test; the rest are just-shape defaults). The helper fills
+// `sidebar_grouping: "flat"` (the serde default) so callers stay focused on the
+// collapse prefs they actually exercise (#251 added the grouping field).
+function baseAppConfig(
+  shell: Omit<AppConfig["shell"], "sidebar_grouping">,
+): AppConfig {
   return {
     format_version: 1,
     theme: "system",
@@ -1123,7 +1127,7 @@ function baseAppConfig(shell: AppConfig["shell"]): AppConfig {
     export: { last_dir: null, default_format: "csv" },
     tunables: { retry_budget: 3, window_turns: 6, far_window: 12 },
     recent_files: [],
-    shell,
+    shell: { ...shell, sidebar_grouping: "flat" },
   };
 }
 
@@ -1203,8 +1207,10 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // setAppConfig receives a config whose shell reflects the toggle.
     await waitFor(() =>
       expect(setAppConfig).toHaveBeenCalledWith(
+        // Nested objectContaining: the commit also carries sidebar_grouping
+        // (#251), which this collapse-only test stays agnostic to.
         expect.objectContaining({
-          shell: { sidebar_collapsed: true, rail_collapsed: false },
+          shell: expect.objectContaining({ sidebar_collapsed: true, rail_collapsed: false }),
         }),
       ),
     );
@@ -1226,7 +1232,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     await waitFor(() =>
       expect(setAppConfig).toHaveBeenCalledWith(
         expect.objectContaining({
-          shell: { sidebar_collapsed: false, rail_collapsed: true },
+          shell: expect.objectContaining({ sidebar_collapsed: false, rail_collapsed: true }),
         }),
       ),
     );

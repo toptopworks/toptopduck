@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { fireEvent, render } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import type { ReactElement } from "react";
 import { SessionSidebar } from "../SessionSidebar";
@@ -44,6 +44,8 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onClose={() => {}}
         onDelete={() => {}}
         onRename={() => {}}
+        grouping="flat"
+        onSwitchGrouping={() => {}}
       />,
     );
     const active = container.querySelector(".session-entry.active .session-entry-main");
@@ -73,6 +75,8 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onClose={() => {}}
         onDelete={() => {}}
         onRename={() => {}}
+        grouping="flat"
+        onSwitchGrouping={() => {}}
       />,
     );
     const bg = container.querySelector(".session-entry.open:not(.active) .session-entry-main");
@@ -100,6 +104,8 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onClose={() => {}}
         onDelete={() => {}}
         onRename={() => {}}
+        grouping="flat"
+        onSwitchGrouping={() => {}}
       />,
     );
     const rows = container.querySelectorAll(".session-entry-main");
@@ -138,6 +144,8 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onClose={() => {}}
         onDelete={() => {}}
         onRename={() => {}}
+        grouping="flat"
+        onSwitchGrouping={() => {}}
       />,
     );
     const main = container.querySelector(".session-entry-main");
@@ -169,6 +177,8 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onClose={() => {}}
         onDelete={() => {}}
         onRename={() => {}}
+        grouping="flat"
+        onSwitchGrouping={() => {}}
       />,
     );
     fireEvent.click(container.querySelector(".session-entry-menu") as HTMLButtonElement);
@@ -203,6 +213,8 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onClose={() => {}}
         onDelete={() => {}}
         onRename={() => {}}
+        grouping="flat"
+        onSwitchGrouping={() => {}}
       />,
     );
     fireEvent.click(container.querySelector(".session-entry-menu") as HTMLButtonElement);
@@ -228,6 +240,8 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onClose={() => {}}
         onDelete={() => {}}
         onRename={() => {}}
+        grouping="flat"
+        onSwitchGrouping={() => {}}
       />,
     );
     const brandRow = container.querySelector(".sidebar-brand-row");
@@ -262,6 +276,8 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onClose={() => {}}
         onDelete={() => {}}
         onRename={() => {}}
+        grouping="flat"
+        onSwitchGrouping={() => {}}
       />,
     );
     const newBtn = container.querySelector(".sidebar-new-button");
@@ -280,5 +296,111 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     expect(icon).toHaveClass("lucide-pencil");
     expect(icon).toHaveAttribute("aria-hidden", "true");
     expect(newBtn).toHaveTextContent("New session");
+  });
+});
+
+describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
+  // One persisted session so a group renders and the toggle's hover affordance
+  // has an anchor (the first group-title row).
+  function onePersisted(): SessionMetadata {
+    return {
+      session_id: "/x/solo.duck",
+      display_name: "Solo",
+      last_modified_at: Date.now(),
+      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+      format_version: 1,
+    };
+  }
+
+  it("hides the grouping toggle on an empty sidebar (no group title to anchor it)", () => {
+    // ADR-0072: empty sidebar renders no group title, so the toggle's hover
+    // affordance has no anchor -- the empty-state row renders instead.
+    const { container } = renderShell(
+      <SessionSidebar
+        sessions={[]}
+        openSessions={[]}
+        activeSessionId={null}
+        disabled={false}
+        loadError={null}
+        grouping="flat"
+        onNew={() => {}}
+        onActivate={() => {}}
+        onOpenPersisted={() => {}}
+        onClose={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onSwitchGrouping={() => {}}
+      />,
+    );
+    expect(container.querySelector(".sidebar-grouping-toggle")).toBeNull();
+  });
+
+  it("reveals the toggle on the first group-title row and opens the popover on click", () => {
+    const onSwitchGrouping = vi.fn();
+    const { container } = renderShell(
+      <SessionSidebar
+        sessions={[onePersisted()]}
+        openSessions={[]}
+        activeSessionId={null}
+        disabled={false}
+        loadError={null}
+        grouping="flat"
+        onNew={() => {}}
+        onActivate={() => {}}
+        onOpenPersisted={() => {}}
+        onClose={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onSwitchGrouping={onSwitchGrouping}
+      />,
+    );
+    // Exactly one toggle (on the first group title); flat mode renders one
+    // "Recent" group, so the toggle sits on that row.
+    const toggles = container.querySelectorAll(".sidebar-grouping-toggle");
+    expect(toggles).toHaveLength(1);
+
+    fireEvent.click(toggles[0] as HTMLButtonElement);
+
+    // Two menuitemradio options render in the Radix Popover portal. The flat
+    // option carries aria-checked=true (the current mode) and the trailing
+    // Check glyph; the time option is unchecked with no Check.
+    const flat = screen.getByRole("menuitemradio", { name: /In a list/i });
+    const time = screen.getByRole("menuitemradio", { name: /By time/i });
+    expect(flat).toHaveAttribute("aria-checked", "true");
+    expect(time).toHaveAttribute("aria-checked", "false");
+    expect(flat.querySelector("svg.lucide-check")).not.toBeNull();
+    expect(time.querySelector("svg.lucide-check")).toBeNull();
+
+    // Picking "By time" fires onSwitchGrouping("time") (the App wires the hook
+    // that persists the change). pick() also closes the popover, so the second
+    // option is asserted from a fresh render in the next test.
+    fireEvent.click(time);
+    expect(onSwitchGrouping).toHaveBeenCalledWith("time");
+  });
+
+  it("marks By time checked when grouping is time", () => {
+    const { container } = renderShell(
+      <SessionSidebar
+        sessions={[onePersisted()]}
+        openSessions={[]}
+        activeSessionId={null}
+        disabled={false}
+        loadError={null}
+        grouping="time"
+        onNew={() => {}}
+        onActivate={() => {}}
+        onOpenPersisted={() => {}}
+        onClose={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onSwitchGrouping={() => {}}
+      />,
+    );
+    fireEvent.click(container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement);
+    const flat = screen.getByRole("menuitemradio", { name: /In a list/i });
+    const time = screen.getByRole("menuitemradio", { name: /By time/i });
+    expect(flat).toHaveAttribute("aria-checked", "false");
+    expect(time).toHaveAttribute("aria-checked", "true");
+    expect(time.querySelector("svg.lucide-check")).not.toBeNull();
   });
 });
