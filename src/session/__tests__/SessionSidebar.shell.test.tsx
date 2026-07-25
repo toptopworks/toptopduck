@@ -30,7 +30,7 @@ function twoOpenSessions(): OpenSession[] {
 }
 
 describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
-  it("session-entry.active lifts bg-accent + text-accent-foreground + left inset bar (ADR-0072 D4, issue #249)", () => {
+  it("session-entry.active lifts bg-accent + text-accent-foreground + left inset bar + aria-current (ADR-0072, issue #249)", () => {
     const { container } = renderShell(
       <SessionSidebar
         sessions={[]}
@@ -49,18 +49,17 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     const active = container.querySelector(".session-entry.active .session-entry-main");
     expect(active).not.toBeNull();
     const classes = active?.className.split(/\s+/);
-    // ADR-0072 (issue #249): active is a light accent tint + the 2px left bar,
-    // retiring the ADR-0060 full-row teal fill (bg-primary +
-    // text-primary-foreground + font-semibold).
     expect(classes).toContain("bg-accent");
     expect(classes).toContain("text-accent-foreground");
     expect(classes).toContain("shadow-[inset_2px_0_var(--primary)]");
     expect(classes).not.toContain("bg-primary");
     expect(classes).not.toContain("text-primary-foreground");
     expect(classes).not.toContain("font-semibold");
+    // The tint is decorative; aria-current is the active row's AT signal.
+    expect(active).toHaveAttribute("aria-current", "true");
   });
 
-  it("session-entry.open:not(.active) lifts the left accent shadow with no tint (ADR-0072 D4)", () => {
+  it("session-entry.open:not(.active) lifts the left accent shadow with no tint (ADR-0072, issue #249)", () => {
     const { container } = renderShell(
       <SessionSidebar
         sessions={[]}
@@ -81,12 +80,13 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     const classes = bg?.className.split(/\s+/);
     expect(classes).toContain("shadow-[inset_2px_0_var(--primary)]");
     // The tint is active-only: an open-but-background row carries just the bar.
-    expect(classes).not.toContain("bg-primary");
     expect(classes).not.toContain("bg-accent");
     expect(classes).not.toContain("text-accent-foreground");
+    // Only the active row carries aria-current.
+    expect(bg).not.toHaveAttribute("aria-current");
   });
 
-  it("session-entry-main renders a leading MessageSquare icon on every row (ADR-0072 D5, issue #249)", () => {
+  it("session-entry-main renders a leading MessageSquare icon on every row (ADR-0072, issue #249)", () => {
     const { container } = renderShell(
       <SessionSidebar
         sessions={[]}
@@ -102,13 +102,19 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onRename={() => {}}
       />,
     );
-    // ADR-0072 (issue #249): each row leads with a unified chat-bubble glyph
-    // (MessageSquare), replacing the persisted/not Database/CircleDot split.
-    const icons = container.querySelectorAll(".session-entry-main svg.lucide-message-square");
-    expect(icons.length).toBe(2);
-    // Decorative -- the session name is the accessible label, so the glyph
-    // hides from AT via aria-hidden.
-    icons.forEach((icon) => expect(icon).toHaveAttribute("aria-hidden", "true"));
+    const rows = container.querySelectorAll(".session-entry-main");
+    expect(rows.length).toBe(2);
+    rows.forEach((row) => {
+      const first = row.firstElementChild;
+      expect(first).not.toBeNull();
+      // Verifying the FIRST child is the svg proves the "leading" claim --
+      // a count alone would miss a reordering. Decorative (aria-hidden) since
+      // the session name is the accessible label.
+      if (!first) return;
+      expect(first.tagName).toBe("svg");
+      expect(first).toHaveClass("lucide-message-square");
+      expect(first).toHaveAttribute("aria-hidden", "true");
+    });
   });
 
   it("session-entry-main keeps [all:unset] + hover:bg-accent + rounded-md on the default row", () => {

@@ -241,16 +241,11 @@ function SidebarRow({
   onDelete: () => void;
 }) {
   const intl = useIntl();
-  // The entry states (ADR-0060, refined by ADR-0072 issue #249) ride inline
-  // utilities over the ADR-0050 token: default = bg-transparent text-foreground;
-  // hover = bg-accent; active (the visible session) = a light accent tint
-  // (bg-accent text-accent-foreground) + the 2px left bar; open-but-not-active =
-  // just the 2px left inset bar so an open background session still leaves a
-  // trace. The bar rides on entry.sid (every open row, active or not); the tint
-  // is active-only. ADR-0072 retires the ADR-0060 full-row teal fill (bg-primary
-  // + text-primary-foreground + font-semibold). The active/open modifiers also
-  // stay as classes on the parent .session-entry hook for selector / test
-  // stability, and the same booleans compose the entry-main utilities.
+  // Entry states ride inline utilities over the ADR-0050 token (ADR-0060,
+  // refined by ADR-0072 issue #249): active = accent tint + the 2px left bar;
+  // open-but-not-active = the bar only; default = no signal. ADR-0072 retires
+  // the ADR-0060 full-row teal fill. The active/open booleans also stay as
+  // classes on the parent .session-entry hook for selector / test stability.
   return (
     <li
       className={cn(
