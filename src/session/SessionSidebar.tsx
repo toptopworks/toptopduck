@@ -114,19 +114,19 @@ export function SessionSidebar({
       className="session-sidebar bg-muted border-r border-border p-2"
       aria-label={intl.formatMessage({ id: "sidebar.ariaLabel", defaultMessage: "Sessions" })}
     >
-      {/* ADR-0072 (issue #250): the top is rebuilt into a brand title row + a
-          New icon button row, retiring the ADR-0060 full-width solid teal New
-          button. Brand title row = product name left + circular search
-          magnifier right (placeholder; the search modal arrives in a later
-          slice). The New button drops the solid primary fill for a fused
-          bg-secondary, matching the row tint visual language. */}
-      <div className="sidebar-brand-row mb-2 flex items-center justify-between">
+      {/* ADR-0072 (issue #250): brand title row (product name left + circular
+          search magnifier right) replaces the ADR-0060 full-width solid teal
+          New button; the New button trades the solid primary fill for a fused
+          bg-secondary. The search magnifier is disabled until its Ctrl/⌘+K
+          modal is wired (ADR-0072 search slice). */}
+      <header className="sidebar-brand-row mb-2 flex items-center justify-between">
         <span className="sidebar-brand text-sm font-semibold text-foreground">
           <FormattedMessage id="sidebar.brand" defaultMessage="TOPTOPDuck" />
         </span>
         <button
           type="button"
-          className="sidebar-search-button inline-flex size-7 items-center justify-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground"
+          disabled
+          className="sidebar-search-button inline-flex size-7 cursor-not-allowed items-center justify-center rounded-full text-muted-foreground opacity-50"
           aria-label={intl.formatMessage({
             id: "sidebar.search.ariaLabel",
             defaultMessage: "Search sessions",
@@ -134,7 +134,7 @@ export function SessionSidebar({
         >
           <Search className="size-4" aria-hidden />
         </button>
-      </div>
+      </header>
       <button
         type="button"
         className="sidebar-new-button mb-2 flex w-full cursor-pointer items-center gap-1.5 rounded-md bg-secondary p-2 text-sm text-secondary-foreground hover:bg-accent disabled:opacity-60 disabled:cursor-progress"

@@ -211,12 +211,10 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     expect(danger?.className.split(/\s+/)).toContain("text-destructive");
   });
 
-  // ADR-0072 (issue #250): the top of the sidebar is rebuilt from the
-  // ADR-0060 full-width solid teal New button into a brand title row (product
-  // name left + circular search magnifier right) sitting above a fused
-  // bg-secondary New icon button. The search button is a placeholder -- its
-  // click target is wired in the search modal slice.
-  it("sidebar-brand-row shows TOPTOPDuck brand + circular search button placeholder (ADR-0072, issue #250)", () => {
+  // ADR-0072 (issue #250): brand title row (product name left + circular
+  // search magnifier right) + fused bg-secondary New icon button replace the
+  // ADR-0060 full-width solid teal New button.
+  it("sidebar-brand-row shows TOPTOPDuck brand + disabled circular search button (ADR-0072, issue #250)", () => {
     const { container } = renderShell(
       <SessionSidebar
         sessions={[]}
@@ -238,10 +236,11 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     const brand = brandRow?.querySelector(".sidebar-brand");
     expect(brand).not.toBeNull();
     expect(brand).toHaveTextContent("TOPTOPDuck");
-    // Circular search button on the right; click wiring is a later slice.
+    // Circular search button on the right; disabled until its modal is wired.
     const searchBtn = brandRow?.querySelector(".sidebar-search-button");
     expect(searchBtn).not.toBeNull();
     expect(searchBtn?.tagName).toBe("BUTTON");
+    expect(searchBtn).toBeDisabled();
     expect(searchBtn?.className.split(/\s+/)).toContain("rounded-full");
     const searchIcon = searchBtn?.querySelector("svg");
     expect(searchIcon).not.toBeNull();
