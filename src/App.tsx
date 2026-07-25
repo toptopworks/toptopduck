@@ -14,7 +14,6 @@ import { ResumeProgress } from "./shell/ResumeProgress";
 import { ColdStartHero } from "./shell/ColdStartHero";
 import { ErrorBanner } from "./components/common/ErrorBanner";
 import { DegradeCard, ErrorBoundary } from "./components/common/ErrorBoundary";
-import { ProfileSwitcher } from "./components/settings/ProfileSwitcher";
 import { SettingsView } from "./components/settings/SettingsView";
 import type { SettingsSection } from "./components/settings/sections";
 import { Alert } from "./components/ui/alert";
@@ -247,21 +246,6 @@ export default function App() {
                     <FormattedMessage id="session.defaultName" defaultMessage="New session" />
                   )}
                 </span>
-                {appConfig && (
-                  // Active-profile quick switcher (issue #154, ADR-0065). Sits
-                  // next to the session name as the other "current context"
-                  // indicator: which profile the next ask will use. Commits the
-                  // new active_profile immediately (no draft -- the settings
-                  // view's stage + Save is the management path); management
-                  // stays behind the gear. .settings-mode CSS hides the whole
-                  // topbar (this included) when settings are open, so no
-                  // settings-open guard here.
-                  <ProfileSwitcher
-                    provider={appConfig.provider}
-                    onSwitchActive={(id) => void switchActiveProfile(id)}
-                    disableSwitch={busy}
-                  />
-                )}
                 {atSoftCap && (
                   // Session-count soft-cap hint (ADR-0046): too many open
                   // sessions risk memory pressure. A warning Alert (ADR-0050,

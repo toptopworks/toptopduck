@@ -5,8 +5,8 @@ import { cn } from "@/lib/utils";
 
 // shadcn/ui v4 new-york copy-in (ADR-0049, issue #238). The Popover primitive
 // gives portal + focus-trap + click-outside/ESC dismiss + keyboard nav for
-// free (replaces the hand-written containerRef + click-outside listener in
-// ProfileSwitcher). It is the click layer of the composer provider/model
+// free (avoids a hand-written containerRef + click-outside listener for the
+// composer panel). It is the click layer of the composer provider/model
 // picker (ADR-0071): an icon trigger beside the QuestionBar carries a hover
 // Tooltip (lightweight "{provider} . {model}" preview) and opens this Popover
 // (the heavy provider/model/key/settings panel). Token consumption is via var

@@ -7,8 +7,8 @@ import type { ReactElement } from "react";
 // the defaultMessage -- the canonical English source (ADR-0052) -- and assertions
 // anchor on stable English strings without coupling to the zh-CN catalog.
 // onError silences the expected missing-message warnings (the ids intentionally
-// resolve via defaultMessage, not the empty catalog). Shared by SettingsView +
-// ProfileSwitcher tests (issue #216 split).
+// resolve via defaultMessage, not the empty catalog). Shared by the
+// SettingsView tests (issue #216 split).
 export function renderSettings(ui: ReactElement) {
   return render(
     <IntlProvider locale="en" messages={{}} onError={() => {}}>

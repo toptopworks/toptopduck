@@ -27,10 +27,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 //     "no key" mark when the active profile has no key, ADR-0019),
 //   - click Popover -- the heavy panel: provider (active profile) dropdown +
 //     model field + key status + "Open settings" entry.
-// ProfileSwitcher (top bar) stays mounted this slice -- its retirement is a
-// follow-up that depends on this one ("ProfileSwitcher 退役另行收尾").
 //
-// State ownership mirrors ProfileSwitcher: the profile RECORDS come from the
+// State ownership: the profile RECORDS come from the
 // parent's provider prop (single source of truth, app-config); the per-profile
 // has_key overlay is fetched on mount via listProviderProfiles AND on a
 // profileKeyEpoch bump from the parent (a switch moves the active pointer, not
@@ -61,9 +59,8 @@ export type ComposerProviderPickerProps = {
   // parent (App) on settings-close -- a Settings Save may have changed a
   // keychain slot, so the mount-time fetch effect re-runs on a bump and the
   // badge does not show a stale "No key" after the user just configured one
-  // (ADR-0019 honest gate). Undefined = mount-only fetch (the original
-  // ProfileSwitcher mirror contract, retained for tests that exercise the
-  // picker in isolation).
+  // (ADR-0019 honest gate). Undefined = mount-only fetch (the mount-only
+  // contract, retained for tests that exercise the picker in isolation).
   profileKeyEpoch?: number;
 };
 
@@ -82,12 +79,12 @@ export function ComposerProviderPicker({
   // Settings Save that changed a keychain slot is reflected without a remount
   // (ADR-0019 honest gate: the popover must not keep showing "No key" after the
   // user just configured one). A profile switch never refetches -- it moves the
-  // active pointer, not the keys (mirrors ProfileSwitcher).
+  // active pointer, not the keys.
   const [profileKeys, setProfileKeys] = useState<Record<string, boolean>>({});
   const [keysError, setKeysError] = useState<string | null>(null);
 
   // Stable intl ref so the mount-time fetch effect runs once ([] deps) instead
-  // of re-firing on an intl identity change (mirrors ProfileSwitcher).
+  // of re-firing on an intl identity change.
   const intlRef = useRef(intl);
   useEffect(() => {
     intlRef.current = intl;
@@ -203,7 +200,7 @@ export function ComposerProviderPicker({
               type="button"
               // ADR-0067 (#171): visual rules -> inline utilities. The trigger
               // is an icon button sized to the QuestionBar row; bg-card + border
-              // mirror the retired ProfileSwitcher trigger affordance.
+              // ride the ADR-0050 token.
               className="composer-picker-trigger inline-flex items-center justify-center size-9 rounded-md border border-border bg-card text-foreground hover:bg-muted transition-colors cursor-pointer"
               aria-label={intl.formatMessage({
                 id: "composer.providerPicker.triggerAria",

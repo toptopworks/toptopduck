@@ -21,7 +21,7 @@ import { Button } from "../components/ui/button";
 //      legacy "New session" CTA (behavior unchanged, ADR-0061).
 //
 // The active profile's has_key comes from list_provider_profiles -- the SAME
-// IPC ProfileSwitcher / ProfilesSection use (ADR-0029 one-shot keychain
+// IPC ProfilesSection uses (ADR-0029 one-shot keychain
 // surface; the frontend learns only booleans, never the key), so no new IPC is
 // introduced (issue #239 AC). The hero stays mounted (CSS-hidden via
 // .settings-mode, ADR-0065) while Settings is open; App bumps profileKeyEpoch
@@ -90,8 +90,8 @@ export function ColdStartHero({
   onOpenSettingsProfiles: (editProfileId?: string) => void;
 }) {
   // Per-profile has_key overlay (issue #239). Map keyed by profile_id, built
-  // from list_provider_profiles. Mirrors the ProfileSwitcher / ProfilesSection
-  // snapshot pattern; only the booleans live here (profile RECORDS stay
+  // from list_provider_profiles. Mirrors the ProfilesSection snapshot
+  // pattern; only the booleans live here (profile RECORDS stay
   // single-sourced in the provider prop).
   const [profileKeys, setProfileKeys] = useState<Record<string, boolean>>({});
   const [keysLoading, setKeysLoading] = useState(true);
