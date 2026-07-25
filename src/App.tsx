@@ -118,6 +118,8 @@ export default function App() {
     railCollapsed,
     toggleSidebarCollapse,
     toggleRailCollapse,
+    sidebarGrouping,
+    switchSidebarGrouping,
   } = useAppConfigState({ setShellError, refreshKeyStatus });
 
   // --- Session shell (issue #195) -----------------------------------------
@@ -217,12 +219,14 @@ export default function App() {
                 activeSessionId={activeSessionId}
                 disabled={busy}
                 loadError={sessionsError}
+                grouping={sidebarGrouping}
                 onNew={() => void openNew()}
                 onActivate={activateSession}
                 onOpenPersisted={(path, name) => void openPersisted(path, name)}
                 onClose={(sid) => void closeOpen(sid)}
                 onDelete={(path, sid) => void deletePersisted(path, sid)}
                 onRename={(sid, path, newName) => void renameEntry(sid, path, newName)}
+                onSwitchGrouping={switchSidebarGrouping}
               />
 
               {/* Row 1 (cols 2+): thin top bar (ADR-0060/0062 R1). The session name

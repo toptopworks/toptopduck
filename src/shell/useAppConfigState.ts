@@ -37,6 +37,7 @@ import { catalogFor, coerceLocalePreference, useLocale } from "../i18n";
 import type { EffectiveLocale } from "../i18n";
 import { log } from "../lib/log";
 import type { AppConfig } from "../types/app-config";
+import type { SidebarGrouping } from "../types/app-config";
 import type { AppError } from "../types/error";
 
 /** Acquire the main window, or null when the Tauri bridge is absent (jsdom
@@ -85,6 +86,8 @@ export function useAppConfigState({
   railCollapsed: boolean;
   toggleSidebarCollapse: () => void;
   toggleRailCollapse: () => void;
+  sidebarGrouping: SidebarGrouping;
+  switchSidebarGrouping: (mode: SidebarGrouping) => void;
 } {
   const [appConfig, setAppConfigState] = useState<AppConfig | null>(null);
   const appConfigRef = useRef<AppConfig | null>(null);
@@ -105,8 +108,12 @@ export function useAppConfigState({
   // session sidebar (full hide + topbar call-out) and thread rail (workspace
   // goes full-width). Both default expanded; both restore from app-config once
   // on the first resolve (ADR-0038) and persist on every toggle.
+  // ADR-0072 (#251): the sidebar's flat/time grouping mode rides the same
+  // shell-chrome surface -- restores with the two collapse prefs, persists on
+  // every switch via commitShellPrefs's single IPC write.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [railCollapsed, setRailCollapsed] = useState(false);
+  const [sidebarGrouping, setSidebarGroupingState] = useState<SidebarGrouping>("flat");
   const collapseRestoredRef = useRef(false);
 
   // Load app-config once on mount (theme/locale/recent files/geometry). Also
@@ -215,16 +222,23 @@ export function useAppConfigState({
     [appConfig, commitAppConfig, intl, setShellError],
   );
 
-  // Commit the two shell collapse prefs as one app-config write (ADR-0038/0054,
-  // issue #84). No-op before app-config resolves (appConfigRef null) -- the
-  // restore effect's one-shot then applies the persisted value on first load.
+  // Commit the three shell prefs (two collapses + the sidebar grouping mode) as
+  // ONE app-config write (ADR-0038/0054, issue #84; ADR-0072, issue #251).
+  // Single IPC write keeps the three shell-chrome prefs atomic against a
+  // concurrent geometry persist (sibling commitAppConfig write). No-op before
+  // app-config resolves (appConfigRef null) -- the restore effect's one-shot
+  // then applies the persisted value on first load.
   const commitShellPrefs = useCallback(
-    (next: { sidebar: boolean; rail: boolean }): void => {
+    (next: { sidebar: boolean; rail: boolean; grouping: SidebarGrouping }): void => {
       const base = appConfigRef.current;
       if (!base) return;
       void commitAppConfig({
         ...base,
-        shell: { sidebar_collapsed: next.sidebar, rail_collapsed: next.rail },
+        shell: {
+          sidebar_collapsed: next.sidebar,
+          rail_collapsed: next.rail,
+          sidebar_grouping: next.grouping,
+        },
       }).catch((e) => {
         // IPC write failed -- the UI already flipped optimistically (state is
         // set before the commit), so the only consequence is the pref not
@@ -239,14 +253,28 @@ export function useAppConfigState({
   const toggleSidebarCollapse = useCallback(() => {
     const next = !sidebarCollapsed;
     setSidebarCollapsed(next);
-    commitShellPrefs({ sidebar: next, rail: railCollapsed });
-  }, [sidebarCollapsed, railCollapsed, commitShellPrefs]);
+    commitShellPrefs({ sidebar: next, rail: railCollapsed, grouping: sidebarGrouping });
+  }, [sidebarCollapsed, railCollapsed, sidebarGrouping, commitShellPrefs]);
 
   const toggleRailCollapse = useCallback(() => {
     const next = !railCollapsed;
     setRailCollapsed(next);
-    commitShellPrefs({ sidebar: sidebarCollapsed, rail: next });
-  }, [sidebarCollapsed, railCollapsed, commitShellPrefs]);
+    commitShellPrefs({ sidebar: sidebarCollapsed, rail: next, grouping: sidebarGrouping });
+  }, [sidebarCollapsed, railCollapsed, sidebarGrouping, commitShellPrefs]);
+
+  // Switch the sidebar's flat/time grouping mode (ADR-0072, issue #251). Sibling
+  // to the two collapse toggles: a one-mode swap that commits immediately via
+  // commitShellPrefs (no debounce -- a low-frequency discrete action, mirroring
+  // the collapse toggles' immediate commit contract). The optimistic + no-
+  // rollback contract is commitAppConfig's; a reject lands in the .catch log.
+  const switchSidebarGrouping = useCallback(
+    (mode: SidebarGrouping) => {
+      if (mode === sidebarGrouping) return;
+      setSidebarGroupingState(mode);
+      commitShellPrefs({ sidebar: sidebarCollapsed, rail: railCollapsed, grouping: mode });
+    },
+    [sidebarCollapsed, railCollapsed, sidebarGrouping, commitShellPrefs],
+  );
 
   // Restore window geometry ONCE on the first app-config load (ADR-0038).
   useEffect(() => {
@@ -275,15 +303,17 @@ export function useAppConfigState({
     }
   }, [appConfig]);
 
-  // Restore shell collapse prefs ONCE on the first app-config load (ADR-0038 /
-  // 0054, issue #84). Mirrors geometryRestoredRef: a one-shot so a later
-  // app-config write (e.g. a toggle's own commit) does not re-clobber the
-  // user's in-session state with the persisted value.
+  // Restore shell collapse prefs + the sidebar grouping mode ONCE on the first
+  // app-config load (ADR-0038 / 0054, issue #84; ADR-0072, issue #251). Mirrors
+  // geometryRestoredRef: a one-shot so a later app-config write (e.g. a toggle's
+  // own commit) does not re-clobber the user's in-session state with the
+  // persisted value.
   useEffect(() => {
     if (!appConfig || collapseRestoredRef.current) return;
     collapseRestoredRef.current = true;
     setSidebarCollapsed(appConfig.shell.sidebar_collapsed);
     setRailCollapsed(appConfig.shell.rail_collapsed);
+    setSidebarGroupingState(appConfig.shell.sidebar_grouping);
   }, [appConfig]);
 
   // Persist window geometry on resize/move, debounced (ADR-0038).
@@ -342,5 +372,7 @@ export function useAppConfigState({
     railCollapsed,
     toggleSidebarCollapse,
     toggleRailCollapse,
+    sidebarGrouping,
+    switchSidebarGrouping,
   };
 }
