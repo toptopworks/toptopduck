@@ -122,7 +122,7 @@ export function timeGroupKind(lastModifiedAt: number, now: number): TimeGroupKin
 export type LastModifiedLabel =
   | { kind: "today" }
   | { kind: "yesterday" }
-  | { kind: "date"; date: Date };
+  | { kind: "date"; readonly date: Date };
 
 /** Classify an mtime for sub-line display (ADR-0072, issue #251). See
  *  {@link LastModifiedLabel}. */
@@ -133,6 +133,46 @@ export function formatLastModified(lastModifiedAt: number, now: number): LastMod
   if (entry >= today - MS_PER_DAY) return { kind: "yesterday" };
   return { kind: "date", date: new Date(lastModifiedAt) };
 }
+
+/** Index open sessions by their bound .duck path so a persisted row can look up
+ *  its runtime binding in one read. Unsaved open sessions (path null) are
+ *  skipped -- they are not in list_sessions. Shared by buildSearchEntries +
+ *  buildSidebarGroups. */
+function indexOpenByPath(open: OpenSession[]): Map<string, OpenSession> {
+  const byPath = new Map<string, OpenSession>();
+  for (const o of open) {
+    if (o.path) byPath.set(o.path, o);
+  }
+  return byPath;
+}
+
+/** Compose a persisted row's entry from its recipe metadata + (optional) open
+ *  binding. An open binding upgrades the row with its runtime sid + the
+ *  (possibly renamed) in-memory name; both constructors emit the same
+ *  persisted-row shape. Returns SearchEntry (path non-null) since
+ *  m.session_id is always a string. */
+function persistedEntry(
+  m: SessionMetadata,
+  bound: OpenSession | null,
+  activeSessionId: string | null,
+): SearchEntry {
+  return {
+    key: m.session_id,
+    name: bound?.name ?? m.display_name,
+    sid: bound?.sid ?? null,
+    path: m.session_id,
+    active: bound !== null && bound.sid === activeSessionId,
+    firstSourceName: m.source_summary.first_source_name,
+    turnCount: m.source_summary.turn_count,
+    lastModifiedAt: m.last_modified_at,
+  };
+}
+
+/** Sort comparator: last-modified descending, name ascending as a deterministic
+ *  tiebreaker. Shared by both constructors so the ordering contract is in one
+ *  place. */
+const BY_MTIME_DESC = (a: SidebarEntry, b: SidebarEntry): number =>
+  b.lastModifiedAt - a.lastModifiedAt || a.name.localeCompare(b.name);
 
 /** Build the flat, filtered, mtime-descending entry list for the Ctrl/⌘+K search
  *  modal (ADR-0072, issue #252). Pure in
@@ -165,14 +205,7 @@ export function buildSearchEntries(
   activeSessionId: string | null,
   query: string,
 ): SearchEntry[] {
-  // Index open sessions by their bound path so a persisted row can pick up its
-  // runtime sid + latest name in one lookup. Unsaved open sessions are skipped
-  // (no path -> not in list_sessions -> out of scope for the modal).
-  const openByPath = new Map<string, OpenSession>();
-  for (const o of open) {
-    if (o.path) openByPath.set(o.path, o);
-  }
-
+  const openByPath = indexOpenByPath(open);
   const q = query.trim().toLowerCase();
   const entries: SearchEntry[] = [];
   for (const m of persisted) {
@@ -181,24 +214,9 @@ export function buildSearchEntries(
     // a false positive at the boundary.
     const hay = `${m.display_name} ${m.source_summary.first_source_name ?? ""}`.toLowerCase();
     if (q && !hay.includes(q)) continue;
-    const bound = openByPath.get(m.session_id) ?? null;
-    entries.push({
-      key: m.session_id,
-      name: bound?.name ?? m.display_name,
-      sid: bound?.sid ?? null,
-      path: m.session_id,
-      active: bound !== null && bound.sid === activeSessionId,
-      firstSourceName: m.source_summary.first_source_name,
-      turnCount: m.source_summary.turn_count,
-      lastModifiedAt: m.last_modified_at,
-    });
+    entries.push(persistedEntry(m, openByPath.get(m.session_id) ?? null, activeSessionId));
   }
-
-  // Sort last-modified descending. Ties (same mtime) fall back to name so the
-  // render is deterministic across renders -- matches `buildSidebarGroups`.
-  entries.sort(
-    (a, b) => b.lastModifiedAt - a.lastModifiedAt || a.name.localeCompare(b.name),
-  );
+  entries.sort(BY_MTIME_DESC);
   return entries;
 }
 
@@ -220,31 +238,15 @@ export function buildSidebarGroups(
   now: number,
   grouping: SidebarGrouping,
 ): SidebarGroup[] {
-  // Index open sessions by their bound path so a persisted row can pick up its
-  // runtime sid + latest name in one lookup.
-  const openByPath = new Map<string, OpenSession>();
-  const unsavedOpen: OpenSession[] = [];
-  for (const o of open) {
-    if (o.path) openByPath.set(o.path, o);
-    else unsavedOpen.push(o);
-  }
+  const openByPath = indexOpenByPath(open);
+  const unsavedOpen = open.filter((o) => !o.path);
 
   const entries: SidebarEntry[] = [];
 
   // Persisted rows (resume-on-click targets). An open binding upgrades the row
   // with its runtime sid + the (possibly renamed) in-memory name.
   for (const m of persisted) {
-    const bound = openByPath.get(m.session_id) ?? null;
-    entries.push({
-      key: m.session_id,
-      name: bound?.name ?? m.display_name,
-      sid: bound?.sid ?? null,
-      path: m.session_id,
-      active: bound !== null && bound.sid === activeSessionId,
-      firstSourceName: m.source_summary.first_source_name,
-      turnCount: m.source_summary.turn_count,
-      lastModifiedAt: m.last_modified_at,
-    });
+    entries.push(persistedEntry(m, openByPath.get(m.session_id) ?? null, activeSessionId));
   }
 
   // Open never-saved sessions: not in list_sessions, so render them as their own
@@ -267,12 +269,7 @@ export function buildSidebarGroups(
   // so the grouping toggle's hover affordance is hidden too).
   if (entries.length === 0) return [];
 
-  // Sort last-modified descending. Ties (same mtime) fall back to name so the
-  // render is deterministic across renders. Both grouping modes consume the
-  // same sorted order.
-  entries.sort(
-    (a, b) => b.lastModifiedAt - a.lastModifiedAt || a.name.localeCompare(b.name),
-  );
+  entries.sort(BY_MTIME_DESC);
 
   if (grouping === "flat") {
     // ADR-0072 flat mode: a single Recent group, already sorted by mtime desc.

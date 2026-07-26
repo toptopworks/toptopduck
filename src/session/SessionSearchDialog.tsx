@@ -15,6 +15,7 @@ import {
   type OpenSession,
   type SearchEntry,
 } from "./sidebarModel";
+import { resolveDisplayName } from "./displayName";
 import type { SessionMetadata } from "../types/session";
 
 // The Ctrl/⌘+K session-search modal (ADR-0072, issue #252). The shell
@@ -105,9 +106,6 @@ export function SessionSearchDialog({
     optionRefs.current[selected]?.scrollIntoView?.({ block: "nearest" });
   }, [selected]);
 
-  const displayName = (name: string): string =>
-    name || intl.formatMessage({ id: "session.defaultName", defaultMessage: "New session" });
-
   const choose = (entry: SearchEntry) => {
     // Mirror the sidebar row contract: an open binding activates by sid; a
     // cold persisted row resumes by path. Either way the dialog closes.
@@ -192,22 +190,25 @@ export function SessionSearchDialog({
               }}
               id={`session-search-option-${i}`}
               entry={entry}
-              displayName={displayName(entry.name)}
+              displayName={resolveDisplayName(entry.name, intl)}
               selected={i === selected}
               now={now}
               onClick={() => choose(entry)}
               onMouseEnter={() => setSelected(i)}
             />
           ))}
-          {entries.length === 0 && (
-            <li className="session-search-empty px-3 py-6 text-center text-sm text-muted-foreground">
-              <FormattedMessage
-                id="sidebar.search.empty"
-                defaultMessage="No matching sessions."
-              />
-            </li>
-          )}
         </ul>
+        {entries.length === 0 && (
+          <p
+            role="status"
+            className="session-search-empty px-3 py-6 text-center text-sm text-muted-foreground"
+          >
+            <FormattedMessage
+              id="sidebar.search.empty"
+              defaultMessage="No matching sessions."
+            />
+          </p>
+        )}
       </DialogContent>
     </Dialog>
   );
@@ -240,7 +241,7 @@ function SearchRow({
 }) {
   const intl = useIntl();
   const label = formatLastModified(entry.lastModifiedAt, now);
-  const lastModifiedText = sublineDateText(label, now, intl.locale, intl);
+  const lastModifiedText = sublineDateText(label, now, intl);
 
   return (
     <li
@@ -282,10 +283,11 @@ function SearchRow({
 }
 
 // Resolve the sub-line last-modified text from a LastModifiedLabel. Today /
-// Yesterday reuse the existing sidebar-group headings ("Today" / "Yesterday" are
-// the correct relative-day words in both surfaces); older dates format via
-// Intl.DateTimeFormat with the year omitted when it matches `now`'s year (a
-// session from this year needs no year suffix; a prior-year one does).
+// Yesterday reuse the sidebar-group locale message ids (sidebar.group.today /
+// yesterday) so the relative-day word agrees with the sidebar's group heading;
+// older dates format via Intl.DateTimeFormat with the year omitted when it
+// matches `now`'s year (a session from this year needs no year suffix; a
+// prior-year one does).
 //
 // Lives here (not in sidebarModel.ts) because the today / yesterday arms need
 // the localized heading text via `intl.formatMessage`, which is a React-layer
@@ -294,7 +296,6 @@ function SearchRow({
 function sublineDateText(
   label: LastModifiedLabel,
   now: number,
-  locale: string,
   intl: ReturnType<typeof useIntl>,
 ): string {
   switch (label.kind) {
@@ -304,7 +305,7 @@ function sublineDateText(
       return intl.formatMessage({ id: "sidebar.group.yesterday", defaultMessage: "Yesterday" });
     case "date": {
       const sameYear = new Date(now).getFullYear() === label.date.getFullYear();
-      return new Intl.DateTimeFormat(locale, {
+      return new Intl.DateTimeFormat(intl.locale, {
         ...(sameYear ? {} : { year: "numeric" }),
         month: "short",
         day: "numeric",

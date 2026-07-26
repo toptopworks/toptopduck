@@ -162,10 +162,10 @@ export default function App() {
   // never forces a close.
   const atSoftCap = openSessions.length >= SOFT_CAP_OPEN_SESSIONS;
 
-  // Global Ctrl/⌘+K keydown -> open the search modal (ADR-0072,
+  // Global Ctrl/⌘+K keydown -> toggle the search modal (ADR-0072,
   // issue #252). The listener binds once on mount; a ref carries the latest
-  // busy gate so a busy shell blocks the open without re-binding on every busy
-  // toggle (same shape as SettingsView's Escape listener). preventDefault stops
+  // busy gate so a busy shell blocks the toggle without re-binding on every busy
+  // change (same shape as SettingsView's Escape listener). preventDefault stops
   // the browser's native ⌘K page-searcher intercept so the modal is the only
   // consumer. metaKey covers macOS (⌘), ctrlKey covers Win/Linux (Ctrl).
   const busyRef = useRef(false);
@@ -176,7 +176,7 @@ export default function App() {
     function onKey(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
         e.preventDefault();
-        if (!busyRef.current) setSearchOpen(true);
+        if (!busyRef.current) setSearchOpen((cur) => !cur);
       }
     }
     window.addEventListener("keydown", onKey);

@@ -118,8 +118,9 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
     );
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "zzz" } });
     expect(screen.queryByRole("option")).toBeNull();
-    // The empty-state copy comes from sidebar.search.empty (en defaultMessage
-    // surfaces when the catalog is empty, as in the test provider).
+    // The empty state is a sibling <p role="status"> (outside the listbox per
+    // WAI-ARIA) so ATs politely announce "no matches" without a listbox violation.
+    expect(screen.getByRole("status")).toBeInTheDocument();
     expect(screen.getByText("No matching sessions.")).toBeInTheDocument();
   });
 
@@ -379,9 +380,11 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
 
   it("renders the empty state when there are no persisted sessions at all", () => {
     // Cold-start / fresh-install: the modal opens against an empty list_sessions
-    // result. The empty-state copy shows; no option renders.
+    // result. The empty state is a sibling <p role="status"> (outside the
+    // listbox per WAI-ARIA); no option renders.
     renderDialog(<SessionSearchDialog {...baseProps} sessions={[]} />);
     expect(screen.queryByRole("option")).toBeNull();
+    expect(screen.getByRole("status")).toBeInTheDocument();
     expect(screen.getByText("No matching sessions.")).toBeInTheDocument();
   });
 
@@ -449,5 +452,38 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
     const options = screen.getAllByRole("option");
     expect(options[0]).toHaveAttribute("aria-selected", "true");
     expect(options[1]).toHaveAttribute("aria-selected", "false");
+  });
+
+  it("formats today / yesterday sub-lines via the localized heading words", () => {
+    // The today / yesterday arms of sublineDateText reuse the sidebar-group
+    // locale message ids; with the empty test catalog the en defaultMessage
+    // ("Today" / "Yesterday") surfaces. Pins the relative-day half of the
+    // sub-line so a regression on the message id or the classification cannot
+    // ship silently.
+    const NOW = new Date("2026-07-26T12:00:00").getTime();
+    const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(NOW);
+    try {
+      renderDialog(
+        <SessionSearchDialog
+          {...baseProps}
+          sessions={[
+            meta("/a.duck", "alpha", {
+              last_modified_at: new Date("2026-07-26T10:00:00").getTime(),
+            }),
+            meta("/b.duck", "beta", {
+              last_modified_at: new Date("2026-07-25T10:00:00").getTime(),
+            }),
+          ]}
+        />,
+      );
+      const options = screen.getAllByRole("option");
+      // alpha (modified today) -> "Today"; beta (modified yesterday) -> "Yesterday".
+      const alphaSubline = options[0].querySelector(".session-search-option-subline");
+      const betaSubline = options[1].querySelector(".session-search-option-subline");
+      expect(alphaSubline?.textContent).toMatch(/Today/);
+      expect(betaSubline?.textContent).toMatch(/Yesterday/);
+    } finally {
+      dateNowSpy.mockRestore();
+    }
   });
 });

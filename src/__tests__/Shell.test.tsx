@@ -1568,4 +1568,21 @@ describe("App Ctrl/⌘+K session-search modal (ADR-0072, issue #252)", () => {
     });
     expect(screen.queryByRole("dialog")).toBeNull();
   });
+
+  it("Ctrl/⌘+K toggles the modal closed when it is already open (not busy)", async () => {
+    vi.mocked(listSessions).mockResolvedValue(twoSessions());
+    render(<App />);
+    await waitFor(() => expect(listSessions).toHaveBeenCalled());
+    // First Ctrl+K opens.
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }));
+    });
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    // Second Ctrl+K (shell not busy) toggles it closed -- matches the Linear /
+    // Raycast / VS Code ⌘K convention.
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }));
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
 });

@@ -7,6 +7,7 @@ import {
   type SidebarEntry,
   type SidebarGroupKind,
 } from "./sidebarModel";
+import { resolveDisplayName } from "./displayName";
 import type { SessionMetadata } from "../types/session";
 import type { SidebarGrouping } from "../types/app-config";
 import {
@@ -120,8 +121,6 @@ export function SessionSidebar({
     now,
     grouping,
   );
-  const displayName = (name: string): string =>
-    name || intl.formatMessage({ id: "session.defaultName", defaultMessage: "New session" });
 
   return (
     // ADR-0067 (issue #171): the shell-skeleton visual rules ride inline
@@ -202,7 +201,7 @@ export function SessionSidebar({
                 <SidebarRow
                   key={entry.key}
                   entry={entry}
-                  displayName={displayName(entry.name)}
+                  displayName={resolveDisplayName(entry.name, intl)}
                   menuOpen={openMenuKey === entry.key}
                   disabled={disabled}
                   onToggleMenu={() =>
@@ -251,7 +250,7 @@ export function SessionSidebar({
       )}
       {pendingAction?.kind === "delete" && (
         <DeleteSessionDialog
-          name={displayName(pendingAction.entry.name)}
+          name={resolveDisplayName(pendingAction.entry.name, intl)}
           path={pendingAction.entry.path}
           onCancel={() => setPendingAction(null)}
           onConfirm={() => {
