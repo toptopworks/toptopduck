@@ -1,6 +1,7 @@
 # 多会话导航：左会话栏取代顶栏 tabs（三栏 shell + 保活切换 + 显式关闭）
 
 > 部分被 [ADR-0072](./0072-sidebar-search-and-grouping-mode.md) 修订：行 53 搜索框否决**推翻**（持久化列表无上限，搜索解决定位）/ 行 72 时间分组默认**改为 flat + time 可选** / New 按钮不再实心（栏顶改为品牌标题行 `TOPTOPDuck` + New icon + 融合背景）/ 行 15 active 整条 teal 填充**改为浅 tint + 左 2px 条**（与 New 按钮视觉统一）。详见 ADR-0072 Consequences。
+> 部分被 [ADR-0073](./0073-session-header-scoped-name-and-rail-toggle.md) 修订：行 15（顶栏含当前会话名只读）/ 行 75 闭合项（顶栏布局细化：中 = 当前会话名）——session 名 + rail 折叠迁出 topbar 进 `SessionPane` 的 `.session-header`（topbar 升级为自定义 titlebar，ADR-0074，需让出 chrome 位）。详见 ADR-0073 Consequences。
 
 ## Decision
 
