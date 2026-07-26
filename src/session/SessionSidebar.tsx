@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { Check, MessageSquare, Pencil, Search } from "lucide-react";
 import {
@@ -424,6 +424,30 @@ function SidebarRow({
   onDelete: () => void;
 }) {
   const intl = useIntl();
+  // Click-away + ESC dismissal for the hand-positioned context menu (issue
+  // #258): the menu is a plain div (not a Radix Popover), so without this a
+  // pointer-down outside the row or an Escape keypress left it stuck open --
+  // the user had to click a menu item or toggle the ⋯ button again. Runs only
+  // while menuOpen; onToggleMenu is a toggle and menuOpen implies openMenuKey
+  // === entry.key, so the call resolves to "close".
+  const rowRef = useRef<HTMLLIElement>(null);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (rowRef.current && !rowRef.current.contains(e.target as Node)) {
+        onToggleMenu();
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onToggleMenu();
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [menuOpen, onToggleMenu]);
   // Entry states ride inline utilities over the ADR-0050 token (ADR-0060,
   // refined by ADR-0072 issue #249): active = accent tint + the 2px left bar;
   // open-but-not-active = the bar only; default = no signal. ADR-0072 retires
@@ -431,6 +455,7 @@ function SidebarRow({
   // classes on the parent .session-entry hook for selector / test stability.
   return (
     <li
+      ref={rowRef}
       className={cn(
         "session-entry relative my-0.5 flex items-stretch",
         entry.active && "active",
@@ -517,17 +542,20 @@ function SidebarRow({
 
 // Strong-confirm delete dialog (ADR-0060, issue #81): deletion is irreversible,
 // so the dialog names the .duck explicitly and requires an explicit confirm.
-// The shell is now a Radix AlertDialog (issue #105): role="alertdialog" +
-// focus-trap + scroll-lock come from the primitive. AlertDialog semantics
-// intentionally do NOT dismiss on ESC or overlay click -- the user must take an
-// explicit Cancel / Delete action, matching the prior hand-written overlay (no
-// overlay-click close). Cancel renders before Action so Radix auto-focuses it
-// (the safe escape), preserving the prior autoFocus behavior. The destructive
-// Action passes buttonVariants({ variant: "destructive" }); twMerge (in cn) lets
-// it override AlertDialogAction's built-in default variant, reusing the
-// destructive look without forking the copy-in component.
+// The shell is a Radix AlertDialog (issue #105): role="alertdialog" + focus-trap
+// + scroll-lock come from the primitive. AlertDialog blocks overlay-click
+// dismiss by default (destructive guard -- a stray pointer-down cannot drop the
+// session). ESC routes to onCancel via onEscapeKeyDown, NOT onOpenChange:
+// AlertDialogAction's built-in auto-close fires onOpenChange(false) after a
+// confirm click, so an onOpenChange-to-onCancel bridge would invoke cancel on
+// every Delete; onEscapeKeyDown isolates the keyboard-cancel path, leaving the
+// Cancel/Action button routing (and their Radix auto-close) untouched. Cancel
+// renders before Action so Radix auto-focuses it (the safe escape). The
+// destructive Action passes buttonVariants({ variant: "destructive" }); twMerge
+// (in cn) lets it override AlertDialogAction's built-in default variant, reusing
+// the destructive look without forking the copy-in component.
 // Exported for component-level testing (issue #111); the dialog is rendered only
-// by SessionSidebar in production, but the destructive-semantics + routing
+// by SessionSidebar in production, but the destructive-semantics + ESC routing
 // contract is verified in isolation.
 export function DeleteSessionDialog({
   name,
@@ -542,7 +570,7 @@ export function DeleteSessionDialog({
 }) {
   return (
     <AlertDialog defaultOpen>
-      <AlertDialogContent>
+      <AlertDialogContent onEscapeKeyDown={() => onCancel()}>
         <AlertDialogHeader>
           <AlertDialogTitle>
             <FormattedMessage id="session.delete.title" defaultMessage="Delete this session?" />

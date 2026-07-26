@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import type { ReactElement } from "react";
-import { SessionSidebar } from "../SessionSidebar";
+import { DeleteSessionDialog, SessionSidebar } from "../SessionSidebar";
 import type { OpenSession } from "../sidebarModel";
 import type { SessionMetadata } from "../../types/session";
 
@@ -541,5 +541,82 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
 
     fireEvent.keyDown(flat, { key: "Escape" });
     expect(screen.queryByRole("radio", { name: /In a list/i })).toBeNull();
+  });
+
+  it("closes the entry context menu on click-away (issue #258)", () => {
+    // The context menu is a hand-positioned div (not a Radix Popover); without
+    // the click-away effect a pointer-down outside the row left it stuck open,
+    // forcing the user to click a menu item or re-toggle the ⋯ button.
+    const { container } = renderShell(
+      <SessionSidebar
+        sessions={[onePersisted()]}
+        openSessions={[]}
+        activeSessionId={null}
+        disabled={false}
+        loadError={null}
+        grouping="flat"
+        onNew={() => {}}
+        onActivate={() => {}}
+        onOpenPersisted={() => {}}
+        onClose={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onSwitchGrouping={() => {}}
+        onOpenSearch={() => {}}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: /Session actions/i });
+    fireEvent.click(trigger);
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+
+    fireEvent.mouseDown(container.querySelector(".session-sidebar")!);
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("closes the entry context menu on Escape (issue #258)", () => {
+    const { container } = renderShell(
+      <SessionSidebar
+        sessions={[onePersisted()]}
+        openSessions={[]}
+        activeSessionId={null}
+        disabled={false}
+        loadError={null}
+        grouping="flat"
+        onNew={() => {}}
+        onActivate={() => {}}
+        onOpenPersisted={() => {}}
+        onClose={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onSwitchGrouping={() => {}}
+        onOpenSearch={() => {}}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: /Session actions/i });
+    fireEvent.click(trigger);
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+
+    fireEvent.keyDown(container.querySelector(".session-sidebar")!, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+});
+
+describe("DeleteSessionDialog ESC routing (issue #258)", () => {
+  // AlertDialog blocks overlay-click dismiss (destructive guard) but ESC is a
+  // deliberate keyboard signal; onOpenChange bridges ESC -> onCancel so parent
+  // pendingAction stays in sync instead of dangling after Radix visually closes.
+  it("routes ESC to onCancel so pendingAction does not dangle (issue #258)", () => {
+    const onCancel = vi.fn();
+    renderShell(
+      <DeleteSessionDialog
+        name="Session"
+        path={null}
+        onCancel={onCancel}
+        onConfirm={() => {}}
+      />,
+    );
+    const dialog = screen.getByRole("alertdialog");
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(onCancel).toHaveBeenCalledTimes(1);
   });
 });
