@@ -267,12 +267,22 @@ export function SessionSidebar({
   );
 }
 
-// The session-menu item base (ADR-0067, issue #171): inline utilities
-// replacing the retired .session-menu button CSS rule. Composed per item via
-// cn() so the danger variant swaps text-foreground -> text-destructive
-// without copy-paste drift across the three items.
+// Bare <button> chrome reset for the sidebar's unstyled buttons (ADR-0067,
+// issue #171). Replaces the former [all:unset]: Tailwind v4's arbitrary
+// [all:unset] cascades AFTER the display utilities on the same element, so
+// `all: unset` clobbered `display: flex` (session-entry-main, grouping
+// options) and `display: block` (menu items) back to `inline`, collapsing the
+// session-entry layout. appearance-none/bg-transparent/border-0 strip the same
+// native chrome WITHOUT touching `display`; per-element utilities own
+// padding/color, and the base-layer `button { font: inherit }` rule (app.css)
+// owns the font.
+const bareButtonReset = "appearance-none bg-transparent border-0";
+
+// The session-menu item base: composed per item via cn() so the danger variant
+// swaps text-foreground -> text-destructive without copy-paste drift across
+// the three items.
 const sessionMenuItemBase =
-  "[all:unset] cursor-pointer block w-full py-1 px-2 rounded-md text-sm hover:bg-accent";
+  `${bareButtonReset} cursor-pointer block w-full py-1 px-2 rounded-md text-sm hover:bg-accent`;
 
 // The flat/time grouping toggle (ADR-0072, issue #251). Triggered by a weakly-
 // visible `⋯` on the first group-title row (one entry point regardless of
@@ -286,7 +296,7 @@ const sessionMenuItemBase =
 // - The trigger rides opacity-60 by default (not opacity-0 + hover-only) so
 //   keyboard, touch, and AT users can discover it without hovering; it
 //   brightens on hover/focus/open.
-// - `[all:unset]` on the trigger/options strips native chrome including the
+// - bareButtonReset on the trigger/options strips native chrome including the
 //   focus ring, so focus-visible:outline-ring re-adds one (the --ring token
 //   is the project focus-indicator standard).
 // - `disabled` propagates to both radio options, not just the trigger: a busy
@@ -308,11 +318,11 @@ function GroupingToggle({
     onSwitch(mode);
   };
 
-  // Shared option styling. `[all:unset]` resets inherited/native button chrome;
-  // the focus-visible outline is re-added explicitly (all:unset would otherwise
+  // Shared option styling. bareButtonReset strips native button chrome; the
+  // focus-visible outline is re-added explicitly (the reset would otherwise
   // leave keyboard users without a focus indicator on the radio options).
   const optionClass = cn(
-    "[all:unset] cursor-pointer flex w-full items-center justify-between gap-2 rounded-md py-1 pl-2 pr-1.5 text-sm text-foreground",
+    `${bareButtonReset} cursor-pointer flex w-full items-center justify-between gap-2 rounded-md py-1 pl-2 pr-1.5 text-sm text-foreground`,
     "hover:bg-accent",
     "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
     "disabled:cursor-progress disabled:opacity-50",
@@ -329,7 +339,7 @@ function GroupingToggle({
             defaultMessage: "Change session grouping",
           })}
           className={cn(
-            "sidebar-grouping-toggle [all:unset] cursor-pointer rounded-md px-1.5 text-base leading-none text-muted-foreground",
+            `sidebar-grouping-toggle ${bareButtonReset} cursor-pointer rounded-md px-1.5 text-base leading-none text-muted-foreground`,
             // Weakly visible by default (opacity-60) so keyboard / touch / AT
             // users can discover the entry point without hovering; brightens on
             // hover, focus, or while the popover is open.
@@ -430,7 +440,7 @@ function SidebarRow({
       <button
         type="button"
         className={cn(
-          "session-entry-main [all:unset] cursor-pointer flex-1 flex flex-row items-center gap-1.5 min-w-0 py-1.5 px-2 rounded-md text-foreground",
+          `session-entry-main ${bareButtonReset} cursor-pointer flex-1 flex flex-row items-center gap-1.5 min-w-0 py-1.5 px-2 rounded-md text-foreground`,
           "hover:bg-accent disabled:opacity-50 disabled:cursor-progress",
           entry.sid && "shadow-[inset_2px_0_var(--primary)]",
           entry.active && "bg-accent text-accent-foreground",
@@ -458,7 +468,7 @@ function SidebarRow({
       </button>
       <button
         type="button"
-        className="session-entry-menu [all:unset] cursor-pointer px-1.5 text-base leading-none rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+        className={`session-entry-menu ${bareButtonReset} cursor-pointer px-1.5 text-base leading-none rounded-md text-muted-foreground hover:bg-accent hover:text-foreground`}
         aria-label={intl.formatMessage({ id: "sidebar.menu.ariaLabel", defaultMessage: "Session actions" })}
         aria-expanded={menuOpen}
         disabled={disabled}

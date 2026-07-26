@@ -126,7 +126,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     });
   });
 
-  it("session-entry-main keeps [all:unset] + hover:bg-accent + rounded-md on the default row", () => {
+  it("session-entry-main keeps appearance-none reset + hover:bg-accent + rounded-md on the default row", () => {
     const persisted: SessionMetadata = {
       session_id: "/x/default.duck",
       display_name: "Default",
@@ -155,7 +155,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     const main = container.querySelector(".session-entry-main");
     expect(main).not.toBeNull();
     const classes = main?.className.split(/\s+/);
-    expect(classes).toContain("[all:unset]");
+    expect(classes).toContain("appearance-none");
     expect(classes).toContain("hover:bg-accent");
     expect(classes).toContain("rounded-md");
     expect(classes).toContain("disabled:opacity-50");
@@ -452,7 +452,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
 
   it("carries a focus-visible outline + weak default opacity so keyboard/touch users can discover it (issue #251 review)", () => {
     // The prior opacity-0 + group-hover-only pattern hid the trigger from
-    // non-mouse users; opacity-60 keeps it weakly visible. `[all:unset]` strips
+    // non-mouse users; opacity-60 keeps it weakly visible. bareButtonReset strips
     // the native focus ring, so focus-visible:outline-ring re-adds one (the
     // --ring token is the project focus-indicator standard).
     const { container } = renderShell(
