@@ -231,7 +231,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
 
   // ADR-0072 (issue #250): brand title row (product name left + circular
   // search magnifier right) + fused bg-secondary New icon button replace the
-  // ADR-0060 full-width solid teal New button. ADR-0072 Decision 1 (issue
+  // ADR-0060 full-width solid teal New button. ADR-0072 (issue
   // #252) wires the magnifier to the Ctrl/⌘+K modal.
   it("sidebar-brand-row shows TOPTOPDuck brand + circular search button that opens the modal on click (ADR-0072, issue #250/#252)", () => {
     const onOpenSearch = vi.fn();
@@ -261,7 +261,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     expect(brand).toHaveTextContent("TOPTOPDuck");
     // Circular search button on the right; enabled (modal is wired). Clicking
     // fires onOpenSearch -- the same shell-owned open state the global Ctrl/⌘+K
-    // keydown routes to (ADR-0072 Decision 1).
+    // keydown routes to (ADR-0072).
     const searchBtn = brandRow?.querySelector(".sidebar-search-button");
     expect(searchBtn).not.toBeNull();
     expect(searchBtn?.tagName).toBe("BUTTON");

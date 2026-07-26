@@ -7,8 +7,8 @@ import { renderI18n } from "../../components/common/__tests__/helpers";
 import type { OpenSession } from "../sidebarModel";
 import type { SessionMetadata } from "../../types/session";
 
-// Component-level tests for the Ctrl/⌘+K session-search modal (ADR-0072
-// Decision 1, issue #252). The pure filter/sort contract is covered in
+// Component-level tests for the Ctrl/⌘+K session-search modal (ADR-0072,
+// issue #252). The pure filter/sort contract is covered in
 // sidebarModel.test.ts; these tests cover the React-layer behavior the pure
 // helper cannot pin: open/close rendering, typing → filter, keyboard nav, and
 // the activate-vs-resume choose contract.
@@ -241,5 +241,108 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
     await new Promise((r) => setTimeout(r, 0));
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("ArrowUp wraps from the first row back to the last", () => {
+    renderDialog(
+      <SessionSearchDialog
+        {...baseProps}
+        sessions={[
+          meta("/a.duck", "alpha", { last_modified_at: 3000 }),
+          meta("/b.duck", "beta", { last_modified_at: 2000 }),
+          meta("/c.duck", "gamma", { last_modified_at: 1000 }),
+        ]}
+      />,
+    );
+    const input = screen.getByRole("combobox");
+    const options = screen.getAllByRole("option");
+    // Default selection is index 0 (alpha); ArrowUp wraps to the last row.
+    expect(options[0]).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expect(options[2]).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("mouse-move over a row syncs the keyboard highlight to it", () => {
+    // Hovering a row mirrors native <select>: the tint follows the pointer, and
+    // Enter activates the hovered row rather than the prior keyboard highlight.
+    const onOpenPersisted = vi.fn();
+    renderDialog(
+      <SessionSearchDialog
+        {...baseProps}
+        onOpenPersisted={onOpenPersisted}
+        sessions={[
+          meta("/a.duck", "alpha", { last_modified_at: 2000 }),
+          meta("/b.duck", "beta", { last_modified_at: 1000 }),
+        ]}
+      />,
+    );
+    const options = screen.getAllByRole("option");
+    expect(options[0]).toHaveAttribute("aria-selected", "true");
+    fireEvent.mouseMove(options[1]);
+    expect(options[1]).toHaveAttribute("aria-selected", "true");
+    expect(options[0]).toHaveAttribute("aria-selected", "false");
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
+    expect(onOpenPersisted).toHaveBeenCalledWith("/b.duck", "beta");
+  });
+
+  it("clamps the selection when the filter narrows it past the end", () => {
+    // Without the render-phase clamp, narrowing the list while selected=2 would
+    // strand the highlight past the end and Enter would read entries[2] =
+    // undefined, crashing choose. The clamp pulls it back to a real row.
+    const onOpenPersisted = vi.fn();
+    renderDialog(
+      <SessionSearchDialog
+        {...baseProps}
+        onOpenPersisted={onOpenPersisted}
+        sessions={[
+          meta("/a.duck", "alpha", { last_modified_at: 3000 }),
+          meta("/b.duck", "beta", { last_modified_at: 2000 }),
+          meta("/c.duck", "gamma", { last_modified_at: 1000 }),
+        ]}
+      />,
+    );
+    const input = screen.getByRole("combobox");
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(screen.getAllByRole("option")[2]).toHaveAttribute("aria-selected", "true");
+    // Filter to alpha only; selected must clamp from 2 -> 0.
+    fireEvent.change(input, { target: { value: "alp" } });
+    const options = screen.getAllByRole("option");
+    expect(options).toHaveLength(1);
+    expect(options[0]).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onOpenPersisted).toHaveBeenCalledWith("/a.duck", "alpha");
+  });
+
+  it("formats same-year mtimes without a year and prior-year mtimes with one", () => {
+    // The dialog captures `now` once per mount via useState(() => Date.now()).
+    // Pin it so the year boundary in the sub-line is deterministic.
+    const NOW = new Date("2026-07-26T12:00:00").getTime();
+    const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(NOW);
+    try {
+      renderDialog(
+        <SessionSearchDialog
+          {...baseProps}
+          sessions={[
+            meta("/a.duck", "alpha", {
+              last_modified_at: new Date("2026-06-01T12:00:00").getTime(),
+            }),
+            meta("/b.duck", "beta", {
+              last_modified_at: new Date("2024-12-31T12:00:00").getTime(),
+            }),
+          ]}
+        />,
+      );
+      const options = screen.getAllByRole("option");
+      // alpha (2026-06-01, same year as NOW) -> "Jun 1", no year suffix.
+      const alphaSubline = options[0].querySelector(".session-search-option-subline");
+      expect(alphaSubline?.textContent).toMatch(/Jun 1/);
+      expect(alphaSubline?.textContent).not.toMatch(/2026/);
+      // beta (2024-12-31, prior year) -> year included.
+      const betaSubline = options[1].querySelector(".session-search-option-subline");
+      expect(betaSubline?.textContent).toMatch(/Dec 31, 2024/);
+    } finally {
+      dateNowSpy.mockRestore();
+    }
   });
 });

@@ -267,7 +267,7 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
   });
 
   it("excludes never-saved open sessions (search scope = list_sessions only)", () => {
-    // ADR-0072 Decision 1: the ⌘K modal filters the list_sessions result -- an
+    // ADR-0072: the ⌘K modal filters the list_sessions result -- an
     // unsaved new session (no .duck) is not in list_sessions, so it never
     // appears here even when it is the active session. The sidebar still lists
     // it; the modal is a persisted-session jump surface.

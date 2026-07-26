@@ -17,9 +17,9 @@ import {
 } from "./sidebarModel";
 import type { SessionMetadata } from "../types/session";
 
-// The Ctrl/⌘+K session-search modal (ADR-0072 Decision 1, issue #252). The shell
+// The Ctrl/⌘+K session-search modal (ADR-0072, issue #252). The shell
 // owns a single open state; both the global keydown (App.tsx) and the sidebar's
-// search button (ADR-0072 #250, wired in this slice) route here. The body
+// search magnifier (ADR-0072, wired in this slice -- issue #252) route here. The body
 // reuses `buildSearchEntries` (pure filter + sort over `list_sessions`) so the
 // merge / filter / sort contract is unit-tested in sidebarModel.test.ts; this
 // component stays a thin caller over input state + keyboard navigation.
@@ -110,9 +110,12 @@ export function SessionSearchDialog({
 
   const choose = (entry: SidebarEntry) => {
     // Mirror the sidebar row contract: an open binding activates by sid; a cold
-    // persisted row resumes by path. Either way the dialog closes.
+    // persisted row resumes by path. Either way the dialog closes. The final
+    // else is unreachable today (buildSearchEntries always sets path) but
+    // guards a future constructor drift from silently closing the dialog.
     if (entry.sid) onActivate(entry.sid);
     else if (entry.path) onOpenPersisted(entry.path, entry.name);
+    else throw new Error(`SessionSearchDialog.choose: entry has no sid and no path (key=${entry.key})`);
     onOpenChange(false);
   };
 
@@ -213,7 +216,8 @@ export function SessionSearchDialog({
 
 // One result row: leading chat-bubble glyph + the session name + a sub-line
 // (first source + turn count left, dynamic last-modified right). Mirrors the
-// sidebar SidebarRow contract (ADR-0072 issue #249) so the two surfaces agree
+// sidebar row contract (ADR-0060 row shape; ADR-0072 unified the leading glyph
+// + subline) so the two surfaces agree
 // on what a "session row" looks like. React 19 ref-as-prop: the parent attaches
 // a per-index callback ref so it can scrollIntoView the highlighted row.
 function SearchRow({
@@ -294,16 +298,26 @@ function sublineDateText(
   locale: string,
   intl: ReturnType<typeof useIntl>,
 ): string {
-  if (label.kind === "today") {
-    return intl.formatMessage({ id: "sidebar.group.today", defaultMessage: "Today" });
+  switch (label.kind) {
+    case "today":
+      return intl.formatMessage({ id: "sidebar.group.today", defaultMessage: "Today" });
+    case "yesterday":
+      return intl.formatMessage({ id: "sidebar.group.yesterday", defaultMessage: "Yesterday" });
+    case "date": {
+      const sameYear = new Date(now).getFullYear() === label.date.getFullYear();
+      return new Intl.DateTimeFormat(locale, {
+        ...(sameYear ? {} : { year: "numeric" }),
+        month: "short",
+        day: "numeric",
+      }).format(label.date);
+    }
+    default: {
+      // Exhaustive guard: a new LastModifiedLabel variant must add a case
+      // above. tsconfig strict lacks noImplicitReturns, so without this the
+      // implicit return undefined would slip (mirrors sidebarModel.ts
+      // buildSidebarGroups + loadErrorDisplay/api.ts).
+      const _exhaustive: never = label;
+      return _exhaustive;
+    }
   }
-  if (label.kind === "yesterday") {
-    return intl.formatMessage({ id: "sidebar.group.yesterday", defaultMessage: "Yesterday" });
-  }
-  const sameYear = new Date(now).getFullYear() === label.date.getFullYear();
-  return new Intl.DateTimeFormat(locale, {
-    ...(sameYear ? {} : { year: "numeric" }),
-    month: "short",
-    day: "numeric",
-  }).format(label.date);
 }

@@ -106,7 +106,7 @@ export function timeGroupKind(lastModifiedAt: number, now: number): TimeGroupKin
 }
 
 /** A dynamic-format classification of an mtime for sub-line display (ADR-0072
- *  search slice, issue #251 prefactor). Pure in (lastModifiedAt, now): returns
+ *  search slice). Pure in (lastModifiedAt, now): returns
  *  `today` / `yesterday` for the past two local calendar days (the caller
  *  localizes via intl), else a `date` arm carrying the Date so the caller can
  *  format with Intl.DateTimeFormat -- year-included when the mtime predates the
@@ -128,7 +128,7 @@ export function formatLastModified(lastModifiedAt: number, now: number): LastMod
 }
 
 /** Build the flat, filtered, mtime-descending entry list for the Ctrl/⌘+K search
- *  modal (ADR-0072 Decision 1, issue #252). Pure in
+ *  modal (ADR-0072, issue #252). Pure in
  *  (persisted, open, activeSessionId, query): the caller supplies the raw
  *  `list_sessions` result + the open set + the active id + the query string;
  *  this function does the rest. Kept alongside `buildSidebarGroups` because the
@@ -136,7 +136,7 @@ export function formatLastModified(lastModifiedAt: number, now: number): LastMod
  *  (a row that is open in this shell carries its runtime sid, so the modal can
  *  activate-by-sid instead of re-resuming).
  *
- *  Scope (ADR-0072 Decision 1): only PERSISTED sessions are searchable -- the
+ *  Scope (ADR-0072): only PERSISTED sessions are searchable -- the
  *  `list_sessions` result. An unsaved new session (no .duck) is NOT in
  *  list_sessions and never appears here, even when it is the active session
  *  (the sidebar still lists it; the modal is a persisted-session jump surface).

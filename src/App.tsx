@@ -88,7 +88,7 @@ export default function App() {
   // its own profileKeys snapshot, separate from hasKey).
   const [profileKeyEpoch, setProfileKeyEpoch] = useState(0);
 
-  // Ctrl/⌘+K session-search modal open state (ADR-0072 Decision 1, issue #252).
+  // Ctrl/⌘+K session-search modal open state (ADR-0072, issue #252).
   // The shell owns the single open state so the global keydown + the sidebar's
   // search button (#250) route to the same dialog. Toggled false by the dialog
   // itself on choose / ESC / overlay-click via onOpenChange.
@@ -162,7 +162,7 @@ export default function App() {
   // never forces a close.
   const atSoftCap = openSessions.length >= SOFT_CAP_OPEN_SESSIONS;
 
-  // Global Ctrl/⌘+K keydown -> open the search modal (ADR-0072 Decision 1,
+  // Global Ctrl/⌘+K keydown -> open the search modal (ADR-0072,
   // issue #252). The listener binds once on mount; a ref carries the latest
   // busy gate so a busy shell blocks the open without re-binding on every busy
   // toggle (same shape as SettingsView's Escape listener). preventDefault stops
@@ -400,7 +400,7 @@ export default function App() {
                 />
               )}
 
-              {/* Ctrl/⌘+K session-search modal (ADR-0072 Decision 1, issue
+              {/* Ctrl/⌘+K session-search modal (ADR-0072, issue
                   #252). Rendered unconditionally (Radix mounts the content
                   lazily on open); shares the shell-owned searchOpen state with
                   the global keydown + the sidebar search button. Reuses the

@@ -1429,7 +1429,7 @@ describe("App topbar header actions + key-state badge (issue #182)", () => {
   });
 });
 
-describe("App Ctrl/⌘+K session-search modal (ADR-0072 Decision 1, issue #252)", () => {
+describe("App Ctrl/⌘+K session-search modal (ADR-0072, issue #252)", () => {
   // Two persisted sessions feed the modal: alpha (fresher) + beta. The default
   // listSessions mock returns []; these tests override per-render.
   function twoSessions() {
@@ -1540,5 +1540,32 @@ describe("App Ctrl/⌘+K session-search modal (ADR-0072 Decision 1, issue #252)"
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).toBeNull(),
     );
+  });
+
+  it("Ctrl/⌘+K does not reopen the modal while the shell is busy (resume in flight)", async () => {
+    vi.mocked(listSessions).mockResolvedValue(twoSessions());
+    // openDuck never resolves -> resumeStatus sticks at "opening" -> busy=true,
+    // which the App-level busyRef gate reads to drop the second Ctrl/⌘+K. This
+    // is the keyboard-side mirror of the sidebar search button's disabled-when-
+    // busy contract (SessionSidebar.shell.test.tsx); the two gates are独立.
+    vi.mocked(openDuck).mockReturnValue(new Promise(() => {}));
+    render(<App />);
+    await waitFor(() => expect(listSessions).toHaveBeenCalled());
+    // First Ctrl+K opens (busy still false); Enter on the default option kicks
+    // openPersisted -> openDuck (now pending) -> busy flips true.
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }));
+    });
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.keyDown(within(dialog).getByRole("combobox"), { key: "Enter" });
+    // Wait for the dialog to close (choose -> onOpenChange(false)) AND busy to
+    // flip (resumeStatus moved to "opening" by the pending openDuck; busyRef
+    // syncs via useEffect on the next commit).
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // Now busy: a second Ctrl+K must NOT reopen the modal.
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }));
+    });
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

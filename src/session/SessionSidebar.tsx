@@ -75,7 +75,7 @@ interface SessionSidebarProps {
   onDelete: (path: string, sid: string | null) => void;
   onRename: (sid: string | null, path: string | null, newName: string) => void;
   onSwitchGrouping: (mode: SidebarGrouping) => void;
-  // Open the Ctrl/⌘+K search modal (ADR-0072 Decision 1, issue #252). The
+  // Open the Ctrl/⌘+K search modal (ADR-0072, issue #252). The
   // shell owns the open state so the global keydown + this button share one
   // entry point; the button is the always-visible affordance for the same
   // shortcut.
@@ -137,7 +137,7 @@ export function SessionSidebar({
       {/* ADR-0072 (issue #250): brand title row (product name left + circular
           search magnifier right) replaces the ADR-0060 full-width solid teal
           New button; the New button trades the solid primary fill for a fused
-          bg-secondary. ADR-0072 Decision 1 (issue #252) wires the magnifier to
+          bg-secondary. ADR-0072 (issue #252) wires the magnifier to
           the Ctrl/⌘+K search modal -- this click + the global keydown route to
           the same shell-owned open state. */}
       <header className="sidebar-brand-row mb-2 flex items-center justify-between">
