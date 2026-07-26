@@ -75,6 +75,13 @@ export interface SidebarEntry {
   lastModifiedAt: number;
 }
 
+/** A search-result row (ADR-0072, issue #252). Narrower than SidebarEntry:
+ *  every persisted search row carries a non-null path (m.session_id), so the
+ *  modal's choose() can branch on sid-vs-path without the defensive else-throw
+ *  the wider SidebarEntry state space (which admits the unsaved-open row with
+ *  path=null) would demand. */
+export type SearchEntry = Omit<SidebarEntry, "path"> & { path: string };
+
 /** A rendered sidebar group: heading kind + its entries (already sorted). The
  *  `mode` discriminant makes the kind/mode correspondence a type-level
  *  invariant -- a flat-mode group only ever carries kind="recent"; a time-mode
@@ -140,6 +147,8 @@ export function formatLastModified(lastModifiedAt: number, now: number): LastMod
  *  `list_sessions` result. An unsaved new session (no .duck) is NOT in
  *  list_sessions and never appears here, even when it is the active session
  *  (the sidebar still lists it; the modal is a persisted-session jump surface).
+ *  Every emitted row therefore has a non-null path, so the return type is
+ *  `SearchEntry[]` (a path-non-null narrowing of SidebarEntry).
  *
  *  Filter: case-insensitive substring over `display_name` + the first source's
  *  name. An empty / whitespace-only query returns every session (Ctrl/⌘+K is
@@ -155,7 +164,7 @@ export function buildSearchEntries(
   open: OpenSession[],
   activeSessionId: string | null,
   query: string,
-): SidebarEntry[] {
+): SearchEntry[] {
   // Index open sessions by their bound path so a persisted row can pick up its
   // runtime sid + latest name in one lookup. Unsaved open sessions are skipped
   // (no path -> not in list_sessions -> out of scope for the modal).
@@ -165,7 +174,7 @@ export function buildSearchEntries(
   }
 
   const q = query.trim().toLowerCase();
-  const entries: SidebarEntry[] = [];
+  const entries: SearchEntry[] = [];
   for (const m of persisted) {
     // Compose a single haystack so the substring test runs once per row; the
     // space keeps a name that ends with the source's prefix from bridging into

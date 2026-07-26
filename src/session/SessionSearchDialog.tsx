@@ -13,7 +13,7 @@ import {
   formatLastModified,
   type LastModifiedLabel,
   type OpenSession,
-  type SidebarEntry,
+  type SearchEntry,
 } from "./sidebarModel";
 import type { SessionMetadata } from "../types/session";
 
@@ -57,7 +57,7 @@ export function SessionSearchDialog({
   const intl = useIntl();
   const [query, setQuery] = useState("");
   // The highlighted listbox index (always within entries range, or 0 when
-  // empty). Arrow keys wrap; mouse-move and click sync it to the hovered row.
+  // empty). Arrow keys wrap; mouse-enter and click sync it to the hovered row.
   const [selected, setSelected] = useState(0);
   // Capture "now" once per mount (Date.now is impure in render). The sub-line
   // relative-day label is stable within a session for our purposes.
@@ -108,14 +108,13 @@ export function SessionSearchDialog({
   const displayName = (name: string): string =>
     name || intl.formatMessage({ id: "session.defaultName", defaultMessage: "New session" });
 
-  const choose = (entry: SidebarEntry) => {
-    // Mirror the sidebar row contract: an open binding activates by sid; a cold
-    // persisted row resumes by path. Either way the dialog closes. The final
-    // else is unreachable today (buildSearchEntries always sets path) but
-    // guards a future constructor drift from silently closing the dialog.
+  const choose = (entry: SearchEntry) => {
+    // Mirror the sidebar row contract: an open binding activates by sid; a
+    // cold persisted row resumes by path. Either way the dialog closes.
+    // SearchEntry guarantees a non-null path (buildSearchEntries sets it from
+    // m.session_id), so no defensive else-throw is needed here.
     if (entry.sid) onActivate(entry.sid);
-    else if (entry.path) onOpenPersisted(entry.path, entry.name);
-    else throw new Error(`SessionSearchDialog.choose: entry has no sid and no path (key=${entry.key})`);
+    else onOpenPersisted(entry.path, entry.name);
     onOpenChange(false);
   };
 
@@ -197,7 +196,7 @@ export function SessionSearchDialog({
               selected={i === selected}
               now={now}
               onClick={() => choose(entry)}
-              onMouseMove={() => setSelected(i)}
+              onMouseEnter={() => setSelected(i)}
             />
           ))}
           {entries.length === 0 && (
@@ -228,16 +227,16 @@ function SearchRow({
   selected,
   now,
   onClick,
-  onMouseMove,
+  onMouseEnter,
 }: {
   ref?: (el: HTMLLIElement | null) => void;
   id: string;
-  entry: SidebarEntry;
+  entry: SearchEntry;
   displayName: string;
   selected: boolean;
   now: number;
   onClick: () => void;
-  onMouseMove: () => void;
+  onMouseEnter: () => void;
 }) {
   const intl = useIntl();
   const label = formatLastModified(entry.lastModifiedAt, now);
@@ -250,12 +249,12 @@ function SearchRow({
       role="option"
       aria-selected={selected}
       onClick={onClick}
-      onMouseMove={onMouseMove}
+      onMouseEnter={onMouseEnter}
       className={cn(
         "session-search-option flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm",
         "hover:bg-accent",
         // The selected (keyboard-highlighted) row carries the accent tint; a
-        // hovered row gets it via hover:bg-accent. Mouse-move syncs `selected`
+        // hovered row gets it via hover:bg-accent. Mouse-enter syncs `selected`
         // so the tint follows the pointer too, matching native select behavior.
         selected && "bg-accent",
       )}

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { IntlProvider } from "react-intl";
 import { SessionSearchDialog } from "../SessionSearchDialog";
@@ -239,8 +239,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
       />,
     );
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
-    await new Promise((r) => setTimeout(r, 0));
-    expect(onOpenChange).toHaveBeenCalledWith(false);
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
   });
 
   it("ArrowUp wraps from the first row back to the last", () => {
@@ -262,7 +261,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
     expect(options[2]).toHaveAttribute("aria-selected", "true");
   });
 
-  it("mouse-move over a row syncs the keyboard highlight to it", () => {
+  it("mouse-enter over a row syncs the keyboard highlight to it", () => {
     // Hovering a row mirrors native <select>: the tint follows the pointer, and
     // Enter activates the hovered row rather than the prior keyboard highlight.
     const onOpenPersisted = vi.fn();
@@ -278,7 +277,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
     );
     const options = screen.getAllByRole("option");
     expect(options[0]).toHaveAttribute("aria-selected", "true");
-    fireEvent.mouseMove(options[1]);
+    fireEvent.mouseEnter(options[1]);
     expect(options[1]).toHaveAttribute("aria-selected", "true");
     expect(options[0]).toHaveAttribute("aria-selected", "false");
     fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
@@ -344,5 +343,111 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
     } finally {
       dateNowSpy.mockRestore();
     }
+  });
+
+  it("exposes aria-activedescendant pointing at the highlighted option id", () => {
+    // The combobox<->listbox wiring is the architectural reason the ARIA pattern
+    // exists: aria-controls points at the listbox id, options carry the
+    // session-search-option-N id prefix, and aria-activedescendant tracks the
+    // keyboard highlight so screen readers announce it without moving DOM
+    // focus. A regression that severs any of these is visually invisible but
+    // breaks AT announcement.
+    renderDialog(
+      <SessionSearchDialog
+        {...baseProps}
+        sessions={[
+          meta("/a.duck", "alpha", { last_modified_at: 2000 }),
+          meta("/b.duck", "beta", { last_modified_at: 1000 }),
+        ]}
+      />,
+    );
+    const input = screen.getByRole("combobox") as HTMLInputElement;
+    const listbox = screen.getByRole("listbox");
+    expect(input).toHaveAttribute("aria-controls", "session-search-listbox");
+    expect(input).toHaveAttribute("aria-autocomplete", "list");
+    expect(input).toHaveAttribute("aria-expanded", "true");
+    expect(listbox).toHaveAttribute("id", "session-search-listbox");
+    const options = screen.getAllByRole("option");
+    expect(options[0]).toHaveAttribute("id", "session-search-option-0");
+    expect(options[1]).toHaveAttribute("id", "session-search-option-1");
+    // Default highlight is the first row.
+    expect(input).toHaveAttribute("aria-activedescendant", "session-search-option-0");
+    // ArrowDown moves both the highlight and the activedescendant pointer.
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input).toHaveAttribute("aria-activedescendant", "session-search-option-1");
+  });
+
+  it("renders the empty state when there are no persisted sessions at all", () => {
+    // Cold-start / fresh-install: the modal opens against an empty list_sessions
+    // result. The empty-state copy shows; no option renders.
+    renderDialog(<SessionSearchDialog {...baseProps} sessions={[]} />);
+    expect(screen.queryByRole("option")).toBeNull();
+    expect(screen.getByText("No matching sessions.")).toBeInTheDocument();
+  });
+
+  it("Enter on an empty list is a no-op (does not crash choose)", () => {
+    // The onKeyDown guard returns early when entries is empty, so Enter never
+    // reaches choose(undefined). Pins the guard so a future refactor that drops
+    // it cannot crash on an empty list.
+    const onActivate = vi.fn();
+    const onOpenPersisted = vi.fn();
+    renderDialog(
+      <SessionSearchDialog
+        {...baseProps}
+        sessions={[]}
+        onActivate={onActivate}
+        onOpenPersisted={onOpenPersisted}
+      />,
+    );
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
+    expect(onActivate).not.toHaveBeenCalled();
+    expect(onOpenPersisted).not.toHaveBeenCalled();
+  });
+
+  it("resets a non-zero keyboard selection when reopened", () => {
+    // The prevOpen render-phase reset clears the query AND the selection index.
+    // This pins the selection half: ArrowDown to index 1, close, reopen -> the
+    // highlight returns to the first row so the next Enter does not activate a
+    // stale row from the prior open.
+    const { rerender } = renderDialog(
+      <SessionSearchDialog
+        {...baseProps}
+        sessions={[
+          meta("/a.duck", "alpha", { last_modified_at: 2000 }),
+          meta("/b.duck", "beta", { last_modified_at: 1000 }),
+        ]}
+      />,
+    );
+    const input = screen.getByRole("combobox");
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(screen.getAllByRole("option")[1]).toHaveAttribute("aria-selected", "true");
+
+    rerender(
+      <IntlProvider locale="en" messages={{}} onError={() => {}}>
+        <SessionSearchDialog
+          {...baseProps}
+          open={false}
+          sessions={[
+            meta("/a.duck", "alpha", { last_modified_at: 2000 }),
+            meta("/b.duck", "beta", { last_modified_at: 1000 }),
+          ]}
+        />
+      </IntlProvider>,
+    );
+    rerender(
+      <IntlProvider locale="en" messages={{}} onError={() => {}}>
+        <SessionSearchDialog
+          {...baseProps}
+          open={true}
+          sessions={[
+            meta("/a.duck", "alpha", { last_modified_at: 2000 }),
+            meta("/b.duck", "beta", { last_modified_at: 1000 }),
+          ]}
+        />
+      </IntlProvider>,
+    );
+    const options = screen.getAllByRole("option");
+    expect(options[0]).toHaveAttribute("aria-selected", "true");
+    expect(options[1]).toHaveAttribute("aria-selected", "false");
   });
 });

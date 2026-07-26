@@ -275,7 +275,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     expect(searchIcon).toHaveAttribute("aria-hidden", "true");
   });
 
-  it("sidebar-search-button is disabled when the shell is busy (issue #252)", () => {
+  it("sidebar-search-button is disabled when the shell is busy (issue #250)", () => {
     // busy shell -> disabled propagates to the search button (parity with the
     // New button / context-menu / grouping toggle): the modal must not open
     // mid-resume / mid-save.
