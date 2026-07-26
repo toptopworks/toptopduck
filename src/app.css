@@ -130,4 +130,12 @@
     color: var(--foreground);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
+  /* Buttons inherit the document font stack. The native <button> UA style
+     carries its own font, so the bare reset buttons in SessionSidebar
+     (appearance-none bg-transparent border-0, replacing [all:unset] -- see
+     SessionSidebar.tsx) would otherwise drift off the body font. Base-layer
+     reset; utilities still override freely (ADR-0067). */
+  button {
+    font: inherit;
+  }
 }
