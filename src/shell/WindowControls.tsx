@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useIntl } from "react-intl";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Copy, Minus, Square, X } from "lucide-react";
+import { log } from "../lib/log";
 
 // Windows-style window controls (minimize / maximize-restore / close) rendered
 // at the topbar's right edge so the sidebar collapse toggle shares the same
@@ -49,15 +50,27 @@ export function WindowControls() {
     };
   }, []);
 
+  // Window-control clicks are fire-and-forget user intent, NOT a Tauri
+  // subscribe chain (the jsdom-promise-catch-test-flake caveat is scoped to
+  // listener chains). A reject here is a real capability / runtime failure,
+  // so log.warn surfaces it instead of leaving an unhandled rejection --
+  // mirrors the useAppConfigState window-IPC .catch + log.warn template.
+  const fire = (action: "minimize" | "toggleMaximize" | "close") => {
+    void getCurrentWindow()[action]().catch((e) => log.warn("window", `${action} failed`, e));
+  };
+
   // -mr-4 offsets the topbar's px-4 padding so the close button's right edge
-  // sits flush with the viewport (Windows-style titlebar hit target).
+  // sits flush with the viewport (Windows-style titlebar hit target). The
+  // focus-visible ring matches SidebarToggle / RailToggle so the three
+  // buttons stay keyboard-reachable now that decorations:false removed the
+  // system chrome (ADR-0052 layer-1 a11y invariant).
   return (
     <div className="window-controls flex items-center -mr-4">
       <button
         type="button"
         aria-label={intl.formatMessage({ id: "window.minimize", defaultMessage: "Minimize" })}
-        onClick={() => void getCurrentWindow().minimize()}
-        className="inline-flex h-8 w-11 items-center justify-center text-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
+        onClick={() => fire("minimize")}
+        className="inline-flex h-8 w-11 items-center justify-center text-foreground/70 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       >
         <Minus className="h-3 w-3" aria-hidden />
       </button>
@@ -68,8 +81,8 @@ export function WindowControls() {
             ? intl.formatMessage({ id: "window.restore", defaultMessage: "Restore" })
             : intl.formatMessage({ id: "window.maximize", defaultMessage: "Maximize" })
         }
-        onClick={() => void getCurrentWindow().toggleMaximize()}
-        className="inline-flex h-8 w-11 items-center justify-center text-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
+        onClick={() => fire("toggleMaximize")}
+        className="inline-flex h-8 w-11 items-center justify-center text-foreground/70 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       >
         {maximized ? (
           <Copy className="h-3 w-3" aria-hidden />
@@ -80,8 +93,8 @@ export function WindowControls() {
       <button
         type="button"
         aria-label={intl.formatMessage({ id: "window.close", defaultMessage: "Close" })}
-        onClick={() => void getCurrentWindow().close()}
-        className="inline-flex h-8 w-11 items-center justify-center text-foreground/70 transition-colors hover:bg-destructive hover:text-destructive-foreground"
+        onClick={() => fire("close")}
+        className="inline-flex h-8 w-11 items-center justify-center text-foreground/70 transition-colors hover:bg-destructive hover:text-destructive-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       >
         <X className="h-3 w-3" aria-hidden />
       </button>
