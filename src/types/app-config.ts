@@ -1,10 +1,11 @@
 // App-level config types split from the single-file src/types.ts (issue #197,
 // ADR-0038). The second at-rest artifact (alongside .duck): preferences,
-// defaults, window geometry, recent files, and the no-key endpoint config.
-// Mirrors the Rust `app_config::model` types verbatim. The API key NEVER appears
-// here -- it lives in the OS keychain; app-config has no key field at all
-// (enforced structurally + a read-time secret scan). Crosses IPC via
-// get/set_app_config.
+// defaults, recent files, and the no-key endpoint config. Mirrors the Rust
+// `app_config::model` types verbatim. The API key NEVER appears here -- it
+// lives in the OS keychain; app-config has no key field at all (enforced
+// structurally + a read-time secret scan). Crosses IPC via get/set_app_config.
+// Window geometry is owned by tauri_plugin_window_state (issue #268), not
+// app-config.
 
 import type { ProviderConfig } from "./provider";
 
@@ -17,16 +18,6 @@ export type Theme = "system" | "light" | "dark";
 // The Rust side resolves "system" independently (locale never crosses IPC from
 // the frontend) for the canonical-prompt locale directive.
 export type LocalePreference = "system" | "zh-CN" | "en-US";
-
-// Persisted window geometry, restored on launch so the app reopens where the
-// user left it. x/y are null until the first move is persisted.
-export interface WindowGeometry {
-  width: number;
-  height: number;
-  x: number | null;
-  y: number | null;
-  maximized: boolean;
-}
 
 // Engine default parameters (ADR-0005 L3). Stored + round-tripped here;
 // applying them to the live DuckDB is a follow-up slice.
@@ -88,7 +79,6 @@ export interface AppConfig {
   format_version: number;
   theme: Theme;
   locale: LocalePreference;
-  window: WindowGeometry;
   engine: EngineDefaults;
   privacy: PrivacyDefaults;
   provider: ProviderConfig;

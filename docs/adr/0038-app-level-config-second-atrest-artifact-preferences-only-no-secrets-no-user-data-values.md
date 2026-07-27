@@ -1,4 +1,4 @@
-# App-level config: the second at-rest artifact (alongside .duck); preferences/defaults/window-geometry only — secrets and user-data values never
+# App-level config: the second at-rest artifact (alongside .duck); preferences/defaults only — secrets and user-data values never
 
 ## Decision
 
@@ -12,7 +12,7 @@
 - 引擎默认参数：`memory_limit` / `threads` / 行数上限（ADR-0005）/ 语句超时
 - 隐私默认：样本默认行数、按列脱敏的**默认**开关（ADR-0011）
 - 接入配置：`baseURL` / endpoint（ADR-0019，**不含 key**）
-- UI 偏好：窗口几何、最近文件列表（路径指针）、主题
+- UI 偏好：最近文件列表（路径指针）、主题
 - 可调默认：重试预算 / N=20 / M=100（ADR-0013/0023/0028）
 
 **app-config OUT（绝不落盘进 app-config）**：
@@ -20,11 +20,11 @@
 - **用户数据值**——样本行 / 结果行 / prompt / SQL / 对话内容（只能进 `.duck` 或不落盘，ADR-0029 不变量 2）
 - 数据集内容 / 源数据本身（用户磁盘，ADR-0034）
 
-**劈线原则**：app-config 只存「无数据的状态」（路径指针、数值默认、布尔开关、几何）；「上次导出目录」是路径指针、非用户数据内容，可接受。
+**劈线原则**：app-config 只存「无数据的状态」（路径指针、数值默认、布尔开关）；「上次导出目录」是路径指针、非用户数据内容，可接受。
 
 ## Context
 
-ADR-0029 不变量 2 = 「默认零**用户数据**持久落盘」、ADR-0034 精确化为「唯一持久 at-rest = 用户拥有的 `.duck`」。但 app 级偏好（导出起始目录 ADR-0004、`memory_limit`/行数上限 ADR-0005、样本默认 ADR-0011、窗口几何、`baseURL` ADR-0019）既非用户数据、也非 `.duck`，却必须落盘。ADR-0015 自陈「导出路径策略另定」。读 0029「零 at-rest」会误以为连窗口大小都不能存——需给 app-config 一个名分与边界，防两个方向的误读。
+ADR-0029 不变量 2 = 「默认零**用户数据**持久落盘」、ADR-0034 精确化为「唯一持久 at-rest = 用户拥有的 `.duck`」。但 app 级偏好（导出起始目录 ADR-0004、`memory_limit`/行数上限 ADR-0005、样本默认 ADR-0011、`baseURL` ADR-0019）既非用户数据、也非 `.duck`，却必须落盘。ADR-0015 自陈「导出路径策略另定」。读 0029「零 at-rest」会误以为连窗口大小都不能存——需给 app-config 一个名分与边界，防两个方向的误读。
 
 ## Why
 
@@ -34,8 +34,8 @@ ADR-0029 不变量 2 = 「默认零**用户数据**持久落盘」、ADR-0034 �
 
 ## Considered options
 
-- **把 app 偏好塞进 `.duck`**：违背 `.duck` = 单个分析单元的语义；偏好跨会话共享、不属于某个分析；且 `.duck` 可分享，窗口几何/`baseURL` 不该随分析文档走。**否决**。
-- **严格「零 at-rest」连偏好都不存**：误读 0029；窗口几何/最近文件/默认参数全丢 = 每次启动回出厂态，体验退化。**否决**。
+- **把 app 偏好塞进 `.duck`**：违背 `.duck` = 单个分析单元的语义；偏好跨会话共享、不属于某个分析；且 `.duck` 可分享，`baseURL` 不该随分析文档走。**否决**。
+- **严格「零 at-rest」连偏好都不存**：误读 0029；最近文件/默认参数全丢 = 每次启动回出厂态，体验退化。**否决**。
 - **app-config 允许存用户数据值（便利）**：直接破 0029 不变量 2 + 0034「数据只在 `.duck` 或用户磁盘」边界。**否决**。
 - **app-config 存 key（便利/可移植配置）**：与 0036 secrets-never 同源否决——keychain 外任何明文/可读存储都是泄露面。**否决**。
 
@@ -46,3 +46,4 @@ ADR-0029 不变量 2 = 「默认零**用户数据**持久落盘」、ADR-0034 �
 - **收口 ADR-0004/0005/0011/0019 的「可调默认」归宿**：这些可调参数的默认值与上次值住 app-config；会话内临时覆盖不落盘（除非另存）。
 - 实现侧：app-config 读写（OS app-data 目录）、schema 只含 IN 项、迁移随 app 版本（与 `.duck` 的 `format_version` 不同域——app-config 是 app 级、随 app 升级自行迁移，不需跨用户移植）。
 - app-config 不可移植（机/用户级偏好），与 `.duck` 的可移植性正交——分享分析给同事只给 `.duck`，不带偏好。
+- **窗口几何移交原生 plugin（issue #268）**：app-config 原含 `window` 字段，与 `tauri_plugin_window_state` 形成**双重持久化**——启动时两条恢复路径时序错位，窗口从系统默认位置跳到恢复位置。`window` 字段退役，几何改由 `tauri_plugin_window_state` 独占（`SIZE | POSITION | MAXIMIZED | VISIBLE` flags + `tauri.conf.json` `visible:false`，plugin 在窗口可见前应用几何后 `show()`）。

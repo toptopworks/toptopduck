@@ -4,17 +4,17 @@ import type { AppConfig } from "../../types/app-config";
 
 // Issue #196: useAppConfigState owns the AppConfig advisory state + every
 // mutating action (commitAppConfig, switchActiveProfile, commitShellPrefs via
-// the two collapse toggles) + the load / geometry-restore / collapse-restore /
-// geometry-persist effects + the locale / intl derived from appConfig.locale.
-// These tests pin the contracts hardest to assert through the App black-box
-// (Shell.test.tsx): optimistic commitAppConfig, the switchActiveProfile no-op
-// guards + refreshKeyStatus kick, the two independent collapse toggles writing
-// through commitShellPrefs, and the one-shot collapse restore from persisted
-// prefs. The api mock stubs getAppConfig / setAppConfig; the
-// switchActiveProfile reject path runs the real toAppError (imported from
-// lib/error-presentation, outside the api mock). safeMainWindow() returns null
-// in jsdom (getCurrentWindow throws synchronously), so the geometry effects
-// no-op.
+// the two collapse toggles) + the load / collapse-restore effects + the
+// locale / intl derived from appConfig.locale. These tests pin the contracts
+// hardest to assert through the App black-box (Shell.test.tsx): optimistic
+// commitAppConfig, the switchActiveProfile no-op guards + refreshKeyStatus
+// kick, the two independent collapse toggles writing through commitShellPrefs,
+// and the one-shot collapse restore from persisted prefs. The api mock stubs
+// getAppConfig / setAppConfig; the switchActiveProfile reject path runs the
+// real toAppError (imported from lib/error-presentation, outside the api
+// mock). Window geometry persistence moved to tauri_plugin_window_state
+// (issue #268), so this hook no longer touches the window -- no jsdom
+// window-bridge caveats apply.
 
 vi.mock("../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api")>();
@@ -37,7 +37,6 @@ function baseAppConfig(shell: Omit<AppConfig["shell"], "sidebar_grouping">): App
     format_version: 1,
     theme: "system",
     locale: "system",
-    window: { width: 800, height: 600, x: null, y: null, maximized: false },
     engine: { memory_limit: "512MB", threads: 1, row_cap: 100, statement_timeout_ms: 30000 },
     privacy: { send_samples: true },
     provider: {

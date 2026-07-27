@@ -691,12 +691,11 @@ pub async fn test_profile(
 
 // --- App-level config (issue #53, ADR-0038) --------------------------------
 //
-// The second at-rest artifact: preferences, defaults, window geometry, recent
-// files, and the no-key endpoint config. Lives in the OS app-data directory,
-// orthogonal to the portable `.duck`. Honest-degrades to defaults on any read
-// failure (missing/corrupt -> built-in defaults, never a crash). The frontend
-// loads it on startup (theme + window geometry + recent files) and persists
-// edits through `set_app_config`.
+// The second at-rest artifact: preferences, defaults, recent files, and the
+// no-key endpoint config. Lives in the OS app-data directory, orthogonal to
+// the portable `.duck`. Honest-degrades to defaults on any read failure
+// (missing/corrupt -> built-in defaults, never a crash). The frontend loads it
+// on startup (theme + recent files) and persists edits through `set_app_config`.
 
 /// Read the full app-config (ADR-0038). Honest-degrades to built-in defaults on
 /// any failure, so the frontend always receives a usable config. On the first
