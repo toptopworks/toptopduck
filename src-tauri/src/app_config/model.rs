@@ -24,6 +24,13 @@ use crate::window::WINDOW_TURNS;
 /// `LowerVersion` branch -- the app is unreleased, so ADR-0064 declines a
 /// v1->v2 migrator and treats a stale v1 file as a reset to defaults
 /// (ADR-0038). Any other version also honest-degrades to built-in defaults.
+///
+/// Removing a field is forward-compatible without a version bump: `AppConfig`
+/// has no `#[serde(deny_unknown_fields)]`, so serde silently drops unknown keys
+/// -- a pre-#268 file still carrying a `window` field parses cleanly with the
+/// key ignored. Issue #268 retired `WindowGeometry` + `AppConfig.window` and
+/// moved geometry persistence to `tauri_plugin_window_state`; the stale `window`
+/// key in an old file is harmless, so no bump accompanies the removal.
 pub const APP_CONFIG_FORMAT_VERSION: u32 = 2;
 
 /// V1 default per-statement timeout (ms). No prior constant existed; 30s is a

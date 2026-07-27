@@ -50,7 +50,7 @@ ADR-0060 的顶栏模型假设系统原生 titlebar（`decorations: true`），t
 - **a11y（WCAG 1.4.1 + 2.2 SC 2.5.8）**：macOS 三圆点的 × / − / + glyph 常显（opacity-60 基线 + group-hover 提至 opacity-100），颜色非唯一区分手段，色盲 / 触摸 / 低视力用户静止可读；`<button>` 点击区域 24×24（h-6 w-6），视觉圆点 12px（h-3 w-3）作为 span 子元素，满足 24px 最低目标尺寸。
 - **关联 ADR-0067**：topbar 仍作 layout-only 语义类；`WindowControls` 用 Tailwind utility + ADR-0050 token，不增 `styles.css` 规则。
 - **关联 ADR-0052**：window-control aria-label 入 i18n 四层不变量。
-- **关联 ADR-0068**：窗口几何 advisory state 不变；`onResized` 既已通过 `useAppConfigState` 持久化几何，自定义 titlebar 不改其语义。
+- **关联 ADR-0068**：窗口几何持久化由 `tauri_plugin_window_state` 独占；`onResized` 现仅驱动 `WindowsWindowControls` 的最大化/恢复图标翻转，自定义 titlebar 不改其语义。
 - **关联 ADR-0054**：`minWidth` / `minHeight` 兜底不变；自定义 titlebar 不改窗口尺寸策略。
 - **关联 ADR-0073**：topbar 承载 window controls + drag region（shell-wide chrome）；session-scoped chrome 迁出见 0073。
 - **CONTEXT.md 不动**：window controls / titlebar / 红绿灯是 UI chrome 实现，非领域术语（遵循 ADR-0060 行 72 / ADR-0068 行 57 先例）。
