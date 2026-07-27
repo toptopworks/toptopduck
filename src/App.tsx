@@ -29,7 +29,7 @@ import { getProviderConfig } from "./api";
 // The Chat-style three-column shell (ADR-0045/0060/0062, issue #81). App owns
 // APP-level state: the OPEN-session set + active id (ADR-0060 multi-session),
 // the persisted-session sidebar list (ADR-0061 cold start), app-config, theme,
-// locale, window geometry, save/open, settings. Each open session renders a
+// locale, save/open, settings. Each open session renders a
 // <SessionPane> (ADR-0051) that owns its working-set / active / thread queries
 // + client UI state. Non-active panes stay mounted under CSS `hidden` keep-alive
 // (ADR-0060): switching is instant, no resume replay, no refetch (ADR-0051).

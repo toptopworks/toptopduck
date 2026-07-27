@@ -21,9 +21,9 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 const { platformMock } = vi.hoisted(() => ({ platformMock: vi.fn<() => string>() }));
 vi.mock("@tauri-apps/plugin-os", () => ({ platform: platformMock }));
 
-// WindowControls (custom titlebar) + useAppConfigState (window-geometry
-// persistence) both reach getCurrentWindow. The shared stub captures the
-// bridge handle so the WindowControls behavior tests below can fire clicks,
+// WindowControls (custom titlebar, ADR-0074) is the sole remaining
+// consumer of getCurrentWindow. The shared stub captures the bridge
+// handle so the WindowControls behavior tests below can fire clicks,
 // emit onResized, and assert on the IPC spies.
 import { buildTauriWindowMock, type WindowBridge } from "./setup/tauriWindowMock";
 
