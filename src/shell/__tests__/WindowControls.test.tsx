@@ -1,13 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactElement } from "react";
 
-// Issue #263 (ADR-0074): WindowControls is a platform dispatcher --
+// ADR-0074 (issue #263): WindowControls is a platform dispatcher --
 // usePlatform() routes to MacOSWindowControls (left traffic lights) or
 // WindowsWindowControls (right min/max/close). The dispatch must be unit-
 // testable, so the underlying @tauri-apps/plugin-os + window + log deps are
 // mocked and each platform scenario re-imports the dispatcher fresh (the
 // module-level platform cache in use-platform.ts would otherwise latch the
 // first scenario's value across tests).
+//
+// Visual-only gap (not covered here): the macOS dot glyph opacity transition
+// (opacity-60 → group-hover:opacity-100) is CSS-driven and cannot be asserted
+// in jsdom (no computed styles, no :hover pseudo). The F2 fidelity cue +
+// WCAG 1.4.1 default-visible glyph are verified by visual / manual review.
 
 // Hoisted mock state survives vi.resetModules (the factory re-runs on each
 // re-import but returns the same hoisted fn), mirroring use-platform.test.ts.
@@ -34,17 +39,20 @@ vi.mock("@tauri-apps/api/window", () => ({
   }),
 }));
 
-// Silence the structured log sink (rejects under jsdom). The fire-and-forget
-// window-action .catch routes failures through log.warn; the no-op mock keeps
-// the error-path test clean without changing behavior.
-const logWarn = vi.hoisted(() => vi.fn());
+// The shared fireWindowAction helper routes close failures to log.error and
+// minimize/toggleMaximize to log.warn; both spies are asserted in the click
+// failure-path tests below.
+const { logWarn, logError } = vi.hoisted(() => ({
+  logWarn: vi.fn(),
+  logError: vi.fn(),
+}));
 vi.mock("../../lib/log", () => ({
   log: {
     trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: logWarn,
-    error: vi.fn(),
+    error: logError,
   },
 }));
 
@@ -55,14 +63,18 @@ beforeEach(() => {
   windowApi.toggleMaximize.mockReset();
   windowApi.isMaximized.mockReset();
   windowApi.onResized.mockReset();
+  logWarn.mockReset();
+  logError.mockReset();
   // WindowsWindowControls' useEffect seeds maximize state from isMaximized()
   // and subscribes to onResized; both resolve to a benign default so the
   // windows/linux scenarios mount without dangling promises.
   windowApi.isMaximized.mockResolvedValue(false);
   windowApi.onResized.mockResolvedValue(vi.fn());
-  // The production fire() chain calls .catch on the action promise; the mock
-  // fns default to returning undefined, which would throw inside .catch and
-  // surface as an uncaught exception. Resolve to undefined so the chain holds.
+  // The production fireWindowAction chain calls .catch on the action promise;
+  // the mock fns default to returning undefined, which would throw inside
+  // .catch and surface as an uncaught exception. Resolve to undefined so the
+  // chain holds for the success-path tests (failure-path tests override with
+  // mockRejectedValueOnce).
   windowApi.close.mockResolvedValue(undefined);
   windowApi.minimize.mockResolvedValue(undefined);
   windowApi.toggleMaximize.mockResolvedValue(undefined);
@@ -102,8 +114,7 @@ describe("WindowControls platform dispatch", () => {
 
     // macOS traffic lights: red close / yellow minimize / green maximize, in
     // that left-to-right order. The green button is maximize semantics (no
-    // restore variant -- ADR-0074 green = toggleMaximize, F2 omits the
-    // unfocused glyph state entirely).
+    // restore variant -- ADR-0074 green = toggleMaximize, no glyph swap).
     const close = screen.getByRole("button", { name: "Close" });
     const minimize = screen.getByRole("button", { name: "Minimize" });
     const maximize = screen.getByRole("button", { name: "Maximize" });
@@ -126,10 +137,10 @@ describe("WindowControls platform dispatch", () => {
     const { screen } = await import("@testing-library/react");
     await renderDispatcher("windows");
 
-    expect(screen.getByRole("button", { name: "Minimize" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Minimize" })).toBeInTheDocument();
     // Default (non-maximized) state shows Maximize, not Restore.
-    expect(screen.getByRole("button", { name: "Maximize" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Maximize" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
     expect(screen.getAllByRole("button")).toHaveLength(3);
   });
 
@@ -139,9 +150,10 @@ describe("WindowControls platform dispatch", () => {
 
     // ADR-0074: Linux never returns null under global decorations:false; it
     // reuses WindowsWindowControls so the desktop always has window controls.
-    expect(screen.getByRole("button", { name: "Minimize" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Maximize" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Minimize" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Maximize" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button")).toHaveLength(3);
   });
 });
 
@@ -176,6 +188,28 @@ describe("MacOSWindowControls click behavior", () => {
     expect(windowApi.toggleMaximize).toHaveBeenCalledTimes(1);
     expect(windowApi.close).not.toHaveBeenCalled();
     expect(windowApi.minimize).not.toHaveBeenCalled();
+  });
+
+  it("routes a close rejection to log.error (most severe — user cannot dismiss)", async () => {
+    const { screen, fireEvent, waitFor } = await import("@testing-library/react");
+    await renderMac();
+    windowApi.close.mockRejectedValueOnce(new Error("denied"));
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() =>
+      expect(logError).toHaveBeenCalledWith("window", "close failed", expect.any(Error)),
+    );
+    expect(logWarn).not.toHaveBeenCalled();
+  });
+
+  it("routes a minimize rejection to log.warn (recoverable)", async () => {
+    const { screen, fireEvent, waitFor } = await import("@testing-library/react");
+    await renderMac();
+    windowApi.minimize.mockRejectedValueOnce(new Error("denied"));
+    fireEvent.click(screen.getByRole("button", { name: "Minimize" }));
+    await waitFor(() =>
+      expect(logWarn).toHaveBeenCalledWith("window", "minimize failed", expect.any(Error)),
+    );
+    expect(logError).not.toHaveBeenCalled();
   });
 });
 

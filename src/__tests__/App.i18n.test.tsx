@@ -13,18 +13,18 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({ onDragDropEvent: () => Promise.resolve(() => {}) }),
 }));
 
-// Pin the platform to "windows" so the WindowControls dispatcher (ADR-0074,
-// issue #263) renders the WindowsWindowControls path. The issue #261 suite
-// below asserts Windows-specific behavior (Restore glyph flip + onResized
-// subscription) that predates the macOS traffic-light split; the macOS path
-// has its own dispatch + click coverage in
+// Platform mock (ADR-0074). Default is "windows" (set in each describe's
+// beforeEach); the macOS placement describe overrides to "macos". The Windows
+// default keeps the Windows-path suite (Restore glyph flip + onResized
+// subscription) valid; the macOS path's own click + dispatch coverage lives in
 // src/shell/__tests__/WindowControls.test.tsx.
-vi.mock("@tauri-apps/plugin-os", () => ({ platform: () => "windows" }));
+const { platformMock } = vi.hoisted(() => ({ platformMock: vi.fn<() => string>() }));
+vi.mock("@tauri-apps/plugin-os", () => ({ platform: platformMock }));
 
 // WindowControls (custom titlebar) + useAppConfigState (window-geometry
 // persistence) both reach getCurrentWindow. The shared stub captures the
 // bridge handle so the WindowControls behavior tests below can fire clicks,
-// emit onResized, and assert on the IPC spies (issue #261 review C1).
+// emit onResized, and assert on the IPC spies.
 import { buildTauriWindowMock, type WindowBridge } from "./setup/tauriWindowMock";
 
 const windowBridge = vi.hoisted<{ current: WindowBridge | null }>(() => ({ current: null }));
@@ -95,6 +95,7 @@ import { getAppConfig, setAppConfig } from "../api";
 describe("App i18n (ADR-0052 black-box)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    platformMock.mockReturnValue("windows");
     // Pin navigator.language to en-US so the "system" preference deterministically
     // resolves to en-US (the host's navigator.language must not sway the tests).
     vi.stubGlobal("navigator", { language: "en-US" });
@@ -107,7 +108,7 @@ describe("App i18n (ADR-0052 black-box)", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument(),
     );
-    // Window-control aria-labels localize too (ADR-0052 layer-1 chrome, #261).
+    // Window-control aria-labels localize too (ADR-0052 layer-1 chrome).
     expect(screen.getByRole("button", { name: "最小化" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "最大化" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "关闭" })).toBeInTheDocument();
@@ -119,7 +120,7 @@ describe("App i18n (ADR-0052 black-box)", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument(),
     );
-    // Window-control aria-labels localize too (ADR-0052 layer-1 chrome, #261).
+    // Window-control aria-labels localize too (ADR-0052 layer-1 chrome).
     expect(screen.getByRole("button", { name: "Minimize" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Maximize" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
@@ -180,9 +181,10 @@ describe("App i18n (ADR-0052 black-box)", () => {
   });
 });
 
-describe("App window controls (issue #261)", () => {
+describe("App window controls (Windows path)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    platformMock.mockReturnValue("windows");
     vi.stubGlobal("navigator", { language: "zh-CN" });
   });
 
@@ -257,5 +259,48 @@ describe("App window controls (issue #261)", () => {
     expect(unsub).not.toHaveBeenCalled();
     unmount();
     await waitFor(() => expect(unsub).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe("App window-controls platform placement (ADR-0074)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    platformMock.mockReturnValue("macos");
+    vi.stubGlobal("navigator", { language: "en-US" });
+    // usePlatform() module-caches the platform on first read; the i18n +
+    // Windows-path suites above have already latched "windows" by the time
+    // this describe runs. resetModules + dynamic re-import of App/api makes
+    // use-platform re-read the mocked "macos" value instead of serving the
+    // stale cache (mirrors the per-scenario re-import in
+    // WindowControls.test.tsx).
+    vi.resetModules();
+  });
+
+  it("places macOS traffic lights at the topbar LEFT edge (not the right-side cluster)", async () => {
+    // ADR-0074: macOS renders <WindowControls /> before SidebarToggle (left
+    // edge); Windows/Linux renders it after HeaderActions (right edge). This
+    // pins the App.tsx positional invariant -- a regression that flips or
+    // drops the left-edge branch would otherwise pass every other suite
+    // (dispatcher unit tests render the component in isolation, and the
+    // Windows-path suite above pins platform to "windows").
+    const { default: App } = await import("../App");
+    const { getAppConfig } = await import("../api");
+    vi.mocked(getAppConfig).mockResolvedValue(appConfigWith("en-US"));
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument(),
+    );
+
+    const macControls = document.querySelector(".macos-window-controls");
+    expect(macControls).not.toBeNull();
+    // The macOS container precedes the right-side HeaderActions (Settings) in
+    // DOM order (DOCUMENT_POSITION_FOLLOWING = settings comes after macControls).
+    const settings = screen.getByRole("button", { name: "Settings" });
+    expect(
+      (macControls as Element).compareDocumentPosition(settings) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // The Windows right-side cluster must NOT also render on macOS.
+    expect(document.querySelector(".window-controls")).toBeNull();
   });
 });

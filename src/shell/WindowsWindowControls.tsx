@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { useIntl } from "react-intl";
+import type { ReactElement } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Copy, Minus, Square, X } from "lucide-react";
 import { log } from "../lib/log";
+import { fireWindowAction } from "./window-actions";
 
 // Windows/Linux window controls (minimize / maximize-restore / close) rendered
 // at the topbar's right edge so the sidebar collapse toggle shares the same
@@ -12,13 +14,12 @@ import { log } from "../lib/log";
 // empty chrome between buttons drags the window; these buttons sit as normal
 // interactive children so clicks still register. Selected by the
 // WindowControls dispatcher on every non-macOS desktop (ADR-0074: Linux also
-// lands here -- global decorations:false would otherwise leave Linux with no
+// lands here — global decorations:false would otherwise leave Linux with no
 // window chrome at all).
-// ADR-0052 (issue #261): the button aria-labels are UI chrome (layer 1) and
-// must localize -- each is a STATIC intl.formatMessage literal so
-// @formatjs/cli extract resolves every id. WindowsWindowControls mounts inside
-// <IntlProvider> (App topbar), so useIntl reaches the catalog directly.
-export function WindowsWindowControls() {
+//
+// ADR-0052 i18n contract + fire-and-forget failure routing live on the
+// dispatcher (WindowControls.tsx) and the shared fireWindowAction helper.
+export function WindowsWindowControls(): ReactElement {
   const intl = useIntl();
   const [maximized, setMaximized] = useState(false);
 
@@ -29,7 +30,12 @@ export function WindowsWindowControls() {
   // mid-attach, e.g. shell-level ErrorBoundary reset).
   useEffect(() => {
     const appWindow = getCurrentWindow();
-    appWindow.isMaximized().then(setMaximized).catch(() => {});
+    appWindow.isMaximized().then(setMaximized).catch((e) => {
+      // Seed failure is usually teardown; log so a persistent capability
+      // failure does not silently leave the maximize/restore glyph out of sync
+      // (aligns with the useAppConfigState window-IPC .catch + log template).
+      log.warn("window", "isMaximized seed failed", e);
+    });
     let aborted = false;
     let resolvedUnsub: (() => void) | null = null;
     appWindow
@@ -37,8 +43,11 @@ export function WindowsWindowControls() {
         try {
           const next = await appWindow.isMaximized();
           if (!aborted) setMaximized(next);
-        } catch {
-          // window torn down during cleanup -- ignore
+        } catch (e) {
+          // Most rejects here are teardown races (window closing mid-resize);
+          // log anyway so a persistent capability failure stays observable
+          // rather than silently leaving the glyph stuck.
+          log.warn("window", "onResized isMaximized failed", e);
         }
       })
       .then((unsub) => {
@@ -51,15 +60,6 @@ export function WindowsWindowControls() {
     };
   }, []);
 
-  // Window-control clicks are fire-and-forget user intent, NOT a Tauri
-  // subscribe chain (the jsdom-promise-catch-test-flake caveat is scoped to
-  // listener chains). A reject here is a real capability / runtime failure,
-  // so log.warn surfaces it instead of leaving an unhandled rejection --
-  // mirrors the useAppConfigState window-IPC .catch + log.warn template.
-  const fire = (action: "minimize" | "toggleMaximize" | "close") => {
-    void getCurrentWindow()[action]().catch((e) => log.warn("window", `${action} failed`, e));
-  };
-
   // -mr-4 offsets the topbar's px-4 padding so the close button's right edge
   // sits flush with the viewport (Windows-style titlebar hit target). The
   // focus-visible ring matches SidebarToggle / RailToggle so the three
@@ -70,7 +70,7 @@ export function WindowsWindowControls() {
       <button
         type="button"
         aria-label={intl.formatMessage({ id: "window.minimize", defaultMessage: "Minimize" })}
-        onClick={() => fire("minimize")}
+        onClick={() => fireWindowAction("minimize")}
         className="inline-flex h-8 w-11 items-center justify-center text-foreground/70 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       >
         <Minus className="h-3 w-3" aria-hidden />
@@ -82,7 +82,7 @@ export function WindowsWindowControls() {
             ? intl.formatMessage({ id: "window.restore", defaultMessage: "Restore" })
             : intl.formatMessage({ id: "window.maximize", defaultMessage: "Maximize" })
         }
-        onClick={() => fire("toggleMaximize")}
+        onClick={() => fireWindowAction("toggleMaximize")}
         className="inline-flex h-8 w-11 items-center justify-center text-foreground/70 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       >
         {maximized ? (
@@ -94,7 +94,7 @@ export function WindowsWindowControls() {
       <button
         type="button"
         aria-label={intl.formatMessage({ id: "window.close", defaultMessage: "Close" })}
-        onClick={() => fire("close")}
+        onClick={() => fireWindowAction("close")}
         className="inline-flex h-8 w-11 items-center justify-center text-foreground/70 transition-colors hover:bg-destructive hover:text-destructive-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       >
         <X className="h-3 w-3" aria-hidden />
