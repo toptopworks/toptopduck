@@ -8,6 +8,7 @@ import { useShellError } from "./shell/useShellError";
 import { usePersistedSessions } from "./shell/usePersistedSessions";
 import { useShellSessions } from "./shell/useShellSessions";
 import { useAppConfigState } from "./shell/useAppConfigState";
+import { usePlatform } from "./shell/use-platform";
 import { HeaderActions } from "./shell/HeaderActions";
 import { SidebarToggle } from "./shell/SidebarToggle";
 import { WindowControls } from "./shell/WindowControls";
@@ -54,6 +55,12 @@ export default function App() {
   const [queryClient] = useState(() => createQueryClient());
 
   const { shellError, setShellError } = useShellError();
+
+  // Platform dispatch (ADR-0074, issue #263): macOS traffic-light window
+  // controls render at the topbar's LEFT edge (before SidebarToggle); Windows
+  // and Linux keep the right-side cluster at the topbar's tail. usePlatform()
+  // is module-cached, so this is a cheap synchronous read in render.
+  const platform = usePlatform();
 
   // --- App-level UI state --------------------------------------------------
   const [hasKey, setHasKey] = useState(false);
@@ -267,6 +274,7 @@ export default function App() {
               lives with the session). ADR-0067 (#171): visual rules -> inline
               utilities; the .topbar grid + flex layout shell stays in styles.css. */}
               <header className="topbar gap-3 px-4 border-b border-border bg-background" data-tauri-drag-region>
+                {platform === "macos" && <WindowControls />}
                 <SidebarToggle
                   collapsed={sidebarCollapsed}
                   onToggle={toggleSidebarCollapse}
@@ -301,7 +309,7 @@ export default function App() {
                   onOpenSettings={() => openSettings()}
                   settingsDisabled={!appConfig}
                 />
-                <WindowControls />
+                {platform !== "macos" && <WindowControls />}
               </header>
 
               {/* Resume progress strip (ADR-0034). Absent unless an open/resume

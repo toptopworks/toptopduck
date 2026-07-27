@@ -1,0 +1,201 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReactElement } from "react";
+
+// Issue #263 (ADR-0074): WindowControls is a platform dispatcher --
+// usePlatform() routes to MacOSWindowControls (left traffic lights) or
+// WindowsWindowControls (right min/max/close). The dispatch must be unit-
+// testable, so the underlying @tauri-apps/plugin-os + window + log deps are
+// mocked and each platform scenario re-imports the dispatcher fresh (the
+// module-level platform cache in use-platform.ts would otherwise latch the
+// first scenario's value across tests).
+
+// Hoisted mock state survives vi.resetModules (the factory re-runs on each
+// re-import but returns the same hoisted fn), mirroring use-platform.test.ts.
+const pluginOs = vi.hoisted(() => ({ platform: vi.fn<() => string>() }));
+vi.mock("@tauri-apps/plugin-os", () => ({ platform: pluginOs.platform }));
+
+// getCurrentWindow returns a fresh object literal each call in production, so
+// the mock returns a stable shape bound to hoisted fns -- both the dispatcher
+// and the per-platform child components reach the same call spies.
+const windowApi = vi.hoisted(() => ({
+  close: vi.fn(),
+  minimize: vi.fn(),
+  toggleMaximize: vi.fn(),
+  isMaximized: vi.fn(),
+  onResized: vi.fn(),
+}));
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({
+    close: windowApi.close,
+    minimize: windowApi.minimize,
+    toggleMaximize: windowApi.toggleMaximize,
+    isMaximized: windowApi.isMaximized,
+    onResized: windowApi.onResized,
+  }),
+}));
+
+// Silence the structured log sink (rejects under jsdom). The fire-and-forget
+// window-action .catch routes failures through log.warn; the no-op mock keeps
+// the error-path test clean without changing behavior.
+const logWarn = vi.hoisted(() => vi.fn());
+vi.mock("../../lib/log", () => ({
+  log: {
+    trace: vi.fn(),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: logWarn,
+    error: vi.fn(),
+  },
+}));
+
+beforeEach(() => {
+  pluginOs.platform.mockReset();
+  windowApi.close.mockReset();
+  windowApi.minimize.mockReset();
+  windowApi.toggleMaximize.mockReset();
+  windowApi.isMaximized.mockReset();
+  windowApi.onResized.mockReset();
+  // WindowsWindowControls' useEffect seeds maximize state from isMaximized()
+  // and subscribes to onResized; both resolve to a benign default so the
+  // windows/linux scenarios mount without dangling promises.
+  windowApi.isMaximized.mockResolvedValue(false);
+  windowApi.onResized.mockResolvedValue(vi.fn());
+  // The production fire() chain calls .catch on the action promise; the mock
+  // fns default to returning undefined, which would throw inside .catch and
+  // surface as an uncaught exception. Resolve to undefined so the chain holds.
+  windowApi.close.mockResolvedValue(undefined);
+  windowApi.minimize.mockResolvedValue(undefined);
+  windowApi.toggleMaximize.mockResolvedValue(undefined);
+  vi.resetModules();
+});
+
+afterEach(async () => {
+  const { cleanup } = await import("@testing-library/react");
+  cleanup();
+});
+
+// Empty-catalog English IntlProvider so aria-labels resolve to defaultMessage
+// (the canonical English source, ADR-0052). Mirrors ColdStartHero.test.tsx.
+async function renderWithPlatform<T extends ReactElement>(
+  platform: string,
+  ui: T,
+) {
+  pluginOs.platform.mockReturnValue(platform);
+  const { render } = await import("@testing-library/react");
+  const { IntlProvider } = await import("react-intl");
+  return render(
+    <IntlProvider locale="en" messages={{}} onError={() => {}}>
+      {ui}
+    </IntlProvider>,
+  );
+}
+
+async function renderDispatcher(platform: string) {
+  const { WindowControls } = await import("../WindowControls");
+  return renderWithPlatform(platform, <WindowControls />);
+}
+
+describe("WindowControls platform dispatch", () => {
+  it("renders the three traffic-light buttons on macOS", async () => {
+    const { screen } = await import("@testing-library/react");
+    await renderDispatcher("macos");
+
+    // macOS traffic lights: red close / yellow minimize / green maximize, in
+    // that left-to-right order. The green button is maximize semantics (no
+    // restore variant -- ADR-0074 green = toggleMaximize, F2 omits the
+    // unfocused glyph state entirely).
+    const close = screen.getByRole("button", { name: "Close" });
+    const minimize = screen.getByRole("button", { name: "Minimize" });
+    const maximize = screen.getByRole("button", { name: "Maximize" });
+
+    // DOM order is red → yellow → green (left to right, macOS convention).
+    expect(
+      close.compareDocumentPosition(minimize) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      minimize.compareDocumentPosition(maximize) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    // No restore button ever on macOS (green is always maximize, not a toggle
+    // glyph that swaps to restore).
+    expect(screen.queryByRole("button", { name: "Restore" })).toBeNull();
+    expect(screen.getAllByRole("button")).toHaveLength(3);
+  });
+
+  it("renders the Windows-style min/max/close buttons on Windows", async () => {
+    const { screen } = await import("@testing-library/react");
+    await renderDispatcher("windows");
+
+    expect(screen.getByRole("button", { name: "Minimize" })).toBeTruthy();
+    // Default (non-maximized) state shows Maximize, not Restore.
+    expect(screen.getByRole("button", { name: "Maximize" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+    expect(screen.getAllByRole("button")).toHaveLength(3);
+  });
+
+  it("falls back to the Windows-style layout on Linux", async () => {
+    const { screen } = await import("@testing-library/react");
+    await renderDispatcher("linux");
+
+    // ADR-0074: Linux never returns null under global decorations:false; it
+    // reuses WindowsWindowControls so the desktop always has window controls.
+    expect(screen.getByRole("button", { name: "Minimize" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Maximize" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+  });
+});
+
+describe("MacOSWindowControls click behavior", () => {
+  async function renderMac() {
+    const { MacOSWindowControls } = await import("../MacOSWindowControls");
+    return renderWithPlatform("macos", <MacOSWindowControls />);
+  }
+
+  it("red button closes the window", async () => {
+    const { screen, fireEvent } = await import("@testing-library/react");
+    await renderMac();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(windowApi.close).toHaveBeenCalledTimes(1);
+    expect(windowApi.minimize).not.toHaveBeenCalled();
+    expect(windowApi.toggleMaximize).not.toHaveBeenCalled();
+  });
+
+  it("yellow button minimizes the window", async () => {
+    const { screen, fireEvent } = await import("@testing-library/react");
+    await renderMac();
+    fireEvent.click(screen.getByRole("button", { name: "Minimize" }));
+    expect(windowApi.minimize).toHaveBeenCalledTimes(1);
+    expect(windowApi.close).not.toHaveBeenCalled();
+    expect(windowApi.toggleMaximize).not.toHaveBeenCalled();
+  });
+
+  it("green button calls toggleMaximize (NOT fullscreen)", async () => {
+    const { screen, fireEvent } = await import("@testing-library/react");
+    await renderMac();
+    fireEvent.click(screen.getByRole("button", { name: "Maximize" }));
+    expect(windowApi.toggleMaximize).toHaveBeenCalledTimes(1);
+    expect(windowApi.close).not.toHaveBeenCalled();
+    expect(windowApi.minimize).not.toHaveBeenCalled();
+  });
+});
+
+describe("WindowsWindowControls click behavior", () => {
+  async function renderWindows() {
+    const { WindowsWindowControls } = await import("../WindowsWindowControls");
+    return renderWithPlatform("windows", <WindowsWindowControls />);
+  }
+
+  it("minimize / maximize / close buttons each fire their action", async () => {
+    const { screen, fireEvent } = await import("@testing-library/react");
+    await renderWindows();
+
+    fireEvent.click(screen.getByRole("button", { name: "Minimize" }));
+    expect(windowApi.minimize).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Maximize" }));
+    expect(windowApi.toggleMaximize).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(windowApi.close).toHaveBeenCalledTimes(1);
+  });
+});

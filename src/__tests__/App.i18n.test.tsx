@@ -13,6 +13,14 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({ onDragDropEvent: () => Promise.resolve(() => {}) }),
 }));
 
+// Pin the platform to "windows" so the WindowControls dispatcher (ADR-0074,
+// issue #263) renders the WindowsWindowControls path. The issue #261 suite
+// below asserts Windows-specific behavior (Restore glyph flip + onResized
+// subscription) that predates the macOS traffic-light split; the macOS path
+// has its own dispatch + click coverage in
+// src/shell/__tests__/WindowControls.test.tsx.
+vi.mock("@tauri-apps/plugin-os", () => ({ platform: () => "windows" }));
+
 // WindowControls (custom titlebar) + useAppConfigState (window-geometry
 // persistence) both reach getCurrentWindow. The shared stub captures the
 // bridge handle so the WindowControls behavior tests below can fire clicks,
