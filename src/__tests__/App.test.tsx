@@ -71,7 +71,7 @@ import {
 // them. The shell-level cold-start + multi-session behavior lives in
 // Shell.test.tsx. Each render gets a fresh QueryClient (ADR-0051: test renders
 // never share cache). zh-CN so the i18n'd chrome matches the assertions.
-function renderPane(locale: EffectiveLocale = "zh-CN"): void {
+function renderPane(locale: EffectiveLocale = "zh-CN", sessionName = "Test session"): void {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const wrap = (children: ReactNode) => (
     <QueryClientProvider client={queryClient}>
@@ -82,7 +82,14 @@ function renderPane(locale: EffectiveLocale = "zh-CN"): void {
   );
   render(
     wrap(
-      <SessionPane sessionId="sess-1" pendingIngestPath={null} onIngestConsumed={() => {}} />,
+      <SessionPane
+        sessionId="sess-1"
+        pendingIngestPath={null}
+        onIngestConsumed={() => {}}
+        railCollapsed={false}
+        onToggleRail={() => {}}
+        sessionName={sessionName}
+      />,
     ),
   );
 }
@@ -648,5 +655,22 @@ describe("App delete-active-source flow (issue #39)", () => {
     );
     expect(screen.queryByText(failedPrefix("load"))).not.toBeInTheDocument();
     expect(screen.queryByText(failedPrefix("rename"))).not.toBeInTheDocument();
+  });
+});
+
+describe("App session-header name fallback (ADR-0060)", () => {
+  // useShellSessions mints a new session with name "" until the backend's
+  // display_name round-trip lands; the session-header must render the
+  // localized "新会话" placeholder (zh-CN catalog) -- never an empty header
+  // span. A regression that swaps `||` for `??` (which only catches null /
+  // undefined) or drops the fallback leaves the header blank during the
+  // new-session window.
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("renders the localized default name when sessionName is empty", async () => {
+    renderPane("zh-CN", "");
+    await waitFor(() => expect(screen.getByText("新会话")).toBeInTheDocument());
   });
 });

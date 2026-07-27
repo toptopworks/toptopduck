@@ -287,5 +287,9 @@
   "viz.error.invalidJson": "the spec is not valid JSON",
   "viz.error.notObject": "the spec is not a Vega-Lite object",
   "viz.error.render": "render error",
-  "viz.error.unsupportedMark": "the chart type \"{mark}\" is not supported (only bar/line/area/scatter/pie)"
+  "viz.error.unsupportedMark": "the chart type \"{mark}\" is not supported (only bar/line/area/scatter/pie)",
+  "window.close": "Close",
+  "window.maximize": "Maximize",
+  "window.minimize": "Minimize",
+  "window.restore": "Restore"
 }

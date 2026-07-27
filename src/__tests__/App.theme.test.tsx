@@ -12,6 +12,14 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({ onDragDropEvent: () => Promise.resolve(() => {}) }),
 }));
 
+// WindowControls (custom titlebar) + useAppConfigState (window-geometry
+// persistence) both reach getCurrentWindow. The shared stub keeps jsdom off
+// the real runtime (which reads window.__TAURI metadata and crashes the
+// shell-level ErrorBoundary).
+import { buildTauriWindowMock } from "./setup/tauriWindowMock";
+
+vi.mock("@tauri-apps/api/window", () => buildTauriWindowMock().module);
+
 // appConfigWith lives in the hoisted block so the hoisted api mock factory can
 // call it (factories run above imports; only vi.hoisted values are in scope).
 const { appConfigWith } = vi.hoisted(() => {

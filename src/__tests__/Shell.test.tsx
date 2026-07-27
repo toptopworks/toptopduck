@@ -23,6 +23,14 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   }),
 }));
 
+// WindowControls (custom titlebar, decorations: false) + useAppConfigState
+// (window-geometry persistence, ADR-0068) both reach through getCurrentWindow.
+// The shared stub keeps jsdom off the real runtime (which reads
+// window.__TAURI metadata and crashes the shell-level boundary).
+import { buildTauriWindowMock } from "./setup/tauriWindowMock";
+
+vi.mock("@tauri-apps/api/window", () => buildTauriWindowMock().module);
+
 const state = vi.hoisted(() => ({
   workingSet: [] as DatasetDescriptor[],
   thread: [] as ThreadEntry[],

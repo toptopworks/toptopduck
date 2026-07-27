@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { AppConfig } from "../types/app-config";
 
 // Black-box i18n tests (ADR-0052, issue #78 AC). Drives the rendered shell like
@@ -12,6 +12,20 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({ onDragDropEvent: () => Promise.resolve(() => {}) }),
 }));
+
+// WindowControls (custom titlebar) + useAppConfigState (window-geometry
+// persistence) both reach getCurrentWindow. The shared stub captures the
+// bridge handle so the WindowControls behavior tests below can fire clicks,
+// emit onResized, and assert on the IPC spies (issue #261 review C1).
+import { buildTauriWindowMock, type WindowBridge } from "./setup/tauriWindowMock";
+
+const windowBridge = vi.hoisted<{ current: WindowBridge | null }>(() => ({ current: null }));
+
+vi.mock("@tauri-apps/api/window", () => {
+  const { module, bridge } = buildTauriWindowMock();
+  windowBridge.current = bridge;
+  return module;
+});
 
 // appConfigWith lives in the hoisted block so the hoisted api mock factory can
 // call it (factories run above imports; only vi.hoisted values are in scope).
@@ -85,6 +99,10 @@ describe("App i18n (ADR-0052 black-box)", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument(),
     );
+    // Window-control aria-labels localize too (ADR-0052 layer-1 chrome, #261).
+    expect(screen.getByRole("button", { name: "最小化" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "最大化" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "关闭" })).toBeInTheDocument();
   });
 
   it("renders chrome in English when the persisted locale is en-US", async () => {
@@ -93,6 +111,10 @@ describe("App i18n (ADR-0052 black-box)", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument(),
     );
+    // Window-control aria-labels localize too (ADR-0052 layer-1 chrome, #261).
+    expect(screen.getByRole("button", { name: "Minimize" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Maximize" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
   });
 
   it("resolves system to the OS language (en-US when navigator is en)", async () => {
@@ -147,5 +169,85 @@ describe("App i18n (ADR-0052 black-box)", () => {
     vi.mocked(getAppConfig).mockResolvedValue(appConfigWith("zh-CN"));
     render(<App />);
     await waitFor(() => expect(document.documentElement.lang).toBe("zh-CN"));
+  });
+});
+
+describe("App window controls (issue #261)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("fires the matching window IPC on each control click", async () => {
+    vi.mocked(getAppConfig).mockResolvedValue(appConfigWith("zh-CN"));
+    render(<App />);
+    // Wait for the topbar (incl. WindowControls) to mount so the bridge is
+    // populated and the buttons are queryable.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument(),
+    );
+    const bridge = windowBridge.current!;
+    expect(bridge).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "最小化" }));
+    await waitFor(() => expect(bridge.minimize).toHaveBeenCalledTimes(1));
+    expect(bridge.toggleMaximize).not.toHaveBeenCalled();
+    expect(bridge.close).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "最大化" }));
+    await waitFor(() => expect(bridge.toggleMaximize).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    await waitFor(() => expect(bridge.close).toHaveBeenCalledTimes(1));
+  });
+
+  it("renders the Restore label when the window starts maximized", async () => {
+    // The mount effect's isMaximized().then(setMaximized) resolves true on
+    // the first paint -> the maximize button flips from 最大化 to 还原.
+    windowBridge.current!.isMaximized.mockResolvedValueOnce(true);
+    vi.mocked(getAppConfig).mockResolvedValue(appConfigWith("zh-CN"));
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "还原" })).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("button", { name: "最大化" })).not.toBeInTheDocument();
+  });
+
+  it("flips the glyph in place when onResized reports a maximized state", async () => {
+    // Capture the onResized callback the component registered, then emit a
+    // resize whose isMaximized read returns true -> the label flips from
+    // 最大化 to 还原 without a remount (covers the onResized callback path,
+    // distinct from the mount-time isMaximized path above).
+    let resized: (() => Promise<void>) | null = null;
+    windowBridge.current!.onResized.mockImplementationOnce(async (cb) => {
+      resized = cb as () => Promise<void>;
+      return () => {};
+    });
+    vi.mocked(getAppConfig).mockResolvedValue(appConfigWith("zh-CN"));
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "最大化" })).toBeInTheDocument(),
+    );
+    windowBridge.current!.isMaximized.mockResolvedValueOnce(true);
+    await act(async () => {
+      await resized!();
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "还原" })).toBeInTheDocument(),
+    );
+  });
+
+  it("unsubscribes onResized when the shell unmounts (race-guard cleanup)", async () => {
+    // The mount effect's onResized returns Promise<UnlistenFn> that resolves
+    // post-mount; cleanup must invoke the resolved unsub. A regression that
+    // drops resolvedUnsub?.() leaves an orphan listener after unmount.
+    const unsub = vi.fn();
+    windowBridge.current!.onResized.mockResolvedValueOnce(unsub);
+    vi.mocked(getAppConfig).mockResolvedValue(appConfigWith("zh-CN"));
+    const { unmount } = render(<App />);
+    await waitFor(() => expect(windowBridge.current!.onResized).toHaveBeenCalled());
+    expect(unsub).not.toHaveBeenCalled();
+    unmount();
+    await waitFor(() => expect(unsub).toHaveBeenCalledTimes(1));
   });
 });

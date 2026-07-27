@@ -287,5 +287,9 @@
   "viz.error.invalidJson": "规格不是合法的 JSON",
   "viz.error.notObject": "规格不是 Vega-Lite 对象",
   "viz.error.render": "渲染出错",
-  "viz.error.unsupportedMark": "图表类型「{mark}」不在支持的范围内（仅支持柱/线/面积/散点/饼图）"
+  "viz.error.unsupportedMark": "图表类型「{mark}」不在支持的范围内（仅支持柱/线/面积/散点/饼图）",
+  "window.close": "关闭",
+  "window.maximize": "最大化",
+  "window.minimize": "最小化",
+  "window.restore": "还原"
 }
