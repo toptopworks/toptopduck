@@ -10,7 +10,7 @@ import { useShellSessions } from "./shell/useShellSessions";
 import { useAppConfigState } from "./shell/useAppConfigState";
 import { HeaderActions } from "./shell/HeaderActions";
 import { SidebarToggle } from "./shell/SidebarToggle";
-import { RailToggle } from "./shell/RailToggle";
+import { WindowControls } from "./shell/WindowControls";
 import { ResumeProgress } from "./shell/ResumeProgress";
 import { ColdStartHero } from "./shell/ColdStartHero";
 import { ErrorBanner } from "./components/common/ErrorBanner";
@@ -259,27 +259,19 @@ export default function App() {
                 onOpenSearch={openSearch}
               />
 
-              {/* Row 1 (cols 2+): thin top bar (ADR-0060/0062 R1). The session name
-              is READ-ONLY (ADR-0060: naming goes through the sidebar menu, the
-              single entry point -- DRY). ADR-0067 (#171): visual rules -> inline
+              {/* Row 1: thin top bar (ADR-0060/0062 R1), spans the full shell
+              width as a custom titlebar (decorations: false). Shell-wide
+              controls only: the sidebar collapse toggle (left) + header actions
+              + window controls (right). The session name + rail collapse toggle
+              moved into each SessionPane's own header (session-scoped chrome
+              lives with the session). ADR-0067 (#171): visual rules -> inline
               utilities; the .topbar grid + flex layout shell stays in styles.css. */}
-              <header className="topbar gap-3 px-4 border-b border-border bg-background">
+              <header className="topbar gap-3 px-4 border-b border-border bg-background" data-tauri-drag-region>
                 <SidebarToggle
                   collapsed={sidebarCollapsed}
                   onToggle={toggleSidebarCollapse}
                 />
-                <RailToggle
-                  collapsed={railCollapsed}
-                  disabled={!activeSession}
-                  onToggle={toggleRailCollapse}
-                />
-                <span className="topbar-session-name flex-1 min-w-0 font-semibold text-base truncate">
-                  {activeSession?.name ? (
-                    activeSession.name
-                  ) : (
-                    <FormattedMessage id="session.defaultName" defaultMessage="New session" />
-                  )}
-                </span>
+                <div className="flex-1" data-tauri-drag-region />
                 {atSoftCap && (
                   // Session-count soft-cap hint (ADR-0046): too many open
                   // sessions risk memory pressure. A warning Alert (ADR-0050,
@@ -309,6 +301,7 @@ export default function App() {
                   onOpenSettings={() => openSettings()}
                   settingsDisabled={!appConfig}
                 />
+                <WindowControls />
               </header>
 
               {/* Resume progress strip (ADR-0034). Absent unless an open/resume
@@ -354,6 +347,9 @@ export default function App() {
                         sessionId={s.sid}
                         pendingIngestPath={s.pendingIngestPath}
                         onIngestConsumed={() => clearPendingIngest(s.sid)}
+                        railCollapsed={railCollapsed}
+                        onToggleRail={toggleRailCollapse}
+                        sessionName={s.name}
                         providerPicker={
                           // ADR-0071 (issue #238): the composer provider/model
                           // picker is app-level state (active profile + writes +

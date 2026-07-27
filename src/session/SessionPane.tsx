@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useIntl, FormattedMessage } from "react-intl";
 import { useQueryClient } from "@tanstack/react-query";
 import { fmtError, errorDetail, formatTurnFailure, turnFailureDetail } from "../lib/error-presentation";
+import { RailToggle } from "../shell/RailToggle";
 import { useSessionState } from "./useSessionState";
 import { ActiveSourceDeleteDialog } from "../components/dataset/ActiveSourceDeleteDialog";
 import { DatasetDetail } from "../components/dataset/DatasetDetail";
@@ -48,9 +49,21 @@ interface SessionPaneProps {
    *  QuestionBar renders alone. Bundled as one slot so the all-or-nothing
    *  render stays a single guard. */
   providerPicker?: ComposerProviderPickerProps;
+  /** Rail collapse state + toggle (ADR-0054 level 2). Shell-owned pref
+   *  rendered per-session: every SessionPane reads the same railCollapsed
+   *  (the pref is app-wide), but only the active pane's header is visible
+   *  (non-active panes stay CSS-hidden), so the toggle is reachable from
+   *  whichever session is active. Moved here from the global topbar so the
+   *  rail's control lives beside the rail. */
+  railCollapsed: boolean;
+  onToggleRail: () => void;
+  /** Display name for THIS session's header. The shell owns the open-session
+   *  set; each SessionPane receives its own name rather than reaching into
+   *  global active-session state (ADR-0060). */
+  sessionName: string;
 }
 
-export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, providerPicker }: SessionPaneProps) {
+export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, providerPicker, railCollapsed, onToggleRail, sessionName }: SessionPaneProps) {
   const s = useSessionState(sessionId, pendingIngestPath, onIngestConsumed);
   const intl = useIntl();
   const persistDetail = s.persistError ? errorDetail(s.persistError) : null;
@@ -86,6 +99,18 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
 
   return (
     <div className="session-pane">
+      {/* Session header (row 1): session name + rail collapse toggle. Moved
+          here from the global topbar so session-scoped chrome lives with the
+          pane. The rail toggle always renders enabled here -- a SessionPane
+          only mounts when its session exists, so there is always a rail to
+          fold (the cold-start hero has no SessionPane). */}
+      <div className="session-header" data-tauri-drag-region>
+        <RailToggle collapsed={railCollapsed} disabled={false} onToggle={onToggleRail} />
+        <span className="flex-1 min-w-0 font-semibold text-base truncate" data-tauri-drag-region>
+          {sessionName ||
+            intl.formatMessage({ id: "session.defaultName", defaultMessage: "New session" })}
+        </span>
+      </div>
       {/* ADR-0058 L2 partition boundaries: Thread rail and ResultView each get
           their own ErrorBoundary so a render crash in one degrades only that
           block (the QuestionBar -- a session-skeleton element, ADR-0062 R1 --

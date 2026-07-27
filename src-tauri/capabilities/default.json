@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "默认能力：核心 + 文件拾取对话框 + 日志 + 窗口状态持久化（#5 / #98 / #100）",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default", "log:default", "window-state:default"]
+  "permissions": ["core:default", "dialog:default", "log:default", "window-state:default", "core:window:allow-minimize", "core:window:allow-maximize", "core:window:allow-unmaximize", "core:window:allow-toggle-maximize", "core:window:allow-close", "core:window:allow-start-dragging"]
 }

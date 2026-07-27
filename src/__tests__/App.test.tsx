@@ -82,7 +82,14 @@ function renderPane(locale: EffectiveLocale = "zh-CN"): void {
   );
   render(
     wrap(
-      <SessionPane sessionId="sess-1" pendingIngestPath={null} onIngestConsumed={() => {}} />,
+      <SessionPane
+        sessionId="sess-1"
+        pendingIngestPath={null}
+        onIngestConsumed={() => {}}
+        railCollapsed={false}
+        onToggleRail={() => {}}
+        sessionName="Test session"
+      />,
     ),
   );
 }

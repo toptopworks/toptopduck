@@ -12,6 +12,32 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({ onDragDropEvent: () => Promise.resolve(() => {}) }),
 }));
 
+// WindowControls (custom titlebar) + useAppConfigState (window-geometry
+// persistence) both reach getCurrentWindow. Stub the Tauri window bridge so
+// jsdom does not hit the real runtime (which reads window.__TAURI metadata and
+// crashes the shell-level ErrorBoundary).
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({
+    minimize: vi.fn(async () => {}),
+    maximize: vi.fn(async () => {}),
+    toggleMaximize: vi.fn(async () => {}),
+    close: vi.fn(async () => {}),
+    setPosition: vi.fn(async () => {}),
+    setSize: vi.fn(async () => {}),
+    innerSize: vi.fn(async () => ({ width: 1024, height: 768 })),
+    outerPosition: vi.fn(async () => ({ x: 0, y: 0 })),
+    isMaximized: vi.fn(async () => false),
+    onResized: vi.fn(async () => () => {}),
+    onMoved: vi.fn(async () => () => {}),
+  }),
+  LogicalPosition: class {
+    constructor(public x: number, public y: number) {}
+  },
+  LogicalSize: class {
+    constructor(public width: number, public height: number) {}
+  },
+}));
+
 // appConfigWith lives in the hoisted block so the hoisted api mock factory can
 // call it (factories run above imports; only vi.hoisted values are in scope).
 const { appConfigWith } = vi.hoisted(() => {
