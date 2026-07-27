@@ -14,15 +14,34 @@ vi.mock("@tauri-apps/plugin-os", () => ({
   platform: pluginOs.platform,
 }));
 
+// Mock the structured log sink so the throw-path log.warn is assertable and
+// does not route into the real plugin-log binding (which rejects under jsdom).
+// Same shape as the sibling usePersistedSessions / ColdStartHero mocks.
+// logWarn is hoisted so the same fn survives vi.resetModules (the mock factory
+// re-runs on each re-import but returns the same hoisted fn).
+const logWarn = vi.hoisted(() => vi.fn());
+vi.mock("../../lib/log", () => ({
+  log: {
+    trace: vi.fn(),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: logWarn,
+    error: vi.fn(),
+  },
+}));
+
 // Module-level cache means the hook's module holds the resolved platform after
 // the first read. Each scenario must start from a clean cache, so beforeEach
 // clears the registry and each test re-imports the hook fresh (the mock factory
 // stays registered, so the re-imported hook still sees the mocked platform()).
 // Dynamic @testing-library/react import matches the post-reset instance the
 // test rendered with -- the static cleanup in test-setup.ts is a separate
-// instance (no containers tracked) and a no-op here.
+// instance (no containers tracked) and a no-op here. Isolation depends on
+// vitest's default per-test module isolation; if pool/isolate is ever changed,
+// vi.resetModules alone would no longer reset cachedPlatform between tests.
 beforeEach(() => {
   pluginOs.platform.mockReset();
+  logWarn.mockReset();
   vi.resetModules();
 });
 
@@ -56,7 +75,7 @@ describe("usePlatform", () => {
     expect(result.current).toBe("linux");
   });
 
-  it("falls back to 'macos' when platform() throws (jsdom, no Tauri global)", async () => {
+  it("falls back to 'macos' and logs when platform() throws (jsdom, no Tauri global)", async () => {
     // jsdom has no Tauri init script, so window.__TAURI_OS_PLUGIN_INTERNALS__ is
     // undefined and the real binding throws TypeError on .platform access.
     pluginOs.platform.mockImplementation(() => {
@@ -64,6 +83,7 @@ describe("usePlatform", () => {
     });
     const { result } = await renderPlatformHook();
     expect(result.current).toBe("macos");
+    expect(logWarn).toHaveBeenCalledWith("platform", expect.any(String), expect.any(TypeError));
   });
 
   it("falls back to 'macos' for a non-desktop platform value", async () => {
@@ -72,11 +92,12 @@ describe("usePlatform", () => {
     expect(result.current).toBe("macos");
   });
 
-  it("reads platform() once across multiple hook instances (module-level cache)", async () => {
-    pluginOs.platform.mockReturnValue("linux");
-    await renderPlatformHook();
-    await renderPlatformHook();
-    expect(pluginOs.platform).toHaveBeenCalledTimes(1);
+  it("falls back to 'macos' when platform() returns empty string (init script misconfiguration)", async () => {
+    // The init script may inject the global but leave the platform field empty
+    // (a plausible misconfiguration); platform() returns "" without throwing.
+    pluginOs.platform.mockReturnValue("");
+    const { result } = await renderPlatformHook();
+    expect(result.current).toBe("macos");
   });
 
   it("serves the cached value even after the underlying global changes", async () => {
@@ -89,5 +110,19 @@ describe("usePlatform", () => {
     pluginOs.platform.mockReturnValue("linux");
     const { result: second } = await renderPlatformHook();
     expect(second.current).toBe("windows");
+  });
+
+  it("serves the fallback-cached value even after platform() would succeed on a later call", async () => {
+    // Cache-wins-over-recovery: a first-call throw latches the fallback for the
+    // whole process lifetime, even if the global would resolve on a later call.
+    pluginOs.platform.mockImplementation(() => {
+      throw new TypeError("no global");
+    });
+    const { result: first } = await renderPlatformHook();
+    expect(first.current).toBe("macos");
+
+    pluginOs.platform.mockReturnValue("windows");
+    const { result: second } = await renderPlatformHook();
+    expect(second.current).toBe("macos");
   });
 });

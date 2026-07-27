@@ -1,57 +1,56 @@
 import { platform as readTauriPlatform } from "@tauri-apps/plugin-os";
 
+import { log } from "../lib/log";
+
 // Platform detection hook (ADR-0074, issue #262). The macOS traffic-light
-// route (ADR-0074 Decision) needs the frontend to dispatch window controls by
-// OS, and `@tauri-apps/plugin-os` `platform()` is the Tauri-official signal:
-// the plugin injects the compile-time OS as a webview global via its init
-// script, and `platform()` reads it synchronously (no IPC round-trip -- only
-// `locale()` / `hostname()` go through commands). The value is process-lifetime
-// fixed, so this module reads it ONCE and caches -- every usePlatform() call
-// after the first serves the cache without touching the global again.
+// window-controls route needs the frontend to dispatch by OS, and
+// @tauri-apps/plugin-os `platform()` is the Tauri-official signal: the plugin
+// injects the compile-time OS as a webview global via its init script, and
+// `platform()` reads it synchronously (no IPC round-trip -- only `locale()` /
+// `hostname()` go through commands). The value is process-lifetime fixed, so
+// this module reads it ONCE and caches -- every usePlatform() call after the
+// first serves the cache without touching the global again.
 //
 // Fallback: in jsdom (tests) no init script runs, so the global is undefined
-// and `platform()` throws TypeError; a non-desktop value (e.g. "ios" on a
-// hypothetical mobile build) also falls through. Both collapse to the default
-// platform -- "macos" per the issue #262 spec, so the test suite exercises the
-// macOS dispatch path by default. Production builds on the three desktop
-// targets (windows / macos / linux) never hit the fallback.
+// and `platform()` throws TypeError. The same path is reachable in production
+// if the init script is stripped or races first render (CSP/bundle change,
+// plugin misregistration); the catch logs via log.warn so the regression is
+// observable, not silent. A non-desktop value (e.g. "ios") also falls through.
+// All three collapse to FALLBACK_PLATFORM ("macos").
 
-/** The three desktop platforms the app ships on. Narrowed from plugin-os's
- *  broader `Platform` union (which also lists ios / android / *bsd / solaris)
- *  because the custom titlebar (ADR-0074) only dispatches between macOS and
- *  the Windows/Linux right-side layout. */
-export type Platform = "windows" | "macos" | "linux";
+/** The three desktop platforms the app ships on. Named `DesktopPlatform` to
+ *  avoid shadowing @tauri-apps/plugin-os's broader `Platform` union (which
+ *  also lists ios / android / *bsd / solaris); the custom titlebar (ADR-0074)
+ *  only dispatches between macOS and the Windows/Linux right-side layout. */
+export type DesktopPlatform = "windows" | "macos" | "linux";
 
-const FALLBACK_PLATFORM: Platform = "macos";
+const FALLBACK_PLATFORM: DesktopPlatform = "macos";
 
-// Module-level cache. Null until the first resolve, then the authoritative
-// platform for the rest of the process lifetime. A `let` (not useState) so the
-// cache is shared across every component that calls the hook -- the OS does not
-// change between mounts, and re-reading the global per mount would be wasted
-// work (plus a redundant throw-catch in tests).
-let cachedPlatform: Platform | null = null;
+// Process-level cache (not useState): the OS does not change between mounts,
+// so a shared `let` means only the first read touches the plugin global;
+// re-reading would be wasted work and would re-throw in jsdom. Never reset in
+// production -- tests reset it via vi.resetModules (re-imports the module).
+let cachedPlatform: DesktopPlatform | null = null;
 
-function isDesktopPlatform(raw: string): raw is Platform {
+function isDesktopPlatform(raw: string): raw is DesktopPlatform {
   return raw === "windows" || raw === "macos" || raw === "linux";
 }
 
-function detectPlatform(): Platform {
+/** The current desktop platform. Reads @tauri-apps/plugin-os `platform()` once
+ *  (module-level cache) and returns the cached value on every subsequent call.
+ *  Use this to dispatch OS-specific chrome (ADR-0074 window controls). */
+export function usePlatform(): DesktopPlatform {
   if (cachedPlatform !== null) return cachedPlatform;
   try {
     const raw = readTauriPlatform();
     cachedPlatform = isDesktopPlatform(raw) ? raw : FALLBACK_PLATFORM;
-  } catch {
-    // jsdom (no Tauri init script) OR a hypothetical runtime without the
-    // injected global -- honest-degrade to the default platform instead of
-    // crashing the shell. Mirrors the log.ts plugin-failure pattern.
+  } catch (e) {
+    // jsdom (no Tauri init script), OR a production regression (init script
+    // stripped or racing first render, plugin misregistered). Honest-degrade
+    // instead of crashing the shell; log.warn keeps a broken global observable
+    // (ADR-0029 honest-degrade).
+    log.warn("platform", "plugin-os platform() threw; using fallback", e);
     cachedPlatform = FALLBACK_PLATFORM;
   }
   return cachedPlatform;
-}
-
-/** The current desktop platform. Reads `@tauri-apps/plugin-os` `platform()`
- *  once (module-level cache) and returns the cached value on every subsequent
- *  call. Use this to dispatch OS-specific chrome (ADR-0074 window controls). */
-export function usePlatform(): Platform {
-  return detectPlatform();
 }
