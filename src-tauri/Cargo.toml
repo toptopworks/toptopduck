@@ -15,6 +15,17 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+# Platform detection (ADR-0074, issue #262): injects the compile-time OS as a
+# webview global the frontend `@tauri-apps/plugin-os` `platform()` binding reads
+# synchronously (no IPC -- locale/hostname are the IPC commands). The frontend
+# `use-platform` hook reads it once (module-level cache) to dispatch window
+# controls: macOS -> traffic lights, Windows/Linux -> right-side buttons.
+# Chosen over `navigator.userAgent` (webview UA drift) and `cfg!(target_os)`
+# (command + async + wiring), consistent with the four existing Tauri plugins
+# (dialog / log / window-state / single-instance). Registered unconditionally
+# (same as dialog / log) -- the plugin works on every target; the desktop-only
+# plugins stay under the cfg(not(mobile)) target gate below.
+tauri-plugin-os = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # `parquet` statically compiles the DuckDB parquet extension into the binary so
