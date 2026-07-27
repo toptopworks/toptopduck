@@ -30,7 +30,6 @@ const { appConfigWith } = vi.hoisted(() => {
       // Pin zh-CN so the Chinese chrome labels the assertions below depend on
       // render regardless of the host navigator.language (theme test, not i18n).
       locale: "zh-CN" as const,
-      window: { width: 800, height: 600, x: null, y: null, maximized: false },
       engine: { memory_limit: "512MB", threads: 1, row_cap: 100, statement_timeout_ms: 30000 },
       privacy: { send_samples: true },
       provider: {

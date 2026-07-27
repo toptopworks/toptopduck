@@ -1117,7 +1117,6 @@ function baseAppConfig(
     format_version: 1,
     theme: "system",
     locale: "system",
-    window: { width: 800, height: 600, x: null, y: null, maximized: false },
     engine: { memory_limit: "512MB", threads: 1, row_cap: 100, statement_timeout_ms: 30000 },
     privacy: { send_samples: true },
     provider: {

@@ -26,7 +26,6 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
     format_version: 2,
     theme: "system",
     locale: "system",
-    window: { width: 800, height: 600, x: null, y: null, maximized: false },
     engine: { memory_limit: "512MB", threads: 2, row_cap: 1000, statement_timeout_ms: 30000 },
     privacy: { send_samples: true },
     provider: {

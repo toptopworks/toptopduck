@@ -28,7 +28,7 @@ pub mod window;
 pub mod workingset;
 
 pub use app_config::{
-    AppConfig, EngineDefaults, ExportDefaults, PrivacyDefaults, Theme, Tunables, WindowGeometry,
+    AppConfig, EngineDefaults, ExportDefaults, PrivacyDefaults, Theme, Tunables,
     APP_CONFIG_FORMAT_VERSION, RECENT_FILES_CAP,
 };
 pub use cancel::CancelToken;
@@ -110,16 +110,23 @@ pub fn run() {
         }));
     }
 
-    // Window position/size/maximized persistence across launches (issue #100).
-    // Replaces the role the app-config WindowGeometry field (ADR-0038) was
-    // meant to fill -- whether that field retires is left for a follow-up.
-    // Only SIZE + POSITION + MAXIMIZED are persisted -- NOT the plugin's full
-    // default (StateFlags::all() also captures VISIBLE / DECORATIONS /
-    // FULLSCREEN, which this app does not manage: fullscreen is never toggled,
-    // decorations never change, and the main window must always show on launch
-    // so VISIBLE must not be restored from a hidden state). No denylist (the
-    // template's quick-pane denylist is an NSPanel is_maximized crash
-    // workaround that does not apply here -- we have no floating panel).
+    // Window geometry persistence across launches (issues #100, #268). The
+    // plugin is the SINGLE source of truth for window geometry: SIZE +
+    // POSITION + MAXIMIZED + VISIBLE. ADR-0038's app-config `WindowGeometry`
+    // field + the frontend restore/persist effects are retired by #268 -- they
+    // raced this plugin's restore on launch, causing the window to jump from
+    // the OS-default spot to the restored spot once the frontend IPC resolved.
+    //
+    // VISIBLE + `visible: false` in tauri.conf.json let the plugin own the
+    // show() timing: the window stays hidden until `restore_state` (in
+    // `on_window_ready`) applies the persisted geometry, then `show()`s --
+    // geometry is set before the window is visible. `WindowState::default()
+    // .visible == true`, so a first launch (no persisted state) still shows.
+    // VISIBLE gates WHO calls show(), not whether the window may be visible.
+    //
+    // DECORATIONS + FULLSCREEN stay off the flags: this app never toggles
+    // them. No denylist (the template's quick-pane denylist is an NSPanel
+    // is_maximized crash workaround that does not apply -- no floating panel).
     #[cfg(desktop)]
     {
         app_builder = app_builder.plugin(
@@ -127,7 +134,8 @@ pub fn run() {
                 .with_state_flags(
                     tauri_plugin_window_state::StateFlags::SIZE
                         | tauri_plugin_window_state::StateFlags::POSITION
-                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED
+                        | tauri_plugin_window_state::StateFlags::VISIBLE,
                 )
                 .build(),
         );

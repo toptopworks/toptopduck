@@ -1,7 +1,7 @@
 //! App-level config model (ADR-0038): the durable shape of the SECOND at-rest
 //! artifact, alongside the user-owned `.duck`. This holds ONLY preferences,
-//! defaults, and data-free state (path pointers, numeric ceilings, booleans,
-//! geometry) -- never a key, never user-data values, never dataset contents.
+//! defaults, and data-free state (path pointers, numeric ceilings, booleans)
+//! -- never a key, never user-data values, never dataset contents.
 //!
 //! The secrets-never invariant (ADR-0029/0036/0038) is enforced structurally:
 //! there is no key field anywhere in this model, so the write path physically
@@ -72,34 +72,6 @@ pub enum Theme {
     System,
     Light,
     Dark,
-}
-
-/// Persisted window geometry (ADR-0038 UI prefs). Restored on launch so the app
-/// reopens at the size/position the user left it. `x`/`y` are `None` until the
-/// first move is persisted (a first-run window is centered by the OS).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WindowGeometry {
-    pub width: u32,
-    pub height: u32,
-    #[serde(default)]
-    pub x: Option<i32>,
-    #[serde(default)]
-    pub y: Option<i32>,
-    #[serde(default)]
-    pub maximized: bool,
-}
-
-impl Default for WindowGeometry {
-    fn default() -> Self {
-        // Mirrors the tauri.conf.json window defaults (1024x768, not maximized).
-        Self {
-            width: 1024,
-            height: 768,
-            x: None,
-            y: None,
-            maximized: false,
-        }
-    }
 }
 
 /// Engine default parameters (ADR-0005 L3). Persisted so a user's preferred
@@ -194,7 +166,7 @@ pub enum SidebarGrouping {
 /// a native window config, not a preference): the session sidebar (full hide +
 /// topbar call-out) and the thread rail (workspace goes full-width). Both
 /// default expanded; both persist across restarts via app-config (ADR-0038),
-/// alongside theme / locale / window geometry. The two stack -- a user may
+/// alongside theme / locale. The two stack -- a user may
 /// collapse either, both, or neither independently.
 ///
 /// `sidebar_grouping` (ADR-0072, issue #251) extends the same shell-chrome
@@ -271,8 +243,6 @@ pub struct AppConfig {
     #[serde(default)]
     pub locale: LocalePreference,
     #[serde(default)]
-    pub window: WindowGeometry,
-    #[serde(default)]
     pub engine: EngineDefaults,
     #[serde(default)]
     pub privacy: PrivacyDefaults,
@@ -302,7 +272,6 @@ impl AppConfig {
             format_version: APP_CONFIG_FORMAT_VERSION,
             theme: Theme::default(),
             locale: LocalePreference::default(),
-            window: WindowGeometry::default(),
             engine: EngineDefaults::default(),
             privacy: PrivacyDefaults::default(),
             provider: ProviderConfig::default(),
@@ -758,7 +727,7 @@ mod tests {
         // A pre-#84 app-config file has NO `shell` key. serde(default) on the
         // field + ShellPrefs::default must fill the expanded defaults rather
         // than rejecting the whole document (forward-compat: the user's prior
-        // theme / locale / geometry survive an app upgrade).
+        // theme / locale survive an app upgrade).
         let json = r#"{"format_version":1,"theme":"dark"}"#;
         let cfg: AppConfig = serde_json::from_str(json).expect("partial deserialize");
         assert_eq!(cfg.theme, Theme::Dark);

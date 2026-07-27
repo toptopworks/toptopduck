@@ -2,9 +2,10 @@
 // every action that mutates it (ADR-0038): commitAppConfig (the single
 // persistence write), switchActiveProfile (top-bar quick switcher, issue
 // #154 / ADR-0065), commitShellPrefs + toggleSidebarCollapse /
-// toggleRailCollapse (ADR-0054 shell collapse), and the restore + persist
-// effects for window geometry (ADR-0038 onResized / onMoved, 500ms debounce)
-// and collapse prefs (ADR-0054 one-shot restore on first resolve).
+// toggleRailCollapse (ADR-0054 shell collapse), and the one-shot restore of
+// collapse prefs on first resolve (ADR-0054). Window geometry persistence
+// moved to tauri_plugin_window_state (issue #268); this hook no longer
+// restores or persists geometry.
 //
 // ADR-0068: this is advisory state held in React (NOT TanStack Query) -- the
 // app-config blob is the persistence layer for shell prefs (theme / locale /
@@ -30,7 +31,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createIntl } from "react-intl";
 import type { IntlShape } from "react-intl";
-import { LogicalPosition, LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
 import { getAppConfig, setAppConfig } from "../api";
 import { toAppError } from "../lib/error-presentation";
 import { catalogFor, coerceLocalePreference, useLocale } from "../i18n";
@@ -39,16 +39,6 @@ import { log } from "../lib/log";
 import type { AppConfig } from "../types/app-config";
 import type { SidebarGrouping } from "../types/app-config";
 import type { AppError } from "../types/error";
-
-/** Acquire the main window, or null when the Tauri bridge is absent (jsdom
- *  tests). Every window-geometry call site is a no-op without it. */
-function safeMainWindow(): ReturnType<typeof getCurrentWindow> | null {
-  try {
-    return getCurrentWindow();
-  } catch {
-    return null;
-  }
-}
 
 export interface UseAppConfigStateDeps {
   /** From useShellError: surfaces a shell-layer AppError (kind "shell") for a
@@ -91,7 +81,6 @@ export function useAppConfigState({
 } {
   const [appConfig, setAppConfigState] = useState<AppConfig | null>(null);
   const appConfigRef = useRef<AppConfig | null>(null);
-  const geometryRestoredRef = useRef(false);
 
   // Locale (ADR-0052): resolved once from the persisted three-state preference
   // (defaulting to system before app-config resolves). The IntlShape is built
@@ -276,33 +265,6 @@ export function useAppConfigState({
     [sidebarCollapsed, railCollapsed, sidebarGrouping, commitShellPrefs],
   );
 
-  // Restore window geometry ONCE on the first app-config load (ADR-0038).
-  useEffect(() => {
-    if (!appConfig || geometryRestoredRef.current) return;
-    const win = safeMainWindow();
-    if (!win) return;
-    geometryRestoredRef.current = true;
-    const { width, height, x, y, maximized } = appConfig.window;
-    if (maximized) {
-      void win.maximize().catch((e) => {
-        log.warn("geometry", "restore failed (maximize)", e);
-      });
-    } else {
-      void win
-        .setSize(new LogicalSize(width, height))
-        .then(async () => {
-          if (x !== null && y !== null) {
-            await win.setPosition(new LogicalPosition(x, y)).catch((e) => {
-              log.warn("geometry", "restore failed (setPosition)", e);
-            });
-          }
-        })
-        .catch((e) => {
-          log.warn("geometry", "restore failed (setSize)", e);
-        });
-    }
-  }, [appConfig]);
-
   // Restore shell collapse prefs + the sidebar grouping mode ONCE on the first
   // app-config load (ADR-0038 / 0054, issue #84; ADR-0072, issue #251). Mirrors
   // geometryRestoredRef: a one-shot so a later app-config write (e.g. a toggle's
@@ -315,51 +277,6 @@ export function useAppConfigState({
     setRailCollapsed(appConfig.shell.rail_collapsed);
     setSidebarGroupingState(appConfig.shell.sidebar_grouping);
   }, [appConfig]);
-
-  // Persist window geometry on resize/move, debounced (ADR-0038).
-  useEffect(() => {
-    const win = safeMainWindow();
-    if (!win) return;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const flush = () => {
-      timer = null;
-      Promise.all([win.innerSize(), win.outerPosition(), win.isMaximized()])
-        .then(([size, pos, maximized]) => {
-          const base = appConfigRef.current;
-          if (!base) return;
-          void commitAppConfig({
-            ...base,
-            window: {
-              width: size.width,
-              height: size.height,
-              x: pos.x,
-              y: pos.y,
-              maximized,
-            },
-          }).catch((e) => {
-            log.warn("geometry", "persist failed", e);
-          });
-        })
-        .catch(() => {});
-    };
-    const schedule = () => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(flush, 500);
-    };
-    const unresizedP = win.onResized(schedule).catch((e) => {
-      log.warn("geometry", "onResized subscription failed", e);
-      return () => {};
-    });
-    const unmovedP = win.onMoved(schedule).catch((e) => {
-      log.warn("geometry", "onMoved subscription failed", e);
-      return () => {};
-    });
-    return () => {
-      if (timer) clearTimeout(timer);
-      void unresizedP.then((un) => un()).catch(() => {});
-      void unmovedP.then((un) => un()).catch(() => {});
-    };
-  }, [commitAppConfig]);
 
   return {
     appConfig,
