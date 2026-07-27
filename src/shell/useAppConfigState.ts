@@ -9,7 +9,7 @@
 //
 // ADR-0068: this is advisory state held in React (NOT TanStack Query) -- the
 // app-config blob is the persistence layer for shell prefs (theme / locale /
-// recent files / window geometry / sidebar + rail collapse / active profile),
+// recent files / sidebar + rail collapse / active profile),
 // read once on mount and re-written on each mutation. The optimistic +
 // no-rollback contract on every mutating action lives on commitAppConfig
 // below (the single persistence write all actions route through).
@@ -53,11 +53,11 @@ export interface UseAppConfigStateDeps {
   refreshKeyStatus: () => Promise<void>;
 }
 
-/** The AppConfig advisory state + every mutating action + the restore / persist
+/** The AppConfig advisory state + every mutating action + the restore
  *  effects + the locale / intl derived from the owned appConfig.locale.
  *  sidebarCollapsed / railCollapsed are public (the shell className reads
- *  them); appConfigRef / geometryRestoredRef / collapseRestoredRef stay
- *  internal (the restore effects' one-shot guards). effectiveLocale + intl are
+ *  them); appConfigRef / collapseRestoredRef stay internal (the restore
+ *  effects' one-shot guards). effectiveLocale + intl are
  *  returned so App can feed <IntlProvider> + the downstream shell hooks
  *  (usePersistedSessions / useShellSessions) from a single locale resolution.
  *  Composed into App as the app-config + collapse + locale source
@@ -105,7 +105,7 @@ export function useAppConfigState({
   const [sidebarGrouping, setSidebarGroupingState] = useState<SidebarGrouping>("flat");
   const collapseRestoredRef = useRef(false);
 
-  // Load app-config once on mount (theme/locale/recent files/geometry). Also
+  // Load app-config once on mount (theme/locale/recent files). Also
   // kicks refreshKeyStatus so the header key indicator reflects the active
   // profile's keychain slot at start.
   useEffect(() => {
@@ -133,8 +133,8 @@ export function useAppConfigState({
   // back (live_config reads disk truth on the next turn, so a failed write
   // leaves the next ask on the OLD value). Mirrors SettingsView Save. Callers
   // install their own surfacing: switchActiveProfile wraps in try/catch ->
-  // setShellError; commitShellPrefs + the geometry persist flush attach
-  // .catch -> log.warn (the visible effect already landed optimistically).
+  // setShellError; commitShellPrefs attaches .catch -> log.warn (the visible
+  // effect already landed optimistically).
   const commitAppConfig = useCallback(async (cfg: AppConfig): Promise<void> => {
     appConfigRef.current = cfg;
     setAppConfigState(cfg);
@@ -213,8 +213,8 @@ export function useAppConfigState({
 
   // Commit the three shell prefs (two collapses + the sidebar grouping mode) as
   // ONE app-config write (ADR-0038/0054, issue #84; ADR-0072, issue #251).
-  // Single IPC write keeps the three shell-chrome prefs atomic against a
-  // concurrent geometry persist (sibling commitAppConfig write). No-op before
+  // A single IPC write keeps the three shell-chrome prefs atomic against any
+  // sibling commitAppConfig caller (e.g. switchActiveProfile). No-op before
   // app-config resolves (appConfigRef null) -- the restore effect's one-shot
   // then applies the persisted value on first load.
   const commitShellPrefs = useCallback(
@@ -231,8 +231,8 @@ export function useAppConfigState({
       }).catch((e) => {
         // IPC write failed -- the UI already flipped optimistically (state is
         // set before the commit), so the only consequence is the pref not
-        // surviving a restart. Mirror the geometry persist handler: log to
-        // devtools, not a user toast (the toggle's visible effect landed).
+        // surviving a restart. Log to devtools, not a user toast (the toggle's
+        // visible effect already landed).
         log.warn("shell", "collapse persist failed", e);
       });
     },
@@ -266,10 +266,9 @@ export function useAppConfigState({
   );
 
   // Restore shell collapse prefs + the sidebar grouping mode ONCE on the first
-  // app-config load (ADR-0038 / 0054, issue #84; ADR-0072, issue #251). Mirrors
-  // geometryRestoredRef: a one-shot so a later app-config write (e.g. a toggle's
-  // own commit) does not re-clobber the user's in-session state with the
-  // persisted value.
+  // app-config load (ADR-0038 / 0054, issue #84; ADR-0072, issue #251). A
+  // one-shot so a later app-config write (e.g. a toggle's own commit) does not
+  // re-clobber the user's in-session state with the persisted value.
   useEffect(() => {
     if (!appConfig || collapseRestoredRef.current) return;
     collapseRestoredRef.current = true;

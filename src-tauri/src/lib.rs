@@ -110,19 +110,24 @@ pub fn run() {
         }));
     }
 
-    // Window geometry persistence across launches (issues #100, #268). The
-    // plugin is the SINGLE source of truth for window geometry: SIZE +
-    // POSITION + MAXIMIZED + VISIBLE. ADR-0038's app-config `WindowGeometry`
-    // field + the frontend restore/persist effects are retired by #268 -- they
-    // raced this plugin's restore on launch, causing the window to jump from
-    // the OS-default spot to the restored spot once the frontend IPC resolved.
+    // Window geometry persistence across launches (issue #268). The plugin is
+    // the SINGLE source of truth for window geometry: SIZE + POSITION +
+    // MAXIMIZED + VISIBLE. ADR-0038's app-config `WindowGeometry` field + the
+    // frontend restore/persist effects are retired by #268 -- they raced this
+    // plugin's restore on launch, causing the window to jump from the OS-
+    // default spot to the restored spot once the frontend IPC resolved.
     //
     // VISIBLE + `visible: false` in tauri.conf.json let the plugin own the
-    // show() timing: the window stays hidden until `restore_state` (in
-    // `on_window_ready`) applies the persisted geometry, then `show()`s --
-    // geometry is set before the window is visible. `WindowState::default()
-    // .visible == true`, so a first launch (no persisted state) still shows.
-    // VISIBLE gates WHO calls show(), not whether the window may be visible.
+    // show() timing: the window stays hidden until `restore_state` (the
+    // plugin's internal on-window-ready hook) applies the persisted geometry,
+    // then `show()`s -- geometry is set before the window is visible. On a
+    // first launch (no persisted state) `restore_state` takes its no-state
+    // branch and leaves `should_show` at its `true` initial value, so `show()`
+    // still fires and the window appears (centered by `center: true` in
+    // tauri.conf.json). VISIBLE both persists the visibility flag and gates
+    // `show()` on restore; a safety-net `show()` in `setup` (below) covers the
+    // narrow case where `restore_state` itself errors and the plugin swallows
+    // the `Err` with `let _ =`.
     //
     // DECORATIONS + FULLSCREEN stay off the flags: this app never toggles
     // them. No denylist (the template's quick-pane denylist is an NSPanel
@@ -233,6 +238,40 @@ pub fn run() {
             // provider reads key + endpoint through it.
             app.manage(Arc::new(SessionStore::new()));
             app.manage(live);
+
+            // Visibility safety net (issue #268). `visible: false` in
+            // tauri.conf.json + the window-state plugin's VISIBLE flag mean
+            // the plugin's `restore_state` is the ONLY code path that calls
+            // `show()` on the main window. The plugin swallows `restore_state`
+            // errors with `let _ =`, so a failure inside it (a platform
+            // set_position / set_size after a monitor unplug, a malformed
+            // .window-state.json) would leave the window permanently hidden
+            // with no log. This fallback checks visibility 2s after boot -- if
+            // the plugin already showed the window, it is a no-op; if not, it
+            // forces show() + set_focus() and logs the recovery so a future
+            // regression is diagnosable instead of presenting as "app won't
+            // open". Desktop-only: mobile has no main window managed here.
+            #[cfg(desktop)]
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    let Some(window) = handle.get_webview_window("main") else {
+                        return;
+                    };
+                    let already_visible = window.is_visible().unwrap_or(false);
+                    if !already_visible {
+                        log::error!(
+                            "main window still hidden 2s after boot; the \
+                             window-state plugin did not show() it -- forcing \
+                             show() so the app is usable"
+                        );
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
