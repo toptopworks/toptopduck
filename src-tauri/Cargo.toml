@@ -15,6 +15,11 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+# Platform detection (ADR-0074, issue #262): plugin-os over `navigator.userAgent`
+# (webview UA drift) and `cfg!(target_os)` (command + async + wiring), consistent
+# with the four existing Tauri plugins. Registered unconditionally (same as
+# dialog / log); the desktop-only plugins stay under cfg(not(mobile)) below.
+tauri-plugin-os = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # `parquet` statically compiles the DuckDB parquet extension into the binary so

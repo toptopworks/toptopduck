@@ -135,6 +135,14 @@ pub fn run() {
 
     app_builder
         .plugin(tauri_plugin_dialog::init())
+        // Platform detection (ADR-0074, issue #262): plugin-os injects the
+        // compile-time OS as a webview global the frontend reads synchronously
+        // via `platform()`. Registered unconditionally like dialog/log -- the
+        // plugin works on every target; the desktop-only plugins (single-
+        // instance, window-state) stay under #[cfg(desktop)] above. The
+        // `locale()` / `hostname()` IPC commands are authorized via `os:default`
+        // in capabilities/default.json.
+        .plugin(tauri_plugin_os::init())
         // Multi-target log sink (issue #98, ADR-0029 invariant 2). Routes the
         // `log` facade to two destinations so the existing log::warn! calls
         // (app-config path fallback, create_dir_all failure, ingest
