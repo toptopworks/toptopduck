@@ -213,7 +213,7 @@ export async function clearProfileKey(profileId: string): Promise<boolean> {
 // (ADR-0029 -- the key never crosses IPC) and probes the caller-supplied
 // endpoint (the edit form's CURRENT protocol/base_url/model values, so a user
 // who edits base_url and re-tests does not have to save first -- ADR-0070 Why
-// 3). Returns the four-state ProfileTestOutcome classification; the listed
+// 3). Returns the five-state ProfileTestOutcome classification; the listed
 // models feed the model dropdown (NOT persisted -- ADR-0038).
 export async function testProfile(
   profileId: string,

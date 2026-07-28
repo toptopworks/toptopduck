@@ -23,7 +23,7 @@ ADR-0064 开放多协议多 profile，但 profile 配置的唯一校验时机是
 ## Consequences
 
 - **碰 ADR-0029 不变量 3**：key 流向不扩（one-shot IPC + Rust 发 HTTP），仅新增 test IPC（Rust 从 keychain 读已存 key）；不变量 3（key 仅存 Rust、前端只看 bool）保留。
-- **新增 IPC `test_profile(profile_id)`**：Rust 读 profile 配置 + 从 keychain 取 key + 按 protocol 发 list models（失败降级 ping）+ 返回分类结果（成功 / key 错 / endpoint 错 / 不兼容）；错误分类沿用 ADR-0044。
+- **新增 IPC `test_profile(profile_id)`**：Rust 读 profile 配置 + 从 keychain 取 key + 按 protocol 发 list models（失败降级 ping）+ 返回分类结果（成功 / key 错 / keychain 不可用 / endpoint 错 / 不兼容）；错误分类沿用 ADR-0044。校准：keychain 读取本身失败（锁定 / 服务关闭 / 权限撤销 / entry 损坏）独立分类为「keychain 不可用」，不与「key 错」混同——信任根不可用（ADR-0029）与 key 错误是两种修复路径，读路径与 clear_key_for 同形传播故障、不吞错。
 - **model 列表不持久化**：list models 返回仅用于 model 字段下拉，内存缓存、不进 app-config（ADR-0038——app-config 只存偏好/指针，不存探测快照）；list 失败或未测时 model 字段回退手填。
 - **已知收窄**：preflight 是「尽力早发现」非绝对保证——个别端点 `/models` 不校验 key（返回 200 即使 key 错），preflight 误报通过，第一次真 turn 仍按 ADR-0044 失败。诚实收窄，非隐藏 bug。
 - **校准 ADR-0064**：profile 配置流程新增 preflight 环节；model 字段选择方式从手填升级为 list models 探测下拉（失败回退手填），profile schema 形状不变（model 仍是字段）。

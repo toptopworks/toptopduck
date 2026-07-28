@@ -126,15 +126,19 @@ impl LiveProviderConfig {
         Ok(self.keychain.has_key_for(profile_id))
     }
 
-    /// The stored key for the named profile, or `None` when nothing is stored.
+    /// The stored key for the named profile: `Ok(None)` when nothing is
+    /// stored, `Err` when the keychain read failed (issue #243: the failure is
+    /// propagated, not swallowed -- see [`KeychainStore::fetch_key_for`]).
     /// Rust-internal accessor for the connection preflight (ADR-0070): the
     /// `test_profile` IPC reads the key here (by profile id, never crossing IPC
-    /// -- ADR-0029 invariant 3) and hands it to `provider::preflight::probe`,
-    /// which attaches it to the LLM HTTP call placed from the Rust core. Mirrors
-    /// the active-profile read on `ProviderConfigSource::api_key` but targets
-    /// ANY profile id (the edit form tests the profile being edited, not
+    /// -- ADR-0029 invariant 3) and hands the read result to
+    /// `provider::preflight::run`, which classifies a failure as
+    /// `KeychainUnavailable` and otherwise probes the endpoint with the key
+    /// attached to the LLM HTTP call placed from the Rust core. Mirrors the
+    /// active-profile read on `ProviderConfigSource::api_key` but targets ANY
+    /// profile id (the edit form tests the profile being edited, not
     /// necessarily the active one).
-    pub fn key_for_profile(&self, profile_id: &ProfileId) -> Option<String> {
+    pub fn key_for_profile(&self, profile_id: &ProfileId) -> Result<Option<String>, String> {
         self.keychain.fetch_key_for(profile_id)
     }
 
@@ -289,9 +293,17 @@ impl ProviderConfigSource for LiveProviderConfig {
         // Per-turn read of the ACTIVE profile's keychain slot (ADR-0064). Fresh
         // disk read for the active id each call so a switched profile lands its
         // key on the next turn, no caching (matches the keychain's stateless
-        // philosophy).
+        // philosophy). A keychain read failure honest-degrades to None -> the
+        // turn refuses as NotWired (ADR-0028/0044 permanent): without a
+        // readable key the turn cannot go out anyway, and the trait's Option
+        // contract cannot carry the error. The diagnostic surface for the
+        // failure is the connection preflight (test_profile ->
+        // KeychainUnavailable, issue #243), whose read path keeps the Err.
         let cfg = self.load();
-        self.keychain.fetch_key_for(&cfg.provider.active_profile)
+        self.keychain
+            .fetch_key_for(&cfg.provider.active_profile)
+            .ok()
+            .flatten()
     }
     fn base_url(&self) -> String {
         // Fresh disk read each call -- a reconfigured endpoint on the active

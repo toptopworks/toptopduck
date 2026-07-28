@@ -5,12 +5,14 @@
 //! (primary path), degrading to a minimal messages ping (fallback) when the
 //! endpoint does not implement `/models` or returns a non-auth HTTP error.
 //!
-//! The result is classified into four states along the ADR-0044 axis
+//! The result is classified into five states along the ADR-0044 axis
 //! ([`ProfileTestOutcome`]): success (carrying the listed models), key rejected
-//! (no key / HTTP 401/403), endpoint unreachable (transport), or incompatible
-//! (the endpoint responded but neither `/models` nor a minimal turn yielded a
-//! usable result). The model list feeds the model dropdown; it is NOT
-//! persisted (ADR-0038 -- app-config stores preferences, not probe snapshots).
+//! (no key / HTTP 401/403), keychain unavailable (the OS keychain read itself
+//! failed -- the probe never ran, issue #243), endpoint unreachable
+//! (transport), or incompatible (the endpoint responded but neither `/models`
+//! nor a minimal turn yielded a usable result). The model list feeds the model
+//! dropdown; it is NOT persisted (ADR-0038 -- app-config stores preferences,
+//! not probe snapshots).
 //!
 //! The endpoint (protocol + base_url + model) is the caller's current edit
 //! value, passed in explicitly -- so a user who edits base_url and re-tests
@@ -60,6 +62,26 @@ const PING_PROMPT: &str = ".";
 /// response is fine -- it only needs an HTTP 200 to confirm the endpoint + key
 /// serve the chat/messages shape.
 const PING_MAX_TOKENS: u32 = 1;
+
+/// Run a connection preflight for a profile: classify the keychain read, then
+/// probe the endpoint (ADR-0070). `key_read` is the caller's
+/// [`KeychainStore::fetch_key_for`](crate::provider::KeychainStore::fetch_key_for)
+/// result (the key never crosses IPC -- ADR-0029 invariant 3). A failed read
+/// short-circuits to [`ProfileTestOutcome::KeychainUnavailable`] without any
+/// HTTP (the trust root itself is unavailable, so no endpoint verdict applies
+/// -- issue #243); a successful read delegates to [`probe`], which splits
+/// "nothing stored" (`Ok(None)` -> `KeyRejected`) from the endpoint verdict.
+pub fn run(
+    key_read: Result<Option<String>, String>,
+    protocol: Protocol,
+    base_url: &str,
+    model: &str,
+) -> ProfileTestOutcome {
+    match key_read {
+        Err(detail) => ProfileTestOutcome::KeychainUnavailable { detail },
+        Ok(key) => probe(key.as_deref(), protocol, base_url, model),
+    }
+}
 
 /// Run a connection preflight against the given key + endpoint (ADR-0070).
 ///
@@ -285,6 +307,37 @@ mod tests {
             "choices": [{"message": {"role":"assistant","content":"ok"}}],
         })
         .to_string()
+    }
+
+    #[test]
+    fn keychain_read_failure_classifies_as_keychain_unavailable_without_probing() {
+        // AC (issue #243): a failed keychain read (locked / service down /
+        // corrupt entry) is NOT a key verdict. `run` short-circuits to
+        // KeychainUnavailable carrying the technical detail, and no HTTP probe
+        // fires -- the base_url is unroutable, so had the probe run it would
+        // have yielded EndpointUnreachable, not this. Previously the failure
+        // rode `.ok()?` into None and misclassified as KeyRejected.
+        let outcome = run(
+            Err("keychain access failed: The user canceled".into()),
+            Protocol::Anthropic,
+            "http://127.0.0.1:1",
+            "m",
+        );
+        assert_eq!(
+            outcome,
+            ProfileTestOutcome::KeychainUnavailable {
+                detail: "keychain access failed: The user canceled".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn run_with_no_key_stored_still_classifies_as_key_rejected() {
+        // The issue #243 split keeps the "nothing stored" verdict intact:
+        // Ok(None) is a legitimate no-entry state (not a read failure) and
+        // delegates to probe's no-key branch -> KeyRejected, no HTTP fired.
+        let outcome = run(Ok(None), Protocol::Anthropic, "http://127.0.0.1:1", "m");
+        assert_eq!(outcome, ProfileTestOutcome::KeyRejected);
     }
 
     #[test]

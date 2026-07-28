@@ -835,10 +835,11 @@ fn profile_test_outcome_serializes_adjacently_tagged() {
     // ProfileTestOutcome (issue #236, ADR-0070) crosses IPC as the test_profile
     // return value. Adjacently-tagged like the other IPC enums: Ok nests the
     // models array under data (empty when only the ping fallback succeeded);
-    // KeyRejected / EndpointUnreachable are unit variants (no data); Incompatible
-    // carries the technical detail string under data. Pin the wire shape
-    // src/types/provider.ts mirrors so a serde drift fails here before the
-    // frontend narrows on `kind`.
+    // KeyRejected / EndpointUnreachable are unit variants (no data);
+    // KeychainUnavailable (issue #243) / Incompatible carry the technical
+    // detail string under data. Pin the wire shape src/types/provider.ts
+    // mirrors so a serde drift fails here before the frontend narrows on
+    // `kind`.
     use toptopduck_lib::ProfileTestOutcome;
     assert_wire(
         &ProfileTestOutcome::Ok {
@@ -853,6 +854,12 @@ fn profile_test_outcome_serializes_adjacently_tagged() {
     assert_wire(
         &ProfileTestOutcome::KeyRejected,
         r#"{"kind":"KeyRejected"}"#,
+    );
+    assert_wire(
+        &ProfileTestOutcome::KeychainUnavailable {
+            detail: "keychain access failed: The user canceled".into(),
+        },
+        r#"{"kind":"KeychainUnavailable","data":{"detail":"keychain access failed: The user canceled"}}"#,
     );
     assert_wire(
         &ProfileTestOutcome::EndpointUnreachable,
