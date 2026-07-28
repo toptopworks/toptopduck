@@ -296,9 +296,10 @@ impl ProviderConfigSource for LiveProviderConfig {
         // philosophy). A keychain read failure honest-degrades to None -> the
         // turn refuses as NotWired (ADR-0028/0044 permanent): without a
         // readable key the turn cannot go out anyway, and the trait's Option
-        // contract cannot carry the error. The diagnostic surface for the
-        // failure is the connection preflight (test_profile ->
-        // KeychainUnavailable, issue #243), whose read path keeps the Err.
+        // contract cannot carry the error. The failure surfaces when the user
+        // next clicks "Test connection" -- test_profile re-reads and classifies
+        // it as KeychainUnavailable (issue #243), keeping the Err this per-turn
+        // path must drop.
         let cfg = self.load();
         self.keychain
             .fetch_key_for(&cfg.provider.active_profile)

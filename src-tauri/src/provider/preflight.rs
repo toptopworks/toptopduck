@@ -90,7 +90,7 @@ pub fn run(
 /// never crosses IPC. `protocol` / `base_url` / `model` are the caller's
 /// current edit values (the frontend's edit form), so the probe tests what the
 /// user is looking at without forcing a save first.
-pub fn probe(
+pub(crate) fn probe(
     key: Option<&str>,
     protocol: Protocol,
     base_url: &str,

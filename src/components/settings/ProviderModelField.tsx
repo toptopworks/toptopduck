@@ -1,5 +1,4 @@
-import { useEffect, useState } from "react";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 
 import { testProfile } from "../../api";
@@ -235,9 +234,10 @@ function PreflightResult({ outcome }: { outcome: ProfileTestOutcome }) {
 // The fold chrome KeychainUnavailable + Incompatible share: a locale summary
 // over the technical English detail, drilled via <details> so the detail does
 // not dominate the form. The <FormattedMessage> literals stay at the call
-// sites -- formatjs extract reads each id off its FormattedMessage directly
-// (scripts/check-i18n.mjs), so a helper that took the id as a prop would drop
-// both ids from the catalog guard.
+// sites -- formatjs extract statically scans for <FormattedMessage> JSX with
+// literal id/defaultMessage (scripts/check-i18n.mjs), so wrapping the literal
+// inside a helper would hide it from the scanner and drop both ids from the
+// catalog guard.
 function DetailFold({ children, detail }: { children: ReactNode; detail: string }) {
   return (
     <details className="text-destructive text-sm">

@@ -86,9 +86,10 @@ impl KeychainStore {
     /// A keychain read failure honest-degrades to `false` ("cannot confirm a
     /// key is stored") -- a bool cannot carry the error, and a false negative
     /// only re-prompts the user, whose set/clear then propagates the real
-    /// keychain error (issue #243). The diagnostic surface for the failure is
-    /// the connection preflight, which consumes [`Self::fetch_key_for`]'s
-    /// `Err` directly (`test_profile` -> `KeychainUnavailable`).
+    /// keychain error (issue #243). The failure surfaces when the user next
+    /// clicks "Test connection" -- the preflight re-reads via
+    /// [`Self::fetch_key_for`] and classifies the fault as
+    /// `KeychainUnavailable` (this bool surface does not auto-route it).
     pub fn has_key_for(&self, profile_id: &ProfileId) -> bool {
         matches!(self.fetch_key_for(profile_id), Ok(Some(_)))
     }
