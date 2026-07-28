@@ -100,6 +100,14 @@ pub(crate) fn probe(
         Some(k) => k,
         None => return ProfileTestOutcome::KeyRejected,
     };
+    // AC #244: reject a non-http/https base_url (file:, data:, scheme-less)
+    // before any probe fires. Mirrors the anthropic/openai adapter boundary
+    // check; classified as EndpointUnreachable -- the endpoint is not a
+    // reachable http(s) target by construction, distinct from a transport
+    // fault on a valid URL (see provider::http).
+    if super::http::validate_http_base_url(base_url).is_err() {
+        return ProfileTestOutcome::EndpointUnreachable;
+    }
     match list_models(protocol, base_url, key) {
         ModelsOutcome::Listed(models) => ProfileTestOutcome::Ok { models },
         ModelsOutcome::KeyRejected => ProfileTestOutcome::KeyRejected,
@@ -132,12 +140,18 @@ enum ModelsOutcome {
 /// Issue `GET {base_url}/<models_path>` and classify the result.
 fn list_models(protocol: Protocol, base_url: &str, key: &str) -> ModelsOutcome {
     let url = join_url(base_url, models_path(protocol));
+    // AC #244: shared egress agent disables redirect-following, so x-api-key
+    // (anthropic) and Authorization (openai) cannot reach a second host via a
+    // 3xx Location -- uniform with the turn adapters.
+    let agent = super::http::egress_agent();
     let request = match protocol {
-        Protocol::Anthropic => ureq::get(&url)
+        Protocol::Anthropic => agent
+            .get(&url)
             .timeout(REQUEST_TIMEOUT)
             .set("x-api-key", key)
             .set("anthropic-version", ANTHROPIC_VERSION),
-        Protocol::Openai => ureq::get(&url)
+        Protocol::Openai => agent
+            .get(&url)
             .timeout(REQUEST_TIMEOUT)
             .set("Authorization", &format!("Bearer {key}")),
     };
@@ -179,12 +193,17 @@ enum PingOutcome {
 /// Issue a minimal `POST {base_url}/<chat_path>` and classify the HTTP outcome.
 fn ping(protocol: Protocol, base_url: &str, model: &str, key: &str) -> PingOutcome {
     let url = join_url(base_url, chat_path(protocol));
+    // AC #244: shared egress agent disables redirect-following (mirrors
+    // list_models and the turn adapters).
+    let agent = super::http::egress_agent();
     let request = match protocol {
-        Protocol::Anthropic => ureq::post(&url)
+        Protocol::Anthropic => agent
+            .post(&url)
             .timeout(REQUEST_TIMEOUT)
             .set("x-api-key", key)
             .set("anthropic-version", ANTHROPIC_VERSION),
-        Protocol::Openai => ureq::post(&url)
+        Protocol::Openai => agent
+            .post(&url)
             .timeout(REQUEST_TIMEOUT)
             .set("Authorization", &format!("Bearer {key}")),
     };
@@ -613,5 +632,83 @@ mod tests {
             join_url("https://api.anthropic.com", "v1/models"),
             "https://api.anthropic.com/v1/models"
         );
+    }
+
+    #[test]
+    fn base_url_non_http_scheme_is_endpoint_unreachable_before_probe() {
+        // AC #244 (mirrors the adapters): a file:// base_url is rejected at
+        // the run/probe boundary -- no HTTP probe fires. Classified as
+        // EndpointUnreachable (the endpoint is not a reachable http(s)
+        // target). Ok(Some(key)) so the verdict is not short-circuited as
+        // KeyRejected; the scheme check fires after the key check.
+        let outcome = run(
+            Ok(Some("sk-test".into())),
+            Protocol::Anthropic,
+            "file:///etc/passwd",
+            "m",
+        );
+        assert_eq!(outcome, ProfileTestOutcome::EndpointUnreachable);
+    }
+
+    #[test]
+    fn list_models_does_not_forward_x_api_key_across_host_redirect() {
+        // AC #244 (three-path uniform handling): the preflight's /models GET
+        // path wires the same shared egress agent, so a 3xx redirect is NOT
+        // followed and x-api-key cannot reach a second host. ureq's default
+        // agent would follow the 302 (GET stays GET) and land x-api-key on
+        // the target; the shared agent's redirects(0) keeps the credential on
+        // the first hop. The second host's x-api-key-matching mock must
+        // record zero hits.
+        let mut first = mockito::Server::new();
+        let mut second = mockito::Server::new();
+        first
+            .mock("GET", "/v1/models")
+            .with_status(302)
+            .with_header("Location", &format!("{}/v1/models", second.url()))
+            .create();
+        let second_leak = second
+            .mock("GET", "/v1/models")
+            .match_header("x-api-key", "sk-secret")
+            .expect(0)
+            .with_status(200)
+            .with_body(models_body(&["claude-leak"]))
+            .create();
+        // The probe outcome is not asserted here -- under redirects(0) the
+        // 302 surfaces raw, list_models falls through to NeedsFallback, and
+        // the ping hits the first host (unmocked -> 501 -> Incompatible). The
+        // assertion is the absence of a cross-host x-api-key leak.
+        let _ = probe(Some("sk-secret"), Protocol::Anthropic, &first.url(), "m");
+        second_leak.assert();
+    }
+
+    #[test]
+    fn ping_fallback_does_not_forward_x_api_key_across_host_redirect() {
+        // AC #244 (three-path uniform handling): the preflight's ping POST
+        // fallback wires the same shared egress agent, so a 3xx redirect on the
+        // chat/messages endpoint is NOT followed and x-api-key cannot reach a
+        // second host. Mirrors the /models GET test but forces the ping
+        // fallback first (/v1/models answers 200 non-list -> NeedsFallback ->
+        // ping POST /v1/messages returns 302). The second host's
+        // x-api-key-matching mock must record zero hits.
+        let mut first = mockito::Server::new();
+        let mut second = mockito::Server::new();
+        first
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_body("<html>not a models list</html>")
+            .create();
+        first
+            .mock("POST", "/v1/messages")
+            .with_status(302)
+            .with_header("Location", &format!("{}/v1/messages", second.url()))
+            .create();
+        let second_leak = second
+            .mock("POST", "/v1/messages")
+            .match_header("x-api-key", "sk-secret")
+            .expect(0)
+            .with_status(200)
+            .create();
+        let _ = probe(Some("sk-secret"), Protocol::Anthropic, &first.url(), "m");
+        second_leak.assert();
     }
 }

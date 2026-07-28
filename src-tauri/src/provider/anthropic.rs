@@ -69,6 +69,12 @@ impl AnthropicProvider {
         // the orchestrator surfaces it as a failed turn prompting configuration.
         let key = config.api_key().ok_or(ProviderError::NotWired)?;
         let base_url = config.base_url();
+        // AC #244: reject a non-http/https base_url (file:, data:, scheme-less)
+        // at the boundary before any request is built. Surfaced as Unavailable
+        // carrying the policy reason; NotWired would drop the detail. See
+        // provider::http for the scheme gate rationale.
+        super::http::validate_http_base_url(&base_url)
+            .map_err(|e| ProviderError::Unavailable(e.to_string()))?;
         let model = config.model();
         let url = format!("{base}/v1/messages", base = base_url.trim_end_matches('/'));
 
@@ -90,7 +96,10 @@ impl AnthropicProvider {
             ProviderError::Unavailable(format!("request serialization failed: {e}"))
         })?;
 
-        let response = ureq::post(&url)
+        // AC #244: the shared egress agent disables redirect-following so a
+        // 3xx Location cannot carry x-api-key off-host (see provider::http).
+        let response = super::http::egress_agent()
+            .post(&url)
             .set("x-api-key", &key)
             .set("anthropic-version", ANTHROPIC_VERSION)
             .timeout(REQUEST_TIMEOUT)
@@ -124,6 +133,20 @@ impl AnthropicProvider {
                 return Err(ProviderError::Unavailable(format!("LLM call failed: {e}")));
             }
         };
+
+        // AC #244: under redirects(0) a 3xx surfaces as `Ok` (only >= 400 is
+        // `Err::Status`). Without this guard the 3xx body (usually empty/HTML)
+        // would reach `into_json` and surface as a misleading "response read
+        // failed" parse error. Map any non-2xx to the same transient
+        // Unavailable so the diagnosis names the status, not a parse fault.
+        if !(200..300).contains(&response.status()) {
+            let status = response.status();
+            let body = response.into_string().unwrap_or_default();
+            return Err(ProviderError::Unavailable(format!(
+                "LLM call failed (HTTP {status}): {}",
+                crate::provider::reply::truncate(&body)
+            )));
+        }
 
         let raw: RawResponse = response
             .into_json()
@@ -558,5 +581,73 @@ mod tests {
         // The prior response is rendered human-readable, naming its result.
         let assistant = &msgs[1].content;
         assert!(assistant.contains("result_1") && assistant.contains("SELECT 1"));
+    }
+
+    #[test]
+    fn base_url_non_http_scheme_is_rejected_before_any_request() {
+        // AC #244: a file:// (or other non-http/https) base_url is rejected at
+        // the boundary -- no HTTP call is placed. A malicious or hand-edited
+        // `file://` endpoint must never reach ureq. The error surfaces the
+        // http/https policy so the diagnosis is readable; it routes to
+        // Unavailable (a configuration fault surfaced with detail), not
+        // NotWired (which drops the reason).
+        let cfg = config_at("file:///etc/passwd", Some("sk-test"));
+        match AnthropicProvider::generate(&cfg, &sample_request("q")) {
+            Err(ProviderError::Unavailable(msg)) => assert!(
+                msg.contains("http/https"),
+                "scheme rejection surfaces the http/https policy: {msg}"
+            ),
+            other => panic!("expected Unavailable for bad scheme, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn does_not_forward_x_api_key_across_host_redirect() {
+        // AC #244: a 3xx redirect to a SECOND host must NOT carry x-api-key.
+        // The shared egress agent disables redirect-following, so the
+        // credential never travels past the first hop; the second host's
+        // x-api-key-matching mock must record zero hits.
+        let mut first = mockito::Server::new();
+        let mut second = mockito::Server::new();
+        first
+            .mock("POST", "/v1/messages")
+            .with_status(302)
+            .with_header("Location", &format!("{}/v1/messages", second.url()))
+            .create();
+        let second_leak = second
+            .mock("GET", "/v1/messages")
+            .match_header("x-api-key", "sk-secret")
+            .expect(0)
+            .with_status(200)
+            .create();
+        let cfg = config_at(&first.url(), Some("sk-secret"));
+        // The turn fails (the 3xx surfaces raw under redirects(0); the M2
+        // status guard then maps it to Unavailable). The assertion is the
+        // absence of a cross-host x-api-key leak, not the call's success.
+        let _ = AnthropicProvider::generate(&cfg, &sample_request("q"));
+        second_leak.assert();
+    }
+
+    #[test]
+    fn redirect_surfaces_as_unavailable_with_status_not_parse_error() {
+        // AC #244 (M2): under redirects(0) a 3xx surfaces as Ok and must be
+        // mapped to an Unavailable that names the status (e.g. "HTTP 302"), NOT
+        // a misleading "response read failed" from a body-parse fault on the
+        // 3xx body. Pins the status guard added with the redirect fix.
+        let mut first = mockito::Server::new();
+        first
+            .mock("POST", "/v1/messages")
+            .with_status(302)
+            .with_header("Location", "https://evil.test/v1/messages")
+            .with_body("<html>302 here</html>")
+            .create();
+        let cfg = config_at(&first.url(), Some("sk-secret"));
+        match AnthropicProvider::generate(&cfg, &sample_request("q")) {
+            Err(ProviderError::Unavailable(msg)) => assert!(
+                msg.contains("HTTP 302"),
+                "3xx surfaces with its status, got: {msg}"
+            ),
+            other => panic!("expected Unavailable for 3xx, got {other:?}"),
+        }
     }
 }

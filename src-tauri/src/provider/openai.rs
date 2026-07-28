@@ -74,6 +74,11 @@ impl OpenaiProvider {
         // the orchestrator surfaces it as a failed turn prompting configuration.
         let key = config.api_key().ok_or(ProviderError::NotWired)?;
         let base_url = config.base_url();
+        // AC #244: reject a non-http/https base_url (file:, data:, scheme-less)
+        // at the boundary before any request is built. Mirrors the anthropic
+        // adapter so the two paths cannot drift. See provider::http.
+        super::http::validate_http_base_url(&base_url)
+            .map_err(|e| ProviderError::Unavailable(e.to_string()))?;
         let model = config.model();
         // The user's base_url carries any version path segment (e.g. `/v1`);
         // only `/chat/completions` (the path documented by OpenAI's Chat
@@ -100,7 +105,11 @@ impl OpenaiProvider {
             ProviderError::Unavailable(format!("request serialization failed: {e}"))
         })?;
 
-        let response = ureq::post(&url)
+        // AC #244: shared egress agent disables redirect-following so neither
+        // Bearer nor any future header can travel past the first hop (see
+        // provider::http).
+        let response = super::http::egress_agent()
+            .post(&url)
             .set("Authorization", &format!("Bearer {key}"))
             .timeout(REQUEST_TIMEOUT)
             .send_json(body_value);
@@ -134,6 +143,20 @@ impl OpenaiProvider {
                 return Err(ProviderError::Unavailable(format!("LLM call failed: {e}")));
             }
         };
+
+        // AC #244: under redirects(0) a 3xx surfaces as `Ok` (only >= 400 is
+        // `Err::Status`). Without this guard the 3xx body would reach
+        // `into_json` and surface as a misleading "response read failed"
+        // parse error. Map any non-2xx to the same transient Unavailable so
+        // the diagnosis names the status.
+        if !(200..300).contains(&response.status()) {
+            let status = response.status();
+            let body = response.into_string().unwrap_or_default();
+            return Err(ProviderError::Unavailable(format!(
+                "LLM call failed (HTTP {status}): {}",
+                crate::provider::reply::truncate(&body)
+            )));
+        }
 
         let raw: RawResponse = response
             .into_json()
@@ -766,5 +789,68 @@ mod tests {
         // The prior response is rendered human-readable, naming its result.
         let assistant = &msgs[2].content;
         assert!(assistant.contains("result_1") && assistant.contains("SELECT 1"));
+    }
+
+    #[test]
+    fn base_url_non_http_scheme_is_rejected_before_any_request() {
+        // AC #244 (mirrors the anthropic adapter): a file:// base_url is
+        // rejected at the boundary before any HTTP call is placed. Surfaced as
+        // Unavailable carrying the http/https policy so the diagnosis reads.
+        let cfg = config_at("file:///etc/passwd", Some("sk-test"));
+        match OpenaiProvider::generate(&cfg, &sample_request("q")) {
+            Err(ProviderError::Unavailable(msg)) => assert!(
+                msg.contains("http/https"),
+                "scheme rejection surfaces the http/https policy: {msg}"
+            ),
+            other => panic!("expected Unavailable for bad scheme, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn does_not_leak_bearer_token_across_host_redirect() {
+        // AC #244 (three-path uniform handling, non-regression on Bearer): the
+        // openai adapter wires the same shared egress agent as anthropic, so a
+        // 3xx redirect is NOT followed and the Bearer token cannot reach a
+        // second host. The second host's Authorization-matching mock must
+        // record zero hits (see provider::http for the rationale).
+        let mut first = mockito::Server::new();
+        let mut second = mockito::Server::new();
+        first
+            .mock("POST", "/chat/completions")
+            .with_status(302)
+            .with_header("Location", &format!("{}/chat/completions", second.url()))
+            .create();
+        let second_hit = second
+            .mock("GET", "/chat/completions")
+            .match_header("authorization", "Bearer sk-secret")
+            .expect(0)
+            .with_status(200)
+            .create();
+        let cfg = config_at(&first.url(), Some("sk-secret"));
+        let _ = OpenaiProvider::generate(&cfg, &sample_request("q"));
+        second_hit.assert();
+    }
+
+    #[test]
+    fn redirect_surfaces_as_unavailable_with_status_not_parse_error() {
+        // AC #244 (M2): under redirects(0) a 3xx surfaces as Ok and must be
+        // mapped to an Unavailable that names the status, NOT a misleading
+        // "response read failed" from a body-parse fault on the 3xx body.
+        // Mirrors the anthropic adapter's status guard.
+        let mut first = mockito::Server::new();
+        first
+            .mock("POST", "/chat/completions")
+            .with_status(302)
+            .with_header("Location", "https://evil.test/chat/completions")
+            .with_body("<html>302 here</html>")
+            .create();
+        let cfg = config_at(&first.url(), Some("sk-secret"));
+        match OpenaiProvider::generate(&cfg, &sample_request("q")) {
+            Err(ProviderError::Unavailable(msg)) => assert!(
+                msg.contains("HTTP 302"),
+                "3xx surfaces with its status, got: {msg}"
+            ),
+            other => panic!("expected Unavailable for 3xx, got {other:?}"),
+        }
     }
 }

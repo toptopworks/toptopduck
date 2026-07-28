@@ -13,6 +13,7 @@
 
 pub mod anthropic;
 pub mod fake;
+pub mod http;
 pub mod keychain;
 pub mod live_config;
 pub mod openai;
