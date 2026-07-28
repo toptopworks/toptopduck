@@ -161,40 +161,40 @@
  * ADR-0067 (issue #170): the `.settings-*` / `.profiles-*` VISUAL rules
  * retired into SettingsView.tsx + ProfilesSection.tsx as Tailwind utility +
  * ADR-0050 token + conditional className. This section keeps ONLY the grid +
- * flex LAYOUT shells below (overlay grid, header/nav/content/footer grid
+ * flex LAYOUT shells below (overlay grid, nav/content grid
  * positioning + flex flow, profiles-master-detail grid + its <=640px stacking
  * media query -- issue #170 AC: responsive stacking stays); cramming them
  * into utility long-strings would obscure the overlay / master-detail
  * structure (ADR-0067 Decision 1). The semantic class hooks (.settings-overlay
- * / .settings-header / .settings-nav / .settings-content / .settings-footer /
- * .settings-nav-button / .profiles-master-detail / .profiles-list-item /
- * .profiles-list-item-select etc.) stay on the components for selector / test
+ * / .settings-nav / .settings-content / .settings-rail-top / .settings-rail-bottom
+ * / .settings-nav-button / .connection-row / .profiles-master-detail /
+ * .profiles-list-item / .profiles-list-item-select etc.) stay on the components
+ * for selector / test
  * stability. The retirement SCOPE is the decision of record in ADR-0067 +
  * each component's ADR-0067 inline comment -- not re-listed here, since a
  * hand-kept copy would drift on the next migration slice.
  */
 .shell.settings-mode { grid-template-columns: 1fr; grid-template-rows: 1fr; }
 .shell.settings-mode > :not(.settings-overlay) { display: none; }
+/* ADR-0075 (issue #281): the overlay is now a full-height rail + content grid.
+ * The retired single settings header + footer split into the rail's top (brand +
+ * back) / bottom (connection row + gear) and each pane's hero; the rail spans
+ * the full height and the content column scrolls. */
 .settings-overlay {
   grid-column: 1; grid-row: 1;
   display: grid;
-  grid-template-columns: 200px 1fr;
-  grid-template-rows: auto 1fr auto;
+  grid-template-columns: 232px 1fr;
+  grid-template-rows: 1fr;
   height: 100vh;
   overflow: hidden;
 }
-.settings-header {
-  grid-column: 1 / -1; grid-row: 1;
-  display: flex; align-items: center;
-  height: 44px; min-height: 44px;
-}
 .settings-nav {
-  grid-column: 1; grid-row: 2 / -1;
+  grid-column: 1; grid-row: 1;
   display: flex; flex-direction: column;
-  overflow-y: auto;
+  overflow: hidden;
 }
 .settings-content {
-  grid-column: 2; grid-row: 2;
+  grid-column: 2; grid-row: 1;
   overflow-y: auto;
 }
 /* Profiles master-detail (issue #153, ADR-0064/0065). Two columns on desktop,
@@ -207,10 +207,6 @@
 }
 @media (max-width: 640px) {
   .profiles-master-detail { grid-template-columns: 1fr; }
-}
-.settings-footer {
-  grid-column: 2; grid-row: 3;
-  display: flex; justify-content: flex-end;
 }
 
 /* --- Row 3 (cols 2+): session pane host ---------------------------------

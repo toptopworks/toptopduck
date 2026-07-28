@@ -400,7 +400,14 @@ export default function App() {
                   appConfig={appConfig}
                   initialSection={settingsView.section}
                   initialEditProfileId={settingsView.editProfileId}
-                  onCommitAppConfig={(cfg) => void commitAppConfig(cfg)}
+                  // Returns the IPC promise (unwrapped) so per-control commits
+                  // inside SettingsView can await + catch failures and revert
+                  // (ADR-0075). commitAppConfig itself stays optimistic /
+                  // no-rollback (ADR-0068); the revert is the view's compensating
+                  // write on a caught reject.
+                  onCommitAppConfig={(cfg) => commitAppConfig(cfg)}
+                  onRefreshKeyStatus={() => void refreshKeyStatus()}
+                  keyStatus={keyStatus}
                   onClose={() => {
                     setSettingsView({ open: false, section: "general" });
                     void refreshKeyStatus();

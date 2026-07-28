@@ -1,4 +1,7 @@
+import { FormattedMessage } from "react-intl";
+
 import { DisclosureBanner } from "../common/DisclosureBanner";
+import { PaneHeader } from "./settings-chrome";
 
 // Privacy pane (ADR-0065, issue #151): carries the ADR-0011/0029 honest-
 // disclosure text -- what leaves the machine when asking (schema + sample
@@ -9,7 +12,16 @@ import { DisclosureBanner } from "../common/DisclosureBanner";
 // statement in its expected place.
 export function PrivacySection() {
   return (
-    <div className="grid gap-4">
+    <div>
+      <PaneHeader
+        title={<FormattedMessage id="settings.nav.privacy" defaultMessage="Privacy" />}
+        description={(
+          <FormattedMessage
+            id="settings.privacy.description"
+            defaultMessage="What leaves this machine when you ask a question, and where the API key is kept."
+          />
+        )}
+      />
       <DisclosureBanner />
     </div>
   );

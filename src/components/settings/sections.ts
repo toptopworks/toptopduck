@@ -1,16 +1,15 @@
 // Section navigation model for the in-app settings overlay (ADR-0065, issue
-// #151). Kept out of the component so the id set + i18n keys live in one place
-// and stay stable across renders. Each entry pairs a `labelId` + defaultMessage
-// so the call-site <FormattedMessage> stays a direct literal -- formatjs extract
-// resolves ids statically, and a helper returning {id} would break the
-// i18n:check CI gate (ADR-0052).
-
-import type { EngineDefaults, LocalePreference, Theme } from "../../types/app-config";
+// #151; ADR-0075, issue #281). Kept out of the component so the id set lives in
+// one place and stays stable across renders.
+//
+// ADR-0075 retired the shared mutable SettingsForm bag (the global draft): every
+// pane now self-persists through the parent's commit helper, so this module only
+// carries the section id set + order.
 
 /** The four settings panes (ADR-0065): General / Profiles / Engine / Privacy. */
 export type SettingsSection = "general" | "profiles" | "engine" | "privacy";
 
-/** The ordered set of settings sections rendered into the left nav. Drives
+/** The ordered set of settings sections rendered into the left rail. Drives
  *  ORDER + state only; the visible label for each id is rendered by SectionLabel
  *  in SettingsView (a static <FormattedMessage id="..."> per case so formatjs
  *  extract resolves every settings.nav.* id statically -- ADR-0052: a variable
@@ -21,22 +20,3 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSection> = [
   "engine",
   "privacy",
 ];
-
-/** The mutable settings form state shared between SettingsView and its General /
- *  Engine section children. Held by the parent (one atomic save commits the
- *  whole document); each pane is a pure editor over a slice of it.
- *
- *  Issue #153: the API-key + endpoint fields moved OUT of General into the
- *  Profiles pane (per-profile management, ADR-0064). The Profiles pane takes its
- *  own prop slice (ProfilesSectionProps in ProfilesSection.tsx) -- the `provider`
- *  config + mutators + its own key overlay -- rather than this shared bag, so
- *  the General/Engine panes stay free of profile entanglement. */
-export interface SettingsForm {
-  theme: Theme;
-  setTheme: (t: Theme) => void;
-  locale: LocalePreference;
-  setLocale: (l: LocalePreference) => void;
-  engine: EngineDefaults;
-  setEngine: (e: EngineDefaults) => void;
-  saving: boolean;
-}

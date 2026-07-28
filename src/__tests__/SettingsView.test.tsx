@@ -128,8 +128,9 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     await waitFor(() =>
       expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
     );
-    // ‹ Back to app (zh: ‹ 返回应用).
-    fireEvent.click(screen.getByRole("button", { name: /返回应用/ }));
+    // Rail-top "Back to workspace" (zh: 返回工作区); the .settings-back hook
+    // class distinguishes it from the gear, which shares its accessible name.
+    fireEvent.click(document.querySelector(".settings-back") as HTMLElement);
     await waitFor(() =>
       expect(document.querySelector(".settings-overlay")).not.toBeInTheDocument(),
     );
@@ -147,11 +148,8 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     await waitFor(() =>
       expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
     );
-    // Wait for the form's loading state to clear (getProviderConfig resolved)
-    // so busy is false and ESC is allowed to close (back button enabled = !busy).
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /返回应用/ })).not.toBeDisabled(),
-    );
+    // No commit is in flight on the General pane, so ESC closes (the close
+    // contract blocks only while an IPC is in flight, ADR-0075).
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() =>
       expect(document.querySelector(".settings-overlay")).not.toBeInTheDocument(),
@@ -183,8 +181,8 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     expect(
       screen.queryByRole("textbox", { name: "提问", hidden: true }),
     ).toBeInTheDocument();
-    // Return from settings.
-    fireEvent.click(screen.getByRole("button", { name: /返回应用/ }));
+    // Return from settings (rail-top back button).
+    fireEvent.click(document.querySelector(".settings-back") as HTMLElement);
     await waitFor(() =>
       expect(document.querySelector(".settings-overlay")).not.toBeInTheDocument(),
     );
@@ -193,20 +191,22 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     expect(vi.mocked(createSession)).toHaveBeenCalledTimes(1);
   });
 
-  it("Save commits app-config and closes the overlay (atomic write, ADR-0038)", async () => {
+  it("engine field Save persists app-config without closing (per-field save, ADR-0075)", async () => {
+    // The global footer Save is retired (ADR-0075): the engine pane carries four
+    // independent per-field Save buttons. Saving one writes app-config and keeps
+    // the overlay open (there is no Save-and-close any more).
     vi.mocked(getAppConfig).mockResolvedValue(baseAppConfig());
     render(<App />);
     await waitFor(() => expect(getAppConfig).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
-    // Wait for the form to finish loading (Save enabled = loading done).
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "保存" })).not.toBeDisabled(),
+      expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
     );
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    // Navigate to the Engine pane (zh: 引擎) and save the first field.
+    fireEvent.click(screen.getByRole("button", { name: "引擎" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "保存" })[0]);
     await waitFor(() => expect(setAppConfig).toHaveBeenCalledTimes(1));
-    // The overlay closed after the successful save.
-    await waitFor(() =>
-      expect(document.querySelector(".settings-overlay")).not.toBeInTheDocument(),
-    );
+    // Per-field save does NOT close the overlay.
+    expect(document.querySelector(".settings-overlay")).toBeInTheDocument();
   });
 });
