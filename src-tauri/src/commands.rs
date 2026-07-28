@@ -565,8 +565,8 @@ pub fn set_api_key(
 
 /// Remove the stored API key. Idempotent: a missing entry is success; a real
 /// keychain error propagates so the frontend can tell the user the key did not
-/// come out. After a successful clear, `has_api_key` is false and the next turn
-/// refuses honestly as not-wired.
+/// come out. After a successful clear, the active profile's `has_key` is false
+/// and the next turn refuses honestly as not-wired.
 #[tauri::command]
 pub fn clear_api_key(live: State<'_, LiveProviderConfig>) -> Result<(), StoreCommandError> {
     live.clear_key().map_err(StoreCommandError::KeychainFailure)
