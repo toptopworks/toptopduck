@@ -74,6 +74,11 @@ impl OpenaiProvider {
         // the orchestrator surfaces it as a failed turn prompting configuration.
         let key = config.api_key().ok_or(ProviderError::NotWired)?;
         let base_url = config.base_url();
+        // AC #244: reject a non-http/https base_url (file:, data:, scheme-less)
+        // at the boundary before any request is built. Mirrors the anthropic
+        // adapter so the two paths cannot drift.
+        super::http::parse_http_base_url(&base_url)
+            .map_err(|e| ProviderError::Unavailable(e.to_string()))?;
         let model = config.model();
         // The user's base_url carries any version path segment (e.g. `/v1`);
         // only `/chat/completions` (the path documented by OpenAI's Chat
@@ -100,7 +105,14 @@ impl OpenaiProvider {
             ProviderError::Unavailable(format!("request serialization failed: {e}"))
         })?;
 
-        let response = ureq::post(&url)
+        // AC #244: shared egress agent disables redirect-following, uniform
+        // across all three out-bound paths. ureq's default
+        // `RedirectAuthHeaders::Never` already stripped `Authorization` on
+        // cross-host redirects; redirects(0) is the stronger guarantee -- no
+        // second request is made at all, so neither Bearer nor any future
+        // header can travel past the first hop.
+        let response = super::http::egress_agent()
+            .post(&url)
             .set("Authorization", &format!("Bearer {key}"))
             .timeout(REQUEST_TIMEOUT)
             .send_json(body_value);
@@ -766,5 +778,53 @@ mod tests {
         // The prior response is rendered human-readable, naming its result.
         let assistant = &msgs[2].content;
         assert!(assistant.contains("result_1") && assistant.contains("SELECT 1"));
+    }
+
+    #[test]
+    fn base_url_non_http_scheme_is_rejected_before_any_request() {
+        // AC #244 (mirrors the anthropic adapter): a file:// base_url is
+        // rejected at the boundary before any HTTP call is placed. Surfaced as
+        // Unavailable carrying the http/https policy so the diagnosis reads.
+        let cfg = config_at("file:///etc/passwd", Some("sk-test"));
+        match OpenaiProvider::generate(&cfg, &sample_request("q")) {
+            Err(ProviderError::Unavailable(msg)) => assert!(
+                msg.contains("http/https"),
+                "scheme rejection surfaces the http/https policy: {msg}"
+            ),
+            other => panic!("expected Unavailable for bad scheme, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn does_not_follow_cross_host_redirect() {
+        // AC #244 (three-path uniform handling): the openai adapter wires the
+        // same shared egress agent as anthropic, so a 3xx redirect is NOT
+        // followed. ureq's default agent would follow the 302 (POST -> GET per
+        // RFC 7231) and reach the second host; the shared agent's redirects(0)
+        // keeps every credential on the first hop. The second host's mock must
+        // record zero hits.
+        //
+        // AC #4 (non-regression on Authorization): ureq's default
+        // `RedirectAuthHeaders::Never` already stripped `Authorization` on
+        // cross-host redirects, so the Bearer token was not leaked even before
+        // this fix. redirects(0) is the stronger, uniform guarantee -- it
+        // covers both auth schemes (x-api-key AND Bearer) by never making the
+        // second request at all. This test pins that the Bearer token still
+        // cannot reach a second host after the refactor.
+        let mut first = mockito::Server::new();
+        let mut second = mockito::Server::new();
+        first
+            .mock("POST", "/chat/completions")
+            .with_status(302)
+            .with_header("Location", &format!("{}/chat/completions", second.url()))
+            .create();
+        let second_hit = second
+            .mock("GET", "/chat/completions")
+            .expect(0)
+            .with_status(200)
+            .create();
+        let cfg = config_at(&first.url(), Some("sk-secret"));
+        let _ = OpenaiProvider::generate(&cfg, &sample_request("q"));
+        second_hit.assert();
     }
 }

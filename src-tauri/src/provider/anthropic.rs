@@ -69,6 +69,12 @@ impl AnthropicProvider {
         // the orchestrator surfaces it as a failed turn prompting configuration.
         let key = config.api_key().ok_or(ProviderError::NotWired)?;
         let base_url = config.base_url();
+        // AC #244: reject a non-http/https base_url (file:, data:, scheme-less)
+        // at the boundary before any request is built. Surfaced as Unavailable
+        // (the reason carries the http/https policy) so the diagnosis is
+        // readable; NotWired would drop the detail.
+        super::http::parse_http_base_url(&base_url)
+            .map_err(|e| ProviderError::Unavailable(e.to_string()))?;
         let model = config.model();
         let url = format!("{base}/v1/messages", base = base_url.trim_end_matches('/'));
 
@@ -90,7 +96,13 @@ impl AnthropicProvider {
             ProviderError::Unavailable(format!("request serialization failed: {e}"))
         })?;
 
-        let response = ureq::post(&url)
+        // AC #244: the shared egress agent disables redirect-following, so a
+        // 3xx Location pointing at a second host can never carry x-api-key
+        // off-host. ureq's default agent follows up to 5 redirects and strips
+        // only `authorization`/`cookie` on each hop -- `x-api-key` would
+        // survive and land on the redirect target.
+        let response = super::http::egress_agent()
+            .post(&url)
             .set("x-api-key", &key)
             .set("anthropic-version", ANTHROPIC_VERSION)
             .timeout(REQUEST_TIMEOUT)
@@ -558,5 +570,54 @@ mod tests {
         // The prior response is rendered human-readable, naming its result.
         let assistant = &msgs[1].content;
         assert!(assistant.contains("result_1") && assistant.contains("SELECT 1"));
+    }
+
+    #[test]
+    fn base_url_non_http_scheme_is_rejected_before_any_request() {
+        // AC #244: a file:// (or other non-http/https) base_url is rejected at
+        // the boundary -- no HTTP call is placed. A malicious or hand-edited
+        // `file://` endpoint must never reach ureq. The error surfaces the
+        // http/https policy so the diagnosis is readable; it routes to
+        // Unavailable (a configuration fault surfaced with detail), not
+        // NotWired (which drops the reason).
+        let cfg = config_at("file:///etc/passwd", Some("sk-test"));
+        match AnthropicProvider::generate(&cfg, &sample_request("q")) {
+            Err(ProviderError::Unavailable(msg)) => assert!(
+                msg.contains("http/https"),
+                "scheme rejection surfaces the http/https policy: {msg}"
+            ),
+            other => panic!("expected Unavailable for bad scheme, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn does_not_forward_x_api_key_across_host_redirect() {
+        // AC #244: a 3xx redirect to a SECOND host must NOT carry x-api-key.
+        // ureq 2.12.1's built-in redirect cleanup strips only `authorization`
+        // and `cookie` (unit.rs:221-225) -- x-api-key survives and would land
+        // on the redirect target. A 302 downgrades POST -> GET (RFC 7231 /
+        // ureq unit.rs:193-196), so the leaked request reaches the second host
+        // as a GET to the same path carrying x-api-key -- this test asserts
+        // that mock records zero hits (the shared egress agent disables
+        // redirect-following, so the credential never travels past hop one).
+        let mut first = mockito::Server::new();
+        let mut second = mockito::Server::new();
+        first
+            .mock("POST", "/v1/messages")
+            .with_status(302)
+            .with_header("Location", &format!("{}/v1/messages", second.url()))
+            .create();
+        let second_leak = second
+            .mock("GET", "/v1/messages")
+            .match_header("x-api-key", "sk-secret")
+            .expect(0)
+            .with_status(200)
+            .create();
+        let cfg = config_at(&first.url(), Some("sk-secret"));
+        // The turn fails (the 3xx surfaces raw under redirects(0); the body
+        // parse then fails -> Unavailable). The assertion is the absence of a
+        // cross-host x-api-key leak, not the call's success.
+        let _ = AnthropicProvider::generate(&cfg, &sample_request("q"));
+        second_leak.assert();
     }
 }
