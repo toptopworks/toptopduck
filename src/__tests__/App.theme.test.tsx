@@ -67,6 +67,7 @@ vi.mock("../api", async (importOriginal) => {
       base_url: "https://api.anthropic.com",
       model: "claude-sonnet-4-6",
       has_key: false,
+      keychain_fault: null,
     })),
     // Default theme is system; per-test overrides via vi.mocked(...).mockResolvedValue.
     getAppConfig: vi.fn(async () => appConfigWith("system")),

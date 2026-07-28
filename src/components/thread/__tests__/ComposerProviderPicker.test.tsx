@@ -56,8 +56,14 @@ function pickerProvider(activeId: string = "anthropic"): ProviderConfig {
   };
 }
 
-function keyStatus(rows: Array<[string, boolean]>): ProfileKeyStatus[] {
-  return rows.map(([profile_id, has_key]) => ({ profile_id, has_key }));
+function keyStatus(
+  rows: Array<[string, boolean, string?]>,
+): ProfileKeyStatus[] {
+  return rows.map(([profile_id, has_key, fault]) => ({
+    profile_id,
+    has_key,
+    keychain_fault: fault ?? null,
+  }));
 }
 
 describe("ComposerProviderPicker (issue #238, ADR-0071)", () => {
@@ -401,5 +407,31 @@ describe("ComposerProviderPicker (issue #238, ADR-0071)", () => {
     expect(tooltip.textContent).toContain("claude-sonnet-4-6");
     // The tooltip text never carries the "no key" suffix when a key is set.
     expect(tooltip.textContent).not.toContain("no key");
+  });
+
+  it("shows the keychain-unavailable badge when the active profile's keychain read failed (issue #275)", async () => {
+    // AC #275: a keychain read fault (locked / service down / corrupt entry)
+    // must NOT misread as "No key" -- the popover shows a distinct badge so the
+    // user is not misled to re-enter a key when the trust root itself is
+    // unavailable. keyStatus carries the fault detail as the third tuple element.
+    vi.mocked(listProviderProfiles).mockResolvedValue(
+      keyStatus([["anthropic", false, "keychain access failed: locked"]]),
+    );
+    renderPicker(
+      <ComposerProviderPicker
+        provider={pickerProvider()}
+        onSwitchActive={() => {}}
+        onSwitchModel={() => {}}
+        onOpenSettings={() => {}}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Provider and model" }),
+    );
+    await screen.findByText("Keychain unavailable");
+    expect(screen.getByText("Keychain unavailable")).toBeInTheDocument();
+    // The pre-#275 bool honest-degrade hid the fault behind "No key"; pin it
+    // does not regress.
+    expect(screen.queryByText("No key")).not.toBeInTheDocument();
   });
 });

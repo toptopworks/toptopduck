@@ -86,6 +86,7 @@ vi.mock("../api", async (importOriginal) => {
       base_url: "https://api.anthropic.com",
       model: "claude-sonnet-4-6",
       has_key: true,
+      keychain_fault: null,
     })),
     // listProviderProfiles feeds the per-profile has_key overlay consumed by
     // ColdStartHero + ComposerProviderPicker (mounted via SessionPane) on App
@@ -1410,6 +1411,7 @@ describe("App topbar header actions + key-state badge (issue #182)", () => {
       base_url: "https://api.anthropic.com",
       model: "claude-sonnet-4-6",
       has_key: true,
+      keychain_fault: null,
     });
     render(<App />);
     await waitFor(() => {
@@ -1425,6 +1427,7 @@ describe("App topbar header actions + key-state badge (issue #182)", () => {
       base_url: "https://api.anthropic.com",
       model: "claude-sonnet-4-6",
       has_key: false,
+      keychain_fault: null,
     });
     render(<App />);
     await waitFor(() => {
@@ -1432,6 +1435,28 @@ describe("App topbar header actions + key-state badge (issue #182)", () => {
       expect(badge).not.toBeNull();
       expect(badge.classList.contains("text-warning")).toBe(true);
       expect(badge.getAttribute("data-slot")).toBe("badge");
+    });
+  });
+
+  it("renders the keychain-unavailable badge when the active read faults (issue #275)", async () => {
+    // The pre-#275 honest-degrade hid a keychain read fault behind has_key=false,
+    // so the header misread "keychain locked" as "no key configured". The view
+    // now carries keychain_fault; the badge renders the warning state with the
+    // fault detail as the native title (the no-key state has no title) and the
+    // keychainUnavailable label instead of the key-missing CTA.
+    vi.mocked(getProviderConfig).mockResolvedValue({
+      base_url: "https://api.anthropic.com",
+      model: "claude-sonnet-4-6",
+      has_key: false,
+      keychain_fault: "keychain access failed: locked",
+    });
+    render(<App />);
+    await waitFor(() => {
+      const badge = document.querySelector(".key-missing") as HTMLElement;
+      expect(badge).not.toBeNull();
+      expect(badge.classList.contains("text-warning")).toBe(true);
+      // The fault detail rides the native title -- absent on the no-key state.
+      expect(badge.getAttribute("title")).toBe("keychain access failed: locked");
     });
   });
 });

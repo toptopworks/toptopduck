@@ -3,7 +3,7 @@ import { FormattedMessage } from "react-intl";
 
 import { listProviderProfiles } from "../api";
 import { log } from "../lib/log";
-import type { ProviderConfig } from "../types/provider";
+import type { ProfileKeyStatus, ProviderConfig } from "../types/provider";
 import { Button } from "../components/ui/button";
 
 // Cold-start / all-closed hero (ADR-0061). The right side when no session is
@@ -61,7 +61,7 @@ import { Button } from "../components/ui/button";
  *  no-profile wins on an empty profiles list; otherwise the active profile's
  *  has_key decides no-key vs ready. The "ready" mode also serves as the
  *  loading / fallback appearance (see the file header). */
-type ColdStartHeroMode = "no-profile" | "no-key" | "ready";
+type ColdStartHeroMode = "no-profile" | "no-key" | "keychain-fault" | "ready";
 
 export function ColdStartHero({
   disabled,
@@ -93,7 +93,7 @@ export function ColdStartHero({
   // from list_provider_profiles. Mirrors the ProfilesSection snapshot
   // pattern; only the booleans live here (profile RECORDS stay
   // single-sourced in the provider prop).
-  const [profileKeys, setProfileKeys] = useState<Record<string, boolean>>({});
+  const [profileKeys, setProfileKeys] = useState<Record<string, ProfileKeyStatus>>({});
   const [keysLoading, setKeysLoading] = useState(true);
 
   // profilesLen drives the fetch decision: 0 (provider null OR no profiles)
@@ -121,8 +121,8 @@ export function ColdStartHero({
     listProviderProfiles()
       .then((status) => {
         if (cancelled) return;
-        const map: Record<string, boolean> = {};
-        for (const s of status) map[s.profile_id] = s.has_key;
+        const map: Record<string, ProfileKeyStatus> = {};
+        for (const s of status) map[s.profile_id] = s;
         setProfileKeys(map);
       })
       .catch((e: unknown) => {
@@ -146,15 +146,17 @@ export function ColdStartHero({
   // an edit target (acceptable; there is no real active profile to edit).
   const activeProfile =
     provider?.profiles.find((p) => p.id === provider.active_profile) ?? null;
-  const activeHasKey = activeProfile
-    ? profileKeys[activeProfile.id] ?? false
-    : false;
+  const activeStatus = activeProfile ? profileKeys[activeProfile.id] : undefined;
+  const activeHasKey = activeStatus?.has_key ?? false;
+  const activeKeychainFault = activeStatus?.keychain_fault ?? null;
   const mode: ColdStartHeroMode =
     provider !== null && profilesLen === 0
       ? "no-profile"
-      : provider !== null && !keysLoading && !activeHasKey
-        ? "no-key"
-        : "ready";
+      : provider !== null && !keysLoading && activeKeychainFault
+        ? "keychain-fault"
+        : provider !== null && !keysLoading && !activeHasKey
+          ? "no-key"
+          : "ready";
 
   return (
     <div className="workspace-hero cold-start-hero flex flex-col items-center gap-4 p-8 text-center">
@@ -189,6 +191,28 @@ export function ColdStartHero({
             <FormattedMessage
               id="coldStart.noKey.hint"
               defaultMessage="Your active profile has no API key yet. Add one to start asking questions."
+            />
+          </p>
+          <Button
+            size="lg"
+            className="primary-cta"
+            onClick={() => onOpenSettingsProfiles(activeProfile?.id)}
+          >
+            <FormattedMessage id="coldStart.openSettings" defaultMessage="Open settings" />
+          </Button>
+        </>
+      ) : mode === "keychain-fault" ? (
+        <>
+          <h2 className="cold-start-title m-0 mb-2 text-[1.4rem]">
+            <FormattedMessage
+              id="settings.profiles.keychainUnavailable"
+              defaultMessage="Keychain unavailable"
+            />
+          </h2>
+          <p className="text-muted-foreground">
+            <FormattedMessage
+              id="settings.profiles.keychainUnavailableHint"
+              defaultMessage="The OS keychain could not be read (it may be locked, or the service is down). Check the OS keychain, then retry."
             />
           </p>
           <Button

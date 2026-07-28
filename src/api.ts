@@ -160,10 +160,6 @@ export async function readRows(
 // frontend learns only a boolean. The webview holds no key and makes no HTTP
 // egress -- all LLM calls are placed by the Rust core (ADR-0029).
 
-export async function hasApiKey(): Promise<boolean> {
-  return invoke<boolean>("has_api_key");
-}
-
 export async function setApiKey(key: string): Promise<void> {
   await invoke<void>("set_api_key", { key });
 }
@@ -183,8 +179,8 @@ export async function setProviderConfig(config: ProviderConfig): Promise<Provide
 // Per-profile key management (issue #153, ADR-0064/0029). The Profiles UI edits
 // keys for ANY profile, not just the active one. Each profile's key lives in its
 // own keychain slot `key-<profile_id>`; the frontend learns only booleans,
-// never the key (ADR-0029 invariant 3). The active-profile commands above
-// (hasApiKey/setApiKey/clearApiKey) stay for the header indicator's active view.
+// never the key (ADR-0029 invariant 3). The active-profile STATUS rides
+// getProviderConfig (above) -- its keychain_fault drives the header indicator.
 
 // One entry per profile currently in app-config: the profile id plus whether its
 // keychain slot holds a key. Profile RECORDS stay single-sourced from

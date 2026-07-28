@@ -100,7 +100,7 @@ describe("ColdStartHero three-state guide (issue #239)", () => {
 
   it("no-key: renders key CTA -> onOpenSettingsProfiles(activeId)", async () => {
     vi.mocked(listProviderProfiles).mockResolvedValue([
-      { profile_id: "p1", has_key: false },
+      { profile_id: "p1", has_key: false, keychain_fault: null },
     ]);
     const onNew = vi.fn();
     const onOpenSettingsProfiles = vi.fn<(editProfileId?: string) => void>();
@@ -126,7 +126,7 @@ describe("ColdStartHero three-state guide (issue #239)", () => {
 
   it("ready: renders the legacy new-session CTA -> onNew", async () => {
     vi.mocked(listProviderProfiles).mockResolvedValue([
-      { profile_id: "p1", has_key: true },
+      { profile_id: "p1", has_key: true, keychain_fault: null },
     ]);
     const onNew = vi.fn();
     const onOpenSettingsProfiles = vi.fn<(editProfileId?: string) => void>();
@@ -149,7 +149,7 @@ describe("ColdStartHero three-state guide (issue #239)", () => {
 
   it("ready CTA is disabled when the busy gate is set", async () => {
     vi.mocked(listProviderProfiles).mockResolvedValue([
-      { profile_id: "p1", has_key: true },
+      { profile_id: "p1", has_key: true, keychain_fault: null },
     ]);
     renderShell(
       <ColdStartHero
@@ -187,7 +187,7 @@ describe("ColdStartHero three-state guide (issue #239)", () => {
   it("profileKeyEpoch bump refetches the overlay (settings-close invalidation)", async () => {
     // First render: active profile has no key -> "no-key".
     vi.mocked(listProviderProfiles).mockResolvedValue([
-      { profile_id: "p1", has_key: false },
+      { profile_id: "p1", has_key: false, keychain_fault: null },
     ]);
     const onNew = vi.fn();
     const onOpenSettingsProfiles = vi.fn<(editProfileId?: string) => void>();
@@ -205,7 +205,7 @@ describe("ColdStartHero three-state guide (issue #239)", () => {
 
     // Settings round-trip: App bumps the epoch; the user configured a key.
     vi.mocked(listProviderProfiles).mockResolvedValue([
-      { profile_id: "p1", has_key: true },
+      { profile_id: "p1", has_key: true, keychain_fault: null },
     ]);
     rerender(
       <IntlProvider locale="en" messages={{}} onError={() => {}}>
@@ -232,7 +232,7 @@ describe("ColdStartHero three-state guide (issue #239)", () => {
     // when the active profile has no key -- defeating the issue #239 honest-gate
     // AC (the whole point of the three-state refactor).
     vi.mocked(listProviderProfiles).mockResolvedValue([
-      { profile_id: "p1", has_key: false },
+      { profile_id: "p1", has_key: false, keychain_fault: null },
     ]);
     const onNew = vi.fn();
     const onOpenSettingsProfiles = vi.fn<(editProfileId?: string) => void>();
@@ -264,6 +264,36 @@ describe("ColdStartHero three-state guide (issue #239)", () => {
     // "no-key" CTA (not stuck on "ready").
     expect(await screen.findByRole("heading", { name: "Add an API key" })).toBeInTheDocument();
     expect(listProviderProfiles).toHaveBeenCalledTimes(1);
+    expect(onNew).not.toHaveBeenCalled();
+  });
+
+  it("keychain-fault: renders the keychain-unavailable CTA, not the no-key misread (issue #275)", async () => {
+    // AC #275: a keychain read fault on the active profile surfaces a dedicated
+    // "keychain unavailable" hero -- NOT the "Add an API key" no-key CTA. The
+    // pre-#275 bool honest-degrade hid the fault behind has_key=false, directing
+    // the user to re-enter a key when the trust root itself is unavailable.
+    vi.mocked(listProviderProfiles).mockResolvedValue([
+      { profile_id: "p1", has_key: false, keychain_fault: "keychain access failed: locked" },
+    ]);
+    const onNew = vi.fn();
+    const onOpenSettingsProfiles = vi.fn<(editProfileId?: string) => void>();
+    renderShell(
+      <ColdStartHero
+        disabled={false}
+        provider={makeProvider()}
+        profileKeyEpoch={0}
+        onNew={onNew}
+        onOpenSettingsProfiles={onOpenSettingsProfiles}
+      />,
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Keychain unavailable" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open settings" })).toBeInTheDocument();
+    // Must NOT misread as the no-key CTA.
+    expect(
+      screen.queryByRole("heading", { name: "Add an API key" }),
+    ).not.toBeInTheDocument();
     expect(onNew).not.toHaveBeenCalled();
   });
 });

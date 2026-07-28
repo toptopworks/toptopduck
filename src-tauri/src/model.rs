@@ -960,15 +960,24 @@ impl ProviderConfig {
         }
     }
 
-    /// The IPC-shaped view of the active profile's endpoint + whether a key is
-    /// set (ADR-0029: only the boolean crosses). One shape for both
-    /// `get_provider_config` and `set_provider_config` so the active-missing
-    /// fallback policy is single-sourced, not duplicated per call site.
-    pub fn view(&self, has_key: bool) -> ProviderConfigView {
+    /// The IPC-shaped view of the active profile's endpoint + key status
+    /// (ADR-0029: only a boolean + read-fault detail cross, never the key).
+    /// Issue #275: the keychain read outcome rides in as a `Result` so a read
+    /// fault surfaces on `keychain_fault` (with `has_key` a placeholder false)
+    /// instead of being honest-degraded behind a bare `false`. One shape for
+    /// both `get_provider_config` and `set_provider_config` so the
+    /// active-missing fallback policy is single-sourced, not duplicated per
+    /// call site.
+    pub fn view(&self, key_read: Result<bool, String>) -> ProviderConfigView {
+        let (has_key, keychain_fault) = match key_read {
+            Ok(has_key) => (has_key, None),
+            Err(detail) => (false, Some(detail)),
+        };
         ProviderConfigView {
             base_url: self.effective_base_url().to_string(),
             model: self.effective_model().to_string(),
             has_key,
+            keychain_fault,
         }
     }
 }
@@ -980,15 +989,27 @@ impl Default for ProviderConfig {
 }
 
 /// The get_provider_config view (ADR-0029): the effective base URL + model the
-/// provider uses, plus `has_key` -- a boolean, never the key itself. The
-/// frontend learns whether to prompt for a key without ever receiving it.
+/// provider uses, plus the active profile's key status -- `has_key` (a boolean,
+/// never the key itself) and a keychain read-fault detail. The frontend's header
+/// key indicator learns whether to prompt for a key without ever receiving it,
+/// and distinguishes a read fault from a legitimate no-key state (issue #275).
+/// One shape for both `get_provider_config` and `set_provider_config` so the
+/// active-missing fallback policy is single-sourced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderConfigView {
     pub base_url: String,
     pub model: String,
     /// Whether an API key is stored in the OS keychain. A boolean only (ADR-0029
-    /// invariant 3: the key never crosses to the frontend).
+    /// invariant 3: the key never crosses to the frontend). When
+    /// [`Self::keychain_fault`] is `Some`, the read failed and this is a
+    /// placeholder `false` (the status is unknown, not empty).
     pub has_key: bool,
+    /// A keychain READ failure detail (issue #275): `None` when the read
+    /// succeeded (has_key authoritative); `Some(detail)` when the OS keychain
+    /// read failed (locked / service down / permission revoked / corrupt entry).
+    /// Technical English only (ADR-0029 -- never the key). See
+    /// [`ProfileKeyStatus::keychain_fault`].
+    pub keychain_fault: Option<String>,
 }
 
 /// Per-profile key-status overlay (issue #153, ADR-0064/0029). The Profiles
@@ -998,12 +1019,30 @@ pub struct ProviderConfigView {
 /// source of truth for the list); this view only carries the key status the
 /// app-config deliberately does not store. `list_provider_profiles` returns one
 /// entry per profile currently in app-config.
+///
+/// Issue #275 adds `keychain_fault`: a non-echoing read-failure detail distinct
+/// from "no key stored". When the OS keychain read itself fails (locked /
+/// service down / permission revoked / corrupt entry), `has_key` is `false`
+/// (a placeholder -- the read could not confirm either way) and `keychain_fault`
+/// carries the technical English detail for the frontend's details fold, so the
+/// status surface renders "keychain unavailable" instead of misreading as "no
+/// key configured" (the pre-#275 bool honest-degrade hid the fault). Mirrors
+/// [`ProfileTestOutcome::KeychainUnavailable`] (issue #243); ADR-0029
+/// invariant 3 holds (never the key itself).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileKeyStatus {
     /// The stable profile id (also the keychain account suffix `key-<id>`).
     pub profile_id: String,
     /// Whether a key is stored for this profile. A boolean only (ADR-0029).
+    /// When [`Self::keychain_fault`] is `Some`, the read failed and this is a
+    /// placeholder `false` (the status is unknown, not empty).
     pub has_key: bool,
+    /// A keychain READ failure detail (issue #275): `None` when the read
+    /// succeeded (has_key is authoritative); `Some(detail)` when the OS
+    /// keychain read failed. Technical English (no key leaked, ADR-0029) for
+    /// the frontend's details fold, matching
+    /// [`StoreCommandError::KeychainFailure`](crate::commands::StoreCommandError).
+    pub keychain_fault: Option<String>,
 }
 
 /// One connection-preflight outcome (ADR-0070). Returned by the `test_profile`

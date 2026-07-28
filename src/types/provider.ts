@@ -42,16 +42,24 @@ export interface ProviderConfig {
   active_profile: string;
 }
 
-// The get_provider_config view (ADR-0029): effective base URL + model plus
-// has_key -- a boolean, never the key itself. Mirrors the Rust
-// ProviderConfigView. The frontend learns whether to prompt for a key without
-// ever receiving it.
+// The get_provider_config view (ADR-0029): effective base URL + model plus the
+// active profile's key status -- has_key (a boolean, never the key itself) and
+// a keychain read-fault detail. Mirrors the Rust ProviderConfigView. The header
+// key indicator learns whether to prompt for a key without ever receiving it,
+// and distinguishes a read fault from a legitimate no-key state (issue #275).
 export interface ProviderConfigView {
   base_url: string;
   model: string;
   // Whether an API key is stored in the OS keychain. A boolean only (ADR-0029
-  // invariant 3: the decrypted key lives only in the Rust core).
+  // invariant 3: the decrypted key lives only in the Rust core). When
+  // keychain_fault is non-null the read failed and this is a placeholder false
+  // (the status is unknown, not empty).
   has_key: boolean;
+  // A keychain READ failure detail (issue #275): null when the read succeeded
+  // (has_key authoritative); a technical English string when the OS keychain
+  // read failed (locked / service down / permission revoked / corrupt entry).
+  // Mirrors ProfileKeyStatus.keychain_fault.
+  keychain_fault: string | null;
 }
 
 // Per-profile key-status overlay (issue #153, ADR-0064/0029). The Profiles
@@ -64,8 +72,15 @@ export interface ProviderConfigView {
 export interface ProfileKeyStatus {
   // The stable profile id (also the keychain account suffix `key-<id>`).
   profile_id: string;
-  // Whether a key is stored for this profile. A boolean only (ADR-0029).
+  // Whether a key is stored for this profile. A boolean only (ADR-0029). When
+  // keychain_fault is non-null the read failed and this is a placeholder false
+  // (the status is unknown, not empty).
   has_key: boolean;
+  // A keychain READ failure detail (issue #275): null when the read succeeded
+  // (has_key authoritative); a technical English string when the OS keychain
+  // read failed (locked / service down / permission revoked / corrupt entry).
+  // Mirrors ProfileTestOutcome.KeychainUnavailable.detail (issue #243).
+  keychain_fault: string | null;
 }
 
 // The test_profile IPC return value (issue #236, ADR-0070 connection preflight).

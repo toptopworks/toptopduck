@@ -81,17 +81,27 @@ impl KeychainStore {
     }
 
     /// Whether an API key is stored for the given profile (ADR-0064 per-profile
-    /// slot `key-<profile_id>`). The IPC `has_api_key` command routes here with
-    /// the active profile's id; it returns a boolean, never the key (ADR-0029).
-    /// A keychain read failure honest-degrades to `false` ("cannot confirm a
-    /// key is stored") -- a bool cannot carry the error, and a false negative
-    /// only re-prompts the user, whose set/clear then propagates the real
-    /// keychain error (issue #243). The failure surfaces when the user next
-    /// clicks "Test connection" -- the preflight re-reads via
-    /// [`Self::fetch_key_for`] and classifies the fault as
-    /// `KeychainUnavailable` (this bool surface does not auto-route it).
-    pub fn has_key_for(&self, profile_id: &ProfileId) -> bool {
-        matches!(self.fetch_key_for(profile_id), Ok(Some(_)))
+    /// slot `key-<profile_id>`), or the keychain read failure when the OS
+    /// keychain itself could not be read. The `get_provider_config` +
+    /// `list_provider_profiles` IPCs route here, propagating the fault to the
+    /// frontend (issue #275) so the status surface renders "keychain
+    /// unavailable" instead of misreading as "no key configured" -- the
+    /// pre-#275 bool honest-degrade hid the fault behind a `false`. Three
+    /// results: `Ok(true)` (key stored), `Ok(false)` (nothing stored -- a
+    /// legitimate no-key state), `Err(detail)` (the read failed -- locked,
+    /// service down, permission revoked, corrupt entry). The failure is logged
+    /// here so a fault leaves a trail even when a caller honest-degrades it
+    /// away; each call site logs independently, so a single outage surfaces
+    /// once per read (not once globally).
+    pub fn has_key_for(&self, profile_id: &ProfileId) -> Result<bool, String> {
+        match self.fetch_key_for(profile_id) {
+            Ok(Some(_)) => Ok(true),
+            Ok(None) => Ok(false),
+            Err(e) => {
+                log::warn!("keychain has-key read failed for {profile_id}: {e}");
+                Err(e)
+            }
+        }
     }
 
     /// Store the API key for the given profile under `key-<profile_id>`

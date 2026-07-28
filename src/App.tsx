@@ -63,7 +63,14 @@ export default function App() {
   const platform = usePlatform();
 
   // --- App-level UI state --------------------------------------------------
-  const [hasKey, setHasKey] = useState(false);
+  // Active-profile key status (issue #275): the header key indicator's source.
+  // has_key is authoritative when keychain_fault is null; a non-null fault means
+  // the OS keychain read failed and the indicator renders "keychain unavailable"
+  // instead of misreading as "no key configured".
+  const [keyStatus, setKeyStatus] = useState<{ has_key: boolean; keychain_fault: string | null }>({
+    has_key: false,
+    keychain_fault: null,
+  });
   // settingsView (ADR-0065): the in-app settings overlay state. `open` gates
   // the render + the .settings-mode CSS class; `section` + `editProfileId` are
   // one-shot ENTRY hints consumed at mount (issue #239: the ColdStartHero CTAs
@@ -90,9 +97,9 @@ export default function App() {
   // (issue #238). Bumped on settings-close so the picker refetches its overlay
   // after a Save that may have changed a keychain slot -- ADR-0019 honest gate:
   // the popover must not keep showing "No key" after the user just configured
-  // one. The header hasKey indicator refreshes via refreshKeyStatus on the same
-  // close; this counter does the same for the picker's own overlay (which has
-  // its own profileKeys snapshot, separate from hasKey).
+  // one. The header key-status indicator refreshes via refreshKeyStatus on the
+  // same close; this counter does the same for the picker's own overlay (which
+  // has its own profileKeys snapshot, separate from keyStatus).
   const [profileKeyEpoch, setProfileKeyEpoch] = useState(0);
 
   // Ctrl/⌘+K session-search modal open state (ADR-0072, issue #252).
@@ -103,13 +110,14 @@ export default function App() {
   const openSearch = useCallback(() => setSearchOpen(true), []);
 
   // refreshKeyStatus: reads the active profile's keychain slot (ADR-0029) into
-  // hasKey. Fired once on mount by useAppConfigState's load effect, again after
-  // a profile switch, and on settings-close (a Save may have changed the slot).
-  // Stays in App because hasKey is App-level UI state rendered by HeaderActions;
-  // the hook consumes it as a dep.
+  // keyStatus. Fired once on mount by useAppConfigState's load effect, again
+  // after a profile switch, and on settings-close (a Save may have changed the
+  // slot). Stays in App because keyStatus is App-level UI state rendered by
+  // HeaderActions; the hook consumes refreshKeyStatus as a dep.
   const refreshKeyStatus = useCallback(async () => {
     try {
-      setHasKey((await getProviderConfig()).has_key);
+      const view = await getProviderConfig();
+      setKeyStatus({ has_key: view.has_key, keychain_fault: view.keychain_fault });
     } catch {
       // keep the previous indicator; the ask path surfaces real failures.
     }
@@ -120,7 +128,7 @@ export default function App() {
   // contract + restore / persist effects). App injects setShellError
   // (switchActiveProfile reject path) + refreshKeyStatus (mount + post-switch
   // kick + settings-close) as deps; reads back AppConfig state + the derived
-  // effectiveLocale / intl + the two collapse toggles. hasKey + settingsView
+  // effectiveLocale / intl + the two collapse toggles. keyStatus + settingsView
   // are App-local UI state (below).
   const {
     appConfig,
@@ -303,7 +311,8 @@ export default function App() {
                 )}
                 <HeaderActions
                   disabled={busy || !activeSession}
-                  hasKey={hasKey}
+                  hasKey={keyStatus.has_key}
+                  keychainFault={keyStatus.keychain_fault}
                   onOpenDuck={() => void handleOpenDuck()}
                   onSaveAs={() => void handleSaveAs()}
                   onOpenSettings={() => openSettings()}
