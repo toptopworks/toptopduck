@@ -104,8 +104,8 @@ pub(crate) fn probe(
     // before any probe fires. Mirrors the anthropic/openai adapter boundary
     // check; classified as EndpointUnreachable -- the endpoint is not a
     // reachable http(s) target by construction, distinct from a transport
-    // fault on a valid URL.
-    if super::http::parse_http_base_url(base_url).is_err() {
+    // fault on a valid URL (see provider::http).
+    if super::http::validate_http_base_url(base_url).is_err() {
         return ProfileTestOutcome::EndpointUnreachable;
     }
     match list_models(protocol, base_url, key) {
@@ -677,6 +677,37 @@ mod tests {
         // 302 surfaces raw, list_models falls through to NeedsFallback, and
         // the ping hits the first host (unmocked -> 501 -> Incompatible). The
         // assertion is the absence of a cross-host x-api-key leak.
+        let _ = probe(Some("sk-secret"), Protocol::Anthropic, &first.url(), "m");
+        second_leak.assert();
+    }
+
+    #[test]
+    fn ping_fallback_does_not_forward_x_api_key_across_host_redirect() {
+        // AC #244 (three-path uniform handling): the preflight's ping POST
+        // fallback wires the same shared egress agent, so a 3xx redirect on the
+        // chat/messages endpoint is NOT followed and x-api-key cannot reach a
+        // second host. Mirrors the /models GET test but forces the ping
+        // fallback first (/v1/models answers 200 non-list -> NeedsFallback ->
+        // ping POST /v1/messages returns 302). The second host's
+        // x-api-key-matching mock must record zero hits.
+        let mut first = mockito::Server::new();
+        let mut second = mockito::Server::new();
+        first
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_body("<html>not a models list</html>")
+            .create();
+        first
+            .mock("POST", "/v1/messages")
+            .with_status(302)
+            .with_header("Location", &format!("{}/v1/messages", second.url()))
+            .create();
+        let second_leak = second
+            .mock("POST", "/v1/messages")
+            .match_header("x-api-key", "sk-secret")
+            .expect(0)
+            .with_status(200)
+            .create();
         let _ = probe(Some("sk-secret"), Protocol::Anthropic, &first.url(), "m");
         second_leak.assert();
     }
