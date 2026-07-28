@@ -83,8 +83,15 @@ impl KeychainStore {
     /// Whether an API key is stored for the given profile (ADR-0064 per-profile
     /// slot `key-<profile_id>`). The IPC `has_api_key` command routes here with
     /// the active profile's id; it returns a boolean, never the key (ADR-0029).
+    /// A keychain read failure honest-degrades to `false` ("cannot confirm a
+    /// key is stored") -- a bool cannot carry the error, and a false negative
+    /// only re-prompts the user, whose set/clear then propagates the real
+    /// keychain error (issue #243). The failure surfaces when the user next
+    /// clicks "Test connection" -- the preflight re-reads via
+    /// [`Self::fetch_key_for`] and classifies the fault as
+    /// `KeychainUnavailable` (this bool surface does not auto-route it).
     pub fn has_key_for(&self, profile_id: &ProfileId) -> bool {
-        self.fetch_key_for(profile_id).is_some()
+        matches!(self.fetch_key_for(profile_id), Ok(Some(_)))
     }
 
     /// Store the API key for the given profile under `key-<profile_id>`
@@ -111,12 +118,23 @@ impl KeychainStore {
         }
     }
 
-    /// The stored API key for the given profile, or `None` when nothing is
-    /// stored. The provider reads this per turn (stateless: each call opens the
-    /// OS entry fresh) for the active profile.
-    pub fn fetch_key_for(&self, profile_id: &ProfileId) -> Option<String> {
-        let entry = Entry::new(SERVICE, &key_account(profile_id)).ok()?;
-        entry.get_password().ok()
+    /// The stored API key for the given profile: `Ok(None)` when nothing is
+    /// stored, `Err` when the OS keychain read failed (locked, service down,
+    /// permission revoked, corrupt entry). Mirrors [`Self::clear_key_for`]'s
+    /// trust-root handling (ADR-0029): the OS keychain is the trust root for
+    /// the key, so a read failure is surfaced rather than swallowed into
+    /// "nothing stored" -- a failed read must not diagnose as a missing / bad
+    /// key (issue #243). The provider reads this per turn (stateless: each call
+    /// opens the OS entry fresh) for the active profile.
+    pub fn fetch_key_for(&self, profile_id: &ProfileId) -> Result<Option<String>, String> {
+        let entry = Entry::new(SERVICE, &key_account(profile_id)).map_err(keychain_err)?;
+        match entry.get_password() {
+            Ok(key) => Ok(Some(key)),
+            // No entry is not a failure: "nothing stored" is a legitimate
+            // state the callers classify as no-key (never a keychain fault).
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(keychain_err(e)),
+        }
     }
 
     /// Read the LEGACY provider-config blob (`{base_url, model}` JSON) that older

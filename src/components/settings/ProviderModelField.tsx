@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 
 import { testProfile } from "../../api";
@@ -12,7 +12,7 @@ import { Label } from "../ui/label";
 // model input OUT of ProviderEndpointFields so this atom owns the ADR-0070
 // preflight surface: a "Test connection" button that fires the test_profile IPC
 // (Rust reads the profile's stored key from the OS keychain + probes the
-// endpoint), classifies the result into ADR-0044's four states, and feeds the
+// endpoint), classifies the result into ADR-0044's five states, and feeds the
 // listed models to a dropdown when the probe succeeds. The model list is held
 // IN-MEMORY here only -- it never enters app-config (ADR-0038 stores
 // preferences, not probe snapshots); list failure or "not yet probed" falls back
@@ -162,11 +162,12 @@ export function ProviderModelField({
   );
 }
 
-// Renders the four-state preflight classification (ADR-0044 axis). Each state
-// has a fixed locale message; Incompatible additionally folds the technical
-// English detail (an upstream HTTP body string) under a <details> so the user
-// can drill in without it dominating the form. The switch is exhaustive -- a
-// future ProfileTestOutcome variant fails the `never` assignment here.
+// Renders the five-state preflight classification (ADR-0044 axis). Each state
+// has a fixed locale message; KeychainUnavailable + Incompatible additionally
+// fold the technical English detail (a keychain error string / an upstream HTTP
+// body string) under a <details> so the user can drill in without it dominating
+// the form. The switch is exhaustive -- a future ProfileTestOutcome variant
+// fails the `never` assignment here.
 function PreflightResult({ outcome }: { outcome: ProfileTestOutcome }) {
   switch (outcome.kind) {
     case "Ok":
@@ -195,6 +196,15 @@ function PreflightResult({ outcome }: { outcome: ProfileTestOutcome }) {
           />
         </p>
       );
+    case "KeychainUnavailable":
+      return (
+        <DetailFold detail={outcome.data.detail}>
+          <FormattedMessage
+            id="settings.profiles.test.keychainUnavailable"
+            defaultMessage="Keychain unavailable — the OS keychain could not be read. Check the OS keychain, then test again."
+          />
+        </DetailFold>
+      );
     case "EndpointUnreachable":
       return (
         <p className="text-destructive text-sm">
@@ -206,17 +216,12 @@ function PreflightResult({ outcome }: { outcome: ProfileTestOutcome }) {
       );
     case "Incompatible":
       return (
-        <details className="text-destructive text-sm">
-          <summary className="cursor-pointer">
-            <FormattedMessage
-              id="settings.profiles.test.incompatible"
-              defaultMessage="Incompatible — the endpoint responded but cannot serve a turn."
-            />
-          </summary>
-          <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-xs">
-            {outcome.data.detail}
-          </pre>
-        </details>
+        <DetailFold detail={outcome.data.detail}>
+          <FormattedMessage
+            id="settings.profiles.test.incompatible"
+            defaultMessage="Incompatible — the endpoint responded but cannot serve a turn."
+          />
+        </DetailFold>
       );
     default: {
       const _exhaustive: never = outcome;
@@ -224,4 +229,20 @@ function PreflightResult({ outcome }: { outcome: ProfileTestOutcome }) {
       return null;
     }
   }
+}
+
+// The fold chrome KeychainUnavailable + Incompatible share: a locale summary
+// over the technical English detail, drilled via <details> so the detail does
+// not dominate the form. The <FormattedMessage> literals stay at the call
+// sites -- formatjs extract statically scans for <FormattedMessage> JSX with
+// literal id/defaultMessage (scripts/check-i18n.mjs), so wrapping the literal
+// inside a helper would hide it from the scanner and drop both ids from the
+// catalog guard.
+function DetailFold({ children, detail }: { children: ReactNode; detail: string }) {
+  return (
+    <details className="text-destructive text-sm">
+      <summary className="cursor-pointer">{children}</summary>
+      <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-xs">{detail}</pre>
+    </details>
+  );
 }

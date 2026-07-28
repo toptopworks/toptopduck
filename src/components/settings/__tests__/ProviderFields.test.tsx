@@ -498,6 +498,24 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
     await screen.findByText(/Key rejected/);
   });
 
+  it("KeychainUnavailable renders the keychain message + the folded technical detail (issue #243)", async () => {
+    vi.mocked(testProfile).mockResolvedValue({
+      kind: "KeychainUnavailable",
+      data: { detail: "keychain access failed: The user canceled" },
+    });
+    renderSettings(
+      <ProviderModelField profile={baseProfile} onUpdate={vi.fn()} disabled={false} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+    // Distinct from KeyRejected: the trust root itself is unavailable, and the
+    // technical detail folds under the summary like Incompatible.
+    await screen.findByText(/Keychain unavailable/);
+    expect(screen.queryByText(/Key rejected/)).not.toBeInTheDocument();
+    expect(
+      screen.getByText("keychain access failed: The user canceled"),
+    ).toBeInTheDocument();
+  });
+
   it("EndpointUnreachable renders the unreachable message", async () => {
     vi.mocked(testProfile).mockResolvedValue({ kind: "EndpointUnreachable" });
     renderSettings(

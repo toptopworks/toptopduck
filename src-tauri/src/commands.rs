@@ -664,13 +664,16 @@ pub fn clear_profile_key(
 /// (ADR-0029 -- the key never crosses IPC) and probes the caller-supplied
 /// endpoint (`protocol` + `base_url` + `model` = the frontend's current edit
 /// values, so a user who edits base_url and re-tests does not have to save
-/// first) via `GET /models` with a minimal-turn ping fallback. Returns the
-/// four-state [`ProfileTestOutcome`] so the frontend renders the result and
-/// feeds the listed models to the model dropdown (the list is NOT persisted --
-/// ADR-0038). Runs off the async/UI thread (the probe is two blocking HTTP
-/// calls up to the 30s ceiling); the only `Err` is a spawn-blocking join
-/// failure -- every probe verdict (including KeyRejected / EndpointUnreachable
-/// / Incompatible) is an `Ok(ProfileTestOutcome)`.
+/// first) via `GET /models` with a minimal-turn ping fallback. A failed
+/// keychain read short-circuits to `KeychainUnavailable` before any HTTP
+/// (issue #243 -- previously swallowed into `None` and misclassified as
+/// `KeyRejected`). Returns the five-state [`ProfileTestOutcome`] so the
+/// frontend renders the result and feeds the listed models to the model
+/// dropdown (the list is NOT persisted -- ADR-0038). Runs off the async/UI
+/// thread (the probe is two blocking HTTP calls up to the 30s ceiling); the
+/// only `Err` is a spawn-blocking join failure -- every preflight verdict
+/// (including KeyRejected / KeychainUnavailable / EndpointUnreachable /
+/// Incompatible) is an `Ok(ProfileTestOutcome)`.
 #[tauri::command]
 pub async fn test_profile(
     live: State<'_, LiveProviderConfig>,
@@ -682,8 +685,8 @@ pub async fn test_profile(
     let live = live.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let id = ProfileId(profile_id);
-        let key = live.key_for_profile(&id);
-        crate::provider::preflight::probe(key.as_deref(), protocol, &base_url, &model)
+        let key_read = live.key_for_profile(&id);
+        crate::provider::preflight::run(key_read, protocol, &base_url, &model)
     })
     .await
     .map_err(|e| format!("test_profile task failed: {e}"))
