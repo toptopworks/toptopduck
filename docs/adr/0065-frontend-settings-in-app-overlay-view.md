@@ -1,5 +1,7 @@
 # Frontend settings: in-app overlay view, not a modal dialog
 
+> 部分被 [ADR-0075](./0075-settings-per-control-persistence-and-rail-chrome.md) 取代：Decision「设置视图自带 header（返回按钮 + 「Settings」标题）」与 Consequences「入口与退出」**退役 / 重排**——返回迁 rail 顶、标题升各面板 hero，退出 / 入口外壳改为 rail 底连接状态行 + 齿轮双态开关；并确立**逐控件持久化模型**取代实现期的全局 draft + 单一 footer 保存。覆盖视图形态、分区列表、焦点 / ESC 习惯保留。详见 ADR-0075。
+
 ## Decision
 
 设置面板作为**应用内全屏覆盖视图**（in-app overlay view），而非模态 Dialog。打开设置 = shell 在 session shell 之上并列渲染 `<SettingsView/>` 覆盖层（`{settingsOpen && <SettingsView/>}`），session sidebar + topbar + keep-alive session pane 仍挂载、靠 `.shell.settings-mode` CSS（`display:none`）隐藏；左上角「‹ Back to app」退出、移除覆盖层即恢复原 session shell 与原 activeSession（组件树未卸载，in-flight turn 不中断）。设置视图自带 header（返回按钮 + 「Settings」标题），主 top bar 在设置视图内隐藏；左侧为设置分类导航（General / Profiles / Engine / Privacy），右侧为选中分类内容。非模态、无遮罩——就是当前视图。设置内的确认类弹窗（如删除 profile）仍用 Radix AlertDialog。

@@ -55,3 +55,4 @@ ADR-0051 收口前端状态分层为「服务端态走 Query + 客户端 UI 态�
 - **未决(留实现期)**:shell 层若出现多消费者共享同一 advisory state(如多窗口、或 sidebar 与 topbar 各自独立 fetch 同一数据),重新评估该子项是否拆出走 Query;v1 单窗口无此场景。
 - **出口保留**:若未来 advisory state 出现一致性 bug(如 sessions 列表与磁盘不同步),可作为该子项拆出走 Query 的触发点。
 - **CONTEXT.md 不动**:shell 层 advisory state 是实现/状态管理决策,不引入新领域术语——app-config(0038 preference)/ sessions(0060 派生元数据)/ provider config(0029/0064)全是已定义术语。
+- **被 ADR-0075 澄清(设置侧调用,契约不变)**:设置侧调用 `commitAppConfig` 的 surfacing 与**逐控件持久化模型**(即时 / 失焦提交失败 = 补偿写回退 + 行内错;显式保存失败 = 仅行内错;全局 draft 退役)见 ADR-0075;本 ADR 的乐观-不回滚契约不变。
