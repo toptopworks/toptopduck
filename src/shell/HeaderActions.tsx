@@ -8,6 +8,7 @@ import { Button } from "../components/ui/button";
 export function HeaderActions({
   disabled,
   hasKey,
+  keychainFault,
   onOpenDuck,
   onSaveAs,
   onOpenSettings,
@@ -15,6 +16,11 @@ export function HeaderActions({
 }: {
   disabled: boolean;
   hasKey: boolean;
+  // A keychain READ failure detail (issue #275): null when the read succeeded
+  // (hasKey authoritative); a technical English string when the OS keychain
+  // read failed. When non-null the badge renders "Keychain unavailable" (with
+  // the detail as the native title) instead of misreading as "no key".
+  keychainFault: string | null;
   onOpenDuck: () => void;
   onSaveAs: () => void;
   onOpenSettings: () => void;
@@ -80,9 +86,15 @@ export function HeaderActions({
       </Button>
       <Badge
         variant="outline"
-        className={hasKey ? "key-ok text-primary" : "key-missing text-warning"}
+        className={hasKey && !keychainFault ? "key-ok text-primary" : "key-missing text-warning"}
+        title={keychainFault ?? undefined}
       >
-        {hasKey ? (
+        {keychainFault ? (
+          <FormattedMessage
+            id="header.keychainUnavailable"
+            defaultMessage="Keychain unavailable"
+          />
+        ) : hasKey ? (
           <FormattedMessage id="header.keyOk" defaultMessage="LLM key configured" />
         ) : (
           <FormattedMessage

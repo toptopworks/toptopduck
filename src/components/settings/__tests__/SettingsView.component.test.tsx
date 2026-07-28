@@ -45,7 +45,7 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
     recent_files: [],
     shell: { sidebar_collapsed: false, rail_collapsed: false, sidebar_grouping: "flat" },
   };
-  const profileKeysDefault = [{ profile_id: "default", has_key: false }];
+  const profileKeysDefault = [{ profile_id: "default", has_key: false, keychain_fault: null }];
 
   // Two-profile config + key overlay: default (Anthropic, active/selected) +
   // second (GLM/openai). Shared by the #153 delete test and the #170
@@ -68,8 +68,8 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
     },
   };
   const twoProfileKeys = [
-    { profile_id: "default", has_key: false },
-    { profile_id: "second", has_key: false },
+    { profile_id: "default", has_key: false, keychain_fault: null },
+    { profile_id: "second", has_key: false, keychain_fault: null },
   ];
 
   beforeEach(() => {
@@ -199,7 +199,7 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
 
   it("Profiles pane lists profiles with key-status badges (issue #153)", async () => {
     vi.mocked(listProviderProfiles).mockResolvedValue([
-      { profile_id: "default", has_key: true },
+      { profile_id: "default", has_key: true, keychain_fault: null },
     ]);
     renderSettings(
       <SettingsView
@@ -451,7 +451,7 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
     // the returned bool (false on success) flips the has_key overlay so the badge
     // updates without a re-fetch. Pins the clear path the set-key test does not.
     vi.mocked(listProviderProfiles).mockResolvedValue([
-      { profile_id: "default", has_key: true },
+      { profile_id: "default", has_key: true, keychain_fault: null },
     ]);
     vi.mocked(clearProfileKey).mockResolvedValue(false);
     renderSettings(
@@ -632,5 +632,25 @@ describe("SettingsView (issue #151, ADR-0065)", () => {
     expect(classes).toContain("focus-visible:outline-2");
     expect(classes).toContain("focus-visible:outline-ring");
     expect(classes).toContain("focus-visible:outline-offset-2");
+  });
+
+  it("Profiles pane shows keychain-unavailable badge on a keychain read fault (issue #275)", async () => {
+    // AC #275: a per-profile keychain read fault surfaces as a distinct badge
+    // in the Profiles list, NOT the "No key" misread. The pre-#275 bool
+    // honest-degrade hid the fault behind has_key=false; pin it does not regress.
+    vi.mocked(listProviderProfiles).mockResolvedValue([
+      { profile_id: "default", has_key: false, keychain_fault: "keychain access failed: locked" },
+    ]);
+    renderSettings(
+      <SettingsView
+        appConfig={baseConfig}
+        onCommitAppConfig={vi.fn()}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    await screen.findByText("Anthropic");
+    expect(screen.getByText("Keychain unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("No key")).not.toBeInTheDocument();
   });
 });

@@ -43,6 +43,7 @@ vi.mock("../api", async (importOriginal) => {
       base_url: "https://api.anthropic.com",
       model: "claude-sonnet-4-6",
       has_key: false,
+      keychain_fault: null,
     })),
   };
 });

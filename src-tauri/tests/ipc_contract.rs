@@ -809,24 +809,82 @@ fn session_metadata_serializes_flat_snake_case() {
 
 #[test]
 fn profile_key_status_serializes_as_a_flat_object() {
-    // ProfileKeyStatus (issue #153) crosses IPC as a flat `{profile_id, has_key}`
-    // object -- one entry per profile in the list_provider_profiles return. The
-    // shape src/types.ts mirrors: profile_id is the opaque id string, has_key is
-    // a boolean (ADR-0029 -- never the key itself).
+    // ProfileKeyStatus (issue #153) crosses IPC as a flat object -- one entry
+    // per profile in the list_provider_profiles return. Issue #275 adds the
+    // `keychain_fault` field: null on a successful read (has_key authoritative),
+    // a string detail when the OS keychain read itself failed. The shape
+    // src/types/provider.ts mirrors: profile_id (opaque id), has_key (boolean),
+    // keychain_fault (string | null). ADR-0029 -- never the key itself.
     use toptopduck_lib::ProfileKeyStatus;
     assert_wire(
         &ProfileKeyStatus {
             profile_id: "default".into(),
             has_key: true,
+            keychain_fault: None,
         },
-        r#"{"profile_id":"default","has_key":true}"#,
+        r#"{"profile_id":"default","has_key":true,"keychain_fault":null}"#,
     );
     assert_wire(
         &ProfileKeyStatus {
             profile_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890".into(),
             has_key: false,
+            keychain_fault: None,
         },
-        r#"{"profile_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","has_key":false}"#,
+        r#"{"profile_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","has_key":false,"keychain_fault":null}"#,
+    );
+    // Issue #275: a keychain read fault rides keychain_fault (technical English
+    // detail), with has_key as a placeholder false -- the status is unknown, not
+    // empty, so the frontend renders "keychain unavailable" instead of "no key".
+    assert_wire(
+        &ProfileKeyStatus {
+            profile_id: "default".into(),
+            has_key: false,
+            keychain_fault: Some("keychain access failed: The user canceled".into()),
+        },
+        r#"{"profile_id":"default","has_key":false,"keychain_fault":"keychain access failed: The user canceled"}"#,
+    );
+}
+
+#[test]
+fn provider_config_view_serializes_with_keychain_fault() {
+    // ProviderConfigView (ADR-0029) crosses IPC as the get_provider_config +
+    // set_provider_config return -- the active profile's effective base URL +
+    // model plus its key status. Issue #275 adds `keychain_fault`: null on a
+    // successful read (has_key authoritative), a string detail when the OS
+    // keychain read itself failed. The shape src/types/provider.ts mirrors:
+    // base_url, model, has_key (boolean), keychain_fault (string | null).
+    // ADR-0029 -- never the key itself.
+    use toptopduck_lib::ProviderConfigView;
+    assert_wire(
+        &ProviderConfigView {
+            base_url: "https://api.anthropic.example".into(),
+            model: "claude-sonnet-4".into(),
+            has_key: true,
+            keychain_fault: None,
+        },
+        r#"{"base_url":"https://api.anthropic.example","model":"claude-sonnet-4","has_key":true,"keychain_fault":null}"#,
+    );
+    assert_wire(
+        &ProviderConfigView {
+            base_url: "https://api.anthropic.example".into(),
+            model: "claude-sonnet-4".into(),
+            has_key: false,
+            keychain_fault: None,
+        },
+        r#"{"base_url":"https://api.anthropic.example","model":"claude-sonnet-4","has_key":false,"keychain_fault":null}"#,
+    );
+    // Issue #275: a keychain read fault rides keychain_fault (technical English
+    // detail), with has_key as a placeholder false -- the status is unknown, not
+    // empty, so the header indicator renders "keychain unavailable" instead of
+    // "no key configured".
+    assert_wire(
+        &ProviderConfigView {
+            base_url: "https://api.anthropic.example".into(),
+            model: "claude-sonnet-4".into(),
+            has_key: false,
+            keychain_fault: Some("keychain access failed: locked".into()),
+        },
+        r#"{"base_url":"https://api.anthropic.example","model":"claude-sonnet-4","has_key":false,"keychain_fault":"keychain access failed: locked"}"#,
     );
 }
 

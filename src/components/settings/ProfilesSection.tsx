@@ -3,7 +3,11 @@ import { FormattedMessage, useIntl } from "react-intl";
 
 import { listProviderProfiles } from "../../api";
 import { fmtError } from "../../lib/error-presentation";
-import type { ProviderConfig, ProviderProfile } from "../../types/provider";
+import type {
+  ProfileKeyStatus,
+  ProviderConfig,
+  ProviderProfile,
+} from "../../types/provider";
 import { cn } from "../../lib/utils";
 import {
   AlertDialog,
@@ -112,7 +116,7 @@ export function ProfilesSection({
   // onKeyStatusChange, so no re-fetch). Missing ids (a freshly-minted, unsaved
   // profile) default to false until set_profile_key returns true. This overlay
   // drives BOTH the list-level badges and the key field's has_key prop.
-  const [profileKeys, setProfileKeys] = useState<Record<string, boolean>>({});
+  const [profileKeys, setProfileKeys] = useState<Record<string, ProfileKeyStatus>>({});
   const [keysLoading, setKeysLoading] = useState(true);
   const [keysError, setKeysError] = useState<string | null>(null);
 
@@ -155,8 +159,8 @@ export function ProfilesSection({
     listProviderProfiles()
       .then((status) => {
         if (cancelled) return;
-        const map: Record<string, boolean> = {};
-        for (const s of status) map[s.profile_id] = s.has_key;
+        const map: Record<string, ProfileKeyStatus> = {};
+        for (const s of status) map[s.profile_id] = s;
         setProfileKeys(map);
       })
       .catch((e) => {
@@ -205,7 +209,8 @@ export function ProfilesSection({
   // the dropdown tracks field edits for free.
   const derivedPreset = selected ? derivePresetId(selected) : PRESET_CUSTOM;
   const activePreset = findPreset(derivedPreset);
-  const selectedHasKey = selected ? profileKeys[selected.id] ?? false : false;
+  const selectedStatus = selected ? profileKeys[selected.id] : undefined;
+  const selectedHasKey = selectedStatus?.has_key ?? false;
 
   function handleCreate() {
     // Auto-select the new profile so the user lands in its edit form.
@@ -271,7 +276,9 @@ export function ProfilesSection({
                 carries the profile name, so its accessible name is complete. */}
             {provider.profiles.map((p) => {
               const isActive = p.id === provider.active_profile;
-              const pHasKey = profileKeys[p.id] ?? false;
+              const pStatus = profileKeys[p.id];
+              const pHasKey = pStatus?.has_key ?? false;
+              const pFault = pStatus?.keychain_fault ?? null;
               const isSelected = p.id === selectedId;
               const label = p.display_name.trim() || unnamed;
               return (
@@ -325,19 +332,28 @@ export function ProfilesSection({
                         />
                       </Badge>
                     )}
-                    <Badge variant={pHasKey ? "secondary" : "outline"}>
-                      {pHasKey ? (
+                    {pFault ? (
+                      <Badge variant="outline" title={pFault}>
                         <FormattedMessage
-                          id="settings.profiles.keySet"
-                          defaultMessage="Key set"
+                          id="settings.profiles.keychainUnavailable"
+                          defaultMessage="Keychain unavailable"
                         />
-                      ) : (
-                        <FormattedMessage
-                          id="settings.profiles.keyMissing"
-                          defaultMessage="No key"
-                        />
-                      )}
-                    </Badge>
+                      </Badge>
+                    ) : (
+                      <Badge variant={pHasKey ? "secondary" : "outline"}>
+                        {pHasKey ? (
+                          <FormattedMessage
+                            id="settings.profiles.keySet"
+                            defaultMessage="Key set"
+                          />
+                        ) : (
+                          <FormattedMessage
+                            id="settings.profiles.keyMissing"
+                            defaultMessage="No key"
+                          />
+                        )}
+                      </Badge>
+                    )}
                   </button>
                   <Button
                     type="button"
@@ -401,7 +417,14 @@ export function ProfilesSection({
               profileId={selected.id}
               hasKey={selectedHasKey}
               onKeyStatusChange={(hasKey) =>
-                setProfileKeys((prev) => ({ ...prev, [selected.id]: hasKey }))}
+                setProfileKeys((prev) => ({
+                  ...prev,
+                  [selected.id]: {
+                    profile_id: selected.id,
+                    has_key: hasKey,
+                    keychain_fault: null,
+                  },
+                }))}
               getKeyLink={activePreset?.get_key_link ?? null}
               keyPlaceholder={activePreset?.key_placeholder ?? ""}
               // The master list already shows the per-profile key badge; hide

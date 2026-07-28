@@ -6,7 +6,7 @@ import { Cpu } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { fmtError } from "../../lib/error-presentation";
 import { listProviderProfiles } from "../../api";
-import type { ProviderConfig } from "../../types/provider";
+import type { ProfileKeyStatus, ProviderConfig } from "../../types/provider";
 import {
   PRESET_CUSTOM,
   derivePresetId,
@@ -80,7 +80,7 @@ export function ComposerProviderPicker({
   // (ADR-0019 honest gate: the popover must not keep showing "No key" after the
   // user just configured one). A profile switch never refetches -- it moves the
   // active pointer, not the keys.
-  const [profileKeys, setProfileKeys] = useState<Record<string, boolean>>({});
+  const [profileKeys, setProfileKeys] = useState<Record<string, ProfileKeyStatus>>({});
   const [keysError, setKeysError] = useState<string | null>(null);
 
   // Stable intl ref so the mount-time fetch effect runs once ([] deps) instead
@@ -95,8 +95,8 @@ export function ComposerProviderPicker({
     listProviderProfiles()
       .then((status) => {
         if (cancelled) return;
-        const map: Record<string, boolean> = {};
-        for (const s of status) map[s.profile_id] = s.has_key;
+        const map: Record<string, ProfileKeyStatus> = {};
+        for (const s of status) map[s.profile_id] = s;
         setProfileKeys(map);
       })
       .catch((e) => {
@@ -115,9 +115,9 @@ export function ComposerProviderPicker({
     defaultMessage: "Unnamed profile",
   });
   const model = activeProfile?.model ?? "";
-  const hasKey = activeProfile
-    ? (profileKeys[activeProfile.id] ?? false)
-    : false;
+  const activeStatus = activeProfile ? profileKeys[activeProfile.id] : undefined;
+  const hasKey = activeStatus?.has_key ?? false;
+  const keychainFault = activeStatus?.keychain_fault ?? null;
 
   // The provider readout = the preset the active profile sits on (e.g.
   // "Anthropic"); falls back to the profile's own display name when the endpoint
@@ -148,7 +148,15 @@ export function ComposerProviderPicker({
     id: "composer.providerPicker.noKeyMark",
     defaultMessage: "no key",
   });
-  const tooltipText = hasKey ? summary : `${summary} · ${noKeyMark}`;
+  const keychainUnavailableMark = intl.formatMessage({
+    id: "settings.profiles.keychainUnavailable",
+    defaultMessage: "Keychain unavailable",
+  });
+  const tooltipText = keychainFault
+    ? `${summary} · ${keychainUnavailableMark}`
+    : hasKey
+      ? summary
+      : `${summary} · ${noKeyMark}`;
 
   // Model field draft. The popover's model input commits on blur / Enter, NOT
   // per keystroke -- a model id is multi-character and per-keystroke writes
@@ -277,27 +285,43 @@ export function ComposerProviderPicker({
           {/* Zone 3: key status. Honest mark when the active profile has no key
               (ADR-0019) -- the badge + the explicit "asking will fail" line. */}
           <div className="flex items-center gap-2 text-sm">
-            <Badge variant={hasKey ? "secondary" : "outline"}>
-              {hasKey ? (
+            {keychainFault ? (
+              <Badge variant="outline" title={keychainFault}>
                 <FormattedMessage
-                  id="settings.profiles.keySet"
-                  defaultMessage="Key set"
+                  id="settings.profiles.keychainUnavailable"
+                  defaultMessage="Keychain unavailable"
                 />
-              ) : (
+              </Badge>
+            ) : (
+              <Badge variant={hasKey ? "secondary" : "outline"}>
+                {hasKey ? (
+                  <FormattedMessage
+                    id="settings.profiles.keySet"
+                    defaultMessage="Key set"
+                  />
+                ) : (
+                  <FormattedMessage
+                    id="settings.profiles.keyMissing"
+                    defaultMessage="No key"
+                  />
+                )}
+              </Badge>
+            )}
+            {keychainFault ? (
+              <span className="text-muted-foreground">
                 <FormattedMessage
-                  id="settings.profiles.keyMissing"
-                  defaultMessage="No key"
+                  id="settings.profiles.keychainUnavailableHint"
+                  defaultMessage="The OS keychain could not be read (it may be locked, or the service is down). Check the OS keychain, then retry."
                 />
-              )}
-            </Badge>
-            {!hasKey && (
+              </span>
+            ) : !hasKey ? (
               <span className="text-muted-foreground">
                 <FormattedMessage
                   id="settings.profiles.key.hintUnset"
                   defaultMessage="No key saved for this profile — asking with this profile active will return a “not configured” failure."
                 />
               </span>
-            )}
+            ) : null}
           </div>
           {keysError && <p className="text-destructive text-sm">{keysError}</p>}
 

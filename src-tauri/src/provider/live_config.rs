@@ -61,9 +61,17 @@ impl LiveProviderConfig {
 
     // --- Key (delegated to the OS keychain, ADR-0029) ------------------------
 
-    /// Whether an API key is stored for the ACTIVE profile. Delegates to the
-    /// keychain under `key-<active_profile_id>` (ADR-0064 per-profile slot).
-    pub fn has_key(&self) -> bool {
+    /// Reads the ACTIVE profile's keychain slot (`key-<active_profile_id>`,
+    /// ADR-0064 per-profile slot) and propagates the outcome. `Ok(bool)` is the
+    /// authoritative has-key state; `Err(detail)` means the OS keychain read
+    /// itself failed (locked / service down / permission revoked / corrupt
+    /// entry), logged at [`KeychainStore::has_key_for`]. The
+    /// `get_provider_config` / `set_provider_config` views feed this straight
+    /// into [`crate::model::ProviderConfig::view`], which maps a fault onto the
+    /// view's `keychain_fault` so the header indicator renders "keychain
+    /// unavailable" instead of misreading the fault as "no key configured"
+    /// (issue #275).
+    pub fn has_key(&self) -> Result<bool, String> {
         self.keychain
             .has_key_for(&self.load().provider.active_profile)
     }
@@ -102,9 +110,17 @@ impl LiveProviderConfig {
             .provider
             .profiles
             .iter()
-            .map(|p| crate::model::ProfileKeyStatus {
-                profile_id: p.id.as_str().to_string(),
-                has_key: self.keychain.has_key_for(&p.id),
+            .map(|p| match self.keychain.has_key_for(&p.id) {
+                Ok(has_key) => crate::model::ProfileKeyStatus {
+                    profile_id: p.id.as_str().to_string(),
+                    has_key,
+                    keychain_fault: None,
+                },
+                Err(detail) => crate::model::ProfileKeyStatus {
+                    profile_id: p.id.as_str().to_string(),
+                    has_key: false,
+                    keychain_fault: Some(detail),
+                },
             })
             .collect()
     }
@@ -114,7 +130,12 @@ impl LiveProviderConfig {
     /// (true on success) so the frontend updates its overlay without a re-fetch.
     pub fn set_profile_key(&self, profile_id: &ProfileId, key: &str) -> Result<bool, String> {
         self.keychain.set_key_for(profile_id, key)?;
-        Ok(self.keychain.has_key_for(profile_id))
+        // The write succeeded, so the key IS stored -- a read fault on the
+        // post-write status check must not propagate as a write failure (the
+        // frontend would misread a successful set as rejected). Honest-degrade
+        // to true; the fault is logged at has_key_for, and the next list/read
+        // re-reads the live state.
+        Ok(self.keychain.has_key_for(profile_id).unwrap_or(true))
     }
 
     /// Remove the key for the named profile (idempotent). Returns the new
@@ -123,7 +144,11 @@ impl LiveProviderConfig {
     /// frontend can tell the user the key did not come out (ADR-0029 trust root).
     pub fn clear_profile_key(&self, profile_id: &ProfileId) -> Result<bool, String> {
         self.keychain.clear_key_for(profile_id)?;
-        Ok(self.keychain.has_key_for(profile_id))
+        // The delete succeeded (idempotent on a missing entry), so the key is
+        // gone -- a read fault on the post-clear status check must not propagate
+        // as a delete failure. Honest-degrade to false; the fault is logged at
+        // has_key_for.
+        Ok(self.keychain.has_key_for(profile_id).unwrap_or(false))
     }
 
     /// The stored key for the named profile: `Ok(None)` when nothing is
@@ -299,12 +324,21 @@ impl ProviderConfigSource for LiveProviderConfig {
         // contract cannot carry the error. The failure surfaces when the user
         // next clicks "Test connection" -- test_profile re-reads and classifies
         // it as KeychainUnavailable (issue #243), keeping the Err this per-turn
-        // path must drop.
+        // path must drop. Issue #275: log the fault before dropping it so the
+        // per-turn honest-degrade leaves a trail (mirrors the has_key_for log);
+        // the signature stays Option<String> (per-turn cannot carry the error,
+        // and test_profile is the diagnostic entry point).
         let cfg = self.load();
-        self.keychain
-            .fetch_key_for(&cfg.provider.active_profile)
-            .ok()
-            .flatten()
+        match self.keychain.fetch_key_for(&cfg.provider.active_profile) {
+            Ok(opt) => opt,
+            Err(e) => {
+                log::warn!(
+                    "keychain per-turn read failed for active {}: {e}",
+                    cfg.provider.active_profile
+                );
+                None
+            }
+        }
     }
     fn base_url(&self) -> String {
         // Fresh disk read each call -- a reconfigured endpoint on the active
@@ -716,7 +750,28 @@ mod tests {
         assert_eq!(status[0].profile_id, "__test_list_a");
         assert_eq!(status[1].profile_id, "__test_list_b");
         // No keychain entry exists for these synthetic ids -> has_key false.
+        // Issue #275: the read itself succeeded (CI keychain has no entry but
+        // the read does not fail), so keychain_fault is None -- the frontend
+        // renders "no key", not "keychain unavailable". The fault branch cannot
+        // be reproduced in CI (OS keychain locking needs host manipulation) and
+        // is covered by the wire-shape pin in tests/ipc_contract.rs + the
+        // Result-returning has_key_for contract.
         assert!(!status[0].has_key);
         assert!(!status[1].has_key);
+        assert!(status[0].keychain_fault.is_none());
+        assert!(status[1].keychain_fault.is_none());
+    }
+
+    #[test]
+    fn has_key_propagates_the_active_profile_read_outcome() {
+        // Issue #275: has_key() propagates the keychain read outcome for the
+        // active profile. In CI the read succeeds (no entry, but not a fault),
+        // so the result is Ok(false) -- the authoritative no-key state. The
+        // fault branch (Err) cannot be reproduced in CI (OS keychain locking
+        // needs host manipulation); it rides the wire-shape pin in
+        // tests/ipc_contract.rs (ProviderConfigView.keychain_fault) + the
+        // Result-returning has_key_for contract.
+        let (_dir, live) = live();
+        assert_eq!(live.has_key(), Ok(false));
     }
 }

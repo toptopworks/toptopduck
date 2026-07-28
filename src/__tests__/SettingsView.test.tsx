@@ -43,6 +43,7 @@ vi.mock("../api", async (importOriginal) => {
       base_url: "https://api.anthropic.com",
       model: "claude-sonnet-4-6",
       has_key: true,
+      keychain_fault: null,
     })),
     getAppConfig: vi.fn(async () => null),
     setAppConfig: vi.fn(async (cfg: AppConfig) => cfg),

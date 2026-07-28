@@ -292,7 +292,6 @@ pub fn run() {
             commands::cancel,
             commands::conversation,
             commands::read_rows,
-            commands::has_api_key,
             commands::set_api_key,
             commands::clear_api_key,
             commands::get_provider_config,

@@ -601,14 +601,16 @@ mod tests {
     #[test]
     fn view_surfaces_active_profile_endpoint_and_has_key() {
         // The IPC view carries the active profile's base URL + model verbatim
-        // and the key boolean as-is (ADR-0029: only the boolean crosses).
+        // and the key read outcome as-is (ADR-0029: a boolean + read-fault
+        // detail cross, never the key).
         let mut provider = ProviderConfig::defaults();
         provider.active_mut().expect("active profile").base_url =
             "https://gateway.example.test".into();
-        let view = provider.view(true);
+        let view = provider.view(Ok(true));
         assert_eq!(view.base_url, "https://gateway.example.test");
         assert_eq!(view.model, crate::model::DEFAULT_PROVIDER_MODEL);
         assert!(view.has_key);
+        assert!(view.keychain_fault.is_none());
     }
 
     #[test]
@@ -620,10 +622,28 @@ mod tests {
         let mut provider = ProviderConfig::defaults();
         provider.active_profile = crate::model::ProfileId("no-such-profile".into());
         // No normalize() -- pin the read-time fallback, not the store-time repair.
-        let view = provider.view(false);
+        let view = provider.view(Ok(false));
         assert_eq!(view.base_url, crate::model::DEFAULT_PROVIDER_BASE_URL);
         assert_eq!(view.model, crate::model::DEFAULT_PROVIDER_MODEL);
         assert!(!view.has_key);
+        assert!(view.keychain_fault.is_none());
+    }
+
+    #[test]
+    fn view_maps_a_keychain_read_fault_onto_keychain_fault() {
+        // Issue #275: view() takes the keychain read outcome as a Result so a
+        // read fault surfaces on keychain_fault (with has_key a placeholder
+        // false) instead of being honest-degraded behind a bare false -- the
+        // header indicator renders "keychain unavailable", not "no key".
+        let provider = ProviderConfig::defaults();
+        let view = provider.view(Err("keychain access failed: locked".into()));
+        assert!(!view.has_key);
+        assert_eq!(
+            view.keychain_fault.as_deref(),
+            Some("keychain access failed: locked")
+        );
+        // The endpoint fields are unaffected by the key read outcome.
+        assert_eq!(view.base_url, crate::model::DEFAULT_PROVIDER_BASE_URL);
     }
 
     #[test]

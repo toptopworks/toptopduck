@@ -552,14 +552,6 @@ pub async fn read_rows(
 // file -- both reached through the single managed [`LiveProviderConfig`] (the
 // key never enters app-config; the endpoint never enters the keychain).
 
-/// Whether an API key is stored. Returns a boolean only -- never the key
-/// itself (ADR-0029 invariant 3). The frontend uses this to decide whether to
-/// prompt for configuration before the first turn.
-#[tauri::command]
-pub fn has_api_key(live: State<'_, LiveProviderConfig>) -> Result<bool, String> {
-    Ok(live.has_key())
-}
-
 /// Store the API key the frontend collected (ADR-0029: a one-shot
 /// frontend-to-Rust transfer; the key is never returned back across IPC).
 #[tauri::command]
@@ -580,10 +572,12 @@ pub fn clear_api_key(live: State<'_, LiveProviderConfig>) -> Result<(), StoreCom
     live.clear_key().map_err(StoreCommandError::KeychainFailure)
 }
 
-/// Read the effective provider endpoint + whether a key is set (ADR-0019/0029/
-/// 0038/0064). The base URL + model come from the ACTIVE profile in app-config;
-/// the key does not cross IPC (only the boolean, from the active profile's
-/// keychain slot `key-<active_profile_id>`).
+/// Read the effective provider endpoint + the active profile's key status
+/// (ADR-0019/0029/0038/0064). The base URL + model come from the ACTIVE profile
+/// in app-config; the key does not cross IPC -- only a boolean + a keychain
+/// read-fault detail, from the active profile's keychain slot
+/// `key-<active_profile_id>` (issue #275: a read fault rides `keychain_fault`
+/// so the header indicator renders "keychain unavailable", not "no key").
 #[tauri::command]
 pub fn get_provider_config(
     live: State<'_, LiveProviderConfig>,
