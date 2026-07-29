@@ -200,11 +200,13 @@ export default function App() {
   // session + settings overlay state). NavigationHistoryProvider pushes on
   // every location change; back/forward move the cursor and call `restore` to
   // re-apply the target view via RAW setters (not nav-wrappers), so the
-  // resulting location change is skipped, not re-pushed. editProfileId is
-  // deliberately NOT restored -- it is a one-shot mount hint (issue #239), and
-  // a back/forward hop is a fresh view, not a profile-edit intent. A null
-  // sessionId (cold-start hero) is not actionable on restore -- there is no
-  // "close all sessions" path -- so only non-null session ids activate.
+  // resulting location change is skipped, not re-pushed. restore REPORTS
+  // whether it moved the derived location: a non-restorable target (cold-start
+  // hero -- sessionId null, no "close all sessions" path) returns false so the
+  // provider treats the hop as a no-op instead of arming skipNextRef and
+  // leaking the one-shot flag into the next genuine navigation. editProfileId
+  // is deliberately NOT restored -- a back/forward hop is a fresh view, not a
+  // profile-edit intent (issue #239).
   const location = useMemo<NavEntry>(
     () => ({
       sessionId: activeSessionId,
@@ -213,16 +215,30 @@ export default function App() {
     [activeSessionId, settingsView.open, liveSettingsSection],
   );
   const restore = useCallback(
-    (entry: NavEntry) => {
+    (entry: NavEntry): boolean => {
+      // Diff against the live state the location is derived from so the return
+      // value is honest: false means this entry cannot move the location (the
+      // provider then treats the hop as a no-op). The cold-start hero target --
+      // sessionId null with matching settings -- lands here: there is no
+      // close-all-sessions path, so reporting false avoids leaking skipNextRef.
+      let moved = false;
       if (entry.settings.open !== settingsView.open) {
         setSettingsView((prev) => ({ ...prev, open: entry.settings.open }));
+        moved = true;
       }
-      setLiveSettingsSection(entry.settings.section);
+      if (entry.settings.section !== liveSettingsSection) {
+        setLiveSettingsSection(entry.settings.section);
+        moved = true;
+      }
+      // Direct null check (not a boolean alias) so TS narrows sessionId to
+      // string for activateSession.
       if (entry.sessionId !== null && entry.sessionId !== activeSessionId) {
         activateSession(entry.sessionId);
+        moved = true;
       }
+      return moved;
     },
-    [settingsView.open, activeSessionId, activateSession],
+    [settingsView.open, liveSettingsSection, activeSessionId, activateSession],
   );
 
   // Global Ctrl/⌘+K keydown -> toggle the search modal (ADR-0072,

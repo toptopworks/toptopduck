@@ -25,6 +25,12 @@ import { NavigationHistoryContext, type NavigationHistoryValue } from "./useNavi
 // effect to ignore the location change that restore just caused -- otherwise
 // walking the stack would re-push the restored entry (the classic effect loop).
 //
+// restore REPORTS whether it moved the location. A false return means the
+// target is not faithfully restorable (e.g. the cold-start hero, which has no
+// close-all-sessions path): the hop is a no-op -- the cursor stays put and
+// skipNextRef is NOT armed -- so a non-restorable target cannot leak the
+// one-shot flag and silently swallow the next genuine navigation.
+//
 // The Context object + useNavigationHistory consumer live in useNavigationHistory.ts
 // (react-refresh: keep this file component-export-only).
 
@@ -35,8 +41,11 @@ type ProviderProps = {
   /** Re-apply a history entry to the app WITHOUT pushing (used by back/forward).
    *  Must drive the same state the location is derived from, via raw setters --
    *  NOT nav-wrappers -- so the resulting location change is skipped, not
-   *  re-pushed. */
-  restore: (entry: NavEntry) => void;
+   *  re-pushed. Return true iff the entry moved (will move) the derived
+   *  location; false marks the target non-restorable, and the provider treats
+   *  the hop as a no-op (cursor stays, skipNextRef unarmed) so the flag cannot
+   *  leak and swallow the next real navigation. */
+  restore: (entry: NavEntry) => boolean;
   children: ReactNode;
 };
 
@@ -79,9 +88,13 @@ export function NavigationHistoryProvider({ location, restore, children }: Provi
     if (!canBack(prev)) return;
     const target = prev.stack[prev.cursor - 1];
     if (!target) return;
+    // Ask restore first: a false return means the target is not faithfully
+    // restorable (e.g. cold-start hero). Treat the hop as a no-op -- do NOT
+    // move the cursor or arm skipNextRef, or the unconsumed flag would silently
+    // swallow the next real navigation.
+    if (!restoreRef.current(target)) return;
     setState(moveBack(prev));
     skipNextRef.current = true;
-    restoreRef.current(target);
   }, []);
 
   const forward = useCallback(() => {
@@ -89,9 +102,9 @@ export function NavigationHistoryProvider({ location, restore, children }: Provi
     if (!canForward(prev)) return;
     const target = prev.stack[prev.cursor + 1];
     if (!target) return;
+    if (!restoreRef.current(target)) return;
     setState(moveForward(prev));
     skipNextRef.current = true;
-    restoreRef.current(target);
   }, []);
 
   const value = useMemo<NavigationHistoryValue>(

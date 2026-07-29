@@ -7,9 +7,12 @@ import type { NavEntry } from "../navigationHistory";
 
 // Issue #288: the provider owns the stack; a location change pushes, and
 // back/forward move the cursor + call `restore` so the consumer re-applies the
-// target view via its RAW setters. These tests drive the provider through its
-// public surface (a location prop + a restore spy) the way App does -- the pure
-// stack transitions are covered separately in navigationHistory.test.ts.
+// target view via its RAW setters. restore returns whether it moved the
+// location -- a false return models a non-restorable target (cold-start hero)
+// and must leave the cursor + skipNextRef untouched. These tests drive the
+// provider through its public surface (a location prop + a restore impl) the
+// way App does; the pure stack transitions are covered separately in
+// navigationHistory.test.ts.
 
 const session = (id: string | null): NavEntry => ({
   sessionId: id,
@@ -18,10 +21,15 @@ const session = (id: string | null): NavEntry => ({
 
 // setup renders the hook inside a provider whose location reads from a mutable
 // ref, so a test "navigates" by mutating the ref + rerendering (exactly how App
-// drives a derived location through useMemo). Returns the live hook result, a
-// navigate() helper, and the restore spy.
-function setup(initial: NavEntry = session("s1")) {
-  const restore = vi.fn();
+// drives a derived location through useMemo). restoreImpl defaults to "always
+// restorable" so existing flows move the cursor; pass () => false to model a
+// non-restorable target (the cold-start hero path). Returns the live hook
+// result, a navigate() helper, and the restore spy.
+function setup({
+  initial = session("s1"),
+  restoreImpl = (): boolean => true,
+}: { initial?: NavEntry; restoreImpl?: (entry: NavEntry) => boolean } = {}) {
+  const restore = vi.fn(restoreImpl);
   const ref: { current: NavEntry } = { current: initial };
   const wrapper = ({ children }: { children: ReactNode }) => (
     <NavigationHistoryProvider location={ref.current} restore={restore}>
@@ -110,6 +118,26 @@ describe("NavigationHistoryProvider (issue #288)", () => {
     expect(result.current.canForward).toBe(true);
     act(() => result.current.forward());
     expect(result.current.canForward).toBe(false); // tail (s3)
+  });
+
+  it("a non-restorable target is a no-op and does not swallow the next push", () => {
+    // Models the cold-start hero: back targets a sessionId-null entry the
+    // consumer cannot faithfully restore, so restore() returns false. The
+    // provider must NOT move the cursor or arm skipNextRef -- otherwise the
+    // unconsumed flag silently drops the next genuine navigation's push.
+    const { result, navigate, restore } = setup({ restoreImpl: () => false });
+    navigate(session("s2")); // stack [s1, s2], cursor 1
+    expect(result.current.canBack).toBe(true);
+    act(() => result.current.back()); // restore false -> no-op
+    expect(restore).toHaveBeenCalledWith(session("s1"));
+    expect(result.current.canBack).toBe(true); // cursor stayed at s2
+    // The next genuine navigation must still push (skipNextRef was not armed).
+    navigate(session("s3"));
+    restore.mockClear();
+    act(() => result.current.back());
+    // stack is [s1, s2, s3] (cursor 2) -> back targets s2, not s1. If the flag
+    // had leaked, s3 would have been dropped and back would target s1.
+    expect(restore).toHaveBeenCalledWith(session("s2"));
   });
 
   it("useNavigationHistory throws outside a provider", () => {
