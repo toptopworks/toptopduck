@@ -291,16 +291,19 @@ describe("App window-controls platform placement (ADR-0074)", () => {
     vi.mocked(getAppConfig).mockResolvedValue(appConfigWith("en-US"));
     render(<App />);
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument(),
+      expect(screen.getByRole("button", { name: "Save as .duck" })).toBeInTheDocument(),
     );
 
     const macControls = document.querySelector(".macos-window-controls");
     expect(macControls).not.toBeNull();
-    // The macOS container precedes the right-side HeaderActions (Settings) in
-    // DOM order (DOCUMENT_POSITION_FOLLOWING = settings comes after macControls).
-    const settings = screen.getByRole("button", { name: "Settings" });
+    // The macOS container precedes the right-side HeaderActions (Save) in DOM
+    // order (DOCUMENT_POSITION_FOLLOWING = save comes after macControls). The
+    // reference is a topbar action, not the settings gear: since issue #282
+    // the gear rides the session sidebar, which precedes the topbar in DOM
+    // order and would invert this positional assertion.
+    const save = screen.getByRole("button", { name: "Save as .duck" });
     expect(
-      (macControls as Element).compareDocumentPosition(settings) &
+      (macControls as Element).compareDocumentPosition(save) &
       Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     // The Windows right-side cluster must NOT also render on macOS.

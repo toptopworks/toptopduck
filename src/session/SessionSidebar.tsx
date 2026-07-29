@@ -10,6 +10,8 @@ import {
 import { resolveDisplayName } from "./displayName";
 import type { SessionMetadata } from "../types/session";
 import type { SidebarGrouping } from "../types/app-config";
+import type { ProviderConfig } from "../types/provider";
+import { ConnectionStatus, type KeyStatus } from "../shell/ConnectionStatus";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -81,6 +83,21 @@ interface SessionSidebarProps {
   // entry point; the button is the always-visible affordance for the same
   // shortcut.
   onOpenSearch: () => void;
+  // Footer connection row + dual-state gear (issue #282): the non-secret
+  // provider config (App-level app-config) + the active profile's key status,
+  // rendered by the shared ConnectionStatus so the workspace footer is
+  // isomorphic to the settings rail bottom. `provider` is null until app-config
+  // resolves -- the footer stays ABSENT until then, which keeps the white-screen
+  // state unreachable (opening settings on a null config hides the shell but
+  // mounts no SettingsView, leaving no ESC exit; the absence replaces the
+  // retired topbar gear's settingsDisabled gate).
+  provider: ProviderConfig | null;
+  keyStatus: KeyStatus;
+  // The gear's workspace half: open the settings overlay (General pane).
+  onOpenSettings: () => void;
+  // The whole-row click: open the settings overlay landing on the Profiles
+  // pane (the workspace analogue of the settings rail row's in-view jump).
+  onOpenSettingsProfiles: () => void;
 }
 
 // The context-menu action the user picked, driving which dialog opens.
@@ -103,6 +120,10 @@ export function SessionSidebar({
   onRename,
   onSwitchGrouping,
   onOpenSearch,
+  provider,
+  keyStatus,
+  onOpenSettings,
+  onOpenSettingsProfiles,
 }: SessionSidebarProps) {
   const intl = useIntl();
   // Which entry's context menu is open (entry key); null = none. Only one menu
@@ -237,6 +258,26 @@ export function SessionSidebar({
           </li>
         )}
       </ul>
+
+      {/* Footer: the shared connection status row + dual-state gear (issue
+          #282), same place + structure as the settings rail bottom. The
+          .session-list flex:1 scroll region above keeps this pinned to the
+          column's bottom. Absent until app-config resolves (see the provider
+          prop's C1 note). The gear carries the workspace half of the
+          dual-state semantic (open settings); the settings rail's copy carries
+          the "back to workspace" half. */}
+      {provider && (
+        <ConnectionStatus
+          provider={provider}
+          keyStatus={keyStatus}
+          gearLabel={intl.formatMessage({
+            id: "header.settings",
+            defaultMessage: "Settings",
+          })}
+          onGearClick={onOpenSettings}
+          onRowClick={onOpenSettingsProfiles}
+        />
+      )}
 
       {pendingAction?.kind === "rename" && (
         <RenameSessionDialog

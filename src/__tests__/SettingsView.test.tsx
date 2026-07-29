@@ -85,19 +85,24 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     vi.stubGlobal("navigator", { language: "zh-CN" });
   });
 
-  it("gear stays disabled until appConfig loads (C1 white-screen guard)", async () => {
+  it("gear stays absent until appConfig loads (C1 white-screen guard)", async () => {
     // C1 regression: opening settings while appConfig is null white-screens
     // the shell -- .settings-mode hides the session shell but SettingsView
     // does not render (appConfig gate) and its window ESC listener never
-    // mounts, leaving no exit. The gear is disabled until appConfig resolves
-    // (settingsDisabled = !appConfig), mirroring the SettingsView render
-    // condition. getAppConfig never resolves here so appConfig stays null.
+    // mounts, leaving no exit. Since issue #282 the sidebar footer (gear +
+    // connection row) renders only once appConfig resolves -- absence
+    // replaces the retired topbar gear's settingsDisabled gate, mirroring the
+    // SettingsView render condition. getAppConfig never resolves here so
+    // appConfig stays null.
     vi.mocked(getAppConfig).mockImplementation(
       () => new Promise<AppConfig>(() => {}),
     );
     render(<App />);
-    const gear = screen.getByRole("button", { name: "设置" });
-    expect(gear).toBeDisabled();
+    // The sidebar itself mounts (cold start) but carries no settings entry.
+    await waitFor(() =>
+      expect(document.querySelector(".session-sidebar")).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("button", { name: "设置" })).toBeNull();
   });
 
   it("gear opens the settings overlay and hides the session shell (settingsOpen ternary)", async () => {
@@ -139,14 +144,22 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     // Window controls persist across the view switch...
     expect(screen.getByRole("button", { name: "关闭" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "最小化" })).toBeInTheDocument();
-    // ...the workspace gear does not (the rail carries the dual-state one)...
-    expect(screen.queryByRole("button", { name: "设置" })).not.toBeInTheDocument();
+    // ...the topbar's workspace children unmount (header actions + sidebar
+    // toggle) -- since issue #282 the topbar carries no settings entry at
+    // all; the dual-state gear rides the left columns' bottoms (the sidebar
+    // copy stays mounted underneath the CSS hide, keep-alive, so scope the
+    // absence assertion to the topbar)...
+    const topbar = document.querySelector(".topbar") as HTMLElement;
+    expect(topbar.querySelector(".header-actions")).toBeNull();
+    expect(topbar.querySelector(".sidebar-toggle")).toBeNull();
     // ...and the topbar keeps its drag region.
     expect(document.querySelector(".topbar [data-tauri-drag-region]")).not.toBeNull();
     // Returning to the workspace restores the workspace actions.
     fireEvent.click(document.querySelector(".settings-back") as HTMLElement);
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument(),
+      expect(
+        (document.querySelector(".topbar") as HTMLElement).querySelector(".header-actions"),
+      ).not.toBeNull(),
     );
   });
 
