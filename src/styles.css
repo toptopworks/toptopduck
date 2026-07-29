@@ -171,11 +171,14 @@
  * media query -- issue #170 AC: responsive stacking stays); cramming them
  * into utility long-strings would obscure the overlay / master-detail
  * structure (ADR-0067 Decision 1). The semantic class hooks (.settings-overlay
- * / .settings-nav / .settings-content / .settings-rail-top / .settings-rail-bottom
- * / .settings-nav-button / .connection-row / .profiles-master-detail /
- * .profiles-list-item / .profiles-list-item-select etc.) stay on the components
- * for selector / test
- * stability. The retirement SCOPE is the decision of record in ADR-0067 +
+ * / .settings-nav / .settings-content / .settings-rail-top
+ * / .settings-nav-button / .connection-status / .connection-row
+ * / .profiles-master-detail / .profiles-list-item / .profiles-list-item-select
+ * etc.) stay on the components for selector / test stability (the
+ * .connection-status / .connection-row pair now rides the shared
+ * ConnectionStatus footer both left columns render, issue #282; the
+ * .settings-rail-bottom hook retired with the inline markup it annotated).
+ * The retirement SCOPE is the decision of record in ADR-0067 +
  * each component's ADR-0067 inline comment -- not re-listed here, since a
  * hand-kept copy would drift on the next migration slice.
  */

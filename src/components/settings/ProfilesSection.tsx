@@ -17,6 +17,7 @@ import type {
   ProviderConfig,
   ProviderProfile,
 } from "../../types/provider";
+import { bareButtonReset } from "../../lib/buttonReset";
 import { cn } from "../../lib/utils";
 import {
   AlertDialog,
@@ -103,12 +104,6 @@ export type ProfilesSectionProps = {
 
 const NEW_PROFILE_DEFAULT_BASE_URL = "https://api.anthropic.com";
 const NEW_PROFILE_DEFAULT_MODEL = "claude-sonnet-4-6";
-
-// Bare <button> chrome reset for the list's unstyled select button (ADR-0067).
-// NOT [all:unset] -- it clobbers `display: flex` to inline (see the matching
-// bareButtonReset note in SettingsView / SessionSidebar); the base-layer
-// `button { font: inherit }` (app.css) owns the font.
-const bareButtonReset = "appearance-none bg-transparent border-0";
 
 function newProfileId(): string {
   return crypto.randomUUID();

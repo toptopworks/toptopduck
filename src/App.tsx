@@ -10,6 +10,7 @@ import { useShellSessions } from "./shell/useShellSessions";
 import { useAppConfigState } from "./shell/useAppConfigState";
 import { usePlatform } from "./shell/use-platform";
 import { HeaderActions } from "./shell/HeaderActions";
+import type { KeyStatus } from "./types/provider";
 import { SidebarToggle } from "./shell/SidebarToggle";
 import { WindowControls } from "./shell/WindowControls";
 import { ResumeProgress } from "./shell/ResumeProgress";
@@ -45,8 +46,8 @@ const SOFT_CAP_OPEN_SESSIONS = 8;
 /** Entry hint for the settings overlay (issue #239): which section to land on
  *  when it opens, and (for the Profiles section) which profile to pre-select
  *  for editing. Consumed by SettingsView/ProfilesSection at mount; reset to
- *  the default on close so a later topbar-gear open does not re-target a stale
- *  profile. */
+ *  the default on close so a later sidebar-gear open does not re-target a
+ *  stale profile. */
 type SettingsEntry = { section: SettingsSection; editProfileId?: string };
 
 export default function App() {
@@ -63,11 +64,12 @@ export default function App() {
   const platform = usePlatform();
 
   // --- App-level UI state --------------------------------------------------
-  // Active-profile key status (issue #275): the header key indicator's source.
-  // has_key is authoritative when keychain_fault is null; a non-null fault means
-  // the OS keychain read failed and the indicator renders "keychain unavailable"
-  // instead of misreading as "no key configured".
-  const [keyStatus, setKeyStatus] = useState<{ has_key: boolean; keychain_fault: string | null }>({
+  // Active-profile key status (issue #275): the connection row's source (the
+  // shared ConnectionStatus footer the sidebar + the settings rail both
+  // render, issue #282). has_key is authoritative when keychain_fault is null;
+  // a non-null fault means the OS keychain read failed and the row renders
+  // "keychain unavailable" instead of misreading as "no key configured".
+  const [keyStatus, setKeyStatus] = useState<KeyStatus>({
     has_key: false,
     keychain_fault: null,
   });
@@ -75,8 +77,9 @@ export default function App() {
   // the render + the .settings-mode CSS class; `section` + `editProfileId` are
   // one-shot ENTRY hints consumed at mount (issue #239: the ColdStartHero CTAs
   // land on the Profiles tab, optionally with the active profile pre-selected
-  // for key editing). openSettings() defaults to the topbar-gear path (general,
-  // no edit target); the hero passes { section: "profiles", editProfileId? }.
+  // for key editing). openSettings() defaults to the sidebar-gear path
+  // (general, no edit target); the hero + the sidebar connection row pass
+  // { section: "profiles", editProfileId? }.
   const [settingsView, setSettingsView] = useState<{ open: boolean } & SettingsEntry>({
     open: false,
     section: "general",
@@ -97,9 +100,9 @@ export default function App() {
   // (issue #238). Bumped on settings-close so the picker refetches its overlay
   // after a Save that may have changed a keychain slot -- ADR-0019 honest gate:
   // the popover must not keep showing "No key" after the user just configured
-  // one. The header key-status indicator refreshes via refreshKeyStatus on the
-  // same close; this counter does the same for the picker's own overlay (which
-  // has its own profileKeys snapshot, separate from keyStatus).
+  // one. The connection row refreshes via refreshKeyStatus on the same close;
+  // this counter does the same for the picker's own overlay (which has its own
+  // profileKeys snapshot, separate from keyStatus).
   const [profileKeyEpoch, setProfileKeyEpoch] = useState(0);
 
   // Ctrl/⌘+K session-search modal open state (ADR-0072, issue #252).
@@ -112,8 +115,9 @@ export default function App() {
   // refreshKeyStatus: reads the active profile's keychain slot (ADR-0029) into
   // keyStatus. Fired once on mount by useAppConfigState's load effect, again
   // after a profile switch, and on settings-close (a Save may have changed the
-  // slot). Stays in App because keyStatus is App-level UI state rendered by
-  // HeaderActions; the hook consumes refreshKeyStatus as a dep.
+  // slot). Stays in App because keyStatus is App-level UI state consumed by
+  // both connection rows (sidebar + settings rail, issue #282); the hook
+  // consumes refreshKeyStatus as a dep.
   const refreshKeyStatus = useCallback(async () => {
     try {
       const view = await getProviderConfig();
@@ -272,6 +276,10 @@ export default function App() {
                 onRename={(sid, path, newName) => void renameEntry(sid, path, newName)}
                 onSwitchGrouping={switchSidebarGrouping}
                 onOpenSearch={openSearch}
+                provider={appConfig?.provider ?? null}
+                keyStatus={keyStatus}
+                onOpenSettings={() => openSettings()}
+                onOpenSettingsProfiles={() => openSettingsProfiles()}
               />
 
               {/* Row 1: thin top bar (ADR-0060/0062 R1), spans the full shell
@@ -286,8 +294,9 @@ export default function App() {
               itself persists: with decorations:false its window controls +
               drag region are shell-wide chrome that must stay reachable in
               every view (ADR-0074) -- the settings-mode CSS exempts .topbar
-              from the overlay hide, and the rail owns settings chrome (its
-              gear is the dual-state one; this gear is not). */}
+              from the overlay hide, and the rail owns settings chrome (the
+              dual-state gear + connection row live at the left columns'
+              bottoms, issue #282 -- the topbar carries no settings entry). */}
               <header className="topbar gap-3 px-4 border-b border-border bg-background" data-tauri-drag-region>
                 {platform === "macos" && <WindowControls />}
                 {!settingsView.open && (
@@ -322,12 +331,8 @@ export default function App() {
                     )}
                     <HeaderActions
                       disabled={busy || !activeSession}
-                      hasKey={keyStatus.has_key}
-                      keychainFault={keyStatus.keychain_fault}
                       onOpenDuck={() => void handleOpenDuck()}
                       onSaveAs={() => void handleSaveAs()}
-                      onOpenSettings={() => openSettings()}
-                      settingsDisabled={!appConfig}
                     />
                   </>
                 )}

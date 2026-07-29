@@ -1,21 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import type { ReactElement } from "react";
 import { DeleteSessionDialog, SessionSidebar } from "../SessionSidebar";
 import type { OpenSession } from "../sidebarModel";
 import type { SessionMetadata } from "../../types/session";
+import type { ProviderConfig } from "../../types/provider";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 // Shell-skeleton tests assert className contracts, not chrome. An empty English
 // provider + onError keeps the render quiet (missing-message warnings are
 // expected -- the catalog is intentionally empty). Named renderShell (not
 // renderSettings) to avoid a cross-domain name clash with the settings
-// domain's renderSettings helper.
+// domain's renderSettings helper. TooltipProvider mirrors the App ancestor
+// (the connection footer's dual-state gear carries a Tooltip, issue #282).
 function renderShell(ui: ReactElement) {
   return render(
-    <IntlProvider locale="en" messages={{}} onError={() => {}}>
-      {ui}
-    </IntlProvider>,
+    <TooltipProvider>
+      <IntlProvider locale="en" messages={{}} onError={() => {}}>{ui}</IntlProvider>
+    </TooltipProvider>,
   );
 }
 
@@ -47,6 +50,10 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         grouping="flat"
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
+        provider={null}
+        keyStatus={{ has_key: true, keychain_fault: null }}
+        onOpenSettings={() => {}}
+        onOpenSettingsProfiles={() => {}}
       />,
     );
     const active = container.querySelector(".session-entry.active .session-entry-main");
@@ -79,6 +86,10 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         grouping="flat"
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
+        provider={null}
+        keyStatus={{ has_key: true, keychain_fault: null }}
+        onOpenSettings={() => {}}
+        onOpenSettingsProfiles={() => {}}
       />,
     );
     const bg = container.querySelector(".session-entry.open:not(.active) .session-entry-main");
@@ -109,6 +120,10 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         grouping="flat"
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
+        provider={null}
+        keyStatus={{ has_key: true, keychain_fault: null }}
+        onOpenSettings={() => {}}
+        onOpenSettingsProfiles={() => {}}
       />,
     );
     const rows = container.querySelectorAll(".session-entry-main");
@@ -150,6 +165,10 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         grouping="flat"
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
+        provider={null}
+        keyStatus={{ has_key: true, keychain_fault: null }}
+        onOpenSettings={() => {}}
+        onOpenSettingsProfiles={() => {}}
       />,
     );
     const main = container.querySelector(".session-entry-main");
@@ -184,6 +203,10 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         grouping="flat"
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
+        provider={null}
+        keyStatus={{ has_key: true, keychain_fault: null }}
+        onOpenSettings={() => {}}
+        onOpenSettingsProfiles={() => {}}
       />,
     );
     fireEvent.click(container.querySelector(".session-entry-menu") as HTMLButtonElement);
@@ -221,6 +244,10 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         grouping="flat"
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
+        provider={null}
+        keyStatus={{ has_key: true, keychain_fault: null }}
+        onOpenSettings={() => {}}
+        onOpenSettingsProfiles={() => {}}
       />,
     );
     fireEvent.click(container.querySelector(".session-entry-menu") as HTMLButtonElement);
@@ -251,6 +278,10 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         grouping="flat"
         onSwitchGrouping={() => {}}
         onOpenSearch={onOpenSearch}
+        provider={null}
+        keyStatus={{ has_key: true, keychain_fault: null }}
+        onOpenSettings={() => {}}
+        onOpenSettingsProfiles={() => {}}
       />,
     );
     const brandRow = container.querySelector(".sidebar-brand-row");
@@ -296,6 +327,10 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         grouping="flat"
         onSwitchGrouping={() => {}}
         onOpenSearch={onOpenSearch}
+        provider={null}
+        keyStatus={{ has_key: true, keychain_fault: null }}
+        onOpenSettings={() => {}}
+        onOpenSettingsProfiles={() => {}}
       />,
     );
     const searchBtn = container.querySelector(".sidebar-search-button") as HTMLButtonElement;
@@ -321,6 +356,10 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         grouping="flat"
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
+        provider={null}
+        keyStatus={{ has_key: true, keychain_fault: null }}
+        onOpenSettings={() => {}}
+        onOpenSettingsProfiles={() => {}}
       />,
     );
     const newBtn = container.querySelector(".sidebar-new-button");
@@ -374,6 +413,10 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onRename={() => {}}
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
+        provider={null}
+        keyStatus={{ has_key: true, keychain_fault: null }}
+        onOpenSettings={() => {}}
+        onOpenSettingsProfiles={() => {}}
       />,
     );
     expect(container.querySelector(".sidebar-grouping-toggle")).toBeNull();
@@ -397,6 +440,10 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onRename={() => {}}
         onSwitchGrouping={onSwitchGrouping}
         onOpenSearch={() => {}}
+        provider={null}
+        keyStatus={{ has_key: true, keychain_fault: null }}
+        onOpenSettings={() => {}}
+        onOpenSettingsProfiles={() => {}}
       />,
     );
     // Exactly one toggle (on the first group title); flat mode renders one
@@ -440,6 +487,10 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onRename={() => {}}
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
+        provider={null}
+        keyStatus={{ has_key: true, keychain_fault: null }}
+        onOpenSettings={() => {}}
+        onOpenSettingsProfiles={() => {}}
       />,
     );
     fireEvent.click(container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement);
@@ -471,6 +522,10 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onRename={() => {}}
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
+        provider={null}
+        keyStatus={{ has_key: true, keychain_fault: null }}
+        onOpenSettings={() => {}}
+        onOpenSettingsProfiles={() => {}}
       />,
     );
     const trigger = container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement;
@@ -503,6 +558,10 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onRename={() => {}}
         onSwitchGrouping={onSwitchGrouping}
         onOpenSearch={() => {}}
+        provider={null}
+        keyStatus={{ has_key: true, keychain_fault: null }}
+        onOpenSettings={() => {}}
+        onOpenSettingsProfiles={() => {}}
       />,
     );
     const trigger = container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement;
@@ -532,6 +591,10 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onRename={() => {}}
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
+        provider={null}
+        keyStatus={{ has_key: true, keychain_fault: null }}
+        onOpenSettings={() => {}}
+        onOpenSettingsProfiles={() => {}}
       />,
     );
     const trigger = container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement;
@@ -563,6 +626,10 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onRename={() => {}}
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
+        provider={null}
+        keyStatus={{ has_key: true, keychain_fault: null }}
+        onOpenSettings={() => {}}
+        onOpenSettingsProfiles={() => {}}
       />,
     );
     const trigger = screen.getByRole("button", { name: /Session actions/i });
@@ -590,6 +657,10 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onRename={() => {}}
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
+        provider={null}
+        keyStatus={{ has_key: true, keychain_fault: null }}
+        onOpenSettings={() => {}}
+        onOpenSettingsProfiles={() => {}}
       />,
     );
     const trigger = screen.getByRole("button", { name: /Session actions/i });
@@ -598,6 +669,132 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
 
     fireEvent.keyDown(container.querySelector(".session-sidebar")!, { key: "Escape" });
     expect(screen.queryByRole("menu")).toBeNull();
+  });
+});
+
+describe("SessionSidebar connection footer (issue #282)", () => {
+  // The sidebar renders the SAME shared ConnectionStatus component as the
+  // settings rail bottom (visual isomorphism AC): status dot + active profile
+  // name + connection label + dual-state gear. The workspace half of the
+  // gear's semantic is "open settings"; the whole-row click opens settings
+  // landing on the Profiles pane.
+  const footerProvider: ProviderConfig = {
+    profiles: [
+      {
+        id: "default",
+        display_name: "Anthropic",
+        protocol: "anthropic",
+        base_url: "https://api.anthropic.com",
+        model: "claude-sonnet",
+      },
+    ],
+    active_profile: "default",
+  };
+
+  function renderWithFooter({
+    provider = footerProvider,
+    keyStatus = { has_key: true, keychain_fault: null },
+    onOpenSettings = vi.fn(),
+    onOpenSettingsProfiles = vi.fn(),
+  }: {
+    provider?: ProviderConfig | null;
+    keyStatus?: { has_key: boolean; keychain_fault: string | null };
+    onOpenSettings?: () => void;
+    onOpenSettingsProfiles?: () => void;
+  } = {}) {
+    const result = renderShell(
+      <SessionSidebar
+        sessions={[]}
+        openSessions={[]}
+        activeSessionId={null}
+        disabled={false}
+        loadError={null}
+        onNew={() => {}}
+        onActivate={() => {}}
+        onOpenPersisted={() => {}}
+        onClose={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        grouping="flat"
+        onSwitchGrouping={() => {}}
+        onOpenSearch={() => {}}
+        provider={provider}
+        keyStatus={keyStatus}
+        onOpenSettings={onOpenSettings}
+        onOpenSettingsProfiles={onOpenSettingsProfiles}
+      />,
+    );
+    return { ...result, onOpenSettings, onOpenSettingsProfiles };
+  }
+
+  it("shows the active profile + Connected + the primary dot (settings-rail isomorph)", () => {
+    const { container } = renderWithFooter();
+    const footer = container.querySelector(".session-sidebar .connection-status");
+    expect(footer).not.toBeNull();
+    const row = footer?.querySelector(".connection-row") as HTMLElement;
+    expect(row).not.toBeNull();
+    expect(within(row).getByText("Anthropic")).toBeInTheDocument();
+    expect(within(row).getByText("Connected")).toBeInTheDocument();
+    // The status dot rides the ADR-0050 primary token (configured / active).
+    const dot = row.querySelector(".rounded-full");
+    expect(dot?.className.split(/\s+/)).toContain("bg-primary");
+  });
+
+  it("reads No key + the warning dot when the active profile has no key", () => {
+    const { container } = renderWithFooter({
+      keyStatus: { has_key: false, keychain_fault: null },
+    });
+    const row = container.querySelector(".connection-row") as HTMLElement;
+    expect(within(row).getByText("No key")).toBeInTheDocument();
+    expect(row.querySelector(".rounded-full")?.className.split(/\s+/)).toContain("bg-warning");
+  });
+
+  it("reads Keychain unavailable + the destructive dot on a keychain fault", () => {
+    const { container } = renderWithFooter({
+      keyStatus: { has_key: false, keychain_fault: "locked" },
+    });
+    const row = container.querySelector(".connection-row") as HTMLElement;
+    expect(within(row).getByText("Keychain unavailable")).toBeInTheDocument();
+    expect(row.querySelector(".rounded-full")?.className.split(/\s+/)).toContain("bg-destructive");
+  });
+
+  it("falls back to Unnamed profile for a blank display name", () => {
+    const unnamedProvider: ProviderConfig = {
+      profiles: [{ ...footerProvider.profiles[0], display_name: "   " }],
+      active_profile: "default",
+    };
+    const { container } = renderWithFooter({ provider: unnamedProvider });
+    const row = container.querySelector(".connection-row") as HTMLElement;
+    expect(within(row).getByText("Unnamed profile")).toBeInTheDocument();
+  });
+
+  it("the whole-row click opens settings landing on the Profiles pane", () => {
+    const { container, onOpenSettingsProfiles } = renderWithFooter();
+    fireEvent.click(container.querySelector(".connection-row") as HTMLElement);
+    expect(onOpenSettingsProfiles).toHaveBeenCalledOnce();
+  });
+
+  it("the gear carries the open-settings half of the dual-state semantic", () => {
+    // The workspace gear's accessible name is "Settings" (the settings rail's
+    // copy reads "Back to workspace"); a lucide-settings glyph distinguishes
+    // it from the rail-top back button, mirroring the settings rail chrome.
+    const { onOpenSettings } = renderWithFooter();
+    const gear = screen.getByRole("button", { name: "Settings" });
+    const icon = gear.querySelector("svg");
+    expect(icon).not.toBeNull();
+    expect(icon).toHaveClass("lucide-settings");
+    fireEvent.click(gear);
+    expect(onOpenSettings).toHaveBeenCalledOnce();
+  });
+
+  it("stays absent until app-config resolves (provider null; C1 render-when-ready)", () => {
+    // The retired topbar gear carried a settingsDisabled gate; the footer
+    // replaces it with absence -- no settings entry exists to open the
+    // white-screen state (settings-mode shell + unmounted SettingsView) while
+    // appConfig is null.
+    const { container } = renderWithFooter({ provider: null });
+    expect(container.querySelector(".connection-status")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
   });
 });
 

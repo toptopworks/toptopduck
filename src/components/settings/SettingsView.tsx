@@ -4,14 +4,16 @@ import {
   ArrowLeft,
   Cpu,
   KeyRound,
-  Settings,
   ShieldCheck,
   SlidersHorizontal,
 } from "lucide-react";
 
 import { fmtError } from "../../lib/error-presentation";
 import type { AppConfig } from "../../types/app-config";
+import type { KeyStatus } from "../../types/provider";
+import { bareButtonReset } from "../../lib/buttonReset";
 import { cn } from "../../lib/utils";
+import { ConnectionStatus } from "../../shell/ConnectionStatus";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -23,7 +25,6 @@ import {
   AlertDialogTitle,
 } from "../ui/alert-dialog";
 import { Button } from "../ui/button";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import { EngineSection } from "./EngineSection";
 import { GeneralSection } from "./GeneralSection";
 import { ProfilesSection, type ProfilesControls } from "./ProfilesSection";
@@ -57,15 +58,6 @@ import { SETTINGS_SECTIONS, type SettingsSection } from "./sections";
 // view's own counter, pane-owned key / test IPCs via transitions mirrored up
 // (they survive a section switch that unmounts the pane) -- and restores focus
 // to the opener (ADR-0065 focus habit).
-
-// Bare <button> chrome reset for the rail's unstyled buttons (ADR-0067). NOT
-// [all:unset]: that arbitrary utility cascades AFTER the display utilities on
-// the same element and clobbers `display: flex` back to inline, collapsing the
-// nav list into a single wrapped row. appearance-none/bg-transparent/border-0
-// strip the same native chrome without touching display; the base-layer
-// `button { font: inherit }` (app.css) owns the font. Same recipe as the
-// sidebar's bareButtonReset (SessionSidebar, issue #171).
-const bareButtonReset = "appearance-none bg-transparent border-0";
 
 /** Icon for one nav section (decorative; the accessible name is the label). */
 function SectionIcon({ section }: { section: SettingsSection }) {
@@ -166,11 +158,11 @@ export function SettingsView({
   // Called to exit back to the workspace (rail-top back, the gear, or ESC).
   onClose: () => void;
   // Re-read the active profile's keychain slot (set-active switches inside the
-  // Profiles pane refresh the connection row + header indicator, ADR-0029).
+  // Profiles pane refresh the connection row, ADR-0029).
   onRefreshKeyStatus: () => void;
   // The active profile's key status (App-level), bound to the rail's connection
-  // row -- the only visible key indicator while the top bar is hidden.
-  keyStatus: { has_key: boolean; keychain_fault: string | null };
+  // row (the shared ConnectionStatus footer, issue #282).
+  keyStatus: KeyStatus;
   initialSection?: SettingsSection;
   initialEditProfileId?: string;
 }) {
@@ -302,43 +294,12 @@ export function SettingsView({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // Connection row (rail bottom): the active profile + its key status. The whole
-  // row jumps to the Profiles pane. The gear beside it is the dual-state
-  // settings toggle -- in the settings view it reads "back to workspace".
-  const activeProfile = appConfig.provider.profiles.find(
-    (p) => p.id === appConfig.provider.active_profile,
-  );
-  const unnamed = intl.formatMessage({
-    id: "settings.profiles.unnamed",
-    defaultMessage: "Unnamed profile",
+  // The rail's "back to workspace" label (rail-top back button + the
+  // dual-state gear's accessible name / tooltip via ConnectionStatus).
+  const backToWorkspaceLabel = intl.formatMessage({
+    id: "settings.backToWorkspace",
+    defaultMessage: "Back to workspace",
   });
-  const activeName = activeProfile
-    ? activeProfile.display_name.trim() || unnamed
-    : intl.formatMessage({
-        id: "settings.connection.notConfigured",
-        defaultMessage: "Not configured",
-      });
-  const connectionLabel = keyStatus.keychain_fault
-    ? intl.formatMessage({
-        id: "settings.connection.keychainFault",
-        defaultMessage: "Keychain unavailable",
-      })
-    : keyStatus.has_key
-      ? intl.formatMessage({ id: "settings.connection.connected", defaultMessage: "Connected" })
-      : intl.formatMessage({ id: "settings.connection.noKey", defaultMessage: "No key" });
-  // Status-dot colors ride the ADR-0050 semantic tokens, reusing the key-state
-  // pairing ADR-0067 anchored for the header badges (primary teal = configured
-  // / active, warning amber = needs key, destructive = fault) -- no raw palette.
-  const connectionDotClass = !activeProfile
-    ? "bg-muted-foreground/40"
-    : keyStatus.keychain_fault
-      ? "bg-destructive"
-      : keyStatus.has_key
-        ? "bg-primary"
-        : "bg-warning";
-  const backToWorkspace = (
-    <FormattedMessage id="settings.backToWorkspace" defaultMessage="Back to workspace" />
-  );
 
   return (
     <div
@@ -367,7 +328,7 @@ export function SettingsView({
             onClick={() => void requestClose()}
           >
             <ArrowLeft className="size-4" aria-hidden />
-            {backToWorkspace}
+            {backToWorkspaceLabel}
           </Button>
         </div>
 
@@ -393,45 +354,17 @@ export function SettingsView({
           ))}
         </div>
 
-        {/* Rail bottom: connection status row + dual-state gear. */}
-        <div className="settings-rail-bottom border-border border-t p-2">
-          <div className="flex items-center gap-1.5">
-            <button
-              type="button"
-              className={cn(
-                bareButtonReset,
-                "connection-row flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded-md px-2 py-2 hover:bg-accent focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2",
-              )}
-              onClick={() => setSection("profiles")}
-            >
-              <span className={cn("size-2 shrink-0 rounded-full", connectionDotClass)} aria-hidden />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm">{activeName}</span>
-                <span className="text-muted-foreground block truncate text-xs">
-                  {connectionLabel}
-                </span>
-              </span>
-            </button>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="shrink-0"
-                  aria-label={intl.formatMessage({
-                    id: "settings.backToWorkspace",
-                    defaultMessage: "Back to workspace",
-                  })}
-                  onClick={() => void requestClose()}
-                >
-                  <Settings className="size-4" aria-hidden />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>{backToWorkspace}</TooltipContent>
-            </Tooltip>
-          </div>
-        </div>
+        {/* Rail bottom: the shared connection status row + dual-state gear
+            (issue #282). Here the gear reads "back to workspace" and the row
+            jumps to the Profiles pane; the workspace sidebar renders the same
+            component with the open-settings half of the semantic. */}
+        <ConnectionStatus
+          provider={appConfig.provider}
+          keyStatus={keyStatus}
+          gearLabel={backToWorkspaceLabel}
+          onGearClick={() => void requestClose()}
+          onRowClick={() => setSection("profiles")}
+        />
       </nav>
 
       <main className="settings-content p-6">

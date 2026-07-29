@@ -1335,7 +1335,7 @@ describe("App session soft-cap hint (ADR-0046/0050, issue #108)", () => {
   });
 });
 
-describe("App topbar header actions + key-state badge (issue #182)", () => {
+describe("App topbar header actions + sidebar connection footer (issue #182 / #282)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     state.workingSet = [];
@@ -1344,27 +1344,29 @@ describe("App topbar header actions + key-state badge (issue #182)", () => {
     // clearAllMocks only clears call history, not implementations set by prior
     // describes.
     // The C1 guard test below needs appConfig=null (the cold-start default) so
-    // the settings gear rides settingsDisabled=true. getAppConfig's real
-    // signature is Promise<AppConfig> (null is an App-level state, not an IPC
-    // return), so hold the mock pending -- the mount effect's .then never
-    // fires and appConfig stays at its useState(null) initial.
+    // the sidebar footer -- the settings entry since issue #282 -- stays
+    // ABSENT (its render-when-ready replaces the retired topbar gear's
+    // settingsDisabled gate). getAppConfig's real signature is
+    // Promise<AppConfig> (null is an App-level state, not an IPC return), so
+    // hold the mock pending -- the mount effect's .then never fires and
+    // appConfig stays at its useState(null) initial.
     vi.mocked(getAppConfig).mockImplementation(
       () => new Promise<AppConfig>(() => {}),
     );
     vi.stubGlobal("navigator", { language: "zh-CN" });
   });
 
-  it("disables all three header buttons on cold start (no active session)", async () => {
-    // Cold-start gate: Open/Save ride disabled={busy || !activeSession} and the
-    // gear rides settingsDisabled={!appConfig}. With no session and appConfig
-    // unresolved, all three are unreachable. A regression that drops the gate
-    // lets Open/Save fire with nothing to act on.
+  it("disables both header buttons on cold start (no active session)", async () => {
+    // Cold-start gate: Open/Save ride disabled={busy || !activeSession}. The
+    // settings gear + key badge left the topbar for the sidebar footer (issue
+    // #282); the header cluster is exactly the two file actions. A regression
+    // that drops the gate lets Open/Save fire with nothing to act on.
     render(<App />);
     const buttons = await waitFor(() => {
       const list = document.querySelectorAll(
         ".header-actions [data-slot='button']",
       );
-      expect(list.length).toBe(3);
+      expect(list.length).toBe(2);
       return list;
     });
     buttons.forEach((btn) =>
@@ -1372,41 +1374,55 @@ describe("App topbar header actions + key-state badge (issue #182)", () => {
     );
   });
 
-  it("re-enables open/save with a session active; gear waits on appConfig (C1 guard)", async () => {
-    // App.tsx C1: opening settings while appConfig is null white-screens the
-    // shell (.settings-mode hides the shell but SettingsView does not render,
-    // no ESC exit). settingsDisabled={!appConfig} makes the state unreachable.
-    // The default getAppConfig mock returns null, so the gear stays disabled
-    // even after a session opens.
+  it("re-enables open/save with a session active", async () => {
     render(<App />);
     await openSession();
     const buttons = document.querySelectorAll(
       ".header-actions [data-slot='button']",
     );
+    expect(buttons).toHaveLength(2);
     expect((buttons[0] as HTMLButtonElement).disabled).toBe(false); // Open
     expect((buttons[1] as HTMLButtonElement).disabled).toBe(false); // Save
-    expect((buttons[2] as HTMLButtonElement).disabled).toBe(true); // Settings
   });
 
-  it("re-enables the gear once appConfig resolves (C1 white-screen guard)", async () => {
+  it("keeps the settings entry absent until appConfig resolves (C1 render-when-ready)", async () => {
+    // C1: opening settings while appConfig is null white-screens the shell
+    // (.settings-mode hides the shell but SettingsView does not render, no
+    // ESC exit). The sidebar footer's render-when-ready keeps the state
+    // unreachable -- the sidebar itself mounts (cold start) but carries no
+    // gear + connection row while the config stays pending (the beforeEach
+    // holds getAppConfig pending).
+    render(<App />);
+    await waitFor(() =>
+      expect(document.querySelector(".session-sidebar")).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("button", { name: "设置" })).toBeNull();
+    expect(document.querySelector(".session-sidebar .connection-status")).toBeNull();
+  });
+
+  it("mounts the sidebar gear + connection row once appConfig resolves", async () => {
     vi.mocked(getAppConfig).mockResolvedValue(
       baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
     );
     render(<App />);
-    await openSession();
-    await waitFor(() => {
-      const gear = document.querySelectorAll(
-        ".header-actions [data-slot='button']",
-      )[2] as HTMLButtonElement;
-      expect(gear.disabled).toBe(false);
-    });
+    // The gear (workspace half of the dual-state toggle) + the connection row
+    // carrying the active profile land at the sidebar bottom.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument(),
+    );
+    const sidebar = document.querySelector(".session-sidebar") as HTMLElement;
+    expect(within(sidebar).getByText("Anthropic")).toBeInTheDocument();
   });
 
-  it("anchors the key-ok badge on the --primary token (ADR-0050, issue #182)", async () => {
-    // The key-state Badge migrated from hardcoded #1a7a3a / #b06000 to a shadcn
-    // Badge outline + text-primary (key-ok) / text-warning (key-missing). The
-    // class hook is the regression seam -- dropping it leaves the badge with no
-    // color semantic. data-slot="badge" anchors the shadcn Badge host.
+  it("anchors the connected dot on the --primary token (ADR-0050, issue #182/#282)", async () => {
+    // The key-state visual moved from the topbar badge (hardcoded #1a7a3a /
+    // #b06000, later a shadcn Badge + text-primary / text-warning) to the
+    // sidebar connection row's status dot, re-anchored on the same ADR-0050
+    // semantic tokens: bg-primary (connected), bg-warning (no key),
+    // bg-destructive (keychain fault).
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+    );
     vi.mocked(getProviderConfig).mockResolvedValue({
       base_url: "https://api.anthropic.com",
       model: "claude-sonnet-4-6",
@@ -1415,14 +1431,19 @@ describe("App topbar header actions + key-state badge (issue #182)", () => {
     });
     render(<App />);
     await waitFor(() => {
-      const badge = document.querySelector(".key-ok") as HTMLElement;
-      expect(badge).not.toBeNull();
-      expect(badge.classList.contains("text-primary")).toBe(true);
-      expect(badge.getAttribute("data-slot")).toBe("badge");
+      const row = document.querySelector(
+        ".session-sidebar .connection-row",
+      ) as HTMLElement;
+      expect(row).not.toBeNull();
+      expect(row.querySelector(".rounded-full")?.classList.contains("bg-primary")).toBe(true);
+      expect(within(row).getByText("已连接")).toBeInTheDocument();
     });
   });
 
-  it("anchors the key-missing badge on the --warning token (ADR-0050, issue #182)", async () => {
+  it("anchors the no-key dot on the --warning token + reads 无 key", async () => {
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+    );
     vi.mocked(getProviderConfig).mockResolvedValue({
       base_url: "https://api.anthropic.com",
       model: "claude-sonnet-4-6",
@@ -1431,19 +1452,22 @@ describe("App topbar header actions + key-state badge (issue #182)", () => {
     });
     render(<App />);
     await waitFor(() => {
-      const badge = document.querySelector(".key-missing") as HTMLElement;
-      expect(badge).not.toBeNull();
-      expect(badge.classList.contains("text-warning")).toBe(true);
-      expect(badge.getAttribute("data-slot")).toBe("badge");
+      const row = document.querySelector(
+        ".session-sidebar .connection-row",
+      ) as HTMLElement;
+      expect(row).not.toBeNull();
+      expect(row.querySelector(".rounded-full")?.classList.contains("bg-warning")).toBe(true);
+      expect(within(row).getByText("无 key")).toBeInTheDocument();
     });
   });
 
-  it("renders the keychain-unavailable badge when the active read faults (issue #275)", async () => {
-    // The pre-#275 honest-degrade hid a keychain read fault behind has_key=false,
-    // so the header misread "keychain locked" as "no key configured". The view
-    // now carries keychain_fault; the badge renders the warning state with the
-    // fault detail as the native title (the no-key state has no title) and the
-    // keychainUnavailable label instead of the key-missing CTA.
+  it("renders the keychain-unavailable row when the active read faults (issue #275)", async () => {
+    // The pre-#275 honest-degrade hid a keychain read fault behind
+    // has_key=false; the row now carries keychain_fault and reads 密钥库不可用
+    // + the destructive dot instead of misreading as "no key configured".
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+    );
     vi.mocked(getProviderConfig).mockResolvedValue({
       base_url: "https://api.anthropic.com",
       model: "claude-sonnet-4-6",
@@ -1452,11 +1476,12 @@ describe("App topbar header actions + key-state badge (issue #182)", () => {
     });
     render(<App />);
     await waitFor(() => {
-      const badge = document.querySelector(".key-missing") as HTMLElement;
-      expect(badge).not.toBeNull();
-      expect(badge.classList.contains("text-warning")).toBe(true);
-      // The fault detail rides the native title -- absent on the no-key state.
-      expect(badge.getAttribute("title")).toBe("keychain access failed: locked");
+      const row = document.querySelector(
+        ".session-sidebar .connection-row",
+      ) as HTMLElement;
+      expect(row).not.toBeNull();
+      expect(row.querySelector(".rounded-full")?.classList.contains("bg-destructive")).toBe(true);
+      expect(within(row).getByText("密钥库不可用")).toBeInTheDocument();
     });
   });
 });
