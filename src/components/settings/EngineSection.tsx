@@ -17,6 +17,41 @@ import { PaneHeader, SettingsCard, SettingsRow } from "./settings-chrome";
 // optimistic app-config write; the draft is unaffected either way). Applying
 // these to the live DuckDB engine is still a follow-up slice.
 
+/** Local string draft of the engine defaults. Numeric fields are held as the
+ *  raw text the user typed (including "") so a number field can be cleared and
+ *  retyped instead of snapping back to 1; parsing + clamping happen at the save
+ *  boundary (governing principle: an explicit save is not a correctness gate,
+ *  so an empty / invalid value clamps to the safe minimum there). */
+type EngineDraft = {
+  memory_limit: string;
+  threads: string;
+  row_cap: string;
+  statement_timeout_ms: string;
+};
+
+function toEngineDraft(e: EngineDefaults): EngineDraft {
+  return {
+    memory_limit: e.memory_limit,
+    threads: String(e.threads),
+    row_cap: String(e.row_cap),
+    statement_timeout_ms: String(e.statement_timeout_ms),
+  };
+}
+
+/** Apply one draft field onto the latest app-config's engine (read-modify-write
+ *  keeps sibling fields intact). memory_limit falls back to the stored value
+ *  when blank; numeric fields parse + clamp to a safe minimum of 1. */
+function patchEngine(cfg: AppConfig, field: keyof EngineDraft, raw: string): AppConfig {
+  const engine = { ...cfg.engine };
+  if (field === "memory_limit") {
+    engine.memory_limit = raw.trim() || cfg.engine.memory_limit;
+  } else {
+    const parsed = Number(raw);
+    engine[field] = Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : 1;
+  }
+  return { ...cfg, engine };
+}
+
 export type EngineSectionProps = {
   appConfig: AppConfig;
   /** Commit a patch (optimistic); on IPC failure the parent reverts + returns
@@ -27,18 +62,14 @@ export type EngineSectionProps = {
 export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
   // Local editable drafts, seeded from the committed engine defaults. Each
   // field commits independently; the drafts hold pending edits until saved.
-  const [draft, setDraft] = useState<EngineDefaults>(appConfig.engine);
-  const [savingField, setSavingField] = useState<keyof EngineDefaults | null>(null);
+  const [draft, setDraft] = useState<EngineDraft>(toEngineDraft(appConfig.engine));
+  const [savingField, setSavingField] = useState<keyof EngineDraft | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function saveField(field: keyof EngineDefaults) {
-    const value = draft[field];
+  async function saveField(field: keyof EngineDraft) {
     setSavingField(field);
     setError(null);
-    const err = await onCommit((cfg) => ({
-      ...cfg,
-      engine: { ...cfg.engine, [field]: value },
-    }));
+    const err = await onCommit((cfg) => patchEngine(cfg, field, draft[field]));
     setError(err);
     setSavingField(null);
   }
@@ -109,8 +140,7 @@ export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
             type="number"
             min={1}
             value={draft.threads}
-            onChange={(e) =>
-              setDraft({ ...draft, threads: Math.max(1, Number(e.target.value) || 1) })}
+            onChange={(e) => setDraft({ ...draft, threads: e.target.value })}
             disabled={saving}
           />
         </SettingsRow>
@@ -129,8 +159,7 @@ export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
             type="number"
             min={1}
             value={draft.row_cap}
-            onChange={(e) =>
-              setDraft({ ...draft, row_cap: Math.max(1, Number(e.target.value) || 1) })}
+            onChange={(e) => setDraft({ ...draft, row_cap: e.target.value })}
             disabled={saving}
           />
         </SettingsRow>
@@ -155,10 +184,7 @@ export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
             min={1}
             value={draft.statement_timeout_ms}
             onChange={(e) =>
-              setDraft({
-                ...draft,
-                statement_timeout_ms: Math.max(1, Number(e.target.value) || 1),
-              })}
+              setDraft({ ...draft, statement_timeout_ms: e.target.value })}
             disabled={saving}
           />
         </SettingsRow>

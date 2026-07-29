@@ -451,4 +451,40 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     fireEvent.click(within(dialog).getByRole("button", { name: "Discard" }));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
+
+  it("selecting another profile stashes the add draft; New profile restores it", async () => {
+    vi.mocked(listProviderProfiles).mockResolvedValue(twoProfileKeys);
+    renderView({ appConfig: twoProfileConfig });
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New profile" }));
+    fireEvent.change(screen.getByLabelText("Display name"), {
+      target: { value: "Half typed" },
+    });
+    // Selecting an existing profile leaves add mode WITHOUT a confirm or loss:
+    // the draft is stashed (retained on addingProfile) and the form switches.
+    fireEvent.click(screen.getByRole("button", { name: "GLM" }));
+    await waitFor(() =>
+      expect(screen.getByLabelText("Base URL")).toHaveValue(
+        twoProfileConfig.provider.profiles[1].base_url,
+      ),
+    );
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    // Re-entering add mode restores the stashed draft verbatim.
+    fireEvent.click(screen.getByRole("button", { name: "New profile" }));
+    expect(await screen.findByLabelText("Display name")).toHaveValue("Half typed");
+  });
+
+  it("a numeric engine field can be cleared; an empty save clamps to the minimum", async () => {
+    const { onCommitAppConfig } = renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Engine" }));
+    const threads = screen.getAllByRole("spinbutton")[0];
+    fireEvent.change(threads, { target: { value: "" } });
+    // The field stays clearable (no snap back to 1). RTL's toHaveValue reads an
+    // empty number input as null, so assert on the DOM value directly.
+    expect((threads as HTMLInputElement).value).toBe("");
+    fireEvent.click(screen.getAllByRole("button", { name: "Save" })[1]);
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalled());
+    // An explicit save is not a correctness gate: an empty value clamps to 1.
+    expect(onCommitAppConfig.mock.calls[0][0].engine.threads).toBe(1);
+  });
 });

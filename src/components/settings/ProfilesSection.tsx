@@ -199,14 +199,20 @@ export function ProfilesSection({
     pickInitialSelectedId(provider, initialEditProfileId),
   );
   const [addingProfile, setAddingProfile] = useState<ProviderProfile | null>(null);
+  // `addingProfile` is the RETAINED new-profile draft: it survives a view
+  // switch (selecting a list item stashes the in-progress edits onto it and
+  // leaves add mode WITHOUT dropping them; the next "New profile" restores it).
+  // `addMode` is whether the add form is currently SHOWN -- the draft persists
+  // even while the user browses existing profiles with addMode false.
+  const [addMode, setAddMode] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
 
   // Local editable draft for the editing target (a copy of the selected profile
   // in edit mode, or of the in-memory skeleton in add mode). Edits land here;
   // commit-on-blur / the create button write it through onCommit.
-  const editingId = addingProfile ? addingProfile.id : selectedId;
-  const source = addingProfile ?? provider.profiles.find((p) => p.id === selectedId) ?? null;
+  const editingId = addMode ? (addingProfile?.id ?? null) : selectedId;
+  const source = addMode ? addingProfile : (provider.profiles.find((p) => p.id === selectedId) ?? null);
   const [draft, setDraft] = useState<ProviderProfile | null>(source ? { ...source } : null);
   const [draftForId, setDraftForId] = useState<string | null>(editingId);
   const [formError, setFormError] = useState<string | null>(null);
@@ -291,7 +297,7 @@ export function ProfilesSection({
   // commit (validation or IPC error) so the parent's requestClose stays open on
   // the surfaced inline error instead of unmounting it.
   async function commitDraft(): Promise<boolean> {
-    if (addingProfile || !draft || !selectedId || commitBusy) return true;
+    if (addMode || !draft || !selectedId || commitBusy) return true;
     const committed = provider.profiles.find((p) => p.id === selectedId);
     if (!committed || sameEndpoint(draft, committed)) return true;
     const validationError = validateProfile(draft, intl);
@@ -318,14 +324,14 @@ export function ProfilesSection({
   // (focus left the window) or outside = commit. Add mode never blur-commits
   // (its create button is the only commit path).
   function handleBlurCapture(e: FocusEvent<HTMLDivElement>) {
-    if (addingProfile) return;
+    if (addMode) return;
     const next = e.relatedTarget as Node | null;
     if (next && e.currentTarget.contains(next)) return;
     void commitDraft();
   }
 
   async function handleCreate() {
-    if (!addingProfile || !draft || commitBusy) return;
+    if (!addMode || !addingProfile || !draft || commitBusy) return;
     const validationError = validateProfile(draft, intl);
     if (validationError) {
       setFormError(validationError);
@@ -342,8 +348,10 @@ export function ProfilesSection({
       setFormError(err);
       return;
     }
-    // Committed: leave add mode, select the new profile for editing.
+    // Committed: clear the retained draft + leave add mode, select the new
+    // profile for editing.
     setAddingProfile(null);
+    setAddMode(false);
     setSelectedId(next.id);
     setFormError(null);
   }
@@ -382,11 +390,22 @@ export function ProfilesSection({
     onRefreshKeyStatus();
   }
 
+  // Selecting a list item. The in-progress new-profile edits are stashed onto
+  // the retained draft (addingProfile) and add mode is left -- the draft is NOT
+  // dropped, and the next "New profile" restores it verbatim. Plain edit mode
+  // just switches. (Stash the live draft unconditionally: simpler than a
+  // sameEndpoint check, and it also preserves "typed but unchanged" input.)
+  function handleSelectProfile(id: string) {
+    if (addMode && addingProfile && draft) setAddingProfile(draft);
+    setAddMode(false);
+    setSelectedId(id);
+  }
+
   // Keep selectedId valid as the list mutates (create / delete elsewhere).
   const [validatedFor, setValidatedFor] = useState(provider);
   if (provider !== validatedFor) {
     setValidatedFor(provider);
-    if (!addingProfile && (!selectedId || !provider.profiles.some((p) => p.id === selectedId))) {
+    if (!addMode && (!selectedId || !provider.profiles.some((p) => p.id === selectedId))) {
       setSelectedId(pickInitialSelectedId(provider));
     }
   }
@@ -397,13 +416,14 @@ export function ProfilesSection({
   // unmounts this pane -- its commit-on-blur already fired on the focus move).
   // In-flight key / test IPCs keep blocking close after unmount via the
   // transitions mirrored upward through onIpcBusy, which survive this pane.
-  const addDirty = addingProfile !== null && draft !== null && !sameEndpoint(draft, addingProfile);
+  const addDirty = addMode && addingProfile !== null && draft !== null && !sameEndpoint(draft, addingProfile);
   useEffect(() => {
     controlsRef.current = {
       flush: commitDraft,
       addDirty,
       discardAdd: () => {
         setAddingProfile(null);
+        setAddMode(false);
         setFormError(null);
       },
       busy,
@@ -468,7 +488,10 @@ export function ProfilesSection({
               variant="outline"
               size="sm"
               onClick={() => {
-                setAddingProfile(freshProfileSkeleton());
+                // Restore a stashed draft if one survives; otherwise start a
+                // fresh skeleton. Entering add mode shows it for editing.
+                setAddingProfile(addingProfile ?? freshProfileSkeleton());
+                setAddMode(true);
                 setFormError(null);
               }}
               disabled={busy}
@@ -495,7 +518,7 @@ export function ProfilesSection({
                 const pStatus = profileKeys[p.id];
                 const pHasKey = pStatus?.has_key ?? false;
                 const pFault = pStatus?.keychain_fault ?? null;
-                const isSelected = !addingProfile && p.id === selectedId;
+                const isSelected = !addMode && p.id === selectedId;
                 const label = p.display_name.trim() || unnamed;
                 // Status dot (ADR-0075): active+key = connected, active+no-key
                 // = needs key, a keychain read fault = fault, otherwise idle.
@@ -528,10 +551,7 @@ export function ProfilesSection({
                         "hover:bg-accent",
                         "focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2",
                       )}
-                      onClick={() => {
-                        setAddingProfile(null);
-                        setSelectedId(p.id);
-                      }}
+                      onClick={() => handleSelectProfile(p.id)}
                       aria-current={isSelected ? "true" : undefined}
                     >
                       <span
@@ -563,7 +583,7 @@ export function ProfilesSection({
               {/* Form header: name heading + pencil (edit mode) or a plain name
                   input (add mode); trash at the right (edit mode only). */}
               <div className="flex items-center justify-between gap-2">
-                {addingProfile || renaming ? (
+                {addMode || renaming ? (
                   <Input
                     type="text"
                     value={draft.display_name}
@@ -597,7 +617,7 @@ export function ProfilesSection({
                     </Button>
                   </div>
                 )}
-                {!addingProfile && (
+                {!addMode && (
                   <Button
                     type="button"
                     variant="ghost"
@@ -662,7 +682,7 @@ export function ProfilesSection({
                 onBusyChange={reportKeyBusy}
               />
 
-              {addingProfile ? (
+              {addMode ? (
                 <div className="flex justify-end">
                   <Button type="button" onClick={() => void handleCreate()} disabled={busy}>
                     <FormattedMessage
@@ -751,6 +771,7 @@ export function ProfilesSection({
           </AlertDialogContent>
         </AlertDialog>
       )}
+
     </div>
   );
 }
