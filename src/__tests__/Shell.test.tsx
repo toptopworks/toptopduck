@@ -1246,6 +1246,59 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     );
   });
 
+  it("collapses the settings overlay left nav via the top-bar toggle (issue #285)", async () => {
+    // The settings overlay's left nav collapses from the SAME topbar slot as
+    // the workspace session-sidebar toggle (settings-mode swaps in the settings
+    // kind). Unlike the workspace collapse prefs this is a TEMP state -- it
+    // never rides app-config, so this test asserts only the className flip, not
+    // a setAppConfig commit.
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+    );
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    // Settings open: the topbar toggle now folds the settings nav. Default is
+    // expanded, so the button offers the collapse action.
+    const shell = document.querySelector(".shell");
+    expect(shell?.classList.contains("settings-nav-collapsed")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "折叠设置导航" }));
+    expect(shell?.classList.contains("settings-nav-collapsed")).toBe(true);
+    // Toggle back expands.
+    fireEvent.click(screen.getByRole("button", { name: "展开设置导航" }));
+    expect(shell?.classList.contains("settings-nav-collapsed")).toBe(false);
+  });
+
+  it("resets the settings nav to expanded on each open (temp state, issue #285)", async () => {
+    // The collapse is per-open temp state (not persisted): closing + reopening
+    // settings always starts expanded, even if the user folded the nav on the
+    // prior visit. openSettings resets the flag on every entry, so a folded nav
+    // does not leak across a close/reopen. ESC closes the overlay (the folded
+    // nav hides its own back button, so the window-level Escape listener is the
+    // reachable close path in the collapsed state).
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+    );
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "折叠设置导航" }));
+    expect(
+      document.querySelector(".shell")?.classList.contains("settings-nav-collapsed"),
+    ).toBe(true);
+    // Close via ESC, then reopen -- the nav is expanded again (no persisted
+    // collapse to recall).
+    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    expect(
+      document.querySelector(".shell")?.classList.contains("settings-nav-collapsed"),
+    ).toBe(false);
+  });
+
   it("drops a file onto an active session as an added source (ADR-0062 R3)", async () => {
     // The bisection's ACTIVE-session branch: with a session open, a drop adds
     // the file to that session's working set (ADR-0022 source event) -- it does

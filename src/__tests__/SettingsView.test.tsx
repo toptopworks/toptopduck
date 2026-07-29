@@ -144,14 +144,15 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     // Window controls persist across the view switch...
     expect(screen.getByRole("button", { name: "关闭" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "最小化" })).toBeInTheDocument();
-    // ...the topbar's workspace children unmount (header actions + sidebar
-    // toggle) -- since issue #282 the topbar carries no settings entry at
-    // all; the dual-state gear rides the left columns' bottoms (the sidebar
-    // copy stays mounted underneath the CSS hide, keep-alive, so scope the
-    // absence assertion to the topbar)...
+    // ...the topbar's workspace children unmount (header actions) while the
+    // left slot swaps to the SETTINGS nav toggle (issue #285: the same slot
+    // the session-sidebar toggle occupies in the workspace carries the settings
+    // left-nav collapse toggle while settings are open). The dual-state gear
+    // still rides the left columns' bottoms (issue #282)...
     const topbar = document.querySelector(".topbar") as HTMLElement;
     expect(topbar.querySelector(".header-actions")).toBeNull();
-    expect(topbar.querySelector(".sidebar-toggle")).toBeNull();
+    // The sidebar-toggle slot persists -- it is now the settings-nav toggle.
+    expect(topbar.querySelector(".sidebar-toggle")).not.toBeNull();
     // ...and the topbar keeps its drag region.
     expect(document.querySelector(".topbar [data-tauri-drag-region]")).not.toBeNull();
     // Returning to the workspace restores the workspace actions.

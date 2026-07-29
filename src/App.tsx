@@ -84,8 +84,16 @@ export default function App() {
     open: false,
     section: "general",
   });
+  // Settings overlay left-nav collapse (issue #285). TEMP state -- NOT persisted
+  // to app-config (unlike the workspace sidebar/rail collapse prefs): the
+  // settings overlay is a brief in-app view, so the collapse is not worth a
+  // persisted field. Lives in App (not SettingsView) because the toggle sits in
+  // the topbar, which App owns. Reset to expanded on every open so each settings
+  // visit starts from the full nav.
+  const [settingsNavCollapsed, setSettingsNavCollapsed] = useState(false);
   function openSettings(entry: SettingsEntry = { section: "general" }) {
     setSettingsView({ open: true, ...entry });
+    setSettingsNavCollapsed(false);
   }
 
   // ColdStartHero CTAs (issue #239): open Settings on the Profiles tab. The
@@ -257,7 +265,7 @@ export default function App() {
             )}
           >
             <div
-              className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${railCollapsed ? " rail-collapsed" : ""}${settingsView.open ? " settings-mode" : ""}`}
+              className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${railCollapsed ? " rail-collapsed" : ""}${settingsView.open ? " settings-mode" : ""}${settingsNavCollapsed ? " settings-nav-collapsed" : ""}`}
             >
               {/* Col 1: session sidebar (ADR-0060) -- full height, independent
               column (R1: QuestionBar does NOT span over it). */}
@@ -299,7 +307,13 @@ export default function App() {
               bottoms, issue #282 -- the topbar carries no settings entry). */}
               <header className="topbar gap-3 px-4 border-b border-border bg-background" data-tauri-drag-region>
                 {platform === "macos" && <WindowControls />}
-                {!settingsView.open && (
+                {settingsView.open ? (
+                  <SidebarToggle
+                    kind="settings"
+                    collapsed={settingsNavCollapsed}
+                    onToggle={() => setSettingsNavCollapsed((c) => !c)}
+                  />
+                ) : (
                   <SidebarToggle
                     collapsed={sidebarCollapsed}
                     onToggle={toggleSidebarCollapse}

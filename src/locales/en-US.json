@@ -177,6 +177,8 @@
   "settings.nav.general": "General",
   "settings.nav.privacy": "Privacy",
   "settings.nav.profiles": "Profiles",
+  "settings.nav.collapse": "Collapse settings navigation",
+  "settings.nav.expand": "Expand settings navigation",
   "settings.privacy.description": "What leaves this machine when you ask a question, and where the API key is kept.",
   "settings.profiles.activeBadge": "Active",
   "settings.profiles.activeHint": "This is the active profile used for new turns.",
