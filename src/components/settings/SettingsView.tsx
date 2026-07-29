@@ -58,6 +58,15 @@ import { SETTINGS_SECTIONS, type SettingsSection } from "./sections";
 // (they survive a section switch that unmounts the pane) -- and restores focus
 // to the opener (ADR-0065 focus habit).
 
+// Bare <button> chrome reset for the rail's unstyled buttons (ADR-0067). NOT
+// [all:unset]: that arbitrary utility cascades AFTER the display utilities on
+// the same element and clobbers `display: flex` back to inline, collapsing the
+// nav list into a single wrapped row. appearance-none/bg-transparent/border-0
+// strip the same native chrome without touching display; the base-layer
+// `button { font: inherit }` (app.css) owns the font. Same recipe as the
+// sidebar's bareButtonReset (SessionSidebar, issue #171).
+const bareButtonReset = "appearance-none bg-transparent border-0";
+
 /** Icon for one nav section (decorative; the accessible name is the label). */
 function SectionIcon({ section }: { section: SettingsSection }) {
   switch (section) {
@@ -369,7 +378,8 @@ export function SettingsView({
               key={s}
               type="button"
               className={cn(
-                "settings-nav-button [all:unset] text-foreground flex w-full cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-2 text-sm",
+                bareButtonReset,
+                "settings-nav-button text-foreground flex w-full cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-2 text-sm",
                 "hover:bg-accent",
                 "focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2",
                 section === s && "bg-accent text-accent-foreground font-medium",
@@ -388,7 +398,10 @@ export function SettingsView({
           <div className="flex items-center gap-1.5">
             <button
               type="button"
-              className="connection-row [all:unset] flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded-md px-2 py-2 hover:bg-accent focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2"
+              className={cn(
+                bareButtonReset,
+                "connection-row flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded-md px-2 py-2 hover:bg-accent focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2",
+              )}
               onClick={() => setSection("profiles")}
             >
               <span className={cn("size-2 shrink-0 rounded-full", connectionDotClass)} aria-hidden />

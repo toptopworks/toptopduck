@@ -104,6 +104,12 @@ export type ProfilesSectionProps = {
 const NEW_PROFILE_DEFAULT_BASE_URL = "https://api.anthropic.com";
 const NEW_PROFILE_DEFAULT_MODEL = "claude-sonnet-4-6";
 
+// Bare <button> chrome reset for the list's unstyled select button (ADR-0067).
+// NOT [all:unset] -- it clobbers `display: flex` to inline (see the matching
+// bareButtonReset note in SettingsView / SessionSidebar); the base-layer
+// `button { font: inherit }` (app.css) owns the font.
+const bareButtonReset = "appearance-none bg-transparent border-0";
+
 function newProfileId(): string {
   return crypto.randomUUID();
 }
@@ -516,7 +522,8 @@ export function ProfilesSection({
                     <button
                       type="button"
                       className={cn(
-                        "profiles-list-item-select [all:unset] min-w-0 flex-1 cursor-pointer",
+                        bareButtonReset,
+                        "profiles-list-item-select min-w-0 flex-1 cursor-pointer",
                         "flex items-center gap-2 rounded-md py-1 pr-1.5 text-sm text-foreground",
                         "hover:bg-accent",
                         "focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2",
