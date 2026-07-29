@@ -10,7 +10,7 @@ import { useShellSessions } from "./shell/useShellSessions";
 import { useAppConfigState } from "./shell/useAppConfigState";
 import { usePlatform } from "./shell/use-platform";
 import { HeaderActions } from "./shell/HeaderActions";
-import { type KeyStatus } from "./shell/ConnectionStatus";
+import type { KeyStatus } from "./types/provider";
 import { SidebarToggle } from "./shell/SidebarToggle";
 import { WindowControls } from "./shell/WindowControls";
 import { ResumeProgress } from "./shell/ResumeProgress";

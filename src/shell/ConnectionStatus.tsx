@@ -1,23 +1,10 @@
 import { useIntl } from "react-intl";
 import { Settings } from "lucide-react";
-import type { ProviderConfig } from "../types/provider";
+import type { ProviderConfig, KeyStatus } from "../types/provider";
 import { Button } from "../components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
+import { bareButtonReset } from "../lib/buttonReset";
 import { cn } from "../lib/utils";
-
-// Bare <button> chrome reset for the connection row (ADR-0067). Same recipe as
-// the sidebar's bareButtonReset (SessionSidebar, issue #171): NOT [all:unset]
-// (it cascades after the display utilities and clobbers `display: flex` back to
-// inline) -- appearance-none/bg-transparent/border-0 strip the native chrome
-// without touching display; the base-layer `button { font: inherit }` (app.css)
-// owns the font.
-const bareButtonReset = "appearance-none bg-transparent border-0";
-
-// The active profile's key status (App-level UI state, issue #275): has_key is
-// authoritative when keychain_fault is null; a non-null fault means the OS
-// keychain read failed, so the connection row renders "Keychain unavailable"
-// instead of misreading as "no key configured".
-export type KeyStatus = { has_key: boolean; keychain_fault: string | null };
 
 // The shared left-column footer (ADR-0075 rail chrome, issue #281; cross-view
 // unification, issue #282): a connection-status row (status dot + active
@@ -91,7 +78,7 @@ export function ConnectionStatus({
           )}
           onClick={onRowClick}
         >
-          <span className={cn("size-2 shrink-0 rounded-full", connectionDotClass)} aria-hidden />
+          <span data-slot="connection-dot" className={cn("size-2 shrink-0 rounded-full", connectionDotClass)} aria-hidden />
           <span className="min-w-0 flex-1">
             <span className="block truncate text-sm">{activeName}</span>
             <span className="text-muted-foreground block truncate text-xs">

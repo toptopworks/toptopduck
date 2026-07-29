@@ -10,8 +10,10 @@ import {
 
 import { fmtError } from "../../lib/error-presentation";
 import type { AppConfig } from "../../types/app-config";
+import type { KeyStatus } from "../../types/provider";
+import { bareButtonReset } from "../../lib/buttonReset";
 import { cn } from "../../lib/utils";
-import { ConnectionStatus, type KeyStatus } from "../../shell/ConnectionStatus";
+import { ConnectionStatus } from "../../shell/ConnectionStatus";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -56,15 +58,6 @@ import { SETTINGS_SECTIONS, type SettingsSection } from "./sections";
 // view's own counter, pane-owned key / test IPCs via transitions mirrored up
 // (they survive a section switch that unmounts the pane) -- and restores focus
 // to the opener (ADR-0065 focus habit).
-
-// Bare <button> chrome reset for the rail's unstyled buttons (ADR-0067). NOT
-// [all:unset]: that arbitrary utility cascades AFTER the display utilities on
-// the same element and clobbers `display: flex` back to inline, collapsing the
-// nav list into a single wrapped row. appearance-none/bg-transparent/border-0
-// strip the same native chrome without touching display; the base-layer
-// `button { font: inherit }` (app.css) owns the font. Same recipe as the
-// sidebar's bareButtonReset (SessionSidebar, issue #171).
-const bareButtonReset = "appearance-none bg-transparent border-0";
 
 /** Icon for one nav section (decorative; the accessible name is the label). */
 function SectionIcon({ section }: { section: SettingsSection }) {

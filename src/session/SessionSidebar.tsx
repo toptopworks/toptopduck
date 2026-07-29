@@ -10,8 +10,8 @@ import {
 import { resolveDisplayName } from "./displayName";
 import type { SessionMetadata } from "../types/session";
 import type { SidebarGrouping } from "../types/app-config";
-import type { ProviderConfig } from "../types/provider";
-import { ConnectionStatus, type KeyStatus } from "../shell/ConnectionStatus";
+import type { ProviderConfig, KeyStatus } from "../types/provider";
+import { ConnectionStatus } from "../shell/ConnectionStatus";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -37,6 +37,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { bareButtonReset } from "@/lib/buttonReset";
 import { cn } from "@/lib/utils";
 
 // Group heading (ADR-0060 Chat-style Today/Yesterday/Previous-7-days/Older, or
@@ -307,17 +308,6 @@ export function SessionSidebar({
     </aside>
   );
 }
-
-// Bare <button> chrome reset for the sidebar's unstyled buttons (ADR-0067,
-// issue #171). Replaces the former [all:unset]: Tailwind v4's arbitrary
-// [all:unset] cascades AFTER the display utilities on the same element, so
-// `all: unset` clobbered `display: flex` (session-entry-main, grouping
-// options) and `display: block` (menu items) back to `inline`, collapsing the
-// session-entry layout. appearance-none/bg-transparent/border-0 strip the same
-// native chrome WITHOUT touching `display`; per-element utilities own
-// padding/color, and the base-layer `button { font: inherit }` rule (app.css)
-// owns the font.
-const bareButtonReset = "appearance-none bg-transparent border-0";
 
 // The session-menu item base: composed per item via cn() so the danger variant
 // swaps text-foreground -> text-destructive without copy-paste drift across
