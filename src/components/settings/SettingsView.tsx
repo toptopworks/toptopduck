@@ -314,9 +314,8 @@ export function SettingsView({
         className="settings-nav border-border bg-muted/30 border-r"
         aria-label="Settings sections"
       >
-        {/* Rail top: brand + back to workspace. */}
-        <div className="settings-rail-top border-border border-b px-2 pt-3 pb-2">
-          <div className="px-2 pb-2 text-sm font-semibold tracking-tight">TOPTOPDuck</div>
+        {/* Rail top: back to workspace. */}
+        <div className="settings-rail-top border-border border-b px-2 pt-2 pb-2">
           <Button
             type="button"
             variant="ghost"

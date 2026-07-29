@@ -84,8 +84,13 @@ export default function App() {
     open: false,
     section: "general",
   });
+  // Settings nav collapse toggle lives in the topbar (App-owned), so the state
+  // stays here. Reset to expanded on every open so each visit starts from the
+  // full nav (issue #285).
+  const [settingsNavCollapsed, setSettingsNavCollapsed] = useState(false);
   function openSettings(entry: SettingsEntry = { section: "general" }) {
     setSettingsView({ open: true, ...entry });
+    setSettingsNavCollapsed(false);
   }
 
   // ColdStartHero CTAs (issue #239): open Settings on the Profiles tab. The
@@ -257,7 +262,7 @@ export default function App() {
             )}
           >
             <div
-              className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${railCollapsed ? " rail-collapsed" : ""}${settingsView.open ? " settings-mode" : ""}`}
+              className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${railCollapsed ? " rail-collapsed" : ""}${settingsView.open ? " settings-mode" : ""}${settingsNavCollapsed ? " settings-nav-collapsed" : ""}`}
             >
               {/* Col 1: session sidebar (ADR-0060) -- full height, independent
               column (R1: QuestionBar does NOT span over it). */}
@@ -299,7 +304,13 @@ export default function App() {
               bottoms, issue #282 -- the topbar carries no settings entry). */}
               <header className="topbar gap-3 px-4 border-b border-border bg-background" data-tauri-drag-region>
                 {platform === "macos" && <WindowControls />}
-                {!settingsView.open && (
+                {settingsView.open ? (
+                  <SidebarToggle
+                    kind="settings"
+                    collapsed={settingsNavCollapsed}
+                    onToggle={() => setSettingsNavCollapsed((c) => !c)}
+                  />
+                ) : (
                   <SidebarToggle
                     collapsed={sidebarCollapsed}
                     onToggle={toggleSidebarCollapse}

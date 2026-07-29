@@ -200,16 +200,40 @@
   grid-template-rows: 1fr;
   height: 100vh;
   overflow: hidden;
+  /* Codex-style collapse (issue #285), mirroring the .shell session-sidebar
+   * animation: the first column animates 220px <-> 0 so the content column
+   * slides instead of snapping. grid-template-columns interpolation needs the
+   * column to actually shrink, which needs min-width:0 + overflow:hidden on
+   * .settings-nav (below). */
+  transition: grid-template-columns 180ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 .settings-nav {
   grid-column: 1; grid-row: 1;
   display: flex; flex-direction: column;
+  /* min-width:0 lets the grid squash this column to 0 on collapse (default
+   * min-width:auto would refuse), mirroring .session-sidebar. overflow stays
+   * hidden so the nav's content fades via opacity instead of reflowing. */
+  min-width: 0;
   overflow: hidden;
+  transition: opacity 120ms ease;
 }
 .settings-content {
   grid-column: 2; grid-row: 1;
   overflow-y: auto;
 }
+/* Settings overlay left-nav collapse (ADR-0054 shell-collapse family, issue
+ * #285). The overlay's own grid (220px 1fr above) animates col 1 to 0 + fades
+ * the nav, so col 2 (.settings-content at 1fr) fills the overlay. The
+ * transition lives on .settings-overlay + .settings-nav above (mirrors the
+ * .shell session-sidebar collapse). display:none would snap both the column
+ * width and the fade (display is not animatable), so this rides opacity +
+ * pointer-events instead -- the nav stays in flow at width 0 while its content
+ * fades out in step with the grid transition. The modifier sits on .shell so
+ * it scopes exactly like the workspace sidebar-collapsed / rail-collapsed
+ * classes (harmless outside settings-mode: the overlay mounts only while
+ * settings are open). */
+.shell.settings-nav-collapsed .settings-overlay { grid-template-columns: 0 1fr; }
+.shell.settings-nav-collapsed .settings-nav { opacity: 0; pointer-events: none; }
 /* Profiles master-detail (issue #153, ADR-0064/0065). Two columns on desktop,
  * stacked on narrow widths. The <=640px stacking is a behavior-equivalence AC
  * (issue #170) and stays here as layout, not on the component. */

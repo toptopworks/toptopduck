@@ -177,6 +177,8 @@
   "settings.nav.general": "通用",
   "settings.nav.privacy": "隐私",
   "settings.nav.profiles": "Profiles",
+  "settings.nav.collapse": "折叠设置导航",
+  "settings.nav.expand": "展开设置导航",
   "settings.privacy.description": "提问时哪些数据会离开本机，以及 API key 的存放位置。",
   "settings.profiles.activeBadge": "活跃",
   "settings.profiles.activeHint": "这是新轮次使用的活跃配置档。",
