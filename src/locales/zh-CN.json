@@ -87,6 +87,8 @@
   "guidedLoad.rowOption": "第 {n} 行",
   "guidedLoad.submit": "按选择加载",
   "guidedLoad.title": "引导加载：{name}",
+  "header.nav.back": "后退",
+  "header.nav.forward": "前进",
   "header.openDuck": "打开 .duck",
   "header.openDuck.title": "打开 .duck 恢复此前的分析",
   "header.saveAs": "另存为 .duck",

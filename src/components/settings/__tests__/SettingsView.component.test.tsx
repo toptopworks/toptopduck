@@ -1,8 +1,10 @@
+import { useState } from "react";
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { SettingsView } from "../SettingsView";
 import { listProviderProfiles, setProfileKey } from "../../../api";
 import type { AppConfig } from "../../../types/app-config";
+import type { SettingsSection } from "../sections";
 import { renderSettings } from "./helpers";
 
 // SettingsView reaches the per-profile keychain surface (issue #153); mock the
@@ -22,6 +24,38 @@ vi.mock("../../../api", async (importOriginal) => {
 // The single write path the view awaits; typed so a commit mock is assignable to
 // the onCommitAppConfig prop and its .mock.calls stay typed.
 type CommitFn = (cfg: AppConfig) => Promise<void>;
+
+// Controlled-section harness (issue #288): owns the section the way the shell
+// does (useState + onSectionChange), so the controlled section prop is exercised
+// exactly as in production. initialSection seeds the first render.
+function SettingsViewHarness({
+  appConfig,
+  onCommitAppConfig,
+  onClose,
+  onRefreshKeyStatus,
+  keyStatus,
+  initialSection,
+}: {
+  appConfig: AppConfig;
+  onCommitAppConfig: Mock<CommitFn>;
+  onClose: () => void;
+  onRefreshKeyStatus: () => void;
+  keyStatus: { has_key: boolean; keychain_fault: string | null };
+  initialSection: SettingsSection;
+}) {
+  const [section, setSection] = useState<SettingsSection>(initialSection);
+  return (
+    <SettingsView
+      appConfig={appConfig}
+      section={section}
+      onSectionChange={setSection}
+      onCommitAppConfig={onCommitAppConfig}
+      onClose={onClose}
+      onRefreshKeyStatus={onRefreshKeyStatus}
+      keyStatus={keyStatus}
+    />
+  );
+}
 
 describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => {
   const baseConfig: AppConfig = {
@@ -77,27 +111,32 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
 
   // Shared render harness: SettingsView now requires the key-status seam
   // (keyStatus for the rail connection row) + onRefreshKeyStatus (set-active
-  // refresh). Returns the RTL result (container etc.) + the seam mocks.
+  // refresh) + a controlled section (issue #288: the section is shell-owned so
+  // the back/forward history can restore it; SettingsViewHarness owns it with
+  // useState the way the shell does). Returns the RTL result + the seam mocks.
   function renderView({
     appConfig = baseConfig,
     onCommitAppConfig = vi.fn<CommitFn>().mockResolvedValue(undefined),
     onClose = vi.fn(),
     onRefreshKeyStatus = vi.fn(),
     keyStatus = { has_key: true, keychain_fault: null },
+    initialSection = "general",
   }: {
     appConfig?: AppConfig;
     onCommitAppConfig?: Mock<CommitFn>;
     onClose?: () => void;
     onRefreshKeyStatus?: () => void;
     keyStatus?: { has_key: boolean; keychain_fault: string | null };
+    initialSection?: SettingsSection;
   } = {}) {
     const result = renderSettings(
-      <SettingsView
+      <SettingsViewHarness
         appConfig={appConfig}
         onCommitAppConfig={onCommitAppConfig}
         onClose={onClose}
         onRefreshKeyStatus={onRefreshKeyStatus}
         keyStatus={keyStatus}
+        initialSection={initialSection}
       />,
     );
     return { ...result, onCommitAppConfig, onClose, onRefreshKeyStatus };

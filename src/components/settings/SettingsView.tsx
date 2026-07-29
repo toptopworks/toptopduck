@@ -148,7 +148,8 @@ export function SettingsView({
   onClose,
   onRefreshKeyStatus,
   keyStatus,
-  initialSection = "general",
+  section,
+  onSectionChange,
   initialEditProfileId,
 }: {
   appConfig: AppConfig;
@@ -163,11 +164,13 @@ export function SettingsView({
   // The active profile's key status (App-level), bound to the rail's connection
   // row (the shared ConnectionStatus footer, issue #282).
   keyStatus: KeyStatus;
-  initialSection?: SettingsSection;
+  // The live settings section is controlled by the shell (issue #288): the
+  // shell's back/forward history restores it, so SettingsView no longer owns it.
+  section: SettingsSection;
+  onSectionChange: (section: SettingsSection) => void;
   initialEditProfileId?: string;
 }) {
   const intl = useIntl();
-  const [section, setSection] = useState<SettingsSection>(initialSection);
   const [confirmDiscardOpen, setConfirmDiscardOpen] = useState(false);
 
   // Latest app-config for read-modify-write. Mirrored from the prop in an effect
@@ -345,7 +348,7 @@ export function SettingsView({
                 section === s && "bg-accent text-accent-foreground font-medium",
               )}
               aria-current={section === s ? "page" : undefined}
-              onClick={() => setSection(s)}
+              onClick={() => onSectionChange(s)}
             >
               <SectionIcon section={s} />
               <SectionLabel section={s} />
@@ -362,7 +365,7 @@ export function SettingsView({
           keyStatus={keyStatus}
           gearLabel={backToWorkspaceLabel}
           onGearClick={() => void requestClose()}
-          onRowClick={() => setSection("profiles")}
+          onRowClick={() => onSectionChange("profiles")}
         />
       </nav>
 
