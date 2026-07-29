@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -61,8 +62,10 @@ import { PRESET_CUSTOM, derivePresetId, findPreset } from "./provider-presets";
  *  flight. SettingsView reads it through a ref this pane keeps populated. */
 export type ProfilesControls = {
   /** Commit the in-flight edit-mode draft (a no-op when clean or in add mode).
-   *  Awaited by the parent before closing. */
-  flush: () => Promise<void>;
+   *  Awaited by the parent before closing; resolves TRUE when the close may
+   *  proceed, FALSE when a dirty draft failed to commit (validation or IPC
+   *  error) -- the parent then stays open so the inline error stays visible. */
+  flush: () => Promise<boolean>;
   /** True while in add mode with unsaved edits (parent confirms discard). */
   addDirty: boolean;
   /** Drop the in-memory new profile without committing (the confirmed discard). */
@@ -70,6 +73,10 @@ export type ProfilesControls = {
   /** True while any IPC this pane owns is in flight (blur commit / create /
    *  key / test). The parent blocks close while set. */
   busy: boolean;
+  /** True while this pane's delete-confirm AlertDialog is open; the parent's
+   *  window ESC handler yields to the dialog while set (ADR-0075: a confirm
+   *  dialog owns window ESC). */
+  dialogOpen: boolean;
 };
 
 export type ProfilesSectionProps = {
@@ -80,6 +87,12 @@ export type ProfilesSectionProps = {
   /** Re-read the active profile's keychain slot after a set-active switch so the
    *  connection row + header indicator reflect the new slot (ADR-0029). */
   onRefreshKeyStatus: () => void;
+  /** Mirror key / test IPC in-flight transitions to the parent's close guard,
+   *  which outlives this pane: the field reports from its IPC finally block,
+   *  which runs even after a section switch unmounts the pane, so close stays
+   *  blocked until that IPC settles (ADR-0075: close blocked while ANY in-flight
+   *  IPC). */
+  onIpcBusy: (channel: "key" | "test", busy: boolean) => void;
   /** One-shot entry hint (issue #239): pre-select this profile for editing on
    *  mount (ColdStartHero "no key" CTA). Ignored if it no longer matches. */
   initialEditProfileId?: string;
@@ -163,6 +176,7 @@ export function ProfilesSection({
   provider,
   onCommit,
   onRefreshKeyStatus,
+  onIpcBusy,
   initialEditProfileId,
   controlsRef,
 }: ProfilesSectionProps) {
@@ -209,6 +223,24 @@ export function ProfilesSection({
   const [commitBusy, setCommitBusy] = useState(false);
   const busy = keyBusy || testBusy || commitBusy;
 
+  // Wrap the field busy mirrors so every transition also reaches the parent's
+  // close guard, which outlives this pane (see the onIpcBusy prop). Stable so
+  // the fields' reporting does not churn.
+  const reportKeyBusy = useCallback(
+    (isBusy: boolean) => {
+      setKeyBusy(isBusy);
+      onIpcBusy("key", isBusy);
+    },
+    [onIpcBusy],
+  );
+  const reportTestBusy = useCallback(
+    (isBusy: boolean) => {
+      setTestBusy(isBusy);
+      onIpcBusy("test", isBusy);
+    },
+    [onIpcBusy],
+  );
+
   // Key-overlay fetch. Mount: an effect with a cancelled guard whose state
   // updates land only in the IPC callbacks (never synchronously in the effect
   // body -- react-hooks/set-state-in-effect). Refresh (the pane header button):
@@ -249,14 +281,17 @@ export function ProfilesSection({
 
   // Commit the edit-mode draft (validate → read-modify-write → revert-on-fail
   // via the parent). A no-op when clean, in add mode, or already committing.
-  async function commitDraft(): Promise<void> {
-    if (addingProfile || !draft || !selectedId || commitBusy) return;
+  // Resolves TRUE when a close may proceed; FALSE when a dirty draft failed to
+  // commit (validation or IPC error) so the parent's requestClose stays open on
+  // the surfaced inline error instead of unmounting it.
+  async function commitDraft(): Promise<boolean> {
+    if (addingProfile || !draft || !selectedId || commitBusy) return true;
     const committed = provider.profiles.find((p) => p.id === selectedId);
-    if (!committed || sameEndpoint(draft, committed)) return;
+    if (!committed || sameEndpoint(draft, committed)) return true;
     const validationError = validateProfile(draft, intl);
     if (validationError) {
       setFormError(validationError);
-      return;
+      return false;
     }
     const next = draft;
     setCommitBusy(true);
@@ -269,6 +304,7 @@ export function ProfilesSection({
     }));
     setCommitBusy(false);
     setFormError(err);
+    return err === null;
   }
 
   // Form-level blur: commit when focus leaves the edit form (commit-on-blur).
@@ -353,6 +389,8 @@ export function ProfilesSection({
   // every render (the closures capture fresh state); cleared on unmount so the
   // parent never reads a stale surface after the pane is left (a section switch
   // unmounts this pane -- its commit-on-blur already fired on the focus move).
+  // In-flight key / test IPCs keep blocking close after unmount via the
+  // transitions mirrored upward through onIpcBusy, which survive this pane.
   const addDirty = addingProfile !== null && draft !== null && !sameEndpoint(draft, addingProfile);
   useEffect(() => {
     controlsRef.current = {
@@ -363,6 +401,7 @@ export function ProfilesSection({
         setFormError(null);
       },
       busy,
+      dialogOpen: confirmDeleteId !== null,
     };
     return () => {
       controlsRef.current = null;
@@ -394,7 +433,7 @@ export function ProfilesSection({
         description={(
           <FormattedMessage
             id="settings.profiles.description"
-            defaultMessage="Named provider endpoints. The active profile drives new turns; edits save as you move away from a field."
+            defaultMessage="Named connection endpoints. The active profile drives new turns; edits save as you move away from a field."
           />
         )}
         action={(
@@ -452,16 +491,19 @@ export function ProfilesSection({
                 const pFault = pStatus?.keychain_fault ?? null;
                 const isSelected = !addingProfile && p.id === selectedId;
                 const label = p.display_name.trim() || unnamed;
-                // Status dot (ADR-0075): active+key = connected (green),
-                // active+no-key = needs key (amber), a keychain read fault =
-                // red, otherwise idle (muted). Conveys what the old Active /
-                // Key-set badges did, compactly.
+                // Status dot (ADR-0075): active+key = connected, active+no-key
+                // = needs key, a keychain read fault = fault, otherwise idle.
+                // Colors ride the ADR-0050 semantic tokens with the same
+                // key-state pairing ADR-0067 anchored for the header badges
+                // (primary teal = configured / active, warning amber = needs
+                // key, destructive = fault) -- no raw palette. Conveys what the
+                // old Active / Key-set badges did, compactly.
                 const dotClass = pFault
                   ? "bg-destructive"
                   : isActive && pHasKey
-                    ? "bg-emerald-500"
+                    ? "bg-primary"
                     : isActive
-                      ? "bg-amber-500"
+                      ? "bg-warning"
                       : "bg-muted-foreground/40";
                 return (
                   <li
@@ -591,7 +633,7 @@ export function ProfilesSection({
                 onUpdate={(patch) => setDraft({ ...draft, ...patch })}
                 showProtocolRadio={derivedPreset === PRESET_CUSTOM}
                 disabled={fieldsDisabled}
-                onBusyChange={setTestBusy}
+                onBusyChange={reportTestBusy}
               />
 
               <ProviderKeyField
@@ -610,7 +652,7 @@ export function ProfilesSection({
                 keyPlaceholder={activePreset?.key_placeholder ?? ""}
                 showBadge={false}
                 disabled={fieldsDisabled}
-                onBusyChange={setKeyBusy}
+                onBusyChange={reportKeyBusy}
               />
 
               {addingProfile ? (
@@ -656,9 +698,16 @@ export function ProfilesSection({
       </div>
 
       {/* Delete confirmation (commit-on-confirm, ADR-0075). The copy no longer
-          says "takes effect when you save" -- delete persists immediately. */}
+          says "takes effect when you save" -- delete persists immediately.
+          While open it owns window ESC (the parent's handler yields via
+          dialogOpen on controlsRef); ESC / overlay dismissal = cancel. */}
       {confirmDeleteId && (
-        <AlertDialog defaultOpen>
+        <AlertDialog
+          defaultOpen
+          onOpenChange={(open) => {
+            if (!open) setConfirmDeleteId(null);
+          }}
+        >
           <AlertDialogContent>
             <AlertDialogHeader>
               <AlertDialogTitle>

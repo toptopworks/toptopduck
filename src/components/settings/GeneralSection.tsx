@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { FormattedMessage } from "react-intl";
+import { FormattedMessage, useIntl } from "react-intl";
 import { Monitor, Moon, Sun } from "lucide-react";
 
 import type { AppConfig, LocalePreference, Theme } from "../../types/app-config";
@@ -31,6 +31,7 @@ export type GeneralSectionProps = {
 };
 
 export function GeneralSection({ appConfig, onCommitImmediate }: GeneralSectionProps) {
+  const intl = useIntl();
   const [error, setError] = useState<string | null>(null);
 
   async function commitTheme(theme: Theme) {
@@ -67,7 +68,15 @@ export function GeneralSection({ appConfig, onCommitImmediate }: GeneralSectionP
               value={appConfig.theme}
               onValueChange={(v) => void commitTheme(v as Theme)}
             >
-              <SelectTrigger className="w-48" aria-label="Theme">
+              {/* The accessible name reuses the row-title key (ADR-0052: no
+                  hardcoded chrome strings) instead of an English literal. */}
+              <SelectTrigger
+                className="w-48"
+                aria-label={intl.formatMessage({
+                  id: "settings.theme.legend",
+                  defaultMessage: "Theme",
+                })}
+              >
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -101,7 +110,13 @@ export function GeneralSection({ appConfig, onCommitImmediate }: GeneralSectionP
               value={appConfig.locale}
               onValueChange={(v) => void commitLocale(v as LocalePreference)}
             >
-              <SelectTrigger className="w-48" aria-label="Language">
+              <SelectTrigger
+                className="w-48"
+                aria-label={intl.formatMessage({
+                  id: "settings.locale.legend",
+                  defaultMessage: "Language",
+                })}
+              >
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>

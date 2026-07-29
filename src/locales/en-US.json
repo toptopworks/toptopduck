@@ -205,7 +205,7 @@
   "settings.profiles.keychainUnavailableHint": "The OS keychain could not be read (it may be locked, or the service is down). Check the OS keychain, then retry.",
   "settings.profiles.create": "Create profile",
   "settings.profiles.deleteLastDisabled": "The last profile cannot be deleted.",
-  "settings.profiles.description": "Named provider endpoints. The active profile drives new turns; edits save as you move away from a field.",
+  "settings.profiles.description": "Named connection endpoints. The active profile drives new turns; edits save as you move away from a field.",
   "settings.profiles.model": "Model",
   "settings.profiles.new": "New profile",
   "settings.profiles.preset.custom": "Custom",

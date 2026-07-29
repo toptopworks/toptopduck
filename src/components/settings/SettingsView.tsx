@@ -45,11 +45,15 @@ import { SETTINGS_SECTIONS, type SettingsSection } from "./sections";
 // PERSISTENCE (ADR-0075 governing principle): the single write path is
 // commitWithRevert -- an optimistic read-modify-write over the latest app-config
 // that reverts with a compensating write + returns a formatted error on IPC
-// failure. Panes choose WHEN to call it: theme/language commit immediately, the
-// engine numbers on per-field Save, profile endpoints on blur, structural ops at
-// once. Close/ESC flushes a still-focused profile field and confirms a dirty
-// add-mode form ("discard new profile?"); close is blocked while any IPC is in
-// flight and restores focus to the opener (ADR-0065 focus habit).
+// failure, serialized on a single-flight chain so a revert can never race a
+// later commit. Panes choose WHEN to call it: theme/language commit immediately,
+// the engine numbers on per-field Save, profile endpoints on blur, structural
+// ops at once. Close/ESC flushes a still-focused profile field (staying open
+// when the flush fails) and confirms a dirty add-mode form ("discard new
+// profile?"); close is blocked while any IPC is in flight -- commits via this
+// view's own counter, pane-owned key / test IPCs via transitions mirrored up
+// (they survive a section switch that unmounts the pane) -- and restores focus
+// to the opener (ADR-0065 focus habit).
 
 /** Icon for one nav section (decorative; the accessible name is the label). */
 function SectionIcon({ section }: { section: SettingsSection }) {
@@ -90,12 +94,14 @@ function SectionLabel({ section }: { section: SettingsSection }) {
 }
 
 /** The active pane. Each pane self-persists via onCommit; the Profiles pane also
- *  publishes its close-contract controls through profilesControlsRef. */
+ *  publishes its close-contract controls through profilesControlsRef and mirrors
+ *  its key / test IPC transitions up through onIpcBusy. */
 function SectionContent({
   section,
   appConfig,
   onCommit,
   onRefreshKeyStatus,
+  onIpcBusy,
   initialEditProfileId,
   profilesControlsRef,
 }: {
@@ -103,6 +109,7 @@ function SectionContent({
   appConfig: AppConfig;
   onCommit: (mutate: (cfg: AppConfig) => AppConfig) => Promise<string | null>;
   onRefreshKeyStatus: () => void;
+  onIpcBusy: (channel: "key" | "test", busy: boolean) => void;
   initialEditProfileId?: string;
   profilesControlsRef: React.MutableRefObject<ProfilesControls | null>;
 }) {
@@ -115,6 +122,7 @@ function SectionContent({
           provider={appConfig.provider}
           onCommit={onCommit}
           onRefreshKeyStatus={onRefreshKeyStatus}
+          onIpcBusy={onIpcBusy}
           initialEditProfileId={initialEditProfileId}
           controlsRef={profilesControlsRef}
         />
@@ -159,51 +167,86 @@ export function SettingsView({
   const [confirmDiscardOpen, setConfirmDiscardOpen] = useState(false);
 
   // Latest app-config for read-modify-write. Mirrored from the prop in an effect
-  // AND updated optimistically inside commitWithRevert, so two rapid commits
-  // chain correctly even before React re-renders (avoids a stale-closure
-  // clobber) without writing the ref during render (react-hooks/refs).
+  // AND updated inside each serialized commit run, so a commit always reads the
+  // true current config (INCLUDING a predecessor's revert) without writing the
+  // ref during render (react-hooks/refs).
   const latestRef = useRef(appConfig);
   useEffect(() => {
     latestRef.current = appConfig;
   }, [appConfig]);
 
-  // Whether a commit this view initiated is in flight (gates ESC / close).
-  const committingRef = useRef(false);
+  // Commits run on a single-flight chain: each read-modify-write starts only
+  // after the previous one SETTLES (its success or its compensating revert).
+  // Concurrent optimistic commits could otherwise diverge UI from disk -- e.g.
+  // a failed commit's revert clobbering an overlapping later success.
+  const commitChainRef = useRef<Promise<void>>(Promise.resolve());
+  // Commits currently queued / in flight (gates ESC / close). Lives here, not
+  // in a pane, so it survives a section switch mid-commit.
+  const commitsInFlightRef = useRef(0);
 
   const commitWithRevert = useCallback(
-    async (mutate: (cfg: AppConfig) => AppConfig): Promise<string | null> => {
-      const prev = latestRef.current;
-      const next = mutate(prev);
-      latestRef.current = next;
-      committingRef.current = true;
-      try {
-        await onCommitAppConfig(next);
-        return null;
-      } catch (e) {
-        // Compensating write: restore the previous config in React state + disk
-        // so the UI never diverges from what is stored (ADR-0075 revert-on-fail).
-        latestRef.current = prev;
-        void onCommitAppConfig(prev).catch(() => {
-          // best effort -- the surfaced error already tells the user.
-        });
-        return fmtError(e, intl);
-      } finally {
-        committingRef.current = false;
-      }
+    (mutate: (cfg: AppConfig) => AppConfig): Promise<string | null> => {
+      const run = async (): Promise<string | null> => {
+        commitsInFlightRef.current += 1;
+        try {
+          const prev = latestRef.current;
+          const next = mutate(prev);
+          latestRef.current = next;
+          try {
+            await onCommitAppConfig(next);
+            return null;
+          } catch (e) {
+            // Compensating write: restore the previous config in React state +
+            // disk so the UI never diverges from what is stored (ADR-0075
+            // revert-on-fail). AWAITED inside the chain so the next commit
+            // reads the reverted config and disk ordering stays consistent.
+            latestRef.current = prev;
+            try {
+              await onCommitAppConfig(prev);
+            } catch {
+              // Best effort -- the surfaced error already tells the user.
+            }
+            return fmtError(e, intl);
+          }
+        } finally {
+          commitsInFlightRef.current -= 1;
+        }
+      };
+      const result = commitChainRef.current.then(run);
+      // Keep the chain alive regardless of outcome (run never actually
+      // rejects -- failures come back as formatted error strings).
+      commitChainRef.current = result.then(
+        () => undefined,
+        () => undefined,
+      );
+      return result;
     },
     [onCommitAppConfig, intl],
   );
 
   // The Profiles pane's close-contract controls (flush / addDirty / discardAdd /
-  // busy); null when the pane is not mounted.
+  // busy / dialogOpen); null when the pane is not mounted.
   const profilesControlsRef = useRef<ProfilesControls | null>(null);
 
+  // Key / test IPCs are owned by pane children whose busy state dies on
+  // unmount, so their in-flight transitions are mirrored here (channel booleans,
+  // set idempotently). The pane reports from the field's IPC finally block,
+  // which runs even after a section switch unmounts the pane -- so the close
+  // guard still blocks until that IPC settles (ADR-0075: close is blocked while
+  // ANY in-flight IPC, not only while the owning pane stays mounted).
+  const paneIpcBusyRef = useRef({ key: false, test: false });
+  const handlePaneIpcBusy = useCallback((channel: "key" | "test", busy: boolean) => {
+    paneIpcBusyRef.current[channel] = busy;
+  }, []);
+
   // Single close path (ADR-0075): block while any IPC is in flight, flush a
-  // still-focused profile field, confirm a dirty add-mode form, else close.
+  // still-focused profile field (staying open when the flush fails so the
+  // inline error remains visible), confirm a dirty add-mode form, else close.
   async function requestClose() {
     const ctl = profilesControlsRef.current;
-    if (committingRef.current || ctl?.busy) return;
-    if (ctl) await ctl.flush();
+    const paneIpc = paneIpcBusyRef.current;
+    if (commitsInFlightRef.current > 0 || paneIpc.key || paneIpc.test || ctl?.busy) return;
+    if (ctl && !(await ctl.flush())) return;
     if (ctl?.addDirty) {
       setConfirmDiscardOpen(true);
       return;
@@ -223,9 +266,10 @@ export function SettingsView({
     };
   }, []);
 
-  // ESC exits via the same requestClose path. While the discard confirm is open
-  // the AlertDialog owns ESC (this handler bails). Refs keep the once-registered
-  // listener stable across renders.
+  // ESC exits via the same requestClose path. While a confirm dialog is open --
+  // this view's discard confirm OR the Profiles pane's delete confirm -- the
+  // AlertDialog owns ESC and this handler bails (ADR-0075 close contract). Refs
+  // keep the once-registered listener stable across renders.
   const confirmDiscardRef = useRef(false);
   useEffect(() => {
     confirmDiscardRef.current = confirmDiscardOpen;
@@ -238,6 +282,7 @@ export function SettingsView({
     function onKey(e: KeyboardEvent) {
       if (e.key !== "Escape") return;
       if (confirmDiscardRef.current) return;
+      if (profilesControlsRef.current?.dialogOpen) return;
       e.preventDefault();
       void requestCloseRef.current();
     }
@@ -269,13 +314,16 @@ export function SettingsView({
     : keyStatus.has_key
       ? intl.formatMessage({ id: "settings.connection.connected", defaultMessage: "Connected" })
       : intl.formatMessage({ id: "settings.connection.noKey", defaultMessage: "No key" });
+  // Status-dot colors ride the ADR-0050 semantic tokens, reusing the key-state
+  // pairing ADR-0067 anchored for the header badges (primary teal = configured
+  // / active, warning amber = needs key, destructive = fault) -- no raw palette.
   const connectionDotClass = !activeProfile
     ? "bg-muted-foreground/40"
     : keyStatus.keychain_fault
       ? "bg-destructive"
       : keyStatus.has_key
-        ? "bg-emerald-500"
-        : "bg-amber-500";
+        ? "bg-primary"
+        : "bg-warning";
   const backToWorkspace = (
     <FormattedMessage id="settings.backToWorkspace" defaultMessage="Back to workspace" />
   );
@@ -377,6 +425,7 @@ export function SettingsView({
             appConfig={appConfig}
             onCommit={commitWithRevert}
             onRefreshKeyStatus={onRefreshKeyStatus}
+            onIpcBusy={handlePaneIpcBusy}
             initialEditProfileId={initialEditProfileId}
             profilesControlsRef={profilesControlsRef}
           />

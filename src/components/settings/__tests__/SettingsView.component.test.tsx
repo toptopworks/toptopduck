@@ -144,6 +144,42 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     expect(await screen.findByText("disk full")).toBeInTheDocument();
   });
 
+  it("overlapping commits serialize: a failed commit's revert lands before the next commit", async () => {
+    // The first commit hangs until the test rejects it; the second change is
+    // issued while the first is still in flight. The single-flight chain makes
+    // the FIRST commit's compensating revert land as the second write and the
+    // queued light commit as the third (concurrent commits could otherwise
+    // diverge UI from disk when one fails mid-overlap).
+    let rejectFirst!: (e: Error) => void;
+    let first = true;
+    const onCommitAppConfig = vi.fn<CommitFn>().mockImplementation(() => {
+      if (first) {
+        first = false;
+        return new Promise<void>((_resolve, reject) => {
+          rejectFirst = reject;
+        });
+      }
+      return Promise.resolve();
+    });
+    renderView({ onCommitAppConfig });
+    openSelect(screen.getByRole("combobox", { name: "Theme" }));
+    chooseOption("Dark");
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalledTimes(1));
+    // A second change while the first commit is still pending.
+    openSelect(screen.getByRole("combobox", { name: "Theme" }));
+    chooseOption("Light");
+    rejectFirst(new Error("disk full"));
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalledTimes(3));
+    expect(onCommitAppConfig.mock.calls[0][0].theme).toBe("dark");
+    // The compensating revert of the failed commit comes BEFORE the queued
+    // light commit, which then reads the reverted (original) config.
+    expect(onCommitAppConfig.mock.calls[1][0].theme).toBe("system");
+    expect(onCommitAppConfig.mock.calls[2][0].theme).toBe("light");
+    // The queued light commit succeeds, so the pane settles error-free on the
+    // last successful value -- UI and disk converge (no split state).
+    await waitFor(() => expect(screen.queryByText("disk full")).not.toBeInTheDocument());
+  });
+
   // --- Engine pane: per-field explicit Save (ADR-0075 case c) --------------
 
   it("each engine field has its own Save that commits only that field", async () => {
@@ -191,6 +227,70 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     fireEvent.keyDown(window, { key: "Escape" });
     await new Promise((r) => setTimeout(r, 0));
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("ESC yields to the open delete-confirm dialog (view stays open)", async () => {
+    vi.mocked(listProviderProfiles).mockResolvedValue(twoProfileKeys);
+    const { onClose } = renderView({ appConfig: twoProfileConfig });
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    fireEvent.click(await screen.findByRole("button", { name: "GLM" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await screen.findByRole("alertdialog");
+    // ESC through the document so BOTH the dialog's dismiss handler and the
+    // view's window listener receive it (bubbling, like a real keydown): the
+    // dialog cancels the delete, the view must NOT also close (ADR-0075: a
+    // confirm dialog owns window ESC).
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(onClose).not.toHaveBeenCalled();
+    // A second ESC -- no dialog open any more -- closes the view.
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  it("ESC with a dirty invalid edit stays open on the flush error", async () => {
+    const { onClose } = renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    const baseUrl = await screen.findByLabelText("Base URL");
+    fireEvent.change(baseUrl, { target: { value: "ftp://nope" } });
+    // ESC flushes the still-dirty draft; validation fails, so the view must
+    // stay open on the surfaced error instead of unmounting it.
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(await screen.findByText("Base URL must use http or https.")).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("a key IPC started before a section switch still blocks ESC until it settles", async () => {
+    // A deferred key IPC the test resolves, so a pane switch can happen
+    // mid-flight: the Profiles pane -- and its local busy state -- unmounts,
+    // but the close guard must keep blocking until the orphaned IPC settles
+    // (ADR-0075: close blocked while ANY in-flight IPC).
+    let resolveKey!: (value: boolean) => void;
+    vi.mocked(setProfileKey).mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveKey = resolve;
+        }),
+    );
+    const { onClose } = renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    await screen.findAllByText("Anthropic");
+    fireEvent.change(screen.getByPlaceholderText("sk-ant-api03-…"), {
+      target: { value: "sk-test-281" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Set key" }));
+    await waitFor(() => expect(vi.mocked(setProfileKey)).toHaveBeenCalled());
+    // Switch panes mid-IPC: the pane's controlsRef is cleared on unmount.
+    fireEvent.click(screen.getByRole("button", { name: "General" }));
+    fireEvent.keyDown(window, { key: "Escape" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(onClose).not.toHaveBeenCalled();
+    // Once the IPC settles (its finally reports upward from the unmounted
+    // pane), ESC closes.
+    resolveKey(true);
+    await new Promise((r) => setTimeout(r, 0));
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
   // --- Rail chrome: nav, connection row, dual-state gear -------------------

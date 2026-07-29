@@ -156,8 +156,9 @@ describe("App theme (ADR-0050 black-box)", () => {
 
     // Theme is now a Select that commits IMMEDIATELY (ADR-0075 case a): open it
     // and pick 深色 -- there is no Save button; the override persists on
-    // selection and applies live.
-    const themeSelect = screen.getByRole("combobox", { name: "Theme" });
+    // selection and applies live. The accessible name is the localized row
+    // title (ADR-0052: the aria-label rides the settings.theme.legend key).
+    const themeSelect = screen.getByRole("combobox", { name: "主题" });
     fireEvent.pointerDown(themeSelect, { button: 0, pointerType: "mouse" });
     fireEvent.click(themeSelect);
     const darkOption = await screen.findByRole("option", { name: "深色" });
@@ -189,7 +190,8 @@ describe("App theme (ADR-0050 black-box)", () => {
     // Open the theme Select and pick 跟随系统 (immediate commit, no Save). Only
     // the theme Select is open, so its "跟随系统" option is unambiguous even
     // though the language Select offers the same option (it stays closed).
-    const themeSelect = screen.getByRole("combobox", { name: "Theme" });
+    // Localized accessible name (settings.theme.legend, ADR-0052).
+    const themeSelect = screen.getByRole("combobox", { name: "主题" });
     fireEvent.pointerDown(themeSelect, { button: 0, pointerType: "mouse" });
     fireEvent.click(themeSelect);
     const systemOption = await screen.findByRole("option", { name: "跟随系统" });

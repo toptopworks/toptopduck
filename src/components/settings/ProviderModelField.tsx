@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 
 import { testProfile } from "../../api";
@@ -31,9 +31,12 @@ type ProviderModelFieldProps = {
   // types (input mode) or selects from the probed dropdown.
   onUpdate: (patch: Partial<ProviderProfile>) => void;
   disabled: boolean;
-  // Mirror testBusy to the parent so ESC / Back / Cancel are blocked while a
-  // preflight IPC is in flight (the returned classification must not land on an
-  // unmounted node). Mirrors ProviderKeyField's onBusyChange contract.
+  // Notified imperatively at probe IPC boundaries (true on start, false in the
+  // finally) so ESC / Back / Cancel are blocked while a preflight IPC is in
+  // flight. Imperative -- NOT state -> effect -- because the finally runs even
+  // after this node unmounts (a section switch mid-probe), where the setTestBusy
+  // mirror would no-op and never report "settled" upward. Mirrors
+  // ProviderKeyField's onBusyChange contract.
   onBusyChange?: (busy: boolean) => void;
 };
 
@@ -68,15 +71,9 @@ export function ProviderModelField({
     setTestError(null);
   }
 
-  // Mirror testBusy up so ESC / Back / Cancel are blocked while a preflight IPC
-  // is in flight. The parent passes a stable onBusyChange (useCallback) so this
-  // does not churn -- same contract as ProviderKeyField.
-  useEffect(() => {
-    onBusyChange?.(testBusy);
-  }, [testBusy, onBusyChange]);
-
   async function handleTest() {
     setTestBusy(true);
+    onBusyChange?.(true);
     setTestError(null);
     try {
       const result = await testProfile(
@@ -90,6 +87,7 @@ export function ProviderModelField({
       setTestError(fmtError(e, intl));
     } finally {
       setTestBusy(false);
+      onBusyChange?.(false);
     }
   }
 

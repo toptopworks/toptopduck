@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 
 import { clearProfileKey, setProfileKey } from "../../api";
@@ -47,8 +47,11 @@ type ProviderKeyFieldProps = {
   // per-profile status badge, so a second one in the edit form duplicates the
   // same fact on one screen.
   showBadge?: boolean;
-  // Mirror keyBusy to the parent so ESC / Back / Cancel are blocked while a key
-  // IPC is in flight (the returned has_key must not land on an unmounted node).
+  // Notified imperatively at key IPC boundaries (true on start, false in the
+  // finally) so the parent's close guard blocks ESC / Back / Cancel while the
+  // IPC is in flight. Imperative -- NOT state -> effect -- because the finally
+  // runs even after this node unmounts (a section switch mid-IPC), where the
+  // setKeyBusy mirror would no-op and never report "settled" upward.
   onBusyChange?: (busy: boolean) => void;
 };
 
@@ -79,17 +82,11 @@ export function ProviderKeyField({
     setKeyError(null);
   }
 
-  // Mirror keyBusy up so ESC / Back / Cancel are blocked while a key IPC is in
-  // flight (the returned has_key must not land on an unmounted node). The parent
-  // passes a stable onBusyChange (useCallback) so this does not churn.
-  useEffect(() => {
-    onBusyChange?.(keyBusy);
-  }, [keyBusy, onBusyChange]);
-
   async function handleSetKey() {
     const trimmed = keyInput.trim();
     if (!trimmed) return;
     setKeyBusy(true);
+    onBusyChange?.(true);
     setKeyError(null);
     try {
       const next = await setProfileKey(profileId, trimmed);
@@ -99,11 +96,13 @@ export function ProviderKeyField({
       setKeyError(fmtError(e, intl));
     } finally {
       setKeyBusy(false);
+      onBusyChange?.(false);
     }
   }
 
   async function handleClearKey() {
     setKeyBusy(true);
+    onBusyChange?.(true);
     setKeyError(null);
     try {
       const next = await clearProfileKey(profileId);
@@ -112,6 +111,7 @@ export function ProviderKeyField({
       setKeyError(fmtError(e, intl));
     } finally {
       setKeyBusy(false);
+      onBusyChange?.(false);
     }
   }
 
