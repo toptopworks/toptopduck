@@ -280,44 +280,57 @@ export default function App() {
               + window controls (right). The session name + rail collapse toggle
               moved into each SessionPane's own header (session-scoped chrome
               lives with the session). ADR-0067 (#171): visual rules -> inline
-              utilities; the .topbar grid + flex layout shell stays in styles.css. */}
+              utilities; the .topbar grid + flex layout shell stays in styles.css.
+              Settings mode (ADR-0075 overlay) unmounts the WORKSPACE children
+              (sidebar toggle / soft-cap / header actions) but the titlebar
+              itself persists: with decorations:false its window controls +
+              drag region are shell-wide chrome that must stay reachable in
+              every view (ADR-0074) -- the settings-mode CSS exempts .topbar
+              from the overlay hide, and the rail owns settings chrome (its
+              gear is the dual-state one; this gear is not). */}
               <header className="topbar gap-3 px-4 border-b border-border bg-background" data-tauri-drag-region>
                 {platform === "macos" && <WindowControls />}
-                <SidebarToggle
-                  collapsed={sidebarCollapsed}
-                  onToggle={toggleSidebarCollapse}
-                />
-                <div className="flex-1" data-tauri-drag-region />
-                {atSoftCap && (
-                  // Session-count soft-cap hint (ADR-0046): too many open
-                  // sessions risk memory pressure. A warning Alert (ADR-0050,
-                  // issue #108) -- role="status" is polite, matching the
-                  // stale/viz-degradation warnings in ResultView. The topbar is
-                  // a compact flex row, so className shrinks the Alert's default
-                  // w-full block chrome to an inline chip (cn tailwind-merge
-                  // reshapes the base, cf. DisclosureBanner's AlertDescription
-                  // override); the variant still supplies the --warning token so
-                  // this recolors with .dark like every other warning surface.
-                  <Alert
-                    variant="warning"
-                    role="status"
-                    className="w-auto inline-flex items-center gap-1.5 px-2 py-0.5 text-xs"
-                  >
-                    <FormattedMessage
-                      id="header.softCap"
-                      defaultMessage="Many sessions open — close some to free memory."
-                    />
-                  </Alert>
+                {!settingsView.open && (
+                  <SidebarToggle
+                    collapsed={sidebarCollapsed}
+                    onToggle={toggleSidebarCollapse}
+                  />
                 )}
-                <HeaderActions
-                  disabled={busy || !activeSession}
-                  hasKey={keyStatus.has_key}
-                  keychainFault={keyStatus.keychain_fault}
-                  onOpenDuck={() => void handleOpenDuck()}
-                  onSaveAs={() => void handleSaveAs()}
-                  onOpenSettings={() => openSettings()}
-                  settingsDisabled={!appConfig}
-                />
+                <div className="flex-1" data-tauri-drag-region />
+                {!settingsView.open && (
+                  <>
+                    {atSoftCap && (
+                      // Session-count soft-cap hint (ADR-0046): too many open
+                      // sessions risk memory pressure. A warning Alert (ADR-0050,
+                      // issue #108) -- role="status" is polite, matching the
+                      // stale/viz-degradation warnings in ResultView. The topbar is
+                      // a compact flex row, so className shrinks the Alert's default
+                      // w-full block chrome to an inline chip (cn tailwind-merge
+                      // reshapes the base, cf. DisclosureBanner's AlertDescription
+                      // override); the variant still supplies the --warning token so
+                      // this recolors with .dark like every other warning surface.
+                      <Alert
+                        variant="warning"
+                        role="status"
+                        className="w-auto inline-flex items-center gap-1.5 px-2 py-0.5 text-xs"
+                      >
+                        <FormattedMessage
+                          id="header.softCap"
+                          defaultMessage="Many sessions open — close some to free memory."
+                        />
+                      </Alert>
+                    )}
+                    <HeaderActions
+                      disabled={busy || !activeSession}
+                      hasKey={keyStatus.has_key}
+                      keychainFault={keyStatus.keychain_fault}
+                      onOpenDuck={() => void handleOpenDuck()}
+                      onSaveAs={() => void handleSaveAs()}
+                      onOpenSettings={() => openSettings()}
+                      settingsDisabled={!appConfig}
+                    />
+                  </>
+                )}
                 {platform !== "macos" && <WindowControls />}
               </header>
 
@@ -400,7 +413,14 @@ export default function App() {
                   appConfig={appConfig}
                   initialSection={settingsView.section}
                   initialEditProfileId={settingsView.editProfileId}
-                  onCommitAppConfig={(cfg) => void commitAppConfig(cfg)}
+                  // Returns the IPC promise (unwrapped) so per-control commits
+                  // inside SettingsView can await + catch failures and revert
+                  // (ADR-0075). commitAppConfig itself stays optimistic /
+                  // no-rollback (ADR-0068); the revert is the view's compensating
+                  // write on a caught reject.
+                  onCommitAppConfig={(cfg) => commitAppConfig(cfg)}
+                  onRefreshKeyStatus={() => void refreshKeyStatus()}
+                  keyStatus={keyStatus}
                   onClose={() => {
                     setSettingsView({ open: false, section: "general" });
                     void refreshKeyStatus();

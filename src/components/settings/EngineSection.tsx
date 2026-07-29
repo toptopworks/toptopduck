@@ -1,74 +1,202 @@
+import { useState } from "react";
 import { FormattedMessage } from "react-intl";
 
+import type { AppConfig, EngineDefaults } from "../../types/app-config";
+import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { Label } from "../ui/label";
-import type { SettingsForm } from "./sections";
+import { PaneHeader, SettingsCard, SettingsRow } from "./settings-chrome";
 
-// Engine pane (ADR-0065, issue #151): the DuckDB engine defaults (ADR-0005),
-// migrated verbatim from SettingsDialog's engine fieldset. A later slice will
-// apply these to the live engine; this slice persists + restores them.
-export function EngineSection({ form }: { form: SettingsForm }) {
-  const { engine, setEngine, saving } = form;
+// Engine pane (ADR-0075, issue #281): the four DuckDB engine defaults
+// (ADR-0005) as four INDEPENDENT explicit-save rows (governing principle case
+// c -- restart / explicit-apply fields keep a per-field Save). Each field owns
+// its own local draft + Save button and commits ONLY its own field via a
+// read-modify-write over the latest app-config (save-unit = coupling boundary:
+// the four numbers are independent, so saving one must not clobber or smuggle
+// the others' pending edits). A failed save surfaces an inline error and keeps
+// the typed draft so the user can retry (the parent's onCommit reverts the
+// optimistic app-config write; the draft is unaffected either way). Applying
+// these to the live DuckDB engine is still a follow-up slice.
+
+/** Local string draft of the engine defaults. Numeric fields are held as the
+ *  raw text the user typed (including "") so a number field can be cleared and
+ *  retyped instead of snapping back to 1; parsing + clamping happen at the save
+ *  boundary (governing principle: an explicit save is not a correctness gate,
+ *  so an empty / invalid value clamps to the safe minimum there). */
+type EngineDraft = {
+  memory_limit: string;
+  threads: string;
+  row_cap: string;
+  statement_timeout_ms: string;
+};
+
+function toEngineDraft(e: EngineDefaults): EngineDraft {
+  return {
+    memory_limit: e.memory_limit,
+    threads: String(e.threads),
+    row_cap: String(e.row_cap),
+    statement_timeout_ms: String(e.statement_timeout_ms),
+  };
+}
+
+/** Apply one draft field onto the latest app-config's engine (read-modify-write
+ *  keeps sibling fields intact). memory_limit falls back to the stored value
+ *  when blank; numeric fields parse + clamp to a safe minimum of 1. */
+function patchEngine(cfg: AppConfig, field: keyof EngineDraft, raw: string): AppConfig {
+  const engine = { ...cfg.engine };
+  if (field === "memory_limit") {
+    engine.memory_limit = raw.trim() || cfg.engine.memory_limit;
+  } else {
+    const parsed = Number(raw);
+    engine[field] = Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : 1;
+  }
+  return { ...cfg, engine };
+}
+
+export type EngineSectionProps = {
+  appConfig: AppConfig;
+  /** Commit a patch (optimistic); on IPC failure the parent reverts + returns
+   *  the formatted error (null on success). */
+  onCommit: (mutate: (cfg: AppConfig) => AppConfig) => Promise<string | null>;
+};
+
+export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
+  // Local editable drafts, seeded from the committed engine defaults. Each
+  // field commits independently; the drafts hold pending edits until saved.
+  const [draft, setDraft] = useState<EngineDraft>(toEngineDraft(appConfig.engine));
+  const [savingField, setSavingField] = useState<keyof EngineDraft | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function saveField(field: keyof EngineDraft) {
+    setSavingField(field);
+    setError(null);
+    const err = await onCommit((cfg) => patchEngine(cfg, field, draft[field]));
+    setError(err);
+    setSavingField(null);
+  }
+
+  const saving = savingField !== null;
+
+  function saveButton(field: keyof EngineDefaults) {
+    return (
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        onClick={() => void saveField(field)}
+        disabled={saving}
+      >
+        {savingField === field ? (
+          <FormattedMessage id="settings.saving" defaultMessage="Saving…" />
+        ) : (
+          <FormattedMessage id="settings.save" defaultMessage="Save" />
+        )}
+      </Button>
+    );
+  }
+
   return (
-    <fieldset className="grid gap-2 border-0 p-0 m-0">
-      <legend className="text-sm font-medium">
-        <FormattedMessage id="settings.engine.legend" defaultMessage="Engine defaults (ADR-0005)" />
-      </legend>
-      <Label>
-        <FormattedMessage id="settings.engine.memoryLimit" defaultMessage="Memory limit:" />
-        <Input
-          type="text"
-          value={engine.memory_limit}
-          onChange={(e) => setEngine({ ...engine, memory_limit: e.target.value })}
-          disabled={saving}
-          placeholder="512MB"
-        />
-      </Label>
-      <Label>
-        <FormattedMessage id="settings.engine.threads" defaultMessage="Threads:" />
-        <Input
-          type="number"
-          min={1}
-          value={engine.threads}
-          onChange={(e) =>
-            setEngine({ ...engine, threads: Math.max(1, Number(e.target.value) || 1) })}
-          disabled={saving}
-        />
-      </Label>
-      <Label>
-        <FormattedMessage id="settings.engine.rowCap" defaultMessage="Result row cap:" />
-        <Input
-          type="number"
-          min={1}
-          value={engine.row_cap}
-          onChange={(e) =>
-            setEngine({ ...engine, row_cap: Math.max(1, Number(e.target.value) || 1) })}
-          disabled={saving}
-        />
-      </Label>
-      <Label>
-        <FormattedMessage
-          id="settings.engine.statementTimeout"
-          defaultMessage="Statement timeout (ms):"
-        />
-        <Input
-          type="number"
-          min={1}
-          value={engine.statement_timeout_ms}
-          onChange={(e) =>
-            setEngine({
-              ...engine,
-              statement_timeout_ms: Math.max(1, Number(e.target.value) || 1),
-            })}
-          disabled={saving}
-        />
-      </Label>
-      <p className="text-muted-foreground text-sm">
+    <div>
+      <PaneHeader
+        title={<FormattedMessage id="settings.nav.engine" defaultMessage="Engine" />}
+        description={(
+          <FormattedMessage
+            id="settings.engine.description"
+            defaultMessage="DuckDB engine defaults. Saved values persist and apply to new sessions."
+          />
+        )}
+      />
+
+      <SettingsCard>
+        <SettingsRow
+          title={<FormattedMessage id="settings.engine.memoryLimit" defaultMessage="Memory limit:" />}
+          description={(
+            <FormattedMessage
+              id="settings.engine.memoryLimit.description"
+              defaultMessage="Maximum memory DuckDB may use, e.g. 512MB."
+            />
+          )}
+          action={saveButton("memory_limit")}
+        >
+          <Input
+            type="text"
+            value={draft.memory_limit}
+            onChange={(e) => setDraft({ ...draft, memory_limit: e.target.value })}
+            disabled={saving}
+            placeholder="512MB"
+          />
+        </SettingsRow>
+
+        <SettingsRow
+          title={<FormattedMessage id="settings.engine.threads" defaultMessage="Threads:" />}
+          description={(
+            <FormattedMessage
+              id="settings.engine.threads.description"
+              defaultMessage="Parallel worker threads DuckDB may schedule."
+            />
+          )}
+          action={saveButton("threads")}
+        >
+          <Input
+            type="number"
+            min={1}
+            value={draft.threads}
+            onChange={(e) => setDraft({ ...draft, threads: e.target.value })}
+            disabled={saving}
+          />
+        </SettingsRow>
+
+        <SettingsRow
+          title={<FormattedMessage id="settings.engine.rowCap" defaultMessage="Result row cap:" />}
+          description={(
+            <FormattedMessage
+              id="settings.engine.rowCap.description"
+              defaultMessage="Ceiling on a materialized result's row count."
+            />
+          )}
+          action={saveButton("row_cap")}
+        >
+          <Input
+            type="number"
+            min={1}
+            value={draft.row_cap}
+            onChange={(e) => setDraft({ ...draft, row_cap: e.target.value })}
+            disabled={saving}
+          />
+        </SettingsRow>
+
+        <SettingsRow
+          title={(
+            <FormattedMessage
+              id="settings.engine.statementTimeout"
+              defaultMessage="Statement timeout (ms):"
+            />
+          )}
+          description={(
+            <FormattedMessage
+              id="settings.engine.statementTimeout.description"
+              defaultMessage="Per-statement timeout in milliseconds."
+            />
+          )}
+          action={saveButton("statement_timeout_ms")}
+        >
+          <Input
+            type="number"
+            min={1}
+            value={draft.statement_timeout_ms}
+            onChange={(e) =>
+              setDraft({ ...draft, statement_timeout_ms: e.target.value })}
+            disabled={saving}
+          />
+        </SettingsRow>
+      </SettingsCard>
+
+      <p className="text-muted-foreground mt-3 text-sm">
         <FormattedMessage
           id="settings.engine.hint"
           defaultMessage="This slice persists and restores these values across restarts; applying them to the live DuckDB engine is a follow-up slice."
         />
       </p>
-    </fieldset>
+      {error && <p className="settings-error mt-3 text-destructive text-sm">{error}</p>}
+    </div>
   );
 }

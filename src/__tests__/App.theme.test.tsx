@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { AppConfig, Theme } from "../types/app-config";
 
 // Black-box theme tests (ADR-0050, issue #77 AC6). Drives the rendered shell
@@ -151,12 +151,19 @@ describe("App theme (ADR-0050 black-box)", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
-    // Wait for the dialog fields to mount (loading finishes).
+    // Wait for the General pane rows to mount.
     await waitFor(() => expect(screen.getByText("主题")).toBeInTheDocument());
 
-    // Select the dark option (radio accessible name = the label text).
-    fireEvent.click(screen.getByRole("radio", { name: "深色" }));
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    // Theme is now a Select that commits IMMEDIATELY (ADR-0075 case a): open it
+    // and pick 深色 -- there is no Save button; the override persists on
+    // selection and applies live. The accessible name is the localized row
+    // title (ADR-0052: the aria-label rides the settings.theme.legend key).
+    const themeSelect = screen.getByRole("combobox", { name: "主题" });
+    fireEvent.pointerDown(themeSelect, { button: 0, pointerType: "mouse" });
+    fireEvent.click(themeSelect);
+    const darkOption = await screen.findByRole("option", { name: "深色" });
+    fireEvent.pointerUp(darkOption, { button: 0, pointerType: "mouse" });
+    fireEvent.click(darkOption);
 
     // The override persists into app-config (ADR-0038) and applies live.
     await waitFor(() =>
@@ -180,11 +187,16 @@ describe("App theme (ADR-0050 black-box)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
     await waitFor(() => expect(screen.getByText("主题")).toBeInTheDocument());
-    // Scope to the theme fieldset: the locale fieldset ALSO has a "跟随系统"
-    // radio (ADR-0052), so an unscoped name query is ambiguous (issue #78).
-    const themeGroup = screen.getByRole("group", { name: "主题" });
-    fireEvent.click(within(themeGroup).getByRole("radio", { name: "跟随系统" }));
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    // Open the theme Select and pick 跟随系统 (immediate commit, no Save). Only
+    // the theme Select is open, so its "跟随系统" option is unambiguous even
+    // though the language Select offers the same option (it stays closed).
+    // Localized accessible name (settings.theme.legend, ADR-0052).
+    const themeSelect = screen.getByRole("combobox", { name: "主题" });
+    fireEvent.pointerDown(themeSelect, { button: 0, pointerType: "mouse" });
+    fireEvent.click(themeSelect);
+    const systemOption = await screen.findByRole("option", { name: "跟随系统" });
+    fireEvent.pointerUp(systemOption, { button: 0, pointerType: "mouse" });
+    fireEvent.click(systemOption);
 
     await waitFor(() =>
       expect(setAppConfig).toHaveBeenCalledWith(

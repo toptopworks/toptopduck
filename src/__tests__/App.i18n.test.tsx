@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { AppConfig } from "../types/app-config";
 
 // Black-box i18n tests (ADR-0052, issue #78 AC). Drives the rendered shell like
@@ -145,11 +145,14 @@ describe("App i18n (ADR-0052 black-box)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     await waitFor(() => expect(screen.getByText("Language")).toBeInTheDocument());
 
-    // Scope to the locale fieldset: the theme fieldset ALSO has a "Follow system"
-    // radio, so an unscoped name query is ambiguous.
-    const localeGroup = screen.getByRole("group", { name: "Language" });
-    fireEvent.click(within(localeGroup).getByRole("radio", { name: "简体中文" }));
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    // Language is now a Select that commits IMMEDIATELY (ADR-0075 case a): open
+    // it and pick 简体中文 -- no Save button; the override persists on selection.
+    const localeSelect = screen.getByRole("combobox", { name: "Language" });
+    fireEvent.pointerDown(localeSelect, { button: 0, pointerType: "mouse" });
+    fireEvent.click(localeSelect);
+    const zhOption = await screen.findByRole("option", { name: "简体中文" });
+    fireEvent.pointerUp(zhOption, { button: 0, pointerType: "mouse" });
+    fireEvent.click(zhOption);
 
     // The locale override persists into app-config (ADR-0038).
     await waitFor(() =>

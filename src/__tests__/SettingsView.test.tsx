@@ -102,9 +102,10 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
 
   it("gear opens the settings overlay and hides the session shell (settingsOpen ternary)", async () => {
     // Topbar gear sets settingsOpen=true; the shell carries .settings-mode so
-    // CSS (.shell.settings-mode > :not(.settings-overlay) { display: none })
-    // hides session sidebar + topbar underneath. They stay mounted -- keep-alive
-    // state survives the round trip.
+    // CSS (.shell.settings-mode > :not(.settings-overlay):not(.topbar) {
+    // display: none }) hides the session sidebar underneath. It stays mounted
+    // -- keep-alive state survives the round trip. The topbar itself persists
+    // as the window titlebar above the overlay (ADR-0074; its own test below).
     vi.mocked(getAppConfig).mockResolvedValue(baseAppConfig());
     render(<App />);
     await waitFor(() => expect(getAppConfig).toHaveBeenCalled());
@@ -114,10 +115,39 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
       expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
     );
     expect(document.querySelector(".shell")?.classList.contains("settings-mode")).toBe(true);
-    // session sidebar + topbar stay in the DOM (keep-alive) -- the .settings-mode
-    // class is what hides them via CSS, not an unmount.
+    // The session sidebar stays in the DOM (keep-alive) -- the .settings-mode
+    // class is what hides it via CSS, not an unmount.
     expect(document.querySelector(".session-sidebar")).toBeInTheDocument();
     expect(document.querySelector(".topbar")).toBeInTheDocument();
+  });
+
+  it("settings mode keeps the window titlebar but strips workspace actions (ADR-0074)", async () => {
+    // decorations:false makes the topbar the window's ONLY chrome; its window
+    // controls + drag region must stay reachable in the settings view too.
+    // The workspace actions unmount while settings are open (the rail owns
+    // settings chrome), leaving a clean titlebar strip above the overlay.
+    vi.mocked(getAppConfig).mockResolvedValue(baseAppConfig());
+    render(<App />);
+    await waitFor(() => expect(getAppConfig).toHaveBeenCalled());
+    // jsdom's platform fallback is macOS (use-platform), so the traffic
+    // lights render on the topbar -- window.* resolve via the zh catalog.
+    expect(screen.getByRole("button", { name: "关闭" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    await waitFor(() =>
+      expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
+    );
+    // Window controls persist across the view switch...
+    expect(screen.getByRole("button", { name: "关闭" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "最小化" })).toBeInTheDocument();
+    // ...the workspace gear does not (the rail carries the dual-state one)...
+    expect(screen.queryByRole("button", { name: "设置" })).not.toBeInTheDocument();
+    // ...and the topbar keeps its drag region.
+    expect(document.querySelector(".topbar [data-tauri-drag-region]")).not.toBeNull();
+    // Returning to the workspace restores the workspace actions.
+    fireEvent.click(document.querySelector(".settings-back") as HTMLElement);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument(),
+    );
   });
 
   it("‹ Back closes the overlay and restores the session shell", async () => {
@@ -128,8 +158,9 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     await waitFor(() =>
       expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
     );
-    // ‹ Back to app (zh: ‹ 返回应用).
-    fireEvent.click(screen.getByRole("button", { name: /返回应用/ }));
+    // Rail-top "Back to workspace" (zh: 返回工作区); the .settings-back hook
+    // class distinguishes it from the gear, which shares its accessible name.
+    fireEvent.click(document.querySelector(".settings-back") as HTMLElement);
     await waitFor(() =>
       expect(document.querySelector(".settings-overlay")).not.toBeInTheDocument(),
     );
@@ -147,11 +178,8 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     await waitFor(() =>
       expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
     );
-    // Wait for the form's loading state to clear (getProviderConfig resolved)
-    // so busy is false and ESC is allowed to close (back button enabled = !busy).
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /返回应用/ })).not.toBeDisabled(),
-    );
+    // No commit is in flight on the General pane, so ESC closes (the close
+    // contract blocks only while an IPC is in flight, ADR-0075).
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() =>
       expect(document.querySelector(".settings-overlay")).not.toBeInTheDocument(),
@@ -183,8 +211,8 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     expect(
       screen.queryByRole("textbox", { name: "提问", hidden: true }),
     ).toBeInTheDocument();
-    // Return from settings.
-    fireEvent.click(screen.getByRole("button", { name: /返回应用/ }));
+    // Return from settings (rail-top back button).
+    fireEvent.click(document.querySelector(".settings-back") as HTMLElement);
     await waitFor(() =>
       expect(document.querySelector(".settings-overlay")).not.toBeInTheDocument(),
     );
@@ -193,20 +221,22 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     expect(vi.mocked(createSession)).toHaveBeenCalledTimes(1);
   });
 
-  it("Save commits app-config and closes the overlay (atomic write, ADR-0038)", async () => {
+  it("engine field Save persists app-config without closing (per-field save, ADR-0075)", async () => {
+    // The global footer Save is retired (ADR-0075): the engine pane carries four
+    // independent per-field Save buttons. Saving one writes app-config and keeps
+    // the overlay open (there is no Save-and-close any more).
     vi.mocked(getAppConfig).mockResolvedValue(baseAppConfig());
     render(<App />);
     await waitFor(() => expect(getAppConfig).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
-    // Wait for the form to finish loading (Save enabled = loading done).
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "保存" })).not.toBeDisabled(),
+      expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
     );
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    // Navigate to the Engine pane (zh: 引擎) and save the first field.
+    fireEvent.click(screen.getByRole("button", { name: "引擎" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "保存" })[0]);
     await waitFor(() => expect(setAppConfig).toHaveBeenCalledTimes(1));
-    // The overlay closed after the successful save.
-    await waitFor(() =>
-      expect(document.querySelector(".settings-overlay")).not.toBeInTheDocument(),
-    );
+    // Per-field save does NOT close the overlay.
+    expect(document.querySelector(".settings-overlay")).toBeInTheDocument();
   });
 });
