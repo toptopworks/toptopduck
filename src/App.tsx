@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { FormattedMessage, IntlProvider } from "react-intl";
 import { SessionPane } from "./session/SessionPane";
@@ -12,6 +12,9 @@ import { usePlatform } from "./shell/use-platform";
 import { HeaderActions } from "./shell/HeaderActions";
 import type { KeyStatus } from "./types/provider";
 import { SidebarToggle } from "./shell/SidebarToggle";
+import { NavButtons } from "./shell/NavButtons";
+import { NavigationHistoryProvider } from "./shell/NavigationHistoryContext";
+import type { NavEntry } from "./shell/navigationHistory";
 import { WindowControls } from "./shell/WindowControls";
 import { ResumeProgress } from "./shell/ResumeProgress";
 import { ColdStartHero } from "./shell/ColdStartHero";
@@ -74,22 +77,28 @@ export default function App() {
     keychain_fault: null,
   });
   // settingsView (ADR-0065): the in-app settings overlay state. `open` gates
-  // the render + the .settings-mode CSS class; `section` + `editProfileId` are
-  // one-shot ENTRY hints consumed at mount (issue #239: the ColdStartHero CTAs
-  // land on the Profiles tab, optionally with the active profile pre-selected
-  // for key editing). openSettings() defaults to the sidebar-gear path
-  // (general, no edit target); the hero + the sidebar connection row pass
+  // the render + the .settings-mode CSS class; `editProfileId` is a one-shot
+  // ENTRY hint consumed by ProfilesSection at mount (issue #239: the "no key"
+  // CTA pre-selects the active profile for key editing). The settings SECTION
+  // is no longer an entry hint: it is shell-owned live state
+  // (liveSettingsSection below, issue #288) so the back/forward history can
+  // restore it. openSettings() defaults to the sidebar-gear path (general, no
+  // edit target); the hero + the sidebar connection row pass
   // { section: "profiles", editProfileId? }.
-  const [settingsView, setSettingsView] = useState<{ open: boolean } & SettingsEntry>({
+  const [settingsView, setSettingsView] = useState<{ open: boolean; editProfileId?: string }>({
     open: false,
-    section: "general",
   });
+  // The live settings section is shell-owned (issue #288): lifted out of
+  // SettingsView so the back/forward history can restore it. Seeded "general"
+  // and reset on close, matching the prior one-shot entry hint default.
+  const [liveSettingsSection, setLiveSettingsSection] = useState<SettingsSection>("general");
   // Settings nav collapse toggle lives in the topbar (App-owned), so the state
   // stays here. Reset to expanded on every open so each visit starts from the
   // full nav (issue #285).
   const [settingsNavCollapsed, setSettingsNavCollapsed] = useState(false);
   function openSettings(entry: SettingsEntry = { section: "general" }) {
-    setSettingsView({ open: true, ...entry });
+    setSettingsView({ open: true, editProfileId: entry.editProfileId });
+    setLiveSettingsSection(entry.section);
     setSettingsNavCollapsed(false);
   }
 
@@ -186,6 +195,52 @@ export default function App() {
   // never forces a close.
   const atSoftCap = openSessions.length >= SOFT_CAP_OPEN_SESSIONS;
 
+  // --- In-app navigation history (issue #288) -----------------------------
+  // The back/forward stack is driven by a derived `location` NavEntry (active
+  // session + settings overlay state). NavigationHistoryProvider pushes on
+  // every location change; back/forward move the cursor and call `restore` to
+  // re-apply the target view via RAW setters (not nav-wrappers), so the
+  // resulting location change is skipped, not re-pushed. restore REPORTS
+  // whether it moved the derived location: a non-restorable target (cold-start
+  // hero -- sessionId null, no "close all sessions" path) returns false so the
+  // provider treats the hop as a no-op instead of arming skipNextRef and
+  // leaking the one-shot flag into the next genuine navigation. editProfileId
+  // is deliberately NOT restored -- a back/forward hop is a fresh view, not a
+  // profile-edit intent (issue #239).
+  const location = useMemo<NavEntry>(
+    () => ({
+      sessionId: activeSessionId,
+      settings: { open: settingsView.open, section: liveSettingsSection },
+    }),
+    [activeSessionId, settingsView.open, liveSettingsSection],
+  );
+  const restore = useCallback(
+    (entry: NavEntry): boolean => {
+      // Diff against the live state the location is derived from so the return
+      // value is honest: false means this entry cannot move the location (the
+      // provider then treats the hop as a no-op). The cold-start hero target --
+      // sessionId null with matching settings -- lands here: there is no
+      // close-all-sessions path, so reporting false avoids leaking skipNextRef.
+      let moved = false;
+      if (entry.settings.open !== settingsView.open) {
+        setSettingsView((prev) => ({ ...prev, open: entry.settings.open }));
+        moved = true;
+      }
+      if (entry.settings.section !== liveSettingsSection) {
+        setLiveSettingsSection(entry.settings.section);
+        moved = true;
+      }
+      // Direct null check (not a boolean alias) so TS narrows sessionId to
+      // string for activateSession.
+      if (entry.sessionId !== null && entry.sessionId !== activeSessionId) {
+        activateSession(entry.sessionId);
+        moved = true;
+      }
+      return moved;
+    },
+    [settingsView.open, liveSettingsSection, activeSessionId, activateSession],
+  );
+
   // Global Ctrl/⌘+K keydown -> toggle the search modal (ADR-0072,
   // issue #252). The listener binds once on mount; a ref carries the latest
   // busy gate so a busy shell blocks the toggle without re-binding on every busy
@@ -261,33 +316,34 @@ export default function App() {
               />
             )}
           >
-            <div
-              className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${railCollapsed ? " rail-collapsed" : ""}${settingsView.open ? " settings-mode" : ""}${settingsNavCollapsed ? " settings-nav-collapsed" : ""}`}
-            >
-              {/* Col 1: session sidebar (ADR-0060) -- full height, independent
+            <NavigationHistoryProvider location={location} restore={restore}>
+              <div
+                className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${railCollapsed ? " rail-collapsed" : ""}${settingsView.open ? " settings-mode" : ""}${settingsNavCollapsed ? " settings-nav-collapsed" : ""}`}
+              >
+                {/* Col 1: session sidebar (ADR-0060) -- full height, independent
               column (R1: QuestionBar does NOT span over it). */}
-              <SessionSidebar
-                sessions={sessions}
-                openSessions={openSessions}
-                activeSessionId={activeSessionId}
-                disabled={busy}
-                loadError={sessionsError}
-                grouping={sidebarGrouping}
-                onNew={() => void openNew()}
-                onActivate={activateSession}
-                onOpenPersisted={(path, name) => void openPersisted(path, name)}
-                onClose={(sid) => void closeOpen(sid)}
-                onDelete={(path, sid) => void deletePersisted(path, sid)}
-                onRename={(sid, path, newName) => void renameEntry(sid, path, newName)}
-                onSwitchGrouping={switchSidebarGrouping}
-                onOpenSearch={openSearch}
-                provider={appConfig?.provider ?? null}
-                keyStatus={keyStatus}
-                onOpenSettings={() => openSettings()}
-                onOpenSettingsProfiles={() => openSettingsProfiles()}
-              />
+                <SessionSidebar
+                  sessions={sessions}
+                  openSessions={openSessions}
+                  activeSessionId={activeSessionId}
+                  disabled={busy}
+                  loadError={sessionsError}
+                  grouping={sidebarGrouping}
+                  onNew={() => void openNew()}
+                  onActivate={activateSession}
+                  onOpenPersisted={(path, name) => void openPersisted(path, name)}
+                  onClose={(sid) => void closeOpen(sid)}
+                  onDelete={(path, sid) => void deletePersisted(path, sid)}
+                  onRename={(sid, path, newName) => void renameEntry(sid, path, newName)}
+                  onSwitchGrouping={switchSidebarGrouping}
+                  onOpenSearch={openSearch}
+                  provider={appConfig?.provider ?? null}
+                  keyStatus={keyStatus}
+                  onOpenSettings={() => openSettings()}
+                  onOpenSettingsProfiles={() => openSettingsProfiles()}
+                />
 
-              {/* Row 1: thin top bar (ADR-0060/0062 R1), spans the full shell
+                {/* Row 1: thin top bar (ADR-0060/0062 R1), spans the full shell
               width as a custom titlebar (decorations: false). Shell-wide
               controls only: the sidebar collapse toggle (left) + header actions
               + window controls (right). The session name + rail collapse toggle
@@ -302,24 +358,29 @@ export default function App() {
               from the overlay hide, and the rail owns settings chrome (the
               dual-state gear + connection row live at the left columns'
               bottoms, issue #282 -- the topbar carries no settings entry). */}
-              <header className="topbar gap-3 px-4 border-b border-border bg-background" data-tauri-drag-region>
-                {platform === "macos" && <WindowControls />}
-                {settingsView.open ? (
-                  <SidebarToggle
-                    kind="settings"
-                    collapsed={settingsNavCollapsed}
-                    onToggle={() => setSettingsNavCollapsed((c) => !c)}
-                  />
-                ) : (
-                  <SidebarToggle
-                    collapsed={sidebarCollapsed}
-                    onToggle={toggleSidebarCollapse}
-                  />
-                )}
-                <div className="flex-1" data-tauri-drag-region />
-                {!settingsView.open && (
-                  <>
-                    {atSoftCap && (
+                <header className="topbar gap-3 px-4 border-b border-border bg-background" data-tauri-drag-region>
+                  {platform === "macos" && <WindowControls />}
+                  {settingsView.open ? (
+                    <SidebarToggle
+                      kind="settings"
+                      collapsed={settingsNavCollapsed}
+                      onToggle={() => setSettingsNavCollapsed((c) => !c)}
+                    />
+                  ) : (
+                    <SidebarToggle
+                      collapsed={sidebarCollapsed}
+                      onToggle={toggleSidebarCollapse}
+                    />
+                  )}
+                  {/* In-app back/forward (issue #288): browser-style nav history.
+                    Rendered in every view (workspace + settings) so the
+                    affordance is stable; the buttons disable at the stack
+                    head/tail via useNavigationHistory. */}
+                  <NavButtons />
+                  <div className="flex-1" data-tauri-drag-region />
+                  {!settingsView.open && (
+                    <>
+                      {atSoftCap && (
                       // Session-count soft-cap hint (ADR-0046): too many open
                       // sessions risk memory pressure. A warning Alert (ADR-0050,
                       // issue #108) -- role="status" is polite, matching the
@@ -329,142 +390,145 @@ export default function App() {
                       // reshapes the base, cf. DisclosureBanner's AlertDescription
                       // override); the variant still supplies the --warning token so
                       // this recolors with .dark like every other warning surface.
-                      <Alert
-                        variant="warning"
-                        role="status"
-                        className="w-auto inline-flex items-center gap-1.5 px-2 py-0.5 text-xs"
-                      >
-                        <FormattedMessage
-                          id="header.softCap"
-                          defaultMessage="Many sessions open — close some to free memory."
-                        />
-                      </Alert>
-                    )}
-                    <HeaderActions
-                      disabled={busy || !activeSession}
-                      onOpenDuck={() => void handleOpenDuck()}
-                      onSaveAs={() => void handleSaveAs()}
-                    />
-                  </>
-                )}
-                {platform !== "macos" && <WindowControls />}
-              </header>
+                        <Alert
+                          variant="warning"
+                          role="status"
+                          className="w-auto inline-flex items-center gap-1.5 px-2 py-0.5 text-xs"
+                        >
+                          <FormattedMessage
+                            id="header.softCap"
+                            defaultMessage="Many sessions open — close some to free memory."
+                          />
+                        </Alert>
+                      )}
+                      <HeaderActions
+                        disabled={busy || !activeSession}
+                        onOpenDuck={() => void handleOpenDuck()}
+                        onSaveAs={() => void handleSaveAs()}
+                      />
+                    </>
+                  )}
+                  {platform !== "macos" && <WindowControls />}
+                </header>
 
-              {/* Resume progress strip (ADR-0034). Absent unless an open/resume
+                {/* Resume progress strip (ADR-0034). Absent unless an open/resume
                   runs -- `idle` is the ADT's resting state (issue #205), so the
                   gate discriminates on `kind` instead of truthiness-coercing a
                   nullable. */}
-              {resumeStatus.kind !== "idle" && <ResumeProgress status={resumeStatus} />}
+                {resumeStatus.kind !== "idle" && <ResumeProgress status={resumeStatus} />}
 
-              {/* Row 3 (cols 2+): the session pane host. Every open session renders
+                {/* Row 3 (cols 2+): the session pane host. Every open session renders
               a keep-alive SessionPane; non-active panes are CSS `hidden` (mounted
               but not laid out) so switching is instant + refetch-free (ADR-0051).
               No active session = the cold-start hero (ADR-0061). */}
-              <main className="session-pane-host">
-                {activeSessionId === null && (
-                  <ColdStartHero
-                    disabled={busy}
-                    provider={appConfig?.provider ?? null}
-                    profileKeyEpoch={profileKeyEpoch}
-                    onNew={() => void openNew()}
-                    onOpenSettingsProfiles={openSettingsProfiles}
-                  />
-                )}
-                {openSessions.map((s) => (
-                  <div
-                    key={s.sid}
-                    className={`session-pane-layer${s.sid === activeSessionId ? " active" : " hidden"}`}
-                    aria-hidden={s.sid !== activeSessionId}
-                  >
-                    {/* ADR-0058 L2 session partition: per-session isolation. A
+                <main className="session-pane-host">
+                  {activeSessionId === null && (
+                    <ColdStartHero
+                      disabled={busy}
+                      provider={appConfig?.provider ?? null}
+                      profileKeyEpoch={profileKeyEpoch}
+                      onNew={() => void openNew()}
+                      onOpenSettingsProfiles={openSettingsProfiles}
+                    />
+                  )}
+                  {openSessions.map((s) => (
+                    <div
+                      key={s.sid}
+                      className={`session-pane-layer${s.sid === activeSessionId ? " active" : " hidden"}`}
+                      aria-hidden={s.sid !== activeSessionId}
+                    >
+                      {/* ADR-0058 L2 session partition: per-session isolation. A
                     render crash inside this SessionPane that the Thread /
                     ResultView granular boundaries (inside SessionPane) do not
                     catch degrades only THIS session's pane -- sibling panes
                     stay alive. The key bump remounts the whole pane; onReset
                     drops its cache so the remount re-fetches fresh. */}
-                    <ErrorBoundary
-                      name="session"
-                      onReset={() => {
-                        void queryClient.removeQueries({ queryKey: ["session", s.sid] });
-                      }}
-                    >
-                      <SessionPane
-                        key={s.sid}
-                        sessionId={s.sid}
-                        pendingIngestPath={s.pendingIngestPath}
-                        onIngestConsumed={() => clearPendingIngest(s.sid)}
-                        railCollapsed={railCollapsed}
-                        onToggleRail={toggleRailCollapse}
-                        sessionName={s.name}
-                        providerPicker={
+                      <ErrorBoundary
+                        name="session"
+                        onReset={() => {
+                          void queryClient.removeQueries({ queryKey: ["session", s.sid] });
+                        }}
+                      >
+                        <SessionPane
+                          key={s.sid}
+                          sessionId={s.sid}
+                          pendingIngestPath={s.pendingIngestPath}
+                          onIngestConsumed={() => clearPendingIngest(s.sid)}
+                          railCollapsed={railCollapsed}
+                          onToggleRail={toggleRailCollapse}
+                          sessionName={s.name}
+                          providerPicker={
                           // ADR-0071 (issue #238): the composer provider/model
                           // picker is app-level state (active profile + writes +
                           // the settings-open path) rendered at each session's
                           // QuestionBar edge. Absent until app-config resolves;
                           // the picker renders only in the visible pane but is
                           // mounted per keep-alive session like QuestionBar.
-                          appConfig
-                            ? {
-                                provider: appConfig.provider,
-                                onSwitchActive: (id) => void switchActiveProfile(id),
-                                onSwitchModel: (model) =>
-                                  void switchActiveProfileModel(model),
-                                onOpenSettings: () => openSettings(),
-                                profileKeyEpoch,
-                              }
-                            : undefined
-                        }
-                      />
-                    </ErrorBoundary>
-                  </div>
-                ))}
-              </main>
+                            appConfig
+                              ? {
+                                  provider: appConfig.provider,
+                                  onSwitchActive: (id) => void switchActiveProfile(id),
+                                  onSwitchModel: (model) =>
+                                    void switchActiveProfileModel(model),
+                                  onOpenSettings: () => openSettings(),
+                                  profileKeyEpoch,
+                                }
+                              : undefined
+                          }
+                        />
+                      </ErrorBoundary>
+                    </div>
+                  ))}
+                </main>
 
-              {shellError && (
-                <ErrorBanner className="shell-error" error={shellError} />
-              )}
+                {shellError && (
+                  <ErrorBanner className="shell-error" error={shellError} />
+                )}
 
-              {settingsView.open && appConfig && (
-                <SettingsView
-                  appConfig={appConfig}
-                  initialSection={settingsView.section}
-                  initialEditProfileId={settingsView.editProfileId}
-                  // Returns the IPC promise (unwrapped) so per-control commits
-                  // inside SettingsView can await + catch failures and revert
-                  // (ADR-0075). commitAppConfig itself stays optimistic /
-                  // no-rollback (ADR-0068); the revert is the view's compensating
-                  // write on a caught reject.
-                  onCommitAppConfig={(cfg) => commitAppConfig(cfg)}
-                  onRefreshKeyStatus={() => void refreshKeyStatus()}
-                  keyStatus={keyStatus}
-                  onClose={() => {
-                    setSettingsView({ open: false, section: "general" });
-                    void refreshKeyStatus();
-                    // A Settings Save may have changed a keychain slot; bump
-                    // the epoch so each keep-alive picker + the ColdStartHero
-                    // refetch their overlays (ADR-0019 honest gate, issue #238;
-                    // issue #239 extends the epoch to the hero).
-                    setProfileKeyEpoch((n) => n + 1);
-                  }}
-                />
-              )}
+                {settingsView.open && appConfig && (
+                  <SettingsView
+                    appConfig={appConfig}
+                    section={liveSettingsSection}
+                    onSectionChange={setLiveSettingsSection}
+                    initialEditProfileId={settingsView.editProfileId}
+                    // Returns the IPC promise (unwrapped) so per-control commits
+                    // inside SettingsView can await + catch failures and revert
+                    // (ADR-0075). commitAppConfig itself stays optimistic /
+                    // no-rollback (ADR-0068); the revert is the view's compensating
+                    // write on a caught reject.
+                    onCommitAppConfig={(cfg) => commitAppConfig(cfg)}
+                    onRefreshKeyStatus={() => void refreshKeyStatus()}
+                    keyStatus={keyStatus}
+                    onClose={() => {
+                      setSettingsView({ open: false });
+                      setLiveSettingsSection("general");
+                      void refreshKeyStatus();
+                      // A Settings Save may have changed a keychain slot; bump
+                      // the epoch so each keep-alive picker + the ColdStartHero
+                      // refetch their overlays (ADR-0019 honest gate, issue #238;
+                      // issue #239 extends the epoch to the hero).
+                      setProfileKeyEpoch((n) => n + 1);
+                    }}
+                  />
+                )}
 
-              {/* Ctrl/⌘+K session-search modal (ADR-0072, issue
+                {/* Ctrl/⌘+K session-search modal (ADR-0072, issue
                   #252). Rendered unconditionally (Radix mounts the content
                   lazily on open); shares the shell-owned searchOpen state with
                   the global keydown + the sidebar search button. Reuses the
                   sessions / openSessions / activate handlers already in App --
                   zero new IPC, zero new persistence (ADR-0072 slice scope). */}
-              <SessionSearchDialog
-                open={searchOpen}
-                onOpenChange={setSearchOpen}
-                sessions={sessions}
-                openSessions={openSessions}
-                activeSessionId={activeSessionId}
-                onActivate={activateSession}
-                onOpenPersisted={(path, name) => void openPersisted(path, name)}
-              />
-            </div>
+                <SessionSearchDialog
+                  open={searchOpen}
+                  onOpenChange={setSearchOpen}
+                  sessions={sessions}
+                  openSessions={openSessions}
+                  activeSessionId={activeSessionId}
+                  onActivate={activateSession}
+                  onOpenPersisted={(path, name) => void openPersisted(path, name)}
+                />
+              </div>
+            </NavigationHistoryProvider>
           </ErrorBoundary>
         </IntlProvider>
       </TooltipProvider>

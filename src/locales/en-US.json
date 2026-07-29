@@ -87,6 +87,8 @@
   "guidedLoad.rowOption": "Row {n}",
   "guidedLoad.submit": "Load by selection",
   "guidedLoad.title": "Guided load: {name}",
+  "header.nav.back": "Back",
+  "header.nav.forward": "Forward",
   "header.openDuck": "Open .duck",
   "header.openDuck.title": "Open a .duck to resume a prior analysis",
   "header.saveAs": "Save as .duck",
