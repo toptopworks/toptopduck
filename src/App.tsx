@@ -84,12 +84,9 @@ export default function App() {
     open: false,
     section: "general",
   });
-  // Settings overlay left-nav collapse (issue #285). TEMP state -- NOT persisted
-  // to app-config (unlike the workspace sidebar/rail collapse prefs): the
-  // settings overlay is a brief in-app view, so the collapse is not worth a
-  // persisted field. Lives in App (not SettingsView) because the toggle sits in
-  // the topbar, which App owns. Reset to expanded on every open so each settings
-  // visit starts from the full nav.
+  // Settings nav collapse toggle lives in the topbar (App-owned), so the state
+  // stays here. Reset to expanded on every open so each visit starts from the
+  // full nav (issue #285).
   const [settingsNavCollapsed, setSettingsNavCollapsed] = useState(false);
   function openSettings(entry: SettingsEntry = { section: "general" }) {
     setSettingsView({ open: true, ...entry });
