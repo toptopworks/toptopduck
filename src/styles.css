@@ -152,11 +152,16 @@
 .shell > .shell-error { grid-column: 2; grid-row: 2; margin: 0.4rem 1rem; }
 
 /* --- Settings in-app overlay view (ADR-0065, issue #151) -----------------
- * When settings-mode is on the shell grid collapses to a single cell and the
- * SettingsView overlay covers it. Non-modal, no mask -- the overlay IS the
- * current view. The session sidebar + topbar + keep-alive session panes stay
- * MOUNTED underneath (display:none): App state + any in-flight turn survive the
- * round trip, restored unchanged on return (no refetch, no resume replay).
+ * When settings-mode is on the shell grid collapses to a titlebar row + a
+ * single content cell, and the SettingsView overlay covers the cell. Non-modal,
+ * no mask -- the overlay IS the current view. The session sidebar + keep-alive
+ * session panes stay MOUNTED but hidden (display:none): App state + any
+ * in-flight turn survive the round trip, restored unchanged on return (no
+ * refetch, no resume replay). The shell TITLEBAR is exempted from the hide:
+ * with decorations:false (ADR-0074) its window controls + drag region are
+ * shell-wide chrome that must stay reachable in every view. App unmounts only
+ * the topbar's workspace children (sidebar toggle / soft-cap / header actions)
+ * while settings are open, leaving a clean titlebar strip above the overlay.
  *
  * ADR-0067 (issue #170): the `.settings-*` / `.profiles-*` VISUAL rules
  * retired into SettingsView.tsx + ProfilesSection.tsx as Tailwind utility +
@@ -174,8 +179,11 @@
  * each component's ADR-0067 inline comment -- not re-listed here, since a
  * hand-kept copy would drift on the next migration slice.
  */
-.shell.settings-mode { grid-template-columns: 1fr; grid-template-rows: 1fr; }
-.shell.settings-mode > :not(.settings-overlay) { display: none; }
+.shell.settings-mode { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+.shell.settings-mode > :not(.settings-overlay):not(.topbar) { display: none; }
+/* The overlay drops below the persistent titlebar (row 2) and rides the row
+ * height instead of 100vh (which would overflow past the 40px strip). */
+.shell.settings-mode .settings-overlay { grid-row: 2; height: 100%; }
 /* ADR-0075 (issue #281): the overlay is now a full-height rail + content grid.
  * The retired single settings header + footer split into the rail's top (brand +
  * back) / bottom (connection row + gear) and each pane's hero; the rail spans

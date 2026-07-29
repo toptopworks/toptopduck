@@ -32,9 +32,12 @@ import { SETTINGS_SECTIONS, type SettingsSection } from "./sections";
 
 // In-app overlay settings view (ADR-0065 shell + ADR-0075 chrome/persistence,
 // issue #281). While settingsView.open, the shell renders <SettingsView/> over
-// the grid (non-modal, no mask -- it IS the current view); the session sidebar
-// + topbar + keep-alive panes stay mounted (display:none) underneath, so App
-// state and any in-flight turn survive the round trip.
+// the grid's content cell (non-modal, no mask -- it IS the current view); the
+// session sidebar + keep-alive panes stay mounted but hidden underneath, so
+// App state and any in-flight turn survive the round trip. The shell titlebar
+// stays visible ABOVE the overlay: decorations:false (ADR-0074) makes its
+// window controls + drag region shell-wide chrome, required in every view --
+// App strips only the topbar's workspace children while settings are open.
 //
 // CHROME (ADR-0075): the retired single settings header is split into a left
 // RAIL -- brand + "Back to workspace" at the top, icon nav in the middle, and a
