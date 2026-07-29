@@ -187,11 +187,13 @@
 /* ADR-0075 (issue #281): the overlay is now a full-height rail + content grid.
  * The retired single settings header + footer split into the rail's top (brand +
  * back) / bottom (connection row + gear) and each pane's hero; the rail spans
- * the full height and the content column scrolls. */
+ * the full height and the content column scrolls. The rail column is 220px to
+ * match the shell's col-1 session sidebar (ADR-0060), so the left-column
+ * boundary stays put when switching between the workspace and settings views. */
 .settings-overlay {
   grid-column: 1; grid-row: 1;
   display: grid;
-  grid-template-columns: 232px 1fr;
+  grid-template-columns: 220px 1fr;
   grid-template-rows: 1fr;
   height: 100vh;
   overflow: hidden;
