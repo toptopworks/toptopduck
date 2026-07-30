@@ -103,10 +103,10 @@ pub(crate) mod test_support {
 
     /// A throwaway [`TurnDeps`] over locally-owned conn + sources + working set,
     /// with inert cap defaults and `temp_path = "."`. Suitable for tool executors
-    /// that never touch the filesystem (explore / describe / sample). The
-    /// `materialize` tests build their own `TurnDeps` because the real materializer
-    /// needs a `TempDir`. Centralized so the four-tool dispatch tests cannot drift
-    /// apart on the cap defaults (DRY).
+    /// that never touch the filesystem (explore / describe / sample). Centralized
+    /// so the four-tool dispatch tests cannot drift apart on the cap defaults
+    /// (DRY); the materialize tests use [`inert_deps_with_temp`] for a real
+    /// `TempDir` without re-spelling the caps.
     pub fn inert_deps<'a>(
         conn: &'a Connection,
         ws: &'a mut WorkingSet,
@@ -119,6 +119,27 @@ pub(crate) mod test_support {
             result_row_cap: 1_000,
             result_count_cap: 100,
             temp_path: Path::new("."),
+        }
+    }
+
+    /// Same inert cap defaults as [`inert_deps`] but with a caller-owned
+    /// `temp_path` for the executors that touch disk (the real materializer needs
+    /// a `TempDir`). The caller retains ownership of the temp dir and passes a
+    /// borrow in -- this covers the materialize tests without duplicating the
+    /// cap literals, so a future production-cap change tracks one site.
+    pub fn inert_deps_with_temp<'a>(
+        conn: &'a Connection,
+        ws: &'a mut WorkingSet,
+        sources: &'a HashMap<String, std::path::PathBuf>,
+        temp_path: &'a Path,
+    ) -> TurnDeps<'a> {
+        TurnDeps {
+            conn,
+            source_files: sources,
+            working_set: ws,
+            result_row_cap: 1_000,
+            result_count_cap: 100,
+            temp_path,
         }
     }
 }
@@ -256,5 +277,99 @@ mod tests {
             result.content
         );
         assert!(result.content.contains("ghost"), "{}", result.content);
+    }
+
+    /// The top-level `dispatch` routes explore / sample / materialize by name,
+    /// not just describe. Each routed tool echoes its `tool_use_id` with a
+    /// non-error outcome on a happy input -- pinning the three remaining match
+    /// arms (TOOL_EXPLORE / TOOL_SAMPLE / TOOL_MATERIALIZE) so a const typo or a
+    /// stale name cannot silently break routing at the gateway boundary.
+    #[test]
+    fn dispatch_routes_explore_sample_and_materialize() {
+        use crate::model::{ColumnSchema, DatasetPrivacy, RectifyProvenance};
+        use crate::session::materializer::RealMaterializer;
+        use crate::tools::test_support::inert_deps_with_temp;
+        use tempfile::TempDir;
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE result_1 (id INTEGER)")
+            .unwrap();
+        conn.execute_batch("INSERT INTO result_1 VALUES (1), (2)")
+            .unwrap();
+        let mut ws = WorkingSet::default();
+        ws.register_result(DatasetDescriptor {
+            reference_name: "result_1".into(),
+            display_name: "result_1".into(),
+            source_path: String::new(),
+            columns: vec![ColumnSchema {
+                name: "id".into(),
+                canonical_type: "INTEGER".into(),
+            }],
+            row_count: 2,
+            sample: Vec::new(),
+            fingerprint: String::new(),
+            rectify: RectifyProvenance::NotApplicable,
+            privacy: DatasetPrivacy::default(),
+            stale: None,
+        });
+        let sources = HashMap::new();
+        let temp = TempDir::new().unwrap();
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+        let cancel = CancelToken::new();
+        let mut materializer = RealMaterializer;
+
+        // explore routes + succeeds (read-only on the mirrored result_1).
+        let explore = dispatch(
+            &ToolUse {
+                id: "e1".into(),
+                name: "explore".into(),
+                input: json!({"sql": "SELECT * FROM result_1"}),
+            },
+            &mut deps,
+            &cancel,
+            &mut materializer,
+        );
+        assert_eq!(explore.tool_use_id, "e1");
+        assert!(
+            !explore.is_error,
+            "explore routes + succeeds: {}",
+            explore.content
+        );
+
+        // sample routes + succeeds (bounded rows from the registered result_1).
+        let sample = dispatch(
+            &ToolUse {
+                id: "s1".into(),
+                name: "sample".into(),
+                input: json!({"reference_name": "result_1"}),
+            },
+            &mut deps,
+            &cancel,
+            &mut materializer,
+        );
+        assert_eq!(sample.tool_use_id, "s1");
+        assert!(
+            !sample.is_error,
+            "sample routes + succeeds: {}",
+            sample.content
+        );
+
+        // materialize routes + succeeds (promotes the next result_N).
+        let materialize = dispatch(
+            &ToolUse {
+                id: "m1".into(),
+                name: "materialize".into(),
+                input: json!({"sql": "SELECT * FROM result_1"}),
+            },
+            &mut deps,
+            &cancel,
+            &mut materializer,
+        );
+        assert_eq!(materialize.tool_use_id, "m1");
+        assert!(
+            !materialize.is_error,
+            "materialize routes + succeeds: {}",
+            materialize.content
+        );
     }
 }

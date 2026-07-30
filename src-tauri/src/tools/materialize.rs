@@ -135,6 +135,7 @@ fn err_message(result_name: &str, e: ExecError) -> String {
 mod tests {
     use super::*;
     use crate::model::{ColumnSchema, DatasetPrivacy, RectifyProvenance};
+    use crate::tools::test_support::{inert_deps, inert_deps_with_temp};
     use duckdb::Connection;
 
     /// A descriptor factory for the payload-shape test.
@@ -229,14 +230,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
         let sources = std::collections::HashMap::new();
-        let mut deps = TurnDeps {
-            conn: &conn,
-            source_files: &sources,
-            working_set: &mut ws,
-            result_row_cap: 1_000,
-            result_count_cap: 100,
-            temp_path: std::path::Path::new("."),
-        };
+        let mut deps = inert_deps(&conn, &mut ws, &sources);
         let cancel = CancelToken::new();
         let mut materializer = ExplodingMaterializer;
         let err = dispatch(&json!({}), &mut deps, &cancel, &mut materializer).unwrap_err();
@@ -261,14 +255,7 @@ mod tests {
         let mut ws = crate::workingset::WorkingSet::default();
         let sources = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
-        let mut deps = TurnDeps {
-            conn: &conn,
-            source_files: &sources,
-            working_set: &mut ws,
-            result_row_cap: 1_000,
-            result_count_cap: 100,
-            temp_path: temp.path(),
-        };
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
 
@@ -310,14 +297,7 @@ mod tests {
         let mut ws = crate::workingset::WorkingSet::default();
         let sources = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
-        let mut deps = TurnDeps {
-            conn: &conn,
-            source_files: &sources,
-            working_set: &mut ws,
-            result_row_cap: 1_000,
-            result_count_cap: 100,
-            temp_path: temp.path(),
-        };
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
         let v = dispatch(
@@ -350,14 +330,7 @@ mod tests {
         let mut ws = crate::workingset::WorkingSet::default();
         let sources = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
-        let mut deps = TurnDeps {
-            conn: &conn,
-            source_files: &sources,
-            working_set: &mut ws,
-            result_row_cap: 1_000,
-            result_count_cap: 100,
-            temp_path: temp.path(),
-        };
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
 
@@ -395,6 +368,41 @@ mod tests {
         assert_eq!(
             deps.working_set.get("result_1").unwrap().display_name,
             "my label"
+        );
+    }
+
+    /// A blank or whitespace-only `display_name` is rejected by the ADR-0037
+    /// trim invariant (`rename_display` refuses an empty label). The tool routes
+    /// the label through `apply_display_label`, whose best-effort `.ok()` falls
+    /// back to the reference name -- the promotion still lands, only the blank
+    /// label is dropped, so the agent can re-call with a real label.
+    #[test]
+    fn display_name_blank_falls_back_to_reference_name() {
+        use crate::session::materializer::RealMaterializer;
+        use tempfile::TempDir;
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = crate::workingset::WorkingSet::default();
+        let sources = std::collections::HashMap::new();
+        let temp = TempDir::new().unwrap();
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+        let cancel = CancelToken::new();
+        let mut materializer = RealMaterializer;
+        let v = dispatch(
+            &json!({"sql": "SELECT 1 AS x", "display_name": "   "}),
+            &mut deps,
+            &cancel,
+            &mut materializer,
+        )
+        .unwrap();
+        assert_eq!(v["reference_name"], "result_1");
+        assert_eq!(
+            v["display_name"], "result_1",
+            "blank label falls back to the reference name"
+        );
+        assert_eq!(
+            deps.working_set.get("result_1").unwrap().display_name,
+            "result_1"
         );
     }
 }

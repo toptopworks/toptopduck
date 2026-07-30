@@ -23,7 +23,6 @@ use duckdb::Connection;
 use serde_json::{json, Value};
 
 use crate::cancel::CancelToken;
-use crate::guardrail::{classify_duckdb_error, ExecErrorKind};
 use crate::ingest::schema::{canonical_type, quote_ident};
 use crate::model::ColumnSchema;
 use crate::provenance;
@@ -111,11 +110,20 @@ fn run_explore(
     // down so a read_* table function is refused. The sandbox is dropped at
     // end of scope -- the scratch table dies with it, leaving no trace on admin
     // (AC #1: turn-local, no naming, no working-set entry).
-    let sandbox_conn = sandbox::open().map_err(err_from_exec)?;
+    let sandbox_conn = sandbox::open().map_err(exec_err)?;
     sandbox::attach_sources(&sandbox_conn, deps.working_set, deps.source_files)
-        .map_err(err_from_exec)?;
-    sandbox::mirror_results(&sandbox_conn, deps.conn, deps.working_set).map_err(err_from_exec)?;
-    sandbox::lockdown(&sandbox_conn).map_err(err_from_exec)?;
+        .map_err(exec_err)?;
+    sandbox::mirror_results(&sandbox_conn, deps.conn, deps.working_set).map_err(exec_err)?;
+    sandbox::lockdown(&sandbox_conn).map_err(exec_err)?;
+
+    // A cancel that arrived during sandbox setup (before the query's interrupt
+    // handle is registered below) is reported honestly as a cancel. Without
+    // this check the only signal would be a later setup step's generic engine
+    // error; the user stopped the turn, so the agent loop (and the user)
+    // should see "cancelled", not a failure that never was (ADR-0077 honesty).
+    if cancel.is_requested() {
+        return Err("explore cancelled".to_string());
+    }
 
     // Register the sandbox interrupt handle so a cancel can abort THIS query at
     // source (ADR-0021 DuckDB interrupt). Scoped to the explore SQL only;
@@ -156,7 +164,7 @@ fn run_explore(
             [],
             |r| r.get(0),
         )
-        .map_err(|e| err_from_exec_str(&e.to_string(), ExecErrorKind::Runtime))?;
+        .map_err(tool_err)?;
     if rows as u64 > deps.result_row_cap {
         return Err(format!(
             "result row count ({rows}) exceeds the cap {}; add a LIMIT or narrow the query",
@@ -190,12 +198,12 @@ fn run_explore(
 fn describe_scratch(conn: &Connection) -> Result<Vec<ColumnSchema>, String> {
     let mut stmt = conn
         .prepare(&format!("DESCRIBE {}", quote_ident(SCRATCH_TABLE)))
-        .map_err(lift_duck)?;
-    let mut rows = stmt.query([]).map_err(lift_duck)?;
+        .map_err(tool_err)?;
+    let mut rows = stmt.query([]).map_err(tool_err)?;
     let mut out = Vec::new();
-    while let Some(row) = rows.next().map_err(lift_duck)? {
-        let name: String = row.get(0).map_err(lift_duck)?;
-        let raw_type: String = row.get(1).map_err(lift_duck)?;
+    while let Some(row) = rows.next().map_err(tool_err)? {
+        let name: String = row.get(0).map_err(tool_err)?;
+        let raw_type: String = row.get(1).map_err(tool_err)?;
         out.push(ColumnSchema {
             name,
             canonical_type: canonical_type(&raw_type),
@@ -225,13 +233,13 @@ fn read_sample(
         selects.join(", "),
         quote_ident(SCRATCH_TABLE)
     );
-    let mut stmt = conn.prepare(&sql).map_err(lift_duck)?;
-    let mut rows = stmt.query([]).map_err(lift_duck)?;
+    let mut stmt = conn.prepare(&sql).map_err(tool_err)?;
+    let mut rows = stmt.query([]).map_err(tool_err)?;
     let mut out = Vec::new();
-    while let Some(row) = rows.next().map_err(lift_duck)? {
+    while let Some(row) = rows.next().map_err(tool_err)? {
         let mut cells = Vec::with_capacity(columns.len());
         for i in 0..columns.len() {
-            let v: Option<String> = row.get(i).map_err(lift_duck)?;
+            let v: Option<String> = row.get(i).map_err(tool_err)?;
             cells.push(v.unwrap_or_default());
         }
         out.push(cells);
@@ -239,28 +247,21 @@ fn read_sample(
     Ok(out)
 }
 
-/// Lift an [`crate::guardrail::ExecError`] into a tool-error string. The kind
-/// is discarded -- every explore failure is a tool-level error the agent can
-/// self-correct from (ADR-0077), so only the descriptive detail reaches the
-/// ToolResult content.
-fn err_from_exec(e: crate::guardrail::ExecError) -> String {
-    format!("explore failed: {}", e.detail)
-}
-
-/// Lift a raw DuckDB error into a tool-error string. The classified kind is
-/// dropped (every explore failure routes back to the agent uniformly,
-/// ADR-0077); the engine's `Display` string is what the agent reads. Shared by
-/// the shape-derivation primitives so each `.map_err` is a one-token call
-/// instead of repeating the classify + format pair.
-fn lift_duck(e: duckdb::Error) -> String {
-    err_from_exec_str(&e.to_string(), classify_duckdb_error(&e.to_string()))
-}
-
-/// Build a tool-error string from a raw DuckDB error message + its classified
-/// kind. The kind is dropped (same rationale as [`err_from_exec`]); the message
-/// is prefixed so a sandbox-internal failure reads distinctly from a SQL error.
-fn err_from_exec_str(detail: &str, _kind: ExecErrorKind) -> String {
+/// Lift any failure into a tool-error string. Every explore failure routes
+/// back to the agent uniformly (ADR-0077) -- the agent self-corrects, never
+/// blind-retries -- so only the descriptive detail reaches the ToolResult
+/// content. The retry-routing kind the legacy single-SQL path classifies is
+/// not relevant here and is dropped.
+fn tool_err(detail: impl std::fmt::Display) -> String {
     format!("explore failed: {detail}")
+}
+
+/// Lift a sandbox-primitive [`crate::guardrail::ExecError`] into a tool-error
+/// string. `ExecError` carries a user-facing `detail` + a retry-routing `kind`
+/// and does not implement `Display`; the detail is the honest explanation the
+/// agent reads (ADR-0077), the kind is dropped (see [`tool_err`]).
+fn exec_err(e: crate::guardrail::ExecError) -> String {
+    tool_err(e.detail)
 }
 
 #[cfg(test)]
@@ -419,5 +420,127 @@ mod tests {
             err.to_ascii_lowercase().contains("sql failed"),
             "error reads as a SQL failure: {err}"
         );
+    }
+
+    /// A cancel requested before the call aborts immediately as "explore
+    /// cancelled" -- the pre-setup checkpoint fires before any sandbox setup
+    /// runs, so a turn the user already stopped never burns setup cost. This is
+    /// the one cancel checkpoint reachable without driving a real query.
+    #[test]
+    fn explore_returns_cancelled_when_cancel_already_requested() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = crate::workingset::WorkingSet::default();
+        let sources = std::collections::HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &sources);
+        let cancel = CancelToken::new();
+        cancel.request();
+        let err = dispatch(&json!({"sql": "SELECT 1"}), &mut deps, &cancel).unwrap_err();
+        assert_eq!(err, "explore cancelled", "{err}");
+        // No sandbox setup ran -> no working-set entry produced.
+        assert_eq!(deps.working_set.len(), 0);
+    }
+
+    /// A result whose row count exceeds `result_row_cap` is refused with a
+    /// resource-cap message naming the cap (ADR-0005/0030: silent truncation is
+    /// forbidden). The scratch table dies with the sandbox, so no trace survives.
+    #[test]
+    fn explore_refuses_result_exceeding_row_cap() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = crate::workingset::WorkingSet::default();
+        let sources = std::collections::HashMap::new();
+        // cap = 2; the query yields 3 rows -> cap+1 rows land on the scratch
+        // sandbox, COUNT (3) > cap (2) -> refused. The cap is below the helper's
+        // default, so this test hand-builds TurnDeps for the one-off bound.
+        let mut deps = crate::session::materializer::TurnDeps {
+            conn: &conn,
+            source_files: &sources,
+            working_set: &mut ws,
+            result_row_cap: 2,
+            result_count_cap: 100,
+            temp_path: std::path::Path::new("."),
+        };
+        let cancel = CancelToken::new();
+        let err = dispatch(
+            &json!({"sql": "SELECT 1 FROM range(3)"}),
+            &mut deps,
+            &cancel,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("exceeds the cap"),
+            "error names the cap refusal: {err}"
+        );
+        assert!(err.contains('2'), "error names the cap value: {err}");
+        assert_eq!(deps.working_set.len(), 0);
+    }
+
+    /// After sandbox lockdown, a `read_*` table function is refused -- the only
+    /// SQL-level ingress is closed (ADR-0005 L3). The refusal surfaces as a SQL
+    /// failure carrying the engine's "disabled" message, so the agent cannot
+    /// read arbitrary files through explore.
+    #[test]
+    fn explore_refuses_read_table_function_after_lockdown() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = crate::workingset::WorkingSet::default();
+        let sources = std::collections::HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &sources);
+        let cancel = CancelToken::new();
+        let err = dispatch(
+            &json!({"sql": "SELECT * FROM read_csv_auto('secret.csv')"}),
+            &mut deps,
+            &cancel,
+        )
+        .unwrap_err();
+        let lower = err.to_ascii_lowercase();
+        assert!(
+            lower.contains("disabled"),
+            "lockdown refusal surfaces the disabled filesystem: {err}"
+        );
+        assert!(
+            lower.contains("sql failed"),
+            "refusal reads as a SQL failure: {err}"
+        );
+    }
+
+    /// A SQL anchored on a stale result_N is refused up front (ADR-0013
+    /// invariant 2) -- explore runs `provenance::analyze` before the sandbox, so
+    /// a stale reference never reaches execution. The error names the stale ref.
+    #[test]
+    fn explore_refuses_stale_reference_anchor() {
+        use crate::model::{
+            DatasetDescriptor, DatasetPrivacy, RectifyProvenance, StaleAnchor, StaleReason,
+        };
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = crate::workingset::WorkingSet::default();
+        ws.register_result(DatasetDescriptor {
+            reference_name: "result_1".into(),
+            display_name: "result_1".into(),
+            source_path: String::new(),
+            columns: vec![ColumnSchema {
+                name: "c".into(),
+                canonical_type: "INTEGER".into(),
+            }],
+            row_count: 0,
+            sample: Vec::new(),
+            fingerprint: String::new(),
+            rectify: RectifyProvenance::NotApplicable,
+            privacy: DatasetPrivacy::default(),
+            stale: Some(StaleAnchor {
+                reference_name: "people".into(),
+                display_name: "people".into(),
+                reason: StaleReason::Deleted,
+            }),
+        });
+        let sources = std::collections::HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &sources);
+        let cancel = CancelToken::new();
+        let err = dispatch(
+            &json!({"sql": "SELECT * FROM result_1"}),
+            &mut deps,
+            &cancel,
+        )
+        .unwrap_err();
+        assert!(err.contains("stale reference"), "{err}");
+        assert!(err.contains("result_1"), "{err}");
     }
 }
