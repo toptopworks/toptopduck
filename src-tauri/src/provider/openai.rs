@@ -75,11 +75,10 @@ impl OpenaiProvider {
         let key = config.api_key().ok_or(ProviderError::NotWired)?;
         let base_url = config.base_url();
         // AC #244: reject a non-http/https base_url (file:, data:, scheme-less)
-        // at the boundary before any request is built. Mirrors the anthropic
-        // adapter so the two paths cannot drift. Surfaced as InvalidConfig
-        // (issue #277): a permanent configuration fault, not a transient call
-        // failure -- the orchestrator must not burn the retry budget on it.
-        // See provider::http.
+        // at the boundary before any request is built. Maps to InvalidConfig
+        // (issue #277), mirroring the anthropic adapter so the two paths cannot
+        // drift. See ProviderError::InvalidConfig for the rationale and
+        // provider::http for the gate.
         super::http::validate_http_base_url(&base_url)
             .map_err(|e| ProviderError::InvalidConfig(e.to_string()))?;
         let model = config.model();

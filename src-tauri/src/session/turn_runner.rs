@@ -282,12 +282,11 @@ impl TurnRunner {
                     return TurnOutcome::Failed(TurnFailure::NotWired);
                 }
                 // InvalidConfig is permanent (issue #277): a non-http/https
-                // base_url or another configuration fault. Retrying cannot help
-                // -- the same config fails identically -- so the turn fails
-                // immediately without consuming the budget, the same short-
-                // circuit as NotWired. Unlike NotWired the detail rides the
-                // fold so the policy reason (e.g. "scheme `file` is not
-                // http/https") reaches the UI.
+                // base_url or another configuration fault retrying cannot fix
+                // (the same config fails identically). Fail immediately without
+                // consuming the budget -- the same early-return as NotWired /
+                // Resource / StaleReference. Unlike NotWired the detail rides
+                // the fold so the policy reason reaches the UI.
                 Err(ProviderError::InvalidConfig(detail)) => {
                     return TurnOutcome::Failed(TurnFailure::InvalidConfig { detail });
                 }

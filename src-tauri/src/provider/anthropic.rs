@@ -70,11 +70,11 @@ impl AnthropicProvider {
         let key = config.api_key().ok_or(ProviderError::NotWired)?;
         let base_url = config.base_url();
         // AC #244: reject a non-http/https base_url (file:, data:, scheme-less)
-        // at the boundary before any request is built. Surfaced as InvalidConfig
-        // (issue #277): a bad scheme is a permanent configuration fault, not a
-        // transient call failure, so the orchestrator must not burn the retry
-        // budget on it. The policy reason rides the detail so it reaches the UI
-        // fold; NotWired would drop it. See provider::http for the gate.
+        // at the boundary before any request is built. Maps to InvalidConfig
+        // (issue #277) -- a permanent fault the orchestrator does not retry --
+        // so the policy reason rides the detail to the UI fold (NotWired would
+        // drop it). See ProviderError::InvalidConfig for the rationale and
+        // provider::http for the gate.
         super::http::validate_http_base_url(&base_url)
             .map_err(|e| ProviderError::InvalidConfig(e.to_string()))?;
         let model = config.model();
