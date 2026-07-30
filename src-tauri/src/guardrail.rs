@@ -23,6 +23,15 @@
 //! sandboxed connection whose LocalFileSystem is disabled (see
 //! `session::sandbox`); the engine's "... disabled by configuration" refusal is
 //! classified [`ExecErrorKind::Resource`] (no retry).
+//!
+//! ADR-0080 (issue #293) layers a gateway path whitelist ON TOP of that engine
+//! lockdown for the `explore` tool: read_* literal paths are classified against
+//! the session source set (read-only) + working temp dir (read-write) before
+//! execution, so an out-of-bounds path becomes a structured, path-naming tool
+//! error the agent self-corrects from (ADR-0077) instead of the engine's opaque
+//! "disabled" message. See [`crate::fs_acl`] + [`crate::tools::read_paths`]. The
+//! lockdown remains the file-reachability GUARANTEE; the whitelist is additive
+//! guidance (and the sole constraint for the future built-in file tools).
 
 use duckdb::Connection;
 

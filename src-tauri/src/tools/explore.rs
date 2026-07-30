@@ -23,12 +23,14 @@ use duckdb::Connection;
 use serde_json::{json, Value};
 
 use crate::cancel::CancelToken;
+use crate::fs_acl::{AccessMode, FsAcl};
 use crate::ingest::schema::{canonical_type, quote_ident};
 use crate::model::ColumnSchema;
 use crate::provenance;
 use crate::session::materializer::TurnDeps;
 use crate::session::sandbox;
 use crate::tools::definitions::{self, EXPLORE_DEFAULT_SAMPLE_ROWS, EXPLORE_MAX_SAMPLE_ROWS};
+use crate::tools::read_paths::extract_read_paths;
 
 /// The scratch table name on the explore sandbox. The sandbox is single-use
 /// (LocalFileSystem lockdown is irreversible, so the connection is dropped per
@@ -103,6 +105,25 @@ fn run_explore(
         return Err(format!(
             "stale reference: `{stale_ref}` has been invalidated and may not anchor a new query"
         ));
+    }
+
+    // Gateway-layer file-reachability whitelist (ADR-0080, issue #293): every
+    // literal `read_*` path in the SQL is classified against the session source
+    // set (read-only) + working temp dir (read-write) before execution. An out-
+    // of-bounds / unresolvable path becomes a structured tool error the agent
+    // self-corrects from (ADR-0077) -- never the engine's opaque "... disabled
+    // by configuration". The engine-level `disabled_filesystems` lockdown below
+    // remains the file-reachability GUARANTEE for SQL-embedded read_*: the CTAS
+    // wrapping bars mutating file statements, narrowing the in-SELECT file
+    // surface to read_* functions, which the lockdown refuses. So this scan is
+    // additive guidance -- a path it misses is still refused by the lockdown,
+    // and an in-bounds read_* (the agent should use the "<ref>".data catalog)
+    // proceeds to the lockdown's honest refusal rather than reading the file.
+    let acl = FsAcl::new(deps.working_set, deps.temp_path);
+    for path in extract_read_paths(sql) {
+        if let Err(e) = acl.check(&path, AccessMode::Read) {
+            return Err(e.message());
+        }
     }
 
     // Scratch sandbox (same lifecycle as the materialize path): fresh instance,
@@ -474,19 +495,110 @@ mod tests {
         assert_eq!(deps.working_set.len(), 0);
     }
 
-    /// After sandbox lockdown, a `read_*` table function is refused -- the only
-    /// SQL-level ingress is closed (ADR-0005 L3). The refusal surfaces as a SQL
-    /// failure carrying the engine's "disabled" message, so the agent cannot
-    /// read arbitrary files through explore.
+    /// AC #2 / AC #4 (issue #293): a `read_*` call whose path resolves OUTSIDE
+    /// the session source set + working temp dir is refused by the gateway
+    /// whitelist BEFORE execution -- never reaching the engine, never failing
+    /// silently. The structured error names the path and the allowed area, so
+    /// the agent can self-correct (ADR-0077). The out-of-bounds file is real on
+    /// disk (so canonicalization resolves it), just outside the temp dir.
     #[test]
-    fn explore_refuses_read_table_function_after_lockdown() {
+    fn explore_refuses_out_of_bounds_read_path_at_gateway() {
+        use crate::tools::test_support::inert_deps_with_temp;
+        use std::fs;
+        use tempfile::TempDir;
+
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
         let sources = std::collections::HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &sources);
+        let temp = TempDir::new().unwrap();
+        // A file that exists on disk but lives outside the session temp dir --
+        // an absolute out-of-bounds target the canonicalizer can resolve.
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("secret.csv");
+        fs::write(&outside_file, "x").unwrap();
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
         let cancel = CancelToken::new();
         let err = dispatch(
-            &json!({"sql": "SELECT * FROM read_csv_auto('secret.csv')"}),
+            &json!({"sql": format!("SELECT * FROM read_csv_auto('{}')", outside_file.to_string_lossy())}),
+            &mut deps,
+            &cancel,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("outside the allowed"),
+            "gateway names the out-of-bounds refusal: {err}"
+        );
+        assert!(
+            err.contains("secret.csv"),
+            "error names the offending path: {err}"
+        );
+        // No sandbox setup ran for a gateway refusal -> no working-set entry.
+        assert_eq!(deps.working_set.len(), 0);
+    }
+
+    /// AC #4 (issue #293): a relative `../` escape lands outside the temp dir
+    /// and is refused at the gateway, same as an absolute out-of-bounds path.
+    /// The escape target is a real file in the temp dir's parent.
+    #[test]
+    fn explore_refuses_relative_dotdot_read_escape_at_gateway() {
+        use crate::tools::test_support::inert_deps_with_temp;
+        use std::fs;
+        use tempfile::TempDir;
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = crate::workingset::WorkingSet::default();
+        let sources = std::collections::HashMap::new();
+        let temp = TempDir::new().unwrap();
+        // A sibling file in the temp dir's parent -- its absolute path is
+        // outside the temp root, so any phrasing of it is out of bounds.
+        let escape_target = temp
+            .path()
+            .parent()
+            .unwrap()
+            .join("explore_escape_target_293.csv");
+        fs::write(&escape_target, "x").unwrap();
+        let escape_abs = escape_target.canonicalize().unwrap();
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+        let cancel = CancelToken::new();
+        let err = dispatch(
+            &json!({"sql": format!("SELECT * FROM read_csv_auto('{}')", escape_abs.to_string_lossy())}),
+            &mut deps,
+            &cancel,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("outside the allowed"),
+            "relative escape refused: {err}"
+        );
+        let _ = fs::remove_file(&escape_target);
+    }
+
+    /// Design-B lockdown backstop (issue #293): a `read_*` call whose path the
+    /// gateway whitelist ALLOWS (a file inside the session temp dir) still does
+    /// not execute -- the engine-level `disabled_filesystems` lockdown remains
+    /// the file-reachability GUARANTEE for SQL-embedded read_*, so the agent
+    /// cannot read files through explore; it reaches sources via the
+    /// `"<ref>".data` catalog. The gateway adds structured out-of-bounds
+    /// guidance (ADR-0080); the lockdown guarantees the rest (ADR-0005).
+    #[test]
+    fn explore_lockdown_still_refuses_in_bounds_read_path() {
+        use crate::tools::test_support::inert_deps_with_temp;
+        use std::fs;
+        use tempfile::TempDir;
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = crate::workingset::WorkingSet::default();
+        let sources = std::collections::HashMap::new();
+        let temp = TempDir::new().unwrap();
+        // A file INSIDE the temp dir: the gateway whitelist allows it (in-
+        // bounds), so the call proceeds to the sandbox, where the engine
+        // lockdown refuses read_* with its "... disabled" message.
+        let inside = temp.path().join("scratch.csv");
+        fs::write(&inside, "x").unwrap();
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+        let cancel = CancelToken::new();
+        let err = dispatch(
+            &json!({"sql": format!("SELECT * FROM read_csv_auto('{}')", inside.to_string_lossy())}),
             &mut deps,
             &cancel,
         )
@@ -494,7 +606,7 @@ mod tests {
         let lower = err.to_ascii_lowercase();
         assert!(
             lower.contains("disabled"),
-            "lockdown refusal surfaces the disabled filesystem: {err}"
+            "lockdown backstop refuses an in-bounds read_*: {err}"
         );
         assert!(
             lower.contains("sql failed"),
