@@ -43,20 +43,58 @@ pub(crate) fn validate_http_base_url(base_url: &str) -> Result<(), InvalidBaseUr
     }
 }
 
-/// Build the shared egress agent with redirect-following disabled (issue #244).
+/// Test-only construction counter for [`EGRESS_AGENT`] (issue #278): proves the
+/// singleton is built at most once across the process, so every call site
+/// (anthropic / openai / preflight) draws from one shared connection pool.
+/// Read by `egress_agent_builds_only_once_across_calls`; compiled out of
+/// release builds.
+#[cfg(test)]
+static EGRESS_AGENT_BUILDS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The process-wide shared egress agent (issue #278).
 ///
-/// Disabling is the structural fix for the `x-api-key` cross-host leak:
-/// ureq's per-hop header cleanup strips only `authorization`/`cookie`, and
-/// the middleware hook wraps the whole redirect loop once (not per-hop), so a
-/// middleware stripper cannot intervene between hops either. `redirects(0)`
-/// means no redirect is followed, so neither `x-api-key` nor `Authorization`
-/// can travel past the first hop.
+/// Built once and reused for the process lifetime; [`egress_agent`] hands out
+/// cheap clones that share the underlying `ConnectionPool` -- a `ureq::Agent` is
+/// `Arc<AgentState>` internally, so cloning shares state (ureq 2.12.1). Every
+/// call site previously built a fresh `AgentBuilder`, dropping the pool at the
+/// end of each call so each LLM turn / preflight probe re-did the TCP+TLS
+/// handshake; the shared pool restores keep-alive reuse across turns.
 ///
-/// Under `redirects(0)` a 3xx reply surfaces as the raw `Response` (ureq keeps
-/// 3xx as `Ok`; only `>= 400` becomes `Error::Status`); adapters map any
-/// non-2xx to their usual transient error.
+/// `redirects(0)` (issue #244) is the structural fix for the `x-api-key`
+/// cross-host leak: ureq's per-hop header cleanup strips only
+/// `authorization`/`cookie`, and the middleware hook wraps the whole redirect
+/// loop once (not per-hop), so a middleware stripper cannot intervene between
+/// hops either. It is baked in at construction and immutable on the shared
+/// agent, so every clone preserves the leak guarantee -- a redirect is never
+/// followed, so neither `x-api-key` nor `Authorization` can travel past the
+/// first hop. Under `redirects(0)` a 3xx reply surfaces as the raw `Response`
+/// (ureq keeps 3xx as `Ok`; only `>= 400` becomes `Error::Status`); adapters
+/// map any non-2xx to their usual transient error.
+///
+/// `std::sync::OnceLock` is the std equivalent of `once_cell::sync::Lazy`
+/// (stable since 1.70, within the crate MSRV of 1.77) and avoids adding a
+/// dependency; the agent is constructed lazily on first use via `get_or_init`.
+/// `ureq::Agent: Send + Sync` (its fields are `Arc` over thread-safe state, so
+/// the auto traits hold), which makes the static `Sync` and safely reachable
+/// from the `spawn_blocking` threads that drive `Provider::generate` and the
+/// preflight probe.
+static EGRESS_AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+
+/// Return a clone of the shared egress agent (issue #278).
+///
+/// The clone shares the singleton's connection pool (see [`EGRESS_AGENT`]), so
+/// repeated calls across turns reuse keep-alive connections instead of
+/// re-handshaking. The signature returns an owned `ureq::Agent` rather than `&`
+/// so call sites chain `.post(..).set(..).send_json(..)` unchanged -- cloning is
+/// the ureq-blessed way to hand out a pool-sharing handle.
 pub(crate) fn egress_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().redirects(0).build()
+    EGRESS_AGENT
+        .get_or_init(|| {
+            #[cfg(test)]
+            EGRESS_AGENT_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            ureq::AgentBuilder::new().redirects(0).build()
+        })
+        .clone()
 }
 
 #[cfg(test)]
@@ -146,5 +184,34 @@ mod tests {
         assert_eq!(resp.status(), 302, "the 3xx surfaces raw, not followed");
 
         second_mock.assert(); // expect(0): the second host was NOT reached
+    }
+
+    #[test]
+    fn egress_agent_builds_only_once_across_calls() {
+        // AC #278: there is exactly one `ureq::Agent` for the whole process, so
+        // every call site (anthropic / openai / preflight) draws from a single
+        // shared connection pool. A `OnceLock` singleton is built on first use
+        // and cloned thereafter -- the construction counter must not advance on
+        // the 2nd+ call, regardless of whether another test already initialized
+        // it (tests run in parallel, so `before` may already be non-zero). The
+        // counter snapshots bracket the calls rather than asserting an absolute
+        // value, so this stays correct under any initialization order.
+        use std::sync::atomic::Ordering;
+        let before = EGRESS_AGENT_BUILDS.load(Ordering::Relaxed);
+        let _first = egress_agent();
+        let after_first = EGRESS_AGENT_BUILDS.load(Ordering::Relaxed);
+        let _second = egress_agent();
+        let _third = egress_agent();
+        let after_third = EGRESS_AGENT_BUILDS.load(Ordering::Relaxed);
+
+        assert!(
+            after_first - before <= 1,
+            "first call builds the agent at most once (got {} builds)",
+            after_first - before
+        );
+        assert_eq!(
+            after_third, after_first,
+            "subsequent calls never rebuild the agent"
+        );
     }
 }
