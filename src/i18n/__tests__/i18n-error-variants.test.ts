@@ -45,6 +45,7 @@ const CATALOG_IDS: Readonly<Record<string, Readonly<Record<string, string | null
     Execute: "error.turn.execute",
     Resource: "error.turn.resource",
     NotWired: "error.turn.notWired",
+    InvalidConfig: "error.turn.invalidConfig",
     StaleReference: "error.turn.stale",
   },
   SessionError: {

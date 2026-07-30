@@ -70,11 +70,13 @@ impl AnthropicProvider {
         let key = config.api_key().ok_or(ProviderError::NotWired)?;
         let base_url = config.base_url();
         // AC #244: reject a non-http/https base_url (file:, data:, scheme-less)
-        // at the boundary before any request is built. Surfaced as Unavailable
-        // carrying the policy reason; NotWired would drop the detail. See
-        // provider::http for the scheme gate rationale.
+        // at the boundary before any request is built. Surfaced as InvalidConfig
+        // (issue #277): a bad scheme is a permanent configuration fault, not a
+        // transient call failure, so the orchestrator must not burn the retry
+        // budget on it. The policy reason rides the detail so it reaches the UI
+        // fold; NotWired would drop it. See provider::http for the gate.
         super::http::validate_http_base_url(&base_url)
-            .map_err(|e| ProviderError::Unavailable(e.to_string()))?;
+            .map_err(|e| ProviderError::InvalidConfig(e.to_string()))?;
         let model = config.model();
         let url = format!("{base}/v1/messages", base = base_url.trim_end_matches('/'));
 
@@ -588,16 +590,17 @@ mod tests {
         // AC #244: a file:// (or other non-http/https) base_url is rejected at
         // the boundary -- no HTTP call is placed. A malicious or hand-edited
         // `file://` endpoint must never reach ureq. The error surfaces the
-        // http/https policy so the diagnosis is readable; it routes to
-        // Unavailable (a configuration fault surfaced with detail), not
+        // http/https policy so the diagnosis is readable. It routes to
+        // InvalidConfig (issue #277): a permanent configuration fault carried
+        // with detail -- distinct from Unavailable (transient/retried) and from
         // NotWired (which drops the reason).
         let cfg = config_at("file:///etc/passwd", Some("sk-test"));
         match AnthropicProvider::generate(&cfg, &sample_request("q")) {
-            Err(ProviderError::Unavailable(msg)) => assert!(
+            Err(ProviderError::InvalidConfig(msg)) => assert!(
                 msg.contains("http/https"),
                 "scheme rejection surfaces the http/https policy: {msg}"
             ),
-            other => panic!("expected Unavailable for bad scheme, got {other:?}"),
+            other => panic!("expected InvalidConfig for bad scheme, got {other:?}"),
         }
     }
 

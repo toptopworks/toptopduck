@@ -76,9 +76,12 @@ impl OpenaiProvider {
         let base_url = config.base_url();
         // AC #244: reject a non-http/https base_url (file:, data:, scheme-less)
         // at the boundary before any request is built. Mirrors the anthropic
-        // adapter so the two paths cannot drift. See provider::http.
+        // adapter so the two paths cannot drift. Surfaced as InvalidConfig
+        // (issue #277): a permanent configuration fault, not a transient call
+        // failure -- the orchestrator must not burn the retry budget on it.
+        // See provider::http.
         super::http::validate_http_base_url(&base_url)
-            .map_err(|e| ProviderError::Unavailable(e.to_string()))?;
+            .map_err(|e| ProviderError::InvalidConfig(e.to_string()))?;
         let model = config.model();
         // The user's base_url carries any version path segment (e.g. `/v1`);
         // only `/chat/completions` (the path documented by OpenAI's Chat
@@ -795,14 +798,16 @@ mod tests {
     fn base_url_non_http_scheme_is_rejected_before_any_request() {
         // AC #244 (mirrors the anthropic adapter): a file:// base_url is
         // rejected at the boundary before any HTTP call is placed. Surfaced as
-        // Unavailable carrying the http/https policy so the diagnosis reads.
+        // InvalidConfig (issue #277) carrying the http/https policy so the
+        // diagnosis reads -- permanent, distinct from the transient Unavailable
+        // path.
         let cfg = config_at("file:///etc/passwd", Some("sk-test"));
         match OpenaiProvider::generate(&cfg, &sample_request("q")) {
-            Err(ProviderError::Unavailable(msg)) => assert!(
+            Err(ProviderError::InvalidConfig(msg)) => assert!(
                 msg.contains("http/https"),
                 "scheme rejection surfaces the http/https policy: {msg}"
             ),
-            other => panic!("expected Unavailable for bad scheme, got {other:?}"),
+            other => panic!("expected InvalidConfig for bad scheme, got {other:?}"),
         }
     }
 

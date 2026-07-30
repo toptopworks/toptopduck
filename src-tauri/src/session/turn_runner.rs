@@ -281,6 +281,16 @@ impl TurnRunner {
                 Err(ProviderError::NotWired) => {
                     return TurnOutcome::Failed(TurnFailure::NotWired);
                 }
+                // InvalidConfig is permanent (issue #277): a non-http/https
+                // base_url or another configuration fault. Retrying cannot help
+                // -- the same config fails identically -- so the turn fails
+                // immediately without consuming the budget, the same short-
+                // circuit as NotWired. Unlike NotWired the detail rides the
+                // fold so the policy reason (e.g. "scheme `file` is not
+                // http/https") reaches the UI.
+                Err(ProviderError::InvalidConfig(detail)) => {
+                    return TurnOutcome::Failed(TurnFailure::InvalidConfig { detail });
+                }
                 // A contract violation / transient call failure -- consume the
                 // budget and retry with the SAME request (blind retry). The real
                 // client's error re-feed lands in #29; the scripted fake's queue
@@ -563,6 +573,44 @@ mod tests {
             other => panic!("expected NotWired Failed, got {other:?}"),
         }
         assert_eq!(calls, 0, "NotWired must not reach the materializer");
+    }
+
+    #[test]
+    fn invalid_config_does_not_retry_and_surfaces_detail() {
+        // AC #277: a permanent configuration fault (e.g. a bad base_url scheme)
+        // is NOT retried -- generate is called exactly once (the retry budget is
+        // not consumed), and the policy detail rides the failure so it reaches
+        // the UI fold. A later scripted Ok is never reached, and the materializer
+        // is never called. Distinct from Unavailable (which retries and would
+        // burn three calls on an identical config) and from NotWired (which
+        // drops the detail). The captured-requests handle (one entry per
+        // generate call) pins the no-retry contract independently of the
+        // outcome variant.
+        let detail = "scheme `file` is not http/https";
+        let provider = FakeProvider::new().scripted_seq(
+            "q",
+            vec![
+                Err(ProviderError::InvalidConfig(detail.to_string())),
+                Ok(reply_sql("SELECT 1")), // would succeed -- never reached
+            ],
+        );
+        let captured = provider.captured();
+        let materializer = FakeMaterializer::new(vec![Ok(fake_descriptor("result_1"))]);
+        let (outcome, calls) = run_with(provider, materializer);
+        let surfaced = match outcome {
+            TurnOutcome::Failed(TurnFailure::InvalidConfig { detail }) => detail,
+            other => panic!("expected InvalidConfig Failed, got {other:?}"),
+        };
+        assert_eq!(
+            captured.lock().expect("captured requests unpoisoned").len(),
+            1,
+            "InvalidConfig must not be retried -- generate called exactly once"
+        );
+        assert_eq!(calls, 0, "InvalidConfig must not reach the materializer");
+        assert!(
+            surfaced.contains("http/https"),
+            "policy detail surfaces to the UI fold: {surfaced}"
+        );
     }
 
     /// Build a minimal active descriptor for the success-path fake queue.

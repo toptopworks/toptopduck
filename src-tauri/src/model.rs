@@ -432,6 +432,13 @@ pub enum TurnFailure {
     /// -- no provider at all. Permanent for the turn; the user must configure a
     /// key. Carries no data -- the locale message is self-contained.
     NotWired,
+    /// The provider's configuration is permanently invalid (issue #277): a
+    /// non-http/https base_url (file:, data:, scheme-less) or another
+    /// configuration fault retrying cannot fix. NOT retried -- the same config
+    /// would fail identically. `detail` is the configuration diagnosis (e.g.
+    /// "scheme `file` is not http/https"); rides the technical fold, like
+    /// Execute / Resource.
+    InvalidConfig { detail: String },
     /// The provider SQL referenced a stale result_N (ADR-0013 invariant 2,
     /// issue #40). NOT retried -- the same SQL would reference the same stale
     /// result. `reference_name` is the dead reference, interpolated into the
@@ -451,6 +458,9 @@ impl std::fmt::Display for TurnFailure {
             Self::Execute { detail } => write!(f, "turn failed (budget exhausted): {detail}"),
             Self::Resource { detail } => write!(f, "turn aborted by resource cap: {detail}"),
             Self::NotWired => write!(f, "turn failed: no LLM provider wired"),
+            Self::InvalidConfig { detail } => {
+                write!(f, "turn failed: invalid provider configuration: {detail}")
+            }
             Self::StaleReference { reference_name } => {
                 write!(f, "turn failed: stale reference {reference_name}")
             }

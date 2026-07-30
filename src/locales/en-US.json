@@ -69,6 +69,7 @@
   "error.turn.execute": "Failed to execute the query",
   "error.turn.notWired": "No LLM provider is configured",
   "error.turn.resource": "A resource limit was reached",
+  "error.turn.invalidConfig": "The provider configuration is invalid",
   "error.turn.stale": "References a stale result \"{name}\"",
   "error.verb.ask": "Ask",
   "error.verb.delete": "Delete source",

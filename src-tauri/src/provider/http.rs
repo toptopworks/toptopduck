@@ -19,16 +19,13 @@
 /// error vocabulary without re-deriving the diagnosis. The reason is read
 /// only via [`Display`](std::fmt::Display); the inner string is private to
 /// keep the diagnostic wording owned by this module.
-#[derive(Debug)]
+///
+/// `Display` is derived via `thiserror` (issue #277) -- matching the
+/// `commands.rs` / `session_store.rs` style -- with a byte-identical format to
+/// the former hand-written impl.
+#[derive(Debug, thiserror::Error)]
+#[error("invalid base_url: {0}")]
 pub(crate) struct InvalidBaseUrl(String);
-
-impl std::fmt::Display for InvalidBaseUrl {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "invalid base_url: {}", self.0)
-    }
-}
-
-impl std::error::Error for InvalidBaseUrl {}
 
 /// Validate that a provider base_url is an http/https URL (issue #244).
 /// `url::Url::parse` rejects malformed URLs (including scheme-less strings,

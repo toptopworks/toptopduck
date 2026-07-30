@@ -69,6 +69,7 @@
   "error.turn.execute": "执行查询失败",
   "error.turn.notWired": "未配置 LLM 提供方",
   "error.turn.resource": "超出资源上限",
+  "error.turn.invalidConfig": "提供方配置无效",
   "error.turn.stale": "引用了已失效的结果「{name}」",
   "error.verb.ask": "提问",
   "error.verb.delete": "删源",
