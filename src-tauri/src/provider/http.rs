@@ -97,6 +97,59 @@ pub(crate) fn egress_agent() -> ureq::Agent {
         .clone()
 }
 
+/// Classify a ureq send result into either a 2xx [`ureq::Response`] or a
+/// [`ProviderError`](crate::provider::ProviderError), applying the ADR-0044
+/// status mapping shared by every outbound LLM call:
+///
+/// - HTTP 401/403 -> [`NotWired`](crate::provider::ProviderError::NotWired)
+///   (permanent for the turn: the stored key was rejected; not retried --
+///   three identical auth failures would only burn time).
+/// - Any other HTTP status, any transport error, and the 3xx that surfaces
+///   as `Ok` under [`egress_agent`]'s `redirects(0)` ->
+///   [`Unavailable`](crate::provider::ProviderError::Unavailable)
+///   (transient/retryable). The upstream body rides the message (bounded by
+///   [`reply::truncate`](crate::provider::reply::truncate)) so the user sees
+///   WHY instead of a bare status code.
+///
+/// Used by the tool-calling adapters (issue #291). The single-shot adapters
+/// retain their inline classification unchanged (zero behavior change to the
+/// legacy path); #295 may route them onto this helper when it retires the
+/// single-shot path.
+pub(crate) fn classify_send_result(
+    result: Result<ureq::Response, ureq::Error>,
+) -> Result<ureq::Response, crate::provider::ProviderError> {
+    use crate::provider::ProviderError;
+    match result {
+        // Under redirects(0) a 3xx surfaces as Ok (only >= 400 becomes
+        // Error::Status). Without this guard the 3xx body would reach
+        // into_json and surface as a misleading "response read failed"
+        // parse fault; map any non-2xx to the same transient Unavailable so
+        // the diagnosis names the status.
+        Ok(r) if !(200..300).contains(&r.status()) => {
+            let status = r.status();
+            let body = r.into_string().unwrap_or_default();
+            Err(ProviderError::Unavailable(format!(
+                "LLM call failed (HTTP {status}): {}",
+                crate::provider::reply::truncate(&body)
+            )))
+        }
+        Ok(r) => Ok(r),
+        Err(ureq::Error::Status(status, resp)) => {
+            if status == 401 || status == 403 {
+                Err(ProviderError::NotWired)
+            } else {
+                let body = resp.into_string().unwrap_or_default();
+                Err(ProviderError::Unavailable(format!(
+                    "LLM call failed (HTTP {status}): {}",
+                    crate::provider::reply::truncate(&body)
+                )))
+            }
+        }
+        // Transport error (DNS / TCP / TLS / timeout): transient/retryable.
+        Err(e) => Err(ProviderError::Unavailable(format!("LLM call failed: {e}"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
