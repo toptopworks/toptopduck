@@ -1,5 +1,7 @@
 # 前端 shell：两栏（thread rail + tabbed workspace），工作集为 workspace tab、非常驻栏
 
+> 部分被 [ADR-0083](./0083-conversation-stream-workspace-panel.md) 取代：Decision「左 = thread rail：承载轮次卡片（逐字提问截断 + outcome 图标 + active chip）」卡片形态演进为对话流轮次卡片（提问 + 可折叠执行轨迹 + 答复 + 结果预览卡），内联预览仅承载窗口化采样；rail / workspace 分离、「工作集不做常驻第三栏」「中间结果不内联进 thread（否决 notebook 式）」保留。详见 ADR-0083。
+
 ## Decision
 
 前端 shell 从当前单列 1100px dev 默认（`App.tsx`）改为**两栏**：

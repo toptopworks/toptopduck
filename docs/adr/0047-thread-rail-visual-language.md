@@ -1,5 +1,7 @@
 # thread rail 视觉语言：单行逐字卡片 + 四类 outcome 编码 + 源事件标记条与 stale 因果染色
 
+> 部分被 [ADR-0083](./0083-conversation-stream-workspace-panel.md) 取代：Decision「（1）轮次卡片（单行）」卡片结构按对话流重写（提问 + 可折叠执行轨迹 + 答复 + 结果卡片）；「逐字提问是身份句柄、非 LLM 摘要」「（2）四类 outcome 视觉语言」（result 含义按 ADR-0077 演进）与「（3）源生命周期事件标记条」（扩技能生命周期事件）、stale 因果染色保留。详见 ADR-0083。
+
 ## Decision
 
 thread rail（ADR-0045 左栏）承载两类**视觉异种**条目：

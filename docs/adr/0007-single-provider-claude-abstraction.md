@@ -1,5 +1,7 @@
 # LLM provider: single provider (Claude) behind an abstraction
 
+> 本 ADR 的「v1 锁定单一提供商 Claude」「不为多提供商预先实现」决策**被 ADR-0076 / 0081 取代**为双运行时架构（内置 BYOK Rust 循环 + 外部 CLI agent）；本 ADR「背后留薄抽象层（Provider 接口），加提供商是配置而非重写」结论**保留**——Provider 层降为内置运行时接入层，多协议已由 ADR-0064 兑现。见 ADR-0076。
+
 ## Decision
 
 v1 锁定**单一提供商 Claude**（SQL 与结构化输出能力一线），背后留**薄抽象层（Provider 接口）**——未来加提供商是"配置"而非"重写"。**不**为多提供商预先实现（YAGNI）。

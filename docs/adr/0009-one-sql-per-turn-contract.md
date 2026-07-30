@@ -1,5 +1,7 @@
 # LLM output contract: one SQL + optional viz spec per turn
 
+> 本 ADR 的「每轮一条 SQL + 可选 viz 规格」「不做单轮 pipeline」契约**被 ADR-0077 取代**——轮次 = 0 或多次工具调用，中间结果仅由显式物化调用产出（探索查询 scratch 轮末即弃）；本 ADR「文本响应分支（越界拒绝 / 消歧澄清）」「跨轮物化链式」语义**保留**。见 ADR-0077。
+
 ## Decision
 
 每个**提问**（一轮）模型返回**一条 SQL + 可选 viz 规格**（产出**一个 `result_N`**），**或一条文本响应（不产 SQL）**——用于越界拒绝（ADR-0017）与消歧澄清（ADR-0018）。多步需求靠**跨轮物化链式**（引用前序 `result_N`）完成。**不做**单轮 pipeline，**不做** plan-then-execute。

@@ -1,5 +1,7 @@
 # Capability boundary: SQL-only v1 scope; out-of-scope requests are refused with an in-scope alternative, never faked
 
+> 本 ADR 的能力边界（SQL / DuckDB 原生为界、越界诚实拒绝）从系统不变量**被 ADR-0079 修订**为默认技能集语义——用户可经技能与 MCP 工具扩展能力，app 不做能力类审计；本 ADR 的 IN / OUT 清单与「诚实拒绝 + in-scope 替代、never faked」交互**保留**为未挂载会话的默认行为。见 ADR-0079。
+
 ## Decision
 
 **v1 能力边界**（SQL / DuckDB 原生范围内）：
