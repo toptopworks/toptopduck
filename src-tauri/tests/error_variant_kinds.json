@@ -63,6 +63,7 @@
   ],
   "TurnFailure": [
     "Execute",
+    "InvalidConfig",
     "NotWired",
     "Resource",
     "StaleReference"

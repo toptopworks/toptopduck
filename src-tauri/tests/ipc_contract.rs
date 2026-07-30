@@ -387,6 +387,24 @@ fn turn_outcome_failed_nests_typed_failure_under_data() {
 }
 
 #[test]
+fn turn_outcome_failed_invalid_config_carries_detail_under_data() {
+    // Outcome C (ADR-0028, issue #277): a permanent configuration fault nests
+    // the typed TurnFailure::InvalidConfig under data, adjacently-tagged like
+    // Execute / Resource so the frontend narrows on kind and folds the detail.
+    // Pinned here -- alongside Execute / NotWired / StaleReference -- so a serde
+    // attribute change (e.g. renaming `detail` or retagging) fails the build
+    // before the frontend's hand-mirrored `types/thread.ts` can drift. The
+    // golden `error_variant_kinds` only pins the `kind` label, not this shape.
+    use toptopduck_lib::{TurnFailure, TurnOutcome};
+    assert_wire(
+        &TurnOutcome::Failed(TurnFailure::InvalidConfig {
+            detail: "scheme `file` is not http/https".into(),
+        }),
+        r#"{"kind":"Failed","data":{"kind":"InvalidConfig","data":{"detail":"scheme `file` is not http/https"}}}"#,
+    );
+}
+
+#[test]
 fn turn_outcome_cancelled_is_a_unit_variant_with_no_data() {
     // Outcome D (ADR-0028, placeholder until #28): a unit variant -- `kind`
     // only, no `data` key -- like the other unit variants in the contract.

@@ -198,37 +198,42 @@ pub enum ProviderReply {
 
 /// Why a provider call did not yield a reply. The orchestrator's single retry
 /// budget (ADR-0028) consumes `Unavailable` (a contract violation / transient
-/// call failure) and re-attempts; `NotWired` is permanent for the turn (no key
-/// configured, the stored key was rejected by the endpoint, or no provider is
-/// wired at all) and is not retried -- it yields a failed turn immediately
-/// prompting the user to configure a valid key.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// call failure) and re-attempts; `NotWired` and `InvalidConfig` are permanent
+/// for the turn (no key configured / key rejected, or a non-recoverable
+/// configuration fault) and are not retried -- they yield a failed turn
+/// immediately. `InvalidConfig` carries its diagnosis so the policy reason
+/// (e.g. "scheme `file` is not http/https") reaches the UI fold (issue #277).
+///
+/// `Display` is derived via `thiserror` (issue #277) -- matching the
+/// `commands.rs` / `session_store.rs` style -- and is Rust-log-only, not the
+/// IPC contract (the orchestrator maps each variant to a typed
+/// [`crate::model::TurnFailure`] that the frontend renders via its locale
+/// catalog).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProviderError {
     /// The provider cannot serve this turn for a non-transient reason: no API
     /// key is stored (ADR-0029 invariant 3), the stored key was rejected by the
     /// endpoint (HTTP 401/403), or -- in test/dev -- no provider is wired at
     /// all ([`UnwiredProvider`]). Permanent for the turn: not retried.
+    #[error("no LLM provider wired (configure an Anthropic API key, then retry)")]
     NotWired,
+    /// The provider's configuration is permanently invalid for this turn
+    /// (issue #277): a non-http/https base_url (file:, data:, scheme-less) or
+    /// another configuration fault retrying cannot fix. NOT retried -- the same
+    /// config would fail identically, so retrying would only burn the budget.
+    /// Carries the diagnosis verbatim so the policy reason surfaces to the UI
+    /// fold; the orchestrator maps it to
+    /// [`crate::model::TurnFailure::InvalidConfig`].
+    #[error("LLM provider configuration is invalid: {0}")]
+    InvalidConfig(String),
     /// The provider call failed or its output violated the contract (network /
     /// quota / malformed output). Transient/recoverable: the retry loop
     /// re-feeds it up to the budget, then yields a failed turn (ADR-0028).
     /// Auth failures (HTTP 401/403) are permanent, not transient -- they map
     /// to [`NotWired`] and skip the retry loop (ADR-0044).
+    #[error("LLM provider call failed: {0}")]
     Unavailable(String),
 }
-
-impl std::fmt::Display for ProviderError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            Self::NotWired => write!(
-                f,
-                "no LLM provider wired (configure an Anthropic API key, then retry)"
-            ),
-            Self::Unavailable(detail) => write!(f, "LLM provider call failed: {detail}"),
-        }
-    }
-}
-impl std::error::Error for ProviderError {}
 
 /// The provider abstraction (ADR-0007). One method: turn a schema-aware request
 /// into the one-SQL reply contract (ADR-0009). Concrete implementations: the

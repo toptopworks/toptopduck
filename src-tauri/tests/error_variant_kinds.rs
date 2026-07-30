@@ -61,6 +61,9 @@ fn turn_failure() -> Vec<TurnFailure> {
             detail: String::new(),
         },
         TurnFailure::NotWired,
+        TurnFailure::InvalidConfig {
+            detail: String::new(),
+        },
         TurnFailure::StaleReference {
             reference_name: String::new(),
         },

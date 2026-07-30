@@ -32,13 +32,15 @@ export interface VizSpec {
 // Why a turn failed (ADR-0028 outcome C, issue #125). Mirrors the Rust
 // TurnFailure (serde adjacently-tagged, nested under TurnOutcome::Failed.data).
 // The frontend narrows on `kind` to render a locale message -- the backend no
-// longer crosses a free-text reason. Execute / Resource carry a technical
-// `detail` for the collapsed fold (audited to carry no API key, ADR-0029);
-// StaleReference carries the dead reference name for the locale template.
+// longer crosses a free-text reason. Execute / Resource / InvalidConfig carry a
+// technical `detail` for the collapsed fold (audited to carry no API key,
+// ADR-0029); StaleReference carries the dead reference name for the locale
+// template.
 export type TurnFailure =
   | { kind: "Execute"; data: { detail: string } }
   | { kind: "Resource"; data: { detail: string } }
   | { kind: "NotWired" }
+  | { kind: "InvalidConfig"; data: { detail: string } }
   | { kind: "StaleReference"; data: { reference_name: string } };
 
 // One turn outcome (ADR-0028). Mirrors the Rust TurnOutcome (serde adjacently-

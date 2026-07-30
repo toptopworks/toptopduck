@@ -11,9 +11,9 @@ import type { TurnFailure } from "../../types/thread";
 // Format a TurnFailure (TurnOutcome::Failed.data, issue #125) through the
 // locale catalog. Execute shares the merged `error.turn.execute` id with
 // SessionError::Turn::Execute (DRY -- one "query failed" message, not two);
-// Resource / NotWired / StaleReference each have their own id, and
-// StaleReference interpolates the dead reference name. Each formatMessage call
-// carries a literal id + defaultMessage so @formatjs extract recovers it.
+// Resource / NotWired / InvalidConfig / StaleReference each have their own id,
+// and StaleReference interpolates the dead reference name. Each formatMessage
+// call carries a literal id + defaultMessage so @formatjs extract recovers it.
 export function formatTurnFailure(failure: TurnFailure, intl: IntlShape): string {
   switch (failure.kind) {
     case "Execute":
@@ -30,6 +30,11 @@ export function formatTurnFailure(failure: TurnFailure, intl: IntlShape): string
       return intl.formatMessage({
         id: "error.turn.notWired",
         defaultMessage: "No LLM provider is configured",
+      });
+    case "InvalidConfig":
+      return intl.formatMessage({
+        id: "error.turn.invalidConfig",
+        defaultMessage: "The provider configuration is invalid",
       });
     case "StaleReference":
       return intl.formatMessage(
@@ -49,13 +54,15 @@ export function formatTurnFailure(failure: TurnFailure, intl: IntlShape): string
 }
 
 // Extract the technical detail for the collapsed "Technical details" fold from
-// a TurnFailure (issue #125). Execute / Resource carry the engine detail
-// (audited to hold no API key, ADR-0029); NotWired / StaleReference are
-// self-contained (the message already names them) -> no fold.
+// a TurnFailure (issue #125). Execute / Resource / InvalidConfig carry the
+// detail (engine detail or the configuration diagnosis; audited to hold no API
+// key, ADR-0029); NotWired / StaleReference are self-contained (the message
+// already names them) -> no fold.
 export function turnFailureDetail(failure: TurnFailure): string | null {
   switch (failure.kind) {
     case "Execute":
     case "Resource":
+    case "InvalidConfig":
       return failure.data.detail;
     case "NotWired":
     case "StaleReference":
