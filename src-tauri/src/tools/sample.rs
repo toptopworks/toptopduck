@@ -37,20 +37,7 @@ pub(crate) fn dispatch(input: &Value, deps: &mut TurnDeps) -> Result<Value, Stri
     // immutable borrow must end first. The fields are small owned copies
     // (reference name + column clones + the row-count u64).
     let (reference_name, columns, total) = {
-        let descriptor = deps.working_set.get(&reference_name).ok_or_else(|| {
-            format!("unknown dataset: `{reference_name}` is not in the working set")
-        })?;
-        // ADR-0013 invariant 2 (refuse stale): a stale result_N may not anchor a
-        // new read -- the table may have been GC'd or the result is semantically
-        // dead. read_rows (IPC) reads stale results from admin directly for
-        // display, but the tool surface refuses because the agent would act on
-        // the rows, not just display them.
-        if let Some(anchor) = &descriptor.stale {
-            return Err(format!(
-                "stale dataset: `{reference_name}` was invalidated by `{}` and may not be read",
-                anchor.reference_name
-            ));
-        }
+        let descriptor = deps.working_set.resolve_readable(&reference_name, "read")?;
         (
             descriptor.reference_name.clone(),
             descriptor.columns.clone(),
@@ -65,10 +52,7 @@ pub(crate) fn dispatch(input: &Value, deps: &mut TurnDeps) -> Result<Value, Stri
     let rows = read_page(deps, &columns, &from, limit, offset)?;
     Ok(json!({
         "reference_name": reference_name,
-        "columns": columns.iter().map(|c| json!({
-            "name": c.name,
-            "type": c.canonical_type,
-        })).collect::<Vec<_>>(),
+        "columns": columns.iter().map(definitions::column_json).collect::<Vec<_>>(),
         "rows": rows,
         "total": total,
         "offset": offset,
@@ -142,24 +126,9 @@ mod tests {
         StaleReason,
     };
     use crate::workingset::WorkingSet;
+    use crate::tools::test_support::inert_deps;
     use duckdb::Connection;
     use std::collections::HashMap;
-    use std::path::Path;
-
-    fn inert_deps<'a>(
-        conn: &'a Connection,
-        ws: &'a mut WorkingSet,
-        sources: &'a HashMap<String, std::path::PathBuf>,
-    ) -> TurnDeps<'a> {
-        TurnDeps {
-            conn,
-            source_files: sources,
-            working_set: ws,
-            result_row_cap: 1_000,
-            result_count_cap: 100,
-            temp_path: Path::new("."),
-        }
-    }
 
     /// `limit` defaults to 10, clamps to [1, 50]; `offset` defaults to 0 and is
     /// floored at 0. Pinning the clamp keeps the payload bounded without

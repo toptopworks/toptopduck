@@ -60,38 +60,45 @@ pub(crate) fn dispatch(
         .try_materialize(&sql, cancel, result_name.clone(), deps)
         .map_err(|e| err_message(&result_name, e))?;
 
-    // Apply the optional display label AFTER a successful materialize. The
-    // materializer set display_name = reference_name; if the caller supplied a
-    // label, swap it in on BOTH the working-set slot and the returned descriptor
-    // (display-only -- ADR-0037, presentation layer only, no reference-name
-    // impact). Done here rather than inside the materializer so the materializer
-    // stays display-name-agnostic (its contract is to install under result_name;
-    // the label is a tool-layer concern).
+    // Apply the optional display label AFTER a successful materialize, through
+    // the working set's display-rename path so the ADR-0037 trim + uniqueness
+    // invariants hold. The materializer set display_name = reference_name; a
+    // caller-supplied label that trims + does not collide is swapped in on BOTH
+    // the working-set slot and the returned descriptor. A label that cannot be
+    // applied (concurrent removal, or a collision with another dataset's display
+    // name) falls back to the reference name -- the promotion already succeeded,
+    // so only the label is dropped and the agent can re-call with a unique one.
+    // Done here rather than inside the materializer so the materializer stays
+    // display-name-agnostic (its contract is to install under result_name; the
+    // label is a tool-layer concern).
     if let Some(label) = display_name {
-        if !label.trim().is_empty() {
-            apply_display_label(deps, &result_name, &label);
-            descriptor.display_name = label;
+        if let Some(applied) = apply_display_label(deps, &result_name, &label) {
+            descriptor.display_name = applied;
         }
     }
 
     Ok(descriptor_json(&descriptor))
 }
 
-/// Set the display label on the just-materialized working-set descriptor. Looks
-/// up the descriptor by its stable reference name and swaps the display_name
-/// field in place. Best-effort display-layer update -- the working set is the
-/// source of truth, and a missing entry (concurrent removal) is silently
-/// skipped since the materialize itself already succeeded. The caller also
-/// mirrors the label onto the returned descriptor so the tool payload matches.
-fn apply_display_label(deps: &mut TurnDeps, reference_name: &str, label: &str) {
-    if let Some(slot) = deps
-        .working_set
-        .list_mut()
-        .iter_mut()
-        .find(|d| d.reference_name == reference_name)
-    {
-        slot.display_name = label.to_string();
-    }
+/// Apply the display label to the just-materialized working-set descriptor via
+/// the working set's display-rename path (WorkingSet::rename_display), so the
+/// ADR-0037 trim + uniqueness invariants are enforced rather than bypassed.
+/// Best-effort: the materialize itself already succeeded, so a label that cannot
+/// be applied (the slot was concurrently removed, or the trimmed label collides
+/// with another dataset's display name) returns `None` and the caller falls back
+/// to the reference name the materializer already installed -- the promotion
+/// stands, only the label is dropped. On success returns the trimmed label as
+/// the working set stored it, so the caller mirrors it onto the returned
+/// descriptor and the payload stays consistent with the working set.
+fn apply_display_label(
+    deps: &mut TurnDeps,
+    reference_name: &str,
+    label: &str,
+) -> Option<String> {
+    deps.working_set
+        .rename_display(reference_name, label)
+        .ok()
+        .map(|updated| updated.display_name)
 }
 
 /// Build the success payload JSON for a promoted descriptor. Carries the stable
@@ -102,10 +109,7 @@ fn descriptor_json(d: &DatasetDescriptor) -> Value {
     json!({
         "reference_name": d.reference_name,
         "display_name": d.display_name,
-        "columns": d.columns.iter().map(|c| json!({
-            "name": c.name,
-            "type": c.canonical_type,
-        })).collect::<Vec<_>>(),
+        "columns": d.columns.iter().map(definitions::column_json).collect::<Vec<_>>(),
         "row_count": d.row_count,
     })
 }
@@ -327,6 +331,69 @@ mod tests {
         assert_eq!(
             deps.working_set.get("result_1").unwrap().display_name,
             "my subset"
+        );
+    }
+
+    /// A display_name that collides with another dataset's label is NOT applied
+    /// -- the ADR-0037 uniqueness invariant holds. The second promotion still
+    /// succeeds (its result_N is registered), but the label falls back to the
+    /// reference name, so the agent can self-correct by re-calling with a unique
+    /// label. The first promotion's label is left untouched.
+    #[test]
+    fn display_name_collision_falls_back_to_reference_name() {
+        use crate::session::materializer::RealMaterializer;
+        use tempfile::TempDir;
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = crate::workingset::WorkingSet::default();
+        let sources = std::collections::HashMap::new();
+        let temp = TempDir::new().unwrap();
+        let mut deps = TurnDeps {
+            conn: &conn,
+            source_files: &sources,
+            working_set: &mut ws,
+            result_row_cap: 1_000,
+            result_count_cap: 100,
+            temp_path: temp.path(),
+        };
+        let cancel = CancelToken::new();
+        let mut materializer = RealMaterializer;
+
+        // First promotion claims the display label "my label".
+        let v1 = dispatch(
+            &json!({"sql": "SELECT 1 AS x", "display_name": "my label"}),
+            &mut deps,
+            &cancel,
+            &mut materializer,
+        )
+        .unwrap();
+        assert_eq!(v1["reference_name"], "result_1");
+        assert_eq!(v1["display_name"], "my label");
+
+        // Second promotion reuses the SAME label -- ADR-0037 uniqueness refuses
+        // it, so the label falls back to result_2. The promotion itself still
+        // lands (result_2 is registered); only the label is dropped.
+        let v2 = dispatch(
+            &json!({"sql": "SELECT 2 AS y", "display_name": "my label"}),
+            &mut deps,
+            &cancel,
+            &mut materializer,
+        )
+        .unwrap();
+        assert_eq!(v2["reference_name"], "result_2");
+        assert_eq!(
+            v2["display_name"],
+            "result_2",
+            "colliding label must fall back to the reference name"
+        );
+        assert_eq!(
+            deps.working_set.get("result_2").unwrap().display_name,
+            "result_2"
+        );
+        // The first promotion's label is untouched.
+        assert_eq!(
+            deps.working_set.get("result_1").unwrap().display_name,
+            "my label"
         );
     }
 }

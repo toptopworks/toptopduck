@@ -92,17 +92,48 @@ pub(crate) fn dispatch(
     }
 }
 
+/// Shared test scaffolding for the built-in tool modules (issue #292).
+#[cfg(test)]
+pub(crate) mod test_support {
+    use crate::session::materializer::TurnDeps;
+    use crate::workingset::WorkingSet;
+    use duckdb::Connection;
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    /// A throwaway [`TurnDeps`] over locally-owned conn + sources + working set,
+    /// with inert cap defaults and `temp_path = "."`. Suitable for tool executors
+    /// that never touch the filesystem (explore / describe / sample). The
+    /// `materialize` tests build their own `TurnDeps` because the real materializer
+    /// needs a `TempDir`. Centralized so the four-tool dispatch tests cannot drift
+    /// apart on the cap defaults (DRY).
+    pub fn inert_deps<'a>(
+        conn: &'a Connection,
+        ws: &'a mut WorkingSet,
+        sources: &'a HashMap<String, std::path::PathBuf>,
+    ) -> TurnDeps<'a> {
+        TurnDeps {
+            conn,
+            source_files: sources,
+            working_set: ws,
+            result_row_cap: 1_000,
+            result_count_cap: 100,
+            temp_path: Path::new("."),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::DatasetDescriptor;
     use crate::provider::tool_calling::ToolUse;
     use crate::session::materializer::FakeMaterializer;
+    use crate::tools::test_support::inert_deps;
     use crate::workingset::WorkingSet;
     use duckdb::Connection;
     use serde_json::json;
     use std::collections::HashMap;
-    use std::path::Path;
 
     /// The advertised tool table contains exactly the four canonical tools, by
     /// name -- the contract the agent loop (and external runtimes, via the
@@ -119,21 +150,6 @@ mod tests {
                 "sample".to_string(),
             ]
         );
-    }
-
-    fn inert_deps<'a>(
-        conn: &'a Connection,
-        ws: &'a mut WorkingSet,
-        sources: &'a HashMap<String, std::path::PathBuf>,
-    ) -> TurnDeps<'a> {
-        TurnDeps {
-            conn,
-            source_files: sources,
-            working_set: ws,
-            result_row_cap: 1_000,
-            result_count_cap: 100,
-            temp_path: Path::new("."),
-        }
     }
 
     /// An unknown tool name returns a tool error (is_error = true) naming the

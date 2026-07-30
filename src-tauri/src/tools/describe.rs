@@ -22,25 +22,10 @@ use crate::tools::definitions;
 /// error string for an unknown or stale reference. No DuckDB query runs.
 pub(crate) fn dispatch(input: &Value, deps: &mut TurnDeps) -> Result<Value, String> {
     let reference_name = definitions::get_str(input, "reference_name")?;
-    let descriptor = deps.working_set.get(&reference_name).ok_or_else(|| {
-        format!("unknown dataset: `{reference_name}` is not in the working set")
-    })?;
-    // ADR-0013 invariant 2 (refuse stale): a stale result_N may not anchor a
-    // new derivation, so describing one as usable would mislead the agent. The
-    // stale anchor's wording lives in the frontend locale; here the bare name +
-    // the honest "stale" reason is what the agent reads to self-correct.
-    if let Some(anchor) = &descriptor.stale {
-        return Err(format!(
-            "stale dataset: `{reference_name}` was invalidated by `{}` and may not be referenced",
-            anchor.reference_name
-        ));
-    }
+    let descriptor = deps.working_set.resolve_readable(&reference_name, "referenced")?;
     Ok(json!({
         "reference_name": descriptor.reference_name,
-        "columns": descriptor.columns.iter().map(|c| json!({
-            "name": c.name,
-            "type": c.canonical_type,
-        })).collect::<Vec<_>>(),
+        "columns": descriptor.columns.iter().map(definitions::column_json).collect::<Vec<_>>(),
         "row_count": descriptor.row_count,
     }))
 }
@@ -53,27 +38,9 @@ mod tests {
         StaleReason,
     };
     use crate::workingset::WorkingSet;
+    use crate::tools::test_support::inert_deps;
     use duckdb::Connection;
     use std::collections::HashMap;
-    use std::path::Path;
-
-    /// A throwaway TurnDeps over local-owned conn + sources. Describe never
-    /// touches the conn / sources / temp_path (it reads the descriptor only),
-    /// so their contents are inert -- the struct just satisfies the signature.
-    fn inert_deps<'a>(
-        conn: &'a Connection,
-        ws: &'a mut WorkingSet,
-        sources: &'a HashMap<String, std::path::PathBuf>,
-    ) -> TurnDeps<'a> {
-        TurnDeps {
-            conn,
-            source_files: sources,
-            working_set: ws,
-            result_row_cap: 1_000,
-            result_count_cap: 100,
-            temp_path: Path::new("."),
-        }
-    }
 
     fn register_dataset(ws: &mut WorkingSet, name: &str, columns: Vec<ColumnSchema>) {
         ws.register(DatasetDescriptor {

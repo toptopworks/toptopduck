@@ -13,6 +13,7 @@
 //! [`crate::session::materializer::Materializer`] and so inherits ADR-0022/0024/
 //! 0030 numbering + caps for free.
 
+use crate::model::ColumnSchema;
 use crate::provider::tool_calling::ToolDefinition;
 use serde_json::{json, Value};
 
@@ -213,6 +214,16 @@ pub(crate) fn get_str(input: &Value, field: &str) -> Result<String, String> {
         .and_then(Value::as_str)
         .map(|s| s.to_string())
         .ok_or_else(|| format!("parameter `{field}`: expected a string"))
+}
+
+/// One column's JSON for a tool payload: `{ "name", "type" }`. The field is
+/// `type` (not the wire [`ColumnSchema`] field name `canonical_type`) because the
+/// tool layer owns this presentation rename for the LLM-facing payload, while the
+/// IPC `ColumnSchema` field name stays for the frontend. Shared by every built-in
+/// tool that echoes a column schema (explore / describe / sample / materialize)
+/// so the shape is identical across payloads.
+pub(crate) fn column_json(c: &ColumnSchema) -> Value {
+    json!({ "name": c.name, "type": c.canonical_type })
 }
 
 #[cfg(test)]

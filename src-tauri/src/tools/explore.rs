@@ -51,7 +51,7 @@ pub(crate) fn dispatch(
     let sample_rows = sample_rows_param(input)?;
     let shape = run_explore(&sql, sample_rows, deps, cancel)?;
     Ok(json!({
-        "columns": shape.columns.iter().map(column_json).collect::<Vec<_>>(),
+        "columns": shape.columns.iter().map(definitions::column_json).collect::<Vec<_>>(),
         "row_count": shape.row_count,
         "sample": shape.sample,
     }))
@@ -238,13 +238,6 @@ fn read_sample(
     Ok(out)
 }
 
-/// One column's JSON for the explore payload: `{ "name", "type" }`. Uses `type`
-/// (not `canonical_type`) for the LLM-facing field name -- the tool layer owns
-/// this presentation rename; the wire `ColumnSchema` field name stays for IPC.
-fn column_json(c: &ColumnSchema) -> Value {
-    json!({ "name": c.name, "type": c.canonical_type })
-}
-
 /// Lift an [`crate::guardrail::ExecError`] into a tool-error string. The kind
 /// is discarded -- every explore failure is a tool-level error the agent can
 /// self-correct from (ADR-0077), so only the descriptive detail reaches the
@@ -272,6 +265,7 @@ fn err_from_exec_str(detail: &str, _kind: ExecErrorKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::test_support::inert_deps;
 
     /// `sample_rows` defaults to 10 when omitted, clamps to [0, 50] when
     /// out of range, and passes through in-range values. Pinning the default +
@@ -297,14 +291,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
         let sources = std::collections::HashMap::new();
-        let mut deps = TurnDeps {
-            conn: &conn,
-            source_files: &sources,
-            working_set: &mut ws,
-            result_row_cap: 1_000,
-            result_count_cap: 100,
-            temp_path: std::path::Path::new("."),
-        };
+        let mut deps = inert_deps(&conn, &mut ws, &sources);
         let cancel = CancelToken::new();
         let err = dispatch(&json!({}), &mut deps, &cancel).unwrap_err();
         assert!(err.contains("`sql`"), "error names the missing field: {err}");
@@ -347,14 +334,7 @@ mod tests {
             stale: None,
         });
         let sources = std::collections::HashMap::new();
-        let mut deps = TurnDeps {
-            conn: &conn,
-            source_files: &sources,
-            working_set: &mut ws,
-            result_row_cap: 1_000,
-            result_count_cap: 100,
-            temp_path: std::path::Path::new("."),
-        };
+        let mut deps = inert_deps(&conn, &mut ws, &sources);
         let cancel = CancelToken::new();
         let v = dispatch(
             &json!({"sql": "SELECT * FROM result_1 WHERE id > 1 ORDER BY id"}),
@@ -418,14 +398,7 @@ mod tests {
             stale: None,
         });
         let sources = std::collections::HashMap::new();
-        let mut deps = TurnDeps {
-            conn: &conn,
-            source_files: &sources,
-            working_set: &mut ws,
-            result_row_cap: 1_000,
-            result_count_cap: 100,
-            temp_path: std::path::Path::new("."),
-        };
+        let mut deps = inert_deps(&conn, &mut ws, &sources);
         let cancel = CancelToken::new();
         let err = dispatch(
             &json!({"sql": "SELECT nonexistent FROM result_1"}),
