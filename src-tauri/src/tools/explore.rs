@@ -112,7 +112,8 @@ fn run_explore(
     // end of scope -- the scratch table dies with it, leaving no trace on admin
     // (AC #1: turn-local, no naming, no working-set entry).
     let sandbox_conn = sandbox::open().map_err(err_from_exec)?;
-    sandbox::attach_sources(&sandbox_conn, deps.working_set, deps.source_files).map_err(err_from_exec)?;
+    sandbox::attach_sources(&sandbox_conn, deps.working_set, deps.source_files)
+        .map_err(err_from_exec)?;
     sandbox::mirror_results(&sandbox_conn, deps.conn, deps.working_set).map_err(err_from_exec)?;
     sandbox::lockdown(&sandbox_conn).map_err(err_from_exec)?;
 
@@ -272,11 +273,11 @@ mod tests {
     /// clamp keeps the payload bounded without rejecting slightly-over requests.
     #[test]
     fn sample_rows_defaults_and_clamps() {
-        assert_eq!(sample_rows_param(&json!({})).unwrap(), EXPLORE_DEFAULT_SAMPLE_ROWS);
         assert_eq!(
-            sample_rows_param(&json!({"sample_rows": 5})).unwrap(),
-            5
+            sample_rows_param(&json!({})).unwrap(),
+            EXPLORE_DEFAULT_SAMPLE_ROWS
         );
+        assert_eq!(sample_rows_param(&json!({"sample_rows": 5})).unwrap(), 5);
         assert_eq!(
             sample_rows_param(&json!({"sample_rows": 9999})).unwrap(),
             EXPLORE_MAX_SAMPLE_ROWS
@@ -294,7 +295,10 @@ mod tests {
         let mut deps = inert_deps(&conn, &mut ws, &sources);
         let cancel = CancelToken::new();
         let err = dispatch(&json!({}), &mut deps, &cancel).unwrap_err();
-        assert!(err.contains("`sql`"), "error names the missing field: {err}");
+        assert!(
+            err.contains("`sql`"),
+            "error names the missing field: {err}"
+        );
     }
 
     /// End-to-end: explore runs a read-only SQL against a working-set result and
@@ -359,7 +363,11 @@ mod tests {
         // result_1 (the one we registered) -- explore produced no result_N and
         // wrote nothing to admin. The next promotion number is still 2 (one
         // past result_1), proving explore did not register anything.
-        assert_eq!(deps.working_set.len(), 1, "explore must not add working-set entries");
+        assert_eq!(
+            deps.working_set.len(),
+            1,
+            "explore must not add working-set entries"
+        );
         assert_eq!(deps.working_set.next_result_number(), 2);
         // And admin has no _explore_scratch and no new result_N table -- the
         // sandbox was dropped, so a scratch table cannot survive.
@@ -380,7 +388,8 @@ mod tests {
         use crate::model::{DatasetDescriptor, DatasetPrivacy, RectifyProvenance};
 
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE result_1 (id INTEGER)").unwrap();
+        conn.execute_batch("CREATE TABLE result_1 (id INTEGER)")
+            .unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
         ws.register_result(DatasetDescriptor {
             reference_name: "result_1".into(),

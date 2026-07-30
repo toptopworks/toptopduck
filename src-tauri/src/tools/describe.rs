@@ -22,7 +22,9 @@ use crate::tools::definitions;
 /// error string for an unknown or stale reference. No DuckDB query runs.
 pub(crate) fn dispatch(input: &Value, deps: &mut TurnDeps) -> Result<Value, String> {
     let reference_name = definitions::get_str(input, "reference_name")?;
-    let descriptor = deps.working_set.resolve_readable(&reference_name, "referenced")?;
+    let descriptor = deps
+        .working_set
+        .resolve_readable(&reference_name, "referenced")?;
     Ok(json!({
         "reference_name": descriptor.reference_name,
         "columns": descriptor.columns.iter().map(definitions::column_json).collect::<Vec<_>>(),
@@ -37,8 +39,8 @@ mod tests {
         ColumnSchema, DatasetDescriptor, DatasetPrivacy, RectifyProvenance, StaleAnchor,
         StaleReason,
     };
-    use crate::workingset::WorkingSet;
     use crate::tools::test_support::inert_deps;
+    use crate::workingset::WorkingSet;
     use duckdb::Connection;
     use std::collections::HashMap;
 

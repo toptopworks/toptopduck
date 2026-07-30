@@ -219,7 +219,10 @@ mod tests {
         };
         let result = dispatch(&call, &mut deps, &cancel, &mut materializer);
         assert_eq!(result.tool_use_id, "tu_2");
-        assert!(!result.is_error, "describe on a registered dataset is success");
+        assert!(
+            !result.is_error,
+            "describe on a registered dataset is success"
+        );
         // The content is the JSON payload the describe executor produced --
         // round-tripped through serde_json so the wire string is valid JSON
         // whose fields the agent can read.

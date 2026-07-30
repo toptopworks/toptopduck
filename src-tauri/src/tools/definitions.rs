@@ -310,7 +310,10 @@ mod tests {
         assert_eq!(get_str(&input, "sql").unwrap(), "SELECT 1");
 
         let missing = get_str(&input, "missing").unwrap_err();
-        assert!(missing.contains("`missing`"), "error names the field: {missing}");
+        assert!(
+            missing.contains("`missing`"),
+            "error names the field: {missing}"
+        );
 
         let wrong_type = json!({"sql": 42});
         let err = get_str(&wrong_type, "sql").unwrap_err();

@@ -90,11 +90,7 @@ pub(crate) fn dispatch(
 /// stands, only the label is dropped. On success returns the trimmed label as
 /// the working set stored it, so the caller mirrors it onto the returned
 /// descriptor and the payload stays consistent with the working set.
-fn apply_display_label(
-    deps: &mut TurnDeps,
-    reference_name: &str,
-    label: &str,
-) -> Option<String> {
+fn apply_display_label(deps: &mut TurnDeps, reference_name: &str, label: &str) -> Option<String> {
     deps.working_set
         .rename_display(reference_name, label)
         .ok()
@@ -183,7 +179,10 @@ mod tests {
             "result_2",
             ExecError::new(ExecErrorKind::Resource, "row count over cap".to_string()),
         );
-        assert!(resource.starts_with("result exceeds a resource cap"), "{resource}");
+        assert!(
+            resource.starts_with("result exceeds a resource cap"),
+            "{resource}"
+        );
         assert!(resource.contains("row count over cap"), "{resource}");
 
         let stale = err_message(
@@ -241,7 +240,10 @@ mod tests {
         let cancel = CancelToken::new();
         let mut materializer = ExplodingMaterializer;
         let err = dispatch(&json!({}), &mut deps, &cancel, &mut materializer).unwrap_err();
-        assert!(err.contains("`sql`"), "error names the missing field: {err}");
+        assert!(
+            err.contains("`sql`"),
+            "error names the missing field: {err}"
+        );
     }
 
     /// End-to-end with the real materializer: two promotions land result_1 then
@@ -382,8 +384,7 @@ mod tests {
         .unwrap();
         assert_eq!(v2["reference_name"], "result_2");
         assert_eq!(
-            v2["display_name"],
-            "result_2",
+            v2["display_name"], "result_2",
             "colliding label must fall back to the reference name"
         );
         assert_eq!(

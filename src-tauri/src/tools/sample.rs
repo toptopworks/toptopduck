@@ -74,7 +74,11 @@ fn limit_param(input: &Value) -> Result<i64, String> {
 /// Parsed `offset`, defaulted to 0 and clamped at 0 (negative offsets make no
 /// sense and would produce a malformed LIMIT/OFFSET).
 fn offset_param(input: &Value) -> Result<i64, String> {
-    Ok(input.get("offset").and_then(Value::as_i64).unwrap_or(0).max(0))
+    Ok(input
+        .get("offset")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .max(0))
 }
 
 /// Read up to `limit` rows starting at `offset`, every cell CAST to VARCHAR
@@ -125,8 +129,8 @@ mod tests {
         ColumnSchema, DatasetDescriptor, DatasetPrivacy, RectifyProvenance, StaleAnchor,
         StaleReason,
     };
-    use crate::workingset::WorkingSet;
     use crate::tools::test_support::inert_deps;
+    use crate::workingset::WorkingSet;
     use duckdb::Connection;
     use std::collections::HashMap;
 
@@ -137,7 +141,10 @@ mod tests {
     fn limit_and_offset_default_and_clamp() {
         assert_eq!(limit_param(&json!({})).unwrap(), SAMPLE_DEFAULT_LIMIT);
         assert_eq!(limit_param(&json!({"limit": 5})).unwrap(), 5);
-        assert_eq!(limit_param(&json!({"limit": 9999})).unwrap(), SAMPLE_MAX_LIMIT);
+        assert_eq!(
+            limit_param(&json!({"limit": 9999})).unwrap(),
+            SAMPLE_MAX_LIMIT
+        );
         assert_eq!(limit_param(&json!({"limit": -3})).unwrap(), 1);
 
         assert_eq!(offset_param(&json!({})).unwrap(), 0);

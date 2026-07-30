@@ -181,9 +181,9 @@ impl WorkingSet {
         reference_name: &str,
         verb: &str,
     ) -> Result<&DatasetDescriptor, String> {
-        let descriptor = self
-            .get(reference_name)
-            .ok_or_else(|| format!("unknown dataset: `{reference_name}` is not in the working set"))?;
+        let descriptor = self.get(reference_name).ok_or_else(|| {
+            format!("unknown dataset: `{reference_name}` is not in the working set")
+        })?;
         if let Some(anchor) = &descriptor.stale {
             return Err(format!(
                 "stale dataset: `{reference_name}` was invalidated by `{}` and may not be {verb}",
