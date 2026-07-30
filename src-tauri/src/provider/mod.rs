@@ -239,7 +239,7 @@ pub enum ProviderError {
 /// The provider abstraction (ADR-0007). Two methods: the single-shot
 /// [`Self::generate`] (turn a schema-aware request into the one-SQL reply
 /// contract, ADR-0009) and the native tool-calling [`Self::generate_tool_turn`]
-/// (ADR-0081 expand phase, issue #291). Concrete implementations: the real
+/// (ADR-0081, issue #291). Concrete implementations: the real
 /// Anthropic client (anthropic::AnthropicProvider, #29), the OpenAI-compatible
 /// client (openai::OpenaiProvider), the scripted test fake
 /// (fake::FakeProvider), and the default UnwiredProvider. Send so the session
@@ -247,7 +247,7 @@ pub enum ProviderError {
 pub trait Provider: Send {
     fn generate(&self, request: &ProviderRequest) -> Result<ProviderReply, ProviderError>;
 
-    /// One native tool-calling round-trip (ADR-0081 expand phase, issue #291):
+    /// One native tool-calling round-trip (ADR-0081, issue #291):
     /// send the active tool table plus the in-progress conversation, get back
     /// either the model's tool invocations to execute or its terminal text
     /// answer. The two adapters translate the protocol-neutral
@@ -258,8 +258,8 @@ pub trait Provider: Send {
     /// ADR-0044 classification is unchanged.
     ///
     /// Coexists with [`Self::generate`] (zero behavior change to the
-    /// single-shot path; the agent loop in #295 routes turns onto
-    /// tool-calling). Default [`ProviderError::NotWired`] so a provider that
+    /// single-shot path; ADR-0077 retires the single-SQL contract for
+    /// tool-calling turns). Default [`ProviderError::NotWired`] so a provider that
     /// does not implement native tool-calling (e.g. [`UnwiredProvider`],
     /// [`fake::FakeProvider`] until #295 extends it) refuses the turn
     /// permanently -- the same surface as an unwired single-shot turn.

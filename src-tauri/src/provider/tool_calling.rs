@@ -1,4 +1,4 @@
-//! Protocol-neutral tool-calling types (ADR-0081 expand phase, issue #291).
+//! Protocol-neutral tool-calling types (ADR-0081, issue #291).
 //!
 //! These types carry one round of a native tool-calling conversation between
 //! the app and the LLM, independent of the wire protocol. The agent loop
@@ -13,9 +13,9 @@
 //!
 //! Coexists with the single-shot SQL contract (ADR-0009): the legacy
 //! [`super::Provider::generate`] path and its [`super::ProviderRequest`] /
-//! [`super::ProviderReply`] types are unchanged. Issue #295 will route the
-//! turn loop onto tool-calling and retire the single-shot path; this module
-//! is the expand-phase foundation.
+//! [`super::ProviderReply`] types are unchanged. ADR-0077 retires the
+//! single-SQL contract in favor of tool-calling turns; this module is the
+//! tool-calling foundation the agent loop (issue #295) will drive.
 //!
 //! ADR-0029 invariant 3 holds: the request never carries the API key -- the
 //! adapter reads it from the config source in the Rust core, same as the
@@ -25,7 +25,7 @@
 
 use serde_json::Value;
 
-/// One tool the agent may invoke (ADR-0081 aggregated gateway surface).
+/// One tool the agent may invoke (ADR-0076 aggregated gateway surface).
 /// `input_schema` is a JSON Schema object describing the tool's parameters;
 /// both wire protocols carry it verbatim (anthropic `input_schema`, openai
 /// `parameters`), so the app-side gateway owns the canonical schema and each

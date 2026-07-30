@@ -167,7 +167,7 @@ impl AnthropicProvider {
         parse_reply(&text)
     }
 
-    /// One native Anthropic tool-calling round-trip (ADR-0081 expand phase,
+    /// One native Anthropic tool-calling round-trip (ADR-0081,
     /// issue #291). Sends the active tool table plus the in-progress
     /// conversation using Anthropic's native tool-calling -- the `tools`
     /// request field plus `tool_use` / `tool_result` content blocks -- and
@@ -865,7 +865,7 @@ mod tests {
         }
     }
 
-    // ----- tool-calling fixtures (issue #291, ADR-0081 expand phase) -----
+    // ----- tool-calling fixtures (issue #291, ADR-0081) -----
 
     /// A tool-calling request with one tool + a single user question (the
     /// minimal round-trip shape). The system prompt + tool schema are stable

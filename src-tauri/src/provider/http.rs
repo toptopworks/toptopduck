@@ -113,8 +113,8 @@ pub(crate) fn egress_agent() -> ureq::Agent {
 ///
 /// Used by the tool-calling adapters (issue #291). The single-shot adapters
 /// retain their inline classification unchanged (zero behavior change to the
-/// legacy path); #295 may route them onto this helper when it retires the
-/// single-shot path.
+/// legacy path); ADR-0077 retires the single-SQL contract, after which the
+/// single-shot path can route onto this helper.
 pub(crate) fn classify_send_result(
     result: Result<ureq::Response, ureq::Error>,
 ) -> Result<ureq::Response, crate::provider::ProviderError> {
@@ -266,5 +266,82 @@ mod tests {
             after_third, after_first,
             "subsequent calls never rebuild the agent"
         );
+    }
+
+    use crate::provider::ProviderError;
+
+    /// Send a no-op POST via the shared egress agent and classify the result,
+    /// so the ADR-0044 status mapping is pinned at [`classify_send_result`]
+    /// itself, not only via the adapters (which exercise just the 401 + 503
+    /// branches indirectly). Returns the small [`ProviderError`] (not the
+    /// 272-byte `ureq::Error`) so the Err variant stays cheap.
+    fn send_and_classify(url: &str) -> Result<ureq::Response, ProviderError> {
+        let result = egress_agent().post(url).send_json(serde_json::json!({}));
+        classify_send_result(result)
+    }
+
+    #[test]
+    fn classify_2xx_passes_response_through() {
+        // A 2xx is the only Ok branch that returns the response unchanged;
+        // the caller then reads the JSON body. Pins the happy path so a
+        // future guard broadening the non-2xx arm cannot swallow 200.
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_body("{\"ok\":true}")
+            .create();
+        let resp = send_and_classify(&format!("{}/v1/messages", server.url()))
+            .expect("2xx passes through");
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[test]
+    fn classify_3xx_under_redirects_zero_is_unavailable_with_status() {
+        // Under redirects(0) a 3xx surfaces as Ok (only >= 400 becomes Err);
+        // the classify guard maps it to Unavailable naming the status, not a
+        // misleading body-parse fault on the 3xx body.
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/v1/messages")
+            .with_status(302)
+            .with_header("Location", "https://evil.test")
+            .with_body("302 here")
+            .create();
+        match send_and_classify(&format!("{}/v1/messages", server.url())) {
+            Err(ProviderError::Unavailable(msg)) => assert!(
+                msg.contains("HTTP 302"),
+                "3xx surfaces with its status, got: {msg}"
+            ),
+            other => panic!("expected Unavailable for 3xx, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_403_is_not_wired() {
+        // ADR-0044: 403 joins 401 in the auth-rejected set -> NotWired
+        // (permanent, not retried). Distinct from the generic 4xx -> Available
+        // path so a regression dropping 403 from the guard fails here.
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/v1/messages")
+            .with_status(403)
+            .with_body(r#"{"error":{"message":"forbidden"}}"#)
+            .create();
+        assert!(matches!(
+            send_and_classify(&format!("{}/v1/messages", server.url())),
+            Err(ProviderError::NotWired)
+        ));
+    }
+
+    #[test]
+    fn classify_transport_error_is_unavailable() {
+        // An unroutable host produces a transport error (connection refused),
+        // mapped to Unavailable -- transient/retryable. Pins the catch-all
+        // Err arm distinct from the auth/status arms.
+        assert!(matches!(
+            send_and_classify("http://127.0.0.1:1/v1/messages"),
+            Err(ProviderError::Unavailable(_))
+        ));
     }
 }

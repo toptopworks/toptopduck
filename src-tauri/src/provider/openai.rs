@@ -195,7 +195,7 @@ impl OpenaiProvider {
         parse_reply(&text)
     }
 
-    /// One native OpenAI tool-calling round-trip (ADR-0081 expand phase,
+    /// One native OpenAI tool-calling round-trip (ADR-0081,
     /// issue #291). Sends the active tool table plus the in-progress
     /// conversation using OpenAI's native function-calling -- the `tools`
     /// request field plus `tool_calls` / `tool` role messages -- and returns
@@ -329,7 +329,9 @@ struct RawToolCall {
 struct RawToolFunction {
     name: String,
     /// OpenAI encodes tool-call arguments as a JSON-encoded STRING (not an
-    /// object); parsed back into a [`Value`] by the caller.
+    /// object); parsed back into a [`Value`] by the adapter. A malformed
+    /// string surfaces as [`ProviderError::Unavailable`]; an absent or empty
+    /// string means "no arguments" and becomes `Value::Null`.
     #[serde(default)]
     arguments: Option<String>,
 }
@@ -406,6 +408,14 @@ fn build_openai_messages(messages: &[ToolTurnMessage], system: &str) -> Vec<Valu
                         .collect();
                     entry["tool_calls"] = Value::Array(calls);
                 }
+                // Chat Completions requires at least one of `content` or
+                // `tool_calls` on an assistant message; a degenerate empty
+                // assistant turn (no text, no calls) would 400. Emit an empty
+                // content string so the wire shape is accepted (mirrors the
+                // anthropic adapter's empty-text-block guard).
+                if text.is_none() && tool_calls.is_empty() {
+                    entry["content"] = Value::String(String::new());
+                }
                 out.push(entry);
             }
             ToolTurnMessage::ToolResult {
@@ -448,18 +458,28 @@ fn parse_tool_turn_response(raw: RawToolTurnResponse) -> Result<ToolTurnReply, P
             let calls: Vec<ToolUse> = tool_calls
                 .into_iter()
                 .map(|c| {
-                    let input = c
-                        .function
-                        .arguments
-                        .and_then(|s| serde_json::from_str(&s).ok())
-                        .unwrap_or(Value::Null);
-                    ToolUse {
-                        id: c.id,
-                        name: c.function.name,
-                        input,
-                    }
+                    let RawToolCall {
+                        id,
+                        function: RawToolFunction { name, arguments },
+                    } = c;
+                    // An absent or empty arguments string means "no arguments"
+                    // (OpenAI allows this for nullary calls) -> Value::Null.
+                    // A present-but-malformed string is a model contract
+                    // violation, not "no arguments" -- surface it as a retried
+                    // Unavailable so the cause is diagnosable instead of
+                    // silently executing a tool with null input.
+                    let input = match arguments {
+                        None => Value::Null,
+                        Some(s) if s.is_empty() => Value::Null,
+                        Some(s) => serde_json::from_str(&s).map_err(|e| {
+                            ProviderError::Unavailable(format!(
+                                "tool_call {id} arguments parse failed: {e}"
+                            ))
+                        })?,
+                    };
+                    Ok(ToolUse { id, name, input })
                 })
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             return Ok(ToolTurnReply::ToolCalls(calls));
         }
     }
@@ -1088,7 +1108,7 @@ mod tests {
         }
     }
 
-    // ----- tool-calling fixtures (issue #291, ADR-0081 expand phase) -----
+    // ----- tool-calling fixtures (issue #291, ADR-0081) -----
 
     /// A tool-calling request with one tool + a single user question (the
     /// minimal round-trip shape). Stable literals so body-matching is
@@ -1353,5 +1373,103 @@ mod tests {
             ),
             other => panic!("expected InvalidConfig for bad scheme, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tool_turn_malformed_arguments_is_unavailable() {
+        // A present-but-malformed arguments string (truncated / hallucinated
+        // JSON -- common on weaker OpenAI-compatible endpoints) is a model
+        // contract violation, NOT "no arguments": surface it as a retried
+        // Unavailable naming the offending call id, instead of silently
+        // executing a tool with null input.
+        let message = serde_json::json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+                {"id":"call_1","type":"function","function":{"name":"run_sql","arguments":"not-json{"}}
+            ]
+        })
+        .to_string();
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_body(tool_response_body(&message))
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match OpenaiProvider::generate_tool_turn(&cfg, &tool_turn_request("bad args")) {
+            Err(ProviderError::Unavailable(msg)) => assert!(
+                msg.contains("call_1") && msg.contains("arguments parse failed"),
+                "malformed arguments surface the call id + cause, got: {msg}"
+            ),
+            other => panic!("expected Unavailable for malformed arguments, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_turn_empty_arguments_falls_back_to_null() {
+        // An empty arguments string means "no arguments" (OpenAI allows this
+        // for nullary calls) -> input Value::Null, not an error. Pins the
+        // None/empty branch distinct from the malformed branch above.
+        let message = serde_json::json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+                {"id":"call_1","type":"function","function":{"name":"list_tables","arguments":""}}
+            ]
+        })
+        .to_string();
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_body(tool_response_body(&message))
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match OpenaiProvider::generate_tool_turn(&cfg, &tool_turn_request("nullary"))
+            .expect("calls")
+        {
+            ToolTurnReply::ToolCalls(calls) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].input, Value::Null);
+            }
+            other => panic!("expected ToolCalls with null input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_turn_degenerate_assistant_turn_emits_empty_content() {
+        // Chat Completions requires at least one of `content` / `tool_calls`
+        // on an assistant message; a degenerate Assistant { None, vec![] }
+        // would 400. The builder emits an empty content string so the shape
+        // is accepted (mirrors anthropic's empty-text-block guard). Asserted
+        // via the body builder directly (no HTTP).
+        let request = ToolTurnRequest {
+            system: "agent".into(),
+            messages: vec![
+                ToolTurnMessage::user("q"),
+                ToolTurnMessage::Assistant {
+                    text: None,
+                    tool_calls: Vec::new(),
+                },
+                ToolTurnMessage::user("follow up"),
+            ],
+            tools: Vec::new(),
+            max_tokens: 1024,
+        };
+        let body = build_tool_turn_body("gpt-4o", &request);
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        let assistant = messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant turn present");
+        assert_eq!(
+            assistant["content"], "",
+            "degenerate assistant gets empty content"
+        );
+        assert!(
+            assistant.get("tool_calls").is_none(),
+            "no tool_calls key on a degenerate assistant"
+        );
     }
 }
