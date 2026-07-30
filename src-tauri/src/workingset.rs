@@ -135,6 +135,15 @@ impl WorkingSet {
         &self.datasets
     }
 
+    /// Mutable view of the registered datasets -- the mutable twin of
+    /// [`Self::list`], used by the tools layer to apply a display-label update
+    /// (ADR-0037) to a just-materialized descriptor in place. The reference name
+    /// is stable, so callers locate the slot by `reference_name` before editing
+    /// a display-only field; no structural mutation happens here.
+    pub fn list_mut(&mut self) -> &mut [DatasetDescriptor] {
+        &mut self.datasets
+    }
+
     pub fn active(&self) -> Option<&DatasetDescriptor> {
         self.active.as_ref().and_then(|r| self.get(r))
     }
