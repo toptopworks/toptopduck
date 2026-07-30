@@ -19,12 +19,14 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 use crate::provider::keychain::ProviderConfigSource;
 use crate::provider::prompt::{
     build_system_prompt, render_response, render_summary_turn_note, Message,
 };
 use crate::provider::reply::parse_reply;
+use crate::provider::tool_calling::{ToolTurnMessage, ToolTurnReply, ToolTurnRequest, ToolUse};
 use crate::provider::{ProviderError, ProviderReply, ProviderRequest, TurnPayload};
 
 /// Anthropic Messages API protocol version header value (ADR-0019: native
@@ -164,6 +166,52 @@ impl AnthropicProvider {
             .ok_or_else(|| ProviderError::Unavailable("LLM response has no text content".into()))?;
         parse_reply(&text)
     }
+
+    /// One native Anthropic tool-calling round-trip (ADR-0081,
+    /// issue #291). Sends the active tool table plus the in-progress
+    /// conversation using Anthropic's native tool-calling -- the `tools`
+    /// request field plus `tool_use` / `tool_result` content blocks -- and
+    /// returns either the model's tool invocations to execute or its
+    /// terminal text answer.
+    ///
+    /// Same invariants as [`Self::generate`]: the key is read in the Rust
+    /// core per call (ADR-0029 invariant 3); HTTP 401/403 -> [`ProviderError::NotWired`],
+    /// transient failures -> [`ProviderError::Unavailable`] (ADR-0044, via
+    /// [`http::classify_send_result`](super::http::classify_send_result));
+    /// blocking ureq on the `spawn_blocking` thread (ADR-0021). The legacy
+    /// single-shot [`Self::generate`] path is untouched.
+    pub fn generate_tool_turn(
+        config: &dyn ProviderConfigSource,
+        request: &ToolTurnRequest,
+    ) -> Result<ToolTurnReply, ProviderError> {
+        // ADR-0029 invariant 3: key fetched in the Rust core, per turn. No
+        // key -> NotWired (permanent, surfaces as a configure-key prompt).
+        let key = config.api_key().ok_or(ProviderError::NotWired)?;
+        let base_url = config.base_url();
+        // AC #244 / #277: reject a non-http/https base_url at the boundary
+        // before any request is built. Maps to InvalidConfig -- a permanent
+        // config fault retrying cannot fix -- so the policy reason rides the
+        // detail (mirrors the single-shot path).
+        super::http::validate_http_base_url(&base_url)
+            .map_err(|e| ProviderError::InvalidConfig(e.to_string()))?;
+        let model = config.model();
+        let url = format!("{base}/v1/messages", base = base_url.trim_end_matches('/'));
+
+        let body = build_tool_turn_body(&model, request);
+        // AC #244: shared egress agent disables redirect-following so a 3xx
+        // Location cannot carry x-api-key off-host.
+        let response = super::http::egress_agent()
+            .post(&url)
+            .set("x-api-key", &key)
+            .set("anthropic-version", ANTHROPIC_VERSION)
+            .timeout(REQUEST_TIMEOUT)
+            .send_json(body);
+        let response = super::http::classify_send_result(response)?;
+        let raw: RawToolTurnResponse = response
+            .into_json()
+            .map_err(|e| ProviderError::Unavailable(format!("response read failed: {e}")))?;
+        parse_tool_turn_response(raw)
+    }
 }
 
 /// The Anthropic Messages API request body (ADR-0019 native protocol). `system`
@@ -191,6 +239,168 @@ struct RawBlock {
     kind: String,
     #[serde(default)]
     text: Option<String>,
+}
+
+/// Minimal Anthropic tool-calling response shape -- the `content` array,
+/// whose blocks may be `text` or `tool_use`. Extra fields (id, model, usage,
+/// stop_reason) are ignored by serde; the `tool_use` block's `id` / `name` /
+/// `input` are read by [`parse_tool_turn_response`] only when the block type
+/// matches.
+#[derive(Deserialize)]
+struct RawToolTurnResponse {
+    content: Vec<RawToolTurnBlock>,
+}
+
+#[derive(Deserialize)]
+struct RawToolTurnBlock {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    text: Option<String>,
+    /// The tool-call id / name (present on `tool_use` blocks only).
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    /// The tool-call input (present on `tool_use` blocks); parsed verbatim.
+    #[serde(default)]
+    input: Option<Value>,
+}
+
+/// Build the Anthropic Messages request body for one tool-calling turn. The
+/// `tools` field is omitted when the table is empty (the model then replies
+/// with text only); `messages` carries the translated conversation as
+/// anthropic content blocks (see [`build_anthropic_messages`]).
+fn build_tool_turn_body(model: &str, request: &ToolTurnRequest) -> Value {
+    let mut body = json!({
+        "model": model,
+        "max_tokens": request.max_tokens,
+        "system": request.system,
+    });
+    if !request.tools.is_empty() {
+        let tools: Vec<Value> = request
+            .tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.input_schema,
+                })
+            })
+            .collect();
+        body["tools"] = Value::Array(tools);
+    }
+    body["messages"] = Value::Array(build_anthropic_messages(&request.messages));
+    body
+}
+
+/// Translate the protocol-neutral [`ToolTurnMessage`] sequence into the
+/// Anthropic messages array. Anthropic requires strict user/assistant role
+/// alternation and carries tool i/o as content blocks:
+/// - [`ToolTurnMessage::User`] -> a `user` turn whose content is the text;
+/// - [`ToolTurnMessage::Assistant`] -> an `assistant` turn whose content is a
+///   block array (optional `text` + one `tool_use` per call);
+/// - [`ToolTurnMessage::ToolResult`] -> bundled into the next flushed `user`
+///   turn as `tool_result` blocks (anthropic requires consecutive tool
+///   results to share one user turn). Trailing results flush at the end.
+fn build_anthropic_messages(messages: &[ToolTurnMessage]) -> Vec<Value> {
+    fn flush(out: &mut Vec<Value>, pending: &mut Vec<Value>) {
+        if !pending.is_empty() {
+            let blocks = std::mem::take(pending);
+            out.push(json!({ "role": "user", "content": blocks }));
+        }
+    }
+    let mut out = Vec::with_capacity(messages.len() + 1);
+    let mut pending_tool_results: Vec<Value> = Vec::new();
+    for msg in messages {
+        match msg {
+            ToolTurnMessage::User { content } => {
+                flush(&mut out, &mut pending_tool_results);
+                out.push(json!({ "role": "user", "content": content }));
+            }
+            ToolTurnMessage::Assistant { text, tool_calls } => {
+                flush(&mut out, &mut pending_tool_results);
+                let mut blocks: Vec<Value> = Vec::new();
+                if let Some(t) = text {
+                    blocks.push(json!({ "type": "text", "text": t }));
+                }
+                for tc in tool_calls {
+                    blocks.push(json!({
+                        "type": "tool_use",
+                        "id": tc.id,
+                        "name": tc.name,
+                        "input": tc.input,
+                    }));
+                }
+                if blocks.is_empty() {
+                    // An assistant turn with no text and no tool calls is
+                    // degenerate; emit an empty text block so Anthropic
+                    // accepts the message shape (content cannot be empty).
+                    blocks.push(json!({ "type": "text", "text": "" }));
+                }
+                out.push(json!({ "role": "assistant", "content": blocks }));
+            }
+            ToolTurnMessage::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                pending_tool_results.push(json!({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": content,
+                    "is_error": is_error,
+                }));
+            }
+        }
+    }
+    flush(&mut out, &mut pending_tool_results);
+    out
+}
+
+/// Parse the Anthropic tool-calling response into a [`ToolTurnReply`]. A
+/// `tool_use` block yields a [`ToolUse`]; a `text` block accumulates prose.
+/// If any `tool_use` blocks are present -> [`ToolTurnReply::ToolCalls`]
+/// (intermediate step; the agent loop executes them). Otherwise the joined
+/// text is the terminal [`ToolTurnReply::Text`]; empty text is a contract
+/// violation -> retried [`ProviderError::Unavailable`]. Unknown block kinds
+/// are ignored (forward-compat with server-added block types).
+fn parse_tool_turn_response(raw: RawToolTurnResponse) -> Result<ToolTurnReply, ProviderError> {
+    let mut tool_calls = Vec::new();
+    let mut text_parts: Vec<String> = Vec::new();
+    for block in raw.content {
+        match block.kind.as_str() {
+            "tool_use" => {
+                let id = block.id.ok_or_else(|| {
+                    ProviderError::Unavailable("tool_use block missing id field".into())
+                })?;
+                let name = block.name.ok_or_else(|| {
+                    ProviderError::Unavailable("tool_use block missing name field".into())
+                })?;
+                let input = block.input.unwrap_or(Value::Null);
+                tool_calls.push(ToolUse { id, name, input });
+            }
+            "text" => {
+                if let Some(t) = block.text {
+                    text_parts.push(t);
+                }
+            }
+            _ => {}
+        }
+    }
+    if !tool_calls.is_empty() {
+        Ok(ToolTurnReply::ToolCalls(tool_calls))
+    } else {
+        let text = text_parts.join("");
+        if text.is_empty() {
+            Err(ProviderError::Unavailable(
+                "LLM response has no text content".into(),
+            ))
+        } else {
+            Ok(ToolTurnReply::Text(text))
+        }
+    }
 }
 
 /// Build the Anthropic messages array from the windowed payload: each prior
@@ -242,6 +452,7 @@ mod tests {
     use crate::model::{ChartKind, Protocol, TextKind};
     use crate::provider::keychain::StaticConfig;
     use crate::provider::prompt::ResponseLocale;
+    use crate::provider::tool_calling::{ToolDefinition, ToolResult};
     use crate::provider::{ColumnRef, DatasetRef, ResponsePayload};
 
     /// Build a fixed config pointing at a mockito server URL (no OS keychain,
@@ -651,6 +862,279 @@ mod tests {
                 "3xx surfaces with its status, got: {msg}"
             ),
             other => panic!("expected Unavailable for 3xx, got {other:?}"),
+        }
+    }
+
+    // ----- tool-calling fixtures (issue #291, ADR-0081) -----
+
+    /// A tool-calling request with one tool + a single user question (the
+    /// minimal round-trip shape). The system prompt + tool schema are stable
+    /// literals so body-matching assertions are deterministic.
+    fn tool_turn_request(question: &str) -> ToolTurnRequest {
+        ToolTurnRequest {
+            system: "You are a SQL agent.".into(),
+            messages: vec![ToolTurnMessage::user(question)],
+            tools: vec![ToolDefinition {
+                name: "run_sql".into(),
+                description: "Run read-only SQL.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": { "sql": { "type": "string" } },
+                    "required": ["sql"],
+                }),
+            }],
+            max_tokens: 1024,
+        }
+    }
+
+    /// Wrap an Anthropic content-array response (tool-calling shape) in the
+    /// response envelope. `content_json` is the raw JSON for the `content`
+    /// array.
+    fn tool_response_body(content_json: &str) -> String {
+        format!("{{\"content\":{content_json}}}")
+    }
+
+    #[test]
+    fn tool_turn_advertises_tools_field_in_request_body() {
+        // AC #291: the request body carries the tool table under the native
+        // anthropic `tools` field, each entry with name + description +
+        // input_schema. Mockito body-regex pins the wire shape.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/v1/messages")
+            .match_header("x-api-key", "sk-test")
+            .match_body(mockito::Matcher::Regex(r#""name":"run_sql""#.into()))
+            .match_body(mockito::Matcher::Regex(r#""input_schema""#.into()))
+            .with_status(200)
+            .with_body(tool_response_body(r#"[{"type":"text","text":"done"}]"#))
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        AnthropicProvider::generate_tool_turn(&cfg, &tool_turn_request("count rows"))
+            .expect("tool turn");
+        _mock.assert();
+    }
+
+    #[test]
+    fn tool_turn_parses_tool_use_blocks_into_calls() {
+        // AC #291: a response with `tool_use` blocks yields
+        // ToolTurnReply::ToolCalls carrying each block's id + name + input
+        // (input parsed to a JSON value). Two calls pin multi-call batches.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_body(tool_response_body(
+                r#"[
+                    {"type":"tool_use","id":"tu_1","name":"run_sql","input":{"sql":"SELECT 1"}},
+                    {"type":"tool_use","id":"tu_2","name":"run_sql","input":{"sql":"SELECT 2"}}
+                ]"#,
+            ))
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        let reply = AnthropicProvider::generate_tool_turn(&cfg, &tool_turn_request("multi"))
+            .expect("tool calls");
+        match reply {
+            ToolTurnReply::ToolCalls(calls) => {
+                assert_eq!(calls.len(), 2);
+                assert_eq!(calls[0].id, "tu_1");
+                assert_eq!(calls[0].name, "run_sql");
+                assert_eq!(calls[0].input, serde_json::json!({"sql":"SELECT 1"}));
+                assert_eq!(calls[1].id, "tu_2");
+            }
+            other => panic!("expected ToolCalls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_turn_round_trips_tool_result_into_user_role() {
+        // AC #291: a fed-back ToolResult is serialized as an anthropic
+        // tool_result block inside a user turn, paired with its tool_use id;
+        // the assistant's prior tool_use is re-sent so the model sees the
+        // call/result pairing. Body-regex pins both block types + the id.
+        let request = ToolTurnRequest {
+            system: "agent".into(),
+            messages: vec![
+                ToolTurnMessage::user("count rows"),
+                ToolTurnMessage::Assistant {
+                    text: None,
+                    tool_calls: vec![ToolUse {
+                        id: "tu_1".into(),
+                        name: "run_sql".into(),
+                        input: serde_json::json!({"sql":"SELECT 1"}),
+                    }],
+                },
+                ToolTurnMessage::tool_result(ToolResult {
+                    tool_use_id: "tu_1".into(),
+                    content: "[{\"n\":1}]".into(),
+                    is_error: false,
+                }),
+            ],
+            tools: vec![ToolDefinition {
+                name: "run_sql".into(),
+                description: "run sql".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+            }],
+            max_tokens: 1024,
+        };
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/v1/messages")
+            .match_body(mockito::Matcher::Regex(r#""type":"tool_use""#.into()))
+            .match_body(mockito::Matcher::Regex(r#""type":"tool_result""#.into()))
+            .match_body(mockito::Matcher::Regex(r#""tool_use_id":"tu_1""#.into()))
+            .with_status(200)
+            .with_body(tool_response_body(r#"[{"type":"text","text":"1 row"}]"#))
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match AnthropicProvider::generate_tool_turn(&cfg, &request).expect("text") {
+            ToolTurnReply::Text(t) => assert_eq!(t, "1 row"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        _mock.assert();
+    }
+
+    #[test]
+    fn tool_turn_bundles_consecutive_tool_results_into_one_user_turn() {
+        // Anthropic requires consecutive tool results for one assistant
+        // tool-call batch to share a single user turn. Two ToolResults for
+        // tu_1/tu_2 must both land in the SAME user message -- pinned by
+        // asserting the assistant tool_use block appears exactly once before
+        // the tool_result pair (roles strictly alternate user/assistant/user).
+        let request = ToolTurnRequest {
+            system: "agent".into(),
+            messages: vec![
+                ToolTurnMessage::user("two queries"),
+                ToolTurnMessage::Assistant {
+                    text: None,
+                    tool_calls: vec![
+                        ToolUse {
+                            id: "tu_1".into(),
+                            name: "run_sql".into(),
+                            input: serde_json::json!({"sql":"SELECT 1"}),
+                        },
+                        ToolUse {
+                            id: "tu_2".into(),
+                            name: "run_sql".into(),
+                            input: serde_json::json!({"sql":"SELECT 2"}),
+                        },
+                    ],
+                },
+                ToolTurnMessage::tool_result(ToolResult {
+                    tool_use_id: "tu_1".into(),
+                    content: "1".into(),
+                    is_error: false,
+                }),
+                ToolTurnMessage::tool_result(ToolResult {
+                    tool_use_id: "tu_2".into(),
+                    content: "2".into(),
+                    is_error: false,
+                }),
+            ],
+            tools: Vec::new(),
+            max_tokens: 1024,
+        };
+        // Reuse the builder directly (no HTTP) to assert the message shape.
+        let body = build_tool_turn_body("claude-sonnet-4-6", &request);
+        let messages = body.get("messages").unwrap();
+        // user(question), assistant(tool_use x2), user(tool_result x2).
+        assert_eq!(messages.as_array().unwrap().len(), 3);
+        let results_turn = &messages.as_array().unwrap()[2];
+        assert_eq!(results_turn["role"], "user");
+        let blocks = results_turn["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2, "two tool_results bundled together");
+        assert_eq!(blocks[0]["tool_use_id"], "tu_1");
+        assert_eq!(blocks[1]["tool_use_id"], "tu_2");
+    }
+
+    #[test]
+    fn tool_turn_returns_terminal_text_when_no_tool_use() {
+        // AC #291: a text-only response (no tool_use) yields the terminal
+        // ToolTurnReply::Text -- the model ended the round.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_body(tool_response_body(
+                r#"[{"type":"text","text":"the answer is 42"}]"#,
+            ))
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match AnthropicProvider::generate_tool_turn(&cfg, &tool_turn_request("final"))
+            .expect("text")
+        {
+            ToolTurnReply::Text(t) => assert_eq!(t, "the answer is 42"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_turn_empty_response_is_unavailable() {
+        // A content array with neither text nor tool_use is a contract
+        // violation -> retried Unavailable (mirrors the single-shot path's
+        // "no text content" handling).
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_body(tool_response_body("[]"))
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        assert!(matches!(
+            AnthropicProvider::generate_tool_turn(&cfg, &tool_turn_request("q")),
+            Err(ProviderError::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn tool_turn_auth_rejected_is_not_wired() {
+        // ADR-0044: 401 -> NotWired (permanent, not retried). Routed via the
+        // shared http::classify_send_result helper -- pins that the
+        // tool-calling path inherits the same auth classification as the
+        // single-shot path.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(401)
+            .with_body(r#"{"type":"error","error":{"type":"authentication_error"}}"#)
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-bad"));
+        assert_eq!(
+            AnthropicProvider::generate_tool_turn(&cfg, &tool_turn_request("q")).unwrap_err(),
+            ProviderError::NotWired
+        );
+    }
+
+    #[test]
+    fn tool_turn_server_error_is_unavailable() {
+        // A 5xx is transient -> Unavailable (retried by the caller). Pins
+        // that the shared classify helper routes 5xx to Unavailable, not
+        // NotWired.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(503)
+            .with_body(r#"{"type":"error","error":{"type":"overloaded_error"}}"#)
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        assert!(matches!(
+            AnthropicProvider::generate_tool_turn(&cfg, &tool_turn_request("q")),
+            Err(ProviderError::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn tool_turn_rejects_non_http_base_url_as_invalid_config() {
+        // AC #244 / #277 (mirrors the single-shot path): a file:// base_url is
+        // rejected before any HTTP call as InvalidConfig -- a permanent config
+        // fault, not retried. Pointed at a host that would refuse connection
+        // if the gate were bypassed.
+        let cfg = config_at("file:///etc/passwd", Some("sk-test"));
+        match AnthropicProvider::generate_tool_turn(&cfg, &tool_turn_request("q")) {
+            Err(ProviderError::InvalidConfig(msg)) => assert!(
+                msg.contains("http/https"),
+                "scheme rejection surfaces the http/https policy: {msg}"
+            ),
+            other => panic!("expected InvalidConfig for bad scheme, got {other:?}"),
         }
     }
 }

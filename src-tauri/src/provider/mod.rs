@@ -20,6 +20,7 @@ pub mod openai;
 pub mod preflight;
 pub mod prompt;
 pub mod reply;
+pub mod tool_calling;
 
 use crate::model::{Protocol, TextKind};
 use crate::provider::keychain::ProviderConfigSource;
@@ -235,13 +236,39 @@ pub enum ProviderError {
     Unavailable(String),
 }
 
-/// The provider abstraction (ADR-0007). One method: turn a schema-aware request
-/// into the one-SQL reply contract (ADR-0009). Concrete implementations: the
-/// real Anthropic client (anthropic::AnthropicProvider, #29), the scripted test
-/// fake (fake::FakeProvider), and the default UnwiredProvider. Send so the
-/// session can hold it behind an Arc<Mutex> and run turns on a blocking thread.
+/// The provider abstraction (ADR-0007). Two methods: the single-shot
+/// [`Self::generate`] (turn a schema-aware request into the one-SQL reply
+/// contract, ADR-0009) and the native tool-calling [`Self::generate_tool_turn`]
+/// (ADR-0081, issue #291). Concrete implementations: the real
+/// Anthropic client (anthropic::AnthropicProvider, #29), the OpenAI-compatible
+/// client (openai::OpenaiProvider), the scripted test fake
+/// (fake::FakeProvider), and the default UnwiredProvider. Send so the session
+/// can hold it behind an Arc<Mutex> and run turns on a blocking thread.
 pub trait Provider: Send {
     fn generate(&self, request: &ProviderRequest) -> Result<ProviderReply, ProviderError>;
+
+    /// One native tool-calling round-trip (ADR-0081, issue #291):
+    /// send the active tool table plus the in-progress conversation, get back
+    /// either the model's tool invocations to execute or its terminal text
+    /// answer. The two adapters translate the protocol-neutral
+    /// [`tool_calling::ToolTurnRequest`] onto their native wire shapes
+    /// (anthropic `tools` / `tool_use` / `tool_result`; openai `tools` /
+    /// `tool_calls` / `tool` role). ADR-0029 invariant 3 holds: the request
+    /// never carries the key; the adapter reads it from the config source.
+    /// ADR-0044 classification is unchanged.
+    ///
+    /// Coexists with [`Self::generate`] (zero behavior change to the
+    /// single-shot path; ADR-0077 retires the single-SQL contract for
+    /// tool-calling turns). Default [`ProviderError::NotWired`] so a provider that
+    /// does not implement native tool-calling (e.g. [`UnwiredProvider`],
+    /// [`fake::FakeProvider`] until #295 extends it) refuses the turn
+    /// permanently -- the same surface as an unwired single-shot turn.
+    fn generate_tool_turn(
+        &self,
+        _request: &tool_calling::ToolTurnRequest,
+    ) -> Result<tool_calling::ToolTurnReply, ProviderError> {
+        Err(ProviderError::NotWired)
+    }
 }
 
 /// Default provider before the real LLM is wired (#29): refuses every turn
@@ -289,6 +316,18 @@ impl<C: ProviderConfigSource + 'static> Provider for LiveProvider<C> {
         match self.config.protocol() {
             Protocol::Anthropic => anthropic::AnthropicProvider::generate(&self.config, request),
             Protocol::Openai => openai::OpenaiProvider::generate(&self.config, request),
+        }
+    }
+
+    fn generate_tool_turn(
+        &self,
+        request: &tool_calling::ToolTurnRequest,
+    ) -> Result<tool_calling::ToolTurnReply, ProviderError> {
+        match self.config.protocol() {
+            Protocol::Anthropic => {
+                anthropic::AnthropicProvider::generate_tool_turn(&self.config, request)
+            }
+            Protocol::Openai => openai::OpenaiProvider::generate_tool_turn(&self.config, request),
         }
     }
 }

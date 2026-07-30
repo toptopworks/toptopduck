@@ -28,12 +28,14 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 use crate::provider::keychain::ProviderConfigSource;
 use crate::provider::prompt::{
     build_system_prompt, render_response, render_summary_turn_note, Message,
 };
 use crate::provider::reply::parse_reply;
+use crate::provider::tool_calling::{ToolTurnMessage, ToolTurnReply, ToolTurnRequest, ToolUse};
 use crate::provider::{ProviderError, ProviderReply, ProviderRequest, TurnPayload};
 
 /// Cap on the model's reply length (mirrors the anthropic adapter). Sized for a
@@ -192,6 +194,54 @@ impl OpenaiProvider {
         };
         parse_reply(&text)
     }
+
+    /// One native OpenAI tool-calling round-trip (ADR-0081,
+    /// issue #291). Sends the active tool table plus the in-progress
+    /// conversation using OpenAI's native function-calling -- the `tools`
+    /// request field plus `tool_calls` / `tool` role messages -- and returns
+    /// either the model's tool invocations to execute or its terminal text
+    /// answer.
+    ///
+    /// Same invariants as [`Self::generate`]: the key is read in the Rust
+    /// core per call (ADR-0029 invariant 3); HTTP 401/403 ->
+    /// [`ProviderError::NotWired`], transient failures ->
+    /// [`ProviderError::Unavailable`] (ADR-0044, via
+    /// [`http::classify_send_result`](super::http::classify_send_result));
+    /// blocking ureq on the `spawn_blocking` thread (ADR-0021). The legacy
+    /// single-shot [`Self::generate`] path is untouched.
+    pub fn generate_tool_turn(
+        config: &dyn ProviderConfigSource,
+        request: &ToolTurnRequest,
+    ) -> Result<ToolTurnReply, ProviderError> {
+        // ADR-0029 invariant 3: key fetched in the Rust core, per turn.
+        let key = config.api_key().ok_or(ProviderError::NotWired)?;
+        let base_url = config.base_url();
+        // AC #244 / #277: reject a non-http/https base_url at the boundary
+        // before any request is built. Maps to InvalidConfig -- a permanent
+        // config fault retrying cannot fix -- so the policy reason rides the
+        // detail (mirrors the single-shot path).
+        super::http::validate_http_base_url(&base_url)
+            .map_err(|e| ProviderError::InvalidConfig(e.to_string()))?;
+        let model = config.model();
+        let url = format!(
+            "{base}/chat/completions",
+            base = base_url.trim_end_matches('/')
+        );
+
+        let body = build_tool_turn_body(&model, request);
+        // AC #244: shared egress agent disables redirect-following so the
+        // Bearer token cannot travel past the first hop.
+        let response = super::http::egress_agent()
+            .post(&url)
+            .set("Authorization", &format!("Bearer {key}"))
+            .timeout(REQUEST_TIMEOUT)
+            .send_json(body);
+        let response = super::http::classify_send_result(response)?;
+        let raw: RawToolTurnResponse = response
+            .into_json()
+            .map_err(|e| ProviderError::Unavailable(format!("response read failed: {e}")))?;
+        parse_tool_turn_response(raw)
+    }
 }
 
 /// The OpenAI Chat Completions request body (ADR-0064 openai protocol). The
@@ -240,6 +290,205 @@ struct RawMessage {
     /// treated as a contract violation by the caller.
     #[serde(default)]
     content: Option<String>,
+}
+
+/// Minimal OpenAI tool-calling response shape -- `choices` plus an optional
+/// `error` envelope (some gateways return HTTP 200 with `error` instead of
+/// `choices`). The tool-calling path reads `choices[0].message.tool_calls`
+/// (and falls back to `content`); extra fields are ignored by serde.
+#[derive(Deserialize)]
+struct RawToolTurnResponse {
+    #[serde(default)]
+    choices: Vec<RawToolTurnChoice>,
+    #[serde(default)]
+    error: Option<RawError>,
+}
+
+#[derive(Deserialize)]
+struct RawToolTurnChoice {
+    message: RawToolTurnMessage,
+}
+
+#[derive(Deserialize)]
+struct RawToolTurnMessage {
+    /// The model's terminal text (absent on a tool-call-only step).
+    #[serde(default)]
+    content: Option<String>,
+    /// The model's tool invocations (absent on a terminal text step).
+    #[serde(default)]
+    tool_calls: Option<Vec<RawToolCall>>,
+}
+
+#[derive(Deserialize)]
+struct RawToolCall {
+    id: String,
+    function: RawToolFunction,
+}
+
+#[derive(Deserialize)]
+struct RawToolFunction {
+    name: String,
+    /// OpenAI encodes tool-call arguments as a JSON-encoded STRING (not an
+    /// object); parsed back into a [`Value`] by the adapter. A malformed
+    /// string surfaces as [`ProviderError::Unavailable`]; an absent or empty
+    /// string means "no arguments" and becomes `Value::Null`.
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+/// Build the OpenAI Chat Completions request body for one tool-calling turn.
+/// The `tools` field is omitted when the table is empty; `messages` carries
+/// the system prompt as a leading role="system" message plus the translated
+/// conversation (see [`build_openai_messages`]).
+fn build_tool_turn_body(model: &str, request: &ToolTurnRequest) -> Value {
+    let mut body = json!({
+        "model": model,
+        "max_tokens": request.max_tokens,
+    });
+    if !request.tools.is_empty() {
+        let tools: Vec<Value> = request
+            .tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema,
+                    }
+                })
+            })
+            .collect();
+        body["tools"] = Value::Array(tools);
+    }
+    body["messages"] = Value::Array(build_openai_messages(&request.messages, &request.system));
+    body
+}
+
+/// Translate the protocol-neutral [`ToolTurnMessage`] sequence into the
+/// OpenAI messages array. OpenAI Chat Completions carries the system prompt
+/// as a leading role="system" message (no separate `system` field); tool i/o
+/// uses the native function-calling shape:
+/// - [`ToolTurnMessage::User`] -> `role:"user"`;
+/// - [`ToolTurnMessage::Assistant`] -> `role:"assistant"` with optional
+///   `content` + a `tool_calls` array (one entry per call, `arguments` is the
+///   JSON-encoded input string per OpenAI convention);
+/// - [`ToolTurnMessage::ToolResult`] -> `role:"tool"` with `tool_call_id`
+///   (one message per result; OpenAI does not bundle them).
+fn build_openai_messages(messages: &[ToolTurnMessage], system: &str) -> Vec<Value> {
+    let mut out = Vec::with_capacity(messages.len() + 1);
+    out.push(json!({ "role": "system", "content": system }));
+    for msg in messages {
+        match msg {
+            ToolTurnMessage::User { content } => {
+                out.push(json!({ "role": "user", "content": content }));
+            }
+            ToolTurnMessage::Assistant { text, tool_calls } => {
+                let mut entry = json!({ "role": "assistant" });
+                if let Some(t) = text {
+                    entry["content"] = Value::String(t.clone());
+                }
+                if !tool_calls.is_empty() {
+                    let calls: Vec<Value> = tool_calls
+                        .iter()
+                        .map(|tc| {
+                            // OpenAI encodes arguments as a JSON string.
+                            let arguments = serde_json::to_string(&tc.input)
+                                .unwrap_or_else(|_| "null".to_string());
+                            json!({
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": arguments,
+                                }
+                            })
+                        })
+                        .collect();
+                    entry["tool_calls"] = Value::Array(calls);
+                }
+                // Chat Completions requires at least one of `content` or
+                // `tool_calls` on an assistant message; a degenerate empty
+                // assistant turn (no text, no calls) would 400. Emit an empty
+                // content string so the wire shape is accepted (mirrors the
+                // anthropic adapter's empty-text-block guard).
+                if text.is_none() && tool_calls.is_empty() {
+                    entry["content"] = Value::String(String::new());
+                }
+                out.push(entry);
+            }
+            ToolTurnMessage::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => {
+                out.push(json!({
+                    "role": "tool",
+                    "tool_call_id": tool_use_id,
+                    "content": content,
+                }));
+            }
+        }
+    }
+    out
+}
+
+/// Parse the OpenAI tool-calling response into a [`ToolTurnReply`]. If
+/// `choices[0].message.tool_calls` is present and non-empty ->
+/// [`ToolTurnReply::ToolCalls`] (each `arguments` JSON string parsed back to
+/// a [`Value`]). Otherwise the message `content` is the terminal
+/// [`ToolTurnReply::Text`]; empty choices surface an optional error envelope
+/// or a contract violation -> retried [`ProviderError::Unavailable`].
+fn parse_tool_turn_response(raw: RawToolTurnResponse) -> Result<ToolTurnReply, ProviderError> {
+    let message = raw
+        .choices
+        .into_iter()
+        .next()
+        .map(|c| c.message)
+        .ok_or_else(|| match raw.error {
+            Some(err) => ProviderError::Unavailable(format!(
+                "LLM returned error envelope: {}",
+                err.message.unwrap_or_else(|| "unknown error".into())
+            )),
+            None => ProviderError::Unavailable("LLM response has no choices".into()),
+        })?;
+    if let Some(tool_calls) = message.tool_calls {
+        if !tool_calls.is_empty() {
+            let calls: Vec<ToolUse> = tool_calls
+                .into_iter()
+                .map(|c| {
+                    let RawToolCall {
+                        id,
+                        function: RawToolFunction { name, arguments },
+                    } = c;
+                    // An absent or empty arguments string means "no arguments"
+                    // (OpenAI allows this for nullary calls) -> Value::Null.
+                    // A present-but-malformed string is a model contract
+                    // violation, not "no arguments" -- surface it as a retried
+                    // Unavailable so the cause is diagnosable instead of
+                    // silently executing a tool with null input.
+                    let input = match arguments {
+                        None => Value::Null,
+                        Some(s) if s.is_empty() => Value::Null,
+                        Some(s) => serde_json::from_str(&s).map_err(|e| {
+                            ProviderError::Unavailable(format!(
+                                "tool_call {id} arguments parse failed: {e}"
+                            ))
+                        })?,
+                    };
+                    Ok(ToolUse { id, name, input })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(ToolTurnReply::ToolCalls(calls));
+        }
+    }
+    match message.content {
+        Some(t) if !t.is_empty() => Ok(ToolTurnReply::Text(t)),
+        _ => Err(ProviderError::Unavailable(
+            "LLM response has no text content".into(),
+        )),
+    }
 }
 
 /// Build the OpenAI messages array from the windowed payload: the system
@@ -301,6 +550,7 @@ mod tests {
     use crate::model::{ChartKind, Protocol, TextKind};
     use crate::provider::keychain::StaticConfig;
     use crate::provider::prompt::ResponseLocale;
+    use crate::provider::tool_calling::{ToolDefinition, ToolResult};
     use crate::provider::{ColumnRef, DatasetRef, ResponsePayload};
 
     /// Build a fixed config pointing at a mockito server URL (no OS keychain,
@@ -856,5 +1106,370 @@ mod tests {
             ),
             other => panic!("expected Unavailable for 3xx, got {other:?}"),
         }
+    }
+
+    // ----- tool-calling fixtures (issue #291, ADR-0081) -----
+
+    /// A tool-calling request with one tool + a single user question (the
+    /// minimal round-trip shape). Stable literals so body-matching is
+    /// deterministic.
+    fn tool_turn_request(question: &str) -> ToolTurnRequest {
+        ToolTurnRequest {
+            system: "You are a SQL agent.".into(),
+            messages: vec![ToolTurnMessage::user(question)],
+            tools: vec![ToolDefinition {
+                name: "run_sql".into(),
+                description: "Run read-only SQL.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": { "sql": { "type": "string" } },
+                    "required": ["sql"],
+                }),
+            }],
+            max_tokens: 1024,
+        }
+    }
+
+    /// Wrap a Chat Completions message object in the choices envelope.
+    /// `message_json` is the raw JSON for `choices[0].message`.
+    fn tool_response_body(message_json: &str) -> String {
+        format!("{{\"choices\":[{{\"message\":{message_json}}}]}}")
+    }
+
+    #[test]
+    fn tool_turn_advertises_tools_field_in_request_body() {
+        // AC #291: the request body carries the tool table under the native
+        // openai `tools` field, each entry shaped as
+        // `{type:"function", function:{name, description, parameters}}`.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .match_header("authorization", "Bearer sk-test")
+            .match_body(mockito::Matcher::Regex(r#""type":"function""#.into()))
+            .match_body(mockito::Matcher::Regex(r#""parameters""#.into()))
+            .with_status(200)
+            .with_body(tool_response_body(
+                r#"{"role":"assistant","content":"done"}"#,
+            ))
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        OpenaiProvider::generate_tool_turn(&cfg, &tool_turn_request("count rows"))
+            .expect("tool turn");
+        _mock.assert();
+    }
+
+    #[test]
+    fn tool_turn_parses_tool_calls_into_calls() {
+        // AC #291: a response with `tool_calls` yields ToolTurnReply::ToolCalls;
+        // each `arguments` JSON string is parsed back into a Value. Two calls
+        // pin multi-call batches.
+        let message = serde_json::json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+                {"id":"call_1","type":"function","function":{"name":"run_sql","arguments":"{\"sql\":\"SELECT 1\"}"}},
+                {"id":"call_2","type":"function","function":{"name":"run_sql","arguments":"{\"sql\":\"SELECT 2\"}"}}
+            ]
+        })
+        .to_string();
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_body(tool_response_body(&message))
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        let reply = OpenaiProvider::generate_tool_turn(&cfg, &tool_turn_request("multi"))
+            .expect("tool calls");
+        match reply {
+            ToolTurnReply::ToolCalls(calls) => {
+                assert_eq!(calls.len(), 2);
+                assert_eq!(calls[0].id, "call_1");
+                assert_eq!(calls[0].name, "run_sql");
+                assert_eq!(calls[0].input, serde_json::json!({"sql":"SELECT 1"}));
+                assert_eq!(calls[1].id, "call_2");
+            }
+            other => panic!("expected ToolCalls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_turn_round_trips_tool_result_as_tool_role_message() {
+        // AC #291: a fed-back ToolResult is serialized as a role="tool"
+        // message carrying tool_call_id + content; the assistant's prior
+        // tool_calls is re-sent. Body-regex pins the tool role + the id.
+        let request = ToolTurnRequest {
+            system: "agent".into(),
+            messages: vec![
+                ToolTurnMessage::user("count rows"),
+                ToolTurnMessage::Assistant {
+                    text: None,
+                    tool_calls: vec![ToolUse {
+                        id: "call_1".into(),
+                        name: "run_sql".into(),
+                        input: serde_json::json!({"sql":"SELECT 1"}),
+                    }],
+                },
+                ToolTurnMessage::tool_result(ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "[{\"n\":1}]".into(),
+                    is_error: false,
+                }),
+            ],
+            tools: vec![ToolDefinition {
+                name: "run_sql".into(),
+                description: "run sql".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+            }],
+            max_tokens: 1024,
+        };
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .match_body(mockito::Matcher::Regex(r#""role":"tool""#.into()))
+            .match_body(mockito::Matcher::Regex(r#""tool_call_id":"call_1""#.into()))
+            .with_status(200)
+            .with_body(tool_response_body(
+                r#"{"role":"assistant","content":"1 row"}"#,
+            ))
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match OpenaiProvider::generate_tool_turn(&cfg, &request).expect("text") {
+            ToolTurnReply::Text(t) => assert_eq!(t, "1 row"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        _mock.assert();
+    }
+
+    #[test]
+    fn tool_turn_emits_one_tool_message_per_result() {
+        // OpenAI does NOT bundle consecutive tool results -- each ToolResult
+        // becomes its own role="tool" message (unlike anthropic's single
+        // user turn). Two results for call_1/call_2 -> two distinct tool
+        // messages. Asserted via the body builder directly (no HTTP).
+        let request = ToolTurnRequest {
+            system: "agent".into(),
+            messages: vec![
+                ToolTurnMessage::user("two queries"),
+                ToolTurnMessage::Assistant {
+                    text: None,
+                    tool_calls: vec![
+                        ToolUse {
+                            id: "call_1".into(),
+                            name: "run_sql".into(),
+                            input: serde_json::json!({"sql":"SELECT 1"}),
+                        },
+                        ToolUse {
+                            id: "call_2".into(),
+                            name: "run_sql".into(),
+                            input: serde_json::json!({"sql":"SELECT 2"}),
+                        },
+                    ],
+                },
+                ToolTurnMessage::tool_result(ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "1".into(),
+                    is_error: false,
+                }),
+                ToolTurnMessage::tool_result(ToolResult {
+                    tool_use_id: "call_2".into(),
+                    content: "2".into(),
+                    is_error: false,
+                }),
+            ],
+            tools: Vec::new(),
+            max_tokens: 1024,
+        };
+        let body = build_tool_turn_body("gpt-4o", &request);
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        // system, user, assistant, tool(call_1), tool(call_2).
+        assert_eq!(messages.len(), 5);
+        let tool_msgs: Vec<&Value> = messages.iter().filter(|m| m["role"] == "tool").collect();
+        assert_eq!(tool_msgs.len(), 2, "one tool message per result");
+        assert_eq!(tool_msgs[0]["tool_call_id"], "call_1");
+        assert_eq!(tool_msgs[1]["tool_call_id"], "call_2");
+    }
+
+    #[test]
+    fn tool_turn_returns_terminal_text_when_no_tool_calls() {
+        // AC #291: a content-only response (no tool_calls) yields the
+        // terminal ToolTurnReply::Text.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_body(tool_response_body(
+                r#"{"role":"assistant","content":"the answer is 42"}"#,
+            ))
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match OpenaiProvider::generate_tool_turn(&cfg, &tool_turn_request("final")).expect("text") {
+            ToolTurnReply::Text(t) => assert_eq!(t, "the answer is 42"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_turn_empty_choices_is_unavailable() {
+        // Empty choices (no completion) is a contract violation -> retried
+        // Unavailable.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_body(serde_json::json!({"choices": []}).to_string())
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        assert!(matches!(
+            OpenaiProvider::generate_tool_turn(&cfg, &tool_turn_request("q")),
+            Err(ProviderError::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn tool_turn_auth_rejected_is_not_wired() {
+        // ADR-0044: 401 -> NotWired (permanent, not retried). Routed via the
+        // shared http::classify_send_result helper.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(401)
+            .with_body(r#"{"error":{"message":"Invalid API key"}}"#)
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-bad"));
+        assert_eq!(
+            OpenaiProvider::generate_tool_turn(&cfg, &tool_turn_request("q")).unwrap_err(),
+            ProviderError::NotWired
+        );
+    }
+
+    #[test]
+    fn tool_turn_server_error_is_unavailable() {
+        // A 5xx is transient -> Unavailable. Pins that the shared classify
+        // helper routes 5xx to Unavailable, not NotWired.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(503)
+            .with_body(r#"{"error":{"message":"Service unavailable"}}"#)
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        assert!(matches!(
+            OpenaiProvider::generate_tool_turn(&cfg, &tool_turn_request("q")),
+            Err(ProviderError::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn tool_turn_rejects_non_http_base_url_as_invalid_config() {
+        // AC #244 / #277 (mirrors the single-shot path): a file:// base_url is
+        // rejected before any HTTP call as InvalidConfig -- a permanent config
+        // fault, not retried.
+        let cfg = config_at("file:///etc/passwd", Some("sk-test"));
+        match OpenaiProvider::generate_tool_turn(&cfg, &tool_turn_request("q")) {
+            Err(ProviderError::InvalidConfig(msg)) => assert!(
+                msg.contains("http/https"),
+                "scheme rejection surfaces the http/https policy: {msg}"
+            ),
+            other => panic!("expected InvalidConfig for bad scheme, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_turn_malformed_arguments_is_unavailable() {
+        // A present-but-malformed arguments string (truncated / hallucinated
+        // JSON -- common on weaker OpenAI-compatible endpoints) is a model
+        // contract violation, NOT "no arguments": surface it as a retried
+        // Unavailable naming the offending call id, instead of silently
+        // executing a tool with null input.
+        let message = serde_json::json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+                {"id":"call_1","type":"function","function":{"name":"run_sql","arguments":"not-json{"}}
+            ]
+        })
+        .to_string();
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_body(tool_response_body(&message))
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match OpenaiProvider::generate_tool_turn(&cfg, &tool_turn_request("bad args")) {
+            Err(ProviderError::Unavailable(msg)) => assert!(
+                msg.contains("call_1") && msg.contains("arguments parse failed"),
+                "malformed arguments surface the call id + cause, got: {msg}"
+            ),
+            other => panic!("expected Unavailable for malformed arguments, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_turn_empty_arguments_falls_back_to_null() {
+        // An empty arguments string means "no arguments" (OpenAI allows this
+        // for nullary calls) -> input Value::Null, not an error. Pins the
+        // None/empty branch distinct from the malformed branch above.
+        let message = serde_json::json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+                {"id":"call_1","type":"function","function":{"name":"list_tables","arguments":""}}
+            ]
+        })
+        .to_string();
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_body(tool_response_body(&message))
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        match OpenaiProvider::generate_tool_turn(&cfg, &tool_turn_request("nullary"))
+            .expect("calls")
+        {
+            ToolTurnReply::ToolCalls(calls) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].input, Value::Null);
+            }
+            other => panic!("expected ToolCalls with null input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_turn_degenerate_assistant_turn_emits_empty_content() {
+        // Chat Completions requires at least one of `content` / `tool_calls`
+        // on an assistant message; a degenerate Assistant { None, vec![] }
+        // would 400. The builder emits an empty content string so the shape
+        // is accepted (mirrors anthropic's empty-text-block guard). Asserted
+        // via the body builder directly (no HTTP).
+        let request = ToolTurnRequest {
+            system: "agent".into(),
+            messages: vec![
+                ToolTurnMessage::user("q"),
+                ToolTurnMessage::Assistant {
+                    text: None,
+                    tool_calls: Vec::new(),
+                },
+                ToolTurnMessage::user("follow up"),
+            ],
+            tools: Vec::new(),
+            max_tokens: 1024,
+        };
+        let body = build_tool_turn_body("gpt-4o", &request);
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        let assistant = messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant turn present");
+        assert_eq!(
+            assistant["content"], "",
+            "degenerate assistant gets empty content"
+        );
+        assert!(
+            assistant.get("tool_calls").is_none(),
+            "no tool_calls key on a degenerate assistant"
+        );
     }
 }
