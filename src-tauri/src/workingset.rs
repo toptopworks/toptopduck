@@ -170,6 +170,29 @@ impl WorkingSet {
             .find(|d| d.reference_name == reference_name)
     }
 
+    /// Resolve a registered dataset a read-shaped tool may reference, refusing an
+    /// unknown name or a stale `result_N` anchor (ADR-0013 invariant 2). Shared by
+    /// the `describe` + `sample` tools so the unknown + stale refusal wording is
+    /// identical across them -- the agent reads one consistent error shape and can
+    /// self-correct (ADR-0077). `verb` is the action the caller was about to take
+    /// ("referenced" / "read"), phrased to fit "... may not be {verb}".
+    pub fn resolve_readable(
+        &self,
+        reference_name: &str,
+        verb: &str,
+    ) -> Result<&DatasetDescriptor, String> {
+        let descriptor = self.get(reference_name).ok_or_else(|| {
+            format!("unknown dataset: `{reference_name}` is not in the working set")
+        })?;
+        if let Some(anchor) = &descriptor.stale {
+            return Err(format!(
+                "stale dataset: `{reference_name}` was invalidated by `{}` and may not be {verb}",
+                anchor.reference_name
+            ));
+        }
+        Ok(descriptor)
+    }
+
     /// Rename a dataset's display label (ADR-0037): changes **only** the display
     /// name, never the reference name -- so every existing reference (SQL FROM,
     /// the recipe chain, the active pointer) stays valid, and no dependency is

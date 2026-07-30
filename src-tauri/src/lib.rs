@@ -24,6 +24,7 @@ pub mod provenance;
 pub mod provider;
 pub mod session;
 pub mod session_store;
+pub mod tools;
 pub mod window;
 pub mod workingset;
 
