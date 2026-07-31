@@ -280,6 +280,65 @@ fn walk_expr(expr: &Expr, out: &mut Vec<String>) {
         }
         Expr::InUnnest { expr, .. } => walk_expr(expr, out),
 
+        // DuckDB-native + dialect access forms carrying one Expr child a
+        // read_* could hide behind (composite field access, JSON/map lookup,
+        // subscripted column, named/converted arg). The subscript's index
+        // expression itself is left to the lockdown (best-effort); the
+        // indexed object is still walked.
+        Expr::CompositeAccess { expr, .. }
+        | Expr::Subscript { expr, .. }
+        | Expr::Named { expr, .. }
+        | Expr::Convert { expr, .. } => walk_expr(expr, out),
+        Expr::JsonAccess { value, .. } => walk_expr(value, out),
+        Expr::MapAccess { column, .. } => walk_expr(column, out),
+
+        // Multi-child wrappers.
+        Expr::AtTimeZone {
+            timestamp,
+            time_zone,
+        } => {
+            walk_expr(timestamp, out);
+            walk_expr(time_zone, out);
+        }
+        Expr::Overlay {
+            expr,
+            overlay_what,
+            overlay_from,
+            overlay_for,
+        } => {
+            walk_expr(expr, out);
+            walk_expr(overlay_what, out);
+            walk_expr(overlay_from, out);
+            if let Some(e) = overlay_for {
+                walk_expr(e, out);
+            }
+        }
+
+        // DuckDB literal collections: a read_* nested in a struct / map /
+        // array literal or a lambda body is caught by recursing each element.
+        Expr::Struct { values, .. } => {
+            for e in values {
+                walk_expr(e, out);
+            }
+        }
+        Expr::Dictionary(fields) => {
+            for f in fields {
+                walk_expr(&f.value, out);
+            }
+        }
+        Expr::Map(map) => {
+            for entry in &map.entries {
+                walk_expr(&entry.key, out);
+                walk_expr(&entry.value, out);
+            }
+        }
+        Expr::Array(arr) => {
+            for e in &arr.elem {
+                walk_expr(e, out);
+            }
+        }
+        Expr::Lambda(lambda) => walk_expr(&lambda.body, out),
+
         // Rare / dialect-specific variants: best-effort skip. A read_* in one of
         // these is still refused by the engine lockdown; only the structured
         // guidance is lost.
@@ -303,9 +362,14 @@ fn arg_arg(arg: &FunctionArg) -> &FunctionArgExpr {
     }
 }
 
-/// If `name` is a read_* / sniff_csv file function, extract the first literal
-/// string argument from `args` and push it. A non-literal first arg is skipped
-/// (best-effort: the lockdown backstops a dynamic path).
+/// If `name` is a read_* / sniff_csv file function, extract the literal path
+/// from its first POSITIONAL (`Unnamed`) argument and push it. DuckDB file
+/// functions take the path positionally; named options that follow
+/// (`compression='gzip'`, `delim='|'`, ...) are never paths. Scan to the
+/// first positional: a literal string there is the path; anything else (a
+/// dynamic `col` ref, a sub-expression, a list arg) is a non-literal path we
+/// leave to the lockdown rather than mis-reading a later option string as the
+/// path (ADR-0077 -- the error must name the real path, not an option value).
 fn collect_if_read_function<'a>(
     name: &str,
     args: impl Iterator<Item = &'a FunctionArg>,
@@ -315,10 +379,17 @@ fn collect_if_read_function<'a>(
         return;
     }
     for arg in args {
-        if let FunctionArgExpr::Expr(Expr::Value(sqlparser::ast::Value::SingleQuotedString(s))) =
-            arg_arg(arg)
-        {
-            out.push(s.clone());
+        // The first positional arg decides: literal-string -> the path;
+        // anything else -> dynamic / non-literal path, so stop. Do NOT keep
+        // scanning: later named options' string values are not paths, and
+        // mis-reading one would feed the ACL a fabricated path (ADR-0077).
+        if let FunctionArg::Unnamed(_) = arg {
+            if let FunctionArgExpr::Expr(Expr::Value(sqlparser::ast::Value::SingleQuotedString(
+                s,
+            ))) = arg_arg(arg)
+            {
+                out.push(s.clone());
+            }
             return;
         }
     }
@@ -330,7 +401,11 @@ fn collect_if_read_function<'a>(
 fn is_file_function(name: &str) -> bool {
     // `name` renders as e.g. `read_csv_auto` or `catalog.read_csv_auto`; the
     // final segment is the function itself.
-    let last = name.rsplit('.').next().unwrap_or(name).to_ascii_lowercase();
+    let last = name
+        .rsplit_once('.')
+        .map(|(_, last)| last)
+        .unwrap_or(name)
+        .to_ascii_lowercase();
     last.starts_with("read_") || last == "sniff_csv"
 }
 
@@ -441,5 +516,54 @@ mod tests {
     fn no_file_functions_yields_no_paths() {
         let paths = extract_read_paths(r#"SELECT id, COUNT(*) FROM "people".data GROUP BY id"#);
         assert!(paths.is_empty());
+    }
+
+    /// A read_* with named options after the path extracts ONLY the positional
+    /// path arg, not a later option string. Pins ADR-0077's honest-error
+    /// contract: the error must name the real path, not `compression='gzip'`.
+    #[test]
+    fn extracts_path_from_first_positional_ignoring_named_options() {
+        let paths = extract_read_paths(
+            "SELECT * FROM read_csv_auto('/data.csv', header=true, compression='gzip')",
+        );
+        assert_eq!(paths, vec!["/data.csv".to_string()]);
+    }
+
+    /// A non-literal first positional (dynamic path) with a later named-option
+    /// string does NOT mis-attribute the option value as the path. Returns
+    /// nothing; the lockdown backstops the dynamic path at execution.
+    #[test]
+    fn dynamic_path_with_named_string_option_is_not_misread() {
+        let paths = extract_read_paths("SELECT * FROM read_csv_auto(col, compression='gzip')");
+        assert!(
+            paths.is_empty(),
+            "option value not misread as path: {paths:?}"
+        );
+    }
+
+    /// A list-arg read_* (`read_csv(['/a','/b'])`) yields no paths today: the
+    /// first positional is a list, not a literal string. Pinned so a future
+    /// change to extract list elements is intentional; the lockdown backstops
+    /// the multi-file read meanwhile.
+    #[test]
+    fn list_arg_read_yields_no_paths() {
+        let paths = extract_read_paths("SELECT * FROM read_csv(['/a.csv','/b.csv'])");
+        assert!(paths.is_empty(), "list-arg behavior pinned: {paths:?}");
+    }
+
+    /// A read_* nested in a DuckDB struct literal is caught via the Struct
+    /// recursion -- the agent cannot hide a file read inside a struct value.
+    #[test]
+    fn extracts_read_path_from_struct_literal() {
+        let paths = extract_read_paths("SELECT {'a': read_blob('/secret')}");
+        assert_eq!(paths, vec!["/secret".to_string()]);
+    }
+
+    /// A read_* nested in a DuckDB array literal is caught via the Array
+    /// recursion.
+    #[test]
+    fn extracts_read_path_from_array_literal() {
+        let paths = extract_read_paths("SELECT [read_text('/x'), read_text('/y')]");
+        assert_eq!(paths, vec!["/x".to_string(), "/y".to_string()]);
     }
 }

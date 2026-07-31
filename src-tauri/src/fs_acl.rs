@@ -257,25 +257,35 @@ mod tests {
     }
 
     /// AC #2 / AC #4: a relative `../` escape is resolved against the process
-    /// CWD and, when it lands outside the temp root, refused. The sibling file
-    /// lives outside the temp dir, so an absolute path to it is out of bounds.
+    /// CWD (mirroring DuckDB) and, when it lands outside every allowed root,
+    /// refused. The sibling lives in the CWD's parent so the literal `../sib`
+    /// resolves to a real on-disk file -- this exercises resolve()'s CWD
+    /// branch (an absolute-path-only check would pass even if that branch
+    /// were broken).
     #[test]
     fn relative_dotdot_escape_is_refused() {
         let temp = TempDir::new().unwrap();
-        // A file outside the temp dir (in its parent) -- absolute path to it is
-        // outside the temp root regardless of how the agent phrases the escape.
-        let sibling = temp
-            .path()
-            .parent()
-            .unwrap()
-            .join("sibling_escape_target_293.txt");
-        fs::write(&sibling, "x").unwrap();
+        let target_name = "relative_dotdot_escape_293.txt";
+        let cwd = std::env::current_dir().unwrap();
+        let sibling = cwd.parent().unwrap().join(target_name);
+        // Skip on environments where the CWD parent is not writable -- the
+        // test needs the sibling to exist for the canonicalizer to resolve.
+        if fs::write(&sibling, "x").is_err() {
+            eprintln!("skipped: CWD parent not writable");
+            return;
+        }
         let acl = FsAcl::new(&WorkingSet::default(), temp.path());
-        let escape_abs = sibling.canonicalize().unwrap();
+        // The literal relative path: resolve() joins it against the CWD and
+        // canonicalizes to cwd.parent/target_name, which is outside temp_root.
         let err = acl
-            .check(&escape_abs.to_string_lossy(), AccessMode::Read)
+            .check(&format!("../{target_name}"), AccessMode::Read)
             .unwrap_err();
         assert_eq!(err.reason, FsAclReason::OutsideAllowedArea);
+        assert!(
+            err.message().contains(&format!("../{target_name}")),
+            "error names the literal relative path: {}",
+            err.message()
+        );
         let _ = fs::remove_file(&sibling);
     }
 
@@ -372,5 +382,55 @@ mod tests {
             reason: FsAclReason::OutsideAllowedArea,
         };
         assert!(err.message().contains("../secret.txt"));
+    }
+
+    /// `Path::starts_with` matches component-by-component, so a path whose
+    /// STRING prefix matches temp_root but is a distinct component (e.g.
+    /// `/tmp/sess` vs `/tmp/sess_evil`) is NOT authorized. Regression guard
+    /// against a future string-prefix refactor.
+    #[test]
+    fn temp_root_prefix_is_component_wise_not_string() {
+        let parent = TempDir::new().unwrap();
+        let temp_root = parent.path().join("sess");
+        fs::create_dir(&temp_root).unwrap();
+        // A sibling dir whose name starts with "sess" as a string but is a
+        // different component -- `sess_evil` != `sess`.
+        let evil_dir = parent.path().join("sess_evil");
+        fs::create_dir(&evil_dir).unwrap();
+        let evil_file = evil_dir.join("secret.csv");
+        fs::write(&evil_file, "x").unwrap();
+        let acl = FsAcl::new(&WorkingSet::default(), &temp_root);
+        let err = acl
+            .check(&evil_file.to_string_lossy(), AccessMode::Read)
+            .unwrap_err();
+        assert_eq!(err.reason, FsAclReason::OutsideAllowedArea);
+    }
+
+    /// AC #2 / AC #4 (Windows): an in-bounds symlink pointing outside resolves
+    /// to the out-of-bounds target via canonicalize and is refused, mirroring
+    /// the unix symlink test on the CI target platform. Symlink creation needs
+    /// Developer Mode or admin on Windows; skip on permission denial so CI is
+    /// not flaky.
+    #[test]
+    #[cfg(windows)]
+    fn symlink_escape_is_refused_windows() {
+        use std::os::windows::fs::symlink_dir;
+        let temp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("secret.txt");
+        fs::write(&outside_file, "secret").unwrap();
+        // Place a directory symlink INSIDE temp pointing at the outside dir.
+        let link = temp.path().join("alias");
+        if symlink_dir(outside.path(), &link).is_err() {
+            eprintln!("skipped: Windows symlink creation needs Developer Mode / admin");
+            return;
+        }
+        let acl = FsAcl::new(&WorkingSet::default(), temp.path());
+        // Reading via the in-bounds link alias canonicalizes to the outside
+        // dir -> refused (not authorized by the in-bounds alias).
+        let err = acl
+            .check(&link.to_string_lossy(), AccessMode::Read)
+            .unwrap_err();
+        assert_eq!(err.reason, FsAclReason::OutsideAllowedArea);
     }
 }

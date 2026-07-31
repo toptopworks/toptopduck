@@ -536,9 +536,10 @@ mod tests {
         assert_eq!(deps.working_set.len(), 0);
     }
 
-    /// AC #4 (issue #293): a relative `../` escape lands outside the temp dir
-    /// and is refused at the gateway, same as an absolute out-of-bounds path.
-    /// The escape target is a real file in the temp dir's parent.
+    /// AC #4 (issue #293): a relative `../` escape lands outside the session
+    /// source set + temp dir and is refused at the gateway, same as an
+    /// absolute out-of-bounds path. The SQL carries the literal `../` so
+    /// resolve()'s CWD branch is exercised end to end through the gateway.
     #[test]
     fn explore_refuses_relative_dotdot_read_escape_at_gateway() {
         use crate::tools::test_support::inert_deps_with_temp;
@@ -549,26 +550,31 @@ mod tests {
         let mut ws = crate::workingset::WorkingSet::default();
         let sources = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
-        // A sibling file in the temp dir's parent -- its absolute path is
-        // outside the temp root, so any phrasing of it is out of bounds.
-        let escape_target = temp
-            .path()
-            .parent()
-            .unwrap()
-            .join("explore_escape_target_293.csv");
-        fs::write(&escape_target, "x").unwrap();
-        let escape_abs = escape_target.canonicalize().unwrap();
+        // A sibling file in the CWD's parent -- the literal `../<name>` in the
+        // SQL resolves against the process CWD to this file, which is outside
+        // temp_root, so the gateway refuses it.
+        let target_name = "explore_dotdot_escape_293.csv";
+        let cwd = std::env::current_dir().unwrap();
+        let escape_target = cwd.parent().unwrap().join(target_name);
+        if fs::write(&escape_target, "x").is_err() {
+            eprintln!("skipped: CWD parent not writable");
+            return;
+        }
         let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
         let cancel = CancelToken::new();
         let err = dispatch(
-            &json!({"sql": format!("SELECT * FROM read_csv_auto('{}')", escape_abs.to_string_lossy())}),
+            &json!({"sql": format!("SELECT * FROM read_csv_auto('../{target_name}')")}),
             &mut deps,
             &cancel,
         )
         .unwrap_err();
         assert!(
             err.contains("outside the allowed"),
-            "relative escape refused: {err}"
+            "relative `../` escape refused: {err}"
+        );
+        assert!(
+            err.contains(&format!("../{target_name}")),
+            "error names the literal relative path: {err}"
         );
         let _ = fs::remove_file(&escape_target);
     }
