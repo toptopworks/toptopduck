@@ -2309,6 +2309,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn build_recipe_persists_a_synthetic_single_call_trace_on_a_materialized_turn() {
+        // ADR-0078/0082 (AC3, issue #296): the live write path pairs each
+        // Materialized turn with its synthetic single-call trace. A fresh ask
+        // that materializes a result must carry one `materialize` trace entry
+        // whose summary is the verbatim SQL; provenance stays default (runtime
+        // + skill tracking lands with the agent-loop wiring slice, ADR-0081).
+        // Pins the live path so a future edit that drops the synthetic trace
+        // call or forgets to wire it into the struct literal fails here, not
+        // only in the migration suite (which bypasses build_recipe via the JSON
+        // transform).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let csv = dir.path().join("people.csv");
+        std::fs::write(&csv, "name,score\nAda,9\n").expect("write csv");
+
+        let provider = FakeProvider::new().scripted(
+            "多少人",
+            ProviderReply::Sql {
+                sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
+                viz: None,
+                assumption: None,
+            },
+        );
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        match session.ingest(&csv) {
+            crate::model::LoadOutcome::Loaded(d) => assert_eq!(d.reference_name, "people"),
+            other => panic!("ingest should load people.csv, got {other:?}"),
+        }
+        let _ = session.ask("多少人");
+
+        use crate::persistence::recipe::{RecipeEntry, RecipeOutcome};
+        let recipe = session.build_recipe();
+        let turn = recipe
+            .history
+            .iter()
+            .find_map(|e| match e {
+                RecipeEntry::Turn(t) if matches!(t.outcome, RecipeOutcome::Materialized { .. }) => {
+                    Some(t)
+                }
+                _ => None,
+            })
+            .expect("a Materialized turn in history");
+        assert_eq!(turn.trace.len(), 1, "synthetic single-call trace");
+        assert_eq!(turn.trace[0].name, "materialize");
+        assert_eq!(
+            turn.trace[0].summary, "SELECT COUNT(*) AS n FROM \"people\".data",
+            "summary is the verbatim SQL",
+        );
+        assert!(
+            turn.provenance.runtime.is_none() && turn.provenance.skills.is_empty(),
+            "provenance default on the live path until the wiring slice",
+        );
+    }
+
     // M1 regression: a turn whose shape derivation fails must roll back the
     // already-created result_N. Here the derivation's fingerprint dump cannot be
     // written -- temp_path points at a file, so its "child" dump path has a file

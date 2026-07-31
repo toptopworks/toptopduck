@@ -218,32 +218,39 @@ mod transforms {
         let Some(data_obj) = entry.get_mut("data").and_then(|d| d.as_object_mut()) else {
             return;
         };
-        let Some(kind) = data_obj
-            .get("outcome")
-            .and_then(|o| o.get("kind"))
-            .and_then(|v| v.as_str())
-        else {
+        // Take the outcome node once; both the kind discriminator and the
+        // Materialized payload's `sql` live under it. A missing outcome is a
+        // Source entry (or a corrupt Turn) -- skip either way.
+        let Some(outcome) = data_obj.get("outcome") else {
+            return;
+        };
+        let Some(kind) = outcome.get("kind").and_then(Value::as_str) else {
             return;
         };
         // Only Materialized turns ran a productive SQL -> get a synthetic trace.
         if kind != "Materialized" {
             return;
         }
-        let Some(sql) = data_obj
-            .get("outcome")
-            .and_then(|o| o.get("data"))
+        let Some(sql) = outcome
+            .get("data")
             .and_then(|d| d.get("sql"))
-            .and_then(|v| v.as_str())
+            .and_then(Value::as_str)
         else {
             // A Materialized outcome missing `sql` is corrupt; the typed
-            // deserialize rejects it. Stay side-effect-free here.
+            // deserialize rejects it downstream. Stay side-effect-free (no
+            // guess), but log the skip so a corrupt .duck is diagnosable
+            // rather than a silent no-trace.
+            log::warn!("v1->v2 migration: Materialized turn missing sql; no synthetic trace");
             return;
         };
         let trace = crate::persistence::recipe::synthetic_materialize_trace(sql);
         // Serialize the typed trace into the JSON the v2 RecipeTurn deserializes
         // back from. Plain serializable struct -- a failure is a logic bug, not
-        // a parse fault; no-op rather than panic on external input.
+        // a parse fault; no-op rather than panic on external input. The
+        // debug_assert surfaces a future non-serializable field under test
+        // builds instead of silently dropping every migrated turn's trace.
         let Ok(trace_value) = serde_json::to_value(&trace) else {
+            debug_assert!(false, "RecipeTraceEntry must serialize");
             return;
         };
         data_obj.insert("trace".to_string(), trace_value);
@@ -690,5 +697,122 @@ mod tests {
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].reference_name, "result_1");
         assert_eq!(chain[0].sql, "SELECT 1");
+    }
+
+    /// Build a synthetic v1 Failed turn (issue #125 TurnFailure shape: adjacently
+    /// tagged, `Execute` variant carrying a technical detail). No tool trajectory
+    /// -> no trace after migration.
+    fn v1_failed_turn(question: &str, detail: &str) -> Value {
+        serde_json::json!({
+            "entry": "Turn",
+            "data": {
+                "question": question,
+                "outcome": {
+                    "kind": "Failed",
+                    "data": {
+                        "kind": "Execute",
+                        "data": {"detail": detail},
+                    },
+                },
+            },
+        })
+    }
+
+    /// Build a synthetic v1 Cancelled turn (ADR-0021/0028). Adjacently-tagged
+    /// unit variant carries no `data` slot; no tool trajectory -> no trace.
+    fn v1_cancelled_turn(question: &str) -> Value {
+        serde_json::json!({
+            "entry": "Turn",
+            "data": {
+                "question": question,
+                "outcome": {"kind": "Cancelled"},
+            },
+        })
+    }
+
+    #[test]
+    fn v1_to_v2_leaves_failed_and_cancelled_turns_without_a_trace() {
+        // ADR-0082: only Materialized turns ran a productive SQL. Failed and
+        // Cancelled outcomes carry no tool trajectory, so the migration adds no
+        // `trace` field -- the transform's `kind != "Materialized"` early-exit
+        // covers them. Pin both branches so a future widening (e.g. giving
+        // Failed an error trace) cannot silently change the migration's
+        // lossless contract.
+        let v1 = serde_json::json!({
+            "format_version": 1,
+            "session_name": "x",
+            "sources": [],
+            "history": [
+                v1_failed_turn("坏 SQL", "relation not found"),
+                v1_cancelled_turn("算了"),
+            ],
+            "active": null,
+        });
+        let v2 = transforms::v1_to_v2(v1).expect("migrate");
+        assert!(
+            v2["history"][0]["data"].get("trace").is_none(),
+            "failed turn gets no trace",
+        );
+        assert!(
+            v2["history"][1]["data"].get("trace").is_none(),
+            "cancelled turn gets no trace",
+        );
+    }
+
+    #[test]
+    fn v1_to_v2_adds_a_trace_to_a_stale_materialized_turn_too() {
+        // ADR-0082 + ADR-0041: a stale (cascade-invalidated, dead) Materialized
+        // turn still RAN one productive SQL under the v1 single-SQL contract
+        // before it was invalidated, and it remains in history for display
+        // (ADR-0041 point 2). The migration keys only on `kind ==
+        // "Materialized"` (not on `stale`), so a stale turn gains the same
+        // synthetic single-call trace a live one does -- the UI shows the
+        // trajectory the turn produced before invalidation. Pin this so the
+        // product decision (stale turns keep their trace) survives a future
+        // refactor that might gate on `stale`.
+        let v1 = serde_json::json!({
+            "format_version": 1,
+            "session_name": "x",
+            "sources": [{
+                "reference_name": "people",
+                "display_name": "people",
+                "source_path": "/data/people.csv",
+                "fingerprint": "fp",
+            }],
+            "history": [{
+                "entry": "Turn",
+                "data": {
+                    "question": "旧问题",
+                    "outcome": {
+                        "kind": "Materialized",
+                        "data": {
+                            "reference_name": "result_1",
+                            "display_name": "result_1",
+                            "sql": "SELECT 1",
+                            "stale": {
+                                "reference_name": "people",
+                                "display_name": "people",
+                                "reason": "Replaced",
+                            },
+                        },
+                    },
+                },
+            }],
+            "active": "people",
+        });
+        let v2 = transforms::v1_to_v2(v1).expect("migrate");
+        let trace = &v2["history"][0]["data"]["trace"];
+        assert_eq!(
+            trace.as_array().map(|a| a.len()),
+            Some(1),
+            "stale turn keeps its synthetic trace",
+        );
+        assert_eq!(trace[0]["name"], "materialize");
+        assert_eq!(trace[0]["summary"], "SELECT 1");
+        // The stale anchor survives untouched (lossless reconstructable part).
+        assert_eq!(
+            v2["history"][0]["data"]["outcome"]["data"]["stale"]["reason"],
+            "Replaced",
+        );
     }
 }

@@ -125,7 +125,7 @@ pub struct RecipeTraceEntry {
     /// Tool name -- a built-in (`explore` / `materialize` / `describe` /
     /// `sample`) or an external MCP server's tool name.
     pub name: String,
-    /// Operation badge (ADR-0083 read/write/execute/network) -- presentation
+    /// Operation badge (ADR-0080 read/write/execute/network) -- presentation
     /// only. Reuses the approval-gateway classification so a reopened turn
     /// renders the same badge the live approval card did.
     pub operation_kind: OperationKind,
@@ -187,10 +187,12 @@ impl TurnProvenance {
     }
 }
 
-/// Maximum length of a synthesized trace entry's argument summary. Mirrors the
-/// agent loop's `SUMMARY_MAX` so a synthetic single-call trace matches what a
-/// live `materialize` call would have recorded.
-const TRACE_SUMMARY_MAX: usize = 120;
+/// Maximum length of a trace entry's argument summary (ADR-0078). The single
+/// source for the trace-summary truncation cap: both the synthetic single-call
+/// trace (this module's [`synthetic_materialize_trace`]) and the agent loop's
+/// live `materialize` summary (`summarize_field`) reuse it, so a reopened v1
+/// turn and a fresh live turn persist the same truncation shape.
+pub(crate) const TRACE_SUMMARY_MAX: usize = 120;
 
 /// Synthesize the single-call execution trace for a Materialized turn's SQL
 /// (ADR-0078). v1-era turns ran exactly one productive SQL under the single-SQL
@@ -203,19 +205,21 @@ pub(crate) fn synthetic_materialize_trace(sql: &str) -> Vec<RecipeTraceEntry> {
     vec![RecipeTraceEntry {
         name: crate::tools::definitions::TOOL_MATERIALIZE.to_string(),
         operation_kind: OperationKind::Write,
-        summary: truncate_sql_summary(sql),
+        summary: truncate_trace_summary(sql),
         success: true,
         result_excerpt: String::new(),
     }]
 }
 
-/// Truncate a SQL string for a trace summary. Appends an ellipsis when cut, so
-/// a long SQL does not bloat the persisted trace while staying recognizable.
-fn truncate_sql_summary(sql: &str) -> String {
-    if sql.chars().count() <= TRACE_SUMMARY_MAX {
-        sql.to_string()
+/// Truncate a trace-entry summary string to [`TRACE_SUMMARY_MAX`] chars,
+/// appending an ellipsis when cut. Shared by [`synthetic_materialize_trace`]
+/// and the agent loop's live `materialize` summary (`summarize_field`) so a
+/// persisted trace never bloats the `.duck` file while staying recognizable.
+pub(crate) fn truncate_trace_summary(s: &str) -> String {
+    if s.chars().count() <= TRACE_SUMMARY_MAX {
+        s.to_string()
     } else {
-        let head: String = sql
+        let head: String = s
             .chars()
             .take(TRACE_SUMMARY_MAX.saturating_sub(1))
             .collect();

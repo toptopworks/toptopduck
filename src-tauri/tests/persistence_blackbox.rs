@@ -1786,6 +1786,37 @@ fn open_duck_migrates_a_v1_recipe_to_v2_and_synthesizes_trace() {
         vec!["result_1".to_string(), "result_2".to_string()],
     );
     assert_eq!(chain[1].sql, "SELECT 2 * n FROM \"result_1\"");
+
+    // Idempotency (AC5): re-opening the now-v2 file must NOT re-migrate or
+    // layer a second trace. A v2 -> v2 hop is a no-op (migrate_to_current's
+    // while-guard), so each Materialized turn still carries exactly one
+    // synthetic trace entry after a second open. Pins the classic migration
+    // double-apply bug -- a `<` vs `<=` boundary flip would re-run v1_to_v2 and
+    // double the trace. Drop the first session so its .duck lock releases
+    // before the second resume tries to acquire.
+    drop(resumed);
+    let persisted2 = read_duck(&duck).expect("read v2 once");
+    fs::write(&duck, serde_json::to_string(&persisted2).unwrap()).expect("rewrite v2");
+    let (_events2, cb2) = collect_events();
+    let _resumed2 =
+        resume_defaults(&duck, Arc::new(CancelToken::new()), cb2).expect("re-resume v2");
+    let persisted3 = read_duck(&duck).expect("read v2 twice");
+    assert_eq!(persisted3.format_version(), RECIPE_FORMAT_VERSION);
+    let turns2: Vec<_> = persisted3
+        .history
+        .iter()
+        .filter_map(|e| match e {
+            RecipeEntry::Turn(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(turns2.len(), 2, "both turns preserved after re-open");
+    assert_eq!(
+        turns2[0].trace.len(),
+        1,
+        "v2 -> v2 is idempotent: trace not duplicated",
+    );
+    assert_eq!(turns2[1].trace.len(), 1);
 }
 
 /// AC1: move the .duck AND its in-subtree source together -> the relative
