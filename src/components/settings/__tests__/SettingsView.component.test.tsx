@@ -77,7 +77,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
       active_profile: "default",
     },
     export: { last_dir: null, default_format: "csv" },
-    tunables: { retry_budget: 3, window_turns: 10, far_window: 30 },
+    tunables: { window_turns: 10, far_window: 30 },
     recent_files: [],
     shell: { sidebar_collapsed: false, rail_collapsed: false, sidebar_grouping: "flat" },
   };

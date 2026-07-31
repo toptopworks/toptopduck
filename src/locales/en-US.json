@@ -272,6 +272,7 @@
   "thread.activeChip.title": "Question names \"{name}\"",
   "thread.ariaLabel": "Conversation history",
   "thread.assumption": "Assumption: {text}",
+  "thread.outcome.agent": "Answered",
   "thread.outcome.cancelled": "Cancelled",
   "thread.outcome.clarify": "Needs clarification",
   "thread.outcome.failed": "Failed",

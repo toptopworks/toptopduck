@@ -161,15 +161,15 @@ pub enum RuntimeKind {
 /// it and which skills were active at assembly time. The persisted audit anchor
 /// for "how was this answer produced".
 ///
-/// Both fields are optional / empty by default. v1-era turns (migrated or
-/// TurnRunner-live) carry no runtime or skill provenance, and
-/// [`Recipe::build_recipe`] writes the default until the agent-loop wiring slice
-/// populates real values. `#[serde(default)]` keeps older v2 recipes (and the
+/// Both fields are optional / empty by default. v1-era turns (migrated) and
+/// live turns from before runtime tracking was wired (issue #319) carry no
+/// runtime or skill provenance, and [`Recipe::build_recipe`] writes the
+/// default until then. `#[serde(default)]` keeps older v2 recipes (and the
 /// migration output) deserializing cleanly.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TurnProvenance {
     /// The runtime that drove this turn (ADR-0081), or `None` for turns created
-    /// before runtime tracking (v1 migrated, or TurnRunner-era live turns).
+    /// before runtime tracking (v1 migrated, or live turns predating #319).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<RuntimeKind>,
     /// The active skill ids at this turn's assembly time (ADR-0079/0040).
@@ -198,9 +198,10 @@ pub(crate) const TRACE_SUMMARY_MAX: usize = 120;
 /// (ADR-0078). v1-era turns ran exactly one productive SQL under the single-SQL
 /// contract, so their trajectory is one `materialize` call -- both the v1->v2
 /// migration and [`Recipe::build_recipe`] use this helper so a reopened v1
-/// session shows the same one-step trajectory it produced live, and a fresh
-/// TurnRunner-era turn persists the same shape. The summary is the verbatim SQL
-/// truncated to [`TRACE_SUMMARY_MAX`].
+/// session shows the same one-step trajectory it produced live. Fresh
+/// agent-loop turns (issue #318) persist the same shape for their primary
+/// promotion until #319 lands the real multi-call trace. The summary is the
+/// verbatim SQL truncated to [`TRACE_SUMMARY_MAX`].
 pub(crate) fn synthetic_materialize_trace(sql: &str) -> Vec<RecipeTraceEntry> {
     vec![RecipeTraceEntry {
         name: crate::tools::definitions::TOOL_MATERIALIZE.to_string(),

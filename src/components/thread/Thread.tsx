@@ -405,21 +405,27 @@ function outcomeVisual(
         // (question-mark semantics preserved). Follow-up: restore
         // MessageSquareQuestion once lucide ships it, OR amend ADR-0050 to make
         // MessageCircleQuestion the canonical glyph. The label still names
-        // which sub-kind (Clarify vs Refuse) so the split is legible without it.
+        // the sub-kind (Agent vs Clarify vs Refuse) so the split is legible
+        // without it.
         Icon: MessageCircleQuestion,
-        // B is intentionally neutral (ADR-0047 B!=C; ADR-0017 honest refuse /
-        // clarify must NOT read as failure, so no warm tint).
+        // B is intentionally neutral (ADR-0047 B!=C; an honest answer /
+        // refuse / clarify must NOT read as failure, so no warm tint).
         tone: "text-muted-foreground",
         label:
-          outcome.data.text_kind === "Clarify"
+          outcome.data.text_kind === "Agent"
             ? intl.formatMessage({
-                id: "thread.outcome.clarify",
-                defaultMessage: "Needs clarification",
+                id: "thread.outcome.agent",
+                defaultMessage: "Answered",
               })
-            : intl.formatMessage({
-                id: "thread.outcome.refused",
-                defaultMessage: "Cannot fulfill",
-              }),
+            : outcome.data.text_kind === "Clarify"
+              ? intl.formatMessage({
+                  id: "thread.outcome.clarify",
+                  defaultMessage: "Needs clarification",
+                })
+              : intl.formatMessage({
+                  id: "thread.outcome.refused",
+                  defaultMessage: "Cannot fulfill",
+                }),
       };
     case "Failed":
       return {
@@ -778,7 +784,15 @@ function TurnBody({
     }
     case "Textual": {
       const { text_kind, body, assumption } = record.outcome.data;
-      const isClarify = text_kind === "Clarify";
+      // The Agent kind (the tool-calling contract's terminal text, ADR-0077)
+      // renders as a plain answer -- the body IS the reply, so no kind badge.
+      // The legacy Clarify / Refuse kinds keep their action-signaling badge.
+      const badge =
+        text_kind === "Clarify" ? (
+          <FormattedMessage id="thread.outcome.clarify" defaultMessage="Needs clarification" />
+        ) : text_kind === "Refuse" ? (
+          <FormattedMessage id="thread.outcome.refused" defaultMessage="Cannot fulfill" />
+        ) : null;
       return (
         <p
           className={cn(
@@ -786,13 +800,9 @@ function TurnBody({
             text_kind.toLowerCase(),
           )}
         >
-          <span className="textual-kind inline-block mr-1 text-muted-foreground">
-            {isClarify ? (
-              <FormattedMessage id="thread.outcome.clarify" defaultMessage="Needs clarification" />
-            ) : (
-              <FormattedMessage id="thread.outcome.refused" defaultMessage="Cannot fulfill" />
-            )}
-          </span>
+          {badge && (
+            <span className="textual-kind inline-block mr-1 text-muted-foreground">{badge}</span>
+          )}
           <span className="textual-body text-foreground">{body}</span>
           <AssumptionNote assumption={assumption} />
         </p>

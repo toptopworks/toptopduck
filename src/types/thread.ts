@@ -6,10 +6,14 @@
 import type { DatasetDescriptor } from "./dataset";
 import type { SourceLifecycleEvent } from "./lifecycle";
 
-// Which kind of non-SQL textual response the provider returned (ADR-0009
-// textual branch): a disambiguation question (ADR-0018) or an out-of-scope
-// refusal (ADR-0017). Mirrors the Rust TextKind (a bare variant string).
-export type TextKind = "Clarify" | "Refuse";
+// Which kind of textual response a turn produced (ADR-0009 textual branch,
+// evolved by ADR-0077/0081): a plain agent answer (the tool-calling
+// contract's terminal text -- an honest answer, a clarification, and a
+// default-skillset boundary refusal (ADR-0079) all ride this kind), or -- on
+// legacy single-SQL data only -- an explicit disambiguation question
+// (ADR-0018) / out-of-scope refusal (ADR-0017). Mirrors the Rust TextKind (a
+// bare variant string).
+export type TextKind = "Agent" | "Clarify" | "Refuse";
 
 // v1 chart whitelist (ADR-0016). Mirrors the Rust ChartKind (serde
 // rename_all="lowercase" -> a bare lowercase variant string). The closed set a

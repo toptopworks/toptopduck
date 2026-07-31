@@ -1,8 +1,9 @@
 //! Window assembler (issue #24, ADR-0023/0026/0039/0011): builds the LLM payload
 //! handed to the provider each turn -- the windowed conversation history plus
 //! every working-set dataset, pruned by the privacy controls. Pure over the
-//! working set + conversation thread; the session calls it once per turn and the
-//! retry loop re-feeds the result, so every attempt sees an identical payload.
+//! working set + conversation thread; the session calls it once per turn and
+//! the agent loop re-sends the assembled system prompt + tool table on every
+//! round-trip, so the model sees an identical context across the whole turn.
 //!
 //! This is the one place that turns the session's raw state (the working set +
 //! the always-visible thread) into the provider-facing payload. The provider
@@ -13,6 +14,10 @@
 use std::collections::HashSet;
 
 use crate::model::{ColumnSchema, DatasetDescriptor, TurnOutcome, TurnRecord};
+use crate::provider::prompt::{
+    build_tool_system_prompt, render_response, render_summary_turn_note, ResponseLocale,
+};
+use crate::provider::tool_calling::{ToolTurnMessage, ToolTurnRequest};
 use crate::provider::{ColumnRef, DatasetRef, ProviderRequest, ResponsePayload, TurnPayload};
 use crate::workingset::WorkingSet;
 
@@ -25,6 +30,12 @@ pub const WINDOW_TURNS: usize = 20;
 /// the verbatim question cut at this many chars -- never an LLM-regenerated
 /// summary.
 const FAR_QUESTION_EXCERPT_CHARS: usize = 80;
+
+/// Reply length cap for tool-calling turns (ADR-0081). Mirrors the single-shot
+/// adapters' `MAX_TOKENS` -- the tool-calling contract terminates in a plain
+/// text answer whose length profile matches the legacy one-SQL reply, so the
+/// two paths share one ceiling.
+const TOOL_TURN_MAX_TOKENS: u32 = 4096;
 
 /// Assemble the provider request for one turn (ADR-0023/0026/0039/0011): the
 /// asking question, the windowed conversation history, and every working-set
@@ -41,6 +52,68 @@ pub fn assemble(
         datasets: assemble_datasets(working_set, history),
         active: resolve_active(working_set, history),
     }
+}
+
+/// Assemble the tool-calling request for one agent turn (ADR-0081, issue #318):
+/// the tool-use system prompt (capability boundary + locale directive + the
+/// windowed schema context), the windowed conversation as user/assistant
+/// message turns closed by the asking question, and the built-in tool table.
+/// Pure over the same state as [`assemble`] -- the single-SQL payload is built
+/// first and reused as the schema-context source, so the two paths can never
+/// disagree on which datasets / samples / privacy pruning the model sees.
+///
+/// The agent loop owns the request for the whole turn: each round-trip re-sends
+/// this system + tool table with the conversation extended by the prior tool
+/// batch (the mid-turn tool results never re-window the schema context).
+pub fn assemble_tool_turn(
+    question: &str,
+    working_set: &WorkingSet,
+    history: &[TurnRecord],
+    locale: ResponseLocale,
+) -> ToolTurnRequest {
+    let request = assemble(question, working_set, history);
+    ToolTurnRequest {
+        system: build_tool_system_prompt(&request, locale),
+        messages: tool_turn_messages(&request),
+        tools: crate::tools::builtin_table(),
+        max_tokens: TOOL_TURN_MAX_TOKENS,
+    }
+}
+
+/// Render the windowed history as tool-calling messages (ADR-0023/0039),
+/// closed by the asking question. Mirrors the single-shot adapters'
+/// `build_messages` turn-for-turn: a full turn is a user question + an
+/// assistant turn carrying the rendered prior response; a far-window summary
+/// is the verbatim question excerpt + the result note. The prior assistant
+/// turns carry empty tool-call lists -- the history predates the tool
+/// contract (or is rendered text either way), so no `tool_use` pairing rides
+/// it; the model reads its own prior turns as prose, exactly as on the
+/// single-shot path.
+fn tool_turn_messages(request: &ProviderRequest) -> Vec<ToolTurnMessage> {
+    let mut messages = Vec::with_capacity(request.history.len() * 2 + 1);
+    for turn in &request.history {
+        match turn {
+            TurnPayload::Full { question, response } => {
+                messages.push(ToolTurnMessage::user(question.clone()));
+                messages.push(ToolTurnMessage::Assistant {
+                    text: Some(render_response(response)),
+                    tool_calls: Vec::new(),
+                });
+            }
+            TurnPayload::Summary {
+                question_excerpt,
+                result,
+            } => {
+                messages.push(ToolTurnMessage::user(question_excerpt.clone()));
+                messages.push(ToolTurnMessage::Assistant {
+                    text: Some(render_summary_turn_note(result)),
+                    tool_calls: Vec::new(),
+                });
+            }
+        }
+    }
+    messages.push(ToolTurnMessage::user(request.question.clone()));
+    messages
 }
 
 /// Resolve the dataset a question targets by default when the user names none

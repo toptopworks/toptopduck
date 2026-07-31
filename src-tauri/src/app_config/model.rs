@@ -41,11 +41,6 @@ const DEFAULT_STATEMENT_TIMEOUT_MS: u64 = 30_000;
 /// named constant elsewhere, so pinned here with the ADR pointer.
 const DEFAULT_FAR_WINDOW: u32 = 100;
 
-/// V1 default per-turn retry budget (ADR-0028). Mirrors `session::TURN_RETRY_BUDGET`
-/// (private); kept in sync by comment. Applying the stored value to the live
-/// orchestrator is a follow-up slice (issue #53 lands the storage layer).
-const DEFAULT_RETRY_BUDGET: u32 = 2;
-
 /// Cap on the recent-files list (issue #53). Keeps the on-disk blob bounded; a
 /// new open unshifts and trims to this length.
 pub const RECENT_FILES_CAP: usize = 10;
@@ -199,11 +194,15 @@ pub struct ShellPrefs {
 /// Tunable defaults (ADR-0013/0023/0028). Persisted so a user's tuned values
 /// survive a restart. Applying them to the live orchestrator/window assembler is
 /// a follow-up slice; this artifact stores + round-trips them per issue #53 AC.
+///
+/// The per-turn retry budget (ADR-0028) was retired with the single-SQL turn
+/// contract (ADR-0077, issue #318): the agent loop self-corrects from
+/// tool-level errors instead of blind retry, so the tunable lost its subject.
+/// A stale `retry_budget` key in a pre-retirement file is harmless (ignored at
+/// parse), so no format-version bump accompanies the removal -- the #268
+/// `window` retirement set the precedent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tunables {
-    /// Per-turn retry budget (ADR-0028).
-    #[serde(default = "default_retry_budget")]
-    pub retry_budget: u32,
     /// Recent-turn window size N (ADR-0023).
     #[serde(default = "default_window_turns")]
     pub window_turns: u32,
@@ -215,15 +214,10 @@ pub struct Tunables {
 impl Default for Tunables {
     fn default() -> Self {
         Self {
-            retry_budget: DEFAULT_RETRY_BUDGET,
             window_turns: WINDOW_TURNS as u32,
             far_window: DEFAULT_FAR_WINDOW,
         }
     }
-}
-
-fn default_retry_budget() -> u32 {
-    DEFAULT_RETRY_BUDGET
 }
 
 fn default_window_turns() -> u32 {

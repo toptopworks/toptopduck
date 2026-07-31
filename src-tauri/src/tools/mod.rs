@@ -8,25 +8,16 @@
 //! configured MCP servers (#301) and skill-declared tools join the same table
 //! at the gateway aggregation layer in a later slice.
 //!
-//! Coexistence with the legacy single-SQL path (ADR-0009 / issue AC #4): this
-//! module is purely additive. The [`Materializer`] trait the `materialize` tool
-//! delegates to is the SAME trait [`crate::session::turn_runner::TurnRunner`]
-//! drives on the single-SQL path, so numbering, caps, provenance, and stale-GC
-//! are inherited byte-for-byte -- no parallel materialize implementation. The
-//! single-SQL turn execution path (`Session::ask` / `TurnRunner::run_with_phase`)
-//! is untouched.
+//! The [`Materializer`] trait the `materialize` tool delegates to is the SAME
+//! trait the live-turn agent loop ([`crate::session::agent_loop::AgentLoop`],
+//! ADR-0081) and the resume replay drive, so numbering, caps, provenance, and
+//! stale-GC are inherited byte-for-byte -- no parallel materialize
+//! implementation. The single-SQL turn contract (ADR-0009) was retired by
+//! issue #318; tool-calling turns are the sole live path.
 //!
 //! Namespace isolation (AC #3): only `materialize` creates a working-set object.
 //! `explore` runs on a scratch sandbox that is dropped per call, so a scratch
 //! table can never reach the working set. There is no raw-DDL tool.
-
-// Expand-phase status (issue #292): the dispatch surface is built but not yet
-// driven by any production caller -- the agent loop that will call it lands in
-// #295. The unit tests in each module exercise the executors; the non-test lib
-// build has no caller yet, so the whole subtree is dead code until #295 wires
-// `dispatch` into a turn. The allow is module-scoped (propagates to the child
-// modules) and should be removed once #295 adds the first production caller.
-#![allow(dead_code)]
 
 pub mod definitions;
 pub mod describe;

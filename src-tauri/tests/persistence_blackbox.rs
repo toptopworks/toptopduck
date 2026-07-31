@@ -16,12 +16,13 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use serde_json::json;
 use toptopduck_lib::persistence::SaveError;
+use toptopduck_lib::provider::tool_calling::{ToolTurnReply, ToolTurnRequest, ToolUse};
 use toptopduck_lib::{
     is_resuming, ActiveAbandoned, ActiveResolution, CancelToken, FakeProvider, LoadOutcome,
     PendingConflict, Provider, ProviderError, ProviderReply, ProviderRequest, ResumeError,
-    ResumeEvent, Session, SourceIssue, SourceResolution, TextKind, ThreadEntry, TurnOutcome,
-    UnwiredProvider,
+    ResumeEvent, Session, SourceIssue, SourceResolution, ThreadEntry, TurnOutcome, UnwiredProvider,
 };
 
 /// Resume with default Abort callbacks for the issue #49 interactive decision
@@ -108,12 +109,24 @@ fn assert_save_atomic_left_no_residue(duck: &Path) {
     );
 }
 
-fn reply_sql(sql: &str) -> ProviderReply {
-    ProviderReply::Sql {
-        sql: sql.to_string(),
-        viz: None,
-        assumption: None,
-    }
+/// A materialize tool call promoting `sql` -- one round-trip's reply.
+fn materialize(sql: &str) -> ToolTurnReply {
+    ToolTurnReply::ToolCalls(vec![ToolUse {
+        id: "tu_1".into(),
+        name: "materialize".into(),
+        input: json!({ "sql": sql }),
+    }])
+}
+
+/// A terminal text answer ending the turn.
+fn answer(text: &str) -> ToolTurnReply {
+    ToolTurnReply::Text(text.to_string())
+}
+
+/// Script a question as one materialize call promoting `sql` plus a terminal
+/// text answer -- the standard productive-turn trajectory.
+fn productive(sql: &str) -> Vec<Result<ToolTurnReply, ProviderError>> {
+    vec![Ok(materialize(sql)), Ok(answer("完成"))]
 }
 
 /// Build the pre-close session used by every test: one CSV source, two
@@ -124,23 +137,22 @@ fn reply_sql(sql: &str) -> ProviderReply {
 fn build_session(duck: &Path) -> Session {
     let csv = fixture("people.csv");
     let provider = FakeProvider::new()
-        .scripted(
+        .scripted_tool_turn_seq(
             "多少人",
-            reply_sql("SELECT COUNT(*) AS n FROM \"people\".data"),
+            productive("SELECT COUNT(*) AS n FROM \"people\".data"),
         )
-        .scripted(
+        .scripted_tool_turn_seq(
             "最高分",
-            reply_sql("SELECT MAX(score) AS m FROM \"people\".data"),
+            productive("SELECT MAX(score) AS m FROM \"people\".data"),
         )
-        .scripted("预测下个月", {
-            // A textual no-result turn (ADR-0017 refuse): the body is carried
-            // verbatim and is NOT re-asked on resume (ADR-0034 static render).
-            ProviderReply::Text {
-                kind: TextKind::Refuse,
-                body: "v1 不做预测（仅描述性统计）".into(),
-                assumption: None,
-            }
-        });
+        .scripted_tool_turn(
+            "预测下个月",
+            // A textual no-result turn (ADR-0079 boundary refusal): the model's
+            // terminal text carries the refusal verbatim and is NOT re-asked on
+            // resume (ADR-0034 static render). The tool-calling contract has no
+            // structural refuse marker, so it rides TextKind::Agent.
+            answer("v1 不做预测（仅描述性统计）"),
+        );
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &csv);
     // Two productive turns -> result_1, result_2.
@@ -388,9 +400,9 @@ fn rename_survives_resume_and_references_still_resolve() {
     let dir = tempfile::tempdir().expect("tempdir");
     let duck = dir.path().join("s.duck");
     let csv = fixture("people.csv");
-    let provider = FakeProvider::new().scripted(
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
         "多少人",
-        reply_sql("SELECT COUNT(*) AS n FROM \"people\".data"),
+        productive("SELECT COUNT(*) AS n FROM \"people\".data"),
     );
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &csv);
@@ -546,9 +558,9 @@ fn resume_is_cancellable_mid_replay() {
 /// The source file's stem MUST be `people` so the derived reference name is
 /// `people` (the scripted SQL names `"people".data`).
 fn build_single_source_session(duck: &Path, source_path: &Path) -> Session {
-    let provider = FakeProvider::new().scripted(
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
         "多少人",
-        reply_sql("SELECT COUNT(*) AS n FROM \"people\".data"),
+        productive("SELECT COUNT(*) AS n FROM \"people\".data"),
     );
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, source_path);
@@ -802,13 +814,13 @@ fn resume_handles_each_source_independently_multi_source() {
     fs::copy(fixture("orders.csv"), &orders_p).expect("copy orders.csv");
 
     let provider = FakeProvider::new()
-        .scripted(
+        .scripted_tool_turn_seq(
             "多少人",
-            reply_sql("SELECT COUNT(*) AS n FROM \"people\".data"),
+            productive("SELECT COUNT(*) AS n FROM \"people\".data"),
         )
-        .scripted(
+        .scripted_tool_turn_seq(
             "多少单",
-            reply_sql("SELECT COUNT(*) AS n FROM \"orders\".data"),
+            productive("SELECT COUNT(*) AS n FROM \"orders\".data"),
         );
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &people_p);
@@ -871,9 +883,9 @@ fn resume_blocks_when_active_source_abandoned_until_user_picks() {
     let orders_p = dir.path().join("orders.csv");
     fs::copy(fixture("orders.csv"), &orders_p).expect("copy orders.csv");
 
-    let provider = FakeProvider::new().scripted(
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
         "多少人",
-        reply_sql("SELECT COUNT(*) AS n FROM \"people\".data"),
+        productive("SELECT COUNT(*) AS n FROM \"people\".data"),
     );
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &orders_p); // orders first
@@ -992,13 +1004,13 @@ fn resume_replay_failure_marks_turn_failed_and_preserves_prior_results() {
     fs::copy(fixture("orders.csv"), &orders_p).expect("copy orders.csv");
 
     let provider = FakeProvider::new()
-        .scripted(
+        .scripted_tool_turn_seq(
             "多少人",
-            reply_sql("SELECT COUNT(*) AS n FROM \"people\".data"),
+            productive("SELECT COUNT(*) AS n FROM \"people\".data"),
         )
-        .scripted(
+        .scripted_tool_turn_seq(
             "多少单",
-            reply_sql("SELECT COUNT(*) AS n FROM \"orders\".data"),
+            productive("SELECT COUNT(*) AS n FROM \"orders\".data"),
         );
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &orders_p); // orders first
@@ -2148,9 +2160,9 @@ fn replace_source_atomically_rewrites_duck_with_stale_chain_and_replaced_event()
     let people = fixture("people.csv");
     let orders = fixture("orders.csv");
 
-    let provider = FakeProvider::new().scripted(
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
         "多少人",
-        reply_sql("SELECT COUNT(*) AS n FROM \"people\".data"),
+        productive("SELECT COUNT(*) AS n FROM \"people\".data"),
     );
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &people);
@@ -2234,9 +2246,9 @@ fn remove_source_atomically_rewrites_duck_with_stale_chain_and_deleted_event() {
     let people = fixture("people.csv");
     let orders = fixture("orders.csv");
 
-    let provider = FakeProvider::new().scripted(
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
         "多少人",
-        reply_sql("SELECT COUNT(*) AS n FROM \"people\".data"),
+        productive("SELECT COUNT(*) AS n FROM \"people\".data"),
     );
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &people);
@@ -2296,13 +2308,13 @@ fn resume_after_replace_excludes_stale_from_replay_but_keeps_marked_stale() {
     let orders = fixture("orders.csv");
 
     let provider = FakeProvider::new()
-        .scripted(
+        .scripted_tool_turn_seq(
             "多少人",
-            reply_sql("SELECT COUNT(*) AS n FROM \"people\".data"),
+            productive("SELECT COUNT(*) AS n FROM \"people\".data"),
         )
-        .scripted(
+        .scripted_tool_turn_seq(
             "现在多少",
-            reply_sql("SELECT COUNT(*) AS m FROM \"people\".data"),
+            productive("SELECT COUNT(*) AS m FROM \"people\".data"),
         );
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &people);
@@ -2388,13 +2400,13 @@ fn resume_after_remove_excludes_stale_from_replay_but_keeps_marked_stale() {
     let orders = fixture("orders.csv");
 
     let provider = FakeProvider::new()
-        .scripted(
+        .scripted_tool_turn_seq(
             "多少人",
-            reply_sql("SELECT COUNT(*) AS n FROM \"people\".data"),
+            productive("SELECT COUNT(*) AS n FROM \"people\".data"),
         )
-        .scripted(
+        .scripted_tool_turn_seq(
             "多少单",
-            reply_sql("SELECT COUNT(*) AS m FROM \"orders\".data"),
+            productive("SELECT COUNT(*) AS m FROM \"orders\".data"),
         );
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &people);
@@ -2453,11 +2465,12 @@ fn resume_after_remove_excludes_stale_from_replay_but_keeps_marked_stale() {
 // (T4), ActiveMissing (T5), SaveError (T6), in-flight-no-write (AC2), resume-
 // no-LLM (T8), and the is_resuming backend guard (H8).
 
-/// A provider that counts `generate()` calls (review T8, issue #55). Wraps the
-/// not-wired semantics (every call returns NotWired) behind a counter so a test
-/// can prove resume is LLM-free: across a full resume with a productive chain,
-/// the counter stays at zero. `Send` so the session can hold it behind the
-/// `Box<dyn Provider>`.
+/// A provider that counts tool-turn round-trips (review T8, issue #55). Wraps
+/// the not-wired semantics (every call returns NotWired) behind a counter so a
+/// test can prove resume is LLM-free: across a full resume with a productive
+/// chain, the counter stays at zero. `Send` so the session can hold it behind
+/// the `Box<dyn Provider>`. The single-shot `generate` counts too (the legacy
+/// surface; the live ask path drives `generate_tool_turn`).
 struct CountingProvider {
     calls: Arc<AtomicUsize>,
 }
@@ -2467,12 +2480,20 @@ impl Provider for CountingProvider {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Err(ProviderError::NotWired)
     }
+
+    fn generate_tool_turn(
+        &self,
+        _request: &ToolTurnRequest,
+    ) -> Result<ToolTurnReply, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(ProviderError::NotWired)
+    }
 }
 
 /// T8 / AC7 (issue #55): resume re-executes stored SQL and asks the CALLER
 /// (not a cloud model) for every integrity decision. A counting provider must
-/// observe ZERO `generate()` calls across a full resume of a session that had
-/// two productive turns + a textual turn -- every replay ran LLM-free.
+/// observe ZERO round-trips across a full resume of a session that had two
+/// productive turns + a textual turn -- every replay ran LLM-free.
 #[test]
 fn resume_does_not_call_the_cloud_llm() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2955,16 +2976,23 @@ fn save_atomic_failure_leaves_existing_recipe_bytes_unchanged() {
 struct WriteProbeProvider {
     duck: PathBuf,
     cancel: Arc<CancelToken>,
-    /// Snapshot of the recipe bytes taken inside `generate()` (mid-flight),
-    /// before cancel fires -- stashed so the test can compare against the
-    /// pre-turn bytes.
+    /// Snapshot of the recipe bytes taken inside the first round-trip
+    /// (mid-flight), before cancel fires -- stashed so the test can compare
+    /// against the pre-turn bytes.
     mid_flight: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl Provider for WriteProbeProvider {
     fn generate(&self, _request: &ProviderRequest) -> Result<ProviderReply, ProviderError> {
+        Err(ProviderError::NotWired)
+    }
+
+    fn generate_tool_turn(
+        &self,
+        _request: &ToolTurnRequest,
+    ) -> Result<ToolTurnReply, ProviderError> {
         // Mid-flight snapshot: persist_if_bound has NOT run yet (it runs in
-        // record_turn, AFTER generate returns), so this should equal the
+        // record_turn, AFTER the loop returns), so this should equal the
         // pre-turn bytes.
         if let Ok(bytes) = fs::read(&self.duck) {
             *self.mid_flight.lock().expect("mid_flight poisoned") = Some(bytes);
@@ -2973,13 +3001,9 @@ impl Provider for WriteProbeProvider {
         while !self.cancel.is_requested() {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        // Reply discarded -- the orchestrator sees the cancel flag and lands
+        // Reply discarded -- the loop sees the cancel flag and lands
         // Cancelled.
-        Ok(ProviderReply::Sql {
-            sql: "SELECT 1".into(),
-            viz: None,
-            assumption: None,
-        })
+        Ok(ToolTurnReply::Text("never".into()))
     }
 }
 

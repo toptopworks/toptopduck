@@ -1133,7 +1133,7 @@ function baseAppConfig(
       active_profile: "default",
     },
     export: { last_dir: null, default_format: "csv" },
-    tunables: { retry_budget: 3, window_turns: 6, far_window: 12 },
+    tunables: { window_turns: 6, far_window: 12 },
     recent_files: [],
     shell: { ...shell, sidebar_grouping: "flat" },
   };

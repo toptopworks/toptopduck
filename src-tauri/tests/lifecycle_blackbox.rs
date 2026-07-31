@@ -10,9 +10,13 @@
 use std::path::{Path, PathBuf};
 
 use rust_xlsxwriter::Workbook;
+use serde_json::json;
+use toptopduck_lib::provider::tool_calling::{
+    ToolTurnMessage, ToolTurnReply, ToolTurnRequest, ToolUse,
+};
 use toptopduck_lib::{
-    FakeProvider, LoadOutcome, ProviderReply, RemoveSourceError, Session, SheetGuidance,
-    SheetRectify, SourceLifecycleKind, StaleReason, ThreadEntry, TurnFailure, TurnOutcome,
+    FakeProvider, LoadOutcome, RemoveSourceError, Session, SheetGuidance, SheetRectify,
+    SourceLifecycleKind, StaleReason, ThreadEntry, TurnFailure, TurnOutcome,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -35,22 +39,52 @@ fn load_source(session: &mut Session, path: &Path) {
     }
 }
 
-fn reply_sql(sql: &str) -> ProviderReply {
-    ProviderReply::Sql {
-        sql: sql.to_string(),
-        viz: None,
-        assumption: None,
-    }
+/// A materialize tool call promoting `sql` -- one round-trip's reply.
+fn materialize(sql: &str) -> ToolTurnReply {
+    ToolTurnReply::ToolCalls(vec![ToolUse {
+        id: "tu_1".into(),
+        name: "materialize".into(),
+        input: json!({ "sql": sql }),
+    }])
 }
 
-/// A session whose provider scripts one stable SQL reply per question. One
-/// session per test keeps the script map scoped and deterministic.
+/// A terminal text answer ending the turn.
+fn answer(text: &str) -> ToolTurnReply {
+    ToolTurnReply::Text(text.to_string())
+}
+
+/// Script a question as one materialize call promoting `sql` plus a terminal
+/// text answer -- the standard productive-turn trajectory.
+fn productive(sql: &str) -> Vec<Result<ToolTurnReply, toptopduck_lib::ProviderError>> {
+    vec![Ok(materialize(sql)), Ok(answer("完成"))]
+}
+
+/// A session whose provider scripts each question as one materialize call
+/// promoting `sql` plus a terminal text answer. One session per test keeps the
+/// script map scoped and deterministic.
 fn session_with_scripts(scripts: &[(&str, &str)]) -> Session {
     let mut provider = FakeProvider::new();
     for (question, sql) in scripts {
-        provider = provider.scripted(question, reply_sql(sql));
+        provider = provider.scripted_tool_turn_seq(question, productive(sql));
     }
     Session::with_provider(Box::new(provider)).expect("session")
+}
+
+/// The captured tool-turn request a question's turn assembled FIRST (one
+/// capture per round-trip; the first round-trip ends with the asking question
+/// and carries no fed-back tool results yet).
+fn request_for<'a>(buf: &'a [ToolTurnRequest], question: &str) -> &'a ToolTurnRequest {
+    buf.iter()
+        .find(|r| {
+            let ends_with_question =
+                matches!(r.messages.last(), Some(ToolTurnMessage::User { content }) if content == question);
+            let first_round = !r
+                .messages
+                .iter()
+                .any(|m| matches!(m, ToolTurnMessage::ToolResult { .. }));
+            ends_with_question && first_round
+        })
+        .unwrap_or_else(|| panic!("no captured first-round request for {question}"))
 }
 
 /// Count source lifecycle events of `kind` in the timeline (ADR-0040).
@@ -499,20 +533,20 @@ fn timeline_interleaves_turns_and_source_events_in_order() {
 fn source_events_do_not_enter_the_llm_turn_window() {
     // ADR-0040 / AC: source lifecycle events are first-class in the thread but
     // NOT turns -- they never enter the LLM turn window or occupy an N=20 slot.
-    // Proved by inspecting the request the window assembler handed the fake: the
-    // two Added events are in the timeline yet the windowed history counts only
-    // prior turns.
+    // Proved by inspecting the tool-turn request the window assembler handed
+    // the fake: the two Added events are in the timeline yet the windowed
+    // message array counts only prior turns.
     let mut provider = FakeProvider::new();
     provider = provider
-        .scripted(
+        .scripted_tool_turn_seq(
             "first",
-            reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+            productive(r#"SELECT COUNT(*) AS n FROM "people".data"#),
         )
-        .scripted(
+        .scripted_tool_turn_seq(
             "second",
-            reply_sql(r#"SELECT COUNT(*) AS n FROM "orders".data"#),
+            productive(r#"SELECT COUNT(*) AS n FROM "orders".data"#),
         );
-    let captured = provider.captured();
+    let captured = provider.captured_tool_turns();
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
 
     load_source(&mut session, &fixture("people.csv")); // Added
@@ -522,30 +556,34 @@ fn source_events_do_not_enter_the_llm_turn_window() {
     session.ask("second"); // window from [Added, Added, Turn(first)] -> turns only
 
     let captured = captured.lock().expect("capture lock");
-    assert_eq!(captured.len(), 2, "one request captured per ask");
-    // First ask: no prior turns -> the windowed history is empty. If the two
-    // Added events leaked into the window, this would be 2.
+    // First ask: no prior turns -> the message array is just the asking
+    // question. If the two Added events leaked into the window, this would
+    // carry them.
+    let first = request_for(&captured, "first");
     assert_eq!(
-        captured[0].history.len(),
-        0,
-        "Added events must not enter the LLM turn window"
-    );
-    // Second ask: exactly one prior turn -> windowed history is 1. If Added
-    // events counted, this would be 3 (2 Added + 1 turn).
-    assert_eq!(
-        captured[1].history.len(),
+        first.messages.len(),
         1,
-        "only prior turns enter the window, not source events"
+        "Added events must not enter the LLM turn window: {:?}",
+        first.messages
+    );
+    // Second ask: exactly one prior turn -> user + assistant + the asking
+    // question = 3 messages. If Added events counted, this would be more.
+    let second = request_for(&captured, "second");
+    assert_eq!(
+        second.messages.len(),
+        3,
+        "only prior turns enter the window, not source events: {:?}",
+        second.messages
     );
 
-    // Stronger ADR-0040 invariant: source events must not leak into the payload
-    // in ANY form -- not just that the turn count is right. A future refactor
-    // that folded source events into the window while keeping the turn count
-    // unchanged would pass the length checks above; this text guard catches it.
-    // "Added"/"Deleted" are SourceLifecycleKind variants -- a TurnPayload's Debug
-    // never emits them, so any hit is a leak.
+    // Stronger ADR-0040 invariant: source events must not leak into the
+    // payload in ANY form -- not just that the message count is right. A
+    // future refactor that folded source events into the window while keeping
+    // the count unchanged would pass the length checks above; this text guard
+    // catches it. "Added"/"Deleted" are SourceLifecycleKind variants -- a
+    // tool-turn message's Debug never emits them, so any hit is a leak.
     for (i, req) in captured.iter().enumerate() {
-        let dump = format!("{req:?}");
+        let dump = format!("{:?}", req.messages);
         assert!(
             !dump.contains("Added") && !dump.contains("Deleted"),
             "request {i}: source-event kind leaked into provider payload: {dump}"
@@ -651,12 +689,24 @@ fn stale_result_remains_visible_in_working_set_and_thread() {
 #[test]
 fn new_question_referencing_stale_result_is_rejected() {
     // AC4 (issue #40, ADR-0013 invariant 2): a stale result_N may not anchor a
-    // new derivation -- the provenance pre-check refuses the SQL with a Failed
-    // turn naming the dead reference, no retry, no execution.
-    let mut session = session_with_scripts(&[
-        ("count", r#"SELECT COUNT(*) AS n FROM "orders".data"#),
-        ("again", r#"SELECT * FROM "result_1""#),
-    ]);
+    // new derivation -- the provenance pre-check refuses the materialize call
+    // before any execution. Under the agent contract (ADR-0077) the refusal
+    // routes back to the model as a tool error; a model that never
+    // self-corrects (the script clamps to the same stale-referencing call)
+    // exhausts the step cap and the turn fails honestly. Nothing derives from
+    // the dead reference.
+    let provider = FakeProvider::new()
+        .scripted_tool_turn_seq(
+            "count",
+            vec![
+                Ok(materialize(r#"SELECT COUNT(*) AS n FROM "orders".data"#)),
+                Ok(answer("done")),
+            ],
+        )
+        // No terminal answer: the stale-referencing call clamps, re-issued
+        // every round-trip until the step cap fails the turn.
+        .scripted_tool_turn("again", materialize(r#"SELECT * FROM "result_1""#));
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
     load_source(&mut session, &fixture("orders.csv")); // active = orders
     session.ask("count"); // result_1 FROM orders
@@ -666,32 +716,43 @@ fn new_question_referencing_stale_result_is_rejected() {
         .expect("cascade");
     assert!(session.get("result_1").unwrap().stale.is_some());
 
-    let outcome = session.ask("again"); // SQL FROM result_1 -> refused
+    let outcome = session.ask("again"); // materialize FROM result_1 -> refused
     match outcome {
-        TurnOutcome::Failed(TurnFailure::StaleReference { reference_name }) => {
-            assert_eq!(
-                reference_name, "result_1",
-                "refusal names the stale reference"
+        TurnOutcome::Failed(TurnFailure::Execute { detail }) => {
+            assert!(
+                detail.contains("did not converge"),
+                "the non-correcting stale-reference loop exhausts the step cap: {detail:?}"
             );
         }
-        other => panic!("expected StaleReference Failed, got {other:?}"),
+        other => panic!("step-cap Failed after stale-reference refusal, got {other:?}"),
     }
+    assert!(
+        session.get("result_2").is_none(),
+        "nothing derived from the stale reference"
+    );
 }
 
 #[test]
 fn stale_result_excluded_from_llm_window() {
     // AC5 (issue #40, ADR-0013 invariant 3): a stale result_N does not enter
-    // the LLM-visible working set. Proved by inspecting the request the window
-    // assembler handed the fake: after result_1 goes stale, the next ask's
-    // dataset list omits it (while the still-active source remains).
+    // the LLM-visible working set. Proved by inspecting the tool-turn request
+    // the window assembler handed the fake: after result_1 goes stale, the
+    // next ask's system-prompt schema context omits it (while the still-active
+    // source remains).
     let mut provider = FakeProvider::new();
     provider = provider
-        .scripted(
+        .scripted_tool_turn_seq(
             "count",
-            reply_sql(r#"SELECT COUNT(*) AS n FROM "orders".data"#),
+            vec![
+                Ok(materialize(r#"SELECT COUNT(*) AS n FROM "orders".data"#)),
+                Ok(answer("done")),
+            ],
         )
-        .scripted("next", reply_sql(r#"SELECT 1 AS n"#));
-    let captured = provider.captured();
+        .scripted_tool_turn_seq(
+            "next",
+            vec![Ok(materialize("SELECT 1 AS n")), Ok(answer("done"))],
+        );
+    let captured = provider.captured_tool_turns();
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
     load_source(&mut session, &fixture("orders.csv")); // active = orders
@@ -702,19 +763,14 @@ fn stale_result_excluded_from_llm_window() {
     session.ask("next"); // window built here
 
     let reqs = captured.lock().expect("capture lock");
-    let last = reqs.last().expect("a request captured");
-    let dataset_names: Vec<&str> = last
-        .datasets
-        .iter()
-        .map(|d| d.reference_name.as_str())
-        .collect();
+    let system = &request_for(&reqs, "next").system;
     assert!(
-        !dataset_names.contains(&"result_1"),
-        "stale result_1 excluded from LLM window, got: {dataset_names:?}"
+        !system.contains("引用名 = result_1"),
+        "stale result_1 excluded from the schema context"
     );
     assert!(
-        dataset_names.contains(&"people"),
-        "active source still present: {dataset_names:?}"
+        system.contains("引用名 = people"),
+        "active source still present in the schema context"
     );
 }
 

@@ -170,10 +170,11 @@ pub(crate) struct ReplayBreak {
 }
 
 /// Resume phase 2/3/4 orchestrator (ADR-0053 Decision 3, issue #66). Borrows
-/// the shared cancel token, the [`Materializer`] (the same trait object
-/// `TurnRunner` drives on the live-turn path), and the recipe -- never the
-/// `Session`. Each phase method borrows `working_set` / [`TurnDeps`] and
-/// returns a structured result; `Session::open_duck` applies it.
+/// the shared cancel token, the [`Materializer`] (the same trait object the
+/// live-turn agent loop drives through the `materialize` tool), and the
+/// recipe -- never the `Session`. Each phase method borrows `working_set` /
+/// [`TurnDeps`] and returns a structured result; `Session::open_duck` applies
+/// it.
 ///
 /// Why a deep module (ADR-0053 Why 1/3): reading resume means reading this file
 /// only, not skipping around a 3500-line god module. Phase 2/4 are pure logic

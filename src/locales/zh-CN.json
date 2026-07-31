@@ -272,6 +272,7 @@
   "thread.activeChip.title": "提问点名「{name}」",
   "thread.ariaLabel": "对话历史",
   "thread.assumption": "假设：{text}",
+  "thread.outcome.agent": "已回答",
   "thread.outcome.cancelled": "已取消",
   "thread.outcome.clarify": "需要澄清",
   "thread.outcome.failed": "失败",

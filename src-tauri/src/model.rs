@@ -347,24 +347,36 @@ impl std::error::Error for RenameError {}
 
 // --- Turn / result materialization (issue #22/#23, query loop) --------------
 //
-// The ask -> outcome loop (PRD #1): a question goes in, the orchestrator runs
-// provider-supplied SQL on the session DuckDB, and the rows land as a
-// materialized result_N physical table (ADR-0003/0024). Slice #22 shipped the
-// narrowest result-only loop; #23 widens it to the full ADR-0028 four-way
-// outcome classification (result / textual / failed / cancelled), the always-
-// visible thread, and the single retry budget.
+// The ask -> outcome loop (PRD #1): a question goes in, the agent loop runs
+// tool calls (explore / materialize) on the session DuckDB, and promoted rows
+// land as a materialized result_N physical table (ADR-0003/0024/0077). The
+// ADR-0028 four-way outcome classification (result / textual / failed /
+// cancelled) + the always-visible thread are the stable contract; the single
+// retry budget that once lived here was retired with the single-SQL contract
+// (ADR-0077 -- tool errors route back to the model for self-correction).
 
-/// Which kind of non-SQL textual response the provider returned (ADR-0009
-/// textual branch): a disambiguation question (ADR-0018) or an out-of-scope
-/// refusal (ADR-0017). The frontend renders the two distinctly so a user can
-/// tell "answer me this" from "I won't do that".
+/// Which kind of textual response a turn produced (ADR-0009 textual branch,
+/// evolved by ADR-0077/0081): a plain agent answer, a disambiguation question
+/// (ADR-0018), or an out-of-scope refusal (ADR-0017). The frontend renders the
+/// kinds distinctly so a user can tell an answer from "answer me this" from
+/// "I won't do that".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextKind {
+    /// A plain agent answer (ADR-0077/0081): the runtime's terminal text reply
+    /// on a turn that promoted no result. The native tool-calling contract
+    /// carries no structural clarify/refuse marker -- an honest answer, a
+    /// clarification question, and a default-skillset boundary refusal
+    /// (ADR-0079) all ride this kind; the body text itself carries which.
+    Agent,
     /// A disambiguation / clarification question (ADR-0018): the provider could
     /// not confidently infer the intent and asks back rather than guess.
+    /// Emitted only by the legacy single-SQL contract (ADR-0009), whose JSON
+    /// reply names the kind explicitly; the tool-calling path maps every
+    /// terminal text to [`Self::Agent`].
     Clarify,
     /// An out-of-scope refusal (ADR-0017): the request is outside v1's SQL-only
     /// capability boundary; the provider refuses honestly instead of faking.
+    /// Legacy single-SQL contract only, like [`Self::Clarify`].
     Refuse,
 }
 
@@ -416,11 +428,11 @@ pub struct VizSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum TurnFailure {
-    /// The retry budget exhausted on retriable schema/runtime errors, or a
-    /// transient provider call failure recurred past the budget (ADR-0028).
-    /// `detail` aggregates the distinct per-attempt failures (consecutive
-    /// duplicates deduped) so the user sees the full picture, not just the last
-    /// attempt. Rides the technical fold.
+    /// An execution-level failure (ADR-0028, calibrated by ADR-0077/0081):
+    /// the agent loop's step cap exhausted without the model converging
+    /// (`detail` says so), or a transient provider fault surfaced after the
+    /// adapter's own HTTP retry (the transport detail rides `detail`; blind
+    /// retry is abolished). Rides the technical fold.
     Execute { detail: String },
     /// An engine-level resource cap aborted the turn (ADR-0005 L3): memory
     /// ceiling, result-row ceiling, or a blocked filesystem function. NOT
@@ -517,12 +529,15 @@ pub enum TurnOutcome {
         body: String,
         assumption: Option<String>,
     },
-    /// Outcome C -- a failed turn: the single retry budget (malformed contract
-    /// violation + schema/runtime error, ADR-0028) is exhausted, OR a non-
-    /// retriable cause (resource cap / not-wired / stale reference) aborted it.
-    /// Carries the typed [`TurnFailure`] kind so the frontend renders a locale
-    /// message by kind, never a backend Display string (issue #125). Occupies a
-    /// thread slot but does NOT advance result_N.
+    /// Outcome C -- a failed turn: the agent loop's execution cap exhausted
+    /// without convergence, a provider fault (not-wired / invalid-config /
+    /// transient), or a replayed-chain failure on resume (ADR-0028, calibrated
+    /// by ADR-0077/0081). Tool-level errors (SQL failure / stale reference)
+    /// do NOT fail the turn on the live path -- they route back to the model
+    /// for self-correction (ADR-0077). Carries the typed [`TurnFailure`] kind
+    /// so the frontend renders a locale message by kind, never a backend
+    /// Display string (issue #125). Occupies a thread slot but does NOT
+    /// advance result_N.
     Failed(TurnFailure),
     /// Outcome D -- a cancelled turn (placeholder): abort via user cancel /
     /// resource cap / statement timeout (ADR-0021). The cancel mechanism lands
@@ -549,10 +564,10 @@ pub struct TurnRecord {
 /// blocking (ADR-0009) with two main waits -- the LLM HTTP call and the SQL
 /// execution -- and neither has an intrinsic continuous progress, so the only
 /// honest granularity is a discrete phase marker at each boundary (ADR-0017
-/// honest, no fabricated percentages). The attempt number is 1-based and rises
-/// across blind retries (ADR-0028 retry budget), so a user can tell a retry from
-/// the first try. This rides the side-channel `turn-progress` event; it does NOT
-/// enter the [`TurnOutcome`] contract payload (ADR-0009 unchanged).
+/// honest, no fabricated percentages). The attempt number is the 1-based agent
+/// STEP (round-trip, ADR-0081), so a multi-step trajectory reads "step N"
+/// honestly. This rides the side-channel `turn-progress` event; it does NOT
+/// enter the [`TurnOutcome`] contract payload.
 ///
 /// Externally-tagged on the wire (`{"Thinking":{"attempt":1}}`) to mirror the
 /// sibling [`crate::ResumeEvent`] resume-progress event shape.
