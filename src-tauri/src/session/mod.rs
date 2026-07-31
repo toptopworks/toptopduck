@@ -2,6 +2,7 @@
 //! result_N) plus READ_ONLY-attached source snapshots (ADR-0004/0005/0012). The
 //! per-session temp dir holds the snapshot files and is cleared on drop (ADR-0012).
 
+pub mod agent_loop;
 pub mod materializer;
 pub mod resume;
 pub mod sandbox;

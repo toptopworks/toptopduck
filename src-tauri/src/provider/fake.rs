@@ -19,16 +19,42 @@ use std::time::Duration;
 
 use crate::cancel::CancelToken;
 
+use super::tool_calling::{ToolTurnReply, ToolTurnRequest};
 use super::{Provider, ProviderError, ProviderReply, ProviderRequest};
 
 /// One question's scripted results, drawn in order then clamped to the last.
-struct Script {
+/// Generic over the reply type so the single-shot path (`ProviderReply`) and
+/// the tool-calling path (`ToolTurnReply`) share one queue shape + draw logic.
+struct Script<T> {
     /// Canned results, returned front-first; the last sticks once reached.
-    results: Vec<Result<ProviderReply, ProviderError>>,
-    /// How many times `generate` has been called for this question. `Cell` (not
-    /// `RefCell`) because the counter is a single Copy value -- the trait takes
-    /// `&self`, so interior mutability is required, and a Cell suffices.
+    results: Vec<Result<T, ProviderError>>,
+    /// How many times this script has been drawn. `Cell` (not `RefCell`)
+    /// because the counter is a single Copy value -- the trait takes `&self`,
+    /// so interior mutability is required, and a Cell suffices.
     calls: Cell<usize>,
+}
+
+impl<T: Clone> Script<T> {
+    /// Draw the next canned result front-first, clamping to the last once
+    /// reached: the first call returns `results[0]`, and once only one remains
+    /// it sticks (returned on every later call). A single scripted result is
+    /// therefore stable, while a sequence models "fail N times then recover"
+    /// (single-shot) or "explore, then materialize, then answer" (tool-calling)
+    /// -- exactly what the single retry budget (ADR-0028) and the agent loop
+    /// (#295) need to exercise offline. An empty queue yields `NotWired` so a
+    /// misconfigured script never invents a reply.
+    fn draw(&self) -> Result<T, ProviderError> {
+        let calls = self.calls.get();
+        self.calls.set(calls + 1);
+        // Clamp to the last canned result: a single scripted reply is stable
+        // (always index 0), and a sequence advances one step per call until it
+        // settles on the final result.
+        let idx = calls.min(self.results.len().saturating_sub(1));
+        self.results
+            .get(idx)
+            .cloned()
+            .unwrap_or(Err(ProviderError::NotWired))
+    }
 }
 
 /// A provider that returns preset replies keyed by the exact question text.
@@ -36,7 +62,7 @@ struct Script {
 /// preserving "the orchestrator only ever runs provider-supplied SQL" for every
 /// test (no hidden default that could mask a wiring bug).
 pub struct FakeProvider {
-    scripts: HashMap<String, Script>,
+    scripts: HashMap<String, Script<ProviderReply>>,
     /// Every request handed to `generate`, newest last (one entry per call, so
     /// a retried turn appends repeats of the same request). Shared by `Arc` so
     /// a test can inspect what the window assembler produced after driving the
@@ -53,6 +79,17 @@ pub struct FakeProvider {
     /// requested. Models a long, user-cancellable query for the cancel/timeout
     /// black-box tests (ADR-0021). Empty by default.
     blocking: HashSet<String>,
+    /// Tool-calling scripts keyed by the first user-message text (the asking
+    /// question). The agent loop (#295) drives `generate_tool_turn` once per
+    /// round-trip; an unscripted question yields `NotWired`, mirroring the
+    /// single-shot path's "never invent a reply" contract.
+    tool_scripts: HashMap<String, Script<ToolTurnReply>>,
+    /// Every `ToolTurnRequest` handed to `generate_tool_turn`, newest last (one
+    /// entry per round-trip). Shared by `Arc` so an agent-loop unit test can
+    /// assert the assembled conversation (messages + tools + system) after
+    /// driving the loop -- the fake is consumed into the loop, but the capture
+    /// handle stays in the test's hand.
+    tool_captured: Arc<Mutex<Vec<ToolTurnRequest>>>,
 }
 
 impl Default for FakeProvider {
@@ -64,6 +101,8 @@ impl Default for FakeProvider {
             captured: Arc::new(Mutex::new(Vec::new())),
             cancel: None,
             blocking: HashSet::new(),
+            tool_scripts: HashMap::new(),
+            tool_captured: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -129,6 +168,87 @@ impl FakeProvider {
         self.blocking.insert(question.to_string());
         self.scripted(question, reply)
     }
+
+    /// A shared handle to every `ToolTurnRequest` this fake has been handed,
+    /// newest last (one entry per `generate_tool_turn` call). The agent-loop
+    /// unit tests clone the `Arc` before passing the fake into the loop, drive
+    /// it, then inspect the assembled conversation (system / messages / tools).
+    pub fn captured_tool_turns(&self) -> Arc<Mutex<Vec<ToolTurnRequest>>> {
+        Arc::clone(&self.tool_captured)
+    }
+
+    /// Register one stable tool-turn reply for a question -- returned on every
+    /// `generate_tool_turn` call. The common case: a question maps to one
+    /// deterministic terminal-text outcome (a clarify / refuse with no tools).
+    /// Builder-style so a test reads top-to-bottom.
+    pub fn scripted_tool_turn(self, question: &str, reply: ToolTurnReply) -> Self {
+        self.scripted_tool_turn_seq(question, vec![Ok(reply)])
+    }
+
+    /// Register a queue of canned tool-turn replies for a question -- returned
+    /// front-first on successive `generate_tool_turn` calls, clamping to the
+    /// last once reached. Models a multi-step agent trajectory: `[ToolCalls
+    /// (explore), ToolCalls(materialize), Text("done")]` is "explore, then
+    /// promote, then answer". An `Err` entry surfaces a provider-level fault
+    /// (`NotWired` permanent / `Unavailable` transient) for the termination
+    /// tests. Builder-style.
+    pub fn scripted_tool_turn_seq(
+        mut self,
+        question: &str,
+        replies: Vec<Result<ToolTurnReply, ProviderError>>,
+    ) -> Self {
+        self.tool_scripts.insert(
+            question.to_string(),
+            Script {
+                results: replies,
+                calls: Cell::new(0),
+            },
+        );
+        self
+    }
+
+    /// Register a stable tool-turn reply for a question AND mark it blocking:
+    /// `generate_tool_turn` polls the cancel token (sleep loop) and only
+    /// returns once cancel is requested, simulating a long round-trip
+    /// (ADR-0021). The agent-loop cancel/timeout tests drive this so a cancel
+    /// or the wall-clock watchdog lands the turn as Cancelled without a real
+    /// slow provider. Requires [`Self::with_cancel`] -- without a token the
+    /// block is a defensive no-op (the reply returns immediately).
+    pub fn scripted_tool_turn_blocking(mut self, question: &str, reply: ToolTurnReply) -> Self {
+        self.blocking.insert(question.to_string());
+        self.scripted_tool_turn(question, reply)
+    }
+
+    /// If `question` is registered blocking, poll the cancel token in a tight
+    /// sleep loop and only return once cancel is requested (ADR-0021). Models a
+    /// long-running call so the orchestrator/loop sees the cancel flag and lands
+    /// the turn as Cancelled. Defensive no-op without a token (a misconfigured
+    /// test never hangs). Shared by `generate` and `generate_tool_turn`.
+    fn block_if_requested(&self, question: &str) {
+        if self.blocking.contains(question) {
+            if let Some(cancel) = &self.cancel {
+                while !cancel.is_requested() {
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+    }
+}
+
+/// Extract the asking question from a tool-turn request: the content of the
+/// first [`ToolTurnMessage::User`] in `messages`. The agent loop always begins
+/// the conversation with the user's verbatim question, so this is the stable
+/// script key. Returns an empty string when no user turn is present -- a
+/// malformed request that yields `NotWired` (the unscripted fallback).
+fn first_user_question(request: &ToolTurnRequest) -> String {
+    request
+        .messages
+        .iter()
+        .find_map(|m| match m {
+            super::tool_calling::ToolTurnMessage::User { content } => Some(content.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 impl Provider for FakeProvider {
@@ -141,35 +261,35 @@ impl Provider for FakeProvider {
         if let Ok(mut buf) = self.captured.lock() {
             buf.push(request.clone());
         }
-        // A blocking question simulates a long query: poll the cancel token in a
-        // tight sleep loop and only proceed once cancel is requested (issue #28,
-        // ADR-0021). The orchestrator checks the flag after this call returns
-        // and lands the turn as Cancelled, so the reply we ultimately hand back
-        // is discarded. Defensive: if no token was wired the block is skipped so
-        // a misconfigured test never hangs.
-        if self.blocking.contains(request.question.as_str()) {
-            if let Some(cancel) = &self.cancel {
-                while !cancel.is_requested() {
-                    thread::sleep(Duration::from_millis(5));
-                }
-            }
-        }
-        let script = self
-            .scripts
+        // A blocking question simulates a long query (ADR-0021); the orchestrator
+        // checks the cancel flag after this call returns and lands the turn as
+        // Cancelled, so the reply we hand back is discarded.
+        self.block_if_requested(request.question.as_str());
+        self.scripts
             .get(request.question.as_str())
-            .ok_or(ProviderError::NotWired)?;
-        let calls = script.calls.get();
-        script.calls.set(calls + 1);
-        // Clamp to the last canned result: a single scripted reply is stable
-        // (always index 0), and a sequence advances one step per call until it
-        // settles on the final result. An empty queue is treated as NotWired so
-        // a misconfigured script never invents a reply.
-        let idx = calls.min(script.results.len().saturating_sub(1));
-        script
-            .results
-            .get(idx)
-            .cloned()
-            .unwrap_or(Err(ProviderError::NotWired))
+            .ok_or(ProviderError::NotWired)?
+            .draw()
+    }
+
+    fn generate_tool_turn(
+        &self,
+        request: &ToolTurnRequest,
+    ) -> Result<ToolTurnReply, ProviderError> {
+        // Record the assembled tool-turn payload before dispatching, mirroring
+        // `generate`'s capture so an agent-loop unit test can assert what the
+        // loop assembled (system / messages / tools). Poison tolerance matches
+        // `generate`.
+        if let Ok(mut buf) = self.tool_captured.lock() {
+            buf.push(request.clone());
+        }
+        // A blocking question simulates a long round-trip (ADR-0021); the loop
+        // sees the cancel flag and lands the turn as Cancelled.
+        let question = first_user_question(request);
+        self.block_if_requested(question.as_str());
+        self.tool_scripts
+            .get(question.as_str())
+            .ok_or(ProviderError::NotWired)?
+            .draw()
     }
 }
 
@@ -340,5 +460,92 @@ mod tests {
                 ProviderError::Unavailable("no".into())
             );
         }
+    }
+
+    // --- native tool-calling (#291, exercised by the agent loop #295) --------
+    use super::super::tool_calling::{ToolDefinition, ToolTurnMessage, ToolTurnRequest, ToolUse};
+    use serde_json::json;
+
+    /// A minimal tool-turn request whose first user message keys the script.
+    fn tool_request(question: &str) -> ToolTurnRequest {
+        ToolTurnRequest {
+            system: "sys".into(),
+            messages: vec![ToolTurnMessage::user(question)],
+            tools: vec![ToolDefinition {
+                name: "explore".into(),
+                description: "d".into(),
+                input_schema: json!({"type": "object"}),
+            }],
+            max_tokens: 1024,
+        }
+    }
+
+    #[test]
+    fn scripted_tool_turn_returns_its_reply() {
+        let provider = FakeProvider::new()
+            .scripted_tool_turn("count rows", ToolTurnReply::Text("done".into()));
+        let got = provider
+            .generate_tool_turn(&tool_request("count rows"))
+            .expect("scripted");
+        assert_eq!(got, ToolTurnReply::Text("done".into()));
+    }
+
+    #[test]
+    fn tool_turn_sequence_advances_then_clamps() {
+        // [ToolCalls, Text] yields the tool batch first, then the terminal text,
+        // then clamps to the text on every later call.
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "two-step",
+            vec![
+                Ok(ToolTurnReply::ToolCalls(vec![ToolUse {
+                    id: "tu_1".into(),
+                    name: "explore".into(),
+                    input: json!({"sql": "SELECT 1"}),
+                }])),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        );
+        let first = provider
+            .generate_tool_turn(&tool_request("two-step"))
+            .expect("first");
+        assert!(matches!(first, ToolTurnReply::ToolCalls(_)));
+        let second = provider
+            .generate_tool_turn(&tool_request("two-step"))
+            .expect("second");
+        assert_eq!(second, ToolTurnReply::Text("done".into()));
+        // Clamps to the last entry on every later call.
+        let third = provider
+            .generate_tool_turn(&tool_request("two-step"))
+            .expect("third");
+        assert_eq!(third, ToolTurnReply::Text("done".into()));
+    }
+
+    #[test]
+    fn unscripted_tool_turn_is_refused() {
+        // Mirrors `generate`: the fake never invents a tool reply, so an
+        // unscripted question yields NotWired -- a test cannot accidentally
+        // pass against a hidden default.
+        let provider = FakeProvider::new().scripted_tool_turn("a", ToolTurnReply::Text("a".into()));
+        assert_eq!(
+            provider.generate_tool_turn(&tool_request("b")).unwrap_err(),
+            ProviderError::NotWired
+        );
+    }
+
+    #[test]
+    fn tool_turn_captures_each_request() {
+        // The capture handle records one entry per round-trip so an agent-loop
+        // test can assert the assembled conversation after driving the loop.
+        let provider =
+            FakeProvider::new().scripted_tool_turn("q", ToolTurnReply::Text("done".into()));
+        let handle = provider.captured_tool_turns();
+        let p2 = provider; // rename for clarity after taking the handle
+        p2.generate_tool_turn(&tool_request("q")).unwrap();
+        p2.generate_tool_turn(&tool_request("q")).unwrap();
+        assert_eq!(
+            handle.lock().unwrap().len(),
+            2,
+            "one capture per generate_tool_turn call"
+        );
     }
 }
