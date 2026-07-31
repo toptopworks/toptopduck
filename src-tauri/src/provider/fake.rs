@@ -137,13 +137,7 @@ impl FakeProvider {
         question: &str,
         results: Vec<Result<ProviderReply, ProviderError>>,
     ) -> Self {
-        self.scripts.insert(
-            question.to_string(),
-            Script {
-                results,
-                calls: Cell::new(0),
-            },
-        );
+        insert_script(&mut self.scripts, question, results);
         self
     }
 
@@ -164,9 +158,8 @@ impl FakeProvider {
     /// reply ultimately returned is discarded by the orchestrator when it sees
     /// the cancel flag -> the turn lands as Cancelled, so the exact reply
     /// matters only in that it must be a valid `ProviderReply`.
-    pub fn scripted_blocking(mut self, question: &str, reply: ProviderReply) -> Self {
-        self.blocking.insert(question.to_string());
-        self.scripted(question, reply)
+    pub fn scripted_blocking(self, question: &str, reply: ProviderReply) -> Self {
+        self.mark_blocking(question).scripted(question, reply)
     }
 
     /// A shared handle to every `ToolTurnRequest` this fake has been handed,
@@ -197,13 +190,7 @@ impl FakeProvider {
         question: &str,
         replies: Vec<Result<ToolTurnReply, ProviderError>>,
     ) -> Self {
-        self.tool_scripts.insert(
-            question.to_string(),
-            Script {
-                results: replies,
-                calls: Cell::new(0),
-            },
-        );
+        insert_script(&mut self.tool_scripts, question, replies);
         self
     }
 
@@ -214,9 +201,18 @@ impl FakeProvider {
     /// or the wall-clock watchdog lands the turn as Cancelled without a real
     /// slow provider. Requires [`Self::with_cancel`] -- without a token the
     /// block is a defensive no-op (the reply returns immediately).
-    pub fn scripted_tool_turn_blocking(mut self, question: &str, reply: ToolTurnReply) -> Self {
+    pub fn scripted_tool_turn_blocking(self, question: &str, reply: ToolTurnReply) -> Self {
+        self.mark_blocking(question)
+            .scripted_tool_turn(question, reply)
+    }
+
+    /// Mark `question` blocking: a subsequent `generate` / `generate_tool_turn`
+    /// for it polls the cancel token instead of returning immediately
+    /// (ADR-0021). Shared spine of the single-shot and tool-calling blocking
+    /// builders; [`block_if_requested`] does the actual poll.
+    fn mark_blocking(mut self, question: &str) -> Self {
         self.blocking.insert(question.to_string());
-        self.scripted_tool_turn(question, reply)
+        self
     }
 
     /// If `question` is registered blocking, poll the cancel token in a tight
@@ -233,6 +229,27 @@ impl FakeProvider {
             }
         }
     }
+}
+
+/// Insert a canned-result queue for `question` into `map` -- the shared spine
+/// of the single-shot and tool-calling builders. Front-first draw with
+/// last-stick clamping lives in [`Script::draw`]; the builders differ only in
+/// which map they populate (and the reply type), so the
+/// `Script { results, calls: 0 }` construction has one source here. An empty
+/// queue yields `NotWired` on draw (a misconfigured script never invents a
+/// reply).
+fn insert_script<T>(
+    map: &mut HashMap<String, Script<T>>,
+    question: &str,
+    results: Vec<Result<T, ProviderError>>,
+) {
+    map.insert(
+        question.to_string(),
+        Script {
+            results,
+            calls: Cell::new(0),
+        },
+    );
 }
 
 /// Extract the asking question from a tool-turn request: the content of the

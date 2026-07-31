@@ -259,8 +259,9 @@ impl<'p> AgentLoop<'p> {
             }
         }
         // Step cap exhausted without a terminal reply (ADR-0081): the agent did
-        // not converge. Maps to TurnOutcome::Failed at the wiring seam.
-        outcome(Termination::StepCap, outputs, round_trips)
+        // not converge. Carries the cap so the wiring seam can render an honest
+        // "did not converge in N steps" detail. Maps to TurnOutcome::Failed.
+        outcome(Termination::StepCap(self.step_cap), outputs, round_trips)
     }
 }
 
@@ -338,6 +339,17 @@ fn execute_call(
     // either a JSON payload (is_error=false) or an error string (is_error=true)
     // -- both feed back to the model; the agent self-corrects on an error.
     let result = tools::dispatch(call, deps, cancel, materializer);
+    // ADR-0077: a tool-level error routes back to the model. Log it so a
+    // non-converging turn (StepCap) leaves an operator-visible trail of what
+    // the model was being told, not just the final cap.
+    if result.is_error {
+        log::debug!(
+            target: "toptopduck::agent_loop",
+            "tool `{}` returned an error (routing back for self-correction): {}",
+            call.name,
+            truncate(&result.content, 200)
+        );
+    }
     let success = !result.is_error;
     // Capture a promotion: a successful materialize registers the full
     // descriptor in the working set; read it back for the promotions list. The
@@ -454,8 +466,10 @@ pub(crate) enum Termination {
     /// rides as the assumption / side note).
     Text(String),
     /// The step cap was reached without a terminal reply (the agent did not
-    /// converge). Maps to `TurnOutcome::Failed` (ADR-0081 execution-level cap).
-    StepCap,
+    /// converge). Carries the cap value so the wiring seam can render an honest
+    /// "did not converge in N steps" detail. Maps to `TurnOutcome::Failed`
+    /// (ADR-0081 execution-level cap).
+    StepCap(u32),
     /// A cancel (user / close / wall-clock watchdog) aborted the turn
     /// (ADR-0021). Maps to `TurnOutcome::Cancelled`. The watchdog is one cause
     /// among several; it shares the cancel path (ADR-0021 timeout -> cancel).
@@ -875,7 +889,7 @@ mod tests {
             &engine.conn,
             engine.temp.path(),
         );
-        assert_eq!(outcome.termination, Termination::StepCap);
+        assert_eq!(outcome.termination, Termination::StepCap(3));
         assert_eq!(outcome.round_trips, 3, "ran exactly step_cap round-trips");
         assert!(
             outcome.promotions.is_empty(),
