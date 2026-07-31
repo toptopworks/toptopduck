@@ -14,6 +14,7 @@
 //! -> outcome seam -- offline and deterministic.
 
 pub mod app_config;
+pub mod approval;
 pub mod cancel;
 pub mod commands;
 pub mod fs_acl;
@@ -32,6 +33,11 @@ pub mod workingset;
 pub use app_config::{
     AppConfig, EngineDefaults, ExportDefaults, PrivacyDefaults, Theme, Tunables,
     APP_CONFIG_FORMAT_VERSION, RECENT_FILES_CAP,
+};
+pub use approval::{
+    auto_allowed, classify, ApprovalRequest, ApprovalRequestBody, ApprovalRequestPayload,
+    ApprovalResolvedPayload, ApprovalResponse, ApprovalSink, ApprovalState, AuthMode,
+    Classification, GateCancelled, GateOutcome, OperationKind, RespondError, ToolKey,
 };
 pub use cancel::CancelToken;
 pub use commands::StoreCommandError;
@@ -313,6 +319,11 @@ pub fn run() {
             commands::open_duck,
             commands::take_persist_error,
             commands::take_pending_conflict,
+            commands::respond_tool_approval,
+            commands::get_authorization_mode,
+            commands::set_authorization_mode,
+            commands::list_session_trust,
+            commands::revoke_session_trust,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -44,6 +44,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
+use crate::approval::SharedApprovalState;
 use crate::cancel::CancelToken;
 use crate::provider::Provider;
 use crate::session::Session;
@@ -242,6 +243,13 @@ pub struct SessionHandle {
     /// `Mutex` wraps the `!Sync` `mpsc::Receiver` so the handle stays `Sync`
     /// (it lives behind an `Arc`).
     drop_signal: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    /// ADR-0080 (issue #294): per-session tiered-approval state -- the
+    /// authorization mode, the "always allow" trust set, and the in-flight
+    /// approval slot. Lives on the handle (NOT inside the `Session` mutex) so
+    /// `respond_tool_approval` reaches it while a waiting turn holds the
+    /// session lock. Allocated once at [`SessionStore::create`]; reset on
+    /// resume via [`Self::reset_approval`].
+    approval: SharedApprovalState,
 }
 
 impl SessionHandle {
@@ -262,8 +270,15 @@ impl SessionHandle {
     /// as `Cancelled` at its next check. Used by the `cancel` command and
     /// `close_session`. Safe when no turn is in flight (no-op besides the
     /// flag, which the next `ask` resets).
+    ///
+    /// Also wakes any in-flight approval gate (ADR-0080, issue #294): a turn
+    /// blocked on the approval condvar is not inside DuckDB, so the engine
+    /// interrupt alone would not reach it. Without this wake the gate would
+    /// rely on its 200ms cancel-poll fallback, delaying the `Cancelled`
+    /// outcome; the explicit wake makes cancel immediate.
     pub fn fire_cancel(&self) {
         self.cancel.request();
+        self.approval.interrupt_pending();
     }
 
     /// Whether a turn is currently in flight on this session (ADR-0021
@@ -336,6 +351,21 @@ impl SessionHandle {
         // Engine error rather than panicking here (Drop-adjacent code must
         // not panic).
     }
+
+    /// The per-session tiered-approval state (ADR-0080, issue #294). The
+    /// approval commands read/mutate this; the future agent loop (#295) and
+    /// external-tool bridge (#299) drive tool calls through its gate.
+    pub fn approval_state(&self) -> SharedApprovalState {
+        Arc::clone(&self.approval)
+    }
+
+    /// Reset the approval posture to the default (ADR-0080: resume 归零).
+    /// Called by `open_duck` after a successful resume -- the authorization
+    /// mode + trust set are session-level and must not survive a resume
+    /// (they are not in the recipe / app-config).
+    pub fn reset_approval(&self) {
+        self.approval.reset();
+    }
 }
 
 /// The multi-session map (ADR-0056). Managed once as Tauri state; every
@@ -388,6 +418,10 @@ impl SessionStore {
             closing,
             resuming: AtomicBool::new(false),
             drop_signal: Mutex::new(Some(drop_rx)),
+            // ADR-0080 (issue #294): per-session approval state, defaulting to
+            // PerCall mode + an empty trust set. Reset on resume
+            // (SessionHandle::reset_approval via open_duck).
+            approval: Arc::new(crate::approval::ApprovalState::new()),
         });
         // Generate the id only after the resource exists; insert under the
         // write lock; return the id only after the insert lands.
@@ -613,5 +647,83 @@ mod tests {
         // A second mark is a harmless no-op (already closing).
         handle.mark_closing();
         assert!(handle.is_closing());
+    }
+
+    /// `fire_cancel` wakes a gate blocked on the approval condvar (not just
+    /// the engine interrupt): while suspended the gate is outside DuckDB, so
+    /// without `interrupt_pending` the engine interrupt alone would leave it
+    /// waiting on the 200ms cancel-poll. This pins the SessionHandle wiring
+    /// (ADR-0080); deleting the `interrupt_pending` line in `fire_cancel`
+    /// would fail this test.
+    #[test]
+    fn fire_cancel_wakes_approval_gate() {
+        use crate::approval::{
+            ApprovalRequest, ApprovalSink, GateCancelled, OperationKind, ToolKey,
+        };
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+
+        // Minimal counting sink: the test only needs to observe the gate has
+        // suspended (request emitted) before firing cancel.
+        // (approval::tests::RecordingSink is private, so this is the local
+        // test seam.)
+        struct CountSink {
+            requests: Mutex<usize>,
+        }
+        impl Default for CountSink {
+            fn default() -> Self {
+                Self {
+                    requests: Mutex::new(0),
+                }
+            }
+        }
+        impl ApprovalSink for CountSink {
+            fn emit_request(&self, _body: &crate::approval::ApprovalRequestBody) {
+                *self.requests.lock().unwrap() += 1;
+            }
+            fn emit_resolved(
+                &self,
+                _body: &crate::approval::ApprovalRequestBody,
+                _response: crate::approval::ApprovalResponse,
+            ) {
+            }
+        }
+
+        let store = SessionStore::new();
+        let id = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+            )
+            .expect("create session");
+        let handle = store.get(&id).expect("get handle");
+
+        let approval = handle.approval_state();
+        let cancel = handle.cancel_token();
+        let sink = Arc::new(CountSink::default());
+
+        let approval_c = Arc::clone(&approval);
+        let cancel_c = Arc::clone(&cancel);
+        let sink_c = Arc::clone(&sink);
+        let worker = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+            };
+            approval_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        // Wait for the gate to suspend (request emitted), then fire_cancel --
+        // engine interrupt + interrupt_pending. The wake must be immediate.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while *sink.requests.lock().unwrap() == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(*sink.requests.lock().unwrap() > 0, "request emitted");
+        handle.fire_cancel();
+
+        let err = worker.join().expect("gate thread").expect_err("cancelled");
+        assert_eq!(err, GateCancelled);
     }
 }

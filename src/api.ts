@@ -23,6 +23,13 @@ import type {
   Protocol,
 } from "./types/provider";
 import type { ThreadEntry, TurnOutcome } from "./types/thread";
+import type {
+  ApprovalRequestPayload,
+  ApprovalResolvedPayload,
+  ApprovalResponse,
+  AuthMode,
+  ToolKey,
+} from "./types/approval";
 
 // Multi-session addressing (ADR-0056): every session-scoped function takes
 // `sessionId` as its first parameter -- the backend looks up the target
@@ -316,4 +323,75 @@ export async function setAppConfig(config: AppConfig): Promise<AppConfig> {
 
 export async function recordRecentFile(path: string): Promise<void> {
   await invoke<void>("record_recent_file", { path });
+}
+
+// --- Tiered tool approval (ADR-0080, issue #294) -------------------------
+//
+// The IPC contract for the in-flow approval card (ADR-0083) + the
+// session-level authorization-mode / trust controls. The frontend rendering
+// (pending/resolved trace entries, three-button card, unanswered badge) lands
+// in #297 / #298; the auth-mode selector UI lands in #302. These functions
+// own the wire surface only.
+
+// Answer the session's in-flight approval request (ADR-0083 three-button
+// card). `requestId` is the one carried by the `approval-request` event; the
+// response escalates to session trust on `always_allow` (resume resets it).
+// A respond that lands after the turn was cancelled, or a duplicate answer,
+// rejects -- the frontend reconciles via `onApprovalResolved` rather than
+// branching on the error.
+export async function respondToolApproval(
+  sessionId: string,
+  requestId: string,
+  response: ApprovalResponse,
+): Promise<void> {
+  await invoke<void>("respond_tool_approval", { sessionId, requestId, response });
+}
+
+// Read the session's authorization posture (ADR-0080 Decision 4): `per_call`
+// (default) or `no_confirmation`. Session-level; resumes as `per_call`.
+export async function getAuthorizationMode(sessionId: string): Promise<AuthMode> {
+  return invoke<AuthMode>("get_authorization_mode", { sessionId });
+}
+
+// Switch the session's authorization posture (ADR-0080 Decision 4). Only
+// `per_call` <-> `no_confirmation` is accepted; both resume to `per_call`.
+export async function setAuthorizationMode(
+  sessionId: string,
+  mode: AuthMode,
+): Promise<void> {
+  await invoke<void>("set_authorization_mode", { sessionId, mode });
+}
+
+// Snapshot the session's "always allow" trust set (ADR-0080 Decision 3),
+// keyed by `server::tool`. Resumes empty.
+export async function listSessionTrust(sessionId: string): Promise<ToolKey[]> {
+  return invoke<ToolKey[]>("list_session_trust", { sessionId });
+}
+
+// Revoke one tool's session-level trust (ADR-0080 Decision 3). The next call
+// to that tool re-enters per-call confirmation.
+export async function revokeSessionTrust(
+  sessionId: string,
+  server: string,
+  tool: string,
+): Promise<void> {
+  await invoke<void>("revoke_session_trust", { sessionId, server, tool });
+}
+
+// Subscribe to approval-request events (ADR-0083). Each event carries the
+// addressing sessionId so a multi-session frontend filters the global
+// broadcast to the one pane that owns the suspended turn (ADR-0056).
+export async function onApprovalRequest(
+  cb: (ev: ApprovalRequestPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<ApprovalRequestPayload>("approval-request", (e) => cb(e.payload));
+}
+
+// Subscribe to approval-resolved events (ADR-0083). The frontend flips the
+// pending card to its resolved state in place; a cancel/close resolves to
+// `deny` so no stale pending entry lingers.
+export async function onApprovalResolved(
+  cb: (ev: ApprovalResolvedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<ApprovalResolvedPayload>("approval-resolved", (e) => cb(e.payload));
 }

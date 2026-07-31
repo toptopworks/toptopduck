@@ -28,6 +28,7 @@ use std::time::Duration;
 use tauri::{Emitter, State};
 
 use crate::app_config::AppConfig;
+use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink, AuthMode, ToolKey};
 use crate::cancel::CancelToken;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, LoadOutcome, ProfileId, ProfileKeyStatus,
@@ -940,6 +941,16 @@ pub async fn open_duck(
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
+    // Symmetric with `ask` (which applies the same guard before entering a
+    // turn): refuse resume while a turn is in flight. A turn blocked in the
+    // approval gate still holds session_lock, so without this guard
+    // open_duck's spawn_blocking would block on session_lock with resuming
+    // latched, freezing every mutating command via reject_if_resuming until
+    // the turn is respond/cancel unstuck. The frontend `busy` flag is the
+    // primary defense; this is the Rust-side backstop for a second window /
+    // IPC replay / automation that triggers resume during an approval-pending
+    // turn.
+    reject_if_in_flight(&handle)?;
     handle.set_resuming(true);
     let path = PathBuf::from(path);
     // Pull the handle's shared tokens out via accessors (the fields
@@ -1013,6 +1024,13 @@ pub async fn open_duck(
         handle_for_task.set_drop_signal_rx(drop_rx);
         let mut s = handle_for_task.session_lock()?;
         *s = new_session;
+        // ADR-0080 (issue #294): resume 归零. Trust state is session-level and
+        // must not survive a resume (it is not in the recipe / app-config), so
+        // the moment the resumed contents are live, drop the authorization
+        // mode + trust set back to the default PerCall posture. Reset is
+        // independent of the session swap -- the approval state lives on the
+        // handle, not inside the Session mutex.
+        handle_for_task.reset_approval();
         Ok::<(), SessionError>(())
     })
     .await;
@@ -1063,6 +1081,172 @@ pub fn take_pending_conflict(
     let handle = store.get(&id)?;
     let mut s = handle.session_lock()?;
     Ok(s.take_pending_conflict())
+}
+
+// --- Tiered tool approval (ADR-0080, issue #294) -------------------------
+//
+// The IPC contract for the in-flow approval card (ADR-0083): one command for
+// the user's answer, two for the authorization-mode selector, two for
+// inspecting / revoking session trust, and the `approval-request` /
+// `approval-resolved` events emitted by [`TauriApprovalSink`]. The frontend
+// rendering (pending/resolved trace entries, three-button card, unanswered
+// badge) lands in #297 / #298; the auth-mode selector UI lands in #302. This
+// slice owns the wire contract + the gateway mechanism only.
+
+/// Tauri-backed [`ApprovalSink`] (ADR-0083). Built at the command boundary
+/// (where the `AppHandle` lives, ADR-0029) with the session id baked in; the
+/// agent loop (#295) and the external-tool bridge (#299) construct one per
+/// turn and pass it to [`crate::approval::ApprovalState::gate`].
+///
+/// `session_id` is closed over (not derived per event) so the gate -- which
+/// does not know its own session id -- emits events addressed correctly for a
+/// multi-session frontend to filter (ADR-0056, mirroring the `turn-progress`
+/// callback's `sid.clone()`).
+pub struct TauriApprovalSink {
+    app: tauri::AppHandle,
+    session_id: String,
+}
+
+impl TauriApprovalSink {
+    pub fn new(app: tauri::AppHandle, session_id: String) -> Self {
+        Self { app, session_id }
+    }
+}
+
+impl ApprovalSink for TauriApprovalSink {
+    fn emit_request(&self, body: &ApprovalRequestBody) {
+        // Best-effort UI delivery like `turn-progress`: a frontend that is
+        // not yet listening (the card UI is #297) drops the event. Unlike
+        // turn-progress, approval-request is a BLOCKING synchronous signal --
+        // the turn stays suspended on the gate condvar until respond / cancel
+        // wakes it -- so log the drop so a listener-less build is diagnosable
+        // rather than hanging silently.
+        if let Err(e) = self.app.emit(
+            "approval-request",
+            &crate::approval::ApprovalRequestPayload {
+                session_id: self.session_id.clone(),
+                request_id: body.request_id.clone(),
+                server: body.server.clone(),
+                tool: body.tool.clone(),
+                operation_kind: body.operation_kind,
+                summary: body.summary.clone(),
+            },
+        ) {
+            log::warn!(
+                target: "approval",
+                "approval-request emit failed (session {}); turn stays suspended until respond/cancel: {}",
+                self.session_id,
+                e,
+            );
+        }
+    }
+
+    fn emit_resolved(&self, body: &ApprovalRequestBody, response: ApprovalResponse) {
+        // A dropped resolved event leaves a stale pending card in the
+        // frontend; the gateway's own state is already advanced, so this is
+        // purely a UI reconciliation loss -- log for diagnosability.
+        if let Err(e) = self.app.emit(
+            "approval-resolved",
+            &crate::approval::ApprovalResolvedPayload {
+                session_id: self.session_id.clone(),
+                request_id: body.request_id.clone(),
+                response,
+            },
+        ) {
+            log::warn!(
+                target: "approval",
+                "approval-resolved emit failed (session {}, request {}); frontend may show a stale pending card: {}",
+                self.session_id,
+                body.request_id,
+                e,
+            );
+        }
+    }
+}
+
+/// Answer the session's in-flight approval request (ADR-0083 three-button
+/// card). The request id is the one carried by the `approval-request` event
+/// the frontend received; the response is `allow_once` / `always_allow` /
+/// `deny`. `always_allow` escalates the `server::tool` to session-level trust
+/// (resume resets it). A respond that lands after the turn was cancelled, or a
+/// duplicate answer, rejects with a typed [`SessionError::Engine`] carrying
+/// the stable kind discriminator -- the frontend reconciles via the
+/// `approval-resolved` event rather than branching on this error.
+#[tauri::command]
+pub fn respond_tool_approval(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+    request_id: String,
+    response: ApprovalResponse,
+) -> Result<(), SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    let request_uuid = uuid::Uuid::parse_str(&request_id)
+        .map_err(|_| SessionError::Engine("approval request id malformed".into()))?;
+    let approval = handle.approval_state();
+    approval
+        .respond(request_uuid, response)
+        .map_err(|e| SessionError::Engine(e.as_kind().to_string()))?;
+    Ok(())
+}
+
+/// Read the session's authorization posture (ADR-0080 Decision 4):
+/// `per_call` (default) or `no_confirmation`. Session-level; resumes as
+/// `per_call`. Drives the composer auth-mode selector (#302) + the warning
+/// color while in no-confirmation mode.
+#[tauri::command]
+pub fn get_authorization_mode(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+) -> Result<AuthMode, SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    Ok(handle.approval_state().auth_mode())
+}
+
+/// Switch the session's authorization posture (ADR-0080 Decision 4). Only
+/// `per_call` <-> `no_confirmation` is accepted; both resume to `per_call`.
+/// Rejected while resuming (the session contents are mid-swap).
+#[tauri::command]
+pub fn set_authorization_mode(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+    mode: AuthMode,
+) -> Result<(), SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    reject_if_resuming(&handle)?;
+    handle.approval_state().set_auth_mode(mode);
+    Ok(())
+}
+
+/// Snapshot the session's "always allow" trust set (ADR-0080 Decision 3),
+/// keyed by `server::tool`. Each entry is one tool the user escalated to
+/// session-level trust via an `always_allow` answer. Resumes empty.
+#[tauri::command]
+pub fn list_session_trust(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+) -> Result<Vec<ToolKey>, SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    Ok(handle.approval_state().trust_list())
+}
+
+/// Revoke one tool's session-level trust (ADR-0080 Decision 3). The next call
+/// to that tool re-enters per-call confirmation. Rejected while resuming.
+#[tauri::command]
+pub fn revoke_session_trust(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+    server: String,
+    tool: String,
+) -> Result<(), SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    reject_if_resuming(&handle)?;
+    handle.approval_state().revoke(&ToolKey { server, tool });
+    Ok(())
 }
 
 #[cfg(test)]
