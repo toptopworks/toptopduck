@@ -16,6 +16,7 @@
 pub mod app_config;
 pub mod cancel;
 pub mod commands;
+pub mod fs_acl;
 pub mod guardrail;
 pub mod ingest;
 pub mod model;

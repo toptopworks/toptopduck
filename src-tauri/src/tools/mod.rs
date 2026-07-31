@@ -32,6 +32,7 @@ pub mod definitions;
 pub mod describe;
 pub mod explore;
 pub mod materialize;
+pub mod read_paths;
 pub mod sample;
 
 use crate::cancel::CancelToken;
