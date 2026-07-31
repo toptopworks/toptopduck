@@ -243,8 +243,10 @@ pub struct ApprovalResolvedPayload {
 /// Emit side-channel for approval events (ADR-0083). Implemented at the
 /// command boundary with a Tauri `AppHandle` + the session id; the gate calls
 /// it to surface the card and to announce the resolution. The trait keeps the
-/// gateway decoupled from Tauri -- tests supply a recording sink.
-pub trait ApprovalSink {
+/// gateway decoupled from Tauri -- tests supply a recording sink. `Send +
+/// Sync` so the agent loop (#295) can thread a sink across the
+/// `spawn_blocking` boundary without changing the trait's API surface.
+pub trait ApprovalSink: Send + Sync {
     /// Surface a new pending approval (emits `approval-request`).
     fn emit_request(&self, body: &ApprovalRequestBody);
     /// Announce that a pending request was answered (emits `approval-resolved`).
@@ -290,8 +292,6 @@ pub struct ApprovalRequest {
 /// previous one returns.
 struct Pending {
     request_id: uuid::Uuid,
-    #[allow(dead_code)]
-    body: ApprovalRequestBody,
     response: Option<ApprovalResponse>,
 }
 
@@ -424,6 +424,13 @@ impl ApprovalState {
             summary: request.summary,
         };
 
+        // Clear any stale interrupt latch from a prior cancel BEFORE installing
+        // the pending slot. Once the slot is live, any interrupt_pending() that
+        // arrives is THIS gate's own cancel signal and must NOT be wiped; the
+        // prior order (clear after install) could erase a legit interrupt that
+        // landed between install and clear (a window future reset call sites
+        // outside the session_lock serializer would reopen).
+        self.interrupted.store(false, Ordering::SeqCst);
         // Install the pending slot, THEN emit. A respond() that races ahead of
         // the wait still finds the slot (matched by request_id) and stores its
         // answer durably in the mutex -- the gate's subsequent wait sees it
@@ -435,13 +442,9 @@ impl ApprovalState {
             // it defensively so the new request is observable, then install.
             *g = Some(Pending {
                 request_id,
-                body: body.clone(),
                 response: None,
             });
         }
-        // Clear any stale interrupt latch from a prior cancel so this gate
-        // call does not observe a poison flag as its own cancel.
-        self.interrupted.store(false, Ordering::SeqCst);
         sink.emit_request(&body);
 
         // Wait for a response or a cancel. The cancel token is the turn's
@@ -479,12 +482,23 @@ impl ApprovalState {
         };
 
         match (response, resolved_response) {
-            (Some(resp), _) => self.apply_response(&request.key, resp, &body, sink),
-            (None, _) => {
-                // Cancelled / closed. The card resolves to a denial so the
-                // frontend does not leave a stale pending entry; the agent
-                // loop sees `Cancelled` (not the card's denial) because the
-                // turn-level outcome is driven by the Err branch.
+            // A response landed -- either the wait loop saw it (Some) OR it was
+            // stored between the loop's cancel-break and the slot take
+            // (None, Some). In both cases the user's answer is durable in the
+            // mutex; honor it: apply_response emits the resolved event with the
+            // ACTUAL answer and escalates trust on AlwaysAllow. The prior
+            // `(None, _)` arm forced a synthetic Deny that contradicted a
+            // respond() which had already returned Ok, and silently dropped the
+            // AlwaysAllow trust escalation.
+            (Some(resp), _) | (None, Some(resp)) => {
+                self.apply_response(&request.key, resp, &body, sink)
+            }
+            (None, None) => {
+                // Cancelled / closed with no landed answer. The card resolves
+                // to a denial so the frontend does not leave a stale pending
+                // entry; the agent loop sees `Cancelled` (not the card's
+                // denial) because the turn-level outcome is driven by the Err
+                // branch.
                 sink.emit_resolved(&body, ApprovalResponse::Deny);
                 Err(GateCancelled)
             }
@@ -1039,6 +1053,89 @@ mod tests {
             let _ = a.respond(id, ApprovalResponse::Deny);
         }
         let _ = handle.join();
+    }
+
+    // --- race + resume-wake ------------------------------------------------
+
+    #[test]
+    fn gate_honors_landed_response_over_cancel() {
+        // A respond() that returns Ok must be honored: the resolved event
+        // carries the user's ACTUAL answer, never a synthetic Deny. Covers
+        // both the (Some, _) arm (respond wins the wait loop) and the
+        // (None, Some) arm (cancel broke the loop but respond stored before
+        // the take); both must emit the user's answer. The prior `(None, _)`
+        // arm emitted Deny on the race, contradicting the Ok respond.
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        let request_id = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        // Respond FIRST (lands the answer durably), then fire the cancel wake.
+        // Whether the gate's loop sees the response before or after the
+        // interrupt, the resolved event must reflect AllowOnce.
+        state
+            .respond(request_id, ApprovalResponse::AllowOnce)
+            .expect("respond ok");
+        cancel.request();
+        state.interrupt_pending();
+
+        let outcome = handle.join().expect("gate thread");
+        assert_eq!(outcome.expect("user allowed"), GateOutcome::Allow);
+        let resolved = sink.resolved.lock().unwrap();
+        assert_eq!(resolved.len(), 1, "resolved emitted exactly once");
+        assert_eq!(
+            resolved[0].1,
+            ApprovalResponse::AllowOnce,
+            "user's actual answer wins over cancel"
+        );
+    }
+
+    #[test]
+    fn reset_wakes_waiting_gate_to_cancelled() {
+        // reset() (the resume reset) must wake a gate blocked on the condvar
+        // so the suspended turn returns GateCancelled -- not hang until the
+        // 200ms cancel-poll. reset wakes via interrupt_pending ONLY (it does
+        // NOT request the cancel token); this pins the resume-cancels-in-
+        // flight-approval guarantee (ADR-0080).
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        // reset clears trust/mode AND fires interrupt_pending (no cancel-token
+        // request) -- the wake under test.
+        state.reset();
+
+        let err = handle.join().expect("gate thread").unwrap_err();
+        assert_eq!(err, GateCancelled);
+        assert!(
+            !cancel.is_requested(),
+            "reset wakes via interrupt_pending, not the cancel token"
+        );
     }
 
     // --- helper ------------------------------------------------------------

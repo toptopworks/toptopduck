@@ -941,6 +941,16 @@ pub async fn open_duck(
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
+    // Symmetric with `ask` (which applies the same guard before entering a
+    // turn): refuse resume while a turn is in flight. A turn blocked in the
+    // approval gate still holds session_lock, so without this guard
+    // open_duck's spawn_blocking would block on session_lock with resuming
+    // latched, freezing every mutating command via reject_if_resuming until
+    // the turn is respond/cancel unstuck. The frontend `busy` flag is the
+    // primary defense; this is the Rust-side backstop for a second window /
+    // IPC replay / automation that triggers resume during an approval-pending
+    // turn.
+    reject_if_in_flight(&handle)?;
     handle.set_resuming(true);
     let path = PathBuf::from(path);
     // Pull the handle's shared tokens out via accessors (the fields
@@ -1105,10 +1115,13 @@ impl TauriApprovalSink {
 
 impl ApprovalSink for TauriApprovalSink {
     fn emit_request(&self, body: &ApprovalRequestBody) {
-        // Fire-and-forget: a frontend that is not yet listening (the card UI
-        // is #297) drops the event; the turn stays suspended and surfaces as
-        // cancelled at the next user action. Mirrors `turn-progress` emit.
-        let _ = self.app.emit(
+        // Best-effort UI delivery like `turn-progress`: a frontend that is
+        // not yet listening (the card UI is #297) drops the event. Unlike
+        // turn-progress, approval-request is a BLOCKING synchronous signal --
+        // the turn stays suspended on the gate condvar until respond / cancel
+        // wakes it -- so log the drop so a listener-less build is diagnosable
+        // rather than hanging silently.
+        if let Err(e) = self.app.emit(
             "approval-request",
             &crate::approval::ApprovalRequestPayload {
                 session_id: self.session_id.clone(),
@@ -1118,18 +1131,36 @@ impl ApprovalSink for TauriApprovalSink {
                 operation_kind: body.operation_kind,
                 summary: body.summary.clone(),
             },
-        );
+        ) {
+            log::warn!(
+                target: "approval",
+                "approval-request emit failed (session {}); turn stays suspended until respond/cancel: {}",
+                self.session_id,
+                e,
+            );
+        }
     }
 
     fn emit_resolved(&self, body: &ApprovalRequestBody, response: ApprovalResponse) {
-        let _ = self.app.emit(
+        // A dropped resolved event leaves a stale pending card in the
+        // frontend; the gateway's own state is already advanced, so this is
+        // purely a UI reconciliation loss -- log for diagnosability.
+        if let Err(e) = self.app.emit(
             "approval-resolved",
             &crate::approval::ApprovalResolvedPayload {
                 session_id: self.session_id.clone(),
                 request_id: body.request_id.clone(),
                 response,
             },
-        );
+        ) {
+            log::warn!(
+                target: "approval",
+                "approval-resolved emit failed (session {}, request {}); frontend may show a stale pending card: {}",
+                self.session_id,
+                body.request_id,
+                e,
+            );
+        }
     }
 }
 

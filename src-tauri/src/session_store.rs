@@ -648,4 +648,82 @@ mod tests {
         handle.mark_closing();
         assert!(handle.is_closing());
     }
+
+    /// `fire_cancel` wakes a gate blocked on the approval condvar (not just
+    /// the engine interrupt): while suspended the gate is outside DuckDB, so
+    /// without `interrupt_pending` the engine interrupt alone would leave it
+    /// waiting on the 200ms cancel-poll. This pins the SessionHandle wiring
+    /// (ADR-0080); deleting the `interrupt_pending` line in `fire_cancel`
+    /// would fail this test.
+    #[test]
+    fn fire_cancel_wakes_approval_gate() {
+        use crate::approval::{
+            ApprovalRequest, ApprovalSink, GateCancelled, OperationKind, ToolKey,
+        };
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+
+        // Minimal counting sink: the test only needs to observe the gate has
+        // suspended (request emitted) before firing cancel.
+        // (approval::tests::RecordingSink is private, so this is the local
+        // test seam.)
+        struct CountSink {
+            requests: Mutex<usize>,
+        }
+        impl Default for CountSink {
+            fn default() -> Self {
+                Self {
+                    requests: Mutex::new(0),
+                }
+            }
+        }
+        impl ApprovalSink for CountSink {
+            fn emit_request(&self, _body: &crate::approval::ApprovalRequestBody) {
+                *self.requests.lock().unwrap() += 1;
+            }
+            fn emit_resolved(
+                &self,
+                _body: &crate::approval::ApprovalRequestBody,
+                _response: crate::approval::ApprovalResponse,
+            ) {
+            }
+        }
+
+        let store = SessionStore::new();
+        let id = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+            )
+            .expect("create session");
+        let handle = store.get(&id).expect("get handle");
+
+        let approval = handle.approval_state();
+        let cancel = handle.cancel_token();
+        let sink = Arc::new(CountSink::default());
+
+        let approval_c = Arc::clone(&approval);
+        let cancel_c = Arc::clone(&cancel);
+        let sink_c = Arc::clone(&sink);
+        let worker = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+            };
+            approval_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        // Wait for the gate to suspend (request emitted), then fire_cancel --
+        // engine interrupt + interrupt_pending. The wake must be immediate.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while *sink.requests.lock().unwrap() == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(*sink.requests.lock().unwrap() > 0, "request emitted");
+        handle.fire_cancel();
+
+        let err = worker.join().expect("gate thread").expect_err("cancelled");
+        assert_eq!(err, GateCancelled);
+    }
 }
