@@ -342,9 +342,20 @@ fn execute_call(
     // Capture a promotion: a successful materialize registers the full
     // descriptor in the working set; read it back for the promotions list. The
     // dispatch content carries the reference_name the materializer installed.
+    // A `None` is a contract violation (the executor always emits
+    // `reference_name` on success, and the working set holds what it just
+    // registered) -- log it so a regression cannot silently drop a
+    // user-visible `result_N`. The SQL itself ran, so the success `ToolResult`
+    // still rides back to the model.
     if success && call.name == definitions::TOOL_MATERIALIZE {
-        if let Some(descriptor) = promotion_from_result(&result.content, deps) {
-            outputs.promotions.push(descriptor);
+        match promotion_from_result(&result.content, deps) {
+            Some(descriptor) => outputs.promotions.push(descriptor),
+            None => log::error!(
+                target: "toptopduck::agent_loop",
+                "materialize reported success but the promotion could not be recovered; \
+                 content=`{}`",
+                truncate(&result.content, 200)
+            ),
         }
     }
     outputs.trace.push(TraceEntry {
@@ -553,6 +564,25 @@ mod tests {
         }])
     }
 
+    /// A tool-call reply carrying several calls in one batch, with 1-based ids
+    /// (`tu_1`, `tu_2`, ...) so each call's `ToolResult` / trace entry can be
+    /// paired back to its request. The single-call [`call`] helper left the
+    /// multi-call batch path -- the loop's serial dispatch plus the
+    /// Assistant-turn + per-call `ToolResult` ordering -- untested.
+    fn calls(items: &[(&str, serde_json::Value)]) -> ToolTurnReply {
+        ToolTurnReply::ToolCalls(
+            items
+                .iter()
+                .enumerate()
+                .map(|(i, (name, input))| ToolUse {
+                    id: format!("tu_{}", i + 1),
+                    name: (*name).into(),
+                    input: input.clone(),
+                })
+                .collect(),
+        )
+    }
+
     /// Throwaway TurnDeps over a real in-memory connection. Mirrors the
     /// `tools::test_support` cap defaults so the loop drives the same engine
     /// shape the dispatch tests do.
@@ -734,6 +764,94 @@ mod tests {
             names,
             vec!["result_1".to_string(), "result_2".to_string()],
             "promotions are in monotonic order"
+        );
+    }
+
+    #[test]
+    fn multi_call_batch_dispatches_serially_and_preserves_order() {
+        // AC #1: a ToolCalls batch with >=2 calls dispatches each serially,
+        // appends one Assistant turn (the whole batch) then one ToolResult per
+        // call, and the next round-trip's request carries the full assembled
+        // conversation. The single-call `call()` helper left this path -- the
+        // loop's serial dispatch + message ordering for a multi-call batch --
+        // entirely untested; `captured_tool_turns()` was built for exactly this
+        // assertion and no loop test had wired it up.
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "two-in-one",
+            vec![
+                Ok(calls(&[
+                    ("explore", json!({"sql": "SELECT 1"})),
+                    ("materialize", json!({"sql": "SELECT 1 AS x"})),
+                ])),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        );
+        let handle = provider.captured_tool_turns();
+        let outcome = run_loop(
+            &provider,
+            cancel,
+            24,
+            "two-in-one",
+            &mut ws,
+            &engine.conn,
+            engine.temp.path(),
+        );
+        assert_eq!(outcome.termination, Termination::Text("done".into()));
+        assert_eq!(outcome.trace.len(), 2, "both calls in the batch dispatched");
+        assert_eq!(outcome.trace[0].name, "explore");
+        assert_eq!(
+            outcome.trace[1].name, "materialize",
+            "serial dispatch order preserved"
+        );
+        assert_eq!(
+            outcome.promotions.len(),
+            1,
+            "explore does not promote; only materialize does"
+        );
+        assert_eq!(
+            outcome.round_trips, 2,
+            "one batch round-trip + one terminal round-trip"
+        );
+
+        // The capture handle records every assembled ToolTurnRequest. The
+        // second round-trip's request proves the loop built the right
+        // conversation: [user, assistant(2 tool_calls), tool_result, tool_result].
+        let captured = handle.lock().expect("capture not poisoned");
+        assert_eq!(captured.len(), 2, "one capture per round-trip");
+        let second = &captured[1];
+        assert_eq!(
+            second.messages.len(),
+            4,
+            "user + assistant + one tool_result per call"
+        );
+        assert!(
+            matches!(&second.messages[0], ToolTurnMessage::User { content } if content.as_str() == "two-in-one"),
+            "first turn is the asking question"
+        );
+        let tool_calls = match &second.messages[1] {
+            ToolTurnMessage::Assistant { text, tool_calls } => {
+                assert!(text.is_none(), "no prose alongside the tool batch");
+                tool_calls
+            }
+            other => panic!("expected Assistant, got {other:?}"),
+        };
+        assert_eq!(
+            tool_calls.len(),
+            2,
+            "the assistant turn carries the whole batch"
+        );
+        assert_eq!(tool_calls[0].name, "explore");
+        assert_eq!(tool_calls[1].name, "materialize");
+        assert!(
+            matches!(second.messages[2], ToolTurnMessage::ToolResult { .. }),
+            "first tool result follows the assistant turn"
+        );
+        assert!(
+            matches!(second.messages[3], ToolTurnMessage::ToolResult { .. }),
+            "second tool result follows in order"
         );
     }
 
