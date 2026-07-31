@@ -113,22 +113,16 @@ pub(crate) struct FsAcl {
 }
 
 impl FsAcl {
-    /// Build the whitelist from the working set's source descriptors + the
-    /// session temp dir. A source whose original file no longer exists on disk
+    /// Build the whitelist from the working set's source paths + the session
+    /// temp dir. A source whose original file no longer exists on disk
     /// (canonicalization fails) is dropped from `source_roots` -- it cannot be
     /// read_* anyway, and carrying a phantom root would be dead policy.
     pub(crate) fn new(working_set: &WorkingSet, temp_path: &Path) -> Self {
         let temp_root = canonicalize(temp_path).unwrap_or_else(|| temp_path.to_path_buf());
         let source_roots = working_set
-            .list()
-            .iter()
-            .filter(|d| !working_set.is_result(&d.reference_name))
-            .filter_map(|d| {
-                if d.source_path.is_empty() {
-                    return None;
-                }
-                canonicalize(&d.source_path)
-            })
+            .source_paths()
+            .into_iter()
+            .filter_map(canonicalize)
             .collect();
         Self {
             source_roots,
@@ -175,8 +169,10 @@ impl FsAcl {
 }
 
 /// Canonicalize a path, following symlinks to the real target. Returns `None`
-/// when the path does not exist on disk -- the caller treats a missing source
-/// root as "not carried" and a missing read target as an `Unresolvable` refusal.
+/// when the path does not exist on disk -- this is the single canonicalization
+/// entry point in the module, so every caller treats a miss consistently: a
+/// missing source root is "not carried", a missing read target is an
+/// `Unresolvable` refusal, and a missing write-parent is likewise.
 fn canonicalize(path: impl AsRef<Path>) -> Option<PathBuf> {
     std::fs::canonicalize(path.as_ref()).ok()
 }
@@ -198,18 +194,16 @@ fn resolve(requested: &str, mode: AccessMode) -> Result<PathBuf, FsAclReason> {
         let cwd = std::env::current_dir().map_err(|_| FsAclReason::Unresolvable)?;
         cwd.join(raw)
     };
-    let canonical = match mode {
-        AccessMode::Read => std::fs::canonicalize(&base),
+    match mode {
+        AccessMode::Read => canonicalize(&base).ok_or(FsAclReason::Unresolvable),
         // Write: the leaf need not exist yet -- canonicalize the parent (so a
         // symlinked ancestor still resolves) and rejoin the leaf name.
         AccessMode::Write => {
             let parent = base.parent().ok_or(FsAclReason::Unresolvable)?;
-            let canon_parent =
-                std::fs::canonicalize(parent).map_err(|_| FsAclReason::Unresolvable)?;
+            let canon_parent = canonicalize(parent).ok_or(FsAclReason::Unresolvable)?;
             Ok(canon_parent.join(base.file_name().ok_or(FsAclReason::Unresolvable)?))
         }
-    };
-    canonical.map_err(|_| FsAclReason::Unresolvable)
+    }
 }
 
 #[cfg(test)]

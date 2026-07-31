@@ -443,6 +443,29 @@ impl WorkingSet {
             .collect()
     }
 
+    /// The original on-disk file paths of every registered source (non-result
+    /// datasets with a non-empty `source_path`), in registration order. These
+    /// are the files the user handed the session and become the read-only roots
+    /// the gateway file-reachability whitelist carries (ADR-0080, issue #293).
+    /// A `result_N` has no source path (it is a main-DB table, ADR-0024) and is
+    /// excluded by the `results` guard; a source whose path is empty is dropped
+    /// -- it cannot be `read_*` anyway. Borrows from `self` so callers consume
+    /// the paths without an owning copy.
+    pub fn source_paths(&self) -> Vec<&str> {
+        self.datasets
+            .iter()
+            .filter(|d| !self.results.contains(&d.reference_name))
+            .filter_map(|d| {
+                let path = d.source_path.as_str();
+                if path.is_empty() {
+                    None
+                } else {
+                    Some(path)
+                }
+            })
+            .collect()
+    }
+
     /// Transitively mark every result_N downstream of `removed_ref` as stale,
     /// each carrying `anchor` (the invalidating source event identity -- Deleted
     /// per #40 or Replaced per #41, for traceability ADR-0040). The walk is the
@@ -876,6 +899,20 @@ mod tests {
     fn sql_from_returns_none_for_unknown_reference() {
         let ws = WorkingSet::default();
         assert!(ws.sql_from("nope").is_none());
+    }
+
+    #[test]
+    fn source_paths_lists_sources_excluding_results() {
+        // ADR-0080 / issue #293: the gateway file-reachability whitelist
+        // carries the original file paths of uploaded sources as its read-only
+        // roots. A derived result_N has no source path (it is a main-DB table,
+        // ADR-0024), so even though it shares the FROM namespace with sources
+        // it never contributes a root. Registration order is preserved.
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("people")); // source_path "/people.csv"
+        ws.register(descriptor("orders")); // source_path "/orders.csv"
+        ws.register_result(result_descriptor("result_1")); // source_path ""
+        assert_eq!(ws.source_paths(), vec!["/people.csv", "/orders.csv"]);
     }
 
     // --- Source removal (issue #38) -------------------------------------------
