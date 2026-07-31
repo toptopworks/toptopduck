@@ -71,10 +71,6 @@ pub(crate) const DEFAULT_WALL_CLOCK: Duration = Duration::from_secs(120);
 /// the loop needs to keep for the collapsible trace.
 const TRACE_EXCERPT_MAX: usize = 240;
 
-/// Maximum length of a tool-call summary (the approval card body + trace label,
-/// ADR-0083). NOT the full arguments -- those may be large or sensitive.
-const SUMMARY_MAX: usize = 120;
-
 /// The Rust-native agent loop (ADR-0081). Holds the provider (borrowed, so the
 /// loop is cheap to build per turn), the shared cancel token (owned `Arc` so the
 /// watchdog can fire cancel without the session lock), and the two
@@ -423,10 +419,12 @@ fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) {
 /// `fallback` when the field is absent (a mis-shaped call the executor will
 /// itself refuse -- the summary is best-effort). Shared by the `sql`- and
 /// `reference_name`-keyed tools so the truncation + fallback shape has one
-/// source rather than one near-duplicate per field.
+/// source rather than one near-duplicate per field. The truncation cap +
+/// helper live in `persistence::recipe` ([`truncate_trace_summary`]) so a
+/// synthetic single-call trace and a live `materialize` summary match.
 fn summarize_field(input: &Value, field: &str, fallback: &str) -> String {
     let value = input.get(field).and_then(Value::as_str).unwrap_or(fallback);
-    truncate(value, SUMMARY_MAX)
+    crate::persistence::recipe::truncate_trace_summary(value)
 }
 
 /// Truncate a string to `max` chars, appending an ellipsis when it was cut.

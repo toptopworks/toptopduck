@@ -207,26 +207,26 @@ mod tests {
                         reference_name: "orders".into(),
                         display_name: "orders".into(),
                     }),
-                    RecipeEntry::Turn(RecipeTurn {
-                        question: "多少单".into(),
-                        outcome: RecipeOutcome::Materialized {
+                    RecipeEntry::Turn(RecipeTurn::new(
+                        "多少单",
+                        RecipeOutcome::Materialized {
                             reference_name: "result_1".into(),
                             display_name: "result_1".into(),
                             sql: "SELECT 1".into(),
                             assumption: None,
                             stale: None,
                         },
-                    }),
-                    RecipeEntry::Turn(RecipeTurn {
-                        question: "再问".into(),
-                        outcome: RecipeOutcome::Materialized {
+                    )),
+                    RecipeEntry::Turn(RecipeTurn::new(
+                        "再问",
+                        RecipeOutcome::Materialized {
                             reference_name: "result_2".into(),
                             display_name: "result_2".into(),
                             sql: "SELECT 2".into(),
                             assumption: None,
                             stale: None,
                         },
-                    }),
+                    )),
                 ],
                 Some("orders".into()),
             )
@@ -364,16 +364,16 @@ mod tests {
                         reference_name: "b".into(),
                         display_name: "b".into(),
                     }),
-                    RecipeEntry::Turn(RecipeTurn {
-                        question: "q".into(),
-                        outcome: RecipeOutcome::Materialized {
+                    RecipeEntry::Turn(RecipeTurn::new(
+                        "q",
+                        RecipeOutcome::Materialized {
                             reference_name: "result_1".into(),
                             display_name: "result_1".into(),
                             sql: "SELECT 1".into(),
                             assumption: None,
                             stale: None,
                         },
-                    }),
+                    )),
                 ],
                 Some("a".into()),
             )

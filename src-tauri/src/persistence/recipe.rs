@@ -18,6 +18,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::approval::OperationKind;
 use crate::model::{
     RectifyProvenance, SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, TextKind,
     TurnFailure,
@@ -27,10 +28,19 @@ use crate::model::{
 /// -> normal; lower -> forward-migrate; higher -> honest refuse. v1's
 /// `RecipeOutcome::Failed` carries the typed [`TurnFailure`] (issue #125) so
 /// the failure kind survives save/resume and renders via the frontend locale.
-/// The app is unreleased, so widening the Failed shape in place under v1 needs
-/// no migration transform; a future released shape change would bump this and
-/// add one.
-pub const RECIPE_FORMAT_VERSION: u32 = 1;
+/// The app is unreleased, so widening the Failed shape in place under v1 needed
+/// no migration transform.
+///
+/// v2 (ADR-0082, issue #296) adds the persisted execution trace + turn
+/// provenance to the display part ([`RecipeTurn::trace`] /
+/// [`RecipeTurn::provenance`]), and reframes the reconstructable part as the
+/// materialized promotion chain (each productive SQL is one promotion entry --
+/// the chain is still derived from `history` at resume time, replay semantics
+/// unchanged, ADR-0035). The v1->v2 mapping is lossless and trivial: a v1
+/// Materialized turn becomes one promotion entry and gains a synthetic
+/// single-call trace; older clients reading a v2 file hit the existing
+/// higher-version honest-refuse path (ADR-0036).
+pub const RECIPE_FORMAT_VERSION: u32 = 2;
 
 /// One source Dataset's portable reference (ADR-0034/0036/0042). Paths use
 /// the **hybrid representation** ADR-0036 §4 mandates: `source_path` is always
@@ -96,14 +106,172 @@ pub enum RecipeEntry {
     Source(SourceLifecycleEvent),
 }
 
+/// One entry in a turn's persisted execution trace (ADR-0078). The trace is a
+/// persisted, collapsible substructure of the turn; the far window carries only
+/// a summary (call count + failure summary), never the full trace verbatim. This
+/// is the recipe form of the agent loop's in-memory trace entry minus the
+/// ephemeral `tool_use_id` (a per-provider-call id that does not survive the
+/// turn, let alone a save/resume).
+///
+/// v1-era turns predate the agent loop and carry no recorded trajectory; the
+/// v1->v2 migration and [`Recipe::build_recipe`] synthesize a single-call trace
+/// for each Materialized turn (one `materialize` entry from the verbatim SQL),
+/// so a reopened v1 session shows the same one-step trajectory the single-SQL
+/// contract produced live. Real multi-call traces arrive once the agent-loop
+/// wiring slice drives live turns (ADR-0081); that slice populates this field
+/// with the loop's recorded calls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeTraceEntry {
+    /// Tool name -- a built-in (`explore` / `materialize` / `describe` /
+    /// `sample`) or an external MCP server's tool name.
+    pub name: String,
+    /// Operation badge (ADR-0080 read/write/execute/network) -- presentation
+    /// only. Reuses the approval-gateway classification so a reopened turn
+    /// renders the same badge the live approval card did.
+    pub operation_kind: OperationKind,
+    /// Short argument summary (the SQL or reference_name), NOT the full args.
+    pub summary: String,
+    /// Whether the call succeeded. A tool-level error routes back to the agent
+    /// (ADR-0077); the trace records the failure for audit + cross-turn
+    /// debugging.
+    pub success: bool,
+    /// Bounded excerpt of the tool result (or the denial / error message).
+    pub result_excerpt: String,
+}
+
+/// Which runtime drove a turn (ADR-0078/0081). Recorded on each turn's
+/// [`TurnProvenance`] so the thread can surface "this answer came from the
+/// built-in loop / an external CLI agent" -- the audit anchor for how a result
+/// was produced.
+///
+/// The legacy single-SQL `TurnRunner` predates runtime tracking and writes
+/// `None` (see [`TurnProvenance`]); only the agent-loop runtimes get a typed
+/// value here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RuntimeKind {
+    /// The app's own Rust-native agent loop (ADR-0081), driven by the active
+    /// BYOK profile. Key never leaves the process.
+    BuiltIn,
+    /// A third-party CLI agent process the app launched (ADR-0081), using its
+    /// own auth -- the app's BYOK key is never injected.
+    External,
+}
+
+/// Provenance of a turn's execution context (ADR-0078): which runtime produced
+/// it and which skills were active at assembly time. The persisted audit anchor
+/// for "how was this answer produced".
+///
+/// Both fields are optional / empty by default. v1-era turns (migrated or
+/// TurnRunner-live) carry no runtime or skill provenance, and
+/// [`Recipe::build_recipe`] writes the default until the agent-loop wiring slice
+/// populates real values. `#[serde(default)]` keeps older v2 recipes (and the
+/// migration output) deserializing cleanly.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TurnProvenance {
+    /// The runtime that drove this turn (ADR-0081), or `None` for turns created
+    /// before runtime tracking (v1 migrated, or TurnRunner-era live turns).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<RuntimeKind>,
+    /// The active skill ids at this turn's assembly time (ADR-0079/0040).
+    /// Empty when no skills were mounted or skill tracking is not yet wired.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
+}
+
+impl TurnProvenance {
+    /// Whether this provenance carries no information (no runtime, no skills).
+    /// Used by `skip_serializing_if` so a v2 recipe omits the field for turns
+    /// with no recorded provenance, keeping the `.duck` file lean.
+    fn is_empty(&self) -> bool {
+        self.runtime.is_none() && self.skills.is_empty()
+    }
+}
+
+/// Maximum length of a trace entry's argument summary (ADR-0078). The single
+/// source for the trace-summary truncation cap: both the synthetic single-call
+/// trace (this module's [`synthetic_materialize_trace`]) and the agent loop's
+/// live `materialize` summary (`summarize_field`) reuse it, so a reopened v1
+/// turn and a fresh live turn persist the same truncation shape.
+pub(crate) const TRACE_SUMMARY_MAX: usize = 120;
+
+/// Synthesize the single-call execution trace for a Materialized turn's SQL
+/// (ADR-0078). v1-era turns ran exactly one productive SQL under the single-SQL
+/// contract, so their trajectory is one `materialize` call -- both the v1->v2
+/// migration and [`Recipe::build_recipe`] use this helper so a reopened v1
+/// session shows the same one-step trajectory it produced live, and a fresh
+/// TurnRunner-era turn persists the same shape. The summary is the verbatim SQL
+/// truncated to [`TRACE_SUMMARY_MAX`].
+pub(crate) fn synthetic_materialize_trace(sql: &str) -> Vec<RecipeTraceEntry> {
+    vec![RecipeTraceEntry {
+        name: crate::tools::definitions::TOOL_MATERIALIZE.to_string(),
+        operation_kind: OperationKind::Write,
+        summary: truncate_trace_summary(sql),
+        success: true,
+        result_excerpt: String::new(),
+    }]
+}
+
+/// Truncate a trace-entry summary string to [`TRACE_SUMMARY_MAX`] chars,
+/// appending an ellipsis when cut. Shared by [`synthetic_materialize_trace`]
+/// and the agent loop's live `materialize` summary (`summarize_field`) so a
+/// persisted trace never bloats the `.duck` file while staying recognizable.
+pub(crate) fn truncate_trace_summary(s: &str) -> String {
+    if s.chars().count() <= TRACE_SUMMARY_MAX {
+        s.to_string()
+    } else {
+        let head: String = s
+            .chars()
+            .take(TRACE_SUMMARY_MAX.saturating_sub(1))
+            .collect();
+        format!("{head}…")
+    }
+}
+
 /// One turn in the recipe timeline (ADR-0028): the verbatim question paired
 /// with a trimmed outcome. Every turn is recorded regardless of outcome --
 /// "no result" is itself a typed outcome, never a silent gap (ADR-0028
 /// always-visible).
+///
+/// v2 (ADR-0078/0082) adds two persisted substructures: the execution
+/// [`trace`](Self::trace) (collapsible; the far window carries only its summary)
+/// and the [`provenance`](Self::provenance) (runtime + active skills). Both
+/// default empty for v1-era turns; see their own docs for the v1->v2 mapping.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecipeTurn {
     pub question: String,
     pub outcome: RecipeOutcome,
+    /// The persisted execution trace (ADR-0078): every tool call the turn made
+    /// (explore / materialize / external), each with its operation badge,
+    /// argument summary, success flag, and a bounded result excerpt. Collapsible
+    /// in the thread rail; never enters the far window verbatim. Empty for
+    /// no-tool turns (a textual refuse with no exploration); a Materialized
+    /// turn carries a synthetic single-call trace (see
+    /// [`synthetic_materialize_trace`]) until real multi-call traces arrive
+    /// with the agent-loop wiring.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trace: Vec<RecipeTraceEntry>,
+    /// The turn's runtime + skill provenance (ADR-0078). Default (no runtime,
+    /// no skills) for v1-era turns until the agent-loop wiring slice populates
+    /// real values.
+    #[serde(default, skip_serializing_if = "TurnProvenance::is_empty")]
+    pub provenance: TurnProvenance,
+}
+
+impl RecipeTurn {
+    /// Construct a turn with an empty trace and default provenance. The shape
+    /// every no-tool / pre-agent-loop turn persists with: a Textual / Failed /
+    /// Cancelled outcome has no trace, and runtime / skill tracking is not yet
+    /// wired on the live path. [`Recipe::build_recipe`] is today the only site
+    /// that sets a non-default trace (a Materialized turn's synthetic
+    /// single-call trace) and constructs `RecipeTurn` via a struct literal.
+    pub fn new(question: impl Into<String>, outcome: RecipeOutcome) -> Self {
+        Self {
+            question: question.into(),
+            outcome,
+            trace: Vec::new(),
+            provenance: TurnProvenance::default(),
+        }
+    }
 }
 
 /// A trimmed turn outcome (ADR-0028 four-way classification). The live
@@ -402,24 +570,24 @@ mod tests {
                     reference_name: "people".into(),
                     display_name: "people".into(),
                 }),
-                RecipeEntry::Turn(RecipeTurn {
-                    question: "多少人".into(),
-                    outcome: RecipeOutcome::Materialized {
+                RecipeEntry::Turn(RecipeTurn::new(
+                    "多少人",
+                    RecipeOutcome::Materialized {
                         reference_name: "result_1".into(),
                         display_name: "result_1".into(),
                         sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
                         assumption: None,
                         stale: None,
                     },
-                }),
-                RecipeEntry::Turn(RecipeTurn {
-                    question: "哪种名字".into(),
-                    outcome: RecipeOutcome::Textual {
+                )),
+                RecipeEntry::Turn(RecipeTurn::new(
+                    "哪种名字",
+                    RecipeOutcome::Textual {
                         text_kind: TextKind::Clarify,
                         body: "按姓还是名？".into(),
                         assumption: None,
                     },
-                }),
+                )),
             ],
             // active points at a SOURCE name (ADR-0035), never a result_N.
             active: Some("people".into()),
@@ -438,11 +606,11 @@ mod tests {
     }
 
     #[test]
-    fn recipe_format_version_is_one() {
-        // ADR-0036: v1 carries format_version = 1. Pin the constant so the
-        // open-path version check stays in sync with what save writes.
-        assert_eq!(RECIPE_FORMAT_VERSION, 1);
-        assert_eq!(build_recipe().format_version, 1);
+    fn recipe_format_version_is_two() {
+        // ADR-0082 (issue #296): v2 carries format_version = 2. Pin the constant
+        // so the open-path version check stays in sync with what save writes.
+        assert_eq!(RECIPE_FORMAT_VERSION, 2);
+        assert_eq!(build_recipe().format_version, 2);
     }
 
     #[test]
@@ -466,26 +634,26 @@ mod tests {
             session_name: "s".into(),
             sources: vec![csv_source("people", "fp")],
             history: vec![
-                RecipeEntry::Turn(RecipeTurn {
-                    question: "q1".into(),
-                    outcome: RecipeOutcome::Materialized {
+                RecipeEntry::Turn(RecipeTurn::new(
+                    "q1",
+                    RecipeOutcome::Materialized {
                         reference_name: "result_1".into(),
                         display_name: "result_1".into(),
                         sql: "SELECT 1".into(),
                         assumption: None,
                         stale: None,
                     },
-                }),
-                RecipeEntry::Turn(RecipeTurn {
-                    question: "q2".into(),
-                    outcome: RecipeOutcome::Materialized {
+                )),
+                RecipeEntry::Turn(RecipeTurn::new(
+                    "q2",
+                    RecipeOutcome::Materialized {
                         reference_name: "result_2".into(),
                         display_name: "result_2".into(),
                         sql: "SELECT * FROM \"result_1\"".into(),
                         assumption: None,
                         stale: None,
                     },
-                }),
+                )),
             ],
             active: Some("people".into()),
         };
@@ -569,25 +737,25 @@ mod tests {
             session_name: "stale-chain".into(),
             sources: vec![csv_source("people", "fp")],
             history: vec![
-                RecipeEntry::Turn(RecipeTurn {
-                    question: "live".into(),
-                    outcome: RecipeOutcome::Materialized {
+                RecipeEntry::Turn(RecipeTurn::new(
+                    "live",
+                    RecipeOutcome::Materialized {
                         reference_name: "result_1".into(),
                         display_name: "result_1".into(),
                         sql: "SELECT 1".into(),
                         assumption: None,
                         stale: None,
                     },
-                }),
-                RecipeEntry::Turn(RecipeTurn {
-                    question: "stale".into(),
-                    outcome: stale_materialized(
+                )),
+                RecipeEntry::Turn(RecipeTurn::new(
+                    "stale",
+                    stale_materialized(
                         "result_2",
                         "SELECT * FROM \"people\".data",
                         "people",
                         StaleReason::Replaced,
                     ),
-                }),
+                )),
             ],
             active: Some("people".into()),
         };
@@ -608,15 +776,15 @@ mod tests {
         // survive serialize -> deserialize so resume can rebuild the timeline
         // AND mark the result_N stale in the working set. A dropped or
         // truncated anchor would silently lose the stale badge after reopen.
-        let turn = RecipeTurn {
-            question: "stale".into(),
-            outcome: stale_materialized(
+        let turn = RecipeTurn::new(
+            "stale",
+            stale_materialized(
                 "result_2",
                 "SELECT COUNT(*) FROM \"orders\".data",
                 "orders",
                 StaleReason::Deleted,
             ),
-        };
+        );
         let json = serde_json::to_string(&turn).expect("serialize");
         let back: RecipeTurn = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, turn);
@@ -656,35 +824,35 @@ mod tests {
             session_name: "interleaved".into(),
             sources: vec![csv_source("people", "fp")],
             history: vec![
-                RecipeEntry::Turn(RecipeTurn {
-                    question: "first live".into(),
-                    outcome: RecipeOutcome::Materialized {
+                RecipeEntry::Turn(RecipeTurn::new(
+                    "first live",
+                    RecipeOutcome::Materialized {
                         reference_name: "result_1".into(),
                         display_name: "result_1".into(),
                         sql: "SELECT 1".into(),
                         assumption: None,
                         stale: None,
                     },
-                }),
-                RecipeEntry::Turn(RecipeTurn {
-                    question: "stale middle".into(),
-                    outcome: stale_materialized(
+                )),
+                RecipeEntry::Turn(RecipeTurn::new(
+                    "stale middle",
+                    stale_materialized(
                         "result_2",
                         "SELECT * FROM \"people\".data",
                         "people",
                         StaleReason::Replaced,
                     ),
-                }),
-                RecipeEntry::Turn(RecipeTurn {
-                    question: "live after gap".into(),
-                    outcome: RecipeOutcome::Materialized {
+                )),
+                RecipeEntry::Turn(RecipeTurn::new(
+                    "live after gap",
+                    RecipeOutcome::Materialized {
                         reference_name: "result_3".into(),
                         display_name: "result_3".into(),
                         sql: "SELECT 3".into(),
                         assumption: None,
                         stale: None,
                     },
-                }),
+                )),
             ],
             active: Some("people".into()),
         };
@@ -716,16 +884,16 @@ mod tests {
         let recipe = Recipe::build(
             "valid".into(),
             vec![csv_source("people", "fp")],
-            vec![RecipeEntry::Turn(RecipeTurn {
-                question: "多少人".into(),
-                outcome: RecipeOutcome::Materialized {
+            vec![RecipeEntry::Turn(RecipeTurn::new(
+                "多少人",
+                RecipeOutcome::Materialized {
                     reference_name: "result_1".into(),
                     display_name: "result_1".into(),
                     sql: "SELECT 1".into(),
                     assumption: None,
                     stale: None,
                 },
-            })],
+            ))],
             Some("people".into()),
         )
         .expect("valid recipe builds");
@@ -768,16 +936,16 @@ mod tests {
     fn build_rejects_a_duplicate_materialized_reference_name() {
         // ADR-0022 result_N is never reused. Two Materialized turns sharing a
         // name would shadow one another on the replay chain; build refuses.
-        let dup_turn = RecipeTurn {
-            question: "q".into(),
-            outcome: RecipeOutcome::Materialized {
+        let dup_turn = RecipeTurn::new(
+            "q",
+            RecipeOutcome::Materialized {
                 reference_name: "result_1".into(),
                 display_name: "result_1".into(),
                 sql: "SELECT 1".into(),
                 assumption: None,
                 stale: None,
             },
-        };
+        );
         let err = Recipe::build(
             "dup".into(),
             vec![csv_source("people", "fp")],
@@ -839,6 +1007,122 @@ mod tests {
         assert_ne!(
             RECIPE_FORMAT_VERSION, 0,
             "test precondition: constant is non-zero"
+        );
+    }
+
+    // --- v2 trace + provenance (ADR-0078/0082, issue #296) -------------------
+
+    #[test]
+    fn synthetic_materialize_trace_produces_one_successful_write_call() {
+        // ADR-0082: a v1-era Materialized turn ran exactly one productive SQL,
+        // so its synthetic trajectory is one `materialize` call classified as a
+        // write, marked successful, with the verbatim SQL as the summary.
+        let trace = synthetic_materialize_trace("SELECT COUNT(*) FROM \"people\".data");
+        assert_eq!(trace.len(), 1);
+        let entry = &trace[0];
+        assert_eq!(entry.name, "materialize");
+        assert_eq!(entry.operation_kind, OperationKind::Write);
+        assert!(entry.success);
+        assert_eq!(entry.summary, "SELECT COUNT(*) FROM \"people\".data");
+        assert!(entry.result_excerpt.is_empty());
+    }
+
+    #[test]
+    fn synthetic_materialize_trace_truncates_a_long_sql_summary() {
+        // A trace summary is bounded (ADR-0078) so a huge SQL does not bloat
+        // the persisted trace. A SQL over TRACE_SUMMARY_MAX is cut with an
+        // ellipsis; the helper matches what the live agent loop records.
+        let long_sql = "x".repeat(TRACE_SUMMARY_MAX + 40);
+        let trace = synthetic_materialize_trace(&long_sql);
+        assert!(trace[0].summary.chars().count() <= TRACE_SUMMARY_MAX);
+        assert!(trace[0].summary.ends_with('…'), "cut with ellipsis");
+    }
+
+    #[test]
+    fn recipe_turn_omits_empty_trace_and_default_provenance_from_json() {
+        // ADR-0078: the trace + provenance are persisted substructures, but a
+        // turn with no tool trajectory and untracked provenance omits BOTH
+        // fields (skip_serializing_if), keeping the .duck lean. A v1-era
+        // Textual turn serializes to the same shape v1 carried (no trace /
+        // provenance keys) -- the round trip is byte-stable.
+        let turn = RecipeTurn::new(
+            "哪种名字",
+            RecipeOutcome::Textual {
+                text_kind: TextKind::Clarify,
+                body: "按姓还是名？".into(),
+                assumption: None,
+            },
+        );
+        let json = serde_json::to_string(&turn).expect("serialize");
+        assert!(!json.contains("trace"), "empty trace omitted");
+        assert!(!json.contains("provenance"), "default provenance omitted");
+        let back: RecipeTurn = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, turn);
+    }
+
+    #[test]
+    fn recipe_turn_round_trips_a_synthetic_trace_through_json() {
+        // A Materialized turn's synthesized single-call trace survives a
+        // serialize -> deserialize cycle, so the .duck written on save reads
+        // back identically on resume -- the foundation for the v2 display-part
+        // contract (ADR-0078/0082).
+        let turn = RecipeTurn {
+            question: "多少人".into(),
+            outcome: RecipeOutcome::Materialized {
+                reference_name: "result_1".into(),
+                display_name: "result_1".into(),
+                sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
+                assumption: None,
+                stale: None,
+            },
+            trace: synthetic_materialize_trace("SELECT COUNT(*) AS n FROM \"people\".data"),
+            provenance: TurnProvenance::default(),
+        };
+        let json = serde_json::to_string(&turn).expect("serialize");
+        assert!(json.contains("\"trace\""), "trace key present");
+        let back: RecipeTurn = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, turn);
+        assert_eq!(back.trace.len(), 1);
+        assert_eq!(back.trace[0].name, "materialize");
+    }
+
+    #[test]
+    fn provenance_round_trips_with_runtime_and_skills() {
+        // Forward-looking (ADR-0078/0081): a turn the agent-loop wiring slice
+        // populates carries a typed runtime + the active skill ids. The shape
+        // round-trips so resume reproduces the audit anchor "how was this
+        // produced" after reopen.
+        let provenance = TurnProvenance {
+            runtime: Some(RuntimeKind::BuiltIn),
+            skills: vec!["sql-coach".into()],
+        };
+        let json = serde_json::to_string(&provenance).expect("serialize");
+        let back: TurnProvenance = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, provenance);
+        assert_eq!(back.runtime, Some(RuntimeKind::BuiltIn));
+        assert_eq!(back.skills, vec!["sql-coach".to_string()]);
+    }
+
+    #[test]
+    fn provenance_is_empty_when_default() {
+        // The skip_serializing_if predicate: a default provenance (no runtime,
+        // no skills) reports empty so the field is omitted from the .duck.
+        assert!(TurnProvenance::default().is_empty());
+        assert!(
+            !TurnProvenance {
+                runtime: Some(RuntimeKind::External),
+                skills: Vec::new(),
+            }
+            .is_empty(),
+            "a typed runtime is non-empty",
+        );
+        assert!(
+            !TurnProvenance {
+                runtime: None,
+                skills: vec!["s".into()],
+            }
+            .is_empty(),
+            "a skill list is non-empty",
         );
     }
 }

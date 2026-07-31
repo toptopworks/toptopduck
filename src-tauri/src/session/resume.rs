@@ -614,16 +614,16 @@ mod tests {
 
     /// A live (non-stale) Materialized recipe entry producing `reference_name`.
     fn materialized_turn(reference_name: &str, sql: &str) -> RecipeEntry {
-        RecipeEntry::Turn(RecipeTurn {
-            question: format!("q_{reference_name}"),
-            outcome: RecipeOutcome::Materialized {
+        RecipeEntry::Turn(RecipeTurn::new(
+            format!("q_{reference_name}"),
+            RecipeOutcome::Materialized {
                 reference_name: reference_name.into(),
                 display_name: reference_name.into(),
                 sql: sql.into(),
                 assumption: None,
                 stale: None,
             },
-        })
+        ))
     }
 
     /// A stale (cascade-invalidated) Materialized recipe entry -- the
@@ -631,9 +631,9 @@ mod tests {
     /// for (absent from the productive chain, so phase 3 never re-materialized
     /// its table).
     fn stale_materialized_turn(reference_name: &str, sql: &str, anchor: &str) -> RecipeEntry {
-        RecipeEntry::Turn(RecipeTurn {
-            question: format!("q_{reference_name}"),
-            outcome: RecipeOutcome::Materialized {
+        RecipeEntry::Turn(RecipeTurn::new(
+            format!("q_{reference_name}"),
+            RecipeOutcome::Materialized {
                 reference_name: reference_name.into(),
                 display_name: reference_name.into(),
                 sql: sql.into(),
@@ -644,7 +644,7 @@ mod tests {
                     reason: StaleReason::Deleted,
                 }),
             },
-        })
+        ))
     }
 
     /// Build a recipe with one source (`active`, if `Some`) + the given

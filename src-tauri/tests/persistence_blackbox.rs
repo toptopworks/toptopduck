@@ -1673,6 +1673,152 @@ fn open_duck_migrates_a_lower_version_recipe_and_persists_current_shape() {
     );
 }
 
+/// AC1/AC2/AC5 (issue #296): open a hand-written v1 `.duck` -> forward-migrates
+/// to v2 (ADR-0082) -> resumes normally with the SAME working set the v1 recipe
+/// would have produced (replay semantics unchanged) -> the post-resume auto-write
+/// lands the v2 shape on disk, with each Materialized turn carrying a synthetic
+/// single-call trace. Pins the v1->v2 migration's lossless replay + the new
+/// display-part substructure.
+#[test]
+fn open_duck_migrates_a_v1_recipe_to_v2_and_synthesizes_trace() {
+    use toptopduck_lib::persistence::{read_duck, RecipeEntry, RECIPE_FORMAT_VERSION};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("v1.duck");
+    let csv = fixture("people.csv");
+
+    // Capture the post-rectify fingerprint under the same ingest path the v1
+    // recipe names, so phase 1 fingerprint verification passes on resume.
+    let session = build_single_source_session(&duck, &csv);
+    let fingerprint = session.get("people").expect("people").fingerprint.clone();
+    let csv_path = csv.to_string_lossy().to_string();
+    drop(session);
+
+    // A v1 recipe: outcome uses v1's `kind` discriminator, sources carry
+    // display_name (the post-v0->v1 shape). No `trace` field -- that is the v2
+    // display-part slot the migration adds. Two Materialized turns so the
+    // chain-replay identity (AC2) covers a derived turn reading an earlier
+    // result_N.
+    let v1 = serde_json::json!({
+        "format_version": 1,
+        "session_name": "v1 分析",
+        "sources": [{
+            "reference_name": "people",
+            "display_name": "people",
+            "source_path": csv_path,
+            "fingerprint": fingerprint,
+        }],
+        "history": [
+            {
+                "entry": "Turn",
+                "data": {
+                    "question": "多少人",
+                    "outcome": {
+                        "kind": "Materialized",
+                        "data": {
+                            "reference_name": "result_1",
+                            "display_name": "result_1",
+                            "sql": "SELECT COUNT(*) AS n FROM \"people\".data",
+                        },
+                    },
+                },
+            },
+            {
+                "entry": "Turn",
+                "data": {
+                    "question": "双倍",
+                    "outcome": {
+                        "kind": "Materialized",
+                        "data": {
+                            "reference_name": "result_2",
+                            "display_name": "result_2",
+                            "sql": "SELECT 2 * n FROM \"result_1\"",
+                        },
+                    },
+                },
+            },
+        ],
+        "active": "people",
+    });
+    fs::write(&duck, serde_json::to_string(&v1).unwrap()).expect("write v1");
+
+    // Resume: forward-migrate v1->v2 -> re-ingest (fingerprint match) ->
+    // replay BOTH productive turns in chain order.
+    let (_events, cb) = collect_events();
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("resume");
+
+    // AC2: the replayed working set matches what the v1 recipe would have
+    // produced -- result_1 (COUNT) then result_2 (derived FROM result_1) both
+    // re-materialize, proving the reconstructable part is untouched by the
+    // migration.
+    assert!(resumed.get("result_1").is_some(), "result_1 replayed");
+    assert!(
+        resumed.get("result_2").is_some(),
+        "result_2 replayed (chain order)"
+    );
+
+    // AC1/AC5: the on-disk .duck is now v2. Each Materialized turn carries the
+    // synthesized single-call trace (the v2 display-part substructure); the
+    // reconstructable fields are unchanged.
+    let persisted = read_duck(&duck).expect("read persisted");
+    assert_eq!(persisted.format_version(), RECIPE_FORMAT_VERSION);
+    let turns: Vec<_> = persisted
+        .history
+        .iter()
+        .filter_map(|e| match e {
+            RecipeEntry::Turn(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(turns.len(), 2, "both turns preserved");
+    assert_eq!(turns[0].trace.len(), 1, "result_1 gained a synthetic trace");
+    assert_eq!(turns[0].trace[0].name, "materialize");
+    assert_eq!(turns[1].trace.len(), 1, "result_2 gained a synthetic trace");
+    assert_eq!(turns[1].trace[0].name, "materialize");
+    // AC2 (replay identity) is also pinned at the recipe level: the productive
+    // chain is unchanged, so a future resume re-materializes the same results.
+    let chain = persisted.productive_chain();
+    assert_eq!(
+        chain
+            .iter()
+            .map(|t| t.reference_name.clone())
+            .collect::<Vec<_>>(),
+        vec!["result_1".to_string(), "result_2".to_string()],
+    );
+    assert_eq!(chain[1].sql, "SELECT 2 * n FROM \"result_1\"");
+
+    // Idempotency (AC5): re-opening the now-v2 file must NOT re-migrate or
+    // layer a second trace. A v2 -> v2 hop is a no-op (migrate_to_current's
+    // while-guard), so each Materialized turn still carries exactly one
+    // synthetic trace entry after a second open. Pins the classic migration
+    // double-apply bug -- a `<` vs `<=` boundary flip would re-run v1_to_v2 and
+    // double the trace. Drop the first session so its .duck lock releases
+    // before the second resume tries to acquire.
+    drop(resumed);
+    let persisted2 = read_duck(&duck).expect("read v2 once");
+    fs::write(&duck, serde_json::to_string(&persisted2).unwrap()).expect("rewrite v2");
+    let (_events2, cb2) = collect_events();
+    let _resumed2 =
+        resume_defaults(&duck, Arc::new(CancelToken::new()), cb2).expect("re-resume v2");
+    let persisted3 = read_duck(&duck).expect("read v2 twice");
+    assert_eq!(persisted3.format_version(), RECIPE_FORMAT_VERSION);
+    let turns2: Vec<_> = persisted3
+        .history
+        .iter()
+        .filter_map(|e| match e {
+            RecipeEntry::Turn(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(turns2.len(), 2, "both turns preserved after re-open");
+    assert_eq!(
+        turns2[0].trace.len(),
+        1,
+        "v2 -> v2 is idempotent: trace not duplicated",
+    );
+    assert_eq!(turns2[1].trace.len(), 1);
+}
+
 /// AC1: move the .duck AND its in-subtree source together -> the relative
 /// path resolves against the .duck's NEW parent, so no re-link fires and the
 /// source re-ingests cleanly. This is the "just works" portability promise
@@ -2447,40 +2593,40 @@ fn resume_renders_a_broken_sql_turn_as_failed_and_preserves_prior_results() {
             fingerprint,
         }],
         vec![
-            RecipeEntry::Turn(RecipeTurn {
-                question: "good".into(),
-                outcome: RecipeOutcome::Materialized {
+            RecipeEntry::Turn(RecipeTurn::new(
+                "good",
+                RecipeOutcome::Materialized {
                     reference_name: "result_1".into(),
                     display_name: "result_1".into(),
                     sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
                     assumption: None,
                     stale: None,
                 },
-            }),
-            RecipeEntry::Turn(RecipeTurn {
-                question: "broken".into(),
-                outcome: RecipeOutcome::Materialized {
+            )),
+            RecipeEntry::Turn(RecipeTurn::new(
+                "broken",
+                RecipeOutcome::Materialized {
                     reference_name: "result_2".into(),
                     display_name: "result_2".into(),
                     sql: "SELECT * FROM nonexistent_relation".into(),
                     assumption: None,
                     stale: None,
                 },
-            }),
+            )),
             // A third turn whose SQL WOULD succeed if replayed -- pins that
             // turns after the break (K+1..) are dropped, not silently skipped
             // then recovered. If the truncation invariant broke, result_3
             // would materialize and this test would fail.
-            RecipeEntry::Turn(RecipeTurn {
-                question: "after-break".into(),
-                outcome: RecipeOutcome::Materialized {
+            RecipeEntry::Turn(RecipeTurn::new(
+                "after-break",
+                RecipeOutcome::Materialized {
                     reference_name: "result_3".into(),
                     display_name: "result_3".into(),
                     sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
                     assumption: None,
                     stale: None,
                 },
-            }),
+            )),
         ],
         Some("people".into()),
     )

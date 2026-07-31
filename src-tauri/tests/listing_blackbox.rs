@@ -35,16 +35,16 @@ fn write_recipe(dir: &std::path::Path, file: &str, session_name: &str, src: &str
     let recipe = Recipe::build(
         session_name.into(),
         vec![source],
-        vec![RecipeEntry::Turn(RecipeTurn {
-            question: "q".into(),
-            outcome: RecipeOutcome::Materialized {
+        vec![RecipeEntry::Turn(RecipeTurn::new(
+            "q",
+            RecipeOutcome::Materialized {
                 reference_name: "result_1".into(),
                 display_name: "result_1".into(),
                 sql: "SELECT 1".into(),
                 assumption: None,
                 stale: None,
             },
-        })],
+        ))],
         Some(src.into()),
     )
     .expect("build");
