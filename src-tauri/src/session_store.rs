@@ -44,6 +44,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
+use crate::approval::SharedApprovalState;
 use crate::cancel::CancelToken;
 use crate::provider::Provider;
 use crate::session::Session;
@@ -242,6 +243,13 @@ pub struct SessionHandle {
     /// `Mutex` wraps the `!Sync` `mpsc::Receiver` so the handle stays `Sync`
     /// (it lives behind an `Arc`).
     drop_signal: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    /// ADR-0080 (issue #294): per-session tiered-approval state -- the
+    /// authorization mode, the "always allow" trust set, and the in-flight
+    /// approval slot. Lives on the handle (NOT inside the `Session` mutex) so
+    /// `respond_tool_approval` reaches it while a waiting turn holds the
+    /// session lock. Allocated once at [`SessionStore::create`]; reset on
+    /// resume via [`Self::reset_approval`].
+    approval: SharedApprovalState,
 }
 
 impl SessionHandle {
@@ -262,8 +270,15 @@ impl SessionHandle {
     /// as `Cancelled` at its next check. Used by the `cancel` command and
     /// `close_session`. Safe when no turn is in flight (no-op besides the
     /// flag, which the next `ask` resets).
+    ///
+    /// Also wakes any in-flight approval gate (ADR-0080, issue #294): a turn
+    /// blocked on the approval condvar is not inside DuckDB, so the engine
+    /// interrupt alone would not reach it. Without this wake the gate would
+    /// rely on its 200ms cancel-poll fallback, delaying the `Cancelled`
+    /// outcome; the explicit wake makes cancel immediate.
     pub fn fire_cancel(&self) {
         self.cancel.request();
+        self.approval.interrupt_pending();
     }
 
     /// Whether a turn is currently in flight on this session (ADR-0021
@@ -336,6 +351,21 @@ impl SessionHandle {
         // Engine error rather than panicking here (Drop-adjacent code must
         // not panic).
     }
+
+    /// The per-session tiered-approval state (ADR-0080, issue #294). The
+    /// approval commands read/mutate this; the future agent loop (#295) and
+    /// external-tool bridge (#299) drive tool calls through its gate.
+    pub fn approval_state(&self) -> SharedApprovalState {
+        Arc::clone(&self.approval)
+    }
+
+    /// Reset the approval posture to the default (ADR-0080: resume 归零).
+    /// Called by `open_duck` after a successful resume -- the authorization
+    /// mode + trust set are session-level and must not survive a resume
+    /// (they are not in the recipe / app-config).
+    pub fn reset_approval(&self) {
+        self.approval.reset();
+    }
 }
 
 /// The multi-session map (ADR-0056). Managed once as Tauri state; every
@@ -388,6 +418,10 @@ impl SessionStore {
             closing,
             resuming: AtomicBool::new(false),
             drop_signal: Mutex::new(Some(drop_rx)),
+            // ADR-0080 (issue #294): per-session approval state, defaulting to
+            // PerCall mode + an empty trust set. Reset on resume
+            // (SessionHandle::reset_approval via open_duck).
+            approval: Arc::new(crate::approval::ApprovalState::new()),
         });
         // Generate the id only after the resource exists; insert under the
         // write lock; return the id only after the insert lands.
