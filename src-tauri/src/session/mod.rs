@@ -31,7 +31,10 @@ use crate::model::{
     RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, SourceLifecycleKind,
     ThreadEntry, TurnError, TurnOutcome, TurnPhase, TurnRecord,
 };
-use crate::persistence::recipe::{Recipe, RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef};
+use crate::persistence::recipe::{
+    synthetic_materialize_trace, Recipe, RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef,
+    TurnProvenance,
+};
 use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
 use crate::persistence::{read_duck, save_atomic, SaveError};
 use crate::provider::{Provider, UnwiredProvider};
@@ -1758,7 +1761,14 @@ impl Session {
             .iter()
             .filter_map(|entry| match entry {
                 ThreadEntry::Turn(record) => {
-                    let outcome = match &record.outcome {
+                    // Build the trimmed outcome paired with its persisted trace
+                    // (ADR-0078). A Materialized turn ran exactly one productive
+                    // SQL under the single-SQL contract, so its trace is a
+                    // synthetic single `materialize` call (real multi-call
+                    // traces arrive with the agent-loop wiring slice, ADR-0081);
+                    // every other outcome has an empty trace -- no tool call
+                    // trajectory to record.
+                    let (outcome, trace) = match &record.outcome {
                         TurnOutcome::Materialized {
                             dataset,
                             sql,
@@ -1782,36 +1792,52 @@ impl Session {
                             // user rename (ADR-0037) updates the working set,
                             // not the history entry, so the snapshot is stale.
                             let display_name = descriptor.display_name.clone();
-                            RecipeOutcome::Materialized {
-                                reference_name: dataset.reference_name.clone(),
-                                display_name,
-                                sql,
-                                assumption: assumption.clone(),
-                                // ADR-0041: a live result -> stale None
-                                // (replayed); a cascade-invalidated result ->
-                                // the anchor from its descriptor (dead turn,
-                                // kept in history, never replayed). The anchor
-                                // is what the UI's stale badge reads, so a
-                                // reopen renders the same "invalidated by"
-                                // provenance as the live session did.
-                                stale: descriptor.stale.clone(),
-                            }
+                            let trace = synthetic_materialize_trace(&sql);
+                            (
+                                RecipeOutcome::Materialized {
+                                    reference_name: dataset.reference_name.clone(),
+                                    display_name,
+                                    sql,
+                                    assumption: assumption.clone(),
+                                    // ADR-0041: a live result -> stale None
+                                    // (replayed); a cascade-invalidated result
+                                    // -> the anchor from its descriptor (dead
+                                    // turn, kept in history, never replayed).
+                                    // The anchor is what the UI's stale badge
+                                    // reads, so a reopen renders the same
+                                    // "invalidated by" provenance as the live
+                                    // session did.
+                                    stale: descriptor.stale.clone(),
+                                },
+                                trace,
+                            )
                         }
                         TurnOutcome::Textual {
                             text_kind,
                             body,
                             assumption,
-                        } => RecipeOutcome::Textual {
-                            text_kind: *text_kind,
-                            body: body.clone(),
-                            assumption: assumption.clone(),
-                        },
-                        TurnOutcome::Failed(failure) => RecipeOutcome::Failed(failure.clone()),
-                        TurnOutcome::Cancelled => RecipeOutcome::Cancelled,
+                        } => (
+                            RecipeOutcome::Textual {
+                                text_kind: *text_kind,
+                                body: body.clone(),
+                                assumption: assumption.clone(),
+                            },
+                            Vec::new(),
+                        ),
+                        TurnOutcome::Failed(failure) => {
+                            (RecipeOutcome::Failed(failure.clone()), Vec::new())
+                        }
+                        TurnOutcome::Cancelled => (RecipeOutcome::Cancelled, Vec::new()),
                     };
                     Some(RecipeEntry::Turn(RecipeTurn {
                         question: record.question.clone(),
                         outcome,
+                        trace,
+                        // Runtime + skill provenance is not yet tracked on the
+                        // live path; the agent-loop wiring slice populates real
+                        // values (ADR-0078/0081). Default-omit keeps the .duck
+                        // lean until then.
+                        provenance: TurnProvenance::default(),
                     }))
                 }
                 ThreadEntry::Source(ev) => Some(RecipeEntry::Source(ev.clone())),
