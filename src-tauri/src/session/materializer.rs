@@ -27,7 +27,9 @@ use crate::cancel::CancelToken;
 use crate::guardrail::{classify_duckdb_error, ExecError, ExecErrorKind};
 use crate::ingest::schema::quote_ident;
 use crate::model::{DatasetDescriptor, DatasetPrivacy, RectifyProvenance};
-use crate::provenance;
+use crate::sandbox_sql::{
+    preflight_read_sql, run_sandboxed_read, PreflightError, SandboxDeps, SandboxExecError,
+};
 use crate::session::{sandbox, snapshot::derive_table};
 use crate::workingset::WorkingSet;
 
@@ -75,9 +77,12 @@ pub(crate) trait Materializer: Send {
 
 /// The production materializer: runs provider SQL on a locked-down sandbox,
 /// installs the result on admin, derives its shape, registers it, and reclaims
-/// the oldest stale results past the cap. Behavior is byte-for-byte the
-/// pre-refactor `Session::try_materialize` (ADR-0053) -- this is a structural
-/// move, not a semantic change. Stateless; the `RealMaterializer` value
+/// the oldest stale results past the cap. Structurally a move of the pre-
+/// refactor `Session::try_materialize` (ADR-0053), with one behavior change in
+/// #334: the path now also runs the FsAcl `read_*` whitelist (shared with
+/// explore via `sandbox_sql::preflight_read_sql`), so an out-of-bounds
+/// `read_*` surfaces as a structured error instead of the engine's opaque
+/// "disabled by configuration". Stateless; the `RealMaterializer` value
 /// carries no data and exists only to anchor the `impl`.
 pub(crate) struct RealMaterializer;
 
@@ -96,111 +101,48 @@ impl Materializer for RealMaterializer {
         // gap (e.g. result_1 dead, result_2 live) does not renumber the live
         // turn -- the chain recreates each result_N under its stable identity.
 
-        // Stale-reference refusal (ADR-0013 invariant 2) + provenance record
-        // (issue #40): parse the SQL once before touching the sandbox so a
-        // stale reference is rejected without burning any setup work.
-        // The same analysis yields the dependency set recorded after a
-        // successful materialize -- the cascade reads it on a later source
-        // delete. Conservative parse failure (deps = all members) is recorded
-        // as-is so a delete never under-cascades ("宁可多失效不漏失效").
-        let deps_analysis = provenance::analyze(sql, deps.working_set);
-        if let Some(stale_ref) = deps_analysis.stale_ref.as_ref() {
-            // The detail carries the bare dead reference name: on the live
-            // path the tool dispatch renders it into the error string routed
-            // back to the model (ADR-0077 self-correction); resume replay
-            // folds it into the failed turn's detail.
-            return Err(ExecError::new(
-                ExecErrorKind::StaleReference,
-                stale_ref.clone(),
-            ));
-        }
+        // Gateway door (ADR-0013 stale-ref + ADR-0080 read_* whitelist), shared
+        // with the explore path. The materialize path now ALSO runs the FsAcl
+        // whitelist (issue #334) -- the sole behavior change -- so an
+        // out-of-bounds read_* becomes a structured "outside the allowed area"
+        // error instead of the engine's opaque "disabled by configuration".
+        // refs are held for the post-install provenance record (issue #40).
+        let analysis = preflight_read_sql(sql, deps.working_set, deps.temp_path)
+            .map_err(|e| match e {
+                PreflightError::StaleReference(s) => {
+                    ExecError::new(ExecErrorKind::StaleReference, s)
+                }
+                PreflightError::FsAcl(s) => ExecError::new(ExecErrorKind::Runtime, s),
+            })?;
 
-        // Provider SQL runs on a locked-down sandbox (ADR-0005 read_* closure):
-        // a separate instance with LocalFileSystem disabled, so a read_* table
-        // function is refused by the engine ("... disabled by configuration").
-        // Sources are re-attached READ_ONLY (zero-copy; concurrent read-only
-        // attach is allowed) and prior results are mirrored in, so the SQL
-        // resolves identically to admin. Only the sandbox runs provider SQL;
-        // admin runs tool-controlled DML. The sandbox is dropped at end of scope
-        // (lockdown is irreversible, so it is single-use).
-        let sandbox_conn = sandbox::open()?;
-        sandbox::attach_sources(&sandbox_conn, deps.working_set, deps.source_files)?;
-        sandbox::mirror_results(&sandbox_conn, deps.conn, deps.working_set)?;
-        sandbox::lockdown(&sandbox_conn)?;
-
-        // Register the sandbox interrupt handle so a cancel can abort THIS query
-        // at source (ADR-0021 DuckDB interrupt). Scoped to the provider SQL only:
-        // cleared right after the CREATE+count, so the tool-controlled
-        // install/derive steps below (fast, on admin) are never disrupted by a
-        // cancel -- the orchestrator's post-call flag check lands those as
-        // Cancelled without touching the working set.
-        cancel.set_interrupt(sandbox_conn.interrupt_handle());
-
-        // Resource cap (ADR-0005 L3): bracket the query and LIMIT to cap+1 so a
-        // runaway cross-join cannot balloon memory (DuckDB pushes LIMIT into the
-        // scan, so only cap+1 rows ever materialize). The brackets make LIMIT
-        // bind to the whole query output; a trailing ';' is stripped so the
-        // subquery parses. Below, a count of cap+1 means the true result
-        // exceeded the cap -> abort (silent truncation is forbidden, ADR-0030).
-        let inner = sql.trim().trim_end_matches(';').trim_end();
-        let cap_plus_one = deps.result_row_cap.saturating_add(1);
-        let create_sql = format!(
-            "CREATE TABLE {} AS SELECT * FROM ({inner}) AS _src LIMIT {cap_plus_one}",
-            quote_ident(&result_name),
-        );
-        let create_outcome = sandbox_conn.execute_batch(&create_sql);
-        // The provider SQL is done (success or failure) -- stop associating the
-        // interrupt handle so a later cancel cannot reach this connection.
-        cancel.clear_interrupt();
-        if let Err(e) = create_outcome {
-            // The engine rejected the CREATE on the sandbox -- a parser error
-            // from a mutating statement / COPY / ATTACH the wrapping bars, a
-            // read_* refusal ("disabled by configuration"), a schema error, a
-            // runtime error, OR the interrupt from a cancel (surfaces as a
-            // generic DuckDB failure -> Runtime here). The agent loop
-            // re-checks the cancel flag and routes a cancel to Cancelled
-            // before the error is fed back to the model, so the kind only
-            // chooses the non-cancel routing.
-            return Err(ExecError::new(
-                classify_duckdb_error(&e.to_string()),
-                e.to_string(),
-            ));
-        }
-        // Row-count governor on the sandbox: count == cap+1 -> the true result
-        // exceeded the cap. Aborts as Resource; the sandbox is dropped (admin
-        // untouched), so -- unlike the install/derive steps below -- no rollback
-        // of result_N is needed here.
-        let rows: i64 = match sandbox_conn.query_row(
-            &format!("SELECT COUNT(*) FROM {}", quote_ident(&result_name)),
-            [],
-            |r| r.get(0),
-        ) {
-            Ok(rows) => rows,
-            Err(e) => return Err(ExecError::new(ExecErrorKind::Runtime, e.to_string())),
-        };
-        if rows as u64 > deps.result_row_cap {
-            return Err(ExecError::new(
-                ExecErrorKind::Resource,
-                format!("结果行数（{rows}）超过上限 {}", deps.result_row_cap),
-            ));
-        }
-        // Cancel landed between the query's success and the install: the partial
-        // result_N exists on the sandbox only (admin untouched), so no rollback
-        // is needed -- drop the sandbox and let the caller record Cancelled. The
-        // check goes after the resource governor so a genuine over-cap result is
-        // not misread as a cancel. The kind is Cancelled (not Resource) so the
-        // signal stays type-honest -- outcome D, not a cap hit (ADR-0028).
-        if cancel.is_requested() {
-            return Err(ExecError::new(
-                ExecErrorKind::Cancelled,
-                "查询已取消".to_string(),
-            ));
-        }
+        // Sandbox lifecycle + cap + cancel checkpoints, shared with the explore
+        // path. The new result_N lands on the sandbox first; the tail below
+        // installs it onto admin.
+        let table = run_sandboxed_read(
+            sql,
+            &result_name,
+            &SandboxDeps {
+                admin_conn: deps.conn,
+                source_files: deps.source_files,
+                working_set: deps.working_set,
+                result_row_cap: deps.result_row_cap,
+            },
+            cancel,
+        )
+        .map_err(|e| match e {
+            SandboxExecError::Cancelled => {
+                ExecError::new(ExecErrorKind::Cancelled, "查询已取消".to_string())
+            }
+            SandboxExecError::Resource { rows, cap } => {
+                ExecError::new(ExecErrorKind::Resource, format!("结果行数（{rows}）超过上限 {cap}"))
+            }
+            SandboxExecError::Runtime(s) => ExecError::new(classify_duckdb_error(&s), s),
+        })?;
 
         // Install the new result onto admin (Value mirror). A failure can leave
         // a partial result_N on admin, so roll it back (ADR-0022 never-reused).
         if let Err(e) =
-            sandbox::install_result(deps.conn, &sandbox_conn, &result_name, &result_name)
+            sandbox::install_result(deps.conn, &table.conn, &result_name, &result_name)
         {
             let detail = rollback_result(deps.conn, &result_name, e.detail);
             return Err(ExecError::new(ExecErrorKind::Runtime, detail));
@@ -237,7 +179,7 @@ impl Materializer for RealMaterializer {
         // with the then-live working set (members present at the parse moment).
         deps.working_set.register_result(descriptor.clone());
         deps.working_set
-            .record_provenance(&result_name, deps_analysis.refs);
+            .record_provenance(&result_name, analysis.refs);
 
         // GC cap (ADR-0013 M=100, issue #42): if the result_N total now
         // exceeds the cap, auto-reclaim the oldest stale results. The fresh

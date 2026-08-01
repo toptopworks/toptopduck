@@ -25,6 +25,7 @@ pub mod model;
 pub mod persistence;
 pub mod provenance;
 pub mod provider;
+pub mod sandbox_sql;
 pub mod session;
 pub mod session_store;
 pub mod tools;

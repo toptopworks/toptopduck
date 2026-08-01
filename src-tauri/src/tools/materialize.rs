@@ -405,4 +405,48 @@ mod tests {
             "result_1"
         );
     }
+
+    /// AC (issue #334): a `read_*` call whose path resolves OUTSIDE the session
+    /// source set + working temp dir is refused by the gateway door BEFORE the
+    /// sandbox runs -- symmetric with `explore_refuses_out_of_bounds_read_path_
+    /// at_gateway`. Before #334 the materialize path skipped the FsAcl whitelist
+    /// (only explore ran it), so an out-of-bounds read_* hit the engine's opaque
+    /// "disabled by configuration"; now it returns the structured "outside the
+    /// allowed area" the agent can self-correct from (ADR-0077 / ADR-0080).
+    #[test]
+    fn materialize_refuses_out_of_bounds_read_path_at_gateway() {
+        use crate::session::materializer::RealMaterializer;
+        use std::fs;
+        use tempfile::TempDir;
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = crate::workingset::WorkingSet::default();
+        let sources = std::collections::HashMap::new();
+        let temp = TempDir::new().unwrap();
+        // A file that exists on disk but lives outside the session temp dir.
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("secret.csv");
+        fs::write(&outside_file, "x").unwrap();
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+        let cancel = CancelToken::new();
+        let mut materializer = RealMaterializer;
+        let err = dispatch(
+            &json!({"sql": format!("SELECT * FROM read_csv_auto('{}')", outside_file.to_string_lossy())}),
+            &mut deps,
+            &cancel,
+            &mut materializer,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("outside the allowed"),
+            "gateway names the out-of-bounds refusal: {err}"
+        );
+        assert!(
+            err.contains("secret.csv"),
+            "error names the offending path: {err}"
+        );
+        // No promotion landed: result_1 was never registered.
+        assert_eq!(deps.working_set.len(), 0);
+        assert_eq!(deps.working_set.next_result_number(), 1);
+    }
 }
