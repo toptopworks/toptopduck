@@ -70,6 +70,11 @@ function GroupTitle({ kind }: { kind: SidebarGroupKind }) {
 const NO_PENDING_APPROVALS: ReadonlySet<string> = new Set();
 
 interface SessionSidebarProps {
+  // Collapse state (ADR-0054 level 1, issue #287): when true the whole
+  // subtree goes inert so keyboard / screen-reader focus cannot land on the
+  // opacity-0 controls (ghost-focus fix). Drives the inert prop on the
+  // <aside> shell; the opacity fade + grid-column animation stay in CSS.
+  collapsed: boolean;
   sessions: SessionMetadata[];
   openSessions: OpenSession[];
   activeSessionId: string | null;
@@ -137,6 +142,7 @@ export function SessionSidebar({
   keyStatus,
   onOpenSettings,
   onOpenSettingsProfiles,
+  collapsed,
 }: SessionSidebarProps) {
   const intl = useIntl();
   // Which entry's context menu is open (entry key); null = none. Only one menu
@@ -166,6 +172,7 @@ export function SessionSidebar({
     <aside
       className="session-sidebar bg-muted border-r border-border p-2"
       aria-label={intl.formatMessage({ id: "sidebar.ariaLabel", defaultMessage: "Sessions" })}
+      inert={collapsed}
     >
       {/* ADR-0072 (issue #250): brand title row (product name left + circular
           search magnifier right) replaces the ADR-0060 full-width solid teal

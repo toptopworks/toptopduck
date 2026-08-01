@@ -46,6 +46,7 @@ function SettingsViewHarness({
   const [section, setSection] = useState<SettingsSection>(initialSection);
   return (
     <SettingsView
+      collapsed={false}
       appConfig={appConfig}
       section={section}
       onSectionChange={setSection}

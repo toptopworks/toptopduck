@@ -209,12 +209,20 @@ describe("App three-column shell (issue #79 ACs)", () => {
     render(<App />);
     await openSession();
     const shell = document.querySelector(".shell");
+    const sidebar = document.querySelector(".session-sidebar");
     expect(shell?.classList.contains("sidebar-collapsed")).toBe(false);
+    // Expanded sidebar stays in the Tab sequence (issue #287).
+    expect(sidebar?.hasAttribute("inert")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "收起会话栏" }));
     expect(shell?.classList.contains("sidebar-collapsed")).toBe(true);
-    // Toggling back expands.
+    // Collapsed sidebar is inert: the subtree leaves the Tab sequence + a11y
+    // tree so keyboard / screen-reader focus cannot land on the opacity-0
+    // controls (ghost-focus fix, issue #287).
+    expect(sidebar?.hasAttribute("inert")).toBe(true);
+    // Toggling back expands + restores the Tab sequence.
     fireEvent.click(screen.getByRole("button", { name: "展开会话栏" }));
     expect(shell?.classList.contains("sidebar-collapsed")).toBe(false);
+    expect(sidebar?.hasAttribute("inert")).toBe(false);
   });
 
   it("shows the hero empty state when no result is viewed (ADR-0062 R2 hero)", async () => {
@@ -1195,12 +1203,17 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     render(<App />);
     await openSession();
     const shell = document.querySelector(".shell");
+    const rail = document.querySelector(".session-rail");
     expect(shell?.classList.contains("rail-collapsed")).toBe(false);
+    expect(rail?.hasAttribute("inert")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "折叠对话栏" }));
     expect(shell?.classList.contains("rail-collapsed")).toBe(true);
-    // Toggle back expands.
+    // Collapsed rail is inert (ghost-focus fix, issue #287).
+    expect(rail?.hasAttribute("inert")).toBe(true);
+    // Toggle back expands + restores the Tab sequence.
     fireEvent.click(screen.getByRole("button", { name: "展开对话栏" }));
     expect(shell?.classList.contains("rail-collapsed")).toBe(false);
+    expect(rail?.hasAttribute("inert")).toBe(false);
   });
 
   it("sidebar and rail collapse stack independently (ADR-0054)", async () => {
