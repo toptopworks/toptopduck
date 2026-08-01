@@ -134,7 +134,7 @@ pub struct RecipeTraceEntry {
     /// Tool name -- a built-in (`explore` / `materialize` / `describe` /
     /// `sample`) or an external MCP server's tool name.
     pub name: String,
-    /// Operation badge (ADR-0080 read/write/execute/network) -- presentation
+    /// Operation badge (ADR-0083 read/write/execute/network) -- presentation
     /// only. Reuses the approval-gateway classification so a reopened turn
     /// renders the same badge the live approval card did.
     pub operation_kind: OperationKind,

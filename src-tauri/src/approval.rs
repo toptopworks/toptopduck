@@ -633,6 +633,33 @@ mod tests {
         }
     }
 
+    // --- wire format -------------------------------------------------------
+
+    /// The `.duck` persistence contract (issue #316, ADR-0078): persisted
+    /// recipe traces reuse `OperationKind`, so the `rename_all =
+    /// "snake_case"` variant spellings are frozen wire format. Migration
+    /// fixtures lock only `write` indirectly; this pins all four so a
+    /// `rename_all` rework or per-variant rename cannot slip through.
+    #[test]
+    fn operation_kind_serializes_to_frozen_snake_case_wire_form() {
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Read).unwrap(),
+            "\"read\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Write).unwrap(),
+            "\"write\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Execute).unwrap(),
+            "\"execute\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Network).unwrap(),
+            "\"network\""
+        );
+    }
+
     // --- pure classify -----------------------------------------------------
 
     #[test]
