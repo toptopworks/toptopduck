@@ -107,8 +107,8 @@ impl Materializer for RealMaterializer {
         // out-of-bounds read_* becomes a structured "outside the allowed area"
         // error instead of the engine's opaque "disabled by configuration".
         // refs are held for the post-install provenance record (issue #40).
-        let analysis = preflight_read_sql(sql, deps.working_set, deps.temp_path)
-            .map_err(|e| match e {
+        let analysis =
+            preflight_read_sql(sql, deps.working_set, deps.temp_path).map_err(|e| match e {
                 PreflightError::StaleReference(s) => {
                     ExecError::new(ExecErrorKind::StaleReference, s)
                 }
@@ -133,16 +133,16 @@ impl Materializer for RealMaterializer {
             SandboxExecError::Cancelled => {
                 ExecError::new(ExecErrorKind::Cancelled, "查询已取消".to_string())
             }
-            SandboxExecError::Resource { rows, cap } => {
-                ExecError::new(ExecErrorKind::Resource, format!("结果行数（{rows}）超过上限 {cap}"))
-            }
+            SandboxExecError::Resource { rows, cap } => ExecError::new(
+                ExecErrorKind::Resource,
+                format!("结果行数（{rows}）超过上限 {cap}"),
+            ),
             SandboxExecError::Runtime(s) => ExecError::new(classify_duckdb_error(&s), s),
         })?;
 
         // Install the new result onto admin (Value mirror). A failure can leave
         // a partial result_N on admin, so roll it back (ADR-0022 never-reused).
-        if let Err(e) =
-            sandbox::install_result(deps.conn, &table.conn, &result_name, &result_name)
+        if let Err(e) = sandbox::install_result(deps.conn, &table.conn, &result_name, &result_name)
         {
             let detail = rollback_result(deps.conn, &result_name, e.detail);
             return Err(ExecError::new(ExecErrorKind::Runtime, detail));

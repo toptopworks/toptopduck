@@ -260,7 +260,8 @@ fn runtime(e: ExecError) -> SandboxExecError {
 mod tests {
     use super::*;
     use crate::model::{
-        ColumnSchema, DatasetDescriptor, DatasetPrivacy, RectifyProvenance, StaleAnchor, StaleReason,
+        ColumnSchema, DatasetDescriptor, DatasetPrivacy, RectifyProvenance, StaleAnchor,
+        StaleReason,
     };
     use crate::workingset::WorkingSet;
     use std::fs;
@@ -365,13 +366,13 @@ mod tests {
     fn clean_sql_returns_refs_for_provenance() {
         let temp = TempDir::new().unwrap();
         let ws = ws_with_people();
-        let analysis =
-            preflight_read_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#, &ws, temp.path())
-                .expect("clean SQL passes preflight");
-        assert_eq!(
-            analysis.refs,
-            ["people".to_string()].into_iter().collect(),
-        );
+        let analysis = preflight_read_sql(
+            r#"SELECT COUNT(*) AS n FROM "people".data"#,
+            &ws,
+            temp.path(),
+        )
+        .expect("clean SQL passes preflight");
+        assert_eq!(analysis.refs, ["people".to_string()].into_iter().collect(),);
     }
 
     /// A SQL that references neither a stale result nor a `read_*` path and

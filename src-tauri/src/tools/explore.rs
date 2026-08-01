@@ -95,9 +95,9 @@ fn run_explore(
     // with the materialize path. Explore ignores the dependency set -- it
     // never promotes, so it records no provenance.
     preflight_read_sql(sql, deps.working_set, deps.temp_path).map_err(|e| match e {
-        PreflightError::StaleReference(s) => format!(
-            "stale reference: `{s}` has been invalidated and may not anchor a new query"
-        ),
+        PreflightError::StaleReference(s) => {
+            format!("stale reference: `{s}` has been invalidated and may not anchor a new query")
+        }
         PreflightError::FsAcl(s) => s,
     })?;
 
