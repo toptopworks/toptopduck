@@ -26,6 +26,16 @@ use crate::model::{Protocol, TextKind};
 use crate::provider::keychain::ProviderConfigSource;
 use crate::provider::prompt::ResponseLocale;
 
+/// Cap on the model's reply length, shared by both single-shot adapters and
+/// the tool-calling window assembler (ADR-0081): the tool contract terminates
+/// in a plain text answer whose length profile matches the legacy one-SQL
+/// reply, so every path shares one ceiling. Sized for a SQL + a Vega-Lite
+/// spec + an assumption note (a viz spec can run long); bounded so a runaway
+/// reply never balloons. Not a user-facing cap (the engine result-row cap,
+/// ADR-0005 L3, governs materialized size -- this bounds only the model's
+/// text).
+pub(crate) const MAX_REPLY_TOKENS: u32 = 4096;
+
 /// One column of a dataset as it appears in the LLM payload. The name is hidden
 /// when the user marked the column "type only" (ADR-0011): the provider learns
 /// the canonical DuckDB type but neither the column name nor any of its sample

@@ -183,9 +183,10 @@ mod transforms {
     /// exactly one productive SQL under the single-SQL contract, so its
     /// trajectory is one `materialize` call -- synthesized from the verbatim
     /// SQL via the shared [`crate::persistence::recipe::synthetic_materialize_trace`] helper
-    /// (the same helper [`crate::session::Session::build_recipe`] uses for a
-    /// fresh TurnRunner-era turn), so a migrated v1 session shows the same
-    /// one-step trajectory it produced live. Every other turn (Textual /
+    /// -- the same one [`crate::session::Session::build_recipe`] uses for live
+    /// turns from before runtime tracking was wired (issue #319) -- so a
+    /// migrated v1 session shows the same one-step trajectory it produced
+    /// live. Every other turn (Textual /
     /// Failed / Cancelled / Source event) carries no tool-call trajectory and
     /// gets no trace field -- `#[serde(default)]` on [`RecipeTurn::trace`]
     /// deserializes the absent field as empty.

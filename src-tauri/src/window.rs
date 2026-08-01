@@ -18,7 +18,9 @@ use crate::provider::prompt::{
     build_tool_system_prompt, render_response, render_summary_turn_note, ResponseLocale,
 };
 use crate::provider::tool_calling::{ToolTurnMessage, ToolTurnRequest};
-use crate::provider::{ColumnRef, DatasetRef, ProviderRequest, ResponsePayload, TurnPayload};
+use crate::provider::{
+    ColumnRef, DatasetRef, ProviderRequest, ResponsePayload, TurnPayload, MAX_REPLY_TOKENS,
+};
 use crate::workingset::WorkingSet;
 
 /// Recent-turn window size (ADR-0023): the most recent N turns ship the full
@@ -30,12 +32,6 @@ pub const WINDOW_TURNS: usize = 20;
 /// the verbatim question cut at this many chars -- never an LLM-regenerated
 /// summary.
 const FAR_QUESTION_EXCERPT_CHARS: usize = 80;
-
-/// Reply length cap for tool-calling turns (ADR-0081). Mirrors the single-shot
-/// adapters' `MAX_TOKENS` -- the tool-calling contract terminates in a plain
-/// text answer whose length profile matches the legacy one-SQL reply, so the
-/// two paths share one ceiling.
-const TOOL_TURN_MAX_TOKENS: u32 = 4096;
 
 /// Assemble the provider request for one turn (ADR-0023/0026/0039/0011): the
 /// asking question, the windowed conversation history, and every working-set
@@ -76,7 +72,7 @@ pub fn assemble_tool_turn(
         system: build_tool_system_prompt(&request, locale),
         messages: tool_turn_messages(&request),
         tools: crate::tools::builtin_table(),
-        max_tokens: TOOL_TURN_MAX_TOKENS,
+        max_tokens: MAX_REPLY_TOKENS,
     }
 }
 

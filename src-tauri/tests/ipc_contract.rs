@@ -361,6 +361,9 @@ fn text_kind_serializes_as_a_bare_variant_string() {
     use toptopduck_lib::TextKind;
     assert_wire(&TextKind::Clarify, r#""Clarify""#);
     assert_wire(&TextKind::Refuse, r#""Refuse""#);
+    // Agent -- the tool-calling contract's terminal text (ADR-0077) -- is the
+    // only textual kind the production loop emits, so it rides the same lock.
+    assert_wire(&TextKind::Agent, r#""Agent""#);
 }
 
 #[test]

@@ -151,6 +151,36 @@ describe("Thread", () => {
     expect(screen.getByText("已取消")).toBeInTheDocument();
   });
 
+  it("renders an Agent textual turn as a plain answer with no action badge", () => {
+    // ADR-0077: the tool-calling contract's terminal text rides TextKind::Agent
+    // -- the body IS the reply, so the turn renders without the clarify /
+    // refuse action badge; the kind still reads off the outcome icon's
+    // aria-label (ADR-0050).
+    renderThread(
+      <Thread
+        entries={[
+          turnEntry({
+            question: "总共有多少客户",
+            outcome: {
+              kind: "Textual",
+              data: { text_kind: "Agent", body: "共 128 位客户。", assumption: null },
+            },
+          }),
+        ]}
+        selectedResult={null}
+        onSelectResult={() => {}}
+      />,
+    );
+
+    // The body renders as a plain answer, labeled by its verbatim question.
+    expect(screen.getByText("总共有多少客户")).toBeInTheDocument();
+    expect(screen.getByText("共 128 位客户。")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "已回答" })).toBeInTheDocument();
+    // No action-signaling badge -- neither a clarify nor a refuse.
+    expect(screen.queryByText("需要澄清")).not.toBeInTheDocument();
+    expect(screen.queryByText("无法处理")).not.toBeInTheDocument();
+  });
+
   it("clicking a result turn selects it (reference name only, ADR-0051)", () => {
     const onSelectResult = vi.fn();
     renderThread(
