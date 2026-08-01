@@ -372,8 +372,11 @@ impl<'a> Resumer<'a> {
     /// persisted), so a reopened chart renders as a table (ADR-0033).
     ///
     /// Returns the rebuilt timeline; `open_duck` assigns it to `session.history`.
-    /// Registers stale placeholders into `working_set` as a pre-pass (ADR-0041
-    /// dead turns stay visible but carry no backing data).
+    /// The rebuild is a 1:1 map over `recipe.history[..end]` (never filtered),
+    /// so the returned length IS `end` -- `open_duck` relies on this to index-
+    /// align the per-turn audit substructures against the same slice (ADR-0078,
+    /// issue #319). Registers stale placeholders into `working_set` as a
+    /// pre-pass (ADR-0041 dead turns stay visible but carry no backing data).
     pub(crate) fn rebuild_timeline(
         &self,
         working_set: &mut WorkingSet,

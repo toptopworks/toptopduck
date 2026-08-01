@@ -45,6 +45,7 @@ use crate::approval::{
 };
 use crate::cancel::CancelToken;
 use crate::model::{DatasetDescriptor, Promotion, TurnPhase};
+use crate::persistence::recipe::RecipeTraceEntry;
 use crate::provider::tool_calling::{
     ToolResult, ToolTurnMessage, ToolTurnReply, ToolTurnRequest, ToolUse,
 };
@@ -476,7 +477,7 @@ fn promotion_from_result(content: &str, deps: &TurnDeps) -> Option<DatasetDescri
 /// Why the loop terminated (ADR-0081). Maps onto the four-way `TurnOutcome`
 /// (ADR-0028) at the wiring seam; kept as a distinct enum here so the loop is
 /// unit-testable without committing to `TurnOutcome`'s single-promotion shape
-/// (ADR-0078 will carry the full promotion list + trace).
+/// (ADR-0084 carries the full promotion chain; ADR-0078 carries the trace).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Termination {
     /// The model emitted a terminal text reply. Carries the verbatim text.
@@ -506,7 +507,9 @@ pub(crate) enum Termination {
 
 /// One entry in the execution trace (ADR-0078). The trace is the persisted,
 /// collapsible substructure of a turn; the far window carries only a summary
-/// (call count + failure summary), never the full trace verbatim.
+/// (call count + failure summary), never the full trace verbatim. Mapped to
+/// its persisted recipe form ([`RecipeTraceEntry`]) when the turn is recorded
+/// (issue #319) -- the mapping drops the ephemeral [`tool_use_id`](Self::tool_use_id).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TraceEntry {
     pub tool_use_id: String,
@@ -515,13 +518,44 @@ pub(crate) struct TraceEntry {
     /// Short argument summary (the SQL or reference_name), NOT the full args.
     pub summary: String,
     pub success: bool,
-    /// Bounded excerpt of the tool result (or the denial / error message).
+    /// Bounded excerpt of the tool result content (or the denial / error
+    /// message), captured for BOTH success and failure at dispatch time. Only
+    /// the FAILED-call excerpt survives the persisted mapping (a success is
+    /// emptied -- see [`RecipeTraceEntry::result_excerpt`]); the in-memory
+    /// form keeps the success payload for the loop's own next-turn context.
     pub result_excerpt: String,
 }
 
+impl From<&TraceEntry> for RecipeTraceEntry {
+    /// The persisted trace form (ADR-0078, issue #319): `name` / `operation_kind`
+    /// / `summary` / `success` ride verbatim; two fields transform:
+    /// - `tool_use_id` drops -- a per-provider-call id that does not survive
+    ///   the turn, let alone a save/resume.
+    /// - `result_excerpt` persists ONLY for a failed call; a successful call's
+    ///   excerpt is emptied. See [`RecipeTraceEntry::result_excerpt`] for the
+    ///   boundary rule (ADR-0078 failure anchor; ADR-0036 contents boundary).
+    ///
+    /// The surviving strings are already bounded at capture time
+    /// (`summarize_field` / `TRACE_EXCERPT_MAX`), so no re-truncation.
+    fn from(entry: &TraceEntry) -> Self {
+        Self {
+            name: entry.name.clone(),
+            operation_kind: entry.operation_kind,
+            summary: entry.summary.clone(),
+            success: entry.success,
+            result_excerpt: if entry.success {
+                String::new()
+            } else {
+                entry.result_excerpt.clone()
+            },
+        }
+    }
+}
+
 /// The structured outcome the agent loop returns. Pure data -- the wiring seam
-/// ([`crate::session::Session::ask_with_phase`], issue #318) maps it onto
-/// `TurnOutcome` + the trace substructure + the far-window summary.
+/// ([`crate::session::Session::ask_with_phase`], issue #318) maps the four-way
+/// termination + promotions onto `TurnOutcome`, and carries the trace
+/// alongside to the turn's persisted audit (issue #319, ADR-0078).
 #[derive(Debug, Clone)]
 pub(crate) struct LoopOutcome {
     pub termination: Termination,
@@ -531,14 +565,14 @@ pub(crate) struct LoopOutcome {
     /// result at the wiring seam.
     pub promotions: Vec<Promotion>,
     /// The full execution trace (ADR-0078). Collapsible; never enters the far
-    /// window verbatim -- only its summary (call count + failure summary) does.
-    // Persisted into the recipe by #319 (real multi-call trace); the loop
-    // tests already read it. The production mapping (issue #318) routes the
-    // four-way outcome only, so the non-test build sees no reader yet.
-    #[allow(dead_code)]
+    /// window verbatim -- only its summary (call count + failure summary)
+    /// does. The wiring seam persists it on the turn's recipe entry (issue
+    /// #319): the real multi-call trajectory, mapped to [`RecipeTraceEntry`].
     pub trace: Vec<TraceEntry>,
     /// Count of provider round-trips executed (one per `generate_tool_turn`).
-    #[allow(dead_code)] // test assertion surface until #319 persists it
+    /// A loop-diagnostic surface (the loop tests assert it); NOT persisted --
+    /// the trace entries already tell the trajectory (ADR-0078, issue #319).
+    #[allow(dead_code)]
     pub round_trips: u32,
 }
 

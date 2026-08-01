@@ -31,13 +31,13 @@ use crate::model::{
     TextKind, ThreadEntry, TurnError, TurnFailure, TurnOutcome, TurnPhase, TurnRecord,
 };
 use crate::persistence::recipe::{
-    synthetic_materialize_trace, Recipe, RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTurn,
+    Recipe, RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTraceEntry, RecipeTurn, RuntimeKind,
     SourceRef, TurnProvenance,
 };
 use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
 use crate::persistence::{read_duck, save_atomic, SaveError};
 use crate::provider::{Provider, UnwiredProvider};
-use crate::session::agent_loop::{AgentLoop, LoopOutcome, Termination};
+use crate::session::agent_loop::{AgentLoop, LoopOutcome, Termination, TraceEntry};
 use crate::session::materializer::{Materializer, RealMaterializer, TurnDeps};
 use crate::session_store::ClosingFlag;
 use crate::window;
@@ -395,6 +395,17 @@ pub struct Session {
     /// so source events occupy a timeline slot and stay always-visible yet never
     /// enter the LLM turn window or advance result_N (ADR-0040).
     history: Vec<ThreadEntry>,
+    /// Per-timeline-entry persisted audit substructures (ADR-0078, issue #319),
+    /// INDEX-ALIGNED with [`Self::history`] (invariant: equal lengths; every
+    /// history push pairs with exactly one audit push). A turn entry carries
+    /// its real execution trace + runtime/skill provenance, snapshotted at
+    /// record time (or harvested from the recipe on resume); a source event
+    /// entry carries a default. The trace rides HERE rather than on
+    /// [`TurnRecord`]: ADR-0078 keeps the full trace out of the far window
+    /// (only its summary enters), and `TurnRecord` additionally crosses IPC,
+    /// which never carries the full trace either -- so the recipe is the
+    /// trace's persistence layer, read per turn by [`Self::build_recipe`].
+    turn_audit: Vec<TurnAudit>,
     /// Ceiling on a materialized result's row count (ADR-0005 L3). A query whose
     /// result would exceed it is aborted with a resource error rather than
     /// allowed to balloon memory. Defaults to [`DEFAULT_MAX_RESULT_ROWS`];
@@ -488,6 +499,55 @@ pub struct Session {
     drop_signal: Option<std::sync::mpsc::Sender<()>>,
 }
 
+/// The persisted-form audit substructures for ONE timeline entry (ADR-0078,
+/// issue #319): a turn's execution trace (the agent loop's recorded calls,
+/// mapped to the recipe form) + its runtime/skill provenance. Lives on the
+/// Session in [`Session::turn_audit`], index-aligned with
+/// [`Session::history`] -- NOT on [`TurnRecord`]: ADR-0078 keeps the full
+/// trace out of the far window (summary only), and `TurnRecord` crosses IPC,
+/// which carries no trace either. [`Session::build_recipe`]'s whole-file
+/// rebuild reads one audit per timeline entry on every persist; resume seeds
+/// the vector from the recipe so persisted values round-trip verbatim.
+/// Source lifecycle entries carry a default (sources are not turns).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TurnAudit {
+    /// The turn's persisted execution trace (ADR-0078); empty for no-tool
+    /// turns and source lifecycle entries.
+    trace: Vec<RecipeTraceEntry>,
+    /// The turn's runtime + skill provenance (ADR-0078/0081).
+    provenance: TurnProvenance,
+}
+
+impl TurnAudit {
+    /// The audit for a turn the built-in agent loop just recorded (ADR-0078/
+    /// 0081, issue #319): the loop's real multi-call trace mapped to its
+    /// persisted form + the BuiltIn runtime. Skills stay empty until skill
+    /// tracking lands (the skill surface is defined by ADR-0079); the field
+    /// is default-omitted from the .duck while empty.
+    fn builtin(trace: Vec<TraceEntry>) -> Self {
+        Self {
+            trace: trace.iter().map(RecipeTraceEntry::from).collect(),
+            provenance: TurnProvenance {
+                runtime: Some(RuntimeKind::BuiltIn),
+                skills: Vec::new(),
+            },
+        }
+    }
+
+    /// The audit harvested from one persisted recipe entry (resume, ADR-0078):
+    /// a turn's trace + provenance round-trip verbatim from the .duck; a
+    /// source entry carries no audit.
+    fn from_recipe_entry(entry: &RecipeEntry) -> Self {
+        match entry {
+            RecipeEntry::Turn(t) => Self {
+                trace: t.trace.clone(),
+                provenance: t.provenance.clone(),
+            },
+            RecipeEntry::Source(_) => Self::default(),
+        }
+    }
+}
+
 impl Session {
     pub fn new() -> anyhow::Result<Self> {
         Self::with_provider_and_cancel(Box::new(UnwiredProvider), Arc::new(CancelToken::new()))
@@ -551,6 +611,7 @@ impl Session {
             provider,
             materializer: Box::new(RealMaterializer),
             history: Vec::new(),
+            turn_audit: Vec::new(),
             result_row_cap: DEFAULT_MAX_RESULT_ROWS,
             result_count_cap: DEFAULT_RESULT_COUNT_CAP,
             source_files: HashMap::new(),
@@ -818,7 +879,18 @@ impl Session {
             // ("对话停在断点").
             let timeline =
                 resumer.rebuild_timeline(&mut session.working_set, replay_break.as_ref())?;
+            // ADR-0078 (issue #319): seed the per-turn audit (trace +
+            // provenance) from the SAME recipe slice the timeline was rebuilt
+            // from -- rebuild_timeline maps history[..end] 1:1 (never
+            // filtered), so the harvested audit is index-aligned with the
+            // assigned history, and phase 5's post-resume persist re-writes
+            // the persisted values verbatim (no re-synthesis).
+            let audit = recipe.history[..timeline.len()]
+                .iter()
+                .map(TurnAudit::from_recipe_entry)
+                .collect();
             session.history = timeline;
+            session.turn_audit = audit;
         }
 
         // Phase 5: re-bind the .duck path + persist the post-resume state.
@@ -1672,7 +1744,7 @@ impl Session {
         // `&mut *self.materializer` -- distinct Session fields, so they
         // coexist without widening to `&mut self`. The block scope drops the
         // borrows before `record_turn` takes its own `&mut self`.
-        let outcome = {
+        let (outcome, trace) = {
             let mut deps = TurnDeps {
                 conn: &self.conn,
                 source_files: &self.source_files,
@@ -1681,7 +1753,7 @@ impl Session {
                 result_count_cap: self.result_count_cap,
                 temp_path: &self.temp_path,
             };
-            let loop_outcome = AgentLoop::new(&*self.provider, Arc::clone(&self.cancel)).run(
+            let mut loop_outcome = AgentLoop::new(&*self.provider, Arc::clone(&self.cancel)).run(
                 &request,
                 &mut deps,
                 &mut *self.materializer,
@@ -1689,7 +1761,16 @@ impl Session {
                 sink,
                 on_phase,
             );
-            turn_outcome_from_loop(loop_outcome)
+            // The loop's real multi-call trace rides alongside the mapped
+            // outcome to record_turn (ADR-0078, issue #319): the mapper stays
+            // focused on the four-way classification, so the trace rides
+            // separately rather than folded into TurnOutcome -- which crosses
+            // IPC, and the full trace never does. `turn_outcome_from_loop`
+            // reads only `termination` + `promotions`, so the trace is moved
+            // out before the outcome is mapped (no clone on the per-turn
+            // record path); `mem::take` leaves an empty Vec the mapper ignores.
+            let trace = std::mem::take(&mut loop_outcome.trace);
+            (turn_outcome_from_loop(loop_outcome), trace)
         };
         // ADR-0055 post-turn discard: if `close_session` marked this session
         // closing while the turn was in flight (it also fired cancel, so the
@@ -1710,19 +1791,32 @@ impl Session {
             );
             return outcome;
         }
-        self.record_turn(question, outcome)
+        self.record_turn(question, outcome, trace)
     }
 
     /// Append a turn to the conversation thread and return its outcome. Every
     /// outcome kind is recorded (ADR-0028 always-visible); the caller has
     /// already decided the outcome, so this just persists + returns it. The turn
     /// is wrapped in a [`ThreadEntry::Turn`] -- source lifecycle events share
-    /// the same timeline (ADR-0040) but never enter the LLM window.
-    fn record_turn(&mut self, question: &str, outcome: TurnOutcome) -> TurnOutcome {
+    /// the same timeline (ADR-0040) but never enter the LLM window. `trace` is
+    /// the agent loop's recorded call trajectory for this turn; it snapshots
+    /// into the turn's persisted audit (ADR-0078) paired with the history
+    /// push, so [`Self::build_recipe`]'s whole-file rebuild reads it per turn.
+    fn record_turn(
+        &mut self,
+        question: &str,
+        outcome: TurnOutcome,
+        trace: Vec<TraceEntry>,
+    ) -> TurnOutcome {
         self.history.push(ThreadEntry::Turn(TurnRecord {
             question: question.to_string(),
             outcome: outcome.clone(),
         }));
+        // ADR-0078 (issue #319): index-aligned with the history push above --
+        // the loop's real multi-call trace (mapped to the recipe form) + the
+        // BuiltIn runtime provenance. The trace rides the Session, not the
+        // TurnRecord: IPC + the far window never carry the full trace.
+        self.turn_audit.push(TurnAudit::builtin(trace));
         // ADR-0034 per-terminal-turn atomic write: the recipe is rewritten
         // whole-file at the bound path (temp + rename). No-op when no .duck
         // is bound; a failure is logged (the prior file is intact and the
@@ -1779,21 +1873,39 @@ impl Session {
             })
             .collect();
 
+        // A HARD assert, not debug_assert: the zip below silently truncates to
+        // the shorter iterator, so a misalignment escaping to a release build
+        // would drop trailing turns from the persisted recipe -- silent data
+        // loss on the persistence path. The invariant holds by pairing: every
+        // history push (record_turn / source lifecycle / resume seed) pushes
+        // exactly one audit alongside. If a future push site forgets the pair,
+        // this fires inside `session_lock` (held by the `ask` command): the
+        // panic poisons the session mutex (the session becomes a zombie until
+        // reopened) and bypasses `persist_if_bound`'s non-blocking `SaveError`
+        // banner -- a deliberate fail-fast over silent corruption. The
+        // structural fix is to pair the two in a single Vec (or a per-entry
+        // timeline enum) so misalignment is unrepresentable; until then this
+        // assert is the backstop.
+        assert_eq!(
+            self.history.len(),
+            self.turn_audit.len(),
+            "turn_audit is index-aligned with history: every push pairs"
+        );
         let history: Vec<RecipeEntry> = self
             .history
             .iter()
-            .filter_map(|entry| match entry {
+            .zip(self.turn_audit.iter())
+            .filter_map(|(entry, audit)| match entry {
                 ThreadEntry::Turn(record) => {
-                    // Build the trimmed outcome paired with its persisted trace
-                    // (ADR-0078). A Materialized turn persists its FULL
-                    // promotion chain (ADR-0084) -- every result_N the turn
-                    // produced, each its own RecipePromotion -- so resume
-                    // replays the whole chain. The trace is still a synthetic
-                    // single `materialize` call keyed on the primary's SQL
-                    // (real multi-call traces arrive with #319); every other
-                    // outcome has an empty trace -- no tool call trajectory to
-                    // record.
-                    let (outcome, trace) = match &record.outcome {
+                    // Build the trimmed outcome; the persisted trace +
+                    // provenance come from the turn's recorded audit
+                    // (ADR-0078, issue #319) -- the loop's real multi-call
+                    // trajectory for a live turn, the recipe's values
+                    // harvested on resume. A Materialized turn persists its
+                    // FULL promotion chain (ADR-0084) -- every result_N the
+                    // turn produced, each its own RecipePromotion -- so
+                    // resume replays the whole chain.
+                    let outcome = match &record.outcome {
                         TurnOutcome::Materialized {
                             promotions,
                             viz: _,
@@ -1833,45 +1945,38 @@ impl Session {
                             // the turn cannot replay or render -- drop it
                             // (`return None` exits the filter_map closure, NOT
                             // build_recipe), mirroring the single-result drop.
-                            let primary_sql = match recipe_promotions.last() {
-                                Some(primary) => primary.sql.clone(),
-                                None => return None,
-                            };
-                            let trace = synthetic_materialize_trace(&primary_sql);
-                            (
-                                RecipeOutcome::Materialized {
-                                    promotions: recipe_promotions,
-                                    assumption: assumption.clone(),
-                                },
-                                trace,
-                            )
+                            // The zipped audit drops with the entry, so the
+                            // alignment with `turn_audit` is preserved.
+                            if recipe_promotions.is_empty() {
+                                return None;
+                            }
+                            RecipeOutcome::Materialized {
+                                promotions: recipe_promotions,
+                                assumption: assumption.clone(),
+                            }
                         }
                         TurnOutcome::Textual {
                             text_kind,
                             body,
                             assumption,
-                        } => (
-                            RecipeOutcome::Textual {
-                                text_kind: *text_kind,
-                                body: body.clone(),
-                                assumption: assumption.clone(),
-                            },
-                            Vec::new(),
-                        ),
-                        TurnOutcome::Failed(failure) => {
-                            (RecipeOutcome::Failed(failure.clone()), Vec::new())
-                        }
-                        TurnOutcome::Cancelled => (RecipeOutcome::Cancelled, Vec::new()),
+                        } => RecipeOutcome::Textual {
+                            text_kind: *text_kind,
+                            body: body.clone(),
+                            assumption: assumption.clone(),
+                        },
+                        TurnOutcome::Failed(failure) => RecipeOutcome::Failed(failure.clone()),
+                        TurnOutcome::Cancelled => RecipeOutcome::Cancelled,
                     };
                     Some(RecipeEntry::Turn(RecipeTurn {
                         question: record.question.clone(),
                         outcome,
-                        trace,
-                        // Runtime + skill provenance is not yet tracked on the
-                        // live path; the agent-loop wiring slice populates real
-                        // values (ADR-0078/0081). Default-omit keeps the .duck
-                        // lean until then.
-                        provenance: TurnProvenance::default(),
+                        // The turn's recorded audit (ADR-0078, issue #319):
+                        // the loop's real multi-call trace + runtime/skill
+                        // provenance for a live turn; the recipe's values
+                        // (harvested at resume) for a resumed one. A no-tool
+                        // turn's audit trace is empty.
+                        trace: audit.trace.clone(),
+                        provenance: audit.provenance.clone(),
                     }))
                 }
                 ThreadEntry::Source(ev) => Some(RecipeEntry::Source(ev.clone())),
@@ -2346,6 +2451,51 @@ mod tests {
         }])
     }
 
+    /// An explore tool call running `sql` -- a read-classified call, so a
+    /// scripted explore-then-materialize turn exercises a MULTI-call trace.
+    fn explore_call(sql: &str) -> ToolTurnReply {
+        ToolTurnReply::ToolCalls(vec![ToolUse {
+            id: "tu_e".into(),
+            name: "explore".into(),
+            input: json!({ "sql": sql }),
+        }])
+    }
+
+    /// Find the first Materialized turn in a built recipe -- the shared
+    /// lookup the trace / provenance tests assert through (mirrors the
+    /// blackbox's helper of the same name).
+    fn materialized_turn(
+        recipe: &crate::persistence::recipe::Recipe,
+    ) -> &crate::persistence::recipe::RecipeTurn {
+        use crate::persistence::recipe::{RecipeEntry, RecipeOutcome};
+        recipe
+            .history
+            .iter()
+            .find_map(|e| match e {
+                RecipeEntry::Turn(t) if matches!(t.outcome, RecipeOutcome::Materialized { .. }) => {
+                    Some(t)
+                }
+                _ => None,
+            })
+            .expect("a Materialized turn in history")
+    }
+
+    /// Ingest a one-row people.csv under a fresh tempdir with the scripted
+    /// `provider`; returns the session (source loaded, reference name
+    /// `people`) + the TempDir guard the caller holds so the CSV outlives the
+    /// ingest. Shared by the trace / provenance persistence tests.
+    fn session_with_people(provider: FakeProvider) -> (Session, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let csv = dir.path().join("people.csv");
+        std::fs::write(&csv, "name,score\nAda,9\n").expect("write csv");
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        match session.ingest(&csv) {
+            crate::model::LoadOutcome::Loaded(d) => assert_eq!(d.reference_name, "people"),
+            other => panic!("ingest should load people.csv, got {other:?}"),
+        }
+        (session, dir)
+    }
+
     #[test]
     fn build_recipe_for_a_fresh_session_is_empty() {
         // ADR-0034: a brand-new session has no sources, no turns, no active
@@ -2428,19 +2578,20 @@ mod tests {
     }
 
     #[test]
-    fn build_recipe_persists_a_synthetic_single_call_trace_on_a_materialized_turn() {
-        // ADR-0078/0082 (AC3, issue #296): the live write path pairs each
-        // Materialized turn with its synthetic single-call trace. A fresh ask
-        // that materializes a result must carry one `materialize` trace entry
-        // whose summary is the primary promotion's verbatim SQL; provenance
-        // stays default -- the real multi-call trace + runtime provenance
-        // lands in #319. Pins the live path so a future edit that drops the
-        // synthetic trace call or forgets to wire it into the struct literal
-        // fails here, not only in the migration suite (which bypasses
-        // build_recipe via the JSON transform).
-        let dir = tempfile::tempdir().expect("tempdir");
-        let csv = dir.path().join("people.csv");
-        std::fs::write(&csv, "name,score\nAda,9\n").expect("write csv");
+    fn build_recipe_persists_the_loops_real_trace_and_builtin_provenance() {
+        // ADR-0078 (issue #319): the live write path persists the agent loop's
+        // REAL recorded trace -- not the migration's synthetic single call --
+        // and records BuiltIn runtime provenance on every live turn. A fresh
+        // ask that materializes a result carries one `materialize` trace entry
+        // whose summary is the verbatim SQL and whose result excerpt stays
+        // empty (a successful call's payload is data-bearing -- the .duck
+        // carries none of it, ADR-0036; the synthetic form is empty too);
+        // provenance records `RuntimeKind::BuiltIn` (skills stay empty
+        // -- skill tracking is unwired, ADR-0079). Pins the live path so a
+        // future edit that drops the trace wiring or the provenance snapshot
+        // fails here, not only in the persistence blackbox.
+        use crate::approval::OperationKind;
+        use crate::persistence::recipe::RuntimeKind;
 
         let provider = FakeProvider::new().scripted_tool_turn_seq(
             "多少人",
@@ -2451,35 +2602,148 @@ mod tests {
                 Ok(ToolTurnReply::Text("done".into())),
             ],
         );
-        let mut session = Session::with_provider(Box::new(provider)).expect("session");
-        match session.ingest(&csv) {
-            crate::model::LoadOutcome::Loaded(d) => assert_eq!(d.reference_name, "people"),
-            other => panic!("ingest should load people.csv, got {other:?}"),
-        }
+        let (mut session, _dir) = session_with_people(provider);
         let _ = session.ask("多少人");
 
+        let recipe = session.build_recipe();
+        let turn = materialized_turn(&recipe);
+        assert_eq!(turn.trace.len(), 1, "the loop's recorded single call");
+        assert_eq!(turn.trace[0].name, "materialize");
+        assert_eq!(turn.trace[0].operation_kind, OperationKind::Write);
+        assert_eq!(
+            turn.trace[0].summary, "SELECT COUNT(*) AS n FROM \"people\".data",
+            "summary is the verbatim SQL",
+        );
+        assert!(turn.trace[0].success, "the call succeeded");
+        assert!(
+            turn.trace[0].result_excerpt.is_empty(),
+            "a success payload is data-bearing (columns/sample/row_count) -- \
+             the .duck carries no materialized data (ADR-0036), so the \
+             persisted success excerpt stays empty"
+        );
+        assert_eq!(
+            turn.provenance.runtime,
+            Some(RuntimeKind::BuiltIn),
+            "a live turn records the built-in runtime"
+        );
+        assert!(turn.provenance.skills.is_empty(), "skill tracking unwired");
+    }
+
+    #[test]
+    fn build_recipe_persists_the_full_multi_call_trace_in_call_order() {
+        // ADR-0078 (issue #319): a turn that explores THEN materializes
+        // persists BOTH calls, in call order, each with its operation badge --
+        // the real multi-call trajectory, never a collapsed synthetic single
+        // call. This is the AC's central seam: the migration's
+        // synthetic_materialize_trace would show one `materialize` entry; the
+        // real trace shows the explore that preceded it.
+        use crate::approval::OperationKind;
+        use crate::persistence::recipe::RuntimeKind;
+
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "多少人",
+            vec![
+                Ok(explore_call("SELECT name FROM \"people\".data")),
+                Ok(materialize_call(
+                    "SELECT COUNT(*) AS n FROM \"people\".data",
+                )),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        );
+        let (mut session, _dir) = session_with_people(provider);
+        let _ = session.ask("多少人");
+
+        let recipe = session.build_recipe();
+        let turn = materialized_turn(&recipe);
+        assert_eq!(
+            turn.trace.len(),
+            2,
+            "both calls persist -- not a synthetic single call"
+        );
+        assert_eq!(turn.trace[0].name, "explore", "call order preserved");
+        assert_eq!(turn.trace[0].operation_kind, OperationKind::Read);
+        assert_eq!(turn.trace[1].name, "materialize");
+        assert_eq!(turn.trace[1].operation_kind, OperationKind::Write);
+        assert!(turn.trace.iter().all(|e| e.success));
+        assert!(
+            turn.trace.iter().all(|e| e.result_excerpt.is_empty()),
+            "success excerpts stay empty (ADR-0036 contents boundary)"
+        );
+        assert_eq!(turn.provenance.runtime, Some(RuntimeKind::BuiltIn));
+    }
+
+    #[test]
+    fn build_recipe_persists_a_failed_calls_excerpt_and_omits_success_excerpts() {
+        // ADR-0078 / ADR-0036 (issue #319): the persisted excerpt is the
+        // FAILURE audit anchor -- a failed materialize (bad SQL) records its
+        // error string so a reopened turn can show what went wrong, while the
+        // successful retry's data-bearing payload stays OUT of the .duck.
+        // Self-correction trajectory (ADR-0077): the error routes back to the
+        // model, which retries with good SQL and converges.
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "多少人",
+            vec![
+                Ok(materialize_call("SELECT FROM WHERE")),
+                Ok(materialize_call(
+                    "SELECT COUNT(*) AS n FROM \"people\".data",
+                )),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        );
+        let (mut session, _dir) = session_with_people(provider);
+        let outcome = session.ask("多少人");
+        assert!(
+            matches!(outcome, TurnOutcome::Materialized { .. }),
+            "the retry converges to a materialized turn"
+        );
+
+        let recipe = session.build_recipe();
+        let turn = materialized_turn(&recipe);
+        assert_eq!(turn.trace.len(), 2, "the failed attempt is recorded too");
+        assert!(!turn.trace[0].success, "first attempt failed (bad SQL)");
+        assert!(
+            !turn.trace[0].result_excerpt.is_empty(),
+            "the failure carries its error string for cross-turn retrospection"
+        );
+        assert!(turn.trace[1].success, "the retry succeeded");
+        assert!(
+            turn.trace[1].result_excerpt.is_empty(),
+            "the success payload never enters the .duck (ADR-0036)"
+        );
+    }
+
+    #[test]
+    fn build_recipe_persists_a_textual_turns_recorded_trace() {
+        // ADR-0078 (issue #319): the trace is the TURN's persisted
+        // substructure -- a textual answer that follows an explore call
+        // persists that call's trace entry too (the audit anchor for "how was
+        // this answer produced"), not just Materialized turns. The record
+        // seam retains the loop's trace for every outcome kind.
         use crate::persistence::recipe::{RecipeEntry, RecipeOutcome};
+
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "看看数据",
+            vec![
+                Ok(explore_call("SELECT name FROM \"people\".data")),
+                Ok(ToolTurnReply::Text("只有一行".into())),
+            ],
+        );
+        let (mut session, _dir) = session_with_people(provider);
+        let _ = session.ask("看看数据");
+
         let recipe = session.build_recipe();
         let turn = recipe
             .history
             .iter()
             .find_map(|e| match e {
-                RecipeEntry::Turn(t) if matches!(t.outcome, RecipeOutcome::Materialized { .. }) => {
+                RecipeEntry::Turn(t) if matches!(t.outcome, RecipeOutcome::Textual { .. }) => {
                     Some(t)
                 }
                 _ => None,
             })
-            .expect("a Materialized turn in history");
-        assert_eq!(turn.trace.len(), 1, "synthetic single-call trace");
-        assert_eq!(turn.trace[0].name, "materialize");
-        assert_eq!(
-            turn.trace[0].summary, "SELECT COUNT(*) AS n FROM \"people\".data",
-            "summary is the verbatim SQL",
-        );
-        assert!(
-            turn.provenance.runtime.is_none() && turn.provenance.skills.is_empty(),
-            "provenance default on the live path until #319 populates it",
-        );
+            .expect("a Textual turn in history");
+        assert_eq!(turn.trace.len(), 1, "the explore call rode the turn");
+        assert_eq!(turn.trace[0].name, "explore");
     }
 
     // M1 regression: a turn whose shape derivation fails must roll back the
