@@ -966,10 +966,10 @@ fn profile_test_outcome_serializes_adjacently_tagged() {
     // return value. Adjacently-tagged like the other IPC enums: Ok nests the
     // models array under data (empty when only the ping fallback succeeded);
     // KeyRejected / EndpointUnreachable are unit variants (no data);
-    // KeychainUnavailable (issue #243) / Incompatible carry the technical
-    // detail string under data. Pin the wire shape src/types/provider.ts
-    // mirrors so a serde drift fails here before the frontend narrows on
-    // `kind`.
+    // KeychainUnavailable (issue #243) / InvalidEndpoint (issue #279) /
+    // Incompatible carry the technical detail string under data. Pin the wire
+    // shape src/types/provider.ts mirrors so a serde drift fails here before
+    // the frontend narrows on `kind`.
     use toptopduck_lib::ProfileTestOutcome;
     assert_wire(
         &ProfileTestOutcome::Ok {
@@ -994,6 +994,12 @@ fn profile_test_outcome_serializes_adjacently_tagged() {
     assert_wire(
         &ProfileTestOutcome::EndpointUnreachable,
         r#"{"kind":"EndpointUnreachable"}"#,
+    );
+    assert_wire(
+        &ProfileTestOutcome::InvalidEndpoint {
+            detail: "invalid base_url: scheme `file` is not http/https".into(),
+        },
+        r#"{"kind":"InvalidEndpoint","data":{"detail":"invalid base_url: scheme `file` is not http/https"}}"#,
     );
     assert_wire(
         &ProfileTestOutcome::Incompatible {

@@ -525,6 +525,30 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
     await screen.findByText(/Could not reach the endpoint/);
   });
 
+  it("InvalidEndpoint renders the protocol message + folded detail, not the DNS/network/TLS one (issue #279)", async () => {
+    // AC #279: a bad scheme (file:/data:/scheme-less) is a configuration error,
+    // not a transport fault. The UI must surface "protocol must be http(s)", NOT
+    // "Could not reach the endpoint (DNS / network / TLS)" -- the latter
+    // misdiagnoses a config error as a network problem. The technical reason
+    // rides the details fold like KeychainUnavailable + Incompatible.
+    vi.mocked(testProfile).mockResolvedValue({
+      kind: "InvalidEndpoint",
+      data: { detail: "invalid base_url: scheme `file` is not http/https" },
+    });
+    renderSettings(
+      <ProviderModelField profile={baseProfile} onUpdate={vi.fn()} disabled={false} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+    await screen.findByText(/protocol must be http or https/);
+    // Regression guard: the transport message must NOT also render -- that is
+    // the misclassification the issue exists to fix.
+    expect(screen.queryByText(/Could not reach the endpoint/)).not.toBeInTheDocument();
+    // The folded technical detail surfaces the offending scheme + the policy.
+    expect(
+      screen.getByText("invalid base_url: scheme `file` is not http/https"),
+    ).toBeInTheDocument();
+  });
+
   it("Incompatible renders the summary + the folded technical detail", async () => {
     vi.mocked(testProfile).mockResolvedValue({
       kind: "Incompatible",

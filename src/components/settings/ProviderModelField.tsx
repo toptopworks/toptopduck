@@ -160,12 +160,13 @@ export function ProviderModelField({
   );
 }
 
-// Renders the five-state preflight classification (ADR-0044 axis). Each state
-// has a fixed locale message; KeychainUnavailable + Incompatible additionally
-// fold the technical English detail (a keychain error string / an upstream HTTP
-// body string) under a <details> so the user can drill in without it dominating
-// the form. The switch is exhaustive -- a future ProfileTestOutcome variant
-// fails the `never` assignment here.
+// Renders the six-state preflight classification (ADR-0044 axis). Each state
+// has a fixed locale message; KeychainUnavailable + InvalidEndpoint +
+// Incompatible additionally fold the technical English detail (a keychain error
+// string / the bad-scheme reason / an upstream HTTP body string) under a
+// <details> so the user can drill in without it dominating the form. The switch
+// is exhaustive -- a future ProfileTestOutcome variant fails the `never`
+// assignment here.
 function PreflightResult({ outcome }: { outcome: ProfileTestOutcome }) {
   switch (outcome.kind) {
     case "Ok":
@@ -211,6 +212,19 @@ function PreflightResult({ outcome }: { outcome: ProfileTestOutcome }) {
             defaultMessage="Could not reach the endpoint (DNS / network / TLS)."
           />
         </p>
+      );
+    case "InvalidEndpoint":
+      // Issue #279: a non-http/https scheme is a configuration error, not a
+      // transport fault -- direct the user at the protocol, not DNS/TLS. The
+      // technical reason (which scheme / the http(s) policy) folds under the
+      // summary like KeychainUnavailable + Incompatible.
+      return (
+        <DetailFold detail={outcome.data.detail}>
+          <FormattedMessage
+            id="settings.profiles.test.invalidEndpoint"
+            defaultMessage="The endpoint protocol must be http or https."
+          />
+        </DetailFold>
       );
     case "Incompatible":
       return (
