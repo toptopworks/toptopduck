@@ -28,7 +28,8 @@ use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
     RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, SourceLifecycleKind,
-    TextKind, ThreadEntry, TurnError, TurnFailure, TurnOutcome, TurnPhase, TurnRecord,
+    TextKind, ThreadEntry, TraceEntryView, TurnError, TurnFailure, TurnOutcome, TurnPhase,
+    TurnRecord,
 };
 use crate::persistence::recipe::{
     Recipe, RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTraceEntry, RecipeTurn, RuntimeKind,
@@ -400,11 +401,12 @@ pub struct Session {
     /// history push pairs with exactly one audit push). A turn entry carries
     /// its real execution trace + runtime/skill provenance, snapshotted at
     /// record time (or harvested from the recipe on resume); a source event
-    /// entry carries a default. The trace rides HERE rather than on
-    /// [`TurnRecord`]: ADR-0078 keeps the full trace out of the far window
-    /// (only its summary enters), and `TurnRecord` additionally crosses IPC,
-    /// which never carries the full trace either -- so the recipe is the
-    /// trace's persistence layer, read per turn by [`Self::build_recipe`].
+    /// entry carries a default. The trace's PERSISTED form rides HERE (the
+    /// recipe is its .duck layer, read per turn by [`Self::build_recipe`]);
+    /// `TurnRecord` additionally carries the DISPLAY view (the same bounded
+    /// shape, issue #297) so the rail can expand a completed turn's calls --
+    /// the full in-memory payloads ride neither, and the far window reads
+    /// only question + outcome (ADR-0078 summary-only invariant intact).
     turn_audit: Vec<TurnAudit>,
     /// Ceiling on a materialized result's row count (ADR-0005 L3). A query whose
     /// result would exceed it is aborted with a resource error rather than
@@ -503,12 +505,15 @@ pub struct Session {
 /// issue #319): a turn's execution trace (the agent loop's recorded calls,
 /// mapped to the recipe form) + its runtime/skill provenance. Lives on the
 /// Session in [`Session::turn_audit`], index-aligned with
-/// [`Session::history`] -- NOT on [`TurnRecord`]: ADR-0078 keeps the full
-/// trace out of the far window (summary only), and `TurnRecord` crosses IPC,
-/// which carries no trace either. [`Session::build_recipe`]'s whole-file
-/// rebuild reads one audit per timeline entry on every persist; resume seeds
-/// the vector from the recipe so persisted values round-trip verbatim.
-/// Source lifecycle entries carry a default (sources are not turns).
+/// [`Session::history`]. This is the trace's PERSISTENCE form; the
+/// [`TurnRecord`] additionally carries the display view ([`crate::model::
+/// TraceEntryView`], issue #297) for the rail's expanded trace -- same
+/// bounded shape, so the full in-memory payloads cross neither, and the far
+/// window still reads only the trace's summary (ADR-0078).
+/// [`Session::build_recipe`]'s whole-file rebuild reads one audit per
+/// timeline entry on every persist; resume seeds the vector from the recipe
+/// so persisted values round-trip verbatim. Source lifecycle entries carry
+/// a default (sources are not turns).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct TurnAudit {
     /// The turn's persisted execution trace (ADR-0078); empty for no-tool
@@ -1705,14 +1710,16 @@ impl Session {
         self.ask_with_phase(question, &approval, &sink, |_| {})
     }
 
-    /// Run one turn AND surface its discrete progress phases (ADR-0059). Same
-    /// semantics as [`Self::ask`]; the `on_phase` callback receives a
-    /// [`TurnPhase`] marker at each wait boundary (Thinking before each
-    /// provider round-trip, Querying before each tool dispatch), carrying the
-    /// 1-based step so a multi-step trajectory reads honestly ("step N"). The
-    /// command layer wraps this callback to emit the side-channel
-    /// `turn-progress` Tauri event addressed by sessionId (ADR-0056/0059); the
-    /// phase never enters the [`TurnOutcome`] contract.
+    /// Run one turn AND surface its discrete progress events (ADR-0059,
+    /// calibrated by ADR-0078). Same semantics as [`Self::ask`]; the
+    /// `on_phase` callback receives the [`TurnPhase`] event stream: Thinking
+    /// before each provider round-trip (carrying the 1-based step so a
+    /// multi-step trajectory reads honestly, "step N") and the
+    /// ToolCallStarted / ToolCallCompleted pair around each tool dispatch --
+    /// the trace's live form, so the rail renders the in-flight turn
+    /// progressively. The command layer wraps this callback to emit the
+    /// side-channel `turn-progress` Tauri event addressed by sessionId
+    /// (ADR-0056/0059); the events never enter the [`TurnOutcome`] contract.
     ///
     /// `approval` + `sink` are the session's tiered-approval gateway
     /// (ADR-0080/0083): the store-attached [`ApprovalState`] the
@@ -1765,10 +1772,12 @@ impl Session {
             // outcome to record_turn (ADR-0078, issue #319): the mapper stays
             // focused on the four-way classification, so the trace rides
             // separately rather than folded into TurnOutcome -- which crosses
-            // IPC, and the full trace never does. `turn_outcome_from_loop`
-            // reads only `termination` + `promotions`, so the trace is moved
-            // out before the outcome is mapped (no clone on the per-turn
-            // record path); `mem::take` leaves an empty Vec the mapper ignores.
+            // IPC as the outcome contract alone; the trace's DISPLAY view
+            // lands on the TurnRecord at record_turn (issue #297), never on
+            // the outcome. `turn_outcome_from_loop` reads only `termination`
+            // + `promotions`, so the trace is moved out before the outcome is
+            // mapped (no clone on the per-turn record path); `mem::take`
+            // leaves an empty Vec the mapper ignores.
             let trace = std::mem::take(&mut loop_outcome.trace);
             (turn_outcome_from_loop(loop_outcome), trace)
         };
@@ -1808,14 +1817,22 @@ impl Session {
         outcome: TurnOutcome,
         trace: Vec<TraceEntry>,
     ) -> TurnOutcome {
+        // ADR-0078 (issue #297): the DISPLAY view of the trace rides the
+        // TurnRecord so the rail can expand a completed turn's tool-call chain
+        // (bounded summaries + the failed-call message; the full in-memory
+        // payloads never cross IPC). Mapped before the audit consumes the
+        // in-memory entries below.
+        let trace_view: Vec<TraceEntryView> = trace.iter().map(TraceEntryView::from).collect();
         self.history.push(ThreadEntry::Turn(TurnRecord {
             question: question.to_string(),
             outcome: outcome.clone(),
+            trace: trace_view,
         }));
         // ADR-0078 (issue #319): index-aligned with the history push above --
         // the loop's real multi-call trace (mapped to the recipe form) + the
-        // BuiltIn runtime provenance. The trace rides the Session, not the
-        // TurnRecord: IPC + the far window never carry the full trace.
+        // BuiltIn runtime provenance. The PERSISTED form rides the Session
+        // (the recipe is the trace's .duck layer, read by build_recipe); the
+        // TurnRecord's display view above is the same bounded shape.
         self.turn_audit.push(TurnAudit::builtin(trace));
         // ADR-0034 per-terminal-turn atomic write: the recipe is rewritten
         // whole-file at the bound path (temp + rename). No-op when no .duck

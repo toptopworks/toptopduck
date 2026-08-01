@@ -2,6 +2,7 @@ import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import {
   Ban,
+  ChevronRight,
   CircleOff,
   MessageCircleQuestion,
   Plus,
@@ -14,6 +15,9 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { LiveTurnCard, TraceRowList } from "./TraceView";
+import type { LiveTurn } from "../../session/useTurnFlow";
+import type { ApprovalResponse } from "../../types/approval";
 import type { DatasetDescriptor, StaleAnchor, StaleReason } from "../../types/dataset";
 import type { SourceLifecycleEvent, SourceLifecycleKind } from "../../types/lifecycle";
 import type { ThreadEntry, TurnOutcome, TurnRecord } from "../../types/thread";
@@ -66,6 +70,16 @@ interface ThreadProps {
    * lights up only when the user typed a dataset name. Optional for tests that
    * do not exercise the chip; defaults to empty (no chips rendered). */
   datasetLabels?: ReadonlyArray<DatasetLabel>;
+  /** The in-flight turn's live trace (ADR-0078, issue #297): when non-null the
+   * thread renders a progressive turn card at its tail (question + tool-call
+   * rows + approval cards). Client UI state only -- the settled turn replaces
+   * it with its recorded TurnRecord. Optional for call sites / tests that do
+   * not exercise live rendering; defaults to null (no live card). */
+  liveTurn?: LiveTurn | null;
+  /** Answers a pending approval request (the live card's three buttons,
+   * ADR-0083). Wired to the app-level approval hook; defaults to a no-op so
+   * tests that render a pending card without the hook do not crash. */
+  onRespondApproval?: (requestId: string, response: ApprovalResponse) => void;
 }
 
 // The always-visible conversation thread (ADR-0028/0039/0040/0047). The rail
@@ -84,12 +98,19 @@ interface ThreadProps {
 // question, reference names, display names, LLM failure reasons) passes through
 // untranslated via ICU placeholders; the assumption note's text is layer-3 LLM
 // content and is likewise passed through.
+// A frozen no-op so the optional approval handler's default keeps a stable
+// reference across renders (the module-level-constant convention the sidebar
+// / pane use for their empty defaults).
+const NOOP_RESPOND: (requestId: string, response: ApprovalResponse) => void = () => {};
+
 export function Thread({
   entries,
   selectedResult,
   onSelectResult,
   staleByReference = new Map(),
   datasetLabels = [],
+  liveTurn = null,
+  onRespondApproval = NOOP_RESPOND,
 }: ThreadProps) {
   const intl = useIntl();
   // The source-event index currently highlighted by a stale-chip jump-select
@@ -127,7 +148,9 @@ export function Thread({
     sourceRefs.current[targetIdx]?.scrollIntoView?.({ behavior: "smooth", block: "center" });
   }, []);
 
-  if (entries.length === 0) return null;
+  // A session asking its FIRST question has no entries yet but a live turn --
+  // the live card must still render, so the empty bail-out needs both empty.
+  if (entries.length === 0 && liveTurn === null) return null;
   // ADR-0067 (issue #184): the Thread rail section does not carry a `.panel`
   // hook -- the rail itself (.session-rail in styles.css) supplies bg-card +
   // 0.5rem padding, so a panel chrome here would be redundant. The .thread
@@ -207,6 +230,14 @@ export function Thread({
           );
         })}
       </ol>
+      {/* The in-flight turn's progressive card (ADR-0078, issue #297): trails
+          the recorded entries while a turn runs, then folds away as the
+          settled TurnRecord appends. A distinct block (not an <li>) -- the
+          ol is the recorded timeline (append-only, ADR-0028/0040), the live
+          card is transient client state that never enters it. */}
+      {liveTurn !== null && (
+        <LiveTurnCard liveTurn={liveTurn} onRespondApproval={onRespondApproval} />
+      )}
     </section>
   );
 }
@@ -637,6 +668,14 @@ function TurnCard({
   // Stale only lands on Materialized turns, so the two dims never stack.
   const weakened =
     record.outcome.kind === "Failed" || record.outcome.kind === "Cancelled";
+  // ADR-0078 (issue #297): the execution trace is collapsible -- the card
+  // shows the question + answer + outcome always and expands the tool-call
+  // chain on demand. Default COLLAPSED so a forty-turn rail stays readable;
+  // the expand state is session-ephemeral UI state (the trace DATA persists
+  // on the TurnRecord / recipe, the toggle does not). Zero-call turns (a
+  // plain textual answer) carry no trace, hence no toggle.
+  const [traceExpanded, setTraceExpanded] = useState(false);
+  const hasTrace = record.trace.length > 0;
   return (
     <div
       className={cn(
@@ -703,6 +742,29 @@ function TurnCard({
           </Tooltip>
         )}
       </div>
+      {hasTrace && (
+        // The trace toggle: a compact chevron + call count between the head
+        // and the answer. aria-expanded conveys the fold state; the chevron
+        // rotates on expand. The count reads "Trace · N calls" so a rail
+        // scan shows which turns made multiple calls without expanding.
+        <button
+          type="button"
+          className="trace-toggle mt-0.5 ml-6 flex items-center gap-1 cursor-pointer text-xs text-muted-foreground hover:text-foreground"
+          aria-expanded={traceExpanded}
+          onClick={() => setTraceExpanded((v) => !v)}
+        >
+          <ChevronRight
+            aria-hidden="true"
+            className={cn("w-3.5 h-3.5 transition-transform", traceExpanded && "rotate-90")}
+          />
+          <FormattedMessage
+            id="thread.trace.toggle"
+            defaultMessage="Trace · {count} {count, plural, one {call} other {calls}}"
+            values={{ count: record.trace.length }}
+          />
+        </button>
+      )}
+      {hasTrace && traceExpanded && <TraceRowList entries={record.trace} />}
       <TurnBody
         record={record}
         selectedResult={selectedResult}

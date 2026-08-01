@@ -44,7 +44,7 @@ use crate::approval::{
     ToolKey,
 };
 use crate::cancel::CancelToken;
-use crate::model::{DatasetDescriptor, Promotion, TurnPhase};
+use crate::model::{DatasetDescriptor, Promotion, TraceEntryView, TurnPhase};
 use crate::persistence::recipe::RecipeTraceEntry;
 use crate::provider::tool_calling::{
     ToolResult, ToolTurnMessage, ToolTurnReply, ToolTurnRequest, ToolUse,
@@ -114,10 +114,14 @@ impl<'p> AgentLoop<'p> {
     /// structured outcome; the caller maps it onto `TurnOutcome` + the trace +
     /// the far-window summary.
     ///
-    /// `on_phase` receives a discrete [`TurnPhase`] marker at each wait
-    /// boundary (ADR-0059): `Thinking` before each `generate_tool_turn` call
-    /// and `Querying` before each tool dispatch. The 1-based attempt rises
-    /// across round-trips so the UI can surface "step N" honestly.
+    /// `on_phase` receives the discrete [`TurnPhase`] event stream (ADR-0059,
+    /// calibrated by ADR-0078): `Thinking` before each `generate_tool_turn`
+    /// call (the 1-based step rises across round-trips so the UI surfaces
+    /// "step N" honestly) and the `ToolCallStarted` / `ToolCallCompleted` pair
+    /// around each dispatch (a gate-denied call fires only the completion,
+    /// `success: false`). The completed payload IS the trace entry that lands
+    /// on `TurnRecord::trace`, so the frontend renders the in-flight trace
+    /// progressively from the very events the turn later persists.
     pub(crate) fn run(
         self,
         request: &ToolTurnRequest,
@@ -212,20 +216,27 @@ impl<'p> AgentLoop<'p> {
                         tool_calls: calls.clone(),
                     });
                     let mut aborted = false;
+                    let gate = GateCtx {
+                        approval,
+                        sink,
+                        cancel: &cancel,
+                    };
                     for call in &calls {
                         if cancel.is_requested() {
                             aborted = true;
                             break;
                         }
-                        on_phase(TurnPhase::Querying { attempt: step });
+                        // ADR-0078: the tool-call event stream replaces the
+                        // retired `Querying` marker; execute_call emits the
+                        // started/completed pair around the dispatch (or only
+                        // the completion for a gate-denied call).
                         match execute_call(
                             call,
                             deps,
                             materializer,
-                            approval,
-                            sink,
-                            &cancel,
+                            &gate,
                             &mut outputs,
+                            &mut on_phase,
                         ) {
                             // The gate was cancelled (close / resume / cancel
                             // interrupted an in-flight approval). The whole
@@ -290,9 +301,28 @@ struct CallOutputs {
     promotions: Vec<Promotion>,
 }
 
+/// The approval-gateway context [`execute_call`] routes every call through
+/// (ADR-0080): the session's gate state + the event sink + the cancel token
+/// the gate suspends on. Bundled (like [`CallOutputs`]) so the call
+/// signature stays under clippy's argument-count threshold now that the
+/// ADR-0078 event emitter rides it too.
+struct GateCtx<'a> {
+    approval: &'a ApprovalState,
+    sink: &'a dyn ApprovalSink,
+    cancel: &'a CancelToken,
+}
+
 /// Drive one tool call through the gateway + dispatch, append a trace entry,
 /// and capture any promotion. Returns the [`ToolResult`] to feed back to the
 /// model, or [`GateCancelled`] if the approval gate was cancelled mid-call.
+///
+/// Emits the ADR-0078 tool-call event stream through `on_phase`:
+/// `ToolCallStarted` right before dispatch (AFTER the gate, so a gated call
+/// has already surfaced its `approval-request` card) and `ToolCallCompleted`
+/// once the call lands -- for both a dispatched call and a gate denial (which
+/// completes `success: false` without ever starting). The completed payload
+/// mirrors the persisted trace shape (success excerpt emptied) so the live
+/// row and the recorded [`TurnRecord::trace`] entry render identically.
 ///
 /// A tool-level error (dispatch `is_error`, or a gateway [`GateOutcome::Denied`])
 /// is NOT a turn failure -- it routes back to the model as a `ToolResult` with
@@ -302,10 +332,9 @@ fn execute_call(
     call: &ToolUse,
     deps: &mut TurnDeps,
     materializer: &mut dyn Materializer,
-    approval: &ApprovalState,
-    sink: &dyn ApprovalSink,
-    cancel: &CancelToken,
+    gate: &GateCtx<'_>,
     outputs: &mut CallOutputs,
+    on_phase: &mut impl FnMut(TurnPhase),
 ) -> Result<ToolResult, GateCancelled> {
     let (key, operation_kind, summary) = classify_call(call);
     let gate_req = ApprovalRequest {
@@ -315,21 +344,27 @@ fn execute_call(
     };
     // ADR-0080: every tool call passes the gate before dispatch. Built-in tools
     // classify Allow (zero approval); external tools would suspend here.
-    match approval.gate(gate_req, sink, cancel) {
+    match gate.approval.gate(gate_req, gate.sink, gate.cancel) {
         Err(GateCancelled) => return Err(GateCancelled),
         Ok(GateOutcome::Denied) => {
             // A denial is a tool-level error the agent can self-correct from
             // (ADR-0077) -- e.g. retry without the denied tool, or surface it
-            // to the user. Reachable once a deny-list / external tool exists;
-            // today classify never returns Deny.
-            outputs.trace.push(TraceEntry {
+            // to the user. The denied call never dispatches, so only the
+            // completion event fires (success: false) -- the frontend's
+            // pending approval card flips to its resolved-deny row in place.
+            let entry = TraceEntry {
                 tool_use_id: call.id.clone(),
                 name: call.name.clone(),
                 operation_kind,
                 summary,
                 success: false,
                 result_excerpt: "denied by approval gateway".to_string(),
-            });
+            };
+            // The completed event carries the persisted-shape view (a failure
+            // keeps its message -- here the denial -- so the resolved card
+            // and the recorded trace show the same why).
+            on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
+            outputs.trace.push(entry);
             return Ok(ToolResult {
                 tool_use_id: call.id.clone(),
                 content: "tool call denied by the approval gateway".to_string(),
@@ -338,10 +373,20 @@ fn execute_call(
         }
         Ok(GateOutcome::Allow) => {}
     }
+    // ADR-0078: the started event fires post-gate so a suspended approval card
+    // is never doubled by a "running" row -- the card flips to resolved (via
+    // the gateway's approval-resolved event) and only then does the call show
+    // as running. The summary matches the approval card's (both come from
+    // classify_call) so the frontend merges the two into one row.
+    on_phase(TurnPhase::ToolCallStarted {
+        name: call.name.clone(),
+        operation_kind,
+        summary: summary.clone(),
+    });
     // ADR-0076: dispatch routes by name to the matching executor. The result is
     // either a JSON payload (is_error=false) or an error string (is_error=true)
     // -- both feed back to the model; the agent self-corrects on an error.
-    let result = tools::dispatch(call, deps, cancel, materializer);
+    let result = tools::dispatch(call, deps, gate.cancel, materializer);
     // ADR-0077: a tool-level error routes back to the model. Log it so a
     // non-converging turn (StepCap) leaves an operator-visible trail of what
     // the model was being told, not just the final cap.
@@ -388,14 +433,19 @@ fn execute_call(
             ),
         }
     }
-    outputs.trace.push(TraceEntry {
+    let entry = TraceEntry {
         tool_use_id: call.id.clone(),
         name: call.name.clone(),
         operation_kind,
         summary,
         success,
         result_excerpt: truncate(&result.content, TRACE_EXCERPT_MAX),
-    });
+    };
+    // ADR-0078: complete the live row with the persisted-shape view (success
+    // excerpt emptied -- see TraceEntryView's mapping below), paired with the
+    // ToolCallStarted emitted pre-dispatch.
+    on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
+    outputs.trace.push(entry);
     Ok(result)
 }
 
@@ -526,38 +576,57 @@ pub(crate) struct TraceEntry {
     pub result_excerpt: String,
 }
 
+/// Project an in-memory [`TraceEntry`] to its reduced form (ADR-0078): the
+/// per-provider `tool_use_id` is gone and a successful call's data-bearing
+/// excerpt is emptied; a failed call keeps its bounded message. ONE mapping
+/// feeds the persisted [`RecipeTraceEntry`], the display [`TraceEntryView`],
+/// and the live `turn-progress` event -- a live row, the recorded trace, and
+/// the resumed trace all render the same. The failure-message guard (issue
+/// #316) fires once here for both projections: the excerpt is the cross-turn
+/// retrospection anchor, so a silent failure panics in debug builds rather
+/// than persisting an empty anchor.
+fn reduced_trace(entry: &TraceEntry) -> TraceEntryView {
+    debug_assert!(
+        entry.success || !entry.result_excerpt.is_empty(),
+        "a failed trace entry keeps its result message (ADR-0078 failure anchor)"
+    );
+    TraceEntryView {
+        name: entry.name.clone(),
+        operation_kind: entry.operation_kind,
+        summary: entry.summary.clone(),
+        success: entry.success,
+        result_excerpt: if entry.success {
+            String::new()
+        } else {
+            entry.result_excerpt.clone()
+        },
+    }
+}
+
 impl From<&TraceEntry> for RecipeTraceEntry {
-    /// The persisted trace form (ADR-0078, issue #319): `name` / `operation_kind`
-    /// / `summary` / `success` ride verbatim; two fields transform:
-    /// - `tool_use_id` drops -- a per-provider-call id that does not survive
-    ///   the turn, let alone a save/resume.
-    /// - `result_excerpt` persists ONLY for a failed call; a successful call's
-    ///   excerpt is emptied. See [`RecipeTraceEntry::result_excerpt`] for the
-    ///   boundary rule (ADR-0078 failure anchor; ADR-0036 contents boundary).
-    ///
-    /// The surviving strings are already bounded at capture time
-    /// (`summarize_field` / `TRACE_EXCERPT_MAX`), so no re-truncation.
-    ///
-    /// Failure-message guard (issue #316): a failed call MUST carry its
-    /// result message -- the persisted excerpt is the cross-turn failure
-    /// retrospection anchor (ADR-0078). A silent failure panics in debug
-    /// builds rather than persisting an empty anchor.
+    /// The persisted trace form (ADR-0078, issue #319): the reduced projection
+    /// (drop the in-memory `tool_use_id`, empty a success call's excerpt, keep
+    /// a failure's message) is the persisted shape verbatim -- the surviving
+    /// strings stay bounded at capture time (`summarize_field` /
+    /// `TRACE_EXCERPT_MAX`), so no re-truncation.
     fn from(entry: &TraceEntry) -> Self {
-        debug_assert!(
-            entry.success || !entry.result_excerpt.is_empty(),
-            "a failed trace entry persists its result message (ADR-0078 failure anchor)"
-        );
+        let v = reduced_trace(entry);
         Self {
-            name: entry.name.clone(),
-            operation_kind: entry.operation_kind,
-            summary: entry.summary.clone(),
-            success: entry.success,
-            result_excerpt: if entry.success {
-                String::new()
-            } else {
-                entry.result_excerpt.clone()
-            },
+            name: v.name,
+            operation_kind: v.operation_kind,
+            summary: v.summary,
+            success: v.success,
+            result_excerpt: v.result_excerpt,
         }
+    }
+}
+
+impl From<&TraceEntry> for TraceEntryView {
+    /// The display-trace mapping (ADR-0078, issue #297): the reduced projection
+    /// feeds both the live `turn-progress` event and the `TurnRecord::trace`
+    /// wire form, so a live row and the resumed trace render identically.
+    fn from(entry: &TraceEntry) -> Self {
+        reduced_trace(entry)
     }
 }
 
@@ -609,20 +678,43 @@ mod tests {
 
     /// A recording approval sink (mirrors the one in approval.rs's tests). The
     /// loop threads it so the gateway can emit approval events; built-in tools
-    /// never reach the sink (they classify Allow before emitting).
+    /// never reach the sink (they classify Allow before emitting). `request_ids`
+    /// captures the UUIDs a concurrent responder threads back via
+    /// `ApprovalState::respond` to drive the gate-deny path (ADR-0078).
     #[derive(Default)]
     struct RecordingSink {
         requests: Mutex<Vec<String>>,
+        request_ids: Mutex<Vec<uuid::Uuid>>,
     }
     impl ApprovalSink for RecordingSink {
         fn emit_request(&self, body: &crate::approval::ApprovalRequestBody) {
             self.requests.lock().unwrap().push(body.summary.clone());
+            // body.request_id is a String; parse to the Uuid respond() takes.
+            if let Ok(id) = uuid::Uuid::parse_str(&body.request_id) {
+                self.request_ids.lock().unwrap().push(id);
+            }
         }
         fn emit_resolved(
             &self,
             _body: &crate::approval::ApprovalRequestBody,
             _response: ApprovalResponse,
         ) {
+        }
+    }
+
+    /// Poll the sink for the first emitted request id (the gate-deny test's
+    /// responder waits on this before answering Deny). Mirrors approval.rs's
+    /// `poll_for_request`.
+    fn poll_request_id(sink: &RecordingSink, timeout: std::time::Duration) -> Option<uuid::Uuid> {
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(id) = sink.request_ids.lock().unwrap().first().copied() {
+                return Some(id);
+            }
+            if start.elapsed() >= timeout {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 
@@ -691,12 +783,191 @@ mod tests {
         );
     }
 
+    /// The display-trace mapping (issue #297) mirrors the persisted one: the
+    /// success payload is dropped, the failure message rides verbatim -- a
+    /// live row and the resumed trace render identically.
+    #[test]
+    fn display_trace_mapping_empties_success_and_carries_failure_messages() {
+        let base = |success: bool, excerpt: &str| TraceEntry {
+            tool_use_id: "tu_1".into(),
+            name: "explore".into(),
+            operation_kind: OperationKind::Read,
+            summary: "SELECT 1".into(),
+            success,
+            result_excerpt: excerpt.into(),
+        };
+        let ok = TraceEntryView::from(&base(true, "42 rows"));
+        assert!(ok.success);
+        assert!(ok.result_excerpt.is_empty(), "success payload dropped");
+        let failed = TraceEntryView::from(&base(false, "no such table"));
+        assert!(!failed.success);
+        assert_eq!(
+            failed.result_excerpt, "no such table",
+            "the failure message rides verbatim"
+        );
+    }
+
+    /// The ADR-0078 (issue #297) event stream: each dispatch emits the
+    /// started/completed pair around it (completed payload = the display
+    /// trace entry, success excerpt emptied), Thinking brackets the provider
+    /// round-trips, and a failed call's completion carries the error message.
+    #[test]
+    fn tool_call_event_stream_pairs_started_and_completed_around_dispatch() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "stream",
+            vec![
+                // A failing explore (unknown table) -- its completion must
+                // carry the error excerpt.
+                Ok(call("explore", json!({"sql": "SELECT * FROM missing"}))),
+                Ok(call("materialize", json!({"sql": "SELECT 1 AS x"}))),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        );
+        let sources = HashMap::new();
+        let mut d = deps(&engine.conn, &mut ws, &sources, engine.temp.path());
+        let approval = ApprovalState::new();
+        let sink = RecordingSink::default();
+        let phases = std::sync::Mutex::new(Vec::new());
+        AgentLoop::new(&provider, cancel).with_caps(24, None).run(
+            &request("stream"),
+            &mut d,
+            &mut RealMaterializer,
+            &approval,
+            &sink,
+            |p| phases.lock().unwrap().push(p),
+        );
+        let phases = phases.into_inner().unwrap();
+        // Thinking{1}, explore started+completed, Thinking{2}, materialize
+        // started+completed, Thinking{3} (the terminal-text round-trip).
+        assert_eq!(phases.len(), 7, "3x Thinking + 2x (Started,Completed)");
+        assert_eq!(phases[0], TurnPhase::Thinking { attempt: 1 });
+        assert_eq!(
+            phases[1],
+            TurnPhase::ToolCallStarted {
+                name: "explore".into(),
+                operation_kind: OperationKind::Read,
+                summary: "SELECT * FROM missing".into(),
+            }
+        );
+        match &phases[2] {
+            TurnPhase::ToolCallCompleted(view) => {
+                assert_eq!(view.name, "explore");
+                assert!(!view.success, "the unknown-table explore failed");
+                assert!(
+                    !view.result_excerpt.is_empty(),
+                    "the failure message rides the completion"
+                );
+            }
+            other => panic!("expected ToolCallCompleted, got {other:?}"),
+        }
+        assert_eq!(phases[3], TurnPhase::Thinking { attempt: 2 });
+        assert_eq!(
+            phases[4],
+            TurnPhase::ToolCallStarted {
+                name: "materialize".into(),
+                operation_kind: OperationKind::Write,
+                summary: "SELECT 1 AS x".into(),
+            }
+        );
+        assert_eq!(
+            phases[5],
+            TurnPhase::ToolCallCompleted(TraceEntryView {
+                name: "materialize".into(),
+                operation_kind: OperationKind::Write,
+                summary: "SELECT 1 AS x".into(),
+                success: true,
+                result_excerpt: String::new(),
+            }),
+            "a success completion empties the excerpt (persisted shape)"
+        );
+        assert_eq!(phases[6], TurnPhase::Thinking { attempt: 3 });
+    }
+
+    /// A gate-denied call (ADR-0078) fires ONLY ToolCallCompleted (success:
+    /// false, excerpt "denied by approval gateway"), NEVER ToolCallStarted --
+    /// the frontend's pending approval card flips straight to its resolved-deny
+    /// row. The denial rides a concurrent `respond(Deny)` (classify never
+    /// returns Deny directly; the only path to GateOutcome::Denied is the
+    /// gate's suspend-then-respond), so a responder thread answers the request
+    /// the sink captured.
+    #[test]
+    fn gate_denied_call_emits_only_completion_no_started() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        // An unknown tool name classifies as external (the gateway suspends
+        // instead of passing through), so execute_call reaches the deny branch.
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "deny",
+            vec![
+                Ok(call("external_tool", json!({}))),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        );
+        let sources = HashMap::new();
+        let mut d = deps(&engine.conn, &mut ws, &sources, engine.temp.path());
+        let approval = Arc::new(ApprovalState::new());
+        let sink = Arc::new(RecordingSink::default());
+        let phases = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let approval_c = Arc::clone(&approval);
+        let sink_c = Arc::clone(&sink);
+        let responder = std::thread::spawn(move || {
+            let request_id = poll_request_id(&sink_c, std::time::Duration::from_secs(2))
+                .expect("the gate emitted an approval request");
+            approval_c
+                .respond(request_id, ApprovalResponse::Deny)
+                .expect("deny ok");
+        });
+
+        AgentLoop::new(&provider, cancel).with_caps(24, None).run(
+            &request("deny"),
+            &mut d,
+            &mut RealMaterializer,
+            &approval,
+            &*sink,
+            {
+                let phases = Arc::clone(&phases);
+                move |p| phases.lock().unwrap().push(p)
+            },
+        );
+        responder.join().expect("responder thread");
+
+        let phases = phases.lock().unwrap().clone();
+        // Thinking{1} (first round-trip), ToolCallCompleted(success:false) for
+        // the denied call, Thinking{2} (the terminal Text round-trip). The
+        // denial never started, so no ToolCallStarted.
+        assert_eq!(
+            phases.len(),
+            3,
+            "denied call: Thinking + completion + Thinking"
+        );
+        assert_eq!(phases[0], TurnPhase::Thinking { attempt: 1 });
+        match &phases[1] {
+            TurnPhase::ToolCallCompleted(view) => {
+                assert_eq!(view.name, "external_tool");
+                assert!(!view.success, "the denied call completes failure");
+                assert_eq!(view.result_excerpt, "denied by approval gateway");
+            }
+            other => panic!("expected ToolCallCompleted for the denied call, got {other:?}"),
+        }
+        assert!(
+            !phases
+                .iter()
+                .any(|p| matches!(p, TurnPhase::ToolCallStarted { .. })),
+            "a gate-denied call must never emit ToolCallStarted"
+        );
+    }
+
     /// The failure-message guard (issue #316): the persisted excerpt is the
     /// cross-turn failure retrospection anchor (ADR-0078), so a failed call
     /// with no message panics in debug builds rather than persisting an
     /// empty anchor.
     #[test]
-    #[should_panic(expected = "a failed trace entry persists its result message")]
+    #[should_panic(expected = "a failed trace entry keeps its result message")]
     fn persisted_trace_mapping_rejects_a_silent_failure() {
         let entry = TraceEntry {
             tool_use_id: "tu_1".into(),

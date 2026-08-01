@@ -3,21 +3,25 @@ import { QueryClient } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { IntlShape } from "react-intl";
 import { sessionKeys } from "../queryKeys";
-import { useTurnFlow } from "../useTurnFlow";
+import { mergeLiveTrace, rowsToTrace, useTurnFlow, type LiveCall, type LiveTraceRow } from "../useTurnFlow";
 import { materialized, textual } from "./fixtures";
-import type { TurnOutcome, TurnRecord } from "../../types/thread";
+import type { ApprovalEntry } from "../useApprovalEvents";
+import type { ThreadEntry, TurnOutcome, TurnRecord } from "../../types/thread";
 import type { TurnProgress } from "../../types/session";
 
-// Tests for useTurnFlow (issue #230) -- pins the three behaviors extracted
-// from useSessionState: the long-lived turn-progress listener + phase
-// lifecycle (ADR-0059), the optimistic thread append with selective invalidate
-// (thread stays un-invalidated, ADR-0051), and the viewed method call timing
-// (markProduced on Materialized, suppressInit on every outcome, issue #229).
-// Drives the hook through stub deps + a captured onTurnProgress callback so it
-// runs offline (jsdom has no Tauri event bus).
+// Tests for useTurnFlow (issue #230, evolved by issue #297) -- pins the
+// behaviors extracted from useSessionState: the long-lived turn-progress
+// listener + event lifecycle (ADR-0059, calibrated to the tool-call event
+// stream by ADR-0078), the in-flight LIVE TRACE (Thinking step + started/
+// completed call rows merged with approval entries), the optimistic thread
+// append carrying the settled trace with selective invalidate (thread stays
+// un-invalidated, ADR-0051), and the viewed method call timing (markProduced
+// on Materialized, suppressInit on every outcome, issue #229). Drives the
+// hook through stub deps + a captured onTurnProgress callback so it runs
+// offline (jsdom has no Tauri event bus).
 
-// Capture the onTurnProgress callback so a test can emit Thinking/Querying
-// phases addressed to THIS session vs a stranger (the ADR-0056 multi-session
+// Capture the onTurnProgress callback so a test can emit Thinking / tool-call
+// events addressed to THIS session vs a stranger (the ADR-0056 multi-session
 // filter inside the listener).
 const turnProgressCb = vi.hoisted(() => ({
   current: null as null | ((ev: TurnProgress) => void),
@@ -97,14 +101,20 @@ describe("useTurnFlow", () => {
       expect(turnProgressCb.current).not.toBeNull();
     });
 
-    it("sets phase from a Thinking/Querying event addressed to this session", async () => {
+    it("sets phase from a Thinking / tool-call event addressed to this session", async () => {
       const { deps } = setup();
       const { result } = renderHook(() => useTurnFlow(SID, deps));
       await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
       emitProgress(SID, { Thinking: { attempt: 1 } });
       expect(result.current.phase).toEqual({ Thinking: { attempt: 1 } });
-      emitProgress(SID, { Querying: { attempt: 1 } });
-      expect(result.current.phase).toEqual({ Querying: { attempt: 1 } });
+      // ADR-0078: the tool-call event stream replaces the retired Querying
+      // marker; the latest event rides `phase` for the QuestionBar label.
+      emitProgress(SID, {
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+      expect(result.current.phase).toEqual({
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
     });
 
     it("filters out events addressed to ANOTHER session (ADR-0056 multi-session filter)", async () => {
@@ -113,8 +123,10 @@ describe("useTurnFlow", () => {
       await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
       emitProgress(SID, { Thinking: { attempt: 1 } });
       expect(result.current.phase).toEqual({ Thinking: { attempt: 1 } });
-      // A sibling pane's phase must never leak in.
-      emitProgress(STRANGER, { Querying: { attempt: 2 } });
+      // A sibling pane's event must never leak in.
+      emitProgress(STRANGER, {
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
       expect(result.current.phase).toEqual({ Thinking: { attempt: 1 } });
     });
 
@@ -136,14 +148,306 @@ describe("useTurnFlow", () => {
       vi.mocked(askQuestion).mockRejectedValue(new Error("ipc down"));
       const { result } = renderHook(() => useTurnFlow(SID, deps));
       await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
-      emitProgress(SID, { Querying: { attempt: 1 } });
+      emitProgress(SID, {
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+      expect(result.current.phase).toEqual({
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
       await act(async () => {
         await result.current.handleAsk("q");
       });
+      // The reject's finally clears the phase the mid-turn event set.
       expect(result.current.phase).toBeNull();
       // Error + loading teardown on the failure path: setError(null) clears the
       // prior error at the ask start, then the reject sets a fresh AppError.
       expect(setError).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "ask" }));
+    });
+  });
+
+  describe("in-flight live trace (ADR-0078, issue #297)", () => {
+    it("renders null before any ask and mounts the live card on ask start", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}), // stays in flight
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      expect(result.current.liveTurn).toBeNull();
+      act(() => {
+        void result.current.handleAsk("多少行？");
+      });
+      expect(result.current.liveTurn).toEqual({ question: "多少行？", step: null, rows: [] });
+    });
+
+    it("grows rows from the tool-call event stream (started -> completed)", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      emitProgress(SID, {
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+      expect(result.current.liveTurn?.step).toBe(1);
+      expect(result.current.liveTurn?.rows).toEqual([
+        {
+          key: "call-0",
+          name: "explore",
+          server: null,
+          operationKind: "read",
+          summary: "SELECT 1",
+          approval: null,
+          running: true,
+          success: null,
+          resultExcerpt: "",
+        },
+      ]);
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "explore",
+          operation_kind: "read",
+          summary: "SELECT 1",
+          success: true,
+          result_excerpt: "",
+        },
+      });
+      const row = result.current.liveTurn?.rows[0];
+      expect(row).toMatchObject({ running: false, success: true, key: "call-0" });
+    });
+
+    it("appends a completed row for a gate-denied call (no started event)", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "fetch",
+          operation_kind: "network",
+          summary: "GET /x",
+          success: false,
+          result_excerpt: "denied by approval gateway",
+        },
+      });
+      expect(result.current.liveTurn?.rows).toHaveLength(1);
+      expect(result.current.liveTurn?.rows[0]).toMatchObject({
+        name: "fetch",
+        success: false,
+        resultExcerpt: "denied by approval gateway",
+        running: false,
+      });
+    });
+
+    it("merges approval entries into the matching call row (one row per call)", async () => {
+      const approval: ApprovalEntry = {
+        requestId: "req-1",
+        server: "acme",
+        tool: "fetch",
+        operationKind: "network",
+        summary: "GET /x",
+        status: { kind: "resolved", response: "allow_once" },
+      };
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() =>
+        useTurnFlow(SID, { ...deps, approvals: [approval] }),
+      );
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      // Pending card row before any tool event (the gate suspends dispatch).
+      expect(result.current.liveTurn?.rows).toEqual([
+        expect.objectContaining({ key: "req-1", approval: { requestId: "req-1", response: "allow_once" }, success: null }),
+      ]);
+      emitProgress(SID, {
+        ToolCallStarted: { name: "fetch", operation_kind: "network", summary: "GET /x" },
+      });
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "fetch",
+          operation_kind: "network",
+          summary: "GET /x",
+          success: true,
+          result_excerpt: "",
+        },
+      });
+      // ONE merged row: the card's identity + the call's outcome.
+      expect(result.current.liveTurn?.rows).toHaveLength(1);
+      expect(result.current.liveTurn?.rows[0]).toMatchObject({
+        key: "req-1",
+        server: "acme",
+        approval: { requestId: "req-1", response: "allow_once" },
+        success: true,
+      });
+    });
+
+    it("clears the live card on ask end and calls onApprovalsSettled", async () => {
+      const { deps } = setup();
+      let resolveAsk!: (o: TurnOutcome) => void;
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>((res) => (resolveAsk = res)),
+      );
+      const onApprovalsSettled = vi.fn();
+      const { result } = renderHook(() =>
+        useTurnFlow(SID, { ...deps, onApprovalsSettled }),
+      );
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      let askDone!: Promise<void>;
+      act(() => {
+        askDone = result.current.handleAsk("q");
+      });
+      expect(result.current.liveTurn).not.toBeNull();
+      await act(async () => {
+        resolveAsk({ kind: "Cancelled" });
+        await askDone;
+      });
+      expect(result.current.liveTurn).toBeNull();
+      expect(onApprovalsSettled).toHaveBeenCalledTimes(1);
+    });
+
+    it("folds the settled rows into the optimistic TurnRecord.trace", async () => {
+      const { queryClient, deps } = setup();
+      queryClient.setQueryData(sessionKeys.thread(SID), []);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      // The ask promise resolves on our signal so events can land mid-turn.
+      let resolveAsk!: (o: TurnOutcome) => void;
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>((res) => (resolveAsk = res)),
+      );
+      let askDone!: Promise<void>;
+      act(() => {
+        askDone = result.current.handleAsk("q");
+      });
+      emitProgress(SID, {
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "explore",
+          operation_kind: "read",
+          summary: "SELECT 1",
+          success: false,
+          result_excerpt: "no such table",
+        },
+      });
+      await act(async () => {
+        resolveAsk({ kind: "Cancelled" });
+        await askDone;
+      });
+      const thread = queryClient.getQueryData<ThreadEntry[]>(sessionKeys.thread(SID));
+      expect(thread).toHaveLength(1);
+      const entry = thread?.[0];
+      if (entry?.entry !== "Turn") throw new Error("expected a Turn entry");
+      expect(entry.data.trace).toEqual([
+        {
+          name: "explore",
+          operation_kind: "read",
+          summary: "SELECT 1",
+          success: false,
+          result_excerpt: "no such table",
+        },
+      ]);
+    });
+  });
+
+  describe("mergeLiveTrace + rowsToTrace (pure helpers)", () => {
+    const call = (over: Partial<LiveCall> = {}): LiveCall => ({
+      key: "call-0",
+      name: "explore",
+      operationKind: "read",
+      summary: "SELECT 1",
+      running: false,
+      success: true,
+      resultExcerpt: "",
+      ...over,
+    });
+    const approval = (over: Partial<ApprovalEntry> = {}): ApprovalEntry => ({
+      requestId: "req-1",
+      server: "acme",
+      tool: "fetch",
+      operationKind: "network",
+      summary: "GET /x",
+      status: { kind: "pending" },
+      ...over,
+    });
+
+    it("passes plain calls through as ungated rows", () => {
+      expect(mergeLiveTrace([call()], [])).toEqual([
+        expect.objectContaining({ key: "call-0", approval: null, success: true }),
+      ]);
+    });
+
+    it("trails unmatched approvals (still pending at the gate)", () => {
+      const rows = mergeLiveTrace([call()], [approval()]);
+      expect(rows).toHaveLength(2);
+      expect(rows[1]).toMatchObject({
+        key: "req-1",
+        approval: { requestId: "req-1", response: null },
+        success: null,
+      });
+    });
+
+    it("merges by tool name + summary, consuming each approval once", () => {
+      const a = approval();
+      const rows = mergeLiveTrace(
+        [
+          call({ key: "call-0", name: "fetch", operationKind: "network", summary: "GET /x" }),
+          call({ key: "call-1", name: "fetch", operationKind: "network", summary: "GET /x" }),
+        ],
+        [a, approval({ requestId: "req-2" })],
+      );
+      // Two calls + two approvals -> two merged rows (no trailing card).
+      expect(rows.map((r) => r.key)).toEqual(["req-1", "req-2"]);
+    });
+
+    it("rowsToTrace keeps completed calls and drops unsettled rows", () => {
+      const rows: LiveTraceRow[] = [
+        {
+          key: "call-0",
+          name: "explore",
+          server: null,
+          operationKind: "read",
+          summary: "SELECT 1",
+          approval: null,
+          running: false,
+          success: false,
+          resultExcerpt: "boom",
+        },
+        {
+          key: "req-1",
+          name: "fetch",
+          server: "acme",
+          operationKind: "network",
+          summary: "GET /x",
+          approval: { requestId: "req-1", response: "deny" },
+          running: false,
+          success: null, // gate-cancelled: no backend trace entry
+          resultExcerpt: "",
+        },
+      ];
+      expect(rowsToTrace(rows)).toEqual([
+        {
+          name: "explore",
+          operation_kind: "read",
+          summary: "SELECT 1",
+          success: false,
+          result_excerpt: "boom",
+        },
+      ]);
     });
   });
 

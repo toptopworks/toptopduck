@@ -28,10 +28,10 @@ use super::materializer::{Materializer, TurnDeps};
 use super::{ActiveAbandoned, ActiveResolution, ResumeError, ResumeEvent};
 use crate::cancel::CancelToken;
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, RectifyProvenance, ThreadEntry, TurnFailure, TurnOutcome,
-    TurnRecord,
+    DatasetDescriptor, DatasetPrivacy, RectifyProvenance, ThreadEntry, TraceEntryView, TurnFailure,
+    TurnOutcome, TurnRecord,
 };
-use crate::persistence::recipe::{Recipe, RecipeEntry, RecipeOutcome};
+use crate::persistence::recipe::{Recipe, RecipeEntry, RecipeOutcome, RecipeTraceEntry};
 use crate::persistence::registry::{release, try_acquire};
 use crate::workingset::WorkingSet;
 
@@ -499,12 +499,36 @@ impl<'a> Resumer<'a> {
                     Ok(ThreadEntry::Turn(TurnRecord {
                         question: turn.question.clone(),
                         outcome,
+                        // ADR-0078 (issue #297): the display trace round-trips
+                        // from the recipe's persisted entries -- the same
+                        // bounded shape the live turn emitted, so a resumed
+                        // session expands identical trace rows. Empty for
+                        // v1-era migrated turns (their RecipeTurn carries no
+                        // trace; the v2+ synthetic single-call trace does).
+                        trace: turn.trace.iter().map(TraceEntryView::from).collect(),
                     }))
                 }
                 RecipeEntry::Source(ev) => Ok(ThreadEntry::Source(ev.clone())),
             })
             .collect::<Result<Vec<_>, ResumeError>>()?;
         Ok(timeline)
+    }
+}
+
+impl From<&RecipeTraceEntry> for TraceEntryView {
+    /// The resumed-trace mapping (ADR-0078, issue #297): the persisted recipe
+    /// entry IS the display shape (the live->persisted mapping already dropped
+    /// the tool_use_id + the success excerpt), so the rebuild copies fields
+    /// verbatim. A resumed turn and the live turn that recorded it render the
+    /// same expanded trace.
+    fn from(entry: &RecipeTraceEntry) -> Self {
+        Self {
+            name: entry.name.clone(),
+            operation_kind: entry.operation_kind,
+            summary: entry.summary.clone(),
+            success: entry.success,
+            result_excerpt: entry.result_excerpt.clone(),
+        }
     }
 }
 

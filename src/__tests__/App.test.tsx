@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { IntlProvider } from "react-intl";
 import type { ReactNode } from "react";
 import type { DatasetDescriptor } from "../types/dataset";
+import type { TurnOutcome } from "../types/thread";
 
 // FileDropzone touches Tauri APIs that don't exist under jsdom; stub them first.
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
@@ -50,12 +51,13 @@ vi.mock("../api", async (importOriginal) => {
 
 import { open } from "@tauri-apps/plugin-dialog";
 import { SessionPane } from "../session/SessionPane";
+import { TooltipProvider } from "../components/ui/tooltip";
+import type { UseApprovalEvents } from "../session/useApprovalEvents";
 import type { SessionFlowKind } from "../types/error";
 import { catalogFor, type CatalogKey, type EffectiveLocale } from "../i18n";
 import {
   activeDataset,
   askQuestion,
-  conversation,
   ingestFile,
   ingestFileGuided,
   listWorkingSet,
@@ -74,13 +76,26 @@ import {
 // never share cache). zh-CN so the i18n'd chrome matches the assertions.
 function renderPane(locale: EffectiveLocale = "zh-CN", sessionName = "Test session"): void {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  // TooltipProvider mirrors the App ancestor: the rail's turn cards carry the
+  // TruncatingTooltip question recovery (ADR-0050), which crashes without the
+  // provider context once a turn renders (an optimistic append or a thread
+  // mock).
   const wrap = (children: ReactNode) => (
     <QueryClientProvider client={queryClient}>
       <IntlProvider locale={locale} messages={catalogFor(locale)} defaultLocale="en-US">
-        {children}
+        <TooltipProvider>{children}</TooltipProvider>
       </IntlProvider>
     </QueryClientProvider>
   );
+  // An inert approval channel: these session-internal flows never exercise
+  // approvals (the api mock has no approval listeners), so the pane reads an
+  // empty map and the callbacks are no-ops.
+  const approvalEvents: UseApprovalEvents = {
+    approvalsBySession: new Map(),
+    pendingApprovalSids: new Set(),
+    respond: () => {},
+    clearSession: () => {},
+  };
   render(
     wrap(
       <SessionPane
@@ -90,6 +105,7 @@ function renderPane(locale: EffectiveLocale = "zh-CN", sessionName = "Test sessi
         railCollapsed={false}
         onToggleRail={() => {}}
         sessionName={sessionName}
+        approvalEvents={approvalEvents}
       />,
     ),
   );
@@ -445,22 +461,13 @@ describe("App ask flow", () => {
     );
     // Mount refresh has settled; queue what the turn produces (asked after mount
     // so the mount's own conversation() call doesn't consume the once-mock).
+    // No conversation once-mock: the turn flow appends optimistically and
+    // never invalidates the thread (ADR-0051), so a queued thread mock would
+    // go UNCONSUMED here and leak into the next test's mount query.
     vi.mocked(askQuestion).mockResolvedValueOnce({
       kind: "Textual",
       data: { text_kind: "Clarify", body: "按产品名还是客户名汇总？", assumption: null },
     });
-    vi.mocked(conversation).mockResolvedValueOnce([
-      {
-        entry: "Turn",
-        data: {
-          question: "哪个名字",
-          outcome: {
-            kind: "Textual",
-            data: { text_kind: "Clarify", body: "按产品名还是客户名汇总？", assumption: null },
-          },
-        },
-      },
-    ]);
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "哪个名字" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
 
@@ -471,6 +478,26 @@ describe("App ask flow", () => {
     );
     // ...and no result pane opens for a non-result outcome.
     expect(screen.queryByText(/结果：result/)).not.toBeInTheDocument();
+  });
+
+  it("the rail empty hint yields to the live turn card on a first in-flight turn (issue #297)", async () => {
+    // A brand-new session has an empty thread AND an in-flight first ask: the
+    // live turn card occupies the rail, so the "尚无对话" hint must NOT render
+    // alongside it (the two read as contradictory).
+    renderPane();
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
+    );
+    // The empty hint is up before any ask (the thread query settles empty).
+    await waitFor(() => expect(screen.getByText(/尚无对话/)).toBeInTheDocument());
+    vi.mocked(askQuestion).mockImplementationOnce(
+      () => new Promise<TurnOutcome>(() => {}), // stays in flight
+    );
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "第一问" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    // The live card renders the asking question; the empty hint is gone.
+    await waitFor(() => expect(screen.getByText("第一问")).toBeInTheDocument());
+    expect(screen.queryByText(/尚无对话/)).not.toBeInTheDocument();
   });
 });
 

@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { useIntl, FormattedMessage } from "react-intl";
 import { useQueryClient } from "@tanstack/react-query";
 import { fmtError, errorDetail, formatTurnFailure, turnFailureDetail } from "../lib/error-presentation";
 import { RailToggle } from "../shell/RailToggle";
 import { useSessionState } from "./useSessionState";
+import type { ApprovalEntry, UseApprovalEvents } from "./useApprovalEvents";
+import type { ApprovalResponse } from "../types/approval";
 import { ActiveSourceDeleteDialog } from "../components/dataset/ActiveSourceDeleteDialog";
 import { DatasetDetail } from "../components/dataset/DatasetDetail";
 import { ErrorBanner } from "../components/common/ErrorBanner";
@@ -61,10 +63,43 @@ interface SessionPaneProps {
    *  set; each SessionPane receives its own name rather than reaching into
    *  global active-session state (ADR-0060). */
   sessionName: string;
+  /** The app-level approval channel (ADR-0083, issue #297): the pane reads
+   *  its own session's entries (merged into the live trace by useTurnFlow)
+   *  and binds the respond + settled-clear callbacks to its sessionId. */
+  approvalEvents: UseApprovalEvents;
 }
 
-export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, providerPicker, railCollapsed, onToggleRail, sessionName }: SessionPaneProps) {
-  const s = useSessionState(sessionId, pendingIngestPath, onIngestConsumed);
+// A frozen empty slice so a session with no approvals keeps a referentially
+// stable prop for useSessionState / useTurnFlow (no every-render fresh []).
+const NO_APPROVALS: ApprovalEntry[] = [];
+
+export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, providerPicker, railCollapsed, onToggleRail, sessionName, approvalEvents }: SessionPaneProps) {
+  // This session's slice of the app-level approval map + the two stable
+  // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
+  // the pane acts on its own session only). The respond / clearSession
+  // methods are destructured out first: they are useCallback-stable inside
+  // useApprovalEvents, while the hook's return object is rebuilt every
+  // render -- depending on the methods (not the object) keeps these two
+  // callbacks identity-stable across renders (the same pattern useTurnFlow
+  // uses for the viewed methods, issue #229).
+  const { approvalsBySession, respond, clearSession } = approvalEvents;
+  const sessionApprovals = approvalsBySession.get(sessionId) ?? NO_APPROVALS;
+  const handleRespondApproval = useCallback(
+    (requestId: string, response: ApprovalResponse) => respond(sessionId, requestId, response),
+    [respond, sessionId],
+  );
+  const handleApprovalsSettled = useCallback(
+    () => clearSession(sessionId),
+    [clearSession, sessionId],
+  );
+  const hasPendingApproval = sessionApprovals.some((a) => a.status.kind === "pending");
+  const s = useSessionState(
+    sessionId,
+    pendingIngestPath,
+    onIngestConsumed,
+    sessionApprovals,
+    handleApprovalsSettled,
+  );
   const intl = useIntl();
   const persistDetail = s.persistError ? errorDetail(s.persistError) : null;
   const queryClient = useQueryClient();
@@ -105,7 +140,15 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
           only mounts when its session exists, so there is always a rail to
           fold (the cold-start hero has no SessionPane). */}
       <div className="session-header" data-tauri-drag-region>
-        <RailToggle collapsed={railCollapsed} disabled={false} onToggle={onToggleRail} />
+        <RailToggle
+          collapsed={railCollapsed}
+          disabled={false}
+          onToggle={onToggleRail}
+          // ADR-0083 (issue #297): a collapsed rail hides the in-flow
+          // approval card, so the toggle badges the unanswered approval to
+          // invite the expand (the badge retires once the rail is open).
+          alert={hasPendingApproval}
+        />
         <span className="flex-1 min-w-0 font-semibold text-base truncate" data-tauri-drag-region>
           {sessionName ||
             intl.formatMessage({ id: "session.defaultName", defaultMessage: "New session" })}
@@ -140,12 +183,20 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
             onSelectResult={s.handleSelectResult}
             staleByReference={s.staleByReference}
             datasetLabels={datasetLabels}
+            // ADR-0078/0083 (issue #297): the in-flight turn's progressive
+            // trace card (tool-call rows + approval cards) trails the
+            // recorded thread while a turn runs.
+            liveTurn={s.liveTurn}
+            onRespondApproval={handleRespondApproval}
           />
         </ErrorBoundary>
-        {s.thread.length === 0 && (
+        {s.thread.length === 0 && s.liveTurn === null && (
           // ADR-0067 (issue #185): the .rail-empty visual rule (font-size +
           // padding) + the .muted color rule retired onto utility; the class
-          // hooks had no selector / test dependents and are dropped.
+          // hooks had no selector / test dependents and are dropped. Gated on
+          // liveTurn too (issue #297): a brand-new session's FIRST in-flight
+          // turn already renders the live card -- the "no conversations yet"
+          // hint would contradict it.
           <p className="text-[0.85rem] p-2 text-muted-foreground">
             <FormattedMessage
               id="session.rail.empty"

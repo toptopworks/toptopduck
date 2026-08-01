@@ -65,6 +65,10 @@ function GroupTitle({ kind }: { kind: SidebarGroupKind }) {
 // Each entry's context menu is the SINGLE entry point for rename / close /
 // delete (ADR-0060 DRY); the top-bar name is read-only.
 
+// A frozen empty set so the optional prop's default keeps a stable identity
+// (no every-render fresh Set -> SidebarRow prop churn).
+const NO_PENDING_APPROVALS: ReadonlySet<string> = new Set();
+
 interface SessionSidebarProps {
   sessions: SessionMetadata[];
   openSessions: OpenSession[];
@@ -72,6 +76,13 @@ interface SessionSidebarProps {
   disabled: boolean;
   loadError: string | null;
   grouping: SidebarGrouping;
+  /** Runtime sids with one or more UNANSWERED approvals (ADR-0083, issue
+   *  #297): the matching entry rows carry the attention tint + dot so a
+   *  suspended turn is visible from anywhere in the shell (the "unanswered
+   *  badge coloring carries forced visibility" consequence). Keyed by runtime
+   *  sid (the approval events' addressing), so only OPEN entries match -- a
+   *  persisted-but-closed session can never hold a pending gate. */
+  pendingApprovalSids?: ReadonlySet<string>;
   onNew: () => void;
   onActivate: (sid: string) => void;
   onOpenPersisted: (path: string, name: string) => void;
@@ -113,6 +124,7 @@ export function SessionSidebar({
   disabled,
   loadError,
   grouping,
+  pendingApprovalSids = NO_PENDING_APPROVALS,
   onNew,
   onActivate,
   onOpenPersisted,
@@ -224,6 +236,9 @@ export function SessionSidebar({
                   key={entry.key}
                   entry={entry}
                   displayName={resolveDisplayName(entry.name, intl)}
+                  hasPendingApproval={
+                    entry.sid !== null && pendingApprovalSids.has(entry.sid)
+                  }
                   menuOpen={openMenuKey === entry.key}
                   disabled={disabled}
                   onToggleMenu={() =>
@@ -436,6 +451,7 @@ function GroupingToggle({
 function SidebarRow({
   entry,
   displayName,
+  hasPendingApproval,
   menuOpen,
   disabled,
   onToggleMenu,
@@ -446,6 +462,10 @@ function SidebarRow({
 }: {
   entry: SidebarEntry;
   displayName: string;
+  /** The session holds an unanswered approval (ADR-0083, issue #297): the row
+   *  carries the warning tint + dot so a suspended turn stays visible while
+   *  the user works in another session. */
+  hasPendingApproval: boolean;
   menuOpen: boolean;
   disabled: boolean;
   onToggleMenu: () => void;
@@ -491,7 +511,9 @@ function SidebarRow({
         "session-entry relative my-0.5 flex items-stretch",
         entry.active && "active",
         entry.sid && "open",
+        hasPendingApproval && "pending-approval",
       )}
+      data-pending-approval={hasPendingApproval ? "true" : undefined}
     >
       <button
         type="button"
@@ -500,6 +522,10 @@ function SidebarRow({
           "hover:bg-accent disabled:opacity-50 disabled:cursor-progress",
           entry.sid && "shadow-[inset_2px_0_var(--primary)]",
           entry.active && "bg-accent text-accent-foreground",
+          // ADR-0083 (issue #297) entry coloring: the warning-tinted left bar
+          // overrides the open-session primary bar -- an unanswered approval
+          // outranks "this session is open" as the row's signal.
+          hasPendingApproval && "shadow-[inset_2px_0_var(--warning)]",
         )}
         aria-current={entry.active ? "true" : undefined}
         disabled={disabled}
@@ -510,7 +536,26 @@ function SidebarRow({
             row, replacing the persisted/not Database/CircleDot split. */}
         <MessageSquare className="size-4 shrink-0" aria-hidden />
         <span className="flex-1 min-w-0 flex flex-col">
-          <span className="session-name text-sm truncate">{displayName}</span>
+          <span className="session-name text-sm truncate">
+            {displayName}
+            {hasPendingApproval && (
+              <>
+                {/* The attention dot beside the name mirrors the rail toggle's
+                    badge; the sr-only text names why for assistive tech (the
+                    dot itself is decorative). */}
+                <span
+                  className="sidebar-pending-dot ml-1 inline-block h-1.5 w-1.5 rounded-full bg-warning align-middle"
+                  aria-hidden="true"
+                />
+                <span className="sr-only">
+                  <FormattedMessage
+                    id="sidebar.pendingApproval"
+                    defaultMessage="(awaiting approval)"
+                  />
+                </span>
+              </>
+            )}
+          </span>
           <span className="session-subline text-muted-foreground text-xs font-normal opacity-85">
             {entry.firstSourceName ?? "—"}
             {" · "}

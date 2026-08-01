@@ -470,10 +470,11 @@ pub async fn ask(
     // ADR-0059: build the side-channel `turn-progress` emit callback here at the
     // command boundary (the only layer allowed to hold a Tauri AppHandle,
     // ADR-0029) and inject it into the turn via Session::ask_with_phase. Each
-    // discrete phase (Thinking / Querying) is emitted addressed by sessionId so
-    // a multi-session frontend filters the global broadcast to its own pane
-    // (ADR-0056/0059). Cloning AppHandle + the id string is cheap; the closure
-    // is FnMut (called once per wait boundary, across every loop step).
+    // discrete event (Thinking + the tool-call started/completed stream,
+    // ADR-0078) is emitted addressed by sessionId so a multi-session frontend
+    // filters the global broadcast to its own pane (ADR-0056/0059). Cloning
+    // AppHandle + the id string is cheap; the closure is FnMut (called once
+    // per wait boundary + per tool call, across every loop step).
     let app_for_cb = app.clone();
     let sid = session_id.clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
@@ -483,13 +484,23 @@ pub async fn ask(
             &approval,
             &sink,
             move |phase| {
-                let _ = app_for_cb.emit(
+                // Fire-and-forget by design: the turn result rides the command
+                // reply, not this channel. But a failing sink must not be
+                // invisible -- a stuck live card with no trail is undiagnosable,
+                // so log the emit error (ADR-0029 honest-degrade; debug, since a
+                // torn-down webview fails every emit and is the expected case).
+                if let Err(e) = app_for_cb.emit(
                     "turn-progress",
                     &TurnProgress {
                         session_id: sid.clone(),
                         phase,
                     },
-                );
+                ) {
+                    log::debug!(
+                        target: "toptopduck::commands",
+                        "turn-progress emit failed (likely a torn-down webview): {e}"
+                    );
+                }
             },
         ))
     })

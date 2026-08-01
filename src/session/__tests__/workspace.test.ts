@@ -30,6 +30,7 @@ describe("lastTurnEntry / isNonMaterialized", () => {
     const cancelledTurn: TurnRecord = {
       question: "q",
       outcome: { kind: "Cancelled" },
+      trace: [],
     };
     expect(isNonMaterialized(cancelledTurn)).toBe(true);
     const m = materialized("result_1");
@@ -51,6 +52,7 @@ describe("findMaterializedPayload", () => {
             assumption: "grouped by product",
           },
         },
+        trace: [],
       },
     };
     const payload = findMaterializedPayload([entry], "result_1");

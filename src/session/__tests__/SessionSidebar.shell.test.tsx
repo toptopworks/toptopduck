@@ -798,6 +798,56 @@ describe("SessionSidebar connection footer (issue #282)", () => {
   });
 });
 
+describe("SessionSidebar pending-approval coloring (ADR-0083, issue #297)", () => {
+  function baseProps() {
+    return {
+      sessions: [] as SessionMetadata[],
+      openSessions: twoOpenSessions(),
+      activeSessionId: "sess-active",
+      disabled: false,
+      loadError: null,
+      onNew: () => {},
+      onActivate: () => {},
+      onOpenPersisted: () => {},
+      onClose: () => {},
+      onDelete: () => {},
+      onRename: () => {},
+      grouping: "flat" as const,
+      onSwitchGrouping: () => {},
+      onOpenSearch: () => {},
+      provider: null,
+      keyStatus: { has_key: true, keychain_fault: null },
+      onOpenSettings: () => {},
+      onOpenSettingsProfiles: () => {},
+    };
+  }
+
+  it("tints the entry of a session with an unanswered approval (dot + warning bar + data hook)", () => {
+    const { container } = renderShell(
+      <SessionSidebar
+        {...baseProps()}
+        pendingApprovalSids={new Set(["sess-bg"])}
+      />,
+    );
+    const entry = container.querySelector(".session-entry[data-pending-approval=\"true\"]");
+    expect(entry).not.toBeNull();
+    expect(entry?.className.split(/\s+/)).toContain("pending-approval");
+    // The background session's row -- not the active one -- carries the mark.
+    expect(entry?.querySelector(".session-name")?.textContent).toContain("Background");
+    expect(entry?.querySelector(".sidebar-pending-dot")).not.toBeNull();
+    const main = entry?.querySelector(".session-entry-main");
+    expect(main?.className.split(/\s+/)).toContain("shadow-[inset_2px_0_var(--warning)]");
+    // The active session has no pending approval: no mark on its row.
+    expect(container.querySelector(".session-entry.active[data-pending-approval]")).toBeNull();
+  });
+
+  it("leaves every row unmarked when no session has a pending approval (default)", () => {
+    const { container } = renderShell(<SessionSidebar {...baseProps()} />);
+    expect(container.querySelector("[data-pending-approval]")).toBeNull();
+    expect(container.querySelector(".sidebar-pending-dot")).toBeNull();
+  });
+});
+
 describe("DeleteSessionDialog ESC routing (issue #258)", () => {
   // AlertDialog blocks overlay-click dismiss (destructive guard) but ESC is a
   // deliberate keyboard signal; onOpenChange bridges ESC -> onCancel so parent
