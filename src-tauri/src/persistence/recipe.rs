@@ -122,13 +122,13 @@ pub enum RecipeEntry {
 /// ephemeral `tool_use_id` (a per-provider-call id that does not survive the
 /// turn, let alone a save/resume).
 ///
-/// v1-era turns predate the agent loop and carry no recorded trajectory; the
-/// v1->v2 migration and [`Recipe::build_recipe`] synthesize a single-call trace
-/// for each Materialized turn (one `materialize` entry from the verbatim SQL),
-/// so a reopened v1 session shows the same one-step trajectory the single-SQL
-/// contract produced live. Real multi-call traces arrive once the agent-loop
-/// wiring slice drives live turns (ADR-0081); that slice populates this field
-/// with the loop's recorded calls.
+/// A live agent-loop turn persists the loop's recorded multi-call trace
+/// (issue #319): every call the turn made, in call order, each mapped from
+/// the in-memory entry. v1-era turns predate the agent loop and carry no
+/// recorded trajectory; the v1->v2 migration synthesizes a single-call trace
+/// for each Materialized turn (one `materialize` entry from the verbatim SQL,
+/// see [`synthetic_materialize_trace`]), so a reopened v1 session shows the
+/// same one-step trajectory the single-SQL contract produced live.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecipeTraceEntry {
     /// Tool name -- a built-in (`explore` / `materialize` / `describe` /
@@ -144,7 +144,11 @@ pub struct RecipeTraceEntry {
     /// (ADR-0077); the trace records the failure for audit + cross-turn
     /// debugging.
     pub success: bool,
-    /// Bounded excerpt of the tool result (or the denial / error message).
+    /// Bounded excerpt of a FAILED call's result (the error / denial message)
+    /// -- the cross-turn failure retrospection anchor (ADR-0078). Empty for a
+    /// successful call: a success payload is the data-bearing descriptor /
+    /// shape JSON the .duck must not carry (ADR-0036 contents boundary), and
+    /// replay rebuilds the result on resume anyway.
     pub result_excerpt: String,
 }
 
@@ -170,11 +174,12 @@ pub enum RuntimeKind {
 /// it and which skills were active at assembly time. The persisted audit anchor
 /// for "how was this answer produced".
 ///
-/// Both fields are optional / empty by default. v1-era turns (migrated) and
-/// live turns from before runtime tracking was wired (issue #319) carry no
-/// runtime or skill provenance, and [`Recipe::build_recipe`] writes the
-/// default until then. `#[serde(default)]` keeps older v2 recipes (and the
-/// migration output) deserializing cleanly.
+/// A live turn driven by the built-in agent loop records
+/// [`RuntimeKind::BuiltIn`] (issue #319); skills stay empty until skill
+/// tracking is wired (ADR-0079). v1-era migrated turns carry no runtime or
+/// skill provenance and round-trip the default (omitted from the .duck).
+/// `#[serde(default)]` keeps older v2 recipes (and the migration output)
+/// deserializing cleanly.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TurnProvenance {
     /// The runtime that drove this turn (ADR-0081), or `None` for turns created
@@ -197,20 +202,20 @@ impl TurnProvenance {
 }
 
 /// Maximum length of a trace entry's argument summary (ADR-0078). The single
-/// source for the trace-summary truncation cap: both the synthetic single-call
-/// trace (this module's [`synthetic_materialize_trace`]) and the agent loop's
-/// live `materialize` summary (`summarize_field`) reuse it, so a reopened v1
-/// turn and a fresh live turn persist the same truncation shape.
+/// source for the trace-summary truncation cap: both the migration's synthetic
+/// single-call trace ([`synthetic_materialize_trace`]) and the agent loop's
+/// live call summary (`summarize_field`) reuse it, so a reopened v1 turn and a
+/// fresh live turn persist the same truncation shape.
 pub(crate) const TRACE_SUMMARY_MAX: usize = 120;
 
 /// Synthesize the single-call execution trace for a Materialized turn's SQL
 /// (ADR-0078). v1-era turns ran exactly one productive SQL under the single-SQL
-/// contract, so their trajectory is one `materialize` call -- both the v1->v2
-/// migration and [`Recipe::build_recipe`] use this helper so a reopened v1
-/// session shows the same one-step trajectory it produced live. Fresh
-/// agent-loop turns (issue #318) persist the same shape for their primary
-/// promotion until #319 lands the real multi-call trace. The summary is the
-/// verbatim SQL truncated to [`TRACE_SUMMARY_MAX`].
+/// contract, so their trajectory is one `materialize` call -- the v1->v2
+/// migration uses this helper so a reopened v1 session shows the same one-step
+/// trajectory it produced live. Live agent-loop turns persist the loop's
+/// recorded multi-call trace instead (issue #319), so this helper's sole
+/// remaining caller is the migration path. The summary is the verbatim SQL
+/// truncated to [`TRACE_SUMMARY_MAX`].
 pub(crate) fn synthetic_materialize_trace(sql: &str) -> Vec<RecipeTraceEntry> {
     vec![RecipeTraceEntry {
         name: crate::tools::definitions::TOOL_MATERIALIZE.to_string(),
@@ -253,27 +258,27 @@ pub struct RecipeTurn {
     /// The persisted execution trace (ADR-0078): every tool call the turn made
     /// (explore / materialize / external), each with its operation badge,
     /// argument summary, success flag, and a bounded result excerpt. Collapsible
-    /// in the thread rail; never enters the far window verbatim. Empty for
-    /// no-tool turns (a textual refuse with no exploration); a Materialized
-    /// turn carries a synthetic single-call trace (see
-    /// [`synthetic_materialize_trace`]) until real multi-call traces arrive
-    /// with the agent-loop wiring.
+    /// in the thread rail; never enters the far window verbatim. A live
+    /// agent-loop turn carries the loop's recorded multi-call trace (issue
+    /// #319); a v1-era migrated turn carries the migration's synthetic
+    /// single-call trace (see [`synthetic_materialize_trace`]); empty for
+    /// no-tool turns (a textual answer with no exploration).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trace: Vec<RecipeTraceEntry>,
-    /// The turn's runtime + skill provenance (ADR-0078). Default (no runtime,
-    /// no skills) for v1-era turns until the agent-loop wiring slice populates
-    /// real values.
+    /// The turn's runtime + skill provenance (ADR-0078). A live built-in loop
+    /// turn records [`RuntimeKind::BuiltIn`] (issue #319); default (no runtime,
+    /// no skills) for v1-era migrated turns.
     #[serde(default, skip_serializing_if = "TurnProvenance::is_empty")]
     pub provenance: TurnProvenance,
 }
 
 impl RecipeTurn {
-    /// Construct a turn with an empty trace and default provenance. The shape
-    /// every no-tool / pre-agent-loop turn persists with: a Textual / Failed /
-    /// Cancelled outcome has no trace, and runtime / skill tracking is not yet
-    /// wired on the live path. [`Recipe::build_recipe`] is today the only site
-    /// that sets a non-default trace (a Materialized turn's synthetic
-    /// single-call trace) and constructs `RecipeTurn` via a struct literal.
+    /// Construct a turn with an empty trace and default provenance -- the shape
+    /// a no-tool turn persists with and the shape the v1->v2 migration emits
+    /// (v1 turns carry no recorded trajectory or runtime). The live path
+    /// (`Session::build_recipe`, issue #319) constructs `RecipeTurn` via a
+    /// struct literal instead, pairing each turn with its recorded audit (the
+    /// loop's real trace + runtime provenance, ADR-0078).
     pub fn new(question: impl Into<String>, outcome: RecipeOutcome) -> Self {
         Self {
             question: question.into(),

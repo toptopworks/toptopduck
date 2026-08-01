@@ -118,6 +118,16 @@ fn materialize(sql: &str) -> ToolTurnReply {
     }])
 }
 
+/// An explore tool call running `sql` -- a read-classified call, so an
+/// explore-then-materialize script exercises a MULTI-call turn trace (#319).
+fn explore(sql: &str) -> ToolTurnReply {
+    ToolTurnReply::ToolCalls(vec![ToolUse {
+        id: "tu_e".into(),
+        name: "explore".into(),
+        input: json!({ "sql": sql }),
+    }])
+}
+
 /// A terminal text answer ending the turn.
 fn answer(text: &str) -> ToolTurnReply {
     ToolTurnReply::Text(text.to_string())
@@ -290,6 +300,91 @@ fn duck_file_carries_no_secrets_or_materialized_data() {
         text.contains("people"),
         "verbatim SQL naming the source is in the recipe"
     );
+}
+
+#[test]
+fn resume_round_trips_the_real_multi_call_trace_and_builtin_provenance() {
+    // AC (issue #319, ADR-0078/0081): a multi-call turn persists the loop's
+    // REAL trace (explore + materialize, in call order) + BuiltIn runtime
+    // provenance, and BOTH survive the restart boundary -- the resumed
+    // session harvests them from the recipe and re-persists them verbatim,
+    // never re-synthesizing a single-call trace.
+    use toptopduck_lib::persistence::read_duck;
+    use toptopduck_lib::persistence::recipe::{
+        Recipe, RecipeEntry, RecipeOutcome, RecipeTurn, RuntimeKind,
+    };
+
+    fn materialized_turn(recipe: &Recipe) -> &RecipeTurn {
+        recipe
+            .history
+            .iter()
+            .find_map(|e| match e {
+                RecipeEntry::Turn(t) if matches!(t.outcome, RecipeOutcome::Materialized { .. }) => {
+                    Some(t)
+                }
+                _ => None,
+            })
+            .expect("a Materialized turn in the recipe history")
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
+        "多少人",
+        vec![
+            Ok(explore("SELECT name FROM \"people\".data")),
+            Ok(materialize("SELECT COUNT(*) AS n FROM \"people\".data")),
+            Ok(answer("3 人")),
+        ],
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    let _ = session.ask("多少人");
+    session
+        .bind_duck(duck.to_path_buf(), "分析 A".into())
+        .expect("bind");
+    drop(session);
+
+    // The .duck carries the real two-call trace + builtin provenance.
+    let persisted = read_duck(&duck).expect("read persisted");
+    let turn = materialized_turn(&persisted);
+    assert_eq!(
+        turn.trace.len(),
+        2,
+        "the real multi-call trace, not a synthetic single call"
+    );
+    assert_eq!(turn.trace[0].name, "explore", "call order preserved");
+    assert_eq!(turn.trace[1].name, "materialize");
+    assert_eq!(
+        turn.trace[1].summary, "SELECT COUNT(*) AS n FROM \"people\".data",
+        "summary is the verbatim SQL"
+    );
+    assert!(turn.trace.iter().all(|e| e.success));
+    assert!(
+        turn.trace.iter().all(|e| e.result_excerpt.is_empty()),
+        "success payloads are data-bearing (columns/row_count) -- the .duck \
+         carries no materialized data (ADR-0036), so success excerpts stay empty"
+    );
+    assert_eq!(
+        turn.provenance.runtime,
+        Some(RuntimeKind::BuiltIn),
+        "a live turn records the built-in runtime"
+    );
+    assert!(turn.provenance.skills.is_empty(), "skill tracking unwired");
+    let before = (turn.trace.clone(), turn.provenance.clone());
+
+    // Resume re-persists the harvested audit verbatim (phase 5's post-resume
+    // write reads the session's per-turn audit, seeded from this very recipe).
+    let (_events, cb) = collect_events();
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("resume");
+    let repersisted = read_duck(&duck).expect("read re-persisted");
+    let turn = materialized_turn(&repersisted);
+    assert_eq!(
+        (turn.trace.clone(), turn.provenance.clone()),
+        before,
+        "trace + provenance round-trip the restart boundary unchanged"
+    );
+    drop(resumed);
 }
 
 #[test]
