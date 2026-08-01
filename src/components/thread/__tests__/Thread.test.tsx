@@ -50,7 +50,9 @@ describe("Thread", () => {
       outcome: {
         kind: "Materialized",
         data: {
-          dataset: { ...mockDataset, reference_name: referenceName },
+          promotions: [
+            { dataset: { ...mockDataset, reference_name: referenceName }, sql: "SELECT 1" },
+          ],
           viz: null,
           assumption,
         },
@@ -63,6 +65,36 @@ describe("Thread", () => {
   function turnEntry(record: TurnRecord): ThreadEntry {
     return { entry: "Turn", data: record };
   }
+
+  it("renders a multi-promotion turn as a primary result link + a muted antecedents line (ADR-0084)", () => {
+    // A result turn that materialized two results in promotion order: the chain
+    // tail (result_2) is the primary -- the clickable result link; the
+    // antecedent (result_1) rides a muted "derived from" line so the lineage
+    // stays visible without competing with the answer.
+    const record: TurnRecord = {
+      question: "筛后聚合",
+      outcome: {
+        kind: "Materialized",
+        data: {
+          promotions: [
+            { dataset: { ...mockDataset, reference_name: "result_1" }, sql: "SELECT 1" },
+            { dataset: { ...mockDataset, reference_name: "result_2" }, sql: "SELECT 2" },
+          ],
+          viz: null,
+          assumption: null,
+        },
+      },
+    };
+    renderThread(
+      <Thread entries={[turnEntry(record)]} selectedResult={null} onSelectResult={() => {}} />,
+    );
+
+    // The primary (chain tail) is the clickable result link.
+    expect(screen.getByRole("button", { name: /结果：result_2/ })).toBeInTheDocument();
+    // The antecedent is NOT a result link -- it rides the muted disclosure.
+    expect(screen.queryByRole("button", { name: /结果：result_1/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/由 result_1 派生/)).toBeInTheDocument();
+  });
 
   it("renders every turn labeled by its verbatim question with its outcome kind", () => {
     // ADR-0028: all four outcomes are always visible, in order, each labeled by
@@ -117,6 +149,36 @@ describe("Thread", () => {
     // engine detail rides the collapsed fold); cancelled renders the marker.
     expect(screen.getByText("执行查询失败")).toBeInTheDocument();
     expect(screen.getByText("已取消")).toBeInTheDocument();
+  });
+
+  it("renders an Agent textual turn as a plain answer with no action badge", () => {
+    // ADR-0077: the tool-calling contract's terminal text rides TextKind::Agent
+    // -- the body IS the reply, so the turn renders without the clarify /
+    // refuse action badge; the kind still reads off the outcome icon's
+    // aria-label (ADR-0050).
+    renderThread(
+      <Thread
+        entries={[
+          turnEntry({
+            question: "总共有多少客户",
+            outcome: {
+              kind: "Textual",
+              data: { text_kind: "Agent", body: "共 128 位客户。", assumption: null },
+            },
+          }),
+        ]}
+        selectedResult={null}
+        onSelectResult={() => {}}
+      />,
+    );
+
+    // The body renders as a plain answer, labeled by its verbatim question.
+    expect(screen.getByText("总共有多少客户")).toBeInTheDocument();
+    expect(screen.getByText("共 128 位客户。")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "已回答" })).toBeInTheDocument();
+    // No action-signaling badge -- neither a clarify nor a refuse.
+    expect(screen.queryByText("需要澄清")).not.toBeInTheDocument();
+    expect(screen.queryByText("无法处理")).not.toBeInTheDocument();
   });
 
   it("clicking a result turn selects it (reference name only, ADR-0051)", () => {

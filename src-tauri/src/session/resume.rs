@@ -170,10 +170,11 @@ pub(crate) struct ReplayBreak {
 }
 
 /// Resume phase 2/3/4 orchestrator (ADR-0053 Decision 3, issue #66). Borrows
-/// the shared cancel token, the [`Materializer`] (the same trait object
-/// `TurnRunner` drives on the live-turn path), and the recipe -- never the
-/// `Session`. Each phase method borrows `working_set` / [`TurnDeps`] and
-/// returns a structured result; `Session::open_duck` applies it.
+/// the shared cancel token, the [`Materializer`] (the same trait object the
+/// live-turn agent loop drives through the `materialize` tool), and the
+/// recipe -- never the `Session`. Each phase method borrows `working_set` /
+/// [`TurnDeps`] and returns a structured result; `Session::open_duck` applies
+/// it.
 ///
 /// Why a deep module (ADR-0053 Why 1/3): reading resume means reading this file
 /// only, not skipping around a 3500-line god module. Phase 2/4 are pure logic
@@ -385,8 +386,8 @@ impl<'a> Resumer<'a> {
             self.recipe.history.iter().position(|entry| match entry {
                 RecipeEntry::Turn(t) => matches!(
                     &t.outcome,
-                    RecipeOutcome::Materialized { reference_name, .. }
-                        if reference_name == &brk.reference_name
+                    RecipeOutcome::Materialized { promotions, .. }
+                        if promotions.iter().any(|p| p.reference_name == brk.reference_name)
                 ),
                 _ => false,
             })
@@ -430,38 +431,51 @@ impl<'a> Resumer<'a> {
                 RecipeEntry::Turn(turn) => {
                     let outcome = match &turn.outcome {
                         RecipeOutcome::Materialized {
-                            reference_name,
-                            sql,
+                            promotions,
                             assumption,
-                            ..
                         } => {
-                            // The break turn renders as Failed (replay broke
-                            // here), NOT as Materialized -- the result was
-                            // never re-materialized.
-                            if let Some(b) =
-                                break_at.filter(|b| b.reference_name == *reference_name)
-                            {
+                            // ADR-0035 honest partial state + ADR-0084: if
+                            // replay broke at ANY promotion in this turn's
+                            // chain, the turn did not complete -- render it
+                            // Failed (the break's failure), NOT Materialized.
+                            // The chain replays in order, so a break at
+                            // promotion K means K.. were never re-materialized.
+                            let broke_here = break_at.filter(|b| {
+                                promotions
+                                    .iter()
+                                    .any(|p| p.reference_name == b.reference_name)
+                            });
+                            if let Some(b) = broke_here {
                                 TurnOutcome::Failed(b.failure.clone())
                             } else {
-                                // Live turns: re-materialized by replay. Stale
-                                // turns: a placeholder was registered in the
-                                // pre-pass above (ADR-0041 dead turn). In both
-                                // cases the working set holds the descriptor,
-                                // so the get() succeeds and the Materialized
-                                // outcome carries the stale flag through to the
-                                // UI badge.
-                                let dataset =
-                                    working_set.get(reference_name).cloned().ok_or_else(|| {
-                                        ResumeError::Replay {
-                                            reference_name: reference_name.clone(),
+                                // Live turn: every promotion was re-materialized
+                                // by replay (or, for a stale promotion, a
+                                // placeholder was registered in the pre-pass
+                                // above -- ADR-0041 dead result). Look up each
+                                // descriptor in the working set; the chain rides
+                                // the outcome in promotion order (ADR-0084), so
+                                // the rebuilt history matches what the live turn
+                                // produced and the stale flag carries through to
+                                // the UI badge.
+                                let mut rebuilt = Vec::with_capacity(promotions.len());
+                                for p in promotions {
+                                    let dataset = working_set
+                                        .get(&p.reference_name)
+                                        .cloned()
+                                        .ok_or_else(|| ResumeError::Replay {
+                                            reference_name: p.reference_name.clone(),
                                             detail: format!(
-                                                "重放后未在 working_set 中找到 {reference_name}"
+                                                "重放后未在 working_set 中找到 {}",
+                                                p.reference_name
                                             ),
-                                        }
-                                    })?;
+                                        })?;
+                                    rebuilt.push(crate::model::Promotion {
+                                        dataset,
+                                        sql: p.sql.clone(),
+                                    });
+                                }
                                 TurnOutcome::Materialized {
-                                    dataset: Box::new(dataset),
-                                    sql: Some(sql.clone()),
+                                    promotions: rebuilt,
                                     viz: None,
                                     assumption: assumption.clone(),
                                 }
@@ -514,31 +528,34 @@ fn register_stale_placeholders(working_set: &mut WorkingSet, recipe: &Recipe, en
         let RecipeEntry::Turn(turn) = entry else {
             continue;
         };
-        let RecipeOutcome::Materialized {
-            reference_name,
-            display_name,
-            stale: Some(anchor),
-            ..
-        } = &turn.outcome
-        else {
+        let RecipeOutcome::Materialized { promotions, .. } = &turn.outcome else {
             continue;
         };
-        if working_set.get(reference_name).is_some() {
-            continue;
+        // ADR-0084: a turn carries a promotion chain; register a placeholder
+        // for EACH stale promotion (each its own dead result_N, ADR-0041), so
+        // the rebuild closure finds every dead result already in the working
+        // set.
+        for promotion in promotions {
+            let Some(anchor) = &promotion.stale else {
+                continue;
+            };
+            if working_set.get(&promotion.reference_name).is_some() {
+                continue;
+            }
+            let placeholder = DatasetDescriptor {
+                reference_name: promotion.reference_name.clone(),
+                display_name: promotion.display_name.clone(),
+                source_path: String::new(),
+                columns: Vec::new(),
+                row_count: 0,
+                sample: Vec::new(),
+                fingerprint: String::new(),
+                rectify: RectifyProvenance::NotApplicable,
+                privacy: DatasetPrivacy::default(),
+                stale: Some(anchor.clone()),
+            };
+            working_set.register_result(placeholder);
         }
-        let placeholder = DatasetDescriptor {
-            reference_name: reference_name.clone(),
-            display_name: display_name.clone(),
-            source_path: String::new(),
-            columns: Vec::new(),
-            row_count: 0,
-            sample: Vec::new(),
-            fingerprint: String::new(),
-            rectify: RectifyProvenance::NotApplicable,
-            privacy: DatasetPrivacy::default(),
-            stale: Some(anchor.clone()),
-        };
-        working_set.register_result(placeholder);
     }
 }
 
@@ -557,7 +574,9 @@ mod tests {
     use crate::cancel::CancelToken;
     use crate::guardrail::{ExecError, ExecErrorKind};
     use crate::model::{StaleAnchor, StaleReason};
-    use crate::persistence::recipe::{RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef};
+    use crate::persistence::recipe::{
+        RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTurn, SourceRef,
+    };
     use crate::session::materializer::FakeMaterializer;
     use crate::session::{ActiveAbandoned, ActiveResolution};
 
@@ -617,11 +636,13 @@ mod tests {
         RecipeEntry::Turn(RecipeTurn::new(
             format!("q_{reference_name}"),
             RecipeOutcome::Materialized {
-                reference_name: reference_name.into(),
-                display_name: reference_name.into(),
-                sql: sql.into(),
+                promotions: vec![RecipePromotion {
+                    reference_name: reference_name.into(),
+                    display_name: reference_name.into(),
+                    sql: sql.into(),
+                    stale: None,
+                }],
                 assumption: None,
-                stale: None,
             },
         ))
     }
@@ -634,15 +655,17 @@ mod tests {
         RecipeEntry::Turn(RecipeTurn::new(
             format!("q_{reference_name}"),
             RecipeOutcome::Materialized {
-                reference_name: reference_name.into(),
-                display_name: reference_name.into(),
-                sql: sql.into(),
+                promotions: vec![RecipePromotion {
+                    reference_name: reference_name.into(),
+                    display_name: reference_name.into(),
+                    sql: sql.into(),
+                    stale: Some(StaleAnchor {
+                        reference_name: anchor.into(),
+                        display_name: anchor.into(),
+                        reason: StaleReason::Deleted,
+                    }),
+                }],
                 assumption: None,
-                stale: Some(StaleAnchor {
-                    reference_name: anchor.into(),
-                    display_name: anchor.into(),
-                    reason: StaleReason::Deleted,
-                }),
             },
         ))
     }

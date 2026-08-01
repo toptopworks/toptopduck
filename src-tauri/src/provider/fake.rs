@@ -7,9 +7,10 @@
 //! Slice #23 extends the fake from "one stable reply per question" to a
 //! per-question queue of canned results: the first call returns the front of
 //! the queue, and once only one remains it sticks (returned on every later
-//! call). A single scripted reply is therefore stable (the #22 behavior), while
-//! a sequence models "fail N times then recover" -- exactly what the single
-//! retry budget (ADR-0028) needs to exercise offline.
+//! call). A single scripted reply is therefore stable (the #22 behavior),
+//! while a sequence models a multi-step trajectory -- on the tool-calling
+//! path (ADR-0077/0081): "explore, then materialize, then answer" (or a
+//! failing call clamped until the step cap).
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -38,11 +39,11 @@ impl<T: Clone> Script<T> {
     /// Draw the next canned result front-first, clamping to the last once
     /// reached: the first call returns `results[0]`, and once only one remains
     /// it sticks (returned on every later call). A single scripted result is
-    /// therefore stable, while a sequence models "fail N times then recover"
-    /// (single-shot) or "explore, then materialize, then answer" (tool-calling)
-    /// -- exactly what the single retry budget (ADR-0028) and the agent loop
-    /// (#295) need to exercise offline. An empty queue yields `NotWired` so a
-    /// misconfigured script never invents a reply.
+    /// therefore stable, while a sequence models "explore, then materialize,
+    /// then answer" (tool-calling, ADR-0081) or "fail N times then recover"
+    /// (legacy single-shot) -- the trajectories the agent loop tests need to
+    /// exercise offline. An empty queue yields `NotWired` so a misconfigured
+    /// script never invents a reply.
     fn draw(&self) -> Result<T, ProviderError> {
         let calls = self.calls.get();
         self.calls.set(calls + 1);
@@ -79,10 +80,11 @@ pub struct FakeProvider {
     /// requested. Models a long, user-cancellable query for the cancel/timeout
     /// black-box tests (ADR-0021). Empty by default.
     blocking: HashSet<String>,
-    /// Tool-calling scripts keyed by the first user-message text (the asking
-    /// question). The agent loop (#295) drives `generate_tool_turn` once per
-    /// round-trip; an unscripted question yields `NotWired`, mirroring the
-    /// single-shot path's "never invent a reply" contract.
+    /// Tool-calling scripts keyed by the asking question (the LAST user
+    /// message of the windowed request -- see [`asking_question`]). The agent
+    /// loop (#295) drives `generate_tool_turn` once per round-trip; an
+    /// unscripted question yields `NotWired`, mirroring the single-shot
+    /// path's "never invent a reply" contract.
     tool_scripts: HashMap<String, Script<ToolTurnReply>>,
     /// Every `ToolTurnRequest` handed to `generate_tool_turn`, newest last (one
     /// entry per round-trip). Shared by `Arc` so an agent-loop unit test can
@@ -253,14 +255,19 @@ fn insert_script<T>(
 }
 
 /// Extract the asking question from a tool-turn request: the content of the
-/// first [`ToolTurnMessage::User`] in `messages`. The agent loop always begins
-/// the conversation with the user's verbatim question, so this is the stable
-/// script key. Returns an empty string when no user turn is present -- a
-/// malformed request that yields `NotWired` (the unscripted fallback).
-fn first_user_question(request: &ToolTurnRequest) -> String {
+/// LAST [`ToolTurnMessage::User`] in `messages`. The windowed request carries
+/// the conversation history first (prior turns' user/assistant pairs,
+/// ADR-0023), then the asking question as the final user turn; within the
+/// loop, later round-trips only append Assistant + ToolResult turns, so the
+/// last user message stays the asking question across every round-trip of the
+/// turn -- the stable script key. Returns an empty string when no user turn
+/// is present -- a malformed request that yields `NotWired` (the unscripted
+/// fallback).
+fn asking_question(request: &ToolTurnRequest) -> String {
     request
         .messages
         .iter()
+        .rev()
         .find_map(|m| match m {
             super::tool_calling::ToolTurnMessage::User { content } => Some(content.clone()),
             _ => None,
@@ -301,7 +308,7 @@ impl Provider for FakeProvider {
         }
         // A blocking question simulates a long round-trip (ADR-0021); the loop
         // sees the cancel flag and lands the turn as Cancelled.
-        let question = first_user_question(request);
+        let question = asking_question(request);
         self.block_if_requested(question.as_str());
         self.tool_scripts
             .get(question.as_str())

@@ -1,23 +1,22 @@
 //! The materialize step, abstracted behind a trait (ADR-0053).
 //!
 //! "Execute provider SQL on a locked-down sandbox + install result_N onto
-//! admin + derive its shape + register the working set" is the half of a turn
-//! the orchestrator (TurnRunner) decides *whether to retry*. Splitting it
-//! behind [`Materializer`] lets a unit test inject a scripted
-//! [`ExecErrorKind`] without touching DuckDB -- the retry / cancel / error-
-//! routing logic in [`crate::session::turn_runner::TurnRunner`] becomes
-//! precisely testable (Resource / StaleReference / budget exhaustion / cancel-
-//! over-textual / NotWired), where the live path could only reach those
-//! branches indirectly via real SQL.
+//! admin + derive its shape + register the working set" is the promotion
+//! mechanism behind the `materialize` built-in tool (ADR-0077): the agent
+//! loop ([`crate::session::agent_loop::AgentLoop`]) dispatches the tool here,
+//! and a tool-level [`ExecErrorKind`] routes back to the model for
+//! self-correction rather than failing the turn. Splitting the step behind
+//! [`Materializer`] lets a unit test inject a scripted [`ExecErrorKind`]
+//! without touching DuckDB -- the resume replay + tool dispatch paths become
+//! precisely testable (Resource / StaleReference / Runtime), where the live
+//! path could only reach those branches indirectly via real SQL.
 //!
-//! The trait is object-safe (no generics, no `Self` return) so [`TurnRunner`]
-//! holds `Box<dyn Materializer>` -- dyn, not generic, so `Session` does not
+//! The trait is object-safe (no generics, no `Self` return) so the `Session`
+//! holds `Box<dyn Materializer>` -- dyn, not generic, so it does not
 //! parameterize `commands.rs` / `lib.rs` (ADR-0053 Decision 4). Live state
 //! (admin connection, source paths, working set, caps) is aggregated in the
 //! Session root and borrowed per turn via [`TurnDeps`]; the materializer owns
 //! none of it (ADR-0053 Decision 4 -- stateless, owned by none).
-//!
-//! [`TurnRunner`]: crate::session::turn_runner::TurnRunner
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -51,14 +50,13 @@ pub(crate) struct TurnDeps<'a> {
 
 /// Execute provider SQL + materialize `result_N` + register the working set
 /// (ADR-0053). The trait is object-safe: no generic methods, no `Self` return,
-/// so a `Box<dyn Materializer>` lands cleanly on [`TurnRunner`] (and the
-/// future Resumer) without type-parameterizing the Session.
+/// so a `Box<dyn Materializer>` lands cleanly on the Session -- shared by the
+/// agent loop's `materialize` tool dispatch and the Resumer -- without
+/// type-parameterizing it.
 ///
 /// Stateless by contract -- all live state rides `deps`. `RealMaterializer`
 /// is a zero-sized struct; a test injects `FakeMaterializer` to script an
 /// `ExecErrorKind` per call without touching DuckDB.
-///
-/// [`TurnRunner`]: crate::session::turn_runner::TurnRunner
 pub(crate) trait Materializer: Send {
     /// Run the provider SQL on a locked-down sandbox, install `result_name`
     /// onto admin, derive its shape, register it in the working set, and run
@@ -100,16 +98,17 @@ impl Materializer for RealMaterializer {
 
         // Stale-reference refusal (ADR-0013 invariant 2) + provenance record
         // (issue #40): parse the SQL once before touching the sandbox so a
-        // stale reference is rejected without burning setup or retry budget.
+        // stale reference is rejected without burning any setup work.
         // The same analysis yields the dependency set recorded after a
         // successful materialize -- the cascade reads it on a later source
         // delete. Conservative parse failure (deps = all members) is recorded
         // as-is so a delete never under-cascades ("宁可多失效不漏失效").
         let deps_analysis = provenance::analyze(sql, deps.working_set);
         if let Some(stale_ref) = deps_analysis.stale_ref.as_ref() {
-            // The detail carries the bare dead reference name; the "stale"
-            // wording lives in the frontend locale (TurnFailure::StaleReference,
-            // issue #125), interpolated from this name -- no Chinese crosses IPC.
+            // The detail carries the bare dead reference name: on the live
+            // path the tool dispatch renders it into the error string routed
+            // back to the model (ADR-0077 self-correction); resume replay
+            // folds it into the failed turn's detail.
             return Err(ExecError::new(
                 ExecErrorKind::StaleReference,
                 stale_ref.clone(),
@@ -158,9 +157,10 @@ impl Materializer for RealMaterializer {
             // from a mutating statement / COPY / ATTACH the wrapping bars, a
             // read_* refusal ("disabled by configuration"), a schema error, a
             // runtime error, OR the interrupt from a cancel (surfaces as a
-            // generic DuckDB failure -> Runtime here). The caller re-checks the
-            // cancel flag and routes a cancel to Cancelled before any retry, so
-            // the kind only chooses the non-cancel routing.
+            // generic DuckDB failure -> Runtime here). The agent loop
+            // re-checks the cancel flag and routes a cancel to Cancelled
+            // before the error is fed back to the model, so the kind only
+            // chooses the non-cancel routing.
             return Err(ExecError::new(
                 classify_duckdb_error(&e.to_string()),
                 e.to_string(),
@@ -317,24 +317,20 @@ fn rollback_result(conn: &Connection, result_name: &str, detail: String) -> Stri
     }
 }
 
-/// Re-export so the TurnRunner unit tests can name the fake without reaching
-/// into the `fake` submodule. Forward-declared before the mod (Rust resolves
-/// item references after collecting the whole file); placed here rather than
-/// after `mod fake` so clippy does not flag it as a post-test-module item.
+/// Re-export so the Resumer / tool-dispatch unit tests can name the fake
+/// without reaching into the `fake` submodule. Forward-declared before the
+/// mod (Rust resolves item references after collecting the whole file);
+/// placed here rather than after `mod fake` so clippy does not flag it as a
+/// post-test-module item.
 #[cfg(test)]
 pub(crate) use fake::FakeMaterializer;
 
 #[cfg(test)]
 mod fake {
     //! Scripted materializer stand-in (ADR-0053): mirrors
-    //! `provider::fake::FakeProvider` so a TurnRunner unit test injects a
-    //! precise `ExecErrorKind` (or a canned `DatasetDescriptor` on success)
-    //! per call, with no DuckDB and no filesystem. Held behind `Box<dyn
-    //! Materializer>` on the runner; the test reads the call count through the
-    //! shared `Arc` handle (the boxed value is consumed into the runner).
-
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    //! `provider::fake::FakeProvider` so a Resumer / tool-dispatch unit test
+    //! injects a precise `ExecErrorKind` (or a canned `DatasetDescriptor` on
+    //! success) per call, with no DuckDB and no filesystem.
 
     use super::{Materializer, TurnDeps};
     use crate::cancel::CancelToken;
@@ -348,25 +344,16 @@ mod fake {
     /// test never invents a success.
     pub(crate) struct FakeMaterializer {
         results: Vec<Result<DatasetDescriptor, ExecError>>,
-        calls: Arc<AtomicUsize>,
+        /// Draw cursor (`Cell` for the `&self` trait signature).
+        calls: std::cell::Cell<usize>,
     }
 
     impl FakeMaterializer {
         pub(crate) fn new(results: Vec<Result<DatasetDescriptor, ExecError>>) -> Self {
             Self {
                 results,
-                calls: Arc::new(AtomicUsize::new(0)),
+                calls: std::cell::Cell::new(0),
             }
-        }
-
-        /// A shared handle to the call counter. Clone before boxing the fake
-        /// into a runner; after `run` returns, `load` reads how many
-        /// materialize attempts the retry loop made -- the assertion that
-        /// distinguishes "no retry" (Resource / StaleReference) from "budget
-        /// exhausted" (Runtime / Unavailable).
-        #[allow(dead_code)] // used by TurnRunner tests via the handle
-        pub(crate) fn calls_handle(&self) -> Arc<AtomicUsize> {
-            Arc::clone(&self.calls)
         }
     }
 
@@ -378,15 +365,16 @@ mod fake {
             _result_name: String,
             deps: &mut TurnDeps,
         ) -> Result<DatasetDescriptor, ExecError> {
-            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            let n = self.calls.get();
+            self.calls.set(n + 1);
             let idx = n.min(self.results.len().saturating_sub(1));
             match self.results.get(idx).cloned() {
                 // Mirror RealMaterializer's working-set side effect so a
-                // Resumer / TurnRunner unit test can assert "K-1 results
-                // preserved in the working set" after a replay / turn without
-                // touching DuckDB. Only register_result is mirrored -- GC +
-                // provenance are not observable from the orchestration tests
-                // that consume this fake, so they stay out (KISS).
+                // Resumer unit test can assert "K-1 results preserved in the
+                // working set" after a replay without touching DuckDB. Only
+                // register_result is mirrored -- GC + provenance are not
+                // observable from the tests that consume this fake, so they
+                // stay out (KISS).
                 Some(Ok(descriptor)) => {
                     deps.working_set.register_result(descriptor.clone());
                     Ok(descriptor)

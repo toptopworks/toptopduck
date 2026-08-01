@@ -17,21 +17,19 @@
 //! in-flight tool call -- via the shared [`CancelToken`], landing as
 //! [`Termination::Cancelled`].
 //!
-//! Pure orchestration: like [`super::turn_runner::TurnRunner`], the loop does
-//! NOT read conversation history and does NOT persist. The caller (the
-//! `Session::ask` wiring seam, a follow-up slice) assembles the request and
-//! records the returned [`LoopOutcome`]. This keeps a unit test with a fake
-//! provider + fake materializer exhaustive over every termination branch
-//! (multi-step success / self-correction / step cap / cancel / not-wired /
-//! invalid-config / transient) without constructing a whole `Session`.
+//! Pure orchestration: the loop does NOT read conversation history and does
+//! NOT persist. The caller (the [`crate::session::Session::ask_with_phase`]
+//! wiring seam, issue #318) assembles the [`ToolTurnRequest`] (windowed
+//! context + tool table + system prompt) and maps the returned
+//! [`LoopOutcome`] onto the four-way `TurnOutcome` + the conversation thread.
+//! This keeps a unit test with a fake provider + the real materializer
+//! exhaustive over every termination branch (multi-step success /
+//! self-correction / step cap / cancel / not-wired / invalid-config /
+//! transient) without constructing a whole `Session`.
 //!
-//! Coexistence (expand-contract): this module is additive. The legacy
-//! single-SQL path (`TurnRunner::run_with_phase` + `TURN_RETRY_BUDGET`) is
-//! untouched; the contract-phase retirement is a follow-up slice. Until that
-//! slice wires `run` into `Session::ask`, this module has no production caller
-//! -- the `allow(dead_code)` mirrors `crate::tools` and lifts once the wiring
-//! lands.
-#![allow(dead_code)]
+//! The legacy single-SQL path (`TurnRunner` + its blind retry budget) was
+//! retired by the same slice that wired this loop into `Session::ask`
+//! (issue #318, ADR-0077): tool-calling turns are the sole live contract.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::Ordering;
@@ -46,7 +44,7 @@ use crate::approval::{
     ToolKey,
 };
 use crate::cancel::CancelToken;
-use crate::model::{DatasetDescriptor, TurnPhase};
+use crate::model::{DatasetDescriptor, Promotion, TurnPhase};
 use crate::provider::tool_calling::{
     ToolResult, ToolTurnMessage, ToolTurnReply, ToolTurnRequest, ToolUse,
 };
@@ -100,6 +98,9 @@ impl<'p> AgentLoop<'p> {
     /// (`StepCap` after N round-trips) and the watchdog (`Cancelled` within
     /// milliseconds) deterministically. `wall_clock = None` disables the
     /// watchdog (step cap still applies); production keeps the default.
+    // Test-only tuning seam: the production wiring (Session::ask_with_phase)
+    // keeps the ADR-0081 defaults, so the non-test build sees no caller.
+    #[allow(dead_code)]
     pub(crate) fn with_caps(mut self, step_cap: u32, wall_clock: Option<Duration>) -> Self {
         self.step_cap = step_cap;
         self.wall_clock = wall_clock;
@@ -125,8 +126,8 @@ impl<'p> AgentLoop<'p> {
         sink: &dyn ApprovalSink,
         mut on_phase: impl FnMut(TurnPhase),
     ) -> LoopOutcome {
-        // Single in-flight + cancellation (ADR-0021, mirroring TurnRunner):
-        // begin the turn on the shared token (marks in-flight, clears any stale
+        // Single in-flight + cancellation (ADR-0021): begin the turn on the
+        // shared token (marks in-flight, clears any stale
         // request from a prior turn) and arm the optional wall-clock watchdog.
         // The guard is held to end of scope -- its Drop clears in-flight + the
         // interrupt slot on every exit (including the early Cancelled returns)
@@ -137,10 +138,15 @@ impl<'p> AgentLoop<'p> {
         if let Some(timeout) = self.wall_clock {
             let alive = guard.watchdog_alive();
             let token = Arc::clone(&cancel);
-            // Detached: the alive flag is its only tie to this turn. The same
-            // generation-race caveat as TurnRunner applies (documented there);
-            // the default 120s watchdog only matters for genuinely stuck turns.
-            // catch_unwind keeps this detached thread self-sufficient.
+            // Detached: the alive flag is its only tie to this turn. KNOWN
+            // RACE: if the watchdog reads alive=true and then the turn ends
+            // and a new turn begins before request() runs, the cancel lands
+            // on the new turn. The window is a handful of instructions
+            // between the load and request(), only reachable when the timeout
+            // ~= the prior turn's runtime; the 120s default makes production
+            // exposure near zero. A generation/turn-id guard closes it fully
+            // (deferred). catch_unwind keeps this detached thread
+            // self-sufficient.
             thread::spawn(move || {
                 thread::sleep(timeout);
                 if alive.load(Ordering::SeqCst)
@@ -280,7 +286,7 @@ fn outcome(termination: Termination, outputs: CallOutputs, round_trips: u32) -> 
 /// always-coupled accumulators move together.
 struct CallOutputs {
     trace: Vec<TraceEntry>,
-    promotions: Vec<DatasetDescriptor>,
+    promotions: Vec<Promotion>,
 }
 
 /// Drive one tool call through the gateway + dispatch, append a trace entry,
@@ -356,8 +362,23 @@ fn execute_call(
     // user-visible `result_N`. The SQL itself ran, so the success `ToolResult`
     // still rides back to the model.
     if success && call.name == definitions::TOOL_MATERIALIZE {
+        // The verbatim SQL the model materialized rides the promotion: the
+        // wiring seam records it on the Materialized outcome (the recipe's
+        // replayable chain reads it there), and the descriptor alone does not
+        // carry it. Absent `sql` is a contract violation the executor would
+        // have refused -- the empty string is a defensive fallback that never
+        // shadows a real failure.
+        let sql = call
+            .input
+            .get("sql")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         match promotion_from_result(&result.content, deps) {
-            Some(descriptor) => outputs.promotions.push(descriptor),
+            Some(descriptor) => outputs.promotions.push(Promotion {
+                dataset: descriptor,
+                sql,
+            }),
             None => log::error!(
                 target: "toptopduck::agent_loop",
                 "materialize reported success but the promotion could not be recovered; \
@@ -499,18 +520,25 @@ pub(crate) struct TraceEntry {
 }
 
 /// The structured outcome the agent loop returns. Pure data -- the wiring seam
-/// (`Session::ask`, a follow-up slice) maps it onto `TurnOutcome` + the trace
-/// substructure + the far-window summary.
+/// ([`crate::session::Session::ask_with_phase`], issue #318) maps it onto
+/// `TurnOutcome` + the trace substructure + the far-window summary.
 #[derive(Debug, Clone)]
 pub(crate) struct LoopOutcome {
     pub termination: Termination,
     /// Promotions this turn, in promotion order (each successful `materialize`
-    /// call). ADR-0022 monotonic numbering applies (result_1, result_2, ...).
-    pub promotions: Vec<DatasetDescriptor>,
+    /// call). ADR-0022 monotonic numbering applies (result_1, result_2, ...);
+    /// a turn with several promotions records the LAST as the turn's primary
+    /// result at the wiring seam.
+    pub promotions: Vec<Promotion>,
     /// The full execution trace (ADR-0078). Collapsible; never enters the far
     /// window verbatim -- only its summary (call count + failure summary) does.
+    // Persisted into the recipe by #319 (real multi-call trace); the loop
+    // tests already read it. The production mapping (issue #318) routes the
+    // four-way outcome only, so the non-test build sees no reader yet.
+    #[allow(dead_code)]
     pub trace: Vec<TraceEntry>,
     /// Count of provider round-trips executed (one per `generate_tool_turn`).
+    #[allow(dead_code)] // test assertion surface until #319 persists it
     pub round_trips: u32,
 }
 
@@ -691,7 +719,11 @@ mod tests {
             1,
             "explore does not promote; only materialize does"
         );
-        assert_eq!(outcome.promotions[0].reference_name, "result_1");
+        assert_eq!(outcome.promotions[0].dataset.reference_name, "result_1");
+        assert_eq!(
+            outcome.promotions[0].sql, "SELECT 1 AS x",
+            "the promotion carries its verbatim materialize SQL"
+        );
         assert_eq!(outcome.trace.len(), 2, "explore + materialize");
         assert!(outcome.trace[0].success, "explore succeeded");
         assert!(outcome.trace[1].success, "materialize succeeded");
@@ -770,7 +802,7 @@ mod tests {
         let names: Vec<String> = outcome
             .promotions
             .iter()
-            .map(|d| d.reference_name.clone())
+            .map(|p| p.dataset.reference_name.clone())
             .collect();
         assert_eq!(
             names,

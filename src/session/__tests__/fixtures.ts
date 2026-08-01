@@ -26,7 +26,13 @@ export function materialized(referenceName: string): ThreadEntry {
       question: `q:${referenceName}`,
       outcome: {
         kind: "Materialized",
-        data: { dataset: src(referenceName), viz: null, assumption: null, sql: null },
+        data: {
+          // ADR-0084: a single-promotion result turn (the common case); the
+          // chain tail is the primary result.
+          promotions: [{ dataset: src(referenceName), sql: "SELECT 1" }],
+          viz: null,
+          assumption: null,
+        },
       },
     },
   };

@@ -35,38 +35,38 @@
 
 use duckdb::Connection;
 
-/// Why a turn's SQL execution failed, for routing through the retry budget
-/// (ADR-0028). The kind decides whether the orchestrator re-attempts.
+/// Why a materialize step's SQL execution failed (ADR-0028 heritage). On the
+/// live path every kind routes back to the model as a `materialize` tool
+/// error for self-correction (ADR-0077); the kind still matters for
+/// type-honest diagnostics, the fs-acl structuring, and resume replay (which
+/// folds the failure into the broken turn's detail, ADR-0035).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExecErrorKind {
-    /// A schema mismatch (table/column does not exist). Retried -- the provider
-    /// may correct the reference on a fresh attempt.
+    /// A schema mismatch (table/column does not exist). The model may correct
+    /// the reference on its next call.
     Schema,
-    /// A runtime/logic error (type conversion, divide-by-zero, etc.). Retried --
-    /// the provider may rephrase the SQL.
+    /// A runtime/logic error (type conversion, divide-by-zero, etc.). The
+    /// model may rephrase the SQL on its next call.
     Runtime,
     /// A resource cap was hit (memory ceiling, result-row ceiling, or a
-    /// filesystem function blocked on the sandbox's disabled LocalFileSystem --
-    /// ADR-0005, issue #25). NOT retried: the same SQL would hit the same wall,
-    /// so it becomes an immediate failed outcome (ADR-0005/0028).
+    /// filesystem function blocked on the sandbox's disabled LocalFileSystem
+    /// -- ADR-0005, issue #25). The same SQL would hit the same wall, so a
+    /// model that keeps re-issuing it exhausts the step cap rather than
+    /// converging (ADR-0005/0081).
     Resource,
-    /// The turn was cancelled mid-execution (ADR-0021). NOT an execution failure
-    /// at all -- routing is done by the orchestrator's cancel-flag check (which
-    /// fires before the retry-routing match on this kind), so this variant never
-    /// reaches the `match exec_err.kind` arm in `ask`. It exists for type-honest
-    /// logging/diagnostics instead of borrowing `Resource` (a cap hit), which
-    /// would conflate outcome C with outcome D. `ask` asserts the invariant with
-    /// an `unreachable!` arm, so a future second caller of `try_materialize` that
-    /// forgets the pre-check fails loudly instead of silently retrying a cancel.
+    /// The turn was cancelled mid-execution (ADR-0021). NOT an execution
+    /// failure at all -- the agent loop's cancel-flag check fires before the
+    /// error is fed back, landing the whole turn as Cancelled. The variant
+    /// exists for type-honest logging/diagnostics instead of borrowing
+    /// `Resource` (a cap hit), which would conflate outcome C with outcome D.
     Cancelled,
     /// A provider SQL referenced a stale result_N (issue #40, ADR-0013
-    /// invariant 2). NOT retried: a stale result may not anchor a new
-    /// derivation, and the same SQL would reference the same stale result on a
-    /// retry, so re-running only burns budget. Becomes an immediate Failed
-    /// turn (like Resource) rather than entering the retry loop. Emitted by
-    /// the provenance pre-check in `try_materialize`, never by
-    /// `classify_duckdb_error` (it is not a DuckDB error -- the SQL is
-    /// rejected before the engine runs it).
+    /// invariant 2): a stale result may not anchor a new derivation. Routed
+    /// back to the model like any tool error on the live path; resume replay
+    /// breaks the chain at the referencing turn. Emitted by the provenance
+    /// pre-check in `try_materialize`, never by `classify_duckdb_error` (it
+    /// is not a DuckDB error -- the SQL is rejected before the engine runs
+    /// it).
     StaleReference,
 }
 

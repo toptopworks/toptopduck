@@ -36,13 +36,9 @@ use crate::provider::prompt::{
 };
 use crate::provider::reply::parse_reply;
 use crate::provider::tool_calling::{ToolTurnMessage, ToolTurnReply, ToolTurnRequest, ToolUse};
-use crate::provider::{ProviderError, ProviderReply, ProviderRequest, TurnPayload};
-
-/// Cap on the model's reply length (mirrors the anthropic adapter). Sized for a
-/// SQL + a Vega-Lite spec + an assumption note; bounded so a runaway reply
-/// never balloons. Not a user-facing cap (the engine result-row cap,
-/// ADR-0005 L3, governs materialized size).
-const MAX_TOKENS: u32 = 4096;
+use crate::provider::{
+    ProviderError, ProviderReply, ProviderRequest, TurnPayload, MAX_REPLY_TOKENS,
+};
 
 /// Wall-clock ceiling on one LLM HTTP call (mirrors the anthropic adapter).
 /// Bounds a hung call so the cancel path eventually lands: a cancel during the
@@ -100,7 +96,7 @@ impl OpenaiProvider {
         let system = build_system_prompt(request, config.locale());
         let body = OpenaiRequest {
             model: &model,
-            max_tokens: MAX_TOKENS,
+            max_tokens: MAX_REPLY_TOKENS,
             messages: build_messages(request, system),
         };
         // serde_json::to_value only fails on non-finite floats / depth limits;

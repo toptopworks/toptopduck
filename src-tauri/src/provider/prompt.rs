@@ -347,6 +347,7 @@ pub fn render_response(r: &ResponsePayload) -> String {
             assumption,
         } => {
             let tag = match kind {
+                TextKind::Agent => "回答",
                 TextKind::Clarify => "反问",
                 TextKind::Refuse => "越界拒绝",
             };

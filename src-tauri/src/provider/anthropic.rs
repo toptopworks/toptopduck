@@ -27,18 +27,14 @@ use crate::provider::prompt::{
 };
 use crate::provider::reply::parse_reply;
 use crate::provider::tool_calling::{ToolTurnMessage, ToolTurnReply, ToolTurnRequest, ToolUse};
-use crate::provider::{ProviderError, ProviderReply, ProviderRequest, TurnPayload};
+use crate::provider::{
+    ProviderError, ProviderReply, ProviderRequest, TurnPayload, MAX_REPLY_TOKENS,
+};
 
 /// Anthropic Messages API protocol version header value (ADR-0019: native
 /// Anthropic protocol). Pinned; bumped only when Anthropic ships a breaking
 /// revision the v1 contract relies on.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-
-/// Cap on the model's reply length. Sized for a SQL + a Vega-Lite spec + an
-/// assumption note (a viz spec can run long); bounded so a runaway reply never
-/// balloons. Not a user-facing cap (the engine result-row cap, ADR-0005 L3,
-/// governs materialized size -- this bounds only the model's text).
-const MAX_TOKENS: u32 = 4096;
 
 /// Wall-clock ceiling on one LLM HTTP call. Bounds a hung call so the cancel
 /// path eventually lands: a cancel during the (blocking) call is only seen
@@ -90,7 +86,7 @@ impl AnthropicProvider {
         let system = build_system_prompt(request, config.locale());
         let body = AnthropicRequest {
             model: &model,
-            max_tokens: MAX_TOKENS,
+            max_tokens: MAX_REPLY_TOKENS,
             system,
             messages: build_messages(request),
         };

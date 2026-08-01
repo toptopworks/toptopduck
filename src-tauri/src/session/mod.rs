@@ -8,19 +8,18 @@ pub mod resume;
 pub mod sandbox;
 pub mod snapshot;
 pub mod source_lifecycle;
-pub mod turn_runner;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use calamine::Data;
 use duckdb::Connection;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState};
 use crate::cancel::CancelToken;
 use crate::guardrail::{apply_resource_caps, DEFAULT_MAX_RESULT_ROWS};
 use crate::ingest;
@@ -29,17 +28,17 @@ use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
     RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, SourceLifecycleKind,
-    ThreadEntry, TurnError, TurnOutcome, TurnPhase, TurnRecord,
+    TextKind, ThreadEntry, TurnError, TurnFailure, TurnOutcome, TurnPhase, TurnRecord,
 };
 use crate::persistence::recipe::{
-    synthetic_materialize_trace, Recipe, RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef,
-    TurnProvenance,
+    synthetic_materialize_trace, Recipe, RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTurn,
+    SourceRef, TurnProvenance,
 };
 use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
 use crate::persistence::{read_duck, save_atomic, SaveError};
 use crate::provider::{Provider, UnwiredProvider};
-use crate::session::materializer::{RealMaterializer, TurnDeps};
-use crate::session::turn_runner::TurnRunner;
+use crate::session::agent_loop::{AgentLoop, LoopOutcome, Termination};
+use crate::session::materializer::{Materializer, RealMaterializer, TurnDeps};
 use crate::session_store::ClosingFlag;
 use crate::window;
 use crate::workingset::{WorkingSet, DEFAULT_RESULT_COUNT_CAP};
@@ -374,13 +373,22 @@ pub struct Session {
     working_set: WorkingSet,
     _temp_dir: TempDir, // held to keep its dir alive; cleared on drop (ADR-0012)
     temp_path: PathBuf,
-    /// The turn orchestrator (ADR-0053): owns the retry loop, the cancel/in-
-    /// flight guard, the optional timeout watchdog, and the outcome routing.
-    /// Holds the provider and the materializer behind `Box<dyn ...>` (dyn, not
+    /// The LLM provider (ADR-0007/0064), held behind `Box<dyn>` (dyn, not
     /// generic) so this struct does not parameterize `commands.rs` / `lib.rs`.
-    /// Built in [`Self::with_provider_and_cancel`]; `ask` is a facade over its
-    /// [`TurnRunner::run_with_phase`].
-    turn_runner: TurnRunner,
+    /// [`Self::ask_with_phase`] borrows it per turn to drive the agent loop
+    /// (ADR-0081) and reads the live response locale off it for the system
+    /// prompt. Built in [`Self::with_provider_and_cancel`].
+    provider: Box<dyn Provider>,
+    /// The shared materializer (ADR-0053): the SAME trait object the live-turn
+    /// agent loop drives (`materialize` tool calls) and the resume path borrows
+    /// (recipe replay) -- one promotion mechanism across both paths, so a fake
+    /// materializer injected for a `Resumer` unit test exercises the replay
+    /// branch without DuckDB / a filesystem. Stateless (`RealMaterializer`);
+    /// the admin connection / source_files / working_set it borrows live on
+    /// this Session and are passed per turn via [`TurnDeps`]. Held on the
+    /// Session itself (not inside the loop, which is built per turn) so the
+    /// resume borrow and the live-turn borrow share one object.
+    materializer: Box<dyn Materializer>,
     /// The conversation thread (ADR-0028/0039/0040): a unified timeline of turns
     /// AND source lifecycle events, in order. The source of truth the frontend
     /// renders; the window assembler reads only the turns (via [`Self::turns`]),
@@ -528,19 +536,20 @@ impl Session {
         // any query runs so a runaway LLM SQL cannot OOM or monopolize the
         // machine. Best-effort; apply_resource_caps logs+swallows a rejection.
         apply_resource_caps(&conn);
-        // TurnRunner owns the provider + materializer behind `Box<dyn>` (dyn,
-        // not generic) so this struct does not parameterize the IPC layer
-        // (ADR-0053). The materializer is stateless (RealMaterializer); the
-        // admin connection / source_files / working_set it borrows live on this
-        // Session and are passed per turn via TurnDeps.
-        let turn_runner =
-            TurnRunner::new(provider, Box::new(RealMaterializer), Arc::clone(&cancel));
+        // The provider + materializer live on the Session behind `Box<dyn>`
+        // (dyn, not generic) so this struct does not parameterize the IPC
+        // layer (ADR-0053). The agent loop borrows both per turn; the resume
+        // path borrows the same materializer for the recipe replay. The
+        // materializer is stateless (RealMaterializer); the admin connection /
+        // source_files / working_set it borrows live on this Session and are
+        // passed per turn via TurnDeps.
         Ok(Self {
             conn,
             working_set: WorkingSet::default(),
             _temp_dir: temp_dir,
             temp_path,
-            turn_runner,
+            provider,
+            materializer: Box::new(RealMaterializer),
             history: Vec::new(),
             result_row_cap: DEFAULT_MAX_RESULT_ROWS,
             result_count_cap: DEFAULT_RESULT_COUNT_CAP,
@@ -608,16 +617,6 @@ impl Session {
     /// test can assert exactly one query runs at a time.
     pub fn is_query_in_flight(&self) -> bool {
         self.cancel.is_in_flight()
-    }
-
-    /// Set a wall-clock ceiling on each turn (ADR-0005/0021 statement-timeout
-    /// path). Forwards to the [`TurnRunner`], whose watchdog fires cancel on
-    /// expiry; the running query is interrupted and the turn lands as Cancelled
-    /// (ADR-0028 outcome D). `None` disables the turn-level timeout (the
-    /// default; engine resource caps still apply). Tunable for deterministic
-    /// timeout tests.
-    pub fn set_turn_timeout(&mut self, timeout: Option<Duration>) {
-        self.turn_runner.set_turn_timeout(timeout);
     }
 
     /// Bind this session to a `.duck` path (ADR-0034) and immediately persist
@@ -788,17 +787,14 @@ impl Session {
 
         // Phase 2/3/4 via the Resumer deep module (ADR-0053 Decision 3): the
         // Resumer borrows the shared cancel + the SAME Materializer trait
-        // object the live-turn path drives + the recipe. It does NOT hold the
-        // Session -- each phase method borrows working_set / TurnDeps and
-        // returns a structured result, which open_duck applies. Scoped so the
-        // Resumer (and its disjoint-field borrows of session.cancel /
-        // session.turn_runner) drops before phase 5's &mut session persist.
+        // object the live-turn agent loop drives + the recipe. It does NOT
+        // hold the Session -- each phase method borrows working_set / TurnDeps
+        // and returns a structured result, which open_duck applies. Scoped so
+        // the Resumer (and its disjoint-field borrows of session.cancel /
+        // session.materializer) drops before phase 5's &mut session persist.
         {
-            let mut resumer = resume::Resumer::new(
-                &session.cancel,
-                session.turn_runner.materializer_mut(),
-                &recipe,
-            );
+            let mut resumer =
+                resume::Resumer::new(&session.cancel, &mut *session.materializer, &recipe);
             // Phase 2: resolve the active-SOURCE pointer. The happy path
             // restores recipe.active; if the active was rebuilt + others
             // remain, the caller picks an explicit continuation (ADR-0035
@@ -1615,47 +1611,67 @@ impl Session {
         self.working_set.set_privacy(reference_name, privacy)
     }
 
-    /// Run one turn (PRD #1): assemble a schema-aware request, ask the provider
-    /// (ADR-0009 contract: SQL or textual), and produce exactly one ADR-0028
-    /// outcome -- result / textual / failed / cancelled. The single retry budget
-    /// (malformed output + schema/runtime error) is consumed invisibly; on
-    /// exhaustion the turn fails honestly. A cancel or timeout (ADR-0021) aborts
-    /// to Cancelled and leaves the working set untouched. Every turn is recorded
-    /// in the conversation thread (always visible, ADR-0028/0039); only a result
+    /// Run one turn (PRD #1, ADR-0077/0081 contract): assemble the windowed
+    /// tool-calling request, drive the native agent loop (explore / materialize
+    /// / describe / sample tool calls with model-driven self-correction), and
+    /// produce exactly one ADR-0028 outcome -- result / textual / failed /
+    /// cancelled. Tool-level errors route back to the model (blind retry is
+    /// abolished, ADR-0077); only a non-converging trajectory exhausts the
+    /// step cap and fails honestly. A cancel (user / close / wall-clock
+    /// watchdog, ADR-0021) aborts the WHOLE turn -- loop + in-flight tool
+    /// call -- and leaves the working set untouched. Every turn is recorded in
+    /// the conversation thread (always visible, ADR-0028/0039); only a result
     /// advances result_N. Infallible -- a question always yields one outcome.
+    ///
+    /// Facade for callers without the command-layer approval wiring (tests):
+    /// built-in tools classify Allow at the gateway without touching the sink,
+    /// so a fresh [`ApprovalState`] + a no-op sink behaves identically to the
+    /// store-attached pair on the built-in tool table.
     pub fn ask(&mut self, question: &str) -> TurnOutcome {
-        // Facade over TurnRunner (ADR-0053): assemble the provider request,
-        // compute the stable result_N (a failed attempt registers nothing, so N
-        // is stable across retries -- ADR-0022), drive the orchestrator with the
-        // shared session state borrowed via TurnDeps, then record the outcome.
-        // The retry / cancel / error-routing that used to live inline here
-        // moved to [`TurnRunner::run_with_phase`]; `record_turn` stays on the facade (the
-        // conversation timeline + persistence are session concerns, not turn
-        // orchestration -- ADR-0053 Decision 2).
-        self.ask_with_phase(question, |_| {})
+        let approval = ApprovalState::new();
+        let sink = NullApprovalSink;
+        self.ask_with_phase(question, &approval, &sink, |_| {})
     }
 
     /// Run one turn AND surface its discrete progress phases (ADR-0059). Same
     /// semantics as [`Self::ask`]; the `on_phase` callback receives a
-    /// [`TurnPhase`] marker at each wait boundary (Thinking before the provider
-    /// call, Querying before SQL execution), carrying the 1-based attempt so a
-    /// blind retry is honestly visible. The command layer wraps this callback to
-    /// emit the side-channel `turn-progress` Tauri event addressed by sessionId
-    /// (ADR-0056/0059); the phase never enters the [`TurnOutcome`] contract.
+    /// [`TurnPhase`] marker at each wait boundary (Thinking before each
+    /// provider round-trip, Querying before each tool dispatch), carrying the
+    /// 1-based step so a multi-step trajectory reads honestly ("step N"). The
+    /// command layer wraps this callback to emit the side-channel
+    /// `turn-progress` Tauri event addressed by sessionId (ADR-0056/0059); the
+    /// phase never enters the [`TurnOutcome`] contract.
+    ///
+    /// `approval` + `sink` are the session's tiered-approval gateway
+    /// (ADR-0080/0083): the store-attached [`ApprovalState`] the
+    /// `respond_tool_approval` command wakes, and the Tauri sink that emits
+    /// the approval-card events. Both live at the command boundary (the only
+    /// layer holding an AppHandle, ADR-0029) and are borrowed per turn, so the
+    /// Session stays unparameterized across `commands.rs`.
     pub fn ask_with_phase(
         &mut self,
         question: &str,
+        approval: &ApprovalState,
+        sink: &dyn ApprovalSink,
         on_phase: impl FnMut(TurnPhase),
     ) -> TurnOutcome {
+        // Facade over the agent loop (ADR-0081, issue #318): assemble the
+        // windowed tool-calling request (system prompt + tool table + windowed
+        // history, via the window assembler), drive the loop with the shared
+        // session state borrowed via TurnDeps + the session's own
+        // materializer, map the structured LoopOutcome onto the four-way
+        // TurnOutcome, then record it. `record_turn` stays on the facade (the
+        // conversation timeline + persistence are session concerns, not turn
+        // orchestration -- ADR-0053 Decision 2).
         let turns = self.turns();
-        let request = window::assemble(question, &self.working_set, &turns);
-        let result_name = format!("result_{}", self.working_set.next_result_number());
-        // Disjoint field borrows: `run_with_phase` takes `&mut self.turn_runner`
-        // while TurnDeps borrows `&self.conn` / `&self.source_files` /
-        // `&mut self.working_set` / `&self.temp_path` -- distinct Session
-        // fields, so they coexist without widening to `&mut self`. The block
-        // scope drops the deps borrow before `record_turn` takes its own
-        // `&mut self`.
+        let locale = self.provider.response_locale();
+        let request = window::assemble_tool_turn(question, &self.working_set, &turns, locale);
+        // Disjoint field borrows: the loop borrows `&*self.provider` while
+        // TurnDeps borrows `&self.conn` / `&self.source_files` /
+        // `&mut self.working_set` / `&self.temp_path` and the loop takes
+        // `&mut *self.materializer` -- distinct Session fields, so they
+        // coexist without widening to `&mut self`. The block scope drops the
+        // borrows before `record_turn` takes its own `&mut self`.
         let outcome = {
             let mut deps = TurnDeps {
                 conn: &self.conn,
@@ -1665,8 +1681,15 @@ impl Session {
                 result_count_cap: self.result_count_cap,
                 temp_path: &self.temp_path,
             };
-            self.turn_runner
-                .run_with_phase(&request, result_name, &mut deps, on_phase)
+            let loop_outcome = AgentLoop::new(&*self.provider, Arc::clone(&self.cancel)).run(
+                &request,
+                &mut deps,
+                &mut *self.materializer,
+                approval,
+                sink,
+                on_phase,
+            );
+            turn_outcome_from_loop(loop_outcome)
         };
         // ADR-0055 post-turn discard: if `close_session` marked this session
         // closing while the turn was in flight (it also fired cancel, so the
@@ -1762,52 +1785,63 @@ impl Session {
             .filter_map(|entry| match entry {
                 ThreadEntry::Turn(record) => {
                     // Build the trimmed outcome paired with its persisted trace
-                    // (ADR-0078). A Materialized turn ran exactly one productive
-                    // SQL under the single-SQL contract, so its trace is a
-                    // synthetic single `materialize` call (real multi-call
-                    // traces arrive with the agent-loop wiring slice, ADR-0081);
-                    // every other outcome has an empty trace -- no tool call
-                    // trajectory to record.
+                    // (ADR-0078). A Materialized turn persists its FULL
+                    // promotion chain (ADR-0084) -- every result_N the turn
+                    // produced, each its own RecipePromotion -- so resume
+                    // replays the whole chain. The trace is still a synthetic
+                    // single `materialize` call keyed on the primary's SQL
+                    // (real multi-call traces arrive with #319); every other
+                    // outcome has an empty trace -- no tool call trajectory to
+                    // record.
                     let (outcome, trace) = match &record.outcome {
                         TurnOutcome::Materialized {
-                            dataset,
-                            sql,
+                            promotions,
                             viz: _,
                             assumption,
                         } => {
-                            // The result_N must still be registered (a GC'd or
-                            // otherwise removed descriptor leaves no trace --
-                            // the turn cannot replay or render, so drop it).
-                            // `?` here returns None from the filter_map closure
-                            // (drop this entry), NOT from build_recipe.
-                            let descriptor = self.working_set.get(&dataset.reference_name)?;
-                            // sql is Some on every fresh Materialized turn; a
-                            // None predates the field and cannot replay, so
-                            // drop the turn rather than fabricate SQL. (A stale
-                            // turn also keeps its SQL -- ADR-0041 point 2: the
-                            // verbatim SQL stays visible in the window.)
-                            let sql = sql.clone()?;
-                            // display_name comes from the working set's CURRENT
-                            // state, not the ask-time snapshot in history -- a
-                            // user rename (ADR-0037) updates the working set,
-                            // not the history entry, so the snapshot is stale.
-                            let display_name = descriptor.display_name.clone();
-                            let trace = synthetic_materialize_trace(&sql);
+                            // ADR-0084: persist EVERY promotion as its own
+                            // RecipePromotion. display_name + stale come from
+                            // the working set's CURRENT state, not the ask-time
+                            // snapshot in history -- a user rename (ADR-0037) /
+                            // cascade (ADR-0041) updates the working set, not
+                            // the history entry. A promotion whose result_N is
+                            // gone (GC'd / removed, no descriptor) is dropped
+                            // -- it can neither replay nor render.
+                            let recipe_promotions: Vec<RecipePromotion> = promotions
+                                .iter()
+                                .filter_map(|p| {
+                                    let descriptor =
+                                        self.working_set.get(&p.dataset.reference_name)?;
+                                    Some(RecipePromotion {
+                                        reference_name: p.dataset.reference_name.clone(),
+                                        display_name: descriptor.display_name.clone(),
+                                        sql: p.sql.clone(),
+                                        // ADR-0041: a live result -> stale None
+                                        // (replayed); a cascade-invalidated
+                                        // result -> the anchor from its
+                                        // descriptor (dead result, kept in
+                                        // history, never replayed). The anchor
+                                        // is what the UI's stale badge reads,
+                                        // so a reopen renders the same
+                                        // "invalidated by" provenance as the
+                                        // live session did.
+                                        stale: descriptor.stale.clone(),
+                                    })
+                                })
+                                .collect();
+                            // If no promotion survived (every result_N GC'd),
+                            // the turn cannot replay or render -- drop it
+                            // (`return None` exits the filter_map closure, NOT
+                            // build_recipe), mirroring the single-result drop.
+                            let primary_sql = match recipe_promotions.last() {
+                                Some(primary) => primary.sql.clone(),
+                                None => return None,
+                            };
+                            let trace = synthetic_materialize_trace(&primary_sql);
                             (
                                 RecipeOutcome::Materialized {
-                                    reference_name: dataset.reference_name.clone(),
-                                    display_name,
-                                    sql,
+                                    promotions: recipe_promotions,
                                     assumption: assumption.clone(),
-                                    // ADR-0041: a live result -> stale None
-                                    // (replayed); a cascade-invalidated result
-                                    // -> the anchor from its descriptor (dead
-                                    // turn, kept in history, never replayed).
-                                    // The anchor is what the UI's stale badge
-                                    // reads, so a reopen renders the same
-                                    // "invalidated by" provenance as the live
-                                    // session did.
-                                    stale: descriptor.stale.clone(),
                                 },
                                 trace,
                             )
@@ -2196,6 +2230,79 @@ impl Session {
     }
 }
 
+/// Map the agent loop's structured outcome onto the four-way [`TurnOutcome`]
+/// (ADR-0028, calibrated by ADR-0077/0081; issue #318). The termination routes:
+///
+/// - Converged (terminal text) with >=1 promotion -> [`TurnOutcome::Materialized`].
+///   The LAST promotion is the turn's primary result (a later materialize
+///   supersedes earlier ones as the analysis focus); its verbatim SQL rides
+///   `sql`, the terminal text rides `assumption`. ADR-0022 monotonic numbering
+///   already applied inside the loop (result_1, result_2, ...).
+/// - Converged with no promotion -> [`TurnOutcome::Textual`] with
+///   [`TextKind::Agent`]: the tool-calling contract carries no structural
+///   clarify/refuse marker, so an honest answer, a clarification, and a
+///   default-skillset boundary refusal (ADR-0079) all ride the agent kind --
+///   the body text itself carries which.
+/// - Step cap exhausted (the agent never converged) -> [`TurnOutcome::Failed`]
+///   (`Execute`, carrying the cap). Provider faults map by class: NotWired /
+///   InvalidConfig permanent, a surfaced transient fault an `Execute` failure
+///   (the adapter's HTTP retry already ran; blind retry is abolished).
+/// - Cancel (user / close / wall-clock watchdog) -> [`TurnOutcome::Cancelled`].
+///
+/// Tool-level errors (SQL failure, approval denial) never land here -- the
+/// loop fed them back to the model for self-correction (ADR-0077); only a
+/// trajectory that never converges exhausts the step cap.
+fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
+    match outcome.termination {
+        Termination::Text(text) => {
+            if outcome.promotions.is_empty() {
+                TurnOutcome::Textual {
+                    text_kind: TextKind::Agent,
+                    body: text,
+                    assumption: None,
+                }
+            } else {
+                TurnOutcome::Materialized {
+                    // ADR-0084: the outcome carries the FULL promotion chain in
+                    // promotion order; the chain tail is the primary result
+                    // (derived at the read sites, never folded here). Working
+                    // set, history, recipe, and resume all see every promotion.
+                    promotions: outcome.promotions,
+                    // The tool-calling contract carries no viz intent (the
+                    // presentation slice is separate); a plain table turn.
+                    viz: None,
+                    assumption: if text.trim().is_empty() {
+                        None
+                    } else {
+                        Some(text)
+                    },
+                }
+            }
+        }
+        Termination::StepCap(cap) => TurnOutcome::Failed(TurnFailure::Execute {
+            detail: format!("agent did not converge within {cap} steps"),
+        }),
+        Termination::Cancelled => TurnOutcome::Cancelled,
+        Termination::NotWired => TurnOutcome::Failed(TurnFailure::NotWired),
+        Termination::InvalidConfig(detail) => {
+            TurnOutcome::Failed(TurnFailure::InvalidConfig { detail })
+        }
+        Termination::Transient(detail) => TurnOutcome::Failed(TurnFailure::Execute { detail }),
+    }
+}
+
+/// A no-op [`ApprovalSink`] for the [`Session::ask`] facade (tests and other
+/// callers outside the command boundary). Built-in tools classify Allow at the
+/// gateway WITHOUT emitting (zero approval, ADR-0080), so the sink's methods
+/// are unreachable on the built-in tool table -- the no-op keeps `ask`
+/// self-contained until external tools (which would suspend on the gate) land.
+struct NullApprovalSink;
+
+impl ApprovalSink for NullApprovalSink {
+    fn emit_request(&self, _body: &ApprovalRequestBody) {}
+    fn emit_resolved(&self, _body: &ApprovalRequestBody, _response: ApprovalResponse) {}
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         // ADR-0035 Decision 3 / issue #50: release the single-writer registry key the
@@ -2225,8 +2332,19 @@ mod tests {
     use super::Session;
     use crate::model::{TurnFailure, TurnOutcome};
     use crate::provider::fake::FakeProvider;
-    use crate::provider::ProviderReply;
+    use crate::provider::tool_calling::{ToolTurnReply, ToolUse};
+    use serde_json::json;
     use tempfile::NamedTempFile;
+
+    /// A materialize tool call promoting `sql` -- the tool-calling contract's
+    /// equivalent of the retired single-shot `ProviderReply::Sql`.
+    fn materialize_call(sql: &str) -> ToolTurnReply {
+        ToolTurnReply::ToolCalls(vec![ToolUse {
+            id: "tu_1".into(),
+            name: "materialize".into(),
+            input: json!({ "sql": sql }),
+        }])
+    }
 
     #[test]
     fn build_recipe_for_a_fresh_session_is_empty() {
@@ -2314,23 +2432,24 @@ mod tests {
         // ADR-0078/0082 (AC3, issue #296): the live write path pairs each
         // Materialized turn with its synthetic single-call trace. A fresh ask
         // that materializes a result must carry one `materialize` trace entry
-        // whose summary is the verbatim SQL; provenance stays default (runtime
-        // + skill tracking lands with the agent-loop wiring slice, ADR-0081).
-        // Pins the live path so a future edit that drops the synthetic trace
-        // call or forgets to wire it into the struct literal fails here, not
-        // only in the migration suite (which bypasses build_recipe via the JSON
-        // transform).
+        // whose summary is the primary promotion's verbatim SQL; provenance
+        // stays default -- the real multi-call trace + runtime provenance
+        // lands in #319. Pins the live path so a future edit that drops the
+        // synthetic trace call or forgets to wire it into the struct literal
+        // fails here, not only in the migration suite (which bypasses
+        // build_recipe via the JSON transform).
         let dir = tempfile::tempdir().expect("tempdir");
         let csv = dir.path().join("people.csv");
         std::fs::write(&csv, "name,score\nAda,9\n").expect("write csv");
 
-        let provider = FakeProvider::new().scripted(
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
             "多少人",
-            ProviderReply::Sql {
-                sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
-                viz: None,
-                assumption: None,
-            },
+            vec![
+                Ok(materialize_call(
+                    "SELECT COUNT(*) AS n FROM \"people\".data",
+                )),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
         );
         let mut session = Session::with_provider(Box::new(provider)).expect("session");
         match session.ingest(&csv) {
@@ -2359,7 +2478,7 @@ mod tests {
         );
         assert!(
             turn.provenance.runtime.is_none() && turn.provenance.skills.is_empty(),
-            "provenance default on the live path until the wiring slice",
+            "provenance default on the live path until #319 populates it",
         );
     }
 
@@ -2368,38 +2487,34 @@ mod tests {
     // written -- temp_path points at a file, so its "child" dump path has a file
     // as parent and the COPY ... TO fails, but only AFTER CREATE TABLE result_1
     // has succeeded. Without the DROP rollback the orphan table lingers
-    // unregistered; within this turn's retry loop the next attempt's
-    // next_result_number reuses N and clashes on CREATE, and across later turns
-    // every ask wedges on the same clash (ADR-0022 never-reused). The derive
-    // failure is retried up to the budget (ADR-0028 single loop), then the turn
-    // fails honestly -- but every failed attempt must still roll back result_1.
+    // unregistered; the next materialize attempt's next_result_number reuses N
+    // and clashes on CREATE, wedging every later turn (ADR-0022 never-reused).
+    // Under the agent contract (ADR-0077) the derive failure routes back to the
+    // model as a tool error; this scripted model never self-corrects (the
+    // single call clamps, re-issued every round-trip), so the turn exhausts
+    // the step cap and fails honestly -- but EVERY failed attempt must still
+    // roll back result_1.
     #[test]
     fn ask_drops_the_result_table_when_shape_derivation_fails() {
-        let provider = FakeProvider::new().scripted(
-            "建表",
-            ProviderReply::Sql {
-                sql: "SELECT 1 AS n".into(),
-                viz: None,
-                assumption: None,
-            },
-        );
+        let provider =
+            FakeProvider::new().scripted_tool_turn("建表", materialize_call("SELECT 1 AS n"));
         let mut session = Session::with_provider(Box::new(provider)).expect("session");
         // Derivation work dir whose parent is a file -> the fingerprint
         // COPY ... TO '<path>/result_1.fingerprint.csv' fails after CREATE.
         let file = NamedTempFile::new().expect("temp file");
         session.temp_path = file.path().to_path_buf();
 
-        // The derive failure exhausts the retry budget and surfaces as a typed
-        // Execute failure; the engine error rides the detail. Lock the kind and
-        // that the aggregate carries the real engine failure -- never the
-        // "unknown error" placeholder an empty failure list would produce.
+        // The non-self-correcting trajectory exhausts the step cap and surfaces
+        // as a typed Execute failure carrying the cap (the per-attempt engine
+        // errors rode back to the model as tool results, ADR-0077 -- they are
+        // not the turn-level detail).
         let detail = match session.ask("建表") {
             TurnOutcome::Failed(TurnFailure::Execute { detail }) => detail,
             other => panic!("expected Execute failure after derive failure, got {other:?}"),
         };
         assert!(
-            !detail.is_empty() && detail != "unknown error",
-            "Execute detail must carry the real aggregated engine failure: {detail:?}"
+            detail.contains("did not converge"),
+            "step-cap exhaustion carries the honest non-convergence detail: {detail:?}"
         );
 
         // result_1 was rolled back on every attempt: it is no longer a table in

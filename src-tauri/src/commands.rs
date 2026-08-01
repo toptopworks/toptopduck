@@ -436,14 +436,15 @@ pub fn remove_active_source(
         .map_err(SessionError::RemoveSource)
 }
 
-/// Ask one question (PRD #1) against the named session: run one turn and
-/// return its ADR-0028 outcome (result / textual / failed / cancelled). The
-/// single retry budget is consumed invisibly inside the turn. Runs off the
-/// async/UI thread (AC8) so a slow provider never freezes the app. A turn
-/// always produces an outcome; the only `Err` here is an unknown session, a
-/// resume guard rejection, an in-flight guard rejection, or a session-lock
-/// failure (not a turn failure -- that is a `Failed` outcome). ADR-0055: if the
-/// session was closed while this turn was in flight, the outcome is discarded
+/// Ask one question (PRD #1) against the named session: run one agent turn
+/// (multi-step tool calls with model-driven self-correction, ADR-0077/0081)
+/// and return its ADR-0028 outcome (result / textual / failed / cancelled).
+/// Runs off the async/UI thread (AC8) so a slow provider never freezes the
+/// app. A turn always produces an outcome; the only `Err` here is an unknown
+/// session, a resume guard rejection, an in-flight guard rejection, or a
+/// session-lock failure (not a turn failure -- that is a `Failed` outcome).
+/// ADR-0055: if the session was closed while this turn was in flight, the
+/// outcome is discarded
 /// inside `Session::ask` (no thread append, no recipe persist).
 #[tauri::command]
 pub async fn ask(
@@ -456,6 +457,15 @@ pub async fn ask(
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
     reject_if_in_flight(&handle)?;
+    // ADR-0080/0083: the session's tiered-approval gateway rides the turn.
+    // The store-attached ApprovalState is the SAME instance the
+    // `respond_tool_approval` command wakes, so an in-flow approval card
+    // suspends + resumes this turn; the TauriApprovalSink emits the card
+    // events addressed by sessionId. Both are built here at the command
+    // boundary (the only layer holding an AppHandle, ADR-0029) and borrowed
+    // per turn, so the Session stays AppHandle-free.
+    let approval = handle.approval_state();
+    let sink = TauriApprovalSink::new(app.clone(), session_id.clone());
     let handle = Arc::clone(&handle);
     // ADR-0059: build the side-channel `turn-progress` emit callback here at the
     // command boundary (the only layer allowed to hold a Tauri AppHandle,
@@ -463,20 +473,25 @@ pub async fn ask(
     // discrete phase (Thinking / Querying) is emitted addressed by sessionId so
     // a multi-session frontend filters the global broadcast to its own pane
     // (ADR-0056/0059). Cloning AppHandle + the id string is cheap; the closure
-    // is FnMut (called once per phase boundary, fires across blind retries).
+    // is FnMut (called once per wait boundary, across every loop step).
     let app_for_cb = app.clone();
     let sid = session_id.clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = handle.session_lock()?;
-        Ok::<TurnOutcome, SessionError>(s.ask_with_phase(&question, move |phase| {
-            let _ = app_for_cb.emit(
-                "turn-progress",
-                &TurnProgress {
-                    session_id: sid.clone(),
-                    phase,
-                },
-            );
-        }))
+        Ok::<TurnOutcome, SessionError>(s.ask_with_phase(
+            &question,
+            &approval,
+            &sink,
+            move |phase| {
+                let _ = app_for_cb.emit(
+                    "turn-progress",
+                    &TurnProgress {
+                        session_id: sid.clone(),
+                        phase,
+                    },
+                );
+            },
+        ))
     })
     .await
     .map_err(|e| SessionError::Engine(e.to_string()))??;
@@ -1307,7 +1322,8 @@ mod tests {
         // Without a turn in flight, an ask is allowed.
         reject_if_in_flight(&handle).expect("first ask allowed");
         // Simulate turn in flight via the token directly (ask does this via
-        // TurnRunner internally); the handle shares the same Arc<CancelToken>.
+        // the agent loop's begin_turn internally); the handle shares the same
+        // Arc<CancelToken>.
         {
             let _guard = handle.cancel_token().clone().begin_turn();
             assert!(handle.is_in_flight());

@@ -24,6 +24,17 @@ pub mod tool_calling;
 
 use crate::model::{Protocol, TextKind};
 use crate::provider::keychain::ProviderConfigSource;
+use crate::provider::prompt::ResponseLocale;
+
+/// Cap on the model's reply length, shared by both single-shot adapters and
+/// the tool-calling window assembler (ADR-0081): the tool contract terminates
+/// in a plain text answer whose length profile matches the legacy one-SQL
+/// reply, so every path shares one ceiling. Sized for a SQL + a Vega-Lite
+/// spec + an assumption note (a viz spec can run long); bounded so a runaway
+/// reply never balloons. Not a user-facing cap (the engine result-row cap,
+/// ADR-0005 L3, governs materialized size -- this bounds only the model's
+/// text).
+pub(crate) const MAX_REPLY_TOKENS: u32 = 4096;
 
 /// One column of a dataset as it appears in the LLM payload. The name is hidden
 /// when the user marked the column "type only" (ADR-0011): the provider learns
@@ -117,18 +128,25 @@ impl From<&crate::model::TurnOutcome> for ResponsePayload {
         use crate::model::TurnOutcome;
         match outcome {
             TurnOutcome::Materialized {
-                dataset,
-                sql,
+                promotions,
                 assumption,
                 // viz intentionally dropped: a prior turn's chart intent is
                 // irrelevant to SQL generation (the ADR-0023 window carries the
                 // prior SQL, not the presentation spec).
                 ..
-            } => ResponsePayload::Materialized {
-                result: dataset.reference_name.clone(),
-                sql: sql.clone(),
-                assumption: assumption.clone(),
-            },
+            } => {
+                // The one-line window summary represents the turn's primary
+                // result (ADR-0084 chain tail); antecedent promotions ride the
+                // dataset blocks the assembler enumerates from the working set.
+                let primary = promotions
+                    .last()
+                    .expect("a Materialized outcome carries at least one promotion (ADR-0084)");
+                ResponsePayload::Materialized {
+                    result: primary.dataset.reference_name.clone(),
+                    sql: Some(primary.sql.clone()),
+                    assumption: assumption.clone(),
+                }
+            }
             TurnOutcome::Textual {
                 text_kind,
                 body,
@@ -197,13 +215,15 @@ pub enum ProviderReply {
     },
 }
 
-/// Why a provider call did not yield a reply. The orchestrator's single retry
-/// budget (ADR-0028) consumes `Unavailable` (a contract violation / transient
-/// call failure) and re-attempts; `NotWired` and `InvalidConfig` are permanent
-/// for the turn (no key configured / key rejected, or a non-recoverable
-/// configuration fault) and are not retried -- they yield a failed turn
-/// immediately. `InvalidConfig` carries its diagnosis so the policy reason
-/// (e.g. "scheme `file` is not http/https") reaches the UI fold (issue #277).
+/// Why a provider call did not yield a reply. All three variants fail the
+/// turn at the wiring seam (ADR-0044/0077/0081): transport-level faults never
+/// reach the model for self-correction (that channel is tool-level errors
+/// only). `Unavailable` (a transient fault surfaced after the adapter's own
+/// HTTP retry) maps to a failed turn honestly -- blind retry is abolished;
+/// `NotWired` and `InvalidConfig` are permanent (no key configured / key
+/// rejected, or a non-recoverable configuration fault). `InvalidConfig`
+/// carries its diagnosis so the policy reason (e.g. "scheme `file` is not
+/// http/https") reaches the UI fold (issue #277).
 ///
 /// `Display` is derived via `thiserror` (issue #277) -- matching the
 /// `commands.rs` / `session_store.rs` style -- and is Rust-log-only, not the
@@ -269,6 +289,19 @@ pub trait Provider: Send {
     ) -> Result<tool_calling::ToolTurnReply, ProviderError> {
         Err(ProviderError::NotWired)
     }
+
+    /// The resolved response locale for prompt assembly (ADR-0052). The
+    /// tool-calling wiring seam (`Session::ask_with_phase`) owns the system
+    /// prompt -- unlike the single-shot path, where each adapter builds it
+    /// internally -- so it reads the locale off the provider per turn. Read
+    /// per turn (not cached) so a locale-preference change takes effect the
+    /// next turn, mirroring [`LiveProvider`]'s per-turn protocol re-read. The
+    /// default is the ADR-0052 fallback locale: providers without a config
+    /// source ([`UnwiredProvider`], the scripted fake) never build a real
+    /// prompt, so the default is inert for them.
+    fn response_locale(&self) -> ResponseLocale {
+        ResponseLocale::EnUS
+    }
 }
 
 /// Default provider before the real LLM is wired (#29): refuses every turn
@@ -329,6 +362,14 @@ impl<C: ProviderConfigSource + 'static> Provider for LiveProvider<C> {
             }
             Protocol::Openai => openai::OpenaiProvider::generate_tool_turn(&self.config, request),
         }
+    }
+
+    fn response_locale(&self) -> ResponseLocale {
+        // Per-turn read off the config source, same freshness as the adapters'
+        // internal prompt assembly on the single-shot path: a "system"
+        // preference re-resolves the OS locale here, an explicit override maps
+        // directly (ADR-0052).
+        self.config.locale()
     }
 }
 

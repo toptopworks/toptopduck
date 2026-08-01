@@ -399,7 +399,9 @@ describe("App ask flow", () => {
     vi.mocked(askQuestion).mockResolvedValue({
       kind: "Materialized",
       data: {
-        dataset: { ...guidedDataset, reference_name: "result_1", row_count: 1 },
+        promotions: [
+          { dataset: { ...guidedDataset, reference_name: "result_1", row_count: 1 }, sql: "SELECT 1" },
+        ],
         viz: null,
         assumption: null,
       },

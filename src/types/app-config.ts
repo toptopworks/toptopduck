@@ -45,9 +45,10 @@ export interface ExportDefaults {
 }
 
 // Tunable defaults (ADR-0013/0023/0028). Stored + round-tripped here; applying
-// them to the live orchestrator is a follow-up slice.
+// them to the live orchestrator is a follow-up slice. The per-turn retry
+// budget was retired with the single-SQL contract (ADR-0077, issue #318); a
+// stale `retry_budget` key in an older config file is ignored at parse.
 export interface Tunables {
-  retry_budget: number;
   window_turns: number;
   far_window: number;
 }

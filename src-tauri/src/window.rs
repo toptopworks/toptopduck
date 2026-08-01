@@ -1,8 +1,9 @@
 //! Window assembler (issue #24, ADR-0023/0026/0039/0011): builds the LLM payload
 //! handed to the provider each turn -- the windowed conversation history plus
 //! every working-set dataset, pruned by the privacy controls. Pure over the
-//! working set + conversation thread; the session calls it once per turn and the
-//! retry loop re-feeds the result, so every attempt sees an identical payload.
+//! working set + conversation thread; the session calls it once per turn and
+//! the agent loop re-sends the assembled system prompt + tool table on every
+//! round-trip, so the model sees an identical context across the whole turn.
 //!
 //! This is the one place that turns the session's raw state (the working set +
 //! the always-visible thread) into the provider-facing payload. The provider
@@ -13,7 +14,13 @@
 use std::collections::HashSet;
 
 use crate::model::{ColumnSchema, DatasetDescriptor, TurnOutcome, TurnRecord};
-use crate::provider::{ColumnRef, DatasetRef, ProviderRequest, ResponsePayload, TurnPayload};
+use crate::provider::prompt::{
+    build_tool_system_prompt, render_response, render_summary_turn_note, ResponseLocale,
+};
+use crate::provider::tool_calling::{ToolTurnMessage, ToolTurnRequest};
+use crate::provider::{
+    ColumnRef, DatasetRef, ProviderRequest, ResponsePayload, TurnPayload, MAX_REPLY_TOKENS,
+};
 use crate::workingset::WorkingSet;
 
 /// Recent-turn window size (ADR-0023): the most recent N turns ship the full
@@ -43,6 +50,68 @@ pub fn assemble(
     }
 }
 
+/// Assemble the tool-calling request for one agent turn (ADR-0081, issue #318):
+/// the tool-use system prompt (capability boundary + locale directive + the
+/// windowed schema context), the windowed conversation as user/assistant
+/// message turns closed by the asking question, and the built-in tool table.
+/// Pure over the same state as [`assemble`] -- the single-SQL payload is built
+/// first and reused as the schema-context source, so the two paths can never
+/// disagree on which datasets / samples / privacy pruning the model sees.
+///
+/// The agent loop owns the request for the whole turn: each round-trip re-sends
+/// this system + tool table with the conversation extended by the prior tool
+/// batch (the mid-turn tool results never re-window the schema context).
+pub fn assemble_tool_turn(
+    question: &str,
+    working_set: &WorkingSet,
+    history: &[TurnRecord],
+    locale: ResponseLocale,
+) -> ToolTurnRequest {
+    let request = assemble(question, working_set, history);
+    ToolTurnRequest {
+        system: build_tool_system_prompt(&request, locale),
+        messages: tool_turn_messages(&request),
+        tools: crate::tools::builtin_table(),
+        max_tokens: MAX_REPLY_TOKENS,
+    }
+}
+
+/// Render the windowed history as tool-calling messages (ADR-0023/0039),
+/// closed by the asking question. Mirrors the single-shot adapters'
+/// `build_messages` turn-for-turn: a full turn is a user question + an
+/// assistant turn carrying the rendered prior response; a far-window summary
+/// is the verbatim question excerpt + the result note. The prior assistant
+/// turns carry empty tool-call lists -- the history predates the tool
+/// contract (or is rendered text either way), so no `tool_use` pairing rides
+/// it; the model reads its own prior turns as prose, exactly as on the
+/// single-shot path.
+fn tool_turn_messages(request: &ProviderRequest) -> Vec<ToolTurnMessage> {
+    let mut messages = Vec::with_capacity(request.history.len() * 2 + 1);
+    for turn in &request.history {
+        match turn {
+            TurnPayload::Full { question, response } => {
+                messages.push(ToolTurnMessage::user(question.clone()));
+                messages.push(ToolTurnMessage::Assistant {
+                    text: Some(render_response(response)),
+                    tool_calls: Vec::new(),
+                });
+            }
+            TurnPayload::Summary {
+                question_excerpt,
+                result,
+            } => {
+                messages.push(ToolTurnMessage::user(question_excerpt.clone()));
+                messages.push(ToolTurnMessage::Assistant {
+                    text: Some(render_summary_turn_note(result)),
+                    tool_calls: Vec::new(),
+                });
+            }
+        }
+    }
+    messages.push(ToolTurnMessage::user(request.question.clone()));
+    messages
+}
+
 /// Resolve the dataset a question targets by default when the user names none
 /// (ADR-0010/0022, issue #27): the most recent **prior** materialized result
 /// ("上一步的中间结果"), or -- when no result exists yet -- the most-recently-
@@ -64,21 +133,21 @@ pub fn assemble(
 /// source. `active` is a top-level payload pointer, independent of which turns
 /// the window happened to keep -- do not "fix" this to read the windowed slice.
 pub fn resolve_active(working_set: &WorkingSet, history: &[TurnRecord]) -> Option<String> {
-    let last_result = history.iter().rev().find_map(|t| match &t.outcome {
-        TurnOutcome::Materialized { dataset, .. } => {
-            // Skip stale results (issue #40, ADR-0013): the focus must never
-            // land on a soft-invalidated result. The stale flag lives on the
-            // working-set descriptor (the TurnRecord snapshot is the at-
-            // materialization state), so check the live working set by name --
-            // a stale result keeps producing turns visible in the thread, this
-            // only stops it from being the next question's default target.
-            if working_set.is_stale(&dataset.reference_name) {
-                None
-            } else {
-                Some(dataset.reference_name.clone())
-            }
+    let last_result = history.iter().rev().find_map(|t| {
+        // The active default is the turn's primary result (ADR-0084): the
+        // chain tail of a multi-promotion turn -- the final answer the user's
+        // question produced. Skip stale results (issue #40, ADR-0013): the
+        // focus must never land on a soft-invalidated result. The stale flag
+        // lives on the working-set descriptor (the TurnRecord snapshot is the
+        // at-materialization state), so check the live working set by name --
+        // a stale result keeps producing turns visible in the thread, this
+        // only stops it from being the next question's default target.
+        let primary = t.outcome.primary_promotion()?;
+        if working_set.is_stale(&primary.dataset.reference_name) {
+            None
+        } else {
+            Some(primary.dataset.reference_name.clone())
         }
-        _ => None,
     });
     last_result.or_else(|| working_set.active().map(|d| d.reference_name.clone()))
 }
@@ -97,7 +166,13 @@ fn assemble_history(history: &[TurnRecord]) -> Vec<TurnPayload> {
             if i < far_count {
                 TurnPayload::Summary {
                     question_excerpt: truncate_question(&turn.question),
-                    result: result_name(&turn.outcome),
+                    // The far-window one-line summary names the turn's primary
+                    // result (ADR-0084 chain tail); antecedent promotions ride
+                    // the dataset blocks, not the per-turn summary line.
+                    result: turn
+                        .outcome
+                        .primary_promotion()
+                        .map(|p| p.dataset.reference_name.clone()),
                 }
             } else {
                 TurnPayload::Full {
@@ -157,15 +232,21 @@ fn recent_result_names(history: &[TurnRecord]) -> HashSet<String> {
     history
         .iter()
         .skip(far_count)
-        .filter_map(|t| result_name(&t.outcome))
+        .flat_map(|t| result_names(&t.outcome))
         .collect()
 }
 
-/// A turn's `result_N` name when it materialized one, else `None`.
-fn result_name(outcome: &TurnOutcome) -> Option<String> {
+/// A turn's `result_N` names (ADR-0084): every promotion's reference name, in
+/// promotion order; empty for a non-result turn. "In-window" is a turn-level
+/// property, so a recent multi-promotion turn contributes ALL its promotions
+/// (antecedents included) -- they ship with samples, not schema-only.
+fn result_names(outcome: &TurnOutcome) -> Vec<String> {
     match outcome {
-        TurnOutcome::Materialized { dataset, .. } => Some(dataset.reference_name.clone()),
-        _ => None,
+        TurnOutcome::Materialized { promotions, .. } => promotions
+            .iter()
+            .map(|p| p.dataset.reference_name.clone())
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -254,7 +335,9 @@ fn type_only_set(cols: &[String]) -> HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DatasetPrivacy, RectifyProvenance, TextKind, TurnFailure, TurnOutcome};
+    use crate::model::{
+        DatasetPrivacy, Promotion, RectifyProvenance, TextKind, TurnFailure, TurnOutcome,
+    };
 
     /// Build column schemas from (name, type) pairs.
     fn cols(specs: &[(&str, &str)]) -> Vec<ColumnSchema> {
@@ -304,8 +387,10 @@ mod tests {
         TurnRecord {
             question: question.to_string(),
             outcome: TurnOutcome::Materialized {
-                dataset: Box::new(result_desc(result)),
-                sql: Some(format!("SELECT * FROM {}", result)),
+                promotions: vec![Promotion {
+                    dataset: result_desc(result),
+                    sql: format!("SELECT * FROM {}", result),
+                }],
                 viz: None,
                 assumption: None,
             },
@@ -408,6 +493,56 @@ mod tests {
         assert!(find("result_2").sample.is_some()); // in-window
         assert!(find("result_21").sample.is_some()); // most recent, in-window
         assert!(find("people").sample.is_some()); // source always samples
+    }
+
+    #[test]
+    fn a_recent_multi_promotion_turn_ships_samples_for_its_antecedents_too() {
+        // ADR-0084: "in-window" is a turn-level property, so a recent
+        // multi-promotion turn ships samples for EVERY promotion -- antecedents
+        // included, not just the primary. result_1 (the chain head) and result_2
+        // (the primary tail) ride the same in-window turn, so both carry
+        // samples; neither is demoted to schema-only.
+        let mut ws = WorkingSet::default();
+        ws.register(source(
+            "people",
+            &[("id", "BIGINT")],
+            vec![vec!["1".to_string()]],
+        ));
+        ws.register_result(result_desc("result_1"));
+        ws.register_result(result_desc("result_2"));
+        let history = vec![TurnRecord {
+            question: "两步晋升".to_string(),
+            outcome: TurnOutcome::Materialized {
+                promotions: vec![
+                    Promotion {
+                        dataset: result_desc("result_1"),
+                        sql: "SELECT 1".to_string(),
+                    },
+                    Promotion {
+                        dataset: result_desc("result_2"),
+                        sql: "SELECT 2".to_string(),
+                    },
+                ],
+                viz: None,
+                assumption: None,
+            },
+        }];
+        let payload = assemble("probe", &ws, &history);
+        let find = |name: &str| {
+            payload
+                .datasets
+                .iter()
+                .find(|d| d.reference_name == name)
+                .unwrap_or_else(|| panic!("missing {name}"))
+        };
+        assert!(
+            find("result_1").sample.is_some(),
+            "the antecedent promotion ships a sample (its turn is in-window)"
+        );
+        assert!(
+            find("result_2").sample.is_some(),
+            "the primary promotion ships a sample"
+        );
     }
 
     #[test]

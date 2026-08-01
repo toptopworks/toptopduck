@@ -6,10 +6,14 @@
 import type { DatasetDescriptor } from "./dataset";
 import type { SourceLifecycleEvent } from "./lifecycle";
 
-// Which kind of non-SQL textual response the provider returned (ADR-0009
-// textual branch): a disambiguation question (ADR-0018) or an out-of-scope
-// refusal (ADR-0017). Mirrors the Rust TextKind (a bare variant string).
-export type TextKind = "Clarify" | "Refuse";
+// Which kind of textual response a turn produced (ADR-0009 textual branch,
+// evolved by ADR-0077/0081): a plain agent answer (the tool-calling
+// contract's terminal text -- an honest answer, a clarification, and a
+// default-skillset boundary refusal (ADR-0079) all ride this kind), or -- on
+// legacy single-SQL data only -- an explicit disambiguation question
+// (ADR-0018) / out-of-scope refusal (ADR-0017). Mirrors the Rust TextKind (a
+// bare variant string).
+export type TextKind = "Agent" | "Clarify" | "Refuse";
 
 // v1 chart whitelist (ADR-0016). Mirrors the Rust ChartKind (serde
 // rename_all="lowercase" -> a bare lowercase variant string). The closed set a
@@ -51,12 +55,15 @@ export type TurnOutcome =
   | {
     kind: "Materialized";
     data: {
-      dataset: DatasetDescriptor;
-      // The verbatim SQL the provider returned (ADR-0009/0023): the recent-turn
-      // window ships it so the provider sees its own prior SQL. Optional to
-      // mirror the Rust serde default (absent on older data); a fresh result
-      // turn always carries one. The frontend does not yet surface it.
-      sql?: string | null;
+      // ADR-0084: the turn's promotions in promotion order (one or more). The
+      // chain tail is the primary result the answer references -- a derived
+      // property, never a separate field. Each promotion carries the result
+      // descriptor + the verbatim SQL that produced it. Mirrors the Rust
+      // Promotion (nested under TurnOutcome::Materialized).
+      promotions: Array<{
+        dataset: DatasetDescriptor;
+        sql: string;
+      }>;
       // The provider's optional viz spec (ADR-0016/0033, issue #26): null when
       // the provider offered no chart (the default table turn). The frontend
       // renders it via Vega-Embed or degrades to the table with a disclosure

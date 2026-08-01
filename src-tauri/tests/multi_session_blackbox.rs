@@ -13,9 +13,11 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use serde_json::json;
+use toptopduck_lib::provider::tool_calling::{ToolTurnReply, ToolUse};
 use toptopduck_lib::{
-    ActiveResolution, CancelToken, FakeProvider, LoadOutcome, ProviderReply, Session, SessionError,
-    SessionId, SessionStore, SourceResolution, TurnOutcome,
+    ActiveResolution, CancelToken, FakeProvider, LoadOutcome, Session, SessionError, SessionId,
+    SessionStore, SourceResolution, TurnOutcome,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -28,12 +30,24 @@ fn fixture(name: &str) -> PathBuf {
     fixtures_dir().join(name)
 }
 
-fn reply_sql(sql: &str) -> ProviderReply {
-    ProviderReply::Sql {
-        sql: sql.to_string(),
-        viz: None,
-        assumption: None,
-    }
+/// A materialize tool call promoting `sql` -- one round-trip's reply.
+fn materialize(sql: &str) -> ToolTurnReply {
+    ToolTurnReply::ToolCalls(vec![ToolUse {
+        id: "tu_1".into(),
+        name: "materialize".into(),
+        input: json!({ "sql": sql }),
+    }])
+}
+
+/// A terminal text answer ending the turn.
+fn answer(text: &str) -> ToolTurnReply {
+    ToolTurnReply::Text(text.to_string())
+}
+
+/// Script a question as one materialize call promoting `sql` plus a terminal
+/// text answer -- the standard "productive turn" trajectory.
+fn productive(sql: &str) -> Vec<Result<ToolTurnReply, toptopduck_lib::ProviderError>> {
+    vec![Ok(materialize(sql)), Ok(answer("完成"))]
 }
 
 /// Poll the cancel token's in-flight flag until it goes true (the ask thread
@@ -117,7 +131,8 @@ fn two_sessions_are_physically_isolated() {
     // sandbox runs it on an empty source set; what matters is that result_1
     // lands in A and never in B.
     let cancel_a = Arc::new(CancelToken::new());
-    let provider_a = FakeProvider::new().scripted("建结果", reply_sql("SELECT 1 AS n"));
+    let provider_a =
+        FakeProvider::new().scripted_tool_turn_seq("建结果", productive("SELECT 1 AS n"));
     let a = store
         .create(cancel_a, Box::new(provider_a))
         .expect("create a");
@@ -161,9 +176,12 @@ fn two_sessions_are_physically_isolated() {
 
     // Cross-reference: a SQL naming A's `people` table in B fails (the table
     // does not exist in B's DuckDB) -- the two instances cannot reference each
-    // other's objects.
+    // other's objects. The tool error routes back to the model (ADR-0077); the
+    // non-self-correcting script clamps to the same failing call and exhausts
+    // the step cap -> Failed.
     let cancel_b = Arc::new(CancelToken::new());
-    let provider_b = FakeProvider::new().scripted("引用A的表", reply_sql("SELECT * FROM people"));
+    let provider_b =
+        FakeProvider::new().scripted_tool_turn("引用A的表", materialize("SELECT * FROM people"));
     let b2 = store
         .create(cancel_b, Box::new(provider_b))
         .expect("create b2");
@@ -194,9 +212,9 @@ fn close_with_inflight_ask_discards_turn_not_in_thread_or_recipe() {
     let provider = FakeProvider::new()
         .with_cancel(cancel.clone())
         // A normal turn that persists a recipe entry.
-        .scripted("好查询", reply_sql("SELECT 1 AS n"))
+        .scripted_tool_turn_seq("好查询", productive("SELECT 1 AS n"))
         // A long, cancellable turn that close_session will interrupt.
-        .scripted_blocking("慢查询", reply_sql("SELECT 1 AS n"));
+        .scripted_tool_turn_blocking("慢查询", answer("never"));
     let id = store
         .create(cancel.clone(), Box::new(provider))
         .expect("create");
@@ -275,7 +293,8 @@ fn close_with_inflight_ask_discards_turn_not_in_thread_or_recipe() {
 /// writer key, then return the id. The key is held until the session drops.
 fn bound_session(store: &SessionStore, duck: &std::path::Path) -> SessionId {
     let cancel = Arc::new(CancelToken::new());
-    let provider = FakeProvider::new().scripted("好查询", reply_sql("SELECT 1 AS n"));
+    let provider =
+        FakeProvider::new().scripted_tool_turn_seq("好查询", productive("SELECT 1 AS n"));
     let id = store.create(cancel, Box::new(provider)).expect("create");
     let handle = store.get(&id).expect("handle");
     let mut s = handle.session_lock().unwrap();
@@ -342,9 +361,9 @@ fn close_wait_release_waits_for_inflight_ask_then_releases_canonical_key() {
     let provider = FakeProvider::new()
         .with_cancel(cancel.clone())
         // A normal turn to bind the recipe + acquire the canonical key.
-        .scripted("好查询", reply_sql("SELECT 1 AS n"))
+        .scripted_tool_turn_seq("好查询", productive("SELECT 1 AS n"))
         // The long, cancellable turn the close-wait will interrupt.
-        .scripted_blocking("慢查询", reply_sql("SELECT 1 AS n"));
+        .scripted_tool_turn_blocking("慢查询", answer("never"));
     let id = store
         .create(cancel.clone(), Box::new(provider))
         .expect("create");
@@ -459,8 +478,8 @@ fn pure_close_does_not_release_canonical_key_while_ask_in_flight() {
     let cancel = Arc::new(CancelToken::new());
     let provider = FakeProvider::new()
         .with_cancel(cancel.clone())
-        .scripted("好查询", reply_sql("SELECT 1 AS n"))
-        .scripted_blocking("慢查询", reply_sql("SELECT 1 AS n"));
+        .scripted_tool_turn_seq("好查询", productive("SELECT 1 AS n"))
+        .scripted_tool_turn_blocking("慢查询", answer("never"));
     let id = store
         .create(cancel.clone(), Box::new(provider))
         .expect("create");
@@ -540,7 +559,7 @@ fn store_lock_not_held_during_a_long_turn() {
     let cancel_a = Arc::new(CancelToken::new());
     let provider_a = FakeProvider::new()
         .with_cancel(cancel_a.clone())
-        .scripted_blocking("慢查询", reply_sql("SELECT 1 AS n"));
+        .scripted_tool_turn_blocking("慢查询", answer("never"));
     let a = store
         .create(cancel_a.clone(), Box::new(provider_a))
         .expect("create a");
@@ -606,7 +625,8 @@ fn open_duck_replaces_contents_in_place_other_sessions_unaffected() {
     // result_1, then close it to release the registry key (held by the binding
     // session until it drops) so open_duck can acquire the same file.
     let cancel_p = Arc::new(CancelToken::new());
-    let provider_p = FakeProvider::new().scripted("建结果", reply_sql("SELECT 1 AS n"));
+    let provider_p =
+        FakeProvider::new().scripted_tool_turn_seq("建结果", productive("SELECT 1 AS n"));
     let producer = store
         .create(cancel_p, Box::new(provider_p))
         .expect("create producer");
@@ -701,7 +721,8 @@ fn close_after_resume_discards_inflight_turn_via_shared_closing_flag() {
     // Producer: bind + one turn so the .duck recipe holds result_1, then close
     // to release the canonical-writer key so open_duck can re-acquire the file.
     let cancel_p = Arc::new(CancelToken::new());
-    let provider_p = FakeProvider::new().scripted("建结果", reply_sql("SELECT 1 AS n"));
+    let provider_p =
+        FakeProvider::new().scripted_tool_turn_seq("建结果", productive("SELECT 1 AS n"));
     let producer = store
         .create(cancel_p, Box::new(provider_p))
         .expect("create producer");
@@ -725,8 +746,8 @@ fn close_after_resume_discards_inflight_turn_via_shared_closing_flag() {
     let cancel = Arc::new(CancelToken::new());
     let provider = FakeProvider::new()
         .with_cancel(cancel.clone())
-        .scripted("好查询", reply_sql("SELECT 1 AS n"))
-        .scripted_blocking("慢查询", reply_sql("SELECT 1 AS n"));
+        .scripted_tool_turn_seq("好查询", productive("SELECT 1 AS n"))
+        .scripted_tool_turn_blocking("慢查询", answer("never"));
     let a = store
         .create(cancel.clone(), Box::new(toptopduck_lib::UnwiredProvider))
         .expect("create a");

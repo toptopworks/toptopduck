@@ -170,7 +170,9 @@ mod tests {
 
     use super::*;
     use crate::model::{SourceLifecycleEvent, SourceLifecycleKind};
-    use crate::persistence::recipe::{RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef};
+    use crate::persistence::recipe::{
+        RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTurn, SourceRef,
+    };
     use crate::persistence::save_atomic;
 
     fn csv_source(name: &str) -> SourceRef {
@@ -210,21 +212,25 @@ mod tests {
                     RecipeEntry::Turn(RecipeTurn::new(
                         "多少单",
                         RecipeOutcome::Materialized {
-                            reference_name: "result_1".into(),
-                            display_name: "result_1".into(),
-                            sql: "SELECT 1".into(),
+                            promotions: vec![RecipePromotion {
+                                reference_name: "result_1".into(),
+                                display_name: "result_1".into(),
+                                sql: "SELECT 1".into(),
+                                stale: None,
+                            }],
                             assumption: None,
-                            stale: None,
                         },
                     )),
                     RecipeEntry::Turn(RecipeTurn::new(
                         "再问",
                         RecipeOutcome::Materialized {
-                            reference_name: "result_2".into(),
-                            display_name: "result_2".into(),
-                            sql: "SELECT 2".into(),
+                            promotions: vec![RecipePromotion {
+                                reference_name: "result_2".into(),
+                                display_name: "result_2".into(),
+                                sql: "SELECT 2".into(),
+                                stale: None,
+                            }],
                             assumption: None,
-                            stale: None,
                         },
                     )),
                 ],
@@ -367,11 +373,13 @@ mod tests {
                     RecipeEntry::Turn(RecipeTurn::new(
                         "q",
                         RecipeOutcome::Materialized {
-                            reference_name: "result_1".into(),
-                            display_name: "result_1".into(),
-                            sql: "SELECT 1".into(),
+                            promotions: vec![RecipePromotion {
+                                reference_name: "result_1".into(),
+                                display_name: "result_1".into(),
+                                sql: "SELECT 1".into(),
+                                stale: None,
+                            }],
                             assumption: None,
-                            stale: None,
                         },
                     )),
                 ],

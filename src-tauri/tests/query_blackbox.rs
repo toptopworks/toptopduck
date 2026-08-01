@@ -1,20 +1,29 @@
-//! Black-box query seam (PRD #1 main seam, issues #22/#23): feed a question to
-//! a Session wired with a scripted FakeProvider and assert the ADR-0028 outcome
-//! -- result / textual / failed (cancelled is #28), the always-visible thread,
-//! and that result_N advances only for results. Fully local, deterministic, no
-//! network, no real LLM. The fake stands in for the provider (ADR-0007); the
-//! orchestrator under test never knows it is not the real Claude client.
+//! Black-box query seam (PRD #1 main seam): feed a question to a Session wired
+//! with a scripted FakeProvider and assert the ADR-0028 outcome -- result /
+//! textual / failed / cancelled -- the always-visible thread, and that result_N
+//! advances only for promotions. The turn contract is the native tool-calling
+//! agent loop (ADR-0077/0081, issue #318): the scripted model emits
+//! explore / materialize tool calls plus a terminal text answer, and the loop
+//! dispatches the calls against the real engine. Tool-level errors route back
+//! to the model for self-correction (blind retry is abolished); only a
+//! non-converging trajectory exhausts the execution caps. Fully local,
+//! deterministic, no network, no real LLM -- the fake stands in for the
+//! provider (ADR-0007); the loop under test never knows it is not a real model.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use serde_json::json;
+use toptopduck_lib::provider::tool_calling::{
+    ToolTurnMessage, ToolTurnReply, ToolTurnRequest, ToolUse,
+};
 use toptopduck_lib::{
-    ActiveResolution, CancelToken, ChartKind, DatasetPrivacy, DatasetRef, FakeProvider,
-    LoadOutcome, ProviderError, ProviderReply, ProviderRequest, ResponsePayload, ResumeEvent,
+    ActiveResolution, ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState,
+    CancelToken, DatasetPrivacy, FakeProvider, LoadOutcome, ProviderError, ResumeEvent,
     ResumeProgress, Session, SourceResolution, TextKind, ThreadEntry, TurnFailure, TurnOutcome,
-    TurnPayload, TurnPhase, TurnProgress, TurnRecord, VizSpec,
+    TurnPhase, TurnProgress, TurnRecord,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -34,45 +43,66 @@ fn load_source(session: &mut Session, path: &Path) {
     }
 }
 
-fn reply_sql(sql: &str) -> ProviderReply {
-    ProviderReply::Sql {
-        sql: sql.to_string(),
-        viz: None,
-        assumption: None,
-    }
+/// A materialize tool call promoting `sql` -- one round-trip's reply. The
+/// tool-calling contract's equivalent of the retired single-shot SQL reply.
+fn materialize(sql: &str) -> ToolTurnReply {
+    ToolTurnReply::ToolCalls(vec![ToolUse {
+        id: "tu_1".into(),
+        name: "materialize".into(),
+        input: json!({ "sql": sql }),
+    }])
 }
 
-fn reply_text(kind: TextKind, body: &str) -> ProviderReply {
-    ProviderReply::Text {
-        kind,
-        body: body.to_string(),
-        assumption: None,
-    }
+/// An explore tool call -- a scratch query that never promotes.
+fn explore(sql: &str) -> ToolTurnReply {
+    ToolTurnReply::ToolCalls(vec![ToolUse {
+        id: "tu_1".into(),
+        name: "explore".into(),
+        input: json!({ "sql": sql }),
+    }])
 }
 
-/// Build a session whose provider is scripted with the given (question, sql)
-/// pairs (one stable SQL reply each). One session per test keeps the script map
-/// scoped and deterministic.
+/// A terminal text answer ending the turn.
+fn answer(text: &str) -> ToolTurnReply {
+    ToolTurnReply::Text(text.to_string())
+}
+
+/// Script a question as one materialize call promoting `sql` plus a terminal
+/// text answer -- the standard productive-turn trajectory.
+fn productive(sql: &str) -> Vec<Result<ToolTurnReply, ProviderError>> {
+    vec![Ok(materialize(sql)), Ok(answer("完成"))]
+}
+
+/// Build a session whose provider is scripted so each question runs one
+/// materialize call promoting `sql`, then terminates with a text answer. One
+/// session per test keeps the script map scoped and deterministic.
 fn session_with(scripts: &[(&str, &str)]) -> Session {
     let mut provider = FakeProvider::new();
     for (question, sql) in scripts {
-        provider = provider.scripted(question, reply_sql(sql));
+        provider = provider.scripted_tool_turn_seq(question, productive(sql));
     }
     Session::with_provider(Box::new(provider)).expect("session")
 }
 
-/// Unpack a Materialized outcome into (reference_name, row_count, columns).
+/// Unpack a Materialized outcome's PRIMARY promotion (the chain tail,
+/// ADR-0084) into (reference_name, row_count, columns). Single-result turns
+/// carry a one-element chain, so this reads exactly the result they produced.
 fn materialized(outcome: TurnOutcome) -> (String, u64, Vec<(String, String)>) {
-    match outcome {
-        TurnOutcome::Materialized { dataset, .. } => {
-            let cols = dataset
+    match outcome.primary_promotion() {
+        Some(primary) => {
+            let cols = primary
+                .dataset
                 .columns
                 .iter()
                 .map(|c| (c.name.clone(), c.canonical_type.clone()))
                 .collect();
-            (dataset.reference_name, dataset.row_count, cols)
+            (
+                primary.dataset.reference_name.clone(),
+                primary.dataset.row_count,
+                cols,
+            )
         }
-        other => panic!("expected Materialized, got {other:?}"),
+        None => panic!("expected Materialized, got {outcome:?}"),
     }
 }
 
@@ -99,11 +129,55 @@ fn turns(entries: &[ThreadEntry]) -> Vec<TurnRecord> {
         .collect()
 }
 
+/// The captured tool-turn request a question's turn assembled FIRST (the fake
+/// records one capture per round-trip; the first carries the turn's windowed
+/// context -- the schema snapshot + window the window assembler built for it).
+/// The first round-trip's request ends with the asking question and carries
+/// no fed-back tool results yet; later round-trips append ToolResult turns.
+fn request_for<'a>(buf: &'a [ToolTurnRequest], question: &str) -> &'a ToolTurnRequest {
+    buf.iter()
+        .find(|r| {
+            let ends_with_question =
+                matches!(r.messages.last(), Some(ToolTurnMessage::User { content }) if content == question);
+            let first_round = !r
+                .messages
+                .iter()
+                .any(|m| matches!(m, ToolTurnMessage::ToolResult { .. }));
+            ends_with_question && first_round
+        })
+        .unwrap_or_else(|| panic!("no captured first-round request for {question}"))
+}
+
+/// The rendered schema-context block of one dataset inside a system prompt:
+/// the span from its `引用名 = <name>` line to the next dataset's (or the
+/// prompt's end). Lets a test assert per-dataset sample / privacy rendering
+/// without parsing the whole prompt structurally.
+fn dataset_block<'a>(system: &'a str, name: &str) -> &'a str {
+    let marker = format!("引用名 = {name}\n");
+    let start = system
+        .find(&marker)
+        .unwrap_or_else(|| panic!("system prompt missing dataset {name}"));
+    let rest = &system[start..];
+    let end = rest[marker.len()..]
+        .find("引用名 = ")
+        .map(|i| i + marker.len())
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
+/// A no-op approval sink for the ask_with_phase tests: built-in tools classify
+/// Allow at the gateway without emitting, so its methods are unreachable.
+struct NullSink;
+impl ApprovalSink for NullSink {
+    fn emit_request(&self, _body: &ApprovalRequestBody) {}
+    fn emit_resolved(&self, _body: &ApprovalRequestBody, _response: ApprovalResponse) {}
+}
+
 #[test]
 fn ask_materializes_one_result_with_rows_and_schema() {
-    // AC: a question -> provider SQL -> executed -> result_1 materialized with
-    // the projected schema + row count. The fake returns a COUNT query, so the
-    // result is one row, one BIGINT column.
+    // AC: a question -> a materialize tool call -> executed -> result_1
+    // promoted with the projected schema + row count. The scripted model
+    // issues a COUNT query, so the result is one row, one BIGINT column.
     let mut session = session_with(&[("总共几行", r#"SELECT COUNT(*) AS n FROM "people".data"#)]);
     load_source(&mut session, &fixture("people.csv"));
 
@@ -187,16 +261,17 @@ fn read_rows_pages_a_materialized_result() {
 }
 
 #[test]
-fn ask_surfaces_the_provider_assumption_note() {
-    // ADR-0009: the optional assumption note rides the outcome, so the UI can
-    // render it as a correctable side note.
-    let provider = FakeProvider::new().scripted(
+fn ask_surfaces_the_terminal_answer_as_the_assumption_note() {
+    // The tool-calling contract carries no separate assumption field (the
+    // single-SQL JSON contract did): the model's terminal text answer rides
+    // the Materialized outcome's assumption when the turn also promoted, so
+    // the UI still renders it as a correctable side note.
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
         "数行",
-        ProviderReply::Sql {
-            sql: r#"SELECT COUNT(*) AS n FROM "people".data"#.into(),
-            viz: None,
-            assumption: Some("把 id 当作主键".into()),
-        },
+        vec![
+            Ok(materialize(r#"SELECT COUNT(*) AS n FROM "people".data"#)),
+            Ok(answer("把 id 当作主键")),
+        ],
     );
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
@@ -207,6 +282,86 @@ fn ask_surfaces_the_provider_assumption_note() {
         }
         other => panic!("expected Materialized, got {other:?}"),
     }
+}
+
+#[test]
+fn multiple_promotions_in_one_turn_land_materialized_with_the_last_as_primary() {
+    // AC #318: one question may promote several results in a single turn; the
+    // outcome is Materialized carrying the FULL promotion chain in promotion
+    // order (ADR-0084), numbering is monotonic (ADR-0022), and the LAST
+    // promotion is the turn's primary result (a later materialize supersedes
+    // earlier ones as the analysis focus) -- its SQL rides the chain tail.
+    // EVERY promotion registers in the working set.
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
+        "两步晋升",
+        vec![
+            Ok(materialize(r#"SELECT COUNT(*) AS n FROM "people".data"#)),
+            Ok(materialize("SELECT MAX(n) AS m FROM result_1")),
+            Ok(answer("完成")),
+        ],
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    match session.ask("两步晋升") {
+        TurnOutcome::Materialized { promotions, .. } => {
+            assert_eq!(
+                promotions.len(),
+                2,
+                "the outcome carries BOTH promotions in promotion order"
+            );
+            assert_eq!(
+                promotions[0].dataset.reference_name, "result_1",
+                "the first promotion is the chain head"
+            );
+            assert_eq!(
+                promotions[1].dataset.reference_name, "result_2",
+                "the last promotion is the primary result"
+            );
+            assert!(
+                promotions[1].sql.contains("MAX(n)"),
+                "the primary promotion's SQL rides the chain tail: {}",
+                promotions[1].sql
+            );
+        }
+        other => panic!("expected Materialized, got {other:?}"),
+    }
+    // Both promotions registered: result_1 AND result_2.
+    assert!(session.get("result_1").is_some(), "first promotion kept");
+    assert!(session.get("result_2").is_some(), "second promotion kept");
+}
+
+#[test]
+fn a_multi_promotion_turn_persists_every_result_into_the_recipe_chain() {
+    // C1 (ADR-0084): the recipe must capture the FULL promotion chain, not just
+    // the primary -- so resume replays every result_N. A turn that promotes
+    // result_1 then result_2 (derived FROM result_1) yields a productive chain
+    // carrying BOTH in promotion order; dropping result_1 would break the
+    // chained replay, since result_2's SQL references result_1.
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
+        "两步晋升",
+        vec![
+            Ok(materialize(r#"SELECT COUNT(*) AS n FROM "people".data"#)),
+            Ok(materialize("SELECT MAX(n) AS m FROM result_1")),
+            Ok(answer("完成")),
+        ],
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    session.ask("两步晋升");
+
+    let chain = session.build_recipe().productive_chain();
+    let names: Vec<&str> = chain.iter().map(|t| t.reference_name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["result_1", "result_2"],
+        "the recipe's productive chain carries EVERY promotion in order, so resume replays the full chain"
+    );
+    assert!(
+        chain[1].sql.contains("MAX(n)"),
+        "the primary's SQL rides the chain tail: {}",
+        chain[1].sql
+    );
 }
 
 #[test]
@@ -236,48 +391,15 @@ fn ask_materializes_a_zero_row_result_normally() {
     assert_eq!(page.total, 0);
 }
 
-// --- Viz pass-through (issue #26) -- ADR-0016/0033 -------------------------
+// --- Materialized turns are plain-table turns (ADR-0077) -------------------
 //
-// The viz spec is presentation layer (ADR-0033): the orchestrator carries the
-// provider's viz verbatim to the Materialized outcome -- it neither interprets
-// nor validates the Vega-Lite JSON. Rendering + degradation disclosure are the
-// frontend's job (ADR-0016/0033); this seam only asserts the spec survives the
-// loop intact, including a malformed one (the backend never silently drops or
-// "fixes" a spec -- degradation is the frontend's honest call).
+// The tool-calling contract carries no viz intent (the single-SQL JSON
+// contract's `viz` field is retired with it, ADR-0009 superseded): a
+// Materialized turn is always a plain table. The TurnOutcome still carries the
+// field (serde + frontend compatibility); the live path sets None.
 
 #[test]
-fn ask_carries_the_provider_viz_spec_through_to_the_outcome() {
-    // AC #26: a provider viz (whitelisted kind + Vega-Lite JSON) rides the
-    // Materialized outcome verbatim -- the loop does not touch it. The frontend
-    // later renders it (ADR-0016) or degrades with a disclosure (ADR-0033).
-    let provider = FakeProvider::new().scripted(
-        "画柱状图",
-        ProviderReply::Sql {
-            sql: r#"SELECT name, COUNT(*) AS n FROM "people".data GROUP BY name"#.into(),
-            viz: Some(VizSpec {
-                kind: ChartKind::Bar,
-                spec: "{\"mark\":{\"type\":\"bar\"},\"encoding\":{}}".into(),
-            }),
-            assumption: None,
-        },
-    );
-    let mut session = Session::with_provider(Box::new(provider)).expect("session");
-    load_source(&mut session, &fixture("people.csv"));
-
-    match session.ask("画柱状图") {
-        TurnOutcome::Materialized { viz, .. } => {
-            let v = viz.expect("viz carried through");
-            assert_eq!(v.kind, ChartKind::Bar);
-            assert_eq!(v.spec, "{\"mark\":{\"type\":\"bar\"},\"encoding\":{}}");
-        }
-        other => panic!("expected Materialized, got {other:?}"),
-    }
-}
-
-#[test]
-fn ask_with_no_viz_yields_a_none_viz_outcome() {
-    // AC #26: the default is a plain table turn -- a provider that offers no viz
-    // yields a Materialized outcome with viz=None (ADR-0033 default table).
+fn a_materialized_turn_is_always_a_plain_table_turn() {
     let mut session = session_with(&[("总数", r#"SELECT COUNT(*) AS n FROM "people".data"#)]);
     load_source(&mut session, &fixture("people.csv"));
     match session.ask("总数") {
@@ -286,48 +408,17 @@ fn ask_with_no_viz_yields_a_none_viz_outcome() {
     }
 }
 
-#[test]
-fn ask_carries_a_malformed_viz_spec_verbatim_for_the_frontend_to_degrade() {
-    // ADR-0033: viz is presentation layer -- the orchestrator does NOT validate
-    // the Vega-Lite JSON. A malformed spec rides the outcome verbatim; the
-    // frontend parses + renders it and degrades to the table with a disclosure.
-    // Asserting the garbage survives intact proves the loop never silently drops
-    // or "fixes" a spec -- degradation is the frontend's honest call, not a
-    // hidden backend scrub.
-    let provider = FakeProvider::new().scripted(
-        "坏图",
-        ProviderReply::Sql {
-            sql: "SELECT 1 AS n".into(),
-            viz: Some(VizSpec {
-                kind: ChartKind::Line,
-                spec: "not-valid-json".into(),
-            }),
-            assumption: None,
-        },
-    );
-    let mut session = Session::with_provider(Box::new(provider)).expect("session");
-    load_source(&mut session, &fixture("people.csv"));
-    match session.ask("坏图") {
-        TurnOutcome::Materialized { viz, .. } => {
-            let v = viz.expect("viz carried through");
-            assert_eq!(v.kind, ChartKind::Line);
-            assert_eq!(v.spec, "not-valid-json"); // garbage survives verbatim
-        }
-        other => panic!("expected Materialized, got {other:?}"),
-    }
-}
-
-// --- Outcome B: textual (clarify / refuse) -- ADR-0017/0018 ----------------
+// --- Outcome B: textual (agent answer / boundary refusal) -- ADR-0079 ------
 
 #[test]
-fn a_clarify_question_yields_a_textual_outcome_without_a_result() {
-    // ADR-0018: when the provider cannot confidently infer intent it asks back
-    // rather than guess. That is a textual outcome -- no SQL runs, no result_N
-    // is consumed, but the turn is still recorded (always visible).
-    let provider = FakeProvider::new().scripted(
-        "哪个名字",
-        reply_text(TextKind::Clarify, "按产品名还是客户名汇总？"),
-    );
+fn a_plain_text_answer_yields_a_textual_outcome_without_a_result() {
+    // ADR-0077/0081: a turn that ends in the model's terminal text without any
+    // promotion is a textual outcome. The tool-calling contract carries no
+    // clarify/refuse marker, so every terminal text rides TextKind::Agent --
+    // here, a clarification question. No SQL runs, no result_N is consumed,
+    // but the turn is still recorded (always visible).
+    let provider =
+        FakeProvider::new().scripted_tool_turn("哪个名字", answer("按产品名还是客户名汇总？"));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
 
@@ -337,7 +428,7 @@ fn a_clarify_question_yields_a_textual_outcome_without_a_result() {
             body,
             assumption,
         } => {
-            assert_eq!(text_kind, TextKind::Clarify);
+            assert_eq!(text_kind, TextKind::Agent);
             assert_eq!(body, "按产品名还是客户名汇总？");
             assert!(assumption.is_none());
         }
@@ -347,12 +438,14 @@ fn a_clarify_question_yields_a_textual_outcome_without_a_result() {
 }
 
 #[test]
-fn a_refuse_question_yields_a_textual_outcome() {
-    // ADR-0017: an out-of-scope request is refused honestly (no faked SQL). The
-    // refusal is a textual outcome distinct from a clarify.
-    let provider = FakeProvider::new().scripted(
+fn a_boundary_refusal_rides_a_textual_outcome() {
+    // ADR-0079: the default skill set preserves the ADR-0017 boundary as
+    // prompt-driven behavior -- an out-of-scope request is refused honestly by
+    // the model's terminal text (no faked tool calls), riding a Textual
+    // outcome of the Agent kind (the contract has no structural refuse marker).
+    let provider = FakeProvider::new().scripted_tool_turn(
         "预测下个月销量",
-        reply_text(TextKind::Refuse, "预测/时序建模不在 v1 能力范围内"),
+        answer("预测/时序建模不在 v1 能力范围内，可按季度汇总历史销量看趋势"),
     );
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
@@ -361,91 +454,100 @@ fn a_refuse_question_yields_a_textual_outcome() {
         TurnOutcome::Textual {
             text_kind, body, ..
         } => {
-            assert_eq!(text_kind, TextKind::Refuse);
+            assert_eq!(text_kind, TextKind::Agent);
             assert!(body.contains("不在 v1 能力范围"));
         }
         other => panic!("expected Textual, got {other:?}"),
     }
 }
 
-#[test]
-fn a_textual_outcome_carries_the_assumption_note() {
-    // ADR-0009/0018: the assumption side note rides the textual outcome too
-    // (e.g. which interpretation a clarify is resolving).
-    let provider = FakeProvider::new().scripted(
-        "汇总",
-        ProviderReply::Text {
-            kind: TextKind::Clarify,
-            body: "哪个维度？".into(),
-            assumption: Some("当前表有多个可汇总列".into()),
-        },
-    );
-    let mut session = Session::with_provider(Box::new(provider)).expect("session");
-    load_source(&mut session, &fixture("people.csv"));
-
-    match session.ask("汇总") {
-        TurnOutcome::Textual { assumption, .. } => {
-            assert_eq!(assumption.as_deref(), Some("当前表有多个可汇总列"));
-        }
-        other => panic!("expected Textual, got {other:?}"),
-    }
-}
-
-// --- Outcome C: failed -- single retry budget (ADR-0028) -------------------
+// --- Outcome C: failed -- self-correction + execution caps (ADR-0077/0081) -
 
 #[test]
-fn retry_recovers_within_the_budget_for_a_contract_violation() {
-    // ADR-0028: a malformed contract violation consumes the shared budget and
-    // retries. [Err, Err, Ok] -> attempts Err, Err, Ok -> Materialized within
-    // the default budget of 2 (3 total attempts). Pinning recovery at the 3rd
-    // attempt proves the budget is at least 2 retries.
-    let provider = FakeProvider::new().scripted_seq(
-        "抖一下",
-        vec![
-            Err(ProviderError::Unavailable("malformed".into())),
-            Err(ProviderError::Unavailable("malformed".into())),
-            Ok(reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#)),
-        ],
-    );
-    let mut session = Session::with_provider(Box::new(provider)).expect("session");
-    load_source(&mut session, &fixture("people.csv"));
-
-    let (name, rows, _) = materialized(session.ask("抖一下"));
-    assert_eq!(name, "result_1"); // recovered -> result materialized
-    assert_eq!(rows, 1);
-}
-
-#[test]
-fn retry_recovers_when_bad_sql_is_then_fixed() {
-    // ADR-0028: a schema/runtime execution error shares the SAME budget as a
-    // contract violation. [bad SQL, good SQL] -> attempt 1 fails to execute,
-    // attempt 2 materializes. Confirms execution errors enter the single loop.
-    let provider = FakeProvider::new().scripted_seq(
+fn tool_error_routes_back_for_self_correction_and_recovers() {
+    // ADR-0077: a tool-level SQL error (bad column) routes back to the model,
+    // which rewrites the SQL and succeeds. Blind retry is abolished -- the
+    // AGENT drives the correction (second call), not a hidden retry loop.
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
         "先错后对",
         vec![
-            Ok(reply_sql(r#"SELECT no_such_col FROM "people".data"#)),
-            Ok(reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#)),
+            Ok(materialize(r#"SELECT no_such_col FROM "people".data"#)),
+            Ok(materialize(r#"SELECT COUNT(*) AS n FROM "people".data"#)),
+            Ok(answer("改对了")),
         ],
     );
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
 
     let (name, _, _) = materialized(session.ask("先错后对"));
-    assert_eq!(name, "result_1"); // second attempt materialized
+    assert_eq!(name, "result_1"); // the corrected call promoted
+}
+
+#[test]
+fn a_transient_provider_fault_fails_the_turn_without_retry() {
+    // ADR-0077/0081: a transient provider fault surfaced after the adapter's
+    // own HTTP retry is an honest turn failure -- NOT blindly retried by the
+    // loop and NOT fed to the model (transport errors never reach the agent).
+    // One round-trip, an Execute failure carrying the transport detail.
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
+        "抖一下",
+        vec![Err(ProviderError::Unavailable("connection reset".into()))],
+    );
+    let captured = provider.captured_tool_turns();
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    let detail = match failed_failure(session.ask("抖一下")) {
+        TurnFailure::Execute { detail } => detail,
+        other => panic!("expected Execute, got {other:?}"),
+    };
+    assert!(detail.contains("connection reset"), "got {detail:?}");
+    assert_eq!(
+        captured.lock().expect("capture lock").len(),
+        1,
+        "no blind retry -- exactly one round-trip"
+    );
+    assert!(session.get("result_1").is_none());
+}
+
+#[test]
+fn step_cap_exhaustion_lands_a_failed_turn() {
+    // ADR-0081 execution-level safety net: an agent that never converges
+    // (keeps exploring) is aborted by the step cap (default 24) as a Failed
+    // turn carrying an honest non-convergence detail. The wall-clock watchdog
+    // (Cancelled) shares the cancel path; its deterministic coverage lives at
+    // the agent-loop unit seam (the 120s default is not tunable through the
+    // Session facade).
+    let provider = FakeProvider::new().scripted_tool_turn("不收敛", explore("SELECT 1"));
+    let captured = provider.captured_tool_turns();
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+
+    let detail = match failed_failure(session.ask("不收敛")) {
+        TurnFailure::Execute { detail } => detail,
+        other => panic!("expected Execute, got {other:?}"),
+    };
+    assert!(detail.contains("did not converge"), "got {detail:?}");
+    assert_eq!(
+        captured.lock().expect("capture lock").len(),
+        24, // ADR-0081 DEFAULT_STEP_CAP
+        "ran exactly the step-cap round-trips"
+    );
+    assert!(session.get("result_1").is_none());
 }
 
 // --- Always-visible thread + result_N numbering (ADR-0028/0039) ------------
 
 #[test]
 fn non_result_outcomes_do_not_advance_result_numbering() {
-    // ADR-0028: only a result advances result_N. A clarify turn occupies a
+    // ADR-0028: only a promotion advances result_N. A textual turn occupies a
     // thread slot but consumes no number -- the next result is result_1, not
     // result_2.
     let provider = FakeProvider::new()
-        .scripted("先澄清", reply_text(TextKind::Clarify, "哪个维度？"))
-        .scripted(
+        .scripted_tool_turn("先澄清", answer("哪个维度？"))
+        .scripted_tool_turn_seq(
             "再查询",
-            reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+            productive(r#"SELECT COUNT(*) AS n FROM "people".data"#),
         );
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
@@ -463,14 +565,16 @@ fn every_turn_is_recorded_in_the_conversation_thread_in_order() {
     // ADR-0028/0039: every turn -- result, textual, failed alike -- is always
     // visible in the thread, in order, labeled by the verbatim question.
     let provider = FakeProvider::new()
-        .scripted(
+        .scripted_tool_turn_seq(
             "查行数",
-            reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+            productive(r#"SELECT COUNT(*) AS n FROM "people".data"#),
         )
-        .scripted("哪个名字", reply_text(TextKind::Clarify, "哪个维度？"))
-        .scripted_seq(
+        .scripted_tool_turn("哪个名字", answer("哪个维度？"))
+        // A non-self-correcting failing call: clamped, re-issued every
+        // round-trip until the step cap fails the turn.
+        .scripted_tool_turn(
             "坏查询",
-            vec![Ok(reply_sql(r#"SELECT no_such_col FROM "people".data"#))],
+            materialize(r#"SELECT no_such_col FROM "people".data"#),
         );
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
@@ -491,7 +595,7 @@ fn every_turn_is_recorded_in_the_conversation_thread_in_order() {
     assert!(matches!(
         thread[1].outcome,
         TurnOutcome::Textual {
-            text_kind: TextKind::Clarify,
+            text_kind: TextKind::Agent,
             ..
         }
     ));
@@ -499,63 +603,26 @@ fn every_turn_is_recorded_in_the_conversation_thread_in_order() {
     assert!(matches!(thread[2].outcome, TurnOutcome::Failed { .. }));
 }
 
-#[test]
-fn budget_exhaustion_keeps_each_distinct_failure() {
-    // ADR-0028 (honest failure): when the retry budget exhausts through a mix
-    // of distinct failures, the failed turn surfaces every distinct one, not
-    // just the last. Without this, a SQL execution error (the actionable kind)
-    // would be silently overwritten by a later transient Unavailable. The
-    // consecutive duplicate Unavailable is deduped so it isn't repeated.
-    let provider = FakeProvider::new().scripted_seq(
-        "又错又抖",
-        vec![
-            // attempt 1: a SQL the engine rejects
-            Ok(reply_sql(r#"SELECT no_such_col FROM "people".data"#)),
-            // attempts 2-3: a transient contract violation (consecutive dup)
-            Err(ProviderError::Unavailable("malformed".into())),
-            Err(ProviderError::Unavailable("malformed".into())),
-        ],
-    );
-    let mut session = Session::with_provider(Box::new(provider)).expect("session");
-    load_source(&mut session, &fixture("people.csv"));
-
-    let detail = match failed_failure(session.ask("又错又抖")) {
-        TurnFailure::Execute { detail } => detail,
-        other => panic!("expected Execute, got {other:?}"),
-    };
-    // The SQL error survives -- not overwritten by the later Unavailable.
-    assert!(detail.contains("no_such_col"), "got {detail:?}");
-    // The transient provider failure is also present, distinct from the SQL error.
-    assert!(detail.contains("provider call failed"), "got {detail:?}");
-    assert!(session.get("result_1").is_none());
-}
-
 // --- Window assembly + privacy payload wiring (issue #24) -------------------
 //
-// The window assembler is observed purely through the assembled payload the fake
-// provider receives -- the highest seam (PRD testing philosophy: assert the
-// payload shape, never prompt-string assembly details). The fake captures every
-// request; the last entry is the turn under inspection.
-
-/// Borrow a dataset's payload entry by reference name, panicking if absent.
-fn dataset_in<'a>(payload: &'a ProviderRequest, name: &str) -> &'a DatasetRef {
-    payload
-        .datasets
-        .iter()
-        .find(|d| d.reference_name == name)
-        .unwrap_or_else(|| panic!("payload missing dataset {name}"))
-}
+// The window assembler is observed through the assembled tool-turn request the
+// fake provider captures -- the highest seam (PRD testing philosophy: assert
+// the payload shape). The windowed context rides the system prompt's schema
+// block (datasets + samples + active pointer) and the message array (history
+// turns + the asking question); the tool table advertises the four built-ins.
 
 #[test]
 fn window_assembler_windows_history_and_samples_via_fake_provider() {
-    // AC #24: drive N>20 turns through the real loop, then capture the assembled
-    // payload at the fake provider and assert the window/summary/sample shape.
+    // AC #24: drive N>20 turns through the real loop, then capture the
+    // assembled tool-turn request at the fake provider and assert the
+    // window/summary/sample shape on the system prompt + messages.
     let mut provider = FakeProvider::new();
     for k in 1..=21u8 {
-        provider = provider.scripted(&format!("turn {k}"), reply_sql("SELECT 1 AS n"));
+        provider =
+            provider.scripted_tool_turn_seq(&format!("turn {k}"), productive("SELECT 1 AS n"));
     }
-    provider = provider.scripted("probe", reply_sql("SELECT 1 AS n"));
-    let captured = provider.captured();
+    provider = provider.scripted_tool_turn_seq("probe", productive("SELECT 1 AS n"));
+    let captured = provider.captured_tool_turns();
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
 
@@ -566,69 +633,84 @@ fn window_assembler_windows_history_and_samples_via_fake_provider() {
     session.ask("probe");
 
     let buf = captured.lock().expect("capture lock");
-    let payload = buf.last().expect("probe request captured");
-    assert_eq!(payload.question, "probe");
+    let payload = request_for(&buf, "probe");
 
-    // 21 prior turns: the oldest (turn 1 -> result_1) falls out of the N=20
-    // window and becomes a verbatim summary; the recent 20 stay full.
-    assert_eq!(payload.history.len(), 21);
+    // The built-in tool table (ADR-0076) is advertised every turn.
+    let tool_names: Vec<&str> = payload.tools.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(
-        payload
-            .history
-            .iter()
-            .filter(|t| matches!(t, TurnPayload::Summary { .. }))
-            .count(),
-        1
+        tool_names,
+        vec!["explore", "materialize", "describe", "sample"]
     );
-    assert_eq!(
-        payload
-            .history
-            .iter()
-            .filter(|t| matches!(t, TurnPayload::Full { .. }))
-            .count(),
-        20
+
+    // 21 prior turns + the asking question: each prior turn ships a user
+    // message + an assistant message (its rendered prior response); the asking
+    // question closes the array.
+    assert_eq!(payload.messages.len(), 21 * 2 + 1);
+    assert!(
+        matches!(&payload.messages[0], ToolTurnMessage::User { content } if content == "turn 1")
     );
-    match &payload.history[0] {
-        TurnPayload::Summary {
-            question_excerpt,
-            result,
-        } => {
-            assert_eq!(question_excerpt, "turn 1"); // short -> verbatim, no truncation
-            assert_eq!(result.as_deref(), Some("result_1")); // retargetable by name
+    assert!(matches!(
+        payload.messages.last(),
+        Some(ToolTurnMessage::User { content }) if content == "probe"
+    ));
+
+    // The oldest turn (turn 1 -> result_1) fell out of the N=20 window: its
+    // assistant message is the verbatim summary note (ADR-0039), retargetable
+    // by result name.
+    match &payload.messages[1] {
+        ToolTurnMessage::Assistant { text, tool_calls } => {
+            let text = text.as_deref().unwrap_or_default();
+            assert!(
+                text.contains("result_1"),
+                "summary names its result: {text}"
+            );
+            assert!(tool_calls.is_empty(), "history turns carry no tool calls");
         }
-        other => panic!("oldest turn should be Summary, got {other:?}"),
+        other => panic!("expected Assistant summary, got {other:?}"),
+    }
+    // A recent turn (turn 21, in-window) ships its rendered response including
+    // the verbatim SQL (ADR-0023 point 1: the model sees its own prior SQL).
+    match &payload.messages[41] {
+        ToolTurnMessage::Assistant { text, .. } => {
+            let text = text.as_deref().unwrap_or_default();
+            assert!(text.contains("result_21"), "got {text}");
+            assert!(
+                text.contains("SELECT 1 AS n"),
+                "prior SQL rides verbatim: {text}"
+            );
+        }
+        other => panic!("expected Assistant response, got {other:?}"),
     }
 
-    // Source always ships full schema + samples (ADR-0023); out-of-window
-    // result_1 ships no sample, in-window results do (ADR-0026).
-    let people = dataset_in(payload, "people");
-    assert_eq!(people.columns.len(), 5); // id,name,joined,active,score
-    assert!(people.sample.is_some());
-    assert_eq!(dataset_in(payload, "result_1").sample, None); // turn 1 is far
-    assert!(dataset_in(payload, "result_2").sample.is_some()); // in-window
-    assert!(dataset_in(payload, "result_21").sample.is_some()); // most recent
-
-    // ADR-0023 point 1: a recent materialized turn ships its verbatim SQL so the
-    // provider sees its own prior SQL. The most recent turn (turn 21) is Full;
-    // its response carries the exact SQL the fake replied with.
-    match &payload.history[20] {
-        TurnPayload::Full { response, .. } => match response {
-            ResponsePayload::Materialized { sql, .. } => {
-                assert_eq!(sql.as_deref(), Some("SELECT 1 AS n"));
-            }
-            other => panic!("expected Materialized response, got {other:?}"),
-        },
-        other => panic!("recent turn should be Full, got {other:?}"),
-    }
+    // Schema context (system prompt): the active pointer tracks the most
+    // recent result; the source always ships samples (ADR-0023); out-of-window
+    // result_1 ships schema only, in-window results ship samples (ADR-0026).
+    assert!(payload.system.contains("active = result_21"));
+    let people = dataset_block(&payload.system, "people");
+    assert!(people.contains("id: BIGINT"), "source schema always full");
+    assert!(
+        people.contains("样本（前几行"),
+        "source always ships samples"
+    );
+    let result_1 = dataset_block(&payload.system, "result_1");
+    assert!(
+        result_1.contains("仅知 schema"),
+        "far result withholds samples"
+    );
+    let result_2 = dataset_block(&payload.system, "result_2");
+    assert!(
+        result_2.contains("样本（前几行"),
+        "in-window result ships samples"
+    );
 }
 
 #[test]
 fn privacy_samples_off_withholds_a_sources_cells() {
     // AC #24: DatasetPrivacy.send_samples=false prunes every sample cell of that
     // dataset from the payload (ADR-0011) -- the controls now "take effect" on
-    // what is actually sent, not just stored.
-    let provider = FakeProvider::new().scripted("q", reply_sql("SELECT 1 AS n"));
-    let captured = provider.captured();
+    // what is actually sent (the system prompt's schema block), not just stored.
+    let provider = FakeProvider::new().scripted_tool_turn_seq("q", productive("SELECT 1 AS n"));
+    let captured = provider.captured_tool_turns();
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
     session.set_privacy(
@@ -641,20 +723,18 @@ fn privacy_samples_off_withholds_a_sources_cells() {
 
     session.ask("q");
     let buf = captured.lock().expect("lock");
-    let payload = buf.last().expect("captured");
-    let people = dataset_in(payload, "people");
-    assert_eq!(people.sample, None); // no cells ship
-                                     // schema still full -- only values are withheld.
-    assert_eq!(people.columns.len(), 5);
-    assert!(people.columns.iter().all(|c| c.name.is_some()));
+    let people = dataset_block(&request_for(&buf, "q").system, "people");
+    assert!(people.contains("仅知 schema"), "no cells ship: {people}");
+    // schema still full -- only values are withheld.
+    assert!(people.contains("id: BIGINT"));
 }
 
 #[test]
 fn privacy_type_only_column_hides_name_and_values() {
     // AC #24: a type-only column ships its type but neither its name nor any
     // sample value (ADR-0011). The "name" column of people.csv is VARCHAR.
-    let provider = FakeProvider::new().scripted("q", reply_sql("SELECT 1 AS n"));
-    let captured = provider.captured();
+    let provider = FakeProvider::new().scripted_tool_turn_seq("q", productive("SELECT 1 AS n"));
+    let captured = provider.captured_tool_turns();
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
     session.set_privacy(
@@ -667,34 +747,37 @@ fn privacy_type_only_column_hides_name_and_values() {
 
     session.ask("q");
     let buf = captured.lock().expect("lock");
-    let payload = buf.last().expect("captured");
-    let people = dataset_in(payload, "people");
-    // Exactly one column is name-redacted, and it is the VARCHAR "name" column.
-    let redacted: Vec<_> = people.columns.iter().filter(|c| c.name.is_none()).collect();
-    assert_eq!(redacted.len(), 1);
-    assert_eq!(redacted[0].canonical_type, "VARCHAR");
-    // Sample cells: id ships, name (index 1) withheld at its position.
-    let row = people.sample.as_ref().unwrap().first().unwrap();
-    assert_eq!(row[0], Some("1".to_string())); // id
-    assert_eq!(row[1], None); // name -- type-only, value withheld
+    let people = dataset_block(&request_for(&buf, "q").system, "people");
+    // The VARCHAR column ships type-only: its name is hidden.
+    assert!(people.contains("_: VARCHAR (仅类型)"), "got {people}");
+    assert!(!people.contains("name: VARCHAR"), "name leaks: {people}");
+    // Sample cells: id ships; the type-only cell is withheld at its position.
+    assert!(
+        people.contains("| 1 | NULL |"),
+        "id ships, name withheld: {people}"
+    );
 }
 
 // --- Engine guardrails (issue #25) -- ADR-0005 ----------------------------
 //
-// Black-box through the ask -> outcome seam: a fake provider returns SQL that
-// touches a guardrail, and we observe the engine refuse it (a Failed outcome)
-// with the source intact. The guarantees are engine-level -- READ_ONLY attach,
-// the `CREATE TABLE result_N AS <query>` wrapping (a non-SELECT statement is a
-// parser error before it can touch a source or the filesystem), and resource
-// PRAGMAs -- never SQL text filtering (ADR-0005).
+// Black-box through the ask -> outcome seam: the scripted model issues SQL
+// that touches a guardrail, and we observe the engine refuse it with the
+// source intact. Under the agent contract (ADR-0077) the refusal routes back
+// to the model as a tool error; a model that never self-corrects (the script
+// clamps to the same failing call) exhausts the step cap and the turn fails
+// honestly. The guarantees are engine-level -- READ_ONLY attach, the
+// `CREATE TABLE result_N AS <query>` wrapping (a non-SELECT statement is a
+// parser error before it can touch a source or the filesystem), the sandbox
+// lockdown (read_* closure), and resource caps -- never SQL text filtering.
 
 #[test]
 fn all_mutating_statements_against_the_source_are_rejected() {
     // AC1: a turn that tries to mutate a source Dataset (DROP/ALTER/INSERT/
     // UPDATE/DELETE) is rejected by the engine, and the source is unchanged.
-    // The DML is embedded inside `CREATE TABLE result_N AS <query>`, where it is
-    // a parser error; the READ_ONLY attach is the second layer. Each variant
-    // fails and leaves people at its original 5 rows.
+    // The DML is embedded inside `CREATE TABLE result_N AS <query>`, where it
+    // is a parser error; the READ_ONLY attach is the second layer. Each
+    // variant routes back as a tool error; the non-correcting script exhausts
+    // the step cap (Failed), and people keeps its original 5 rows.
     let mutating = [
         r#"DROP TABLE "people".data"#,
         r#"DELETE FROM "people".data"#,
@@ -703,7 +786,8 @@ fn all_mutating_statements_against_the_source_are_rejected() {
         r#"ALTER TABLE "people".data DROP COLUMN name"#,
     ];
     for sql in mutating {
-        let mut session = session_with(&[("改源", sql)]);
+        let provider = FakeProvider::new().scripted_tool_turn("改源", materialize(sql));
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
         load_source(&mut session, &fixture("people.csv"));
         let reason = failed_failure(session.ask("改源"));
         assert!(
@@ -716,17 +800,17 @@ fn all_mutating_statements_against_the_source_are_rejected() {
             5,
             "source mutated by {sql}"
         );
-        assert!(session.get("result_1").is_none()); // nothing materialized
+        assert!(session.get("result_1").is_none()); // nothing promoted
     }
 }
 
 #[test]
 fn filesystem_statements_are_rejected_by_the_wrapping() {
-    // AC2: COPY / ATTACH / INSTALL / LOAD are statements, not query expressions,
-    // so embedding them inside `CREATE TABLE ... AS <query>` is a parser error
-    // (ADR-0005 engine-level, not text filtering). The turn fails; nothing is
-    // written to disk, attached, or loaded. (The remaining read_* table functions
-    // in a SELECT need a sandboxed connection -- tracked separately.)
+    // AC2: COPY / ATTACH / INSTALL / LOAD are statements, not query
+    // expressions, so embedding them inside `CREATE TABLE ... AS <query>` is a
+    // parser error (ADR-0005 engine-level, not text filtering). The tool error
+    // routes back; the non-correcting script fails the turn at the step cap.
+    // Nothing is written to disk, attached, or loaded.
     let stmts = [
         "COPY result_1 TO 'leak.csv'",
         "ATTACH ':memory:' AS leak",
@@ -734,7 +818,8 @@ fn filesystem_statements_are_rejected_by_the_wrapping() {
         "LOAD httpfs",
     ];
     for sql in stmts {
-        let mut session = session_with(&[("fs", sql)]);
+        let provider = FakeProvider::new().scripted_tool_turn("fs", materialize(sql));
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
         load_source(&mut session, &fixture("people.csv"));
         let reason = failed_failure(session.ask("fs"));
         assert!(
@@ -745,30 +830,24 @@ fn filesystem_statements_are_rejected_by_the_wrapping() {
 }
 
 #[test]
-fn a_query_over_the_row_cap_aborts_with_a_resource_error_without_retrying() {
-    // AC3/AC4: a result exceeding the row-count ceiling is aborted with a
-    // resource error (ADR-0005 L3). Unlike a schema/runtime error it does NOT
-    // enter the retry loop -- a scripted second attempt that would succeed is
-    // never reached, proving the resource path fails immediately (ADR-0028:
-    // resource caps stay out of the loop). Contrast with
-    // `a_persistently_bad_sql_exhausts_the_budget_and_fails` (schema -> retried).
-    let provider = FakeProvider::new().scripted_seq(
-        "大查询",
-        vec![
-            Ok(reply_sql("SELECT * FROM range(10)")), // 10 rows > cap of 3
-            Ok(reply_sql("SELECT 1 AS n")),           // would succeed -- never reached
-        ],
-    );
+fn a_query_over_the_row_cap_is_refused_and_never_promotes() {
+    // AC3/AC4: a result exceeding the row-count ceiling is refused by the
+    // materializer's governor (ADR-0005 L3). Under the agent contract the
+    // refusal routes back as a tool error (blind retry is abolished); the
+    // non-correcting script exhausts the step cap, and the over-cap result
+    // never promotes (the sandbox drops before admin is touched).
+    let provider =
+        FakeProvider::new().scripted_tool_turn("大查询", materialize("SELECT * FROM range(10)"));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     session.set_result_row_cap(3); // small cap for a deterministic hit
     load_source(&mut session, &fixture("people.csv"));
 
     let failure = failed_failure(session.ask("大查询"));
     assert!(
-        matches!(failure, TurnFailure::Resource { .. }),
+        matches!(failure, TurnFailure::Execute { .. }),
         "got {failure:?}"
     );
-    assert!(session.get("result_1").is_none()); // over-cap result rolled back
+    assert!(session.get("result_1").is_none()); // over-cap result never promoted
 }
 
 #[test]
@@ -784,15 +863,14 @@ fn a_query_under_the_row_cap_materializes_normally() {
 }
 
 #[test]
-fn a_read_function_into_arbitrary_disk_aborts_with_a_resource_error_without_retrying() {
-    // AC2 (issue #25, read_* closure): a SELECT calling a read_* table function
-    // (read_csv_auto / read_parquet / read_json_auto) would let the LLM read
-    // arbitrary disk. The sandbox runs provider SQL with LocalFileSystem
-    // disabled, so the engine refuses with "disabled by configuration" --
-    // classified Resource (ADR-0005/0028), which aborts WITHOUT retrying. A
-    // scripted second reply that would succeed is never reached, proving the
-    // resource path fails immediately. Contrast with the COPY/ATTACH statement
-    // test (a parser error -> Runtime -> retried) and the row-cap test.
+fn a_read_function_into_arbitrary_disk_is_refused_and_never_promotes() {
+    // AC2 (issue #25, read_* closure): a SELECT calling a read_* table
+    // function (read_csv_auto / read_parquet / read_json_auto) would let the
+    // model read arbitrary disk. The sandbox runs provider SQL with
+    // LocalFileSystem disabled, so the engine refuses with "disabled by
+    // configuration" -- a tool error that routes back to the model (ADR-0077).
+    // The non-correcting script exhausts the step cap; nothing is ever read
+    // into a result.
     //
     // The leak target is a real temp file carrying a sentinel secret so the
     // assertion is concrete: had the sandbox not blocked read_csv_auto, the
@@ -804,104 +882,91 @@ fn a_read_function_into_arbitrary_disk_aborts_with_a_resource_error_without_retr
         "SELECT secret FROM read_csv_auto('{}')",
         leak.to_string_lossy()
     );
-    let provider = FakeProvider::new().scripted_seq(
-        "leak",
-        vec![
-            Ok(reply_sql(&leak_sql)),       // blocked -> Resource, no retry
-            Ok(reply_sql("SELECT 1 AS n")), // would succeed -- never reached
-        ],
-    );
+    let provider = FakeProvider::new().scripted_tool_turn("leak", materialize(&leak_sql));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
 
     let failure = failed_failure(session.ask("leak"));
     assert!(
-        matches!(failure, TurnFailure::Resource { .. }),
-        "read_* should be blocked as a resource error, got {failure:?}"
+        matches!(failure, TurnFailure::Execute { .. }),
+        "read_* refusal rides the step-cap Failed turn, got {failure:?}"
     );
-    // Nothing materialized: the over-disk read never produced a result.
+    // Nothing promoted: the over-disk read never produced a result.
     assert!(session.get("result_1").is_none());
 }
 
 // --- Active dataset resolution + natural-language redirect (issue #27) -----
 //
 // ADR-0010/0022: the dataset a question targets is resolved implicitly. The
-// default is the previous step's intermediate result (or the most-recent source
-// at session start); the user can redirect by natural language ("在原始数据上").
-// No UI "selection" control exists -- the WorkingSetList click only picks which
-// detail pane to show, never the query target. The contract established here:
-// the payload carries `active` (the default hint), and the provider may target
-// any dataset by name. The real LLM's implicit resolution lands in #8; this
-// slice pins the contract via the scripted fake and observes it at the ask ->
-// outcome seam (captured payload.active + the materialized outcome's target).
+// default is the previous step's intermediate result (or the most-recent
+// source at session start); the user can redirect by natural language
+// ("在原始数据上"). The resolved default rides the system prompt's schema
+// context (`active = <name>`); the model may target any dataset by name in
+// its tool calls. Observed at the ask -> outcome seam via the captured
+// tool-turn request + the materialized outcome's target.
 
 #[test]
 fn active_defaults_to_the_most_recent_source_at_session_start() {
-    // AC1/AC6: with no turns yet, the payload's `active` is the most-recently-
-    // uploaded source (ADR-0022 active default). Two sources loaded -> the
-    // second is active; both sit in the shared namespace.
-    let provider = FakeProvider::new().scripted("探针", reply_sql("SELECT 1 AS n"));
-    let captured = provider.captured();
+    // AC1/AC6: with no turns yet, the schema context's `active` is the
+    // most-recently-uploaded source (ADR-0022 active default). Two sources
+    // loaded -> the second is active; both sit in the shared namespace.
+    let provider = FakeProvider::new().scripted_tool_turn_seq("探针", productive("SELECT 1 AS n"));
+    let captured = provider.captured_tool_turns();
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
     load_source(&mut session, &fixture("orders.csv")); // most recent upload
 
     session.ask("探针");
-    let payload = captured
-        .lock()
-        .expect("lock")
-        .last()
-        .expect("captured")
-        .clone();
-    assert_eq!(payload.active.as_deref(), Some("orders"));
+    let buf = captured.lock().expect("lock");
+    let system = &request_for(&buf, "探针").system;
+    assert!(system.contains("active = orders"), "active pointer missing");
     // Multi-dataset working set: both sources coexist + referenceable.
-    assert!(payload
-        .datasets
-        .iter()
-        .any(|d| d.reference_name == "people"));
-    assert!(payload
-        .datasets
-        .iter()
-        .any(|d| d.reference_name == "orders"));
+    assert!(system.contains("引用名 = people"));
+    assert!(system.contains("引用名 = orders"));
     assert!(session.get("people").is_some());
     assert!(session.get("orders").is_some());
 }
 
 #[test]
 fn active_defaults_to_the_previous_result_after_a_turn() {
-    // AC2: once a result exists, the next question's payload defaults `active`
-    // to the most recent prior result ("上一步的中间结果"), not the source.
+    // AC2: once a result exists, the next question's schema context defaults
+    // `active` to the most recent prior result ("上一步的中间结果"), not the
+    // source.
     let provider = FakeProvider::new()
-        .scripted(
+        .scripted_tool_turn_seq(
             "第一步",
-            reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+            productive(r#"SELECT COUNT(*) AS n FROM "people".data"#),
         )
-        .scripted("第二步", reply_sql("SELECT COUNT(*) AS m FROM result_1"));
-    let captured = provider.captured();
+        .scripted_tool_turn_seq("第二步", productive("SELECT COUNT(*) AS m FROM result_1"));
+    let captured = provider.captured_tool_turns();
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
 
     session.ask("第一步"); // -> result_1
-    session.ask("第二步"); // payload for this turn
+    session.ask("第二步"); // assembled request for this turn
 
-    let payloads = captured.lock().expect("lock");
-    assert_eq!(payloads[0].active.as_deref(), Some("people")); // before any result
-    assert_eq!(payloads[1].active.as_deref(), Some("result_1")); // after result_1
+    let buf = captured.lock().expect("lock");
+    assert!(request_for(&buf, "第一步")
+        .system
+        .contains("active = people"));
+    assert!(request_for(&buf, "第二步")
+        .system
+        .contains("active = result_1"));
 }
 
 #[test]
 fn active_stays_on_the_last_result_across_a_textual_turn() {
-    // AC2 edge: a textual turn produces no intermediate result, so the resolved
-    // active stays at the most recent RESULT (result_1), not the most recent
-    // turn. The next question still defaults to result_1.
+    // AC2 edge: a textual turn produces no intermediate result, so the
+    // resolved active stays at the most recent RESULT (result_1), not the most
+    // recent turn. The next question still defaults to result_1.
     let provider = FakeProvider::new()
-        .scripted(
+        .scripted_tool_turn_seq(
             "第一步",
-            reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+            productive(r#"SELECT COUNT(*) AS n FROM "people".data"#),
         )
-        .scripted("澄清", reply_text(TextKind::Clarify, "哪个维度？"))
-        .scripted("跟进", reply_sql("SELECT COUNT(*) AS m FROM result_1"));
-    let captured = provider.captured();
+        .scripted_tool_turn("澄清", answer("哪个维度？"))
+        .scripted_tool_turn_seq("跟进", productive("SELECT COUNT(*) AS m FROM result_1"));
+    let captured = provider.captured_tool_turns();
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
 
@@ -909,22 +974,24 @@ fn active_stays_on_the_last_result_across_a_textual_turn() {
     session.ask("澄清"); // textual -- no result
     session.ask("跟进"); // defaults active to result_1 (still the last result)
 
-    let payloads = captured.lock().expect("lock");
-    assert_eq!(payloads[2].active.as_deref(), Some("result_1"));
+    let buf = captured.lock().expect("lock");
+    assert!(request_for(&buf, "跟进")
+        .system
+        .contains("active = result_1"));
 }
 
 #[test]
 fn a_default_follow_up_targets_the_resolved_active_result() {
-    // AC6 (default path): the provider's SQL targets the resolved active
-    // (result_1) and materializes a new result from it. result_1 holds one row
-    // (a COUNT), so counting it yields 1 -- proving the turn acted on result_1,
-    // not the 5-row source.
+    // AC6 (default path): the model's SQL targets the resolved active
+    // (result_1) and promotes a new result from it. result_1 holds one row
+    // (a COUNT), so counting it yields 1 -- proving the turn acted on
+    // result_1, not the 5-row source.
     let provider = FakeProvider::new()
-        .scripted(
+        .scripted_tool_turn_seq(
             "源计数",
-            reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+            productive(r#"SELECT COUNT(*) AS n FROM "people".data"#),
         )
-        .scripted("结果计数", reply_sql("SELECT COUNT(*) AS m FROM result_1"));
+        .scripted_tool_turn_seq("结果计数", productive("SELECT COUNT(*) AS m FROM result_1"));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
 
@@ -938,25 +1005,23 @@ fn a_default_follow_up_targets_the_resolved_active_result() {
 
 #[test]
 fn a_natural_language_redirect_targets_the_named_source_not_the_default() {
-    // AC3/AC6 (redirect path): the user says "在原始数据上重算" -- the provider's
+    // AC3/AC6 (redirect path): the user says "在原始数据上重算" -- the model's
     // SQL targets the source, not the default active (result_1). The contract:
-    // `active` is a default hint; the provider may target any dataset by name.
-    // Real LLM implicit resolution lands in #8; the fake simulates it by
-    // scripting source-targeting SQL for the redirect question.
+    // `active` is a default hint; the model may target any dataset by name.
     //
-    // Observable two ways: (1) the payload's `active` is STILL result_1 -- the
-    // redirect happens in the provider's SQL, not by moving the pointer; (2) the
-    // outcome read the 5-row source (count = 5), not result_1 (which would be 1).
+    // Observable two ways: (1) the schema context's `active` is STILL result_1
+    // -- the redirect happens in the tool-call SQL, not by moving the pointer;
+    // (2) the outcome read the 5-row source (count = 5), not result_1 (1).
     let provider = FakeProvider::new()
-        .scripted(
+        .scripted_tool_turn_seq(
             "源计数",
-            reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+            productive(r#"SELECT COUNT(*) AS n FROM "people".data"#),
         )
-        .scripted(
+        .scripted_tool_turn_seq(
             "在原始数据上重算",
-            reply_sql(r#"SELECT COUNT(*) AS k FROM "people".data"#),
+            productive(r#"SELECT COUNT(*) AS k FROM "people".data"#),
         );
-    let captured = provider.captured();
+    let captured = provider.captured_tool_turns();
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
 
@@ -964,9 +1029,11 @@ fn a_natural_language_redirect_targets_the_named_source_not_the_default() {
     let (name, rows, _) = materialized(session.ask("在原始数据上重算"));
 
     // (1) The default `active` is unchanged by the redirect -- still result_1.
-    let payloads = captured.lock().expect("lock");
-    assert_eq!(payloads[1].active.as_deref(), Some("result_1"));
-    drop(payloads);
+    let buf = captured.lock().expect("lock");
+    assert!(request_for(&buf, "在原始数据上重算")
+        .system
+        .contains("active = result_1"));
+    drop(buf);
 
     // (2) The outcome targeted the 5-row source, not result_1 (1 row).
     assert_eq!(name, "result_2");
@@ -978,17 +1045,17 @@ fn a_natural_language_redirect_targets_the_named_source_not_the_default() {
 #[test]
 fn a_redirect_to_a_named_cosource_targets_it_not_the_default() {
     // AC3/AC6 (multi-dataset redirect): with two sources + a result, the user
-    // redirects "在订单表上" to the non-active co-source (orders). The fake's SQL
-    // targets orders; the outcome reflects orders' 3 rows, not result_1 (1) or
-    // people (5). Proves redirection works across a multi-dataset working set.
+    // redirects "在订单表上" to the non-active co-source (orders). The model's
+    // SQL targets orders; the outcome reflects orders' 3 rows, not result_1
+    // (1) or people (5). Proves redirection across a multi-dataset working set.
     let provider = FakeProvider::new()
-        .scripted(
+        .scripted_tool_turn_seq(
             "源计数",
-            reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+            productive(r#"SELECT COUNT(*) AS n FROM "people".data"#),
         )
-        .scripted(
+        .scripted_tool_turn_seq(
             "在订单表上计数",
-            reply_sql(r#"SELECT COUNT(*) AS k FROM "orders".data"#),
+            productive(r#"SELECT COUNT(*) AS k FROM "orders".data"#),
         );
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
@@ -1004,32 +1071,31 @@ fn a_redirect_to_a_named_cosource_targets_it_not_the_default() {
 #[test]
 fn the_active_dataset_command_reflects_the_resolved_active() {
     // AC5 wiring: the `active_dataset` surface (UI label) agrees with the
-    // payload -- after a turn, both resolve to the most recent result, so the
-    // "当前表" indicator the user sees matches what the next question targets.
-    let provider = FakeProvider::new().scripted(
+    // schema context -- after a turn, both resolve to the most recent result,
+    // so the "当前表" indicator the user sees matches what the next question
+    // targets.
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
         "源计数",
-        reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        productive(r#"SELECT COUNT(*) AS n FROM "people".data"#),
     );
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
     // Before any turn: active = the source.
     assert_eq!(session.active().expect("active").reference_name, "people");
     session.ask("源计数"); // result_1
-                           // After a turn: active = the most recent result, matching the payload.
+                           // After a turn: active = the most recent result, matching the context.
     assert_eq!(session.active().expect("active").reference_name, "result_1");
 }
 
-// --- Single in-flight + cancellation (issue #28) -- ADR-0021/0028 -----------
+// --- Single in-flight + cancellation (issue #28) -- ADR-0021/0028/0081 -----
 //
-// ADR-0021: at most one query executes per session; while it runs the input is
-// disabled (the frontend's loading lock), and the user may cancel the in-flight
-// query. Cancel fires the shared cancel token, which sets the cooperative flag
-// AND interrupts the running DuckDB query; the turn lands as the Cancelled
-// outcome (ADR-0028 D) with the working set untouched (no result_N, sources and
-// prior results intact). A turn-level timeout shares the same abort path. The
-// fake simulates a long, cancellable query by blocking in `generate` until the
-// token fires (the real LLM's latency + a real long DuckDB query are exercised
-// by the interrupt test further down).
+// ADR-0021 (extended by ADR-0081): at most one turn executes per session; a
+// cancel (user / close / wall-clock watchdog) aborts the WHOLE turn -- the
+// loop + any in-flight tool call -- via the shared cancel token, landing as
+// the Cancelled outcome with the working set untouched. The fake simulates a
+// long, cancellable round-trip by blocking in `generate_tool_turn` until the
+// token fires (a real long DuckDB query is exercised by the #[ignore]
+// interrupt test further down).
 
 /// Poll the shared cancel token's in-flight flag until it goes true (the ask
 /// thread has begun its turn). Bounded so a misconfigured test (one that never
@@ -1045,14 +1111,13 @@ fn await_in_flight(cancel: &CancelToken, timeout: Duration) {
 }
 
 #[test]
-fn cancelling_an_in_flight_query_lands_as_cancelled_with_working_set_unchanged() {
-    // AC1/AC2/AC4: a blocking query is cancelled mid-flight -> Cancelled outcome,
-    // no result_N materialized, source intact (ADR-0021). The "prior result
-    // survives" angle is covered by `a_turn_after_a_cancelled_turn_still_works`.
+fn cancelling_an_in_flight_turn_lands_as_cancelled_with_working_set_unchanged() {
+    // AC1/AC2/AC4: a blocking round-trip is cancelled mid-flight -> Cancelled
+    // outcome, no result_N promoted, source intact (ADR-0021).
     let cancel = Arc::new(CancelToken::new());
     let provider = FakeProvider::new()
         .with_cancel(cancel.clone())
-        .scripted_blocking("慢查询", reply_sql("SELECT 1 AS n"));
+        .scripted_tool_turn_blocking("慢查询", answer("never"));
     let session =
         Session::with_provider_and_cancel(Box::new(provider), cancel.clone()).expect("session");
     let session = Arc::new(Mutex::new(session));
@@ -1068,126 +1133,117 @@ fn cancelling_an_in_flight_query_lands_as_cancelled_with_working_set_unchanged()
     });
 
     await_in_flight(&cancel, Duration::from_secs(2));
-    // While in-flight: the single-in-flight flag is the observable backend truth
-    // (AC1) -- exactly one query is executing.
+    // While in-flight: the single-in-flight flag is the observable backend
+    // truth (AC1) -- exactly one turn is executing.
     assert!(cancel.is_in_flight());
     cancel.request();
 
     let outcome = handle.join().expect("ask thread");
     assert!(matches!(outcome, TurnOutcome::Cancelled), "got {outcome:?}");
-    // Working set unchanged: no result materialized, source intact.
+    // Working set unchanged: no result promoted, source intact.
     let s = session.lock().unwrap();
     assert!(s.get("result_1").is_none());
     assert_eq!(s.snapshot_row_count("people").unwrap(), 5);
 }
 
 #[test]
-fn a_turn_level_timeout_lands_as_cancelled() {
-    // AC3: a turn that exceeds the wall-clock ceiling is aborted by the watchdog
-    // -> Cancelled (ADR-0028 D -- timeout shares the cancel abort path). No
-    // manual cancel call; the watchdog fires the token after the deadline.
-    let cancel = Arc::new(CancelToken::new());
-    let provider = FakeProvider::new()
-        .with_cancel(cancel.clone())
-        .scripted_blocking("慢查询", reply_sql("SELECT 1 AS n"));
-    let mut session =
-        Session::with_provider_and_cancel(Box::new(provider), cancel.clone()).expect("session");
-    load_source(&mut session, &fixture("people.csv"));
-    session.set_turn_timeout(Some(Duration::from_millis(60)));
-
-    let start = std::time::Instant::now();
-    let outcome = session.ask("慢查询");
-    let elapsed = start.elapsed();
-
-    assert!(matches!(outcome, TurnOutcome::Cancelled), "got {outcome:?}");
-    // The watchdog fired well before a naive 60s safety ceiling -- proves the
-    // timeout (not a full hang) drove the abort.
-    assert!(elapsed < Duration::from_secs(10), "took {elapsed:?}");
-    assert!(session.get("result_1").is_none()); // working set unchanged
-}
-
-#[test]
 fn a_cancelled_turn_is_recorded_in_the_thread_but_advances_no_result_number() {
-    // ADR-0028/0039: a cancelled turn is always visible (occupies a thread slot)
-    // but does NOT advance result_N. The next result is result_1, not result_2.
+    // ADR-0028/0039: a cancelled turn is always visible (occupies a thread
+    // slot) but does NOT advance result_N. The next result is result_1, not
+    // result_2.
     let cancel = Arc::new(CancelToken::new());
     let provider = FakeProvider::new()
         .with_cancel(cancel.clone())
-        .scripted_blocking("慢查询", reply_sql("SELECT 1 AS n"))
-        .scripted(
+        .scripted_tool_turn_blocking("慢查询", answer("never"))
+        .scripted_tool_turn_seq(
             "再查",
-            reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+            productive(r#"SELECT COUNT(*) AS n FROM "people".data"#),
         );
-    let mut session =
+    let session =
         Session::with_provider_and_cancel(Box::new(provider), cancel.clone()).expect("session");
-    load_source(&mut session, &fixture("people.csv"));
-    session.set_turn_timeout(Some(Duration::from_millis(100)));
+    let session = Arc::new(Mutex::new(session));
+    {
+        let mut s = session.lock().unwrap();
+        load_source(&mut s, &fixture("people.csv"));
+    }
 
-    let cancelled = session.ask("慢查询");
+    let session_ask = Arc::clone(&session);
+    let handle = thread::spawn(move || session_ask.lock().unwrap().ask("慢查询"));
+    await_in_flight(&cancel, Duration::from_secs(2));
+    cancel.request();
+    let cancelled = handle.join().expect("ask thread");
     assert!(matches!(cancelled, TurnOutcome::Cancelled));
 
     // The cancelled turn is in the thread, labeled by its verbatim question.
     // (Source lifecycle events share the timeline but are filtered out by the
     // turns() helper, so the leading `Added` event from load_source is not
     // counted here -- the assertion stays about the turn slot.)
-    let thread = turns(session.conversation());
+    let thread = {
+        let s = session.lock().unwrap();
+        turns(s.conversation())
+    };
     assert_eq!(thread.len(), 1);
     assert_eq!(thread[0].question, "慢查询");
     assert!(matches!(thread[0].outcome, TurnOutcome::Cancelled));
 
-    // The follow-up turn is a normal turn -- drop the timeout so the watchdog
-    // cannot race the (fast) sandbox setup + COUNT. The point under test is
-    // result_N numbering, not the timeout.
-    session.set_turn_timeout(None);
     // A subsequent result is result_1 -- the cancelled turn consumed no number.
-    let (name, _, _) = materialized(session.ask("再查"));
+    let (name, _, _) = materialized(session.lock().unwrap().ask("再查"));
     assert_eq!(name, "result_1");
 }
 
 #[test]
 fn a_turn_after_a_cancelled_turn_starts_clean_with_no_stale_request() {
     // begin_turn resets the token: a cancel that landed on the cancelled turn
-    // must not leak into the next turn (which would then also cancel). The next
-    // turn runs to completion.
+    // must not leak into the next turn (which would then also cancel). The
+    // next turn runs to completion.
     let cancel = Arc::new(CancelToken::new());
     let provider = FakeProvider::new()
         .with_cancel(cancel.clone())
-        .scripted_blocking("慢查询", reply_sql("SELECT 1 AS n"))
-        .scripted(
+        .scripted_tool_turn_blocking("慢查询", answer("never"))
+        .scripted_tool_turn_seq(
             "正常",
-            reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+            productive(r#"SELECT COUNT(*) AS n FROM "people".data"#),
         );
-    let mut session =
+    let session =
         Session::with_provider_and_cancel(Box::new(provider), cancel.clone()).expect("session");
-    load_source(&mut session, &fixture("people.csv"));
-    session.set_turn_timeout(Some(Duration::from_millis(100)));
+    let session = Arc::new(Mutex::new(session));
+    {
+        let mut s = session.lock().unwrap();
+        load_source(&mut s, &fixture("people.csv"));
+    }
 
-    assert!(matches!(session.ask("慢查询"), TurnOutcome::Cancelled));
-    // The follow-up is a normal turn: drop the timeout so its watchdog cannot
-    // race the fast sandbox setup.
-    session.set_turn_timeout(None);
-    // The flag is still set from the cancelled turn; the next ask must clear it.
+    let session_ask = Arc::clone(&session);
+    let handle = thread::spawn(move || session_ask.lock().unwrap().ask("慢查询"));
+    await_in_flight(&cancel, Duration::from_secs(2));
+    cancel.request();
+    assert!(matches!(
+        handle.join().expect("ask thread"),
+        TurnOutcome::Cancelled
+    ));
+    // The flag is still set from the cancelled turn; the next ask must clear
+    // it via begin_turn and run to completion.
     assert!(cancel.is_requested());
-    let (name, rows, _) = materialized(session.ask("正常"));
-    assert_eq!(name, "result_1"); // materialized, not cancelled
+    let (name, rows, _) = materialized(session.lock().unwrap().ask("正常"));
+    assert_eq!(name, "result_1"); // promoted, not cancelled
     assert_eq!(rows, 1);
 }
 
 #[test]
-fn cancelling_when_no_query_is_in_flight_is_a_harmless_noop() {
+fn cancelling_when_no_turn_is_in_flight_is_a_harmless_noop() {
     // The cancel command may be called when nothing is running (the user hits
-    // 停止 a moment after the turn finished). The flag is set, but the next ask
-    // resets it before starting -- so a stray cancel cannot wedge the session.
+    // 停止 a moment after the turn finished). The flag is set, but the next
+    // ask's begin_turn resets it before starting -- so a stray cancel cannot
+    // wedge the session.
     let cancel = Arc::new(CancelToken::new());
-    let provider = FakeProvider::new().scripted(
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
         "正常",
-        reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        productive(r#"SELECT COUNT(*) AS n FROM "people".data"#),
     );
     let mut session =
         Session::with_provider_and_cancel(Box::new(provider), cancel.clone()).expect("session");
     load_source(&mut session, &fixture("people.csv"));
 
-    cancel.request(); // no query running
+    cancel.request(); // no turn running
     assert!(cancel.is_requested());
     let (name, _, _) = materialized(session.ask("正常")); // resets + runs to completion
     assert_eq!(name, "result_1");
@@ -1196,19 +1252,18 @@ fn cancelling_when_no_query_is_in_flight_is_a_harmless_noop() {
 #[test]
 #[ignore] // exercises the real DuckDB interrupt path; slower, run explicitly
 fn a_real_long_duckdb_query_is_interruptible_via_cancel() {
-    // ADR-0021 "DuckDB query interrupt": a genuinely long engine query (a
-    // cross-join count over billions of rows) is aborted at source when cancel
-    // fires the registered interrupt handle -> the turn lands as Cancelled. This
-    // proves the interrupt-handle wiring in try_materialize, not just the
-    // cooperative flag the blocking-fake tests exercise. The query is sized to
-    // run for many seconds uninterrupted, so a cancel at ~100ms reliably catches
-    // it mid-flight on any machine.
+    // ADR-0021/0081 "cancel aborts the whole turn": a genuinely long engine
+    // query (a cross-join count over billions of rows) inside a materialize
+    // call is aborted at source when cancel fires the registered interrupt
+    // handle -> the turn lands as Cancelled (the loop's next check sees the
+    // flag). This proves the interrupt-handle wiring in try_materialize, not
+    // just the cooperative flag the blocking-fake tests exercise.
     let cancel = Arc::new(CancelToken::new());
-    // No `with_cancel`/`scripted_blocking`: the provider returns instantly; the
-    // LATENCY is the DuckDB query itself.
-    let provider = FakeProvider::new().scripted(
+    // No blocking fake: the provider returns instantly; the LATENCY is the
+    // DuckDB query inside the materialize dispatch.
+    let provider = FakeProvider::new().scripted_tool_turn(
         "慢查询",
-        reply_sql("SELECT count(*) AS n FROM range(200000000) t1 CROSS JOIN range(10) t2"),
+        materialize("SELECT count(*) AS n FROM range(200000000) t1 CROSS JOIN range(10) t2"),
     );
     let session =
         Session::with_provider_and_cancel(Box::new(provider), cancel.clone()).expect("session");
@@ -1225,7 +1280,8 @@ fn a_real_long_duckdb_query_is_interruptible_via_cancel() {
     });
 
     await_in_flight(&cancel, Duration::from_secs(2));
-    // Give the query a moment to start running on the engine before interrupting.
+    // Give the query a moment to start running on the engine before
+    // interrupting.
     thread::sleep(Duration::from_millis(100));
     cancel.request();
 
@@ -1242,18 +1298,22 @@ fn a_real_long_duckdb_query_is_interruptible_via_cancel() {
 //
 // ask_with_phase surfaces the discrete Thinking / Querying wait boundaries so
 // the command layer can emit the side-channel `turn-progress` event. The phase
-// never enters the TurnOutcome contract (ADR-0009 unchanged); it is pure
-// observer feedback. These tests pin the phase SEQUENCE the UI renders from.
+// never enters the TurnOutcome contract; it is pure observer feedback. On the
+// multi-step agent loop the attempt number is the 1-based STEP (round-trip),
+// so a materialize turn reads Thinking{1} -> Querying{1} -> Thinking{2} (the
+// terminal-text round-trip). These tests pin the phase SEQUENCE the UI
+// renders from.
 
 #[test]
-fn ask_with_phase_records_thinking_then_querying_on_a_result_turn() {
-    // ADR-0059: a result turn has two waits -- the provider call (Thinking) and
-    // the SQL execution (Querying). The callback receives both, in order, each
-    // carrying attempt = 1 (the first try). A retry path is covered separately
-    // at the TurnRunner unit seam (where a transient failure is injectable).
+fn ask_with_phase_records_the_step_phases_on_a_result_turn() {
+    // ADR-0059/0081: a one-call result turn has three waits -- the first
+    // provider round-trip (Thinking{1}), the materialize dispatch
+    // (Querying{1}), and the terminal-text round-trip (Thinking{2}).
     let mut session = session_with(&[("建结果", "SELECT 1 AS n")]);
+    let approval = ApprovalState::new();
+    let sink = NullSink;
     let mut phases: Vec<TurnPhase> = Vec::new();
-    let outcome = session.ask_with_phase("建结果", |p| phases.push(p));
+    let outcome = session.ask_with_phase("建结果", &approval, &sink, |p| phases.push(p));
     assert!(
         matches!(outcome, TurnOutcome::Materialized { .. }),
         "got {outcome:?}"
@@ -1263,22 +1323,23 @@ fn ask_with_phase_records_thinking_then_querying_on_a_result_turn() {
         vec![
             TurnPhase::Thinking { attempt: 1 },
             TurnPhase::Querying { attempt: 1 },
+            TurnPhase::Thinking { attempt: 2 },
         ],
-        "a result turn emits Thinking then Querying, both at attempt 1"
+        "a one-call result turn emits Thinking{{1}}, Querying{{1}}, Thinking{{2}}"
     );
 }
 
 #[test]
 fn ask_with_phase_records_only_thinking_on_a_textual_turn() {
-    // ADR-0059: a textual turn (clarify / refuse) has only the provider wait --
-    // no SQL runs, so Querying never fires. The callback receives a single
-    // Thinking marker.
-    let mut provider = FakeProvider::new();
-    provider = provider.scripted("澄清", reply_text(TextKind::Clarify, "哪个维度？"));
+    // ADR-0059: a textual turn (terminal text, no tool calls) has only the
+    // provider wait -- no tool dispatch, so Querying never fires.
+    let provider = FakeProvider::new().scripted_tool_turn("澄清", answer("哪个维度？"));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    let approval = ApprovalState::new();
+    let sink = NullSink;
 
     let mut phases: Vec<TurnPhase> = Vec::new();
-    let outcome = session.ask_with_phase("澄清", |p| phases.push(p));
+    let outcome = session.ask_with_phase("澄清", &approval, &sink, |p| phases.push(p));
     assert!(
         matches!(outcome, TurnOutcome::Textual { .. }),
         "got {outcome:?}"
@@ -1311,8 +1372,10 @@ fn turn_progress_events_for_one_turn_share_one_session_id() {
     // event carries it, so a multi-session frontend can filter on sessionId.
     const SID: &str = "turn-session-id";
     let mut session = session_with(&[("建结果", "SELECT 1 AS n")]);
+    let approval = ApprovalState::new();
+    let sink = NullSink;
     let mut addressed: Vec<TurnProgress> = Vec::new();
-    let outcome = session.ask_with_phase("建结果", |phase| {
+    let outcome = session.ask_with_phase("建结果", &approval, &sink, |phase| {
         addressed.push(TurnProgress {
             session_id: SID.into(),
             phase,
@@ -1322,7 +1385,7 @@ fn turn_progress_events_for_one_turn_share_one_session_id() {
         matches!(outcome, TurnOutcome::Materialized { .. }),
         "got {outcome:?}"
     );
-    // A result turn emits at least Thinking + Querying.
+    // A one-call result turn emits Thinking{1} + Querying{1} + Thinking{2}.
     assert!(addressed.len() >= 2, "got {addressed:?}");
     assert!(
         addressed.iter().all(|p| p.session_id == SID),
@@ -1336,17 +1399,16 @@ fn resume_progress_events_carry_one_session_id_and_cover_the_resume_sequence() {
     // source verification + per replayed turn, and the whole sequence is
     // addressable by the open_duck's single session_id. This seam also pins
     // that resume ACTUALLY fires Source + Replay events (ADR-0034 visible
-    // progress) -- the resume on_progress emit path was previously untested at
-    // any layer. The command layer wraps each ResumeEvent with the session_id;
+    // progress). The command layer wraps each ResumeEvent with the session_id;
     // here we drive the same callback and assert one id addresses every event.
     let dir = tempfile::tempdir().expect("tempdir");
     let duck = dir.path().join("resumed.duck");
 
     // Build + persist a real .duck: one source + one productive turn.
     let cancel = Arc::new(CancelToken::new());
-    let provider = FakeProvider::new().scripted(
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
         "建结果",
-        reply_sql(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+        productive(r#"SELECT COUNT(*) AS n FROM "people".data"#),
     );
     let mut session =
         Session::with_provider_and_cancel(Box::new(provider), cancel).expect("session");

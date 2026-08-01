@@ -81,6 +81,7 @@ pub fn migrate_to_current(value: Value, from_version: u32) -> Result<Value, Migr
         current = match v {
             0 => transforms::v0_to_v1(current)?,
             1 => transforms::v1_to_v2(current)?,
+            2 => transforms::v2_to_v3(current)?,
             other => {
                 return Err(MigrationError::NoTransform {
                     from: other,
@@ -182,9 +183,10 @@ mod transforms {
     /// exactly one productive SQL under the single-SQL contract, so its
     /// trajectory is one `materialize` call -- synthesized from the verbatim
     /// SQL via the shared [`crate::persistence::recipe::synthetic_materialize_trace`] helper
-    /// (the same helper [`crate::session::Session::build_recipe`] uses for a
-    /// fresh TurnRunner-era turn), so a migrated v1 session shows the same
-    /// one-step trajectory it produced live. Every other turn (Textual /
+    /// -- the same one [`crate::session::Session::build_recipe`] uses for live
+    /// turns from before runtime tracking was wired (issue #319) -- so a
+    /// migrated v1 session shows the same one-step trajectory it produced
+    /// live. Every other turn (Textual /
     /// Failed / Cancelled / Source event) carries no tool-call trajectory and
     /// gets no trace field -- `#[serde(default)]` on [`RecipeTurn::trace`]
     /// deserializes the absent field as empty.
@@ -254,6 +256,66 @@ mod transforms {
             return;
         };
         data_obj.insert("trace".to_string(), trace_value);
+    }
+
+    /// v2 -> v3 (ADR-0084): make the result turn's promotion chain explicit. A
+    /// v2 Materialized turn carries a single flattened result (reference_name /
+    /// display_name / sql / stale at the outcome-data top level); v3 wraps
+    /// those into a one-element `promotions` list so a result turn carries an
+    /// ordered chain (each promotion with its own stale anchor). The turn-level
+    /// `assumption` stays at the outcome-data level. Every other turn (Textual
+    /// / Failed / Cancelled / Source event) is untouched. Lossless: the single
+    /// v2 result becomes the chain's sole (and primary) promotion, so resume
+    /// replay re-materializes the same result_N.
+    ///
+    /// Stamps no version itself -- [`migrate_to_current`] stamps after each
+    /// step so the version always reflects the shape.
+    pub(super) fn v2_to_v3(mut value: Value) -> Result<Value, MigrationError> {
+        if let Some(history) = value.get_mut("history").and_then(|h| h.as_array_mut()) {
+            for entry in history.iter_mut() {
+                wrap_materialized_promotions_in_place(entry);
+            }
+        }
+        Ok(value)
+    }
+
+    /// Wrap one v2 Materialized turn's flat result fields into a one-element
+    /// `promotions` list, in place (ADR-0084). No-op for Source entries (no
+    /// `outcome`) and for non-Materialized outcomes (no promotion). Defensive
+    /// on a malformed shape: a missing required field is left absent and
+    /// surfaces as an honest typed-deserialize error downstream rather than a
+    /// guess here. Per-entry so the caller loop is a flat map.
+    fn wrap_materialized_promotions_in_place(entry: &mut Value) {
+        // A Turn entry's outcome lives at `data.outcome` (the adjacently-tagged
+        // RecipeEntry shape `{entry, data}`). Source entries have no outcome.
+        let Some(outcome) = entry.get_mut("data").and_then(|d| d.get_mut("outcome")) else {
+            return;
+        };
+        let Some(kind) = outcome.get("kind").and_then(Value::as_str) else {
+            return;
+        };
+        if kind != "Materialized" {
+            return;
+        }
+        let Some(data) = outcome.get_mut("data").and_then(|d| d.as_object_mut()) else {
+            return;
+        };
+        // Lift the flat result fields out of the outcome data; whatever remains
+        // (assumption) stays at the turn level. A v2 Materialized turn that ran
+        // a productive result carries reference_name + display_name + sql;
+        // `stale` is optional (live turns omit it). Each present field rides
+        // into the single promotion; an absent required field deserializes to
+        // an honest error downstream.
+        let mut promotion = serde_json::Map::new();
+        for key in ["reference_name", "display_name", "sql", "stale"] {
+            if let Some(v) = data.remove(key) {
+                promotion.insert(key.to_string(), v);
+            }
+        }
+        data.insert(
+            "promotions".to_string(),
+            Value::Array(vec![Value::Object(promotion)]),
+        );
     }
 }
 
@@ -813,6 +875,168 @@ mod tests {
         assert_eq!(
             v2["history"][0]["data"]["outcome"]["data"]["stale"]["reason"],
             "Replaced",
+        );
+    }
+
+    // --- v2 -> v3 (ADR-0084) --------------------------------------------------
+
+    /// Build a synthetic v2 Materialized turn: the v1 adjacently-tagged outcome
+    /// plus the v2 synthetic trace, with the reconstructable result fields
+    /// still FLAT at the outcome-data level (the pre-chain shape v3 wraps).
+    fn v2_materialized_turn(question: &str, reference_name: &str, sql: &str) -> Value {
+        serde_json::json!({
+            "entry": "Turn",
+            "data": {
+                "question": question,
+                "outcome": {
+                    "kind": "Materialized",
+                    "data": {
+                        "reference_name": reference_name,
+                        "display_name": reference_name,
+                        "sql": sql,
+                        "assumption": "把 id 当作主键",
+                    },
+                },
+                "trace": [{
+                    "name": "materialize",
+                    "operation_kind": "write",
+                    "success": true,
+                    "summary": sql,
+                    "result_excerpt": "",
+                }],
+            },
+        })
+    }
+
+    #[test]
+    fn v2_to_v3_wraps_flat_result_fields_into_a_one_element_promotion_chain() {
+        // ADR-0084: v2's flat result fields (reference_name / display_name /
+        // sql) move INTO a one-element `promotions` chain. The turn-level
+        // assumption stays at the outcome-data level and the v2 trace is
+        // untouched. Lossless: the single v2 result becomes the chain's sole
+        // (and primary) promotion.
+        let v2 = serde_json::json!({
+            "format_version": 2,
+            "session_name": "v2 分析",
+            "sources": [],
+            "history": [
+                v2_materialized_turn(
+                    "多少人",
+                    "result_1",
+                    "SELECT COUNT(*) AS n FROM \"people\".data",
+                ),
+                v1_textual_turn("哪种名字"),
+            ],
+            "active": null,
+        });
+        let v3 = transforms::v2_to_v3(v2.clone()).expect("migrate");
+        let data = &v3["history"][0]["data"]["outcome"]["data"];
+        let promotions = data["promotions"]
+            .as_array()
+            .expect("promotions array present");
+        assert_eq!(
+            promotions.len(),
+            1,
+            "the single v2 result wraps into one promotion"
+        );
+        assert_eq!(promotions[0]["reference_name"], "result_1");
+        assert_eq!(promotions[0]["display_name"], "result_1");
+        assert_eq!(
+            promotions[0]["sql"],
+            "SELECT COUNT(*) AS n FROM \"people\".data"
+        );
+        // The flat fields are LIFTED out of the outcome data, not duplicated.
+        assert!(data.get("reference_name").is_none());
+        assert!(data.get("display_name").is_none());
+        assert!(data.get("sql").is_none());
+        // The turn-level assumption stays at the outcome-data level.
+        assert_eq!(data["assumption"], "把 id 当作主键");
+        // The v2 trace survives the re-wrap untouched.
+        assert_eq!(v3["history"][0]["data"]["trace"][0]["name"], "materialize");
+        // A non-Materialized turn carries no promotion and is untouched.
+        assert_eq!(v3["history"][1], v2["history"][1], "textual turn unchanged");
+    }
+
+    #[test]
+    fn v2_to_v3_moves_a_stale_anchor_into_the_promotion() {
+        // ADR-0084 + ADR-0041: the stale anchor is per-result, so it rides
+        // into the promotion alongside its reference / sql -- the dead turn
+        // stays in history (point 2) and the v3 shape keeps the anchor where
+        // productive_chain's per-promotion filter reads it.
+        let v2 = serde_json::json!({
+            "format_version": 2,
+            "session_name": "x",
+            "sources": [],
+            "history": [{
+                "entry": "Turn",
+                "data": {
+                    "question": "旧问题",
+                    "outcome": {
+                        "kind": "Materialized",
+                        "data": {
+                            "reference_name": "result_1",
+                            "display_name": "result_1",
+                            "sql": "SELECT 1",
+                            "stale": {
+                                "reference_name": "people",
+                                "display_name": "people",
+                                "reason": "Replaced",
+                            },
+                        },
+                    },
+                },
+            }],
+            "active": null,
+        });
+        let v3 = transforms::v2_to_v3(v2).expect("migrate");
+        let data = &v3["history"][0]["data"]["outcome"]["data"];
+        assert_eq!(data["promotions"][0]["stale"]["reason"], "Replaced");
+        assert!(
+            data.get("stale").is_none(),
+            "the anchor is moved into the promotion, not duplicated",
+        );
+    }
+
+    #[test]
+    fn migrate_to_current_from_v2_round_trips_through_recipe_deserialize() {
+        // End-to-end: a synthetic v2 fixture migrates to the current version
+        // and deserializes as a v3 Recipe. The single v2 result becomes a
+        // one-element promotion chain; the replayable chain re-materializes
+        // the same result_N with the same SQL, and the turn-level assumption
+        // rides the primary (chain tail) promotion.
+        use crate::persistence::recipe::{Recipe, RecipeEntry};
+        let v2 = serde_json::json!({
+            "format_version": 2,
+            "session_name": "v2 分析",
+            "sources": [{
+                "reference_name": "people",
+                "display_name": "people",
+                "source_path": "/data/people.csv",
+                "fingerprint": "fp",
+            }],
+            "history": [v2_materialized_turn("多少人", "result_1", "SELECT 1")],
+            "active": "people",
+        });
+        let v3 = migrate_to_current(v2, 2).expect("migrate");
+        let recipe: Recipe =
+            serde_json::from_value(v3).expect("migrated shape deserializes as the current Recipe");
+        assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
+        match &recipe.history[0] {
+            RecipeEntry::Turn(t) => assert_eq!(
+                t.trace.len(),
+                1,
+                "the v2 synthetic trace survives the v2->v3 step"
+            ),
+            other => panic!("expected Turn, got {other:?}"),
+        }
+        let chain = recipe.productive_chain();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].reference_name, "result_1");
+        assert_eq!(chain[0].sql, "SELECT 1");
+        assert_eq!(
+            chain[0].assumption.as_deref(),
+            Some("把 id 当作主键"),
+            "the turn-level assumption rides the primary promotion on replay",
         );
     }
 }

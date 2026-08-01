@@ -4,14 +4,15 @@
 //! (ingest / session / workingset) is driven as a black box by
 //! tests/ingest_blackbox.rs -- the PRD's main seam.
 //!
-//! Query loop (issue #22/#23): ask -> outcome. A turn orchestrator
-//! (session::Session::ask) calls the provider abstraction (provider::Provider,
-//! ADR-0007) for one SQL or a textual response (ADR-0009), runs any SQL on the
-//! session DuckDB, and produces one ADR-0028 outcome (result / textual / failed
-//! / cancelled). Slice #23 adds the full four-way classification, the always-
-//! visible conversation thread, and the single retry budget.
-//! tests/query_blackbox.rs drives it through a scripted FakeProvider at the ask
-//! -> outcome seam -- offline and deterministic.
+//! Query loop (PRD #1, ADR-0077/0081): ask -> outcome. The session facade
+//! (session::Session::ask) drives the native agent loop
+//! (session::agent_loop) over the provider abstraction (provider::Provider,
+//! ADR-0007): tool-calling round-trips (explore / materialize / describe /
+//! sample) dispatched on the session DuckDB, tool-level errors routed back to
+//! the model for self-correction, and one ADR-0028 outcome (result / textual
+//! / failed / cancelled) at the end. tests/query_blackbox.rs drives it
+//! through a scripted FakeProvider at the ask -> outcome seam -- offline and
+//! deterministic.
 
 pub mod app_config;
 pub mod approval;
