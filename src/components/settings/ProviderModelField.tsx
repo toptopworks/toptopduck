@@ -12,7 +12,7 @@ import { Label } from "../ui/label";
 // model input OUT of ProviderEndpointFields so this atom owns the ADR-0070
 // preflight surface: a "Test connection" button that fires the test_profile IPC
 // (Rust reads the profile's stored key from the OS keychain + probes the
-// endpoint), classifies the result into ADR-0044's five states, and feeds the
+// endpoint), classifies the result into ADR-0044's six states, and feeds the
 // listed models to a dropdown when the probe succeeds. The model list is held
 // IN-MEMORY here only -- it never enters app-config (ADR-0038 stores
 // preferences, not probe snapshots); list failure or "not yet probed" falls back
@@ -160,12 +160,13 @@ export function ProviderModelField({
   );
 }
 
-// Renders the five-state preflight classification (ADR-0044 axis). Each state
-// has a fixed locale message; KeychainUnavailable + Incompatible additionally
-// fold the technical English detail (a keychain error string / an upstream HTTP
-// body string) under a <details> so the user can drill in without it dominating
-// the form. The switch is exhaustive -- a future ProfileTestOutcome variant
-// fails the `never` assignment here.
+// Renders the six-state preflight classification (ADR-0044 axis). Each state
+// has a fixed locale message; KeychainUnavailable + InvalidEndpoint +
+// Incompatible additionally fold the technical English detail (a keychain error
+// string / the bad-scheme reason / an upstream HTTP body string) under a
+// <details> so the user can drill in without it dominating the form. The switch
+// is exhaustive -- a future ProfileTestOutcome variant fails the `never`
+// assignment here.
 function PreflightResult({ outcome }: { outcome: ProfileTestOutcome }) {
   switch (outcome.kind) {
     case "Ok":
@@ -211,6 +212,19 @@ function PreflightResult({ outcome }: { outcome: ProfileTestOutcome }) {
             defaultMessage="Could not reach the endpoint (DNS / network / TLS)."
           />
         </p>
+      );
+    case "InvalidEndpoint":
+      // Issue #279: a non-http/https scheme is a configuration error, not a
+      // transport fault -- direct the user at the protocol, not DNS/TLS. The
+      // technical reason (which scheme / the http(s) policy) folds under the
+      // summary like KeychainUnavailable + Incompatible.
+      return (
+        <DetailFold detail={outcome.data.detail}>
+          <FormattedMessage
+            id="settings.profiles.test.invalidEndpoint"
+            defaultMessage="The endpoint protocol must be http or https."
+          />
+        </DetailFold>
       );
     case "Incompatible":
       return (

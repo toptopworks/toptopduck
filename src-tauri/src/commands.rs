@@ -688,13 +688,13 @@ pub fn clear_profile_key(
 /// first) via `GET /models` with a minimal-turn ping fallback. A failed
 /// keychain read short-circuits to `KeychainUnavailable` before any HTTP
 /// (issue #243 -- previously swallowed into `None` and misclassified as
-/// `KeyRejected`). Returns the five-state [`ProfileTestOutcome`] so the
+/// `KeyRejected`). Returns the six-state [`ProfileTestOutcome`] so the
 /// frontend renders the result and feeds the listed models to the model
 /// dropdown (the list is NOT persisted -- ADR-0038). Runs off the async/UI
 /// thread (the probe is two blocking HTTP calls up to the 30s ceiling); the
 /// only `Err` is a spawn-blocking join failure -- every preflight verdict
 /// (including KeyRejected / KeychainUnavailable / EndpointUnreachable /
-/// Incompatible) is an `Ok(ProfileTestOutcome)`.
+/// InvalidEndpoint / Incompatible) is an `Ok(ProfileTestOutcome)`.
 #[tauri::command]
 pub async fn test_profile(
     live: State<'_, LiveProviderConfig>,

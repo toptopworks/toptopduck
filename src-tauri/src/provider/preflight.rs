@@ -5,14 +5,15 @@
 //! (primary path), degrading to a minimal messages ping (fallback) when the
 //! endpoint does not implement `/models` or returns a non-auth HTTP error.
 //!
-//! The result is classified into five states along the ADR-0044 axis
+//! The result is classified into six states along the ADR-0044 axis
 //! ([`ProfileTestOutcome`]): success (carrying the listed models), key rejected
 //! (no key / HTTP 401/403), keychain unavailable (the OS keychain read itself
 //! failed -- the probe never ran, issue #243), endpoint unreachable
-//! (transport), or incompatible (the endpoint responded but neither `/models`
-//! nor a minimal turn yielded a usable result). The model list feeds the model
-//! dropdown; it is NOT persisted (ADR-0038 -- app-config stores preferences,
-//! not probe snapshots).
+//! (transport), invalid endpoint (a non-http/https scheme rejected before any
+//! probe fires, issue #279), or incompatible (the endpoint responded but
+//! neither `/models` nor a minimal turn yielded a usable result). The model
+//! list feeds the model dropdown; it is NOT persisted (ADR-0038 -- app-config
+//! stores preferences, not probe snapshots).
 //!
 //! The endpoint (protocol + base_url + model) is the caller's current edit
 //! value, passed in explicitly -- so a user who edits base_url and re-tests
@@ -100,13 +101,18 @@ pub(crate) fn probe(
         Some(k) => k,
         None => return ProfileTestOutcome::KeyRejected,
     };
-    // AC #244: reject a non-http/https base_url (file:, data:, scheme-less)
-    // before any probe fires. Mirrors the anthropic/openai adapter boundary
-    // check; classified as EndpointUnreachable -- the endpoint is not a
-    // reachable http(s) target by construction, distinct from a transport
-    // fault on a valid URL (see provider::http).
-    if super::http::validate_http_base_url(base_url).is_err() {
-        return ProfileTestOutcome::EndpointUnreachable;
+    // AC #244 / #279: reject a non-http/https base_url (file:, data:,
+    // scheme-less) before any probe fires. Mirrors the anthropic/openai adapter
+    // boundary check. Classified as InvalidEndpoint -- the endpoint is not a
+    // reachable http(s) target by construction (a CONFIGURATION error), distinct
+    // from EndpointUnreachable (a transport fault on a VALID url). The detail
+    // rides the shared validate_http_base_url Display verbatim, matching the
+    // turn adapters' TurnFailure::InvalidConfig mapping so one root cause
+    // yields one diagnosis at either surface (see provider::http).
+    if let Err(e) = super::http::validate_http_base_url(base_url) {
+        return ProfileTestOutcome::InvalidEndpoint {
+            detail: e.to_string(),
+        };
     }
     match list_models(protocol, base_url, key) {
         ModelsOutcome::Listed(models) => ProfileTestOutcome::Ok { models },
@@ -635,19 +641,61 @@ mod tests {
     }
 
     #[test]
-    fn base_url_non_http_scheme_is_endpoint_unreachable_before_probe() {
-        // AC #244 (mirrors the adapters): a file:// base_url is rejected at
-        // the run/probe boundary -- no HTTP probe fires. Classified as
-        // EndpointUnreachable (the endpoint is not a reachable http(s)
-        // target). Ok(Some(key)) so the verdict is not short-circuited as
-        // KeyRejected; the scheme check fires after the key check.
+    fn base_url_non_http_scheme_is_invalid_endpoint_before_probe() {
+        // AC #244 / #279 (mirrors the adapters): a file:// base_url is rejected
+        // at the run/probe boundary -- no HTTP probe fires. Classified as
+        // InvalidEndpoint (a configuration error), NOT EndpointUnreachable --
+        // the endpoint is not a reachable http(s) target by construction, so
+        // directing the user at DNS/network/TLS would misdiagnose. The detail
+        // rides validate_http_base_url's Display verbatim, naming the offending
+        // scheme + the http/https policy (the same string the turn adapters
+        // surface as TurnFailure::InvalidConfig). Ok(Some(key)) so the verdict
+        // is not short-circuited as KeyRejected; the scheme check fires after
+        // the key check.
         let outcome = run(
             Ok(Some("sk-test".into())),
             Protocol::Anthropic,
             "file:///etc/passwd",
             "m",
         );
-        assert_eq!(outcome, ProfileTestOutcome::EndpointUnreachable);
+        match outcome {
+            ProfileTestOutcome::InvalidEndpoint { detail } => {
+                assert!(
+                    detail.contains("file") && detail.contains("http/https"),
+                    "detail names the bad scheme + the policy: {detail}"
+                );
+            }
+            other => panic!("expected InvalidEndpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn base_url_data_scheme_and_schemeless_are_invalid_endpoint_before_probe() {
+        // AC #279: the two other bad-scheme shapes the shared gate rejects --
+        // data: (parses but wrong scheme) and a scheme-less string (no scheme,
+        // Url::parse fails) -- also classify as InvalidEndpoint, not
+        // EndpointUnreachable. Pins the full bad-scheme surface named in the
+        // issue so a regression on any one of the three shapes is caught.
+        for bad in ["data:text/plain,hello", "api.anthropic.com"] {
+            let outcome = run(Ok(Some("sk-test".into())), Protocol::Anthropic, bad, "m");
+            assert!(
+                matches!(outcome, ProfileTestOutcome::InvalidEndpoint { .. }),
+                "bad scheme {bad:?} -> InvalidEndpoint, got {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_key_with_bad_scheme_is_key_rejected_before_invalid_endpoint() {
+        // AC: the key-existence check (-> KeyRejected) runs BEFORE the scheme
+        // gate (-> InvalidEndpoint) in probe -- a profile with no stored key
+        // AND a bad-scheme base_url is diagnosed "set a key", not "fix the
+        // protocol". Pins the ordering invariant the bad-scheme tests above
+        // (which all pass a key) do not exercise on their own; a future
+        // refactor flipping the order would otherwise silently reclassify
+        // this case with no test failure.
+        let outcome = run(Ok(None), Protocol::Anthropic, "file:///etc/passwd", "m");
+        assert_eq!(outcome, ProfileTestOutcome::KeyRejected);
     }
 
     #[test]

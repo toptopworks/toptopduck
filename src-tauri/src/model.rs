@@ -1165,7 +1165,7 @@ pub struct ProfileKeyStatus {
 /// One connection-preflight outcome (ADR-0070). Returned by the `test_profile`
 /// IPC when the user clicks "Test connection" in the Profiles edit form, after
 /// the Rust core reads the profile's stored key from the OS keychain and probes
-/// the endpoint. Five states along the ADR-0044 axis:
+/// the endpoint. Six states along the ADR-0044 axis:
 ///
 /// - [`ProfileTestOutcome::Ok`]: the probe succeeded; `models` carries the
 ///   model ids listed by `GET /models` (fed to the model dropdown). Empty when
@@ -1181,6 +1181,12 @@ pub struct ProfileKeyStatus {
 ///   key.
 /// - [`ProfileTestOutcome::EndpointUnreachable`]: a transport failure (DNS /
 ///   TCP / TLS / timeout) -- the endpoint could not be reached at all.
+/// - [`ProfileTestOutcome::InvalidEndpoint`]: the endpoint URL is permanently
+///   invalid (issue #279) -- a non-http/https scheme (`file:`, `data:`, or
+///   scheme-less) rejected at the boundary before any probe fires. Distinct
+///   from `EndpointUnreachable` (a transport fault on a VALID url): this is a
+///   configuration error, not a network failure, so the fix is correcting the
+///   protocol, not debugging DNS/TLS.
 /// - [`ProfileTestOutcome::Incompatible`]: the endpoint responded (HTTP non-auth
 ///   status, or a 200 body that is not a model list) AND a minimal turn ping
 ///   also failed for a non-key, non-transport reason -- the endpoint is alive
@@ -1209,6 +1215,17 @@ pub enum ProfileTestOutcome {
     KeychainUnavailable { detail: String },
     /// Transport failure (DNS / TCP / TLS / timeout) -- endpoint unreachable.
     EndpointUnreachable,
+    /// The endpoint URL is permanently invalid (issue #279): a non-http/https
+    /// scheme (`file:`, `data:`, or scheme-less) rejected at the boundary before
+    /// any probe fires. Distinct from `EndpointUnreachable` (a transport fault
+    /// on a VALID url) -- this is a configuration error, not a network failure,
+    /// so the fix is correcting the protocol, not debugging DNS/TLS. `detail`
+    /// is the technical English reason from the shared `validate_http_base_url`
+    /// gate (e.g. "invalid base_url: scheme `file` is not http/https") -- the
+    /// SAME string the turn adapters ride on [`TurnFailure::InvalidConfig`], so
+    /// one root cause yields one diagnosis whether it surfaces at preflight or
+    /// at turn time. Surfaced for the details fold, like `Incompatible`.
+    InvalidEndpoint { detail: String },
     /// The endpoint responded but is not compatible (non-auth HTTP error whose
     /// body or a failed ping shows it cannot serve the chat/messages contract).
     /// `detail` is a technical English string for the details fold.

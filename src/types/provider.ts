@@ -77,18 +77,21 @@ export interface ProfileKeyStatus extends KeyStatus {
 }
 
 // The test_profile IPC return value (issue #236, ADR-0070 connection preflight).
-// Five states along the ADR-0044 axis: Ok carries the listed models (fed to the
+// Six states along the ADR-0044 axis: Ok carries the listed models (fed to the
 // model dropdown; empty when only the ping fallback succeeded -- the dropdown
 // then falls back to a hand-typed input); KeyRejected (no key stored / HTTP
 // 401/403); KeychainUnavailable (the OS keychain read itself failed -- locked /
 // service down / permission revoked -- the probe never ran, issue #243);
-// EndpointUnreachable (transport: DNS/TCP/TLS/timeout); Incompatible carries a
-// technical English detail for the details fold. Mirrors the Rust
-// ProfileTestOutcome -- adjacently-tagged (`kind`/`data`), pinned by
-// tests/ipc_contract.rs. User wording lives in the locale catalog (ADR-0052).
+// EndpointUnreachable (transport: DNS/TCP/TLS/timeout); InvalidEndpoint (a
+// non-http/https scheme rejected before any probe fires -- a configuration
+// error, not a network failure, issue #279); Incompatible carries a technical
+// English detail for the details fold. Mirrors the Rust ProfileTestOutcome --
+// adjacently-tagged (`kind`/`data`), pinned by tests/ipc_contract.rs. User
+// wording lives in the locale catalog (ADR-0052).
 export type ProfileTestOutcome =
   | { kind: "Ok"; data: { models: string[] } }
   | { kind: "KeyRejected" }
   | { kind: "KeychainUnavailable"; data: { detail: string } }
   | { kind: "EndpointUnreachable" }
+  | { kind: "InvalidEndpoint"; data: { detail: string } }
   | { kind: "Incompatible"; data: { detail: string } };

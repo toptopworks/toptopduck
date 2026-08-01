@@ -12,7 +12,7 @@ import { RadioGroup, RadioGroupItem } from "../ui/radio-group";
 // ProfilesSection so the composer popover (#3) and cold-start guide (#5) can
 // reuse the same endpoint form. The model field is the ProviderModelField atom
 // (issue #236, ADR-0070): a hand-typed input that upgrades to a list-models
-// dropdown after a "Test connection" probe, with the five-state classification
+// dropdown after a "Test connection" probe, with the six-state classification
 // rendered inline. This component boundary IS the swap point #235 reserved.
 
 type ProviderEndpointFieldsProps = {

@@ -224,6 +224,7 @@
   "settings.profiles.test.action": "Test connection",
   "settings.profiles.test.endpointUnreachable": "Could not reach the endpoint (DNS / network / TLS).",
   "settings.profiles.test.incompatible": "Incompatible — the endpoint responded but cannot serve a turn.",
+  "settings.profiles.test.invalidEndpoint": "The endpoint protocol must be http or https.",
   "settings.profiles.test.keychainUnavailable": "Keychain unavailable — the OS keychain could not be read. Check the OS keychain, then test again.",
   "settings.profiles.test.keyRejected": "Key rejected — no key stored, or the endpoint rejected it (401/403).",
   "settings.profiles.test.okModels": "Connected — {count, plural, one {# model} other {# models}} available.",
