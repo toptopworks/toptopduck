@@ -110,6 +110,14 @@ pub enum AuthMode {
 /// it. The external-tool bridge classifies each call; the gateway just
 /// carries the label through to the event so the frontend renders the right
 /// badge without re-inferring.
+///
+/// The serde form is a `.duck` persistence contract (issue #316): persisted
+/// recipe traces reuse this enum (`RecipeTraceEntry.operation_kind`,
+/// ADR-0078), so the `rename_all = "snake_case"` variant spellings (`read` /
+/// `write` / `execute` / `network`) are part of the recipe wire format,
+/// frozen by the backward-compatibility constraint. Renaming a variant or
+/// reworking the case convention breaks historical `.duck` readability;
+/// appending a variant is append-only-safe (no historical file carries it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {

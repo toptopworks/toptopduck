@@ -1967,17 +1967,19 @@ impl Session {
                         TurnOutcome::Failed(failure) => RecipeOutcome::Failed(failure.clone()),
                         TurnOutcome::Cancelled => RecipeOutcome::Cancelled,
                     };
-                    Some(RecipeEntry::Turn(RecipeTurn {
-                        question: record.question.clone(),
+                    // The turn's recorded audit (ADR-0078, issue #319): the
+                    // loop's real multi-call trace + runtime/skill provenance
+                    // for a live turn; the recipe's values (harvested at
+                    // resume) for a resumed one. A no-tool turn's audit trace
+                    // is empty. Construction routes through the audit-bearing
+                    // constructor (issue #316) so production `RecipeTurn`
+                    // construction stays on constructor paths.
+                    Some(RecipeEntry::Turn(RecipeTurn::with_audit(
+                        record.question.clone(),
                         outcome,
-                        // The turn's recorded audit (ADR-0078, issue #319):
-                        // the loop's real multi-call trace + runtime/skill
-                        // provenance for a live turn; the recipe's values
-                        // (harvested at resume) for a resumed one. A no-tool
-                        // turn's audit trace is empty.
-                        trace: audit.trace.clone(),
-                        provenance: audit.provenance.clone(),
-                    }))
+                        audit.trace.clone(),
+                        audit.provenance.clone(),
+                    )))
                 }
                 ThreadEntry::Source(ev) => Some(RecipeEntry::Source(ev.clone())),
             })
