@@ -192,20 +192,25 @@ fn load_outcome_error_nests_load_error_tag() {
 }
 
 #[test]
-fn turn_outcome_materialized_carries_descriptor_and_assumption() {
-    // Pin the wire shape the frontend mirrors (src/types.ts): adjacently-tagged,
-    // the Materialized variant nests the descriptor + assumption under data.
-    // assumption is always present -- null when the provider offered none; viz
-    // is null when the provider offered no chart (ADR-0016/0033, default table).
+fn turn_outcome_materialized_carries_the_promotion_chain_and_assumption() {
+    // Pin the wire shape the frontend mirrors (src/types/thread.ts, ADR-0084):
+    // adjacently-tagged, the Materialized variant nests the promotion chain --
+    // each a full dataset descriptor + the verbatim SQL that produced it --
+    // plus viz + assumption under data. assumption is always present -- null
+    // when the provider offered none; viz is null when the provider offered no
+    // chart (ADR-0016/0033, default table).
+    use toptopduck_lib::model::Promotion;
     use toptopduck_lib::TurnOutcome;
     assert_wire(
         &TurnOutcome::Materialized {
-            dataset: Box::new(sample_descriptor()),
-            sql: None,
+            promotions: vec![Promotion {
+                dataset: sample_descriptor(),
+                sql: "SELECT 1".into(),
+            }],
             viz: None,
             assumption: None,
         },
-        r#"{"kind":"Materialized","data":{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"sql":null,"viz":null,"assumption":null}}"#,
+        r#"{"kind":"Materialized","data":{"promotions":[{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"sql":"SELECT 1"}],"viz":null,"assumption":null}}"#,
     );
 }
 
@@ -217,18 +222,21 @@ fn turn_outcome_materialized_carries_a_viz_spec() {
     // frontend regression is caught here, not silently. The spec string is
     // carried verbatim (escaped as a JSON string); the frontend parses + renders
     // it, degrading to the table on a malformed spec or render failure.
+    use toptopduck_lib::model::Promotion;
     use toptopduck_lib::{ChartKind, TurnOutcome, VizSpec};
     assert_wire(
         &TurnOutcome::Materialized {
-            dataset: Box::new(sample_descriptor()),
-            sql: None,
+            promotions: vec![Promotion {
+                dataset: sample_descriptor(),
+                sql: "SELECT 1".into(),
+            }],
             viz: Some(VizSpec {
                 kind: ChartKind::Bar,
                 spec: "{\"mark\":\"bar\"}".into(),
             }),
             assumption: None,
         },
-        r#"{"kind":"Materialized","data":{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"sql":null,"viz":{"kind":"bar","spec":"{\"mark\":\"bar\"}"},"assumption":null}}"#,
+        r#"{"kind":"Materialized","data":{"promotions":[{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"sql":"SELECT 1"}],"viz":{"kind":"bar","spec":"{\"mark\":\"bar\"}"},"assumption":null}}"#,
     );
 }
 

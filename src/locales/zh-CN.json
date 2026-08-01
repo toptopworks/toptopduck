@@ -270,6 +270,7 @@
   "sidebar.search.title": "搜索会话",
   "sidebar.turns": "{count, plural, =0 {尚无轮次} other {# 轮}}",
   "thread.activeChip.title": "提问点名「{name}」",
+  "thread.antecedents": "由 {names} 派生",
   "thread.ariaLabel": "对话历史",
   "thread.assumption": "假设：{text}",
   "thread.outcome.agent": "已回答",

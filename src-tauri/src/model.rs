@@ -481,6 +481,26 @@ impl std::fmt::Display for TurnFailure {
 }
 impl std::error::Error for TurnFailure {}
 
+/// One working-set promotion (ADR-0022/0077, representation ADR-0084): the
+/// dataset descriptor a `materialize` call registered, paired with the verbatim
+/// SQL that produced it. The descriptor alone does not carry its SQL, and the
+/// recipe's replayable chain reads the SQL here, so the two always travel
+/// together. A result turn's outcome carries these in promotion order (one or
+/// more); the chain tail is the turn's primary result -- a derived property,
+/// never a stored field (see [`TurnOutcome::primary_promotion`]). Crosses IPC
+/// nested under [`TurnOutcome::Materialized`] and is mirrored by
+/// src/types/thread.ts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Promotion {
+    /// The materialized result's descriptor (a Dataset like any source,
+    /// ADR-0003): reference name, display name, columns, sample, row count.
+    pub dataset: DatasetDescriptor,
+    /// The verbatim SQL that produced this promotion (ADR-0009/0023): the
+    /// recent-turn window ships it so the provider sees its own prior SQL, and
+    /// the recipe's productive chain re-executes it on resume.
+    pub sql: String,
+}
+
 /// One turn outcome (ADR-0028): one exhaustive four-way classification. A turn
 /// always produces exactly one, regardless of whether it materialized a result
 /// -- "no result" is itself a typed outcome, never a silent gap. The four kinds
@@ -494,27 +514,26 @@ impl std::error::Error for TurnFailure {}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum TurnOutcome {
-    /// Outcome A -- a result turn: produced one SQL, executed it, and
-    /// materialized result_N. Carries the result descriptor (a Dataset like any
-    /// source, ADR-0003) plus the provider's optional assumption note
-    /// (ADR-0009), surfaced as a correctable side note. This is the only
-    /// outcome that advances result_N numbering.
+    /// Outcome A -- a result turn (ADR-0077 "one or more promotions";
+    /// representation ADR-0084): the agent loop materialized one or more
+    /// result_N this turn. Carries the full promotion chain in promotion order
+    /// (each a dataset descriptor + the verbatim SQL that produced it); the
+    /// chain tail is the turn's primary result -- derived via
+    /// [`TurnOutcome::primary_promotion`], never a stored field. Plus the
+    /// provider's optional assumption note (ADR-0009), surfaced as a
+    /// correctable side note. This is the only outcome that advances result_N
+    /// numbering (one number per promotion, in promotion order, ADR-0022).
     Materialized {
-        dataset: Box<DatasetDescriptor>,
-        /// The verbatim SQL the provider returned this turn (ADR-0009/0023):
-        /// the recent-turn window ships it so the provider sees its own prior
-        /// SQL (ADR-0023 point 1: "LLM 响应（SQL + assumption 文本）"). `None`
-        /// only on legacy data that predates the field -- a fresh result turn
-        /// always produced a SQL, so the live path sets `Some`. The serde
-        /// default lets older recipes / IPC peers deserialize without it.
-        #[serde(default)]
-        sql: Option<String>,
+        /// The turn's promotions in promotion order (ADR-0022 monotonic
+        /// numbering: result_1, result_2, ...). Non-empty for a result turn;
+        /// the chain tail is the primary result the terminal answer references.
+        promotions: Vec<Promotion>,
         /// The provider's optional viz spec (ADR-0016/0033): the LLM-decided
-        /// chart to render over this result, or `None` for a plain table turn
-        /// (the default -- a visual intent is required to emit one, ADR-0033).
-        /// Carried verbatim to the frontend, which renders it or degrades to the
-        /// table with a disclosure. `#[serde(default)]` keeps older data
-        /// (recipes / IPC peers from before #26) deserializing to `None`.
+        /// chart to render over the primary result, or `None` for a plain table
+        /// turn (the default -- a visual intent is required to emit one,
+        /// ADR-0033). Carried verbatim to the frontend, which renders it or
+        /// degrades to the table with a disclosure. `#[serde(default)]` keeps
+        /// older IPC peers (from before #26) deserializing to `None`.
         #[serde(default)]
         viz: Option<VizSpec>,
         assumption: Option<String>,
@@ -545,6 +564,22 @@ pub enum TurnOutcome {
     /// complete and the frontend can render it, but no code path produces it
     /// yet.
     Cancelled,
+}
+
+impl TurnOutcome {
+    /// The turn's primary promotion (ADR-0084): the chain tail -- the result
+    /// the terminal answer references, by the loop's termination shape (the
+    /// model materializes, then writes its terminal text about the last
+    /// product). Derived, never stored: routing every "which result is THE
+    /// answer" read through this single call site keeps "primary == last"
+    /// consistent by construction, with no stored index that could disagree
+    /// with the chain. `None` for a non-Materialized outcome.
+    pub fn primary_promotion(&self) -> Option<&Promotion> {
+        match self {
+            TurnOutcome::Materialized { promotions, .. } => promotions.last(),
+            _ => None,
+        }
+    }
 }
 
 /// One entry in the conversation thread (ADR-0028/0039): the verbatim user

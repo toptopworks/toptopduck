@@ -46,10 +46,9 @@ describe("findMaterializedPayload", () => {
         outcome: {
           kind: "Materialized",
           data: {
-            dataset: src("result_1"),
+            promotions: [{ dataset: src("result_1"), sql: "SELECT 1" }],
             viz: { kind: "bar", spec: "{\"mark\":\"bar\"}" },
             assumption: "grouped by product",
-            sql: null,
           },
         },
       },

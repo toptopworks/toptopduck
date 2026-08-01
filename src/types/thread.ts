@@ -55,12 +55,15 @@ export type TurnOutcome =
   | {
     kind: "Materialized";
     data: {
-      dataset: DatasetDescriptor;
-      // The verbatim SQL the provider returned (ADR-0009/0023): the recent-turn
-      // window ships it so the provider sees its own prior SQL. Optional to
-      // mirror the Rust serde default (absent on older data); a fresh result
-      // turn always carries one. The frontend does not yet surface it.
-      sql?: string | null;
+      // ADR-0084: the turn's promotions in promotion order (one or more). The
+      // chain tail is the primary result the answer references -- a derived
+      // property, never a separate field. Each promotion carries the result
+      // descriptor + the verbatim SQL that produced it. Mirrors the Rust
+      // Promotion (nested under TurnOutcome::Materialized).
+      promotions: Array<{
+        dataset: DatasetDescriptor;
+        sql: string;
+      }>;
       // The provider's optional viz spec (ADR-0016/0033, issue #26): null when
       // the provider offered no chart (the default table turn). The frontend
       // renders it via Vega-Embed or degrades to the table with a disclosure

@@ -118,18 +118,25 @@ impl From<&crate::model::TurnOutcome> for ResponsePayload {
         use crate::model::TurnOutcome;
         match outcome {
             TurnOutcome::Materialized {
-                dataset,
-                sql,
+                promotions,
                 assumption,
                 // viz intentionally dropped: a prior turn's chart intent is
                 // irrelevant to SQL generation (the ADR-0023 window carries the
                 // prior SQL, not the presentation spec).
                 ..
-            } => ResponsePayload::Materialized {
-                result: dataset.reference_name.clone(),
-                sql: sql.clone(),
-                assumption: assumption.clone(),
-            },
+            } => {
+                // The one-line window summary represents the turn's primary
+                // result (ADR-0084 chain tail); antecedent promotions ride the
+                // dataset blocks the assembler enumerates from the working set.
+                let primary = promotions
+                    .last()
+                    .expect("a Materialized outcome carries at least one promotion (ADR-0084)");
+                ResponsePayload::Materialized {
+                    result: primary.dataset.reference_name.clone(),
+                    sql: Some(primary.sql.clone()),
+                    assumption: assumption.clone(),
+                }
+            }
             TurnOutcome::Textual {
                 text_kind,
                 body,

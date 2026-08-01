@@ -27,6 +27,17 @@ import { TechnicalDetailsFold } from "../common/TechnicalDetailsFold";
 // field names that would silently drift on a rename.
 export type DatasetLabel = Pick<DatasetDescriptor, "reference_name" | "display_name">;
 
+// The reference name of a Materialized turn's primary result (ADR-0084): the
+// promotion chain's tail -- the result the turn's answer references. The stale
+// ghost and the result link both key on the primary; antecedent promotions
+// (earlier in the chain) are intermediate results. undefined for a
+// non-Materialized outcome (or an illegal empty chain).
+function primaryReferenceName(outcome: TurnOutcome): string | undefined {
+  if (outcome.kind !== "Materialized") return undefined;
+  const { promotions } = outcome.data;
+  return promotions[promotions.length - 1]?.dataset.reference_name;
+}
+
 interface ThreadProps {
   /** The unified timeline (ADR-0040): turns interleaved with source lifecycle
    * events, in order. Source events render as non-interactive markers distinct
@@ -135,10 +146,9 @@ export function Thread({
       <ol className="list-none m-0 p-0">
         {entries.map((entry, i) => {
           if (entry.entry === "Turn") {
+            const primaryRef = primaryReferenceName(entry.data.outcome);
             const staleAnchor =
-              entry.data.outcome.kind === "Materialized"
-                ? staleByReference.get(entry.data.outcome.data.dataset.reference_name)
-                : undefined;
+              primaryRef === undefined ? undefined : staleByReference.get(primaryRef);
             // Resolve the chip's jump target up front (ADR-0047): the nearest
             // matching SourceLifecycleEvent after this turn. null when no event
             // follows (resume / stale-map inconsistency) -- the chip then
@@ -743,10 +753,31 @@ function TurnBody({
   const intl = useIntl();
   switch (record.outcome.kind) {
     case "Materialized": {
-      const { dataset, assumption } = record.outcome.data;
-      const active = dataset.reference_name === selectedResult;
+      const { promotions, assumption } = record.outcome.data;
+      // ADR-0084: the chain tail is the primary result (the answer the question
+      // produced); earlier promotions are intermediate results, rendered as a
+      // muted "derived from" line so the lineage stays visible without
+      // competing with the primary link.
+      const primary = promotions[promotions.length - 1];
+      const antecedents = promotions.slice(0, -1);
+      if (!primary) return null;
+      const active = primary.dataset.reference_name === selectedResult;
       return (
         <p className="turn-outcome mt-1 ml-6 text-xs leading-snug">
+          {antecedents.length > 0 && (
+            <span className="antecedents block mb-0.5 text-muted-foreground">
+              <FormattedMessage
+                id="thread.antecedents"
+                defaultMessage="Derived from {names}"
+                values={{
+                  names: intl.formatList(
+                    antecedents.map((p) => p.dataset.reference_name),
+                    { type: "conjunction" },
+                  ),
+                }}
+              />
+            </span>
+          )}
           {/* result-link is a real <button> (clickable, focusable) but stripped
               of native button chrome via [all:unset] so it reads as an inline
               link; subsequent utilities rebuild the box model + token color.
@@ -763,12 +794,12 @@ function TurnBody({
               staleAnchor && "stale text-muted-foreground border-dashed",
             )}
             aria-current={active ? "true" : undefined}
-            onClick={() => onSelectResult(dataset.reference_name)}
+            onClick={() => onSelectResult(primary.dataset.reference_name)}
           >
             <FormattedMessage
               id="thread.resultLink"
               defaultMessage="Result: {name}"
-              values={{ name: dataset.reference_name }}
+              values={{ name: primary.dataset.reference_name }}
             />
           </button>
           {staleAnchor && (

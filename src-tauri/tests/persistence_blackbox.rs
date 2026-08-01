@@ -2206,11 +2206,10 @@ fn replace_source_atomically_rewrites_duck_with_stale_chain_and_replaced_event()
         .iter()
         .find_map(|e| match e {
             RecipeEntry::Turn(t) => match &t.outcome {
-                RecipeOutcome::Materialized {
-                    reference_name,
-                    stale: Some(a),
-                    ..
-                } if reference_name == "result_1" => Some(a.clone()),
+                RecipeOutcome::Materialized { promotions, .. } => promotions
+                    .iter()
+                    .find(|p| p.reference_name == "result_1")
+                    .and_then(|p| p.stale.clone()),
                 _ => None,
             },
             _ => None,
@@ -2271,11 +2270,10 @@ fn remove_source_atomically_rewrites_duck_with_stale_chain_and_deleted_event() {
         .iter()
         .find_map(|e| match e {
             RecipeEntry::Turn(t) => match &t.outcome {
-                RecipeOutcome::Materialized {
-                    reference_name,
-                    stale: Some(a),
-                    ..
-                } if reference_name == "result_1" => Some(a.clone()),
+                RecipeOutcome::Materialized { promotions, .. } => promotions
+                    .iter()
+                    .find(|p| p.reference_name == "result_1")
+                    .and_then(|p| p.stale.clone()),
                 _ => None,
             },
             _ => None,
@@ -2371,7 +2369,8 @@ fn resume_after_replace_excludes_stale_from_replay_but_keeps_marked_stale() {
             t.question == "多少人"
                 && matches!(
                     &t.outcome,
-                    TurnOutcome::Materialized { dataset, .. } if dataset.stale.is_some()
+                    TurnOutcome::Materialized { promotions, .. }
+                        if promotions.iter().any(|p| p.dataset.stale.is_some())
                 )
         }
         _ => false,
@@ -2586,6 +2585,7 @@ fn resume_rejects_a_recipe_whose_active_points_at_an_unregistered_source() {
 /// turns are dropped -- the honest partial state, not a silent gap.
 #[test]
 fn resume_renders_a_broken_sql_turn_as_failed_and_preserves_prior_results() {
+    use toptopduck_lib::persistence::recipe::RecipePromotion;
     use toptopduck_lib::persistence::{
         save_atomic, Recipe, RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef,
     };
@@ -2617,21 +2617,25 @@ fn resume_renders_a_broken_sql_turn_as_failed_and_preserves_prior_results() {
             RecipeEntry::Turn(RecipeTurn::new(
                 "good",
                 RecipeOutcome::Materialized {
-                    reference_name: "result_1".into(),
-                    display_name: "result_1".into(),
-                    sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
+                    promotions: vec![RecipePromotion {
+                        reference_name: "result_1".into(),
+                        display_name: "result_1".into(),
+                        sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
+                        stale: None,
+                    }],
                     assumption: None,
-                    stale: None,
                 },
             )),
             RecipeEntry::Turn(RecipeTurn::new(
                 "broken",
                 RecipeOutcome::Materialized {
-                    reference_name: "result_2".into(),
-                    display_name: "result_2".into(),
-                    sql: "SELECT * FROM nonexistent_relation".into(),
+                    promotions: vec![RecipePromotion {
+                        reference_name: "result_2".into(),
+                        display_name: "result_2".into(),
+                        sql: "SELECT * FROM nonexistent_relation".into(),
+                        stale: None,
+                    }],
                     assumption: None,
-                    stale: None,
                 },
             )),
             // A third turn whose SQL WOULD succeed if replayed -- pins that
@@ -2641,11 +2645,13 @@ fn resume_renders_a_broken_sql_turn_as_failed_and_preserves_prior_results() {
             RecipeEntry::Turn(RecipeTurn::new(
                 "after-break",
                 RecipeOutcome::Materialized {
-                    reference_name: "result_3".into(),
-                    display_name: "result_3".into(),
-                    sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
+                    promotions: vec![RecipePromotion {
+                        reference_name: "result_3".into(),
+                        display_name: "result_3".into(),
+                        sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
+                        stale: None,
+                    }],
                     assumption: None,
-                    stale: None,
                 },
             )),
         ],

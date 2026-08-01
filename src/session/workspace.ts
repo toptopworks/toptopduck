@@ -74,9 +74,12 @@ export function findMaterializedPayload(
   for (const entry of thread) {
     if (entry.entry !== "Turn") continue;
     const { outcome } = entry.data;
+    // ADR-0084: a result turn carries a promotion chain; the viewed result
+    // matches if ANY promotion produced it. The payload (assumption + viz) is
+    // turn-level -- it rides the whole turn, not a single promotion.
     if (
       outcome.kind === "Materialized" &&
-      outcome.data.dataset.reference_name === referenceName
+      outcome.data.promotions.some((p) => p.dataset.reference_name === referenceName)
     ) {
       return { assumption: outcome.data.assumption, viz: outcome.data.viz };
     }

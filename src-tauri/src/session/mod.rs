@@ -31,8 +31,8 @@ use crate::model::{
     TextKind, ThreadEntry, TurnError, TurnFailure, TurnOutcome, TurnPhase, TurnRecord,
 };
 use crate::persistence::recipe::{
-    synthetic_materialize_trace, Recipe, RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef,
-    TurnProvenance,
+    synthetic_materialize_trace, Recipe, RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTurn,
+    SourceRef, TurnProvenance,
 };
 use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
 use crate::persistence::{read_duck, save_atomic, SaveError};
@@ -1785,52 +1785,63 @@ impl Session {
             .filter_map(|entry| match entry {
                 ThreadEntry::Turn(record) => {
                     // Build the trimmed outcome paired with its persisted trace
-                    // (ADR-0078). A Materialized turn ran exactly one productive
-                    // SQL under the single-SQL contract, so its trace is a
-                    // synthetic single `materialize` call (real multi-call
-                    // traces arrive with the agent-loop wiring slice, ADR-0081);
-                    // every other outcome has an empty trace -- no tool call
-                    // trajectory to record.
+                    // (ADR-0078). A Materialized turn persists its FULL
+                    // promotion chain (ADR-0084) -- every result_N the turn
+                    // produced, each its own RecipePromotion -- so resume
+                    // replays the whole chain. The trace is still a synthetic
+                    // single `materialize` call keyed on the primary's SQL
+                    // (real multi-call traces arrive with #319); every other
+                    // outcome has an empty trace -- no tool call trajectory to
+                    // record.
                     let (outcome, trace) = match &record.outcome {
                         TurnOutcome::Materialized {
-                            dataset,
-                            sql,
+                            promotions,
                             viz: _,
                             assumption,
                         } => {
-                            // The result_N must still be registered (a GC'd or
-                            // otherwise removed descriptor leaves no trace --
-                            // the turn cannot replay or render, so drop it).
-                            // `?` here returns None from the filter_map closure
-                            // (drop this entry), NOT from build_recipe.
-                            let descriptor = self.working_set.get(&dataset.reference_name)?;
-                            // sql is Some on every fresh Materialized turn; a
-                            // None predates the field and cannot replay, so
-                            // drop the turn rather than fabricate SQL. (A stale
-                            // turn also keeps its SQL -- ADR-0041 point 2: the
-                            // verbatim SQL stays visible in the window.)
-                            let sql = sql.clone()?;
-                            // display_name comes from the working set's CURRENT
-                            // state, not the ask-time snapshot in history -- a
-                            // user rename (ADR-0037) updates the working set,
-                            // not the history entry, so the snapshot is stale.
-                            let display_name = descriptor.display_name.clone();
-                            let trace = synthetic_materialize_trace(&sql);
+                            // ADR-0084: persist EVERY promotion as its own
+                            // RecipePromotion. display_name + stale come from
+                            // the working set's CURRENT state, not the ask-time
+                            // snapshot in history -- a user rename (ADR-0037) /
+                            // cascade (ADR-0041) updates the working set, not
+                            // the history entry. A promotion whose result_N is
+                            // gone (GC'd / removed, no descriptor) is dropped
+                            // -- it can neither replay nor render.
+                            let recipe_promotions: Vec<RecipePromotion> = promotions
+                                .iter()
+                                .filter_map(|p| {
+                                    let descriptor =
+                                        self.working_set.get(&p.dataset.reference_name)?;
+                                    Some(RecipePromotion {
+                                        reference_name: p.dataset.reference_name.clone(),
+                                        display_name: descriptor.display_name.clone(),
+                                        sql: p.sql.clone(),
+                                        // ADR-0041: a live result -> stale None
+                                        // (replayed); a cascade-invalidated
+                                        // result -> the anchor from its
+                                        // descriptor (dead result, kept in
+                                        // history, never replayed). The anchor
+                                        // is what the UI's stale badge reads,
+                                        // so a reopen renders the same
+                                        // "invalidated by" provenance as the
+                                        // live session did.
+                                        stale: descriptor.stale.clone(),
+                                    })
+                                })
+                                .collect();
+                            // If no promotion survived (every result_N GC'd),
+                            // the turn cannot replay or render -- drop it
+                            // (`return None` exits the filter_map closure, NOT
+                            // build_recipe), mirroring the single-result drop.
+                            let primary_sql = match recipe_promotions.last() {
+                                Some(primary) => primary.sql.clone(),
+                                None => return None,
+                            };
+                            let trace = synthetic_materialize_trace(&primary_sql);
                             (
                                 RecipeOutcome::Materialized {
-                                    reference_name: dataset.reference_name.clone(),
-                                    display_name,
-                                    sql,
+                                    promotions: recipe_promotions,
                                     assumption: assumption.clone(),
-                                    // ADR-0041: a live result -> stale None
-                                    // (replayed); a cascade-invalidated result
-                                    // -> the anchor from its descriptor (dead
-                                    // turn, kept in history, never replayed).
-                                    // The anchor is what the UI's stale badge
-                                    // reads, so a reopen renders the same
-                                    // "invalidated by" provenance as the live
-                                    // session did.
-                                    stale: descriptor.stale.clone(),
                                 },
                                 trace,
                             )
@@ -2243,25 +2254,31 @@ impl Session {
 /// trajectory that never converges exhausts the step cap.
 fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
     match outcome.termination {
-        Termination::Text(text) => match outcome.promotions.last() {
-            Some(primary) => TurnOutcome::Materialized {
-                dataset: Box::new(primary.descriptor.clone()),
-                sql: Some(primary.sql.clone()),
-                // The tool-calling contract carries no viz intent (the
-                // presentation slice is separate); a plain table turn.
-                viz: None,
-                assumption: if text.trim().is_empty() {
-                    None
-                } else {
-                    Some(text)
-                },
-            },
-            None => TurnOutcome::Textual {
-                text_kind: TextKind::Agent,
-                body: text,
-                assumption: None,
-            },
-        },
+        Termination::Text(text) => {
+            if outcome.promotions.is_empty() {
+                TurnOutcome::Textual {
+                    text_kind: TextKind::Agent,
+                    body: text,
+                    assumption: None,
+                }
+            } else {
+                TurnOutcome::Materialized {
+                    // ADR-0084: the outcome carries the FULL promotion chain in
+                    // promotion order; the chain tail is the primary result
+                    // (derived at the read sites, never folded here). Working
+                    // set, history, recipe, and resume all see every promotion.
+                    promotions: outcome.promotions,
+                    // The tool-calling contract carries no viz intent (the
+                    // presentation slice is separate); a plain table turn.
+                    viz: None,
+                    assumption: if text.trim().is_empty() {
+                        None
+                    } else {
+                        Some(text)
+                    },
+                }
+            }
+        }
         Termination::StepCap(cap) => TurnOutcome::Failed(TurnFailure::Execute {
             detail: format!("agent did not converge within {cap} steps"),
         }),

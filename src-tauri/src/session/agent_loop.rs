@@ -44,7 +44,7 @@ use crate::approval::{
     ToolKey,
 };
 use crate::cancel::CancelToken;
-use crate::model::{DatasetDescriptor, TurnPhase};
+use crate::model::{DatasetDescriptor, Promotion, TurnPhase};
 use crate::provider::tool_calling::{
     ToolResult, ToolTurnMessage, ToolTurnReply, ToolTurnRequest, ToolUse,
 };
@@ -375,7 +375,10 @@ fn execute_call(
             .unwrap_or_default()
             .to_string();
         match promotion_from_result(&result.content, deps) {
-            Some(descriptor) => outputs.promotions.push(Promotion { descriptor, sql }),
+            Some(descriptor) => outputs.promotions.push(Promotion {
+                dataset: descriptor,
+                sql,
+            }),
             None => log::error!(
                 target: "toptopduck::agent_loop",
                 "materialize reported success but the promotion could not be recovered; \
@@ -514,17 +517,6 @@ pub(crate) struct TraceEntry {
     pub success: bool,
     /// Bounded excerpt of the tool result (or the denial / error message).
     pub result_excerpt: String,
-}
-
-/// One working-set promotion this turn (ADR-0022/0077): the descriptor the
-/// `materialize` call registered, paired with the verbatim SQL that produced
-/// it. The descriptor alone does not carry its SQL, and the wiring seam
-/// records the SQL on the Materialized outcome (the recipe's replayable chain
-/// reads it there), so the two always travel together.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Promotion {
-    pub descriptor: DatasetDescriptor,
-    pub sql: String,
 }
 
 /// The structured outcome the agent loop returns. Pure data -- the wiring seam
@@ -727,7 +719,7 @@ mod tests {
             1,
             "explore does not promote; only materialize does"
         );
-        assert_eq!(outcome.promotions[0].descriptor.reference_name, "result_1");
+        assert_eq!(outcome.promotions[0].dataset.reference_name, "result_1");
         assert_eq!(
             outcome.promotions[0].sql, "SELECT 1 AS x",
             "the promotion carries its verbatim materialize SQL"
@@ -810,7 +802,7 @@ mod tests {
         let names: Vec<String> = outcome
             .promotions
             .iter()
-            .map(|p| p.descriptor.reference_name.clone())
+            .map(|p| p.dataset.reference_name.clone())
             .collect();
         assert_eq!(
             names,

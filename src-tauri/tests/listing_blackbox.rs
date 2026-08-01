@@ -14,6 +14,7 @@
 //! session_id = path addressing invariant at the public-API boundary (issue
 //! #76 AC: "black-box coverage of list_sessions field completeness").
 
+use toptopduck_lib::persistence::recipe::RecipePromotion;
 use toptopduck_lib::persistence::{
     list_session_metadata, save_atomic, Recipe, RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef,
     RECIPE_FORMAT_VERSION,
@@ -38,11 +39,13 @@ fn write_recipe(dir: &std::path::Path, file: &str, session_name: &str, src: &str
         vec![RecipeEntry::Turn(RecipeTurn::new(
             "q",
             RecipeOutcome::Materialized {
-                reference_name: "result_1".into(),
-                display_name: "result_1".into(),
-                sql: "SELECT 1".into(),
+                promotions: vec![RecipePromotion {
+                    reference_name: "result_1".into(),
+                    display_name: "result_1".into(),
+                    sql: "SELECT 1".into(),
+                    stale: None,
+                }],
                 assumption: None,
-                stale: None,
             },
         ))],
         Some(src.into()),

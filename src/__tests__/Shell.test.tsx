@@ -153,7 +153,11 @@ function materializedTurn(referenceName: string): ThreadEntry {
       question: `q:${referenceName}`,
       outcome: {
         kind: "Materialized",
-        data: { dataset: src(referenceName), viz: null, assumption: null, sql: null },
+        data: {
+          promotions: [{ dataset: src(referenceName), sql: "SELECT 1" }],
+          viz: null,
+          assumption: null,
+        },
       },
     },
   };
@@ -217,7 +221,11 @@ describe("App three-column shell (issue #79 ACs)", () => {
     state.workingSet = [src("people")];
     vi.mocked(askQuestion).mockResolvedValue({
       kind: "Materialized",
-      data: { dataset: { ...src("result_1"), row_count: 1 }, viz: null, assumption: null },
+      data: {
+        promotions: [{ dataset: { ...src("result_1"), row_count: 1 }, sql: "SELECT 1" }],
+        viz: null,
+        assumption: null,
+      },
     });
     render(<App />);
     await openSession();
@@ -262,7 +270,11 @@ describe("App three-column shell (issue #79 ACs)", () => {
     state.workingSet = [src("people")];
     vi.mocked(askQuestion).mockResolvedValue({
       kind: "Materialized",
-      data: { dataset: { ...src("result_1"), row_count: 1 }, viz: null, assumption: null },
+      data: {
+        promotions: [{ dataset: { ...src("result_1"), row_count: 1 }, sql: "SELECT 1" }],
+        viz: null,
+        assumption: null,
+      },
     });
     render(<App />);
     await openSession();
@@ -907,7 +919,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
     resolve({
       kind: "Materialized",
       data: {
-        dataset: { ...src("result_1"), row_count: 1 },
+        promotions: [{ dataset: { ...src("result_1"), row_count: 1 }, sql: "SELECT 1" }],
         viz: null,
         assumption: null,
       },

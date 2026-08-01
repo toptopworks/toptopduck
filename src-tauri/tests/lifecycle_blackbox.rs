@@ -613,9 +613,10 @@ fn source_events_neither_advance_result_n_nor_are_turns() {
     );
     let outcome = session.ask("count");
     match outcome {
-        TurnOutcome::Materialized { dataset, .. } => {
+        TurnOutcome::Materialized { promotions, .. } => {
+            let primary = promotions.last().expect("a result turn carries promotions");
             assert_eq!(
-                dataset.reference_name, "result_1",
+                primary.dataset.reference_name, "result_1",
                 "events did not advance result_N"
             );
         }
@@ -679,8 +680,8 @@ fn stale_result_remains_visible_in_working_set_and_thread() {
         session.conversation().iter().any(|e| matches!(
             e,
             ThreadEntry::Turn(t) if matches!(&t.outcome,
-                TurnOutcome::Materialized { dataset, .. }
-                if dataset.reference_name == "result_1")
+                TurnOutcome::Materialized { promotions, .. }
+                if promotions.iter().any(|p| p.dataset.reference_name == "result_1"))
         )),
         "stale result's producing turn stays in thread"
     );
@@ -815,9 +816,10 @@ fn result_number_takes_max_plus_one_after_stale() {
 
     let outcome = session.ask("more"); // FROM people -> new result
     match outcome {
-        TurnOutcome::Materialized { dataset, .. } => {
+        TurnOutcome::Materialized { promotions, .. } => {
+            let primary = promotions.last().expect("a result turn carries promotions");
             assert_eq!(
-                dataset.reference_name, "result_2",
+                primary.dataset.reference_name, "result_2",
                 "next result is max+1, never reusing the stale number"
             );
         }
@@ -999,9 +1001,10 @@ fn replace_does_not_revive_stale_result_fresh_ask_yields_new_number() {
     // result_1 (ADR-0041 终局死轮; ADR-0022 编号不重用).
     let second = session.ask("q2");
     match second {
-        TurnOutcome::Materialized { dataset, .. } => {
+        TurnOutcome::Materialized { promotions, .. } => {
+            let primary = promotions.last().expect("a result turn carries promotions");
             assert_eq!(
-                dataset.reference_name, "result_2",
+                primary.dataset.reference_name, "result_2",
                 "fresh result_2, not a revival of stale result_1"
             );
         }
@@ -1105,8 +1108,9 @@ fn gc_reclaims_oldest_stale_when_result_count_exceeds_cap() {
     // GC reclaims the oldest stale (result_1).
     let outcome = session.ask("q4");
     match outcome {
-        TurnOutcome::Materialized { dataset, .. } => {
-            assert_eq!(dataset.reference_name, "result_4");
+        TurnOutcome::Materialized { promotions, .. } => {
+            let primary = promotions.last().expect("a result turn carries promotions");
+            assert_eq!(primary.dataset.reference_name, "result_4");
         }
         other => panic!("expected Materialized result_4, got {other:?}"),
     }
@@ -1197,8 +1201,8 @@ fn gc_preserves_producing_turn_in_thread() {
     assert!(
         session.conversation().iter().any(|e| matches!(e,
             ThreadEntry::Turn(t) if matches!(&t.outcome,
-                TurnOutcome::Materialized { dataset, .. }
-                if dataset.reference_name == "result_1")
+                TurnOutcome::Materialized { promotions, .. }
+                if promotions.iter().any(|p| p.dataset.reference_name == "result_1"))
         )),
         "result_1's producing turn stays in the thread after GC"
     );
@@ -1233,9 +1237,10 @@ fn gc_leaves_number_holes_never_reused() {
     // Next materialization: max(2,3,4)+1 = 5, never reusing the result_1 hole.
     let outcome = session.ask("q5");
     match outcome {
-        TurnOutcome::Materialized { dataset, .. } => {
+        TurnOutcome::Materialized { promotions, .. } => {
+            let primary = promotions.last().expect("a result turn carries promotions");
             assert_eq!(
-                dataset.reference_name, "result_5",
+                primary.dataset.reference_name, "result_5",
                 "GC'd number is a hole, not reused (ADR-0022)"
             );
         }

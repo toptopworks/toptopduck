@@ -84,18 +84,25 @@ fn session_with(scripts: &[(&str, &str)]) -> Session {
     Session::with_provider(Box::new(provider)).expect("session")
 }
 
-/// Unpack a Materialized outcome into (reference_name, row_count, columns).
+/// Unpack a Materialized outcome's PRIMARY promotion (the chain tail,
+/// ADR-0084) into (reference_name, row_count, columns). Single-result turns
+/// carry a one-element chain, so this reads exactly the result they produced.
 fn materialized(outcome: TurnOutcome) -> (String, u64, Vec<(String, String)>) {
-    match outcome {
-        TurnOutcome::Materialized { dataset, .. } => {
-            let cols = dataset
+    match outcome.primary_promotion() {
+        Some(primary) => {
+            let cols = primary
+                .dataset
                 .columns
                 .iter()
                 .map(|c| (c.name.clone(), c.canonical_type.clone()))
                 .collect();
-            (dataset.reference_name, dataset.row_count, cols)
+            (
+                primary.dataset.reference_name.clone(),
+                primary.dataset.row_count,
+                cols,
+            )
         }
-        other => panic!("expected Materialized, got {other:?}"),
+        None => panic!("expected Materialized, got {outcome:?}"),
     }
 }
 
@@ -280,10 +287,11 @@ fn ask_surfaces_the_terminal_answer_as_the_assumption_note() {
 #[test]
 fn multiple_promotions_in_one_turn_land_materialized_with_the_last_as_primary() {
     // AC #318: one question may promote several results in a single turn; the
-    // outcome is Materialized, numbering is monotonic by promotion order
-    // (ADR-0022), and the LAST promotion is the turn's primary result (a later
-    // materialize supersedes earlier ones as the analysis focus) -- its SQL
-    // rides the outcome. EVERY promotion registers in the working set.
+    // outcome is Materialized carrying the FULL promotion chain in promotion
+    // order (ADR-0084), numbering is monotonic (ADR-0022), and the LAST
+    // promotion is the turn's primary result (a later materialize supersedes
+    // earlier ones as the analysis focus) -- its SQL rides the chain tail.
+    // EVERY promotion registers in the working set.
     let provider = FakeProvider::new().scripted_tool_turn_seq(
         "两步晋升",
         vec![
@@ -296,14 +304,24 @@ fn multiple_promotions_in_one_turn_land_materialized_with_the_last_as_primary() 
     load_source(&mut session, &fixture("people.csv"));
 
     match session.ask("两步晋升") {
-        TurnOutcome::Materialized { dataset, sql, .. } => {
+        TurnOutcome::Materialized { promotions, .. } => {
             assert_eq!(
-                dataset.reference_name, "result_2",
+                promotions.len(),
+                2,
+                "the outcome carries BOTH promotions in promotion order"
+            );
+            assert_eq!(
+                promotions[0].dataset.reference_name, "result_1",
+                "the first promotion is the chain head"
+            );
+            assert_eq!(
+                promotions[1].dataset.reference_name, "result_2",
                 "the last promotion is the primary result"
             );
             assert!(
-                sql.as_deref().unwrap_or("").contains("MAX(n)"),
-                "the primary promotion's SQL rides the outcome: {sql:?}"
+                promotions[1].sql.contains("MAX(n)"),
+                "the primary promotion's SQL rides the chain tail: {}",
+                promotions[1].sql
             );
         }
         other => panic!("expected Materialized, got {other:?}"),
@@ -311,6 +329,39 @@ fn multiple_promotions_in_one_turn_land_materialized_with_the_last_as_primary() 
     // Both promotions registered: result_1 AND result_2.
     assert!(session.get("result_1").is_some(), "first promotion kept");
     assert!(session.get("result_2").is_some(), "second promotion kept");
+}
+
+#[test]
+fn a_multi_promotion_turn_persists_every_result_into_the_recipe_chain() {
+    // C1 (ADR-0084): the recipe must capture the FULL promotion chain, not just
+    // the primary -- so resume replays every result_N. A turn that promotes
+    // result_1 then result_2 (derived FROM result_1) yields a productive chain
+    // carrying BOTH in promotion order; dropping result_1 would break the
+    // chained replay, since result_2's SQL references result_1.
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
+        "两步晋升",
+        vec![
+            Ok(materialize(r#"SELECT COUNT(*) AS n FROM "people".data"#)),
+            Ok(materialize("SELECT MAX(n) AS m FROM result_1")),
+            Ok(answer("完成")),
+        ],
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    session.ask("两步晋升");
+
+    let chain = session.build_recipe().productive_chain();
+    let names: Vec<&str> = chain.iter().map(|t| t.reference_name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["result_1", "result_2"],
+        "the recipe's productive chain carries EVERY promotion in order, so resume replays the full chain"
+    );
+    assert!(
+        chain[1].sql.contains("MAX(n)"),
+        "the primary's SQL rides the chain tail: {}",
+        chain[1].sql
+    );
 }
 
 #[test]

@@ -230,7 +230,9 @@ pub fn read_duck(path: &Path) -> Result<Recipe, LoadError> {
 mod tests {
     use super::*;
     use crate::model::RectifyProvenance;
-    use crate::persistence::recipe::{RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef};
+    use crate::persistence::recipe::{
+        RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTurn, SourceRef,
+    };
 
     fn sample_recipe(name: &str) -> Recipe {
         // Review H7 (issue #55): construct via the invariant-validating
@@ -250,11 +252,13 @@ mod tests {
             vec![RecipeEntry::Turn(RecipeTurn::new(
                 "q",
                 RecipeOutcome::Materialized {
-                    reference_name: "result_1".into(),
-                    display_name: "result_1".into(),
-                    sql: "SELECT 1".into(),
+                    promotions: vec![RecipePromotion {
+                        reference_name: "result_1".into(),
+                        display_name: "result_1".into(),
+                        sql: "SELECT 1".into(),
+                        stale: None,
+                    }],
                     assumption: None,
-                    stale: None,
                 },
             ))],
             Some("people".into()),
@@ -378,8 +382,9 @@ mod tests {
         // deserialized -- a failed remap would have surfaced as a Parse error.
         match &recipe.history[0] {
             RecipeEntry::Turn(t) => match &t.outcome {
-                RecipeOutcome::Materialized { reference_name, .. } => {
-                    assert_eq!(reference_name, "result_1");
+                RecipeOutcome::Materialized { promotions, .. } => {
+                    assert_eq!(promotions.len(), 1);
+                    assert_eq!(promotions[0].reference_name, "result_1");
                 }
                 other => panic!("expected Materialized after migration, got {other:?}"),
             },

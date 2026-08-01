@@ -40,7 +40,16 @@ use crate::model::{
 /// Materialized turn becomes one promotion entry and gains a synthetic
 /// single-call trace; older clients reading a v2 file hit the existing
 /// higher-version honest-refuse path (ADR-0036).
-pub const RECIPE_FORMAT_VERSION: u32 = 2;
+///
+/// v3 (ADR-0084) makes the result turn's promotion chain explicit in the
+/// reconstructable part: `RecipeOutcome::Materialized` carries an ordered
+/// `promotions` list (each a [`RecipePromotion`] with its own stale anchor)
+/// instead of a single flattened reference, so a multi-promotion turn persists
+/// EVERY result_N and resume replays the full chain. The v2->v3 mapping is
+/// lossless: a v2 Materialized turn (single reference) wraps into a
+/// one-element promotions list; older clients reading a v3 file hit the
+/// existing higher-version honest-refuse path (ADR-0036).
+pub const RECIPE_FORMAT_VERSION: u32 = 3;
 
 /// One source Dataset's portable reference (ADR-0034/0036/0042). Paths use
 /// the **hybrid representation** ADR-0036 §4 mandates: `source_path` is always
@@ -275,37 +284,54 @@ impl RecipeTurn {
     }
 }
 
+/// One persisted promotion within a result turn (ADR-0084): the trimmed form of
+/// a live [`crate::model::Promotion`]. The recipe carries only the stable
+/// identity (reference name), the display label, the verbatim SQL, and the
+/// per-promotion stale anchor -- everything else (columns / sample / row-count)
+/// is rebuilt by eager replay (ADR-0034). Replayed on resume to re-materialize
+/// its `result_N` (reusing the same number, ADR-0022) UNLESS its own `stale` is
+/// set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipePromotion {
+    pub reference_name: String,
+    pub display_name: String,
+    pub sql: String,
+    /// ADR-0041 stale marker (issue #52), per promotion. `None` = live,
+    /// replayed on resume. `Some(anchor)` = the result_N was cascade-
+    /// invalidated by a source replace/remove -- a dead result: kept in the
+    /// timeline for display and the LLM window (ADR-0041 point 2 -- the
+    /// verbatim SQL stays visible so the user / model can reference the prior
+    /// logic), but excluded from [`Recipe::productive_chain`] so resume never
+    /// re-executes it. The anchor carries the invalidating source event's
+    /// identity + reason (ADR-0040 traceability), so the stale badge renders
+    /// the same way after resume as it did live. `#[serde(default)]` so a
+    /// pre-#52 recipe (whose stale turns were dropped at write time under the
+    /// old contract) deserializes as live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale: Option<StaleAnchor>,
+}
+
 /// A trimmed turn outcome (ADR-0028 four-way classification). The live
 /// [`crate::model::TurnOutcome::Materialized`] carries the full dataset
-/// descriptor (columns / sample / row-count / fingerprint) plus the viz spec;
-/// the recipe form carries only the stable identity (reference name), the
-/// display label, the verbatim SQL, and the assumption -- everything else is
-/// rebuilt by eager replay (ADR-0034) or dropped because not persisted
-/// (ADR-0036 viz / execution metadata).
+/// descriptors (columns / sample / row-count / fingerprint) plus the viz spec;
+/// the recipe form carries, per promotion, only the stable identity (reference
+/// name), the display label, and the verbatim SQL -- everything else is rebuilt
+/// by eager replay (ADR-0034) or dropped because not persisted (ADR-0036 viz /
+/// execution metadata).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum RecipeOutcome {
-    /// Outcome A -- a result turn. Replayed on resume to re-materialize
-    /// `result_N` (reusing the same number, ADR-0022) UNLESS `stale` is set.
+    /// Outcome A -- a result turn (ADR-0077 "one or more promotions";
+    /// representation ADR-0084). Carries the full promotion chain in promotion
+    /// order; [`Recipe::productive_chain`] flattens every turn's chain into the
+    /// flat replay list. The chain tail is the turn's primary result -- the
+    /// answer the question produced (derived, never stored).
     Materialized {
-        reference_name: String,
-        display_name: String,
-        sql: String,
+        /// The turn's promotions in promotion order (ADR-0022 monotonic
+        /// numbering: result_1, result_2, ...). Non-empty for a result turn.
+        promotions: Vec<RecipePromotion>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assumption: Option<String>,
-        /// ADR-0041 stale marker (issue #52). `None` = live turn, replayed on
-        /// resume. `Some(anchor)` = the result_N was cascade-invalidated by a
-        /// source replace/remove -- a dead turn: kept in the timeline for
-        /// display and the LLM window (ADR-0041 point 2 -- the verbatim SQL
-        /// stays visible so the user / model can reference the prior logic),
-        /// but excluded from [`Recipe::productive_chain`] so resume never
-        /// re-executes it. The anchor carries the invalidating source event's
-        /// identity + reason (ADR-0040 traceability), so the stale badge
-        /// renders the same way after resume as it did live.
-        /// `#[serde(default)]` so a pre-#52 v1 recipe (whose stale turns were
-        /// dropped at write time under the old contract) deserializes as live.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        stale: Option<StaleAnchor>,
     },
     /// Outcome B -- a textual turn (ADR-0017 refuse / ADR-0018 clarify).
     /// Statically rendered on resume; the disambiguation choice is already
@@ -472,11 +498,13 @@ impl Recipe {
         for (index, entry) in history.iter().enumerate() {
             match entry {
                 RecipeEntry::Turn(turn) => {
-                    if let RecipeOutcome::Materialized { reference_name, .. } = &turn.outcome {
-                        if !seen_results.insert(reference_name.clone()) {
-                            return Err(RecipeError::DuplicateResultReference {
-                                reference_name: reference_name.clone(),
-                            });
+                    if let RecipeOutcome::Materialized { promotions, .. } = &turn.outcome {
+                        for promotion in promotions {
+                            if !seen_results.insert(promotion.reference_name.clone()) {
+                                return Err(RecipeError::DuplicateResultReference {
+                                    reference_name: promotion.reference_name.clone(),
+                                });
+                            }
                         }
                     }
                 }
@@ -517,25 +545,38 @@ impl Recipe {
     pub fn productive_chain(&self) -> Vec<ProductiveTurn> {
         self.history
             .iter()
-            .filter_map(|entry| match entry {
+            .flat_map(|entry| match entry {
                 RecipeEntry::Turn(turn) => match &turn.outcome {
+                    // ADR-0084: flatten the turn's promotion chain into the flat
+                    // replay list, in promotion order. Each live promotion
+                    // (stale: None) re-materializes its result_N; stale ones
+                    // (ADR-0041 dead results) are skipped. The turn-level
+                    // assumption rides the PRIMARY (chain tail) only -- the
+                    // answer the question produced; antecedents carry none.
                     RecipeOutcome::Materialized {
-                        reference_name,
-                        display_name,
-                        sql,
+                        promotions,
                         assumption,
-                        stale: None,
-                    } => Some(ProductiveTurn {
-                        reference_name: reference_name.clone(),
-                        display_name: display_name.clone(),
-                        sql: sql.clone(),
-                        assumption: assumption.clone(),
-                    }),
-                    // Stale dead turn (ADR-0041) -- display-only, not replayed.
-                    RecipeOutcome::Materialized { stale: Some(_), .. } => None,
-                    _ => None,
+                    } => {
+                        let primary_idx = promotions.len().saturating_sub(1);
+                        promotions
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, p)| p.stale.is_none())
+                            .map(|(i, p)| ProductiveTurn {
+                                reference_name: p.reference_name.clone(),
+                                display_name: p.display_name.clone(),
+                                sql: p.sql.clone(),
+                                assumption: if i == primary_idx {
+                                    assumption.clone()
+                                } else {
+                                    None
+                                },
+                            })
+                            .collect::<Vec<_>>()
+                    }
+                    _ => Vec::new(),
                 },
-                RecipeEntry::Source(_) => None,
+                RecipeEntry::Source(_) => Vec::new(),
             })
             .collect()
     }
@@ -574,11 +615,13 @@ mod tests {
                 RecipeEntry::Turn(RecipeTurn::new(
                     "多少人",
                     RecipeOutcome::Materialized {
-                        reference_name: "result_1".into(),
-                        display_name: "result_1".into(),
-                        sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
+                        promotions: vec![RecipePromotion {
+                            reference_name: "result_1".into(),
+                            display_name: "result_1".into(),
+                            sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
+                            stale: None,
+                        }],
                         assumption: None,
-                        stale: None,
                     },
                 )),
                 RecipeEntry::Turn(RecipeTurn::new(
@@ -607,11 +650,12 @@ mod tests {
     }
 
     #[test]
-    fn recipe_format_version_is_two() {
-        // ADR-0082 (issue #296): v2 carries format_version = 2. Pin the constant
-        // so the open-path version check stays in sync with what save writes.
-        assert_eq!(RECIPE_FORMAT_VERSION, 2);
-        assert_eq!(build_recipe().format_version, 2);
+    fn recipe_format_version_is_three() {
+        // ADR-0084: v3 carries format_version = 3 (a result turn persists its
+        // full promotion chain). Pin the constant so the open-path version
+        // check stays in sync with what save writes.
+        assert_eq!(RECIPE_FORMAT_VERSION, 3);
+        assert_eq!(build_recipe().format_version, 3);
     }
 
     #[test]
@@ -638,21 +682,25 @@ mod tests {
                 RecipeEntry::Turn(RecipeTurn::new(
                     "q1",
                     RecipeOutcome::Materialized {
-                        reference_name: "result_1".into(),
-                        display_name: "result_1".into(),
-                        sql: "SELECT 1".into(),
+                        promotions: vec![RecipePromotion {
+                            reference_name: "result_1".into(),
+                            display_name: "result_1".into(),
+                            sql: "SELECT 1".into(),
+                            stale: None,
+                        }],
                         assumption: None,
-                        stale: None,
                     },
                 )),
                 RecipeEntry::Turn(RecipeTurn::new(
                     "q2",
                     RecipeOutcome::Materialized {
-                        reference_name: "result_2".into(),
-                        display_name: "result_2".into(),
-                        sql: "SELECT * FROM \"result_1\"".into(),
+                        promotions: vec![RecipePromotion {
+                            reference_name: "result_2".into(),
+                            display_name: "result_2".into(),
+                            sql: "SELECT * FROM \"result_1\"".into(),
+                            stale: None,
+                        }],
                         assumption: None,
-                        stale: None,
                     },
                 )),
             ],
@@ -716,15 +764,17 @@ mod tests {
         reason: StaleReason,
     ) -> RecipeOutcome {
         RecipeOutcome::Materialized {
-            reference_name: reference_name.into(),
-            display_name: reference_name.into(),
-            sql: sql.into(),
+            promotions: vec![RecipePromotion {
+                reference_name: reference_name.into(),
+                display_name: reference_name.into(),
+                sql: sql.into(),
+                stale: Some(StaleAnchor {
+                    reference_name: anchor_ref.into(),
+                    display_name: anchor_ref.into(),
+                    reason,
+                }),
+            }],
             assumption: None,
-            stale: Some(StaleAnchor {
-                reference_name: anchor_ref.into(),
-                display_name: anchor_ref.into(),
-                reason,
-            }),
         }
     }
 
@@ -741,11 +791,13 @@ mod tests {
                 RecipeEntry::Turn(RecipeTurn::new(
                     "live",
                     RecipeOutcome::Materialized {
-                        reference_name: "result_1".into(),
-                        display_name: "result_1".into(),
-                        sql: "SELECT 1".into(),
+                        promotions: vec![RecipePromotion {
+                            reference_name: "result_1".into(),
+                            display_name: "result_1".into(),
+                            sql: "SELECT 1".into(),
+                            stale: None,
+                        }],
                         assumption: None,
-                        stale: None,
                     },
                 )),
                 RecipeEntry::Turn(RecipeTurn::new(
@@ -791,9 +843,13 @@ mod tests {
         assert_eq!(back, turn);
         // The anchor's reason is preserved (not defaulted back to Deleted).
         match &back.outcome {
-            RecipeOutcome::Materialized { stale: Some(a), .. } => {
-                assert_eq!(a.reason, StaleReason::Deleted);
-                assert_eq!(a.reference_name, "orders");
+            RecipeOutcome::Materialized { promotions, .. } => {
+                let anchor = promotions[0]
+                    .stale
+                    .as_ref()
+                    .expect("stale anchor survives the round trip");
+                assert_eq!(anchor.reason, StaleReason::Deleted);
+                assert_eq!(anchor.reference_name, "orders");
             }
             other => panic!("expected stale Materialized, got {other:?}"),
         }
@@ -806,10 +862,16 @@ mod tests {
     /// "missing field `stale`" error. Pins the load-bearing serde attribute.
     #[test]
     fn materialized_outcome_without_stale_field_deserializes_as_live() {
-        let json = r#"{"kind":"Materialized","data":{"reference_name":"result_1","display_name":"result_1","sql":"SELECT 1"}}"#;
+        let json = r#"{"kind":"Materialized","data":{"promotions":[{"reference_name":"result_1","display_name":"result_1","sql":"SELECT 1"}]}}"#;
         let back: RecipeOutcome = serde_json::from_str(json).expect("deserialize pre-#52 form");
         match back {
-            RecipeOutcome::Materialized { stale: None, .. } => {}
+            RecipeOutcome::Materialized { promotions, .. } => {
+                assert_eq!(promotions.len(), 1);
+                assert!(
+                    promotions[0].stale.is_none(),
+                    "a promotion without a stale field deserializes as live"
+                );
+            }
             other => panic!("expected live Materialized (stale: None), got {other:?}"),
         }
     }
@@ -828,11 +890,13 @@ mod tests {
                 RecipeEntry::Turn(RecipeTurn::new(
                     "first live",
                     RecipeOutcome::Materialized {
-                        reference_name: "result_1".into(),
-                        display_name: "result_1".into(),
-                        sql: "SELECT 1".into(),
+                        promotions: vec![RecipePromotion {
+                            reference_name: "result_1".into(),
+                            display_name: "result_1".into(),
+                            sql: "SELECT 1".into(),
+                            stale: None,
+                        }],
                         assumption: None,
-                        stale: None,
                     },
                 )),
                 RecipeEntry::Turn(RecipeTurn::new(
@@ -847,11 +911,13 @@ mod tests {
                 RecipeEntry::Turn(RecipeTurn::new(
                     "live after gap",
                     RecipeOutcome::Materialized {
-                        reference_name: "result_3".into(),
-                        display_name: "result_3".into(),
-                        sql: "SELECT 3".into(),
+                        promotions: vec![RecipePromotion {
+                            reference_name: "result_3".into(),
+                            display_name: "result_3".into(),
+                            sql: "SELECT 3".into(),
+                            stale: None,
+                        }],
                         assumption: None,
-                        stale: None,
                     },
                 )),
             ],
@@ -888,11 +954,13 @@ mod tests {
             vec![RecipeEntry::Turn(RecipeTurn::new(
                 "多少人",
                 RecipeOutcome::Materialized {
-                    reference_name: "result_1".into(),
-                    display_name: "result_1".into(),
-                    sql: "SELECT 1".into(),
+                    promotions: vec![RecipePromotion {
+                        reference_name: "result_1".into(),
+                        display_name: "result_1".into(),
+                        sql: "SELECT 1".into(),
+                        stale: None,
+                    }],
                     assumption: None,
-                    stale: None,
                 },
             ))],
             Some("people".into()),
@@ -940,11 +1008,13 @@ mod tests {
         let dup_turn = RecipeTurn::new(
             "q",
             RecipeOutcome::Materialized {
-                reference_name: "result_1".into(),
-                display_name: "result_1".into(),
-                sql: "SELECT 1".into(),
+                promotions: vec![RecipePromotion {
+                    reference_name: "result_1".into(),
+                    display_name: "result_1".into(),
+                    sql: "SELECT 1".into(),
+                    stale: None,
+                }],
                 assumption: None,
-                stale: None,
             },
         );
         let err = Recipe::build(
@@ -1070,11 +1140,13 @@ mod tests {
         let turn = RecipeTurn {
             question: "多少人".into(),
             outcome: RecipeOutcome::Materialized {
-                reference_name: "result_1".into(),
-                display_name: "result_1".into(),
-                sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
+                promotions: vec![RecipePromotion {
+                    reference_name: "result_1".into(),
+                    display_name: "result_1".into(),
+                    sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
+                    stale: None,
+                }],
                 assumption: None,
-                stale: None,
             },
             trace: synthetic_materialize_trace("SELECT COUNT(*) AS n FROM \"people\".data"),
             provenance: TurnProvenance::default(),

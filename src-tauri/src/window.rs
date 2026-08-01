@@ -137,21 +137,21 @@ fn tool_turn_messages(request: &ProviderRequest) -> Vec<ToolTurnMessage> {
 /// source. `active` is a top-level payload pointer, independent of which turns
 /// the window happened to keep -- do not "fix" this to read the windowed slice.
 pub fn resolve_active(working_set: &WorkingSet, history: &[TurnRecord]) -> Option<String> {
-    let last_result = history.iter().rev().find_map(|t| match &t.outcome {
-        TurnOutcome::Materialized { dataset, .. } => {
-            // Skip stale results (issue #40, ADR-0013): the focus must never
-            // land on a soft-invalidated result. The stale flag lives on the
-            // working-set descriptor (the TurnRecord snapshot is the at-
-            // materialization state), so check the live working set by name --
-            // a stale result keeps producing turns visible in the thread, this
-            // only stops it from being the next question's default target.
-            if working_set.is_stale(&dataset.reference_name) {
-                None
-            } else {
-                Some(dataset.reference_name.clone())
-            }
+    let last_result = history.iter().rev().find_map(|t| {
+        // The active default is the turn's primary result (ADR-0084): the
+        // chain tail of a multi-promotion turn -- the final answer the user's
+        // question produced. Skip stale results (issue #40, ADR-0013): the
+        // focus must never land on a soft-invalidated result. The stale flag
+        // lives on the working-set descriptor (the TurnRecord snapshot is the
+        // at-materialization state), so check the live working set by name --
+        // a stale result keeps producing turns visible in the thread, this
+        // only stops it from being the next question's default target.
+        let primary = t.outcome.primary_promotion()?;
+        if working_set.is_stale(&primary.dataset.reference_name) {
+            None
+        } else {
+            Some(primary.dataset.reference_name.clone())
         }
-        _ => None,
     });
     last_result.or_else(|| working_set.active().map(|d| d.reference_name.clone()))
 }
@@ -170,7 +170,13 @@ fn assemble_history(history: &[TurnRecord]) -> Vec<TurnPayload> {
             if i < far_count {
                 TurnPayload::Summary {
                     question_excerpt: truncate_question(&turn.question),
-                    result: result_name(&turn.outcome),
+                    // The far-window one-line summary names the turn's primary
+                    // result (ADR-0084 chain tail); antecedent promotions ride
+                    // the dataset blocks, not the per-turn summary line.
+                    result: turn
+                        .outcome
+                        .primary_promotion()
+                        .map(|p| p.dataset.reference_name.clone()),
                 }
             } else {
                 TurnPayload::Full {
@@ -230,15 +236,21 @@ fn recent_result_names(history: &[TurnRecord]) -> HashSet<String> {
     history
         .iter()
         .skip(far_count)
-        .filter_map(|t| result_name(&t.outcome))
+        .flat_map(|t| result_names(&t.outcome))
         .collect()
 }
 
-/// A turn's `result_N` name when it materialized one, else `None`.
-fn result_name(outcome: &TurnOutcome) -> Option<String> {
+/// A turn's `result_N` names (ADR-0084): every promotion's reference name, in
+/// promotion order; empty for a non-result turn. "In-window" is a turn-level
+/// property, so a recent multi-promotion turn contributes ALL its promotions
+/// (antecedents included) -- they ship with samples, not schema-only.
+fn result_names(outcome: &TurnOutcome) -> Vec<String> {
     match outcome {
-        TurnOutcome::Materialized { dataset, .. } => Some(dataset.reference_name.clone()),
-        _ => None,
+        TurnOutcome::Materialized { promotions, .. } => promotions
+            .iter()
+            .map(|p| p.dataset.reference_name.clone())
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -327,7 +339,9 @@ fn type_only_set(cols: &[String]) -> HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DatasetPrivacy, RectifyProvenance, TextKind, TurnFailure, TurnOutcome};
+    use crate::model::{
+        DatasetPrivacy, Promotion, RectifyProvenance, TextKind, TurnFailure, TurnOutcome,
+    };
 
     /// Build column schemas from (name, type) pairs.
     fn cols(specs: &[(&str, &str)]) -> Vec<ColumnSchema> {
@@ -377,8 +391,10 @@ mod tests {
         TurnRecord {
             question: question.to_string(),
             outcome: TurnOutcome::Materialized {
-                dataset: Box::new(result_desc(result)),
-                sql: Some(format!("SELECT * FROM {}", result)),
+                promotions: vec![Promotion {
+                    dataset: result_desc(result),
+                    sql: format!("SELECT * FROM {}", result),
+                }],
                 viz: None,
                 assumption: None,
             },
@@ -481,6 +497,56 @@ mod tests {
         assert!(find("result_2").sample.is_some()); // in-window
         assert!(find("result_21").sample.is_some()); // most recent, in-window
         assert!(find("people").sample.is_some()); // source always samples
+    }
+
+    #[test]
+    fn a_recent_multi_promotion_turn_ships_samples_for_its_antecedents_too() {
+        // ADR-0084: "in-window" is a turn-level property, so a recent
+        // multi-promotion turn ships samples for EVERY promotion -- antecedents
+        // included, not just the primary. result_1 (the chain head) and result_2
+        // (the primary tail) ride the same in-window turn, so both carry
+        // samples; neither is demoted to schema-only.
+        let mut ws = WorkingSet::default();
+        ws.register(source(
+            "people",
+            &[("id", "BIGINT")],
+            vec![vec!["1".to_string()]],
+        ));
+        ws.register_result(result_desc("result_1"));
+        ws.register_result(result_desc("result_2"));
+        let history = vec![TurnRecord {
+            question: "两步晋升".to_string(),
+            outcome: TurnOutcome::Materialized {
+                promotions: vec![
+                    Promotion {
+                        dataset: result_desc("result_1"),
+                        sql: "SELECT 1".to_string(),
+                    },
+                    Promotion {
+                        dataset: result_desc("result_2"),
+                        sql: "SELECT 2".to_string(),
+                    },
+                ],
+                viz: None,
+                assumption: None,
+            },
+        }];
+        let payload = assemble("probe", &ws, &history);
+        let find = |name: &str| {
+            payload
+                .datasets
+                .iter()
+                .find(|d| d.reference_name == name)
+                .unwrap_or_else(|| panic!("missing {name}"))
+        };
+        assert!(
+            find("result_1").sample.is_some(),
+            "the antecedent promotion ships a sample (its turn is in-window)"
+        );
+        assert!(
+            find("result_2").sample.is_some(),
+            "the primary promotion ships a sample"
+        );
     }
 
     #[test]

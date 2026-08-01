@@ -124,10 +124,15 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       );
       suppressInit(); // the user has acted; the R5 init is moot.
       if (outcome.kind === "Materialized") {
-        const referenceName = outcome.data.dataset.reference_name;
-        // Auto-selects + pin resets (ADR-0062 R2 "new-turn produce -> pinned=false"):
-        // the pin rule is encapsulated in useViewedResult (issue #229).
-        markProduced(referenceName);
+        // ADR-0084: the just-produced primary is the promotion chain's tail --
+        // the result the answer references. Auto-selects + pin resets (ADR-0062
+        // R2 "new-turn produce -> pinned=false"); the pin rule is encapsulated
+        // in useViewedResult (issue #229).
+        const { promotions } = outcome.data;
+        const referenceName = promotions[promotions.length - 1]?.dataset.reference_name;
+        if (referenceName !== undefined) {
+          markProduced(referenceName);
+        }
         // Only workingSet + active change here (a new result_N registered
         // server-side + active may have moved); thread stays un-invalidated
         // (ADR-0051) -- see the hook header for the why. The try/catch guard

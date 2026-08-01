@@ -50,7 +50,9 @@ describe("Thread", () => {
       outcome: {
         kind: "Materialized",
         data: {
-          dataset: { ...mockDataset, reference_name: referenceName },
+          promotions: [
+            { dataset: { ...mockDataset, reference_name: referenceName }, sql: "SELECT 1" },
+          ],
           viz: null,
           assumption,
         },
@@ -63,6 +65,36 @@ describe("Thread", () => {
   function turnEntry(record: TurnRecord): ThreadEntry {
     return { entry: "Turn", data: record };
   }
+
+  it("renders a multi-promotion turn as a primary result link + a muted antecedents line (ADR-0084)", () => {
+    // A result turn that materialized two results in promotion order: the chain
+    // tail (result_2) is the primary -- the clickable result link; the
+    // antecedent (result_1) rides a muted "derived from" line so the lineage
+    // stays visible without competing with the answer.
+    const record: TurnRecord = {
+      question: "筛后聚合",
+      outcome: {
+        kind: "Materialized",
+        data: {
+          promotions: [
+            { dataset: { ...mockDataset, reference_name: "result_1" }, sql: "SELECT 1" },
+            { dataset: { ...mockDataset, reference_name: "result_2" }, sql: "SELECT 2" },
+          ],
+          viz: null,
+          assumption: null,
+        },
+      },
+    };
+    renderThread(
+      <Thread entries={[turnEntry(record)]} selectedResult={null} onSelectResult={() => {}} />,
+    );
+
+    // The primary (chain tail) is the clickable result link.
+    expect(screen.getByRole("button", { name: /结果：result_2/ })).toBeInTheDocument();
+    // The antecedent is NOT a result link -- it rides the muted disclosure.
+    expect(screen.queryByRole("button", { name: /结果：result_1/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/由 result_1 派生/)).toBeInTheDocument();
+  });
 
   it("renders every turn labeled by its verbatim question with its outcome kind", () => {
     // ADR-0028: all four outcomes are always visible, in order, each labeled by

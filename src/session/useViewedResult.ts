@@ -43,9 +43,12 @@ export function useViewedResult(thread: ThreadEntry[]): UseViewedResult {
     for (let i = thread.length - 1; i >= 0; i--) {
       const entry = thread[i];
       if (entry.entry === "Turn" && entry.data.outcome.kind === "Materialized") {
-        setViewedResult({
-          referenceName: entry.data.outcome.data.dataset.reference_name,
-        });
+        // ADR-0084: view the turn's primary result (the promotion chain's tail
+        // -- the answer the question produced).
+        const { promotions } = entry.data.outcome.data;
+        const primary = promotions[promotions.length - 1];
+        if (!primary) continue;
+        setViewedResult({ referenceName: primary.dataset.reference_name });
         setPinnedToHistory(false);
         return;
       }
@@ -61,10 +64,13 @@ export function useViewedResult(thread: ThreadEntry[]): UseViewedResult {
     (referenceName: string) => {
       setViewedResult({ referenceName });
       const last = lastTurnEntry(thread);
-      const isLastMaterialized =
-        last !== null &&
-        last.outcome.kind === "Materialized" &&
-        last.outcome.data.dataset.reference_name === referenceName;
+      // ADR-0084: the last turn's primary (chain tail) is the current working
+      // position; selecting it un-pins, selecting anything else pins to history.
+      const lastPrimary =
+        last !== null && last.outcome.kind === "Materialized"
+          ? last.outcome.data.promotions[last.outcome.data.promotions.length - 1]
+          : undefined;
+      const isLastMaterialized = lastPrimary?.dataset.reference_name === referenceName;
       setPinnedToHistory(!isLastMaterialized);
     },
     [thread],

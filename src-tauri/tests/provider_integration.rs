@@ -142,21 +142,27 @@ fn real_provider_end_to_end_materializes_result() {
     let outcome = session.ask("多少人");
     match outcome {
         TurnOutcome::Materialized {
-            dataset,
-            sql,
+            promotions,
             assumption,
             ..
         } => {
+            assert_eq!(
+                promotions.len(),
+                1,
+                "a single materialize call promotes exactly once"
+            );
+            let primary = &promotions[0];
             // The model's materialize call was dispatched and promoted result_1.
-            assert_eq!(dataset.reference_name, "result_1");
-            assert_eq!(dataset.row_count, 1, "COUNT(*) yields one row");
+            assert_eq!(primary.dataset.reference_name, "result_1");
+            assert_eq!(primary.dataset.row_count, 1, "COUNT(*) yields one row");
             assert!(
-                sql.as_deref().unwrap_or("").contains("COUNT(*)"),
-                "the promotion carries the model's SQL: {sql:?}"
+                primary.sql.contains("COUNT(*)"),
+                "the promotion carries the model's SQL: {}",
+                primary.sql
             );
             // The count cell is the people.csv row count (5 data rows).
             assert_eq!(
-                dataset.sample.first().and_then(|r| r.first()),
+                primary.dataset.sample.first().and_then(|r| r.first()),
                 Some(&"5".to_string())
             );
             // The terminal text answer rides the assumption side note.
@@ -270,20 +276,26 @@ fn real_openai_provider_end_to_end_materializes_result() {
     let outcome = session.ask("多少人");
     match outcome {
         TurnOutcome::Materialized {
-            dataset,
-            sql,
+            promotions,
             assumption,
             ..
         } => {
-            assert_eq!(dataset.reference_name, "result_1");
-            assert_eq!(dataset.row_count, 1, "COUNT(*) yields one row");
+            assert_eq!(
+                promotions.len(),
+                1,
+                "a single materialize call promotes exactly once"
+            );
+            let primary = &promotions[0];
+            assert_eq!(primary.dataset.reference_name, "result_1");
+            assert_eq!(primary.dataset.row_count, 1, "COUNT(*) yields one row");
             assert!(
-                sql.as_deref().unwrap_or("").contains("COUNT(*)"),
-                "the promotion carries the model's SQL: {sql:?}"
+                primary.sql.contains("COUNT(*)"),
+                "the promotion carries the model's SQL: {}",
+                primary.sql
             );
             // The count cell is the people.csv row count (5 data rows).
             assert_eq!(
-                dataset.sample.first().and_then(|r| r.first()),
+                primary.dataset.sample.first().and_then(|r| r.first()),
                 Some(&"5".to_string())
             );
             assert_eq!(assumption.as_deref(), Some("共 5 人"));
