@@ -145,10 +145,13 @@ pub struct RecipeTraceEntry {
     /// debugging.
     pub success: bool,
     /// Bounded excerpt of a FAILED call's result (the error / denial message)
-    /// -- the cross-turn failure retrospection anchor (ADR-0078). Empty for a
-    /// successful call: a success payload is the data-bearing descriptor /
-    /// shape JSON the .duck must not carry (ADR-0036 contents boundary), and
-    /// replay rebuilds the result on resume anyway.
+    /// -- the cross-turn failure retrospection anchor (ADR-0078): the trace
+    /// exists so a reopened session can answer "which call failed, and why".
+    /// Empty for a successful call: its dispatch content is a data-bearing
+    /// descriptor / shape JSON the .duck should not carry (ADR-0036 contents
+    /// boundary -- though the excerpt is already bounded at capture, the
+    /// success payload is rebuilt on resume anyway), so persisting it would
+    /// add noise without value.
     pub result_excerpt: String,
 }
 
@@ -176,8 +179,9 @@ pub enum RuntimeKind {
 ///
 /// A live turn driven by the built-in agent loop records
 /// [`RuntimeKind::BuiltIn`] (issue #319); skills stay empty until skill
-/// tracking is wired (ADR-0079). v1-era migrated turns carry no runtime or
-/// skill provenance and round-trip the default (omitted from the .duck).
+/// tracking lands (the skill surface itself is defined by ADR-0079).
+/// v1-era migrated turns carry no runtime or skill provenance and round-trip
+/// the default (omitted from the .duck).
 /// `#[serde(default)]` keeps older v2 recipes (and the migration output)
 /// deserializing cleanly.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

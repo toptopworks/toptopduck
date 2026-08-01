@@ -401,8 +401,9 @@ pub struct Session {
     /// its real execution trace + runtime/skill provenance, snapshotted at
     /// record time (or harvested from the recipe on resume); a source event
     /// entry carries a default. The trace rides HERE rather than on
-    /// [`TurnRecord`] because [`TurnRecord`] crosses IPC and the far window,
-    /// neither of which carries the full trace (ADR-0078); the recipe is the
+    /// [`TurnRecord`]: ADR-0078 keeps the full trace out of the far window
+    /// (only its summary enters), and `TurnRecord` additionally crosses IPC,
+    /// which never carries the full trace either -- so the recipe is the
     /// trace's persistence layer, read per turn by [`Self::build_recipe`].
     turn_audit: Vec<TurnAudit>,
     /// Ceiling on a materialized result's row count (ADR-0005 L3). A query whose
@@ -502,11 +503,12 @@ pub struct Session {
 /// issue #319): a turn's execution trace (the agent loop's recorded calls,
 /// mapped to the recipe form) + its runtime/skill provenance. Lives on the
 /// Session in [`Session::turn_audit`], index-aligned with
-/// [`Session::history`] -- NOT on [`TurnRecord`], which crosses IPC, while
-/// the full trace never does (ADR-0078). [`Session::build_recipe`]'s
-/// whole-file rebuild reads one audit per timeline entry on every persist;
-/// resume seeds the vector from the recipe so persisted values round-trip
-/// verbatim. Source lifecycle entries carry a default (sources are not turns).
+/// [`Session::history`] -- NOT on [`TurnRecord`]: ADR-0078 keeps the full
+/// trace out of the far window (summary only), and `TurnRecord` crosses IPC,
+/// which carries no trace either. [`Session::build_recipe`]'s whole-file
+/// rebuild reads one audit per timeline entry on every persist; resume seeds
+/// the vector from the recipe so persisted values round-trip verbatim.
+/// Source lifecycle entries carry a default (sources are not turns).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct TurnAudit {
     /// The turn's persisted execution trace (ADR-0078); empty for no-tool
@@ -520,8 +522,8 @@ impl TurnAudit {
     /// The audit for a turn the built-in agent loop just recorded (ADR-0078/
     /// 0081, issue #319): the loop's real multi-call trace mapped to its
     /// persisted form + the BuiltIn runtime. Skills stay empty until skill
-    /// tracking is wired (ADR-0079); the field is default-omitted from the
-    /// .duck while empty.
+    /// tracking lands (the skill surface is defined by ADR-0079); the field
+    /// is default-omitted from the .duck while empty.
     fn builtin(trace: Vec<TraceEntry>) -> Self {
         Self {
             trace: trace.iter().map(RecipeTraceEntry::from).collect(),
@@ -1751,7 +1753,7 @@ impl Session {
                 result_count_cap: self.result_count_cap,
                 temp_path: &self.temp_path,
             };
-            let loop_outcome = AgentLoop::new(&*self.provider, Arc::clone(&self.cancel)).run(
+            let mut loop_outcome = AgentLoop::new(&*self.provider, Arc::clone(&self.cancel)).run(
                 &request,
                 &mut deps,
                 &mut *self.materializer,
@@ -1761,10 +1763,13 @@ impl Session {
             );
             // The loop's real multi-call trace rides alongside the mapped
             // outcome to record_turn (ADR-0078, issue #319): the mapper stays
-            // focused on the four-way classification, so the trace is cloned
-            // through verbatim rather than folded into TurnOutcome -- which
-            // crosses IPC, and the full trace never does (ADR-0078).
-            let trace = loop_outcome.trace.clone();
+            // focused on the four-way classification, so the trace rides
+            // separately rather than folded into TurnOutcome -- which crosses
+            // IPC, and the full trace never does. `turn_outcome_from_loop`
+            // reads only `termination` + `promotions`, so the trace is moved
+            // out before the outcome is mapped (no clone on the per-turn
+            // record path); `mem::take` leaves an empty Vec the mapper ignores.
+            let trace = std::mem::take(&mut loop_outcome.trace);
             (turn_outcome_from_loop(loop_outcome), trace)
         };
         // ADR-0055 post-turn discard: if `close_session` marked this session
@@ -1873,7 +1878,14 @@ impl Session {
         // would drop trailing turns from the persisted recipe -- silent data
         // loss on the persistence path. The invariant holds by pairing: every
         // history push (record_turn / source lifecycle / resume seed) pushes
-        // exactly one audit alongside.
+        // exactly one audit alongside. If a future push site forgets the pair,
+        // this fires inside `session_lock` (held by the `ask` command): the
+        // panic poisons the session mutex (the session becomes a zombie until
+        // reopened) and bypasses `persist_if_bound`'s non-blocking `SaveError`
+        // banner -- a deliberate fail-fast over silent corruption. The
+        // structural fix is to pair the two in a single Vec (or a per-entry
+        // timeline enum) so misalignment is unrepresentable; until then this
+        // assert is the backstop.
         assert_eq!(
             self.history.len(),
             self.turn_audit.len(),

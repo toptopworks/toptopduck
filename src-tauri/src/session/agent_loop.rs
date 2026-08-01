@@ -477,7 +477,7 @@ fn promotion_from_result(content: &str, deps: &TurnDeps) -> Option<DatasetDescri
 /// Why the loop terminated (ADR-0081). Maps onto the four-way `TurnOutcome`
 /// (ADR-0028) at the wiring seam; kept as a distinct enum here so the loop is
 /// unit-testable without committing to `TurnOutcome`'s single-promotion shape
-/// (ADR-0078 will carry the full promotion list + trace).
+/// (ADR-0084 carries the full promotion chain; ADR-0078 carries the trace).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Termination {
     /// The model emitted a terminal text reply. Carries the verbatim text.
@@ -518,7 +518,11 @@ pub(crate) struct TraceEntry {
     /// Short argument summary (the SQL or reference_name), NOT the full args.
     pub summary: String,
     pub success: bool,
-    /// Bounded excerpt of the tool result (or the denial / error message).
+    /// Bounded excerpt of the tool result content (or the denial / error
+    /// message), captured for BOTH success and failure at dispatch time. Only
+    /// the FAILED-call excerpt survives the persisted mapping (a success is
+    /// emptied -- see [`RecipeTraceEntry::result_excerpt`]); the in-memory
+    /// form keeps the success payload for the loop's own next-turn context.
     pub result_excerpt: String,
 }
 
@@ -527,12 +531,9 @@ impl From<&TraceEntry> for RecipeTraceEntry {
     /// / `summary` / `success` ride verbatim; two fields transform:
     /// - `tool_use_id` drops -- a per-provider-call id that does not survive
     ///   the turn, let alone a save/resume.
-    /// - `result_excerpt` persists ONLY for a failed call (the error / denial
-    ///   string -- ADR-0078's cross-turn failure retrospection anchor). A
-    ///   SUCCESSFUL call's dispatch content is a data-bearing payload (the
-    ///   descriptor / shape JSON: columns, sample, row_count) the .duck must
-    ///   not carry (ADR-0036 contents boundary); replay rebuilds it on resume
-    ///   anyway, so the persisted success excerpt is empty.
+    /// - `result_excerpt` persists ONLY for a failed call; a successful call's
+    ///   excerpt is emptied. See [`RecipeTraceEntry::result_excerpt`] for the
+    ///   boundary rule (ADR-0078 failure anchor; ADR-0036 contents boundary).
     ///
     /// The surviving strings are already bounded at capture time
     /// (`summarize_field` / `TRACE_EXCERPT_MAX`), so no re-truncation.
