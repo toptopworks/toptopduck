@@ -1086,5 +1086,48 @@ describe("Thread", () => {
       const card = container.querySelector(".result-preview");
       expect(card?.classList.contains("stale")).toBe(true);
     });
+
+    it("renders gracefully when a sample row is shorter than the columns (wire mismatch)", () => {
+      // ADR-0026 sample is frozen at copy-in from the same columns, so a short
+      // row is a wire-contract violation -- the card degrades to empty cells
+      // (row[c] ?? "") rather than crashing, so a malformed IPC payload never
+      // blanks the whole rail.
+      const record: TurnRecord = {
+        question: "错位样本",
+        outcome: {
+          kind: "Materialized",
+          data: {
+            promotions: [
+              {
+                dataset: {
+                  ...mockDataset,
+                  reference_name: "result_1",
+                  columns: [
+                    { name: "a", canonical_type: "VARCHAR" },
+                    { name: "b", canonical_type: "VARCHAR" },
+                  ],
+                  sample: [["x"]],
+                },
+                sql: "SELECT 1",
+              },
+            ],
+            viz: null,
+            assumption: null,
+          },
+        },
+        trace: [],
+      };
+      renderThread(
+        <Thread entries={[turnEntry(record)]} selectedResult={null} onSelectResult={() => {}} />,
+      );
+      const card = screen.getByRole("button", { name: /result_1 的预览/ });
+      // Both column headers render; column a's cell has the value, column b's
+      // missing cell degrades to empty (no crash, no "undefined" leak).
+      expect(within(card as HTMLElement).getByText("a")).toBeInTheDocument();
+      expect(within(card as HTMLElement).getByText("b")).toBeInTheDocument();
+      expect(within(card as HTMLElement).getByText("x")).toBeInTheDocument();
+      // The footer still names the window by row count (mockDataset row_count 5).
+      expect(within(card as HTMLElement).getByText("首 1 行，共 5 行")).toBeInTheDocument();
+    });
   });
 });

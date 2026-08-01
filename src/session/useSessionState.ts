@@ -226,6 +226,11 @@ export function useSessionState(
   // the session's first result_N opens the panel with the produced dataset,
   // later promotions never steal focus. Composed here (not inside either
   // hook) so each hook keeps owning exactly one state domain.
+  // INVARIANT: markProduced must run unconditionally before notePromotion --
+  // notePromotion spends the one-shot whether or not viewedResult actually
+  // moved, so any future guard inside markProduced would desync the two
+  // ("one-shot spent but the workspace points nowhere"). useViewedResult's
+  // markProduced is unconditional by contract; keep it so.
   const markProducedWithExpand = useCallback(
     (referenceName: string) => {
       markProduced(referenceName);
@@ -378,6 +383,11 @@ export function useSessionState(
   // moves viewedResult (the pin rule lives in useViewedResult) AND opens the
   // workspace when folded -- the rail and the panel are dual views of the same
   // dataset, so a rail selection must surface its panel half.
+  // INVARIANT: callers must pass a referenceName that exists in the thread --
+  // selectResult is unconditional, so a stale / foreign name would expand the
+  // panel onto an empty workspace. Both current callers (result-link +
+  // preview card) source the name from primary.dataset.reference_name, which
+  // is always in-thread; add a guard here if that ever changes.
   const handleSelectResult = useCallback(
     (referenceName: string) => {
       selectResult(referenceName);

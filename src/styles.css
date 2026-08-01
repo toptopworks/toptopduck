@@ -292,9 +292,10 @@
   transition: grid-template-columns 180ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 /* Workspace folded (ADR-0083, issue #298): the second track collapses to 0
- * and the rail takes the pane. The px -> fr track-type change is NOT
- * interpolatable, so this snaps where the sidebar / rail collapses slide --
- * the workspace's opacity / visibility fade (below) carries the motion. */
+ * and the rail takes the pane. The first track flips 320px -> 1fr
+ * (length <-> flex is NOT interpolatable, so it snaps) while the second
+ * track slides 1fr -> 0fr; the workspace's opacity / visibility fade
+ * (below) masks the first-track snap. */
 .shell .session-pane.workspace-collapsed { grid-template-columns: 1fr 0fr; }
 .shell .session-pane.workspace-collapsed .session-workspace {
   opacity: 0;

@@ -70,18 +70,21 @@ export function ResultPreviewCard({
           className="preview-grid grid w-max min-w-full"
           style={{ gridTemplateColumns: `repeat(${columns.length}, max-content)` }}
         >
-          {columns.map((col) => (
+          {/* Column index (not name) keys the grid: SQL may emit duplicate
+            column names (an un-aliased `SELECT a.id, b.id`), which would
+            collide React keys built from col.name. Column position is stable. */}
+          {columns.map((col, c) => (
             <span
-              key={col.name}
+              key={c}
               className="preview-head px-1.5 py-1 font-medium text-muted-foreground whitespace-nowrap border-b"
             >
               {col.name}
             </span>
           ))}
           {sample.map((row, r) =>
-            columns.map((col, c) => (
+            columns.map((_col, c) => (
               <span
-                key={`${r}:${col.name}`}
+                key={`${r}:${c}`}
                 className={cn(
                   "preview-cell px-1.5 py-0.5 whitespace-nowrap text-foreground",
                   r > 0 && "border-t border-border/50",

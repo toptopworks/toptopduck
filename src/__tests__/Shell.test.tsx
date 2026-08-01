@@ -1281,6 +1281,36 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
   });
 
+  it("on resume, the first NEW promotion still auto-expands (one-shot survives R5 init, ADR-0083)", async () => {
+    // Resume lands viewedResult on the prior Materialized primary via the R5
+    // init effect in useViewedResult -- NOT via markProduced, so the workspace
+    // auto-expand one-shot stays intact. A subsequent first ask must still open
+    // the panel. Locks the seam against rerouting R5 through markProduced
+    // (which would silently spend the one-shot on a turn the user never asked).
+    state.thread = [materializedTurn("result_1")];
+    vi.mocked(askQuestion).mockResolvedValueOnce({
+      kind: "Materialized",
+      data: {
+        promotions: [{ dataset: { ...src("result_2"), row_count: 1 }, sql: "SELECT 2" }],
+        viz: null,
+        assumption: null,
+      },
+    });
+    render(<App />);
+    await openSession();
+    // Resume cold-start: folded (the one-shot is intact, not spent by R5).
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    // The first NEW promotion after resume opens the panel.
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "新问" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /结果：result_2/ })).toBeInTheDocument(),
+    );
+  });
+
   it("a rail preview-card click opens the workspace on the same dataset (dual view, issue #298)", async () => {
     // The rail preview card and the workspace panel are dual views of the
     // same dataset: clicking the card selects its result AND unfolds the
@@ -1299,6 +1329,38 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     expect(screen.getByRole("button", { name: /result_1 的预览/ })).toHaveAttribute(
       "aria-current",
       "true",
+    );
+  });
+
+  it("switching the viewed dataset with the panel already open (dual view, issue #298)", async () => {
+    // Dual-view linkage is not only "collapsed -> click -> open": with the
+    // panel already open, clicking another card swaps viewedResult and the
+    // active marker follows. expandWorkspace is a no-op when already open;
+    // selectResult carries the switch.
+    state.thread = [materializedTurn("result_1"), materializedTurn("result_2")];
+    render(<App />);
+    await openSession();
+    // Open the workspace onto result_1.
+    fireEvent.click(await screen.findByRole("button", { name: /result_1 的预览/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /结果：result_1/ })).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: /result_1 的预览/ })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    // Click result_2's card: the workspace swaps + the active marker moves.
+    fireEvent.click(screen.getByRole("button", { name: /result_2 的预览/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /结果：result_2/ })).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: /result_2 的预览/ })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    // result_1's card drops the active marker (aria-current absent).
+    expect(screen.getByRole("button", { name: /result_1 的预览/ })).not.toHaveAttribute(
+      "aria-current",
     );
   });
 
