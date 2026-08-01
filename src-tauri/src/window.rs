@@ -335,8 +335,10 @@ fn type_only_set(cols: &[String]) -> HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval::OperationKind;
     use crate::model::{
-        DatasetPrivacy, Promotion, RectifyProvenance, TextKind, TurnFailure, TurnOutcome,
+        DatasetPrivacy, Promotion, RectifyProvenance, TextKind, TraceEntryView, TurnFailure,
+        TurnOutcome,
     };
 
     /// Build column schemas from (name, type) pairs.
@@ -477,6 +479,81 @@ mod tests {
             payload.history.last().unwrap(),
             TurnPayload::Full { .. }
         ));
+    }
+
+    /// ADR-0078 summary-only far window (issue #297): the trace (the rail's
+    /// tool-call chain) never reaches the LLM window -- `assemble_history` reads
+    /// `question` + `outcome` only, never `trace`. The failure excerpt persists
+    /// cross-turn as the rail's retrospection anchor, so a regression that let
+    /// trace text leak into a TurnPayload would silently inflate the LLM context
+    /// and cross the ADR-0036 contents boundary. Asserted with sentinel strings
+    /// so any field that picks up trace data trips.
+    #[test]
+    fn window_history_carries_no_trace_data_adr_0078() {
+        let trace_failure_excerpt = "SENTINEL_TRACE_FAILURE";
+        let trace_summary = "SENTINEL_TRACE_SUMMARY";
+        let poisoned_trace = vec![
+            TraceEntryView {
+                name: "explore".into(),
+                operation_kind: OperationKind::Read,
+                summary: trace_summary.into(),
+                success: false,
+                result_excerpt: trace_failure_excerpt.into(),
+            },
+            TraceEntryView {
+                name: "materialize".into(),
+                operation_kind: OperationKind::Write,
+                summary: trace_summary.into(),
+                success: true,
+                result_excerpt: String::new(),
+            },
+        ];
+
+        // In-window (Full payload): a single trace-bearing turn.
+        let mut ws = WorkingSet::default();
+        ws.register(source(
+            "people",
+            &[("id", "BIGINT")],
+            vec![vec!["1".to_string()]],
+        ));
+        ws.register_result(result_desc("result_1"));
+        let history = vec![TurnRecord {
+            question: "turn 1".to_string(),
+            outcome: TurnOutcome::Materialized {
+                promotions: vec![Promotion {
+                    dataset: result_desc("result_1"),
+                    sql: "SELECT 1".to_string(),
+                }],
+                viz: None,
+                assumption: None,
+            },
+            trace: poisoned_trace.clone(),
+        }];
+        let payload = assemble("probe", &ws, &history);
+        let full = format!("{:?}", payload.history);
+        assert!(
+            !full.contains(trace_failure_excerpt),
+            "ADR-0078: a failure trace excerpt leaked into an in-window Full TurnPayload:\n{full}"
+        );
+        assert!(
+            !full.contains(trace_summary),
+            "ADR-0078: a trace summary leaked into an in-window Full TurnPayload:\n{full}"
+        );
+
+        // Far-window (Summary payload): 21 turns, turn 1 carries the poisoned
+        // trace and falls out of the N=20 window into a Summary.
+        let (ws2, mut history2) = source_plus_turns(21);
+        history2[0].trace = poisoned_trace;
+        let payload2 = assemble("probe", &ws2, &history2);
+        let summary = format!("{:?}", payload2.history);
+        assert!(
+            !summary.contains(trace_failure_excerpt),
+            "ADR-0078: a failure trace excerpt leaked into a far-window Summary TurnPayload:\n{summary}"
+        );
+        assert!(
+            !summary.contains(trace_summary),
+            "ADR-0078: a trace summary leaked into a far-window Summary TurnPayload:\n{summary}"
+        );
     }
 
     #[test]

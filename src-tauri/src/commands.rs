@@ -484,13 +484,23 @@ pub async fn ask(
             &approval,
             &sink,
             move |phase| {
-                let _ = app_for_cb.emit(
+                // Fire-and-forget by design: the turn result rides the command
+                // reply, not this channel. But a failing sink must not be
+                // invisible -- a stuck live card with no trail is undiagnosable,
+                // so log the emit error (ADR-0029 honest-degrade; debug, since a
+                // torn-down webview fails every emit and is the expected case).
+                if let Err(e) = app_for_cb.emit(
                     "turn-progress",
                     &TurnProgress {
                         session_id: sid.clone(),
                         phase,
                     },
-                );
+                ) {
+                    log::debug!(
+                        target: "toptopduck::commands",
+                        "turn-progress emit failed (likely a torn-down webview): {e}"
+                    );
+                }
             },
         ))
     })

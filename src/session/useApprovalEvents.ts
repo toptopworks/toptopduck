@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { onApprovalRequest, onApprovalResolved, respondToolApproval } from "../api";
 import type { ApprovalResponse, OperationKind } from "../types/approval";
+import { log } from "../lib/log";
 
 // App-level ownership of the tiered-approval side channel (ADR-0083, issue
 // #297). ONE long-lived listener pair (approval-request + approval-resolved,
@@ -43,9 +44,10 @@ export interface UseApprovalEvents {
   pendingApprovalSids: ReadonlySet<string>;
   /** Answer a pending request (the card's three buttons). Flips the entry
    *  optimistically and fires the respond command; reconciliation rides the
-   *  approval-resolved event, NOT the promise (a reject means the event still
-   *  arrives -- cancel/close resolves to deny -- so branching on the error
-   *  would double-handle, cf. api.ts respondToolApproval). */
+   *  approval-resolved event, not this promise. A reject rolls the optimistic
+   *  flip back to pending so the card re-suspends (an IPC-level failure leaves
+   *  no resolved event and TraceView hides the buttons once resolved); a later
+   *  resolved event re-flips idempotently, cf. api.ts respondToolApproval. */
   respond: (sessionId: string, requestId: string, response: ApprovalResponse) => void;
   /** Drop every entry for a session: called when its turn settles (the
    *  resolved cards fold into the optimistic thread record) and when the
@@ -152,10 +154,41 @@ export function useApprovalEvents(): UseApprovalEvents {
         return updated;
       });
       // Fire-and-forget by contract (api.ts): reconciliation rides the
-      // approval-resolved event, not this promise. A swallow is safe -- the
-      // turn stays suspended until SOMETHING resolves the gate, and a stuck
-      // card is still answerable (the buttons re-fire).
-      void respondToolApproval(sessionId, requestId, response).catch(() => {});
+      // approval-resolved event, not this promise. BUT a reject that leaves no
+      // resolved event (an IPC-level failure -- command panic, serialization,
+      // a torn-down webview -- where the gateway never heard the answer) would
+      // strand the card on its optimistic resolved state, and TraceView hides
+      // the buttons once resolved, so the user could not re-answer. Roll the
+      // optimistic flip back to pending in that case so the card re-suspends
+      // and the buttons re-render; a later resolved event (the gateway DID
+      // hear it) re-flips idempotently. The `stillOurs` guard leaves a
+      // concurrent reconciliation (a different response already landed) alone.
+      void respondToolApproval(sessionId, requestId, response).catch((err) => {
+        log.warn(
+          "approval",
+          "respond command rejected; rolling the optimistic flip back to pending",
+          { sessionId, requestId, err },
+        );
+        setApprovalsBySession((prev) => {
+          const existing = prev.get(sessionId);
+          if (!existing) return prev;
+          const stillOurs = existing.some(
+            (e) =>
+              e.requestId === requestId &&
+              e.status.kind === "resolved" &&
+              e.status.response === response,
+          );
+          if (!stillOurs) return prev;
+          const updated = new Map(prev);
+          updated.set(
+            sessionId,
+            existing.map((e) =>
+              e.requestId === requestId ? { ...e, status: { kind: "pending" } } : e,
+            ),
+          );
+          return updated;
+        });
+      });
     },
     [],
   );

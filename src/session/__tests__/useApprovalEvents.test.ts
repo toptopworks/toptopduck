@@ -132,14 +132,39 @@ describe("useApprovalEvents", () => {
     expect(respondToolApproval).toHaveBeenCalledWith(SID, "req-1", "allow_once");
   });
 
-  it("respond keeps the optimistic flip when the command rejects (event reconciles)", async () => {
-    vi.mocked(respondToolApproval).mockRejectedValueOnce(new Error("already answered"));
+  it("respond rolls the optimistic flip back to pending when the command rejects (re-suspends the card)", async () => {
+    // TraceView hides the action buttons once a card flips to resolved, so a
+    // reject that leaves no approval-resolved event (an IPC-level failure)
+    // would strand the card. The roll-back re-suspends it so the buttons
+    // re-render; a later resolved event re-flips idempotently.
+    vi.mocked(respondToolApproval).mockRejectedValueOnce(new Error("ipc gone"));
     const { result } = renderHook(() => useApprovalEvents());
     await waitFor(() => expect(approvalCbs.request).not.toBeNull());
     act(() => approvalCbs.request!(requestEvent()));
     act(() => result.current.respond(SID, "req-1", "deny"));
-    // The rejection is swallowed by contract (api.ts): the resolved event is
-    // the reconciliation channel, so the card stays flipped, not reverted.
+    // The optimistic flip lands first (resolved), then the reject rolls it back.
+    await waitFor(() =>
+      expect(result.current.approvalsBySession.get(SID)?.[0].status).toEqual({
+        kind: "pending",
+      }),
+    );
+    // The pending card re-enters the coloring set.
+    expect(result.current.pendingApprovalSids.has(SID)).toBe(true);
+  });
+
+  it("respond leaves a concurrent reconciliation alone (a different response already landed)", async () => {
+    // If the approval-resolved event reconciled to a DIFFERENT response between
+    // the optimistic flip and the reject, the roll-back guard (`stillOurs`)
+    // leaves it -- the gateway's answer is authoritative.
+    vi.mocked(respondToolApproval).mockRejectedValueOnce(new Error("ipc gone"));
+    const { result } = renderHook(() => useApprovalEvents());
+    await waitFor(() => expect(approvalCbs.request).not.toBeNull());
+    act(() => approvalCbs.request!(requestEvent()));
+    act(() => result.current.respond(SID, "req-1", "allow_once"));
+    // The gateway resolves to deny (a different response) before the reject lands.
+    act(() =>
+      approvalCbs.resolved!({ session_id: SID, request_id: "req-1", response: "deny" }),
+    );
     await waitFor(() => expect(respondToolApproval).toHaveBeenCalled());
     expect(result.current.approvalsBySession.get(SID)?.[0].status).toEqual({
       kind: "resolved",
