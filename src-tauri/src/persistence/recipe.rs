@@ -134,7 +134,7 @@ pub struct RecipeTraceEntry {
     /// Tool name -- a built-in (`explore` / `materialize` / `describe` /
     /// `sample`) or an external MCP server's tool name.
     pub name: String,
-    /// Operation badge (ADR-0080 read/write/execute/network) -- presentation
+    /// Operation badge (ADR-0083 read/write/execute/network) -- presentation
     /// only. Reuses the approval-gateway classification so a reopened turn
     /// renders the same badge the live approval card did.
     pub operation_kind: OperationKind,
@@ -147,6 +147,9 @@ pub struct RecipeTraceEntry {
     /// Bounded excerpt of a FAILED call's result (the error / denial message)
     /// -- the cross-turn failure retrospection anchor (ADR-0078): the trace
     /// exists so a reopened session can answer "which call failed, and why".
+    /// Both construction sites guard the inverse invariant (issue #316): a
+    /// failed entry never persists an empty excerpt (`debug_assert!` in the
+    /// migration's synthetic trace helper + the live trace mapping).
     /// Empty for a successful call: its dispatch content is a data-bearing
     /// descriptor / shape JSON the .duck should not carry (ADR-0036 contents
     /// boundary -- though the excerpt is already bounded at capture, the
@@ -221,13 +224,23 @@ pub(crate) const TRACE_SUMMARY_MAX: usize = 120;
 /// remaining caller is the migration path. The summary is the verbatim SQL
 /// truncated to [`TRACE_SUMMARY_MAX`].
 pub(crate) fn synthetic_materialize_trace(sql: &str) -> Vec<RecipeTraceEntry> {
-    vec![RecipeTraceEntry {
+    let entry = RecipeTraceEntry {
         name: crate::tools::definitions::TOOL_MATERIALIZE.to_string(),
         operation_kind: OperationKind::Write,
         summary: truncate_trace_summary(sql),
         success: true,
         result_excerpt: String::new(),
-    }]
+    };
+    // Failure-message guard (issue #316): shared with the live trace mapping
+    // (`From<&TraceEntry> for RecipeTraceEntry`) -- a failed entry must carry
+    // its result message (ADR-0078 failure anchor). Trivially satisfied here
+    // (the synthesized entry is always a success); kept so both construction
+    // sites pin the same invariant.
+    debug_assert!(
+        entry.success || !entry.result_excerpt.is_empty(),
+        "a failed trace entry persists its result message (ADR-0078 failure anchor)"
+    );
+    vec![entry]
 }
 
 /// Truncate a trace-entry summary string to [`TRACE_SUMMARY_MAX`] chars,
@@ -280,15 +293,36 @@ impl RecipeTurn {
     /// Construct a turn with an empty trace and default provenance -- the shape
     /// a no-tool turn persists with and the shape the v1->v2 migration emits
     /// (v1 turns carry no recorded trajectory or runtime). The live path
-    /// (`Session::build_recipe`, issue #319) constructs `RecipeTurn` via a
-    /// struct literal instead, pairing each turn with its recorded audit (the
-    /// loop's real trace + runtime provenance, ADR-0078).
+    /// (`Session::build_recipe`) routes through [`Self::with_audit`] instead,
+    /// pairing each turn with its recorded audit (the loop's real trace +
+    /// runtime provenance, ADR-0078).
     pub fn new(question: impl Into<String>, outcome: RecipeOutcome) -> Self {
         Self {
             question: question.into(),
             outcome,
             trace: Vec::new(),
             provenance: TurnProvenance::default(),
+        }
+    }
+
+    /// Construct a turn paired with its recorded execution audit (ADR-0078,
+    /// issue #316) -- the live path's shape. `Session::build_recipe` routes
+    /// every persisted turn through here, pairing each turn with the trace
+    /// and runtime/skill provenance recorded as it ran (the loop's real
+    /// multi-call trajectory for a live turn; the recipe's values harvested
+    /// on resume). [`Self::new`] stays the empty-trace / default-provenance
+    /// shape (a no-tool turn, or a v1-era migrated turn).
+    pub fn with_audit(
+        question: impl Into<String>,
+        outcome: RecipeOutcome,
+        trace: Vec<RecipeTraceEntry>,
+        provenance: TurnProvenance,
+    ) -> Self {
+        Self {
+            question: question.into(),
+            outcome,
+            trace,
+            provenance,
         }
     }
 }
@@ -1169,9 +1203,39 @@ mod tests {
     }
 
     #[test]
+    fn with_audit_pairs_the_turn_with_its_recorded_trace_and_provenance() {
+        // The live path's constructor (issue #316): `Session::build_recipe`
+        // pairs each turn with its recorded audit (ADR-0078) -- the loop's
+        // real multi-call trace + runtime/skill provenance -- through this
+        // constructor instead of a bare struct literal.
+        let trace = synthetic_materialize_trace("SELECT COUNT(*) AS n FROM \"people\".data");
+        let provenance = TurnProvenance {
+            runtime: Some(RuntimeKind::BuiltIn),
+            skills: vec!["sql-coach".into()],
+        };
+        let turn = RecipeTurn::with_audit(
+            "多少人",
+            RecipeOutcome::Materialized {
+                promotions: vec![RecipePromotion {
+                    reference_name: "result_1".into(),
+                    display_name: "result_1".into(),
+                    sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
+                    stale: None,
+                }],
+                assumption: None,
+            },
+            trace.clone(),
+            provenance.clone(),
+        );
+        assert_eq!(turn.question, "多少人");
+        assert_eq!(turn.trace, trace, "the recorded trace rides verbatim");
+        assert_eq!(turn.provenance, provenance, "as does the provenance");
+    }
+
+    #[test]
     fn provenance_round_trips_with_runtime_and_skills() {
-        // Forward-looking (ADR-0078/0081): a turn the agent-loop wiring slice
-        // populates carries a typed runtime + the active skill ids. The shape
+        // A live agent-loop turn's provenance (ADR-0078/0081, issue #319)
+        // carries a typed runtime + the active skill ids. The shape
         // round-trips so resume reproduces the audit anchor "how was this
         // produced" after reopen.
         let provenance = TurnProvenance {

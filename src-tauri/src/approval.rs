@@ -110,6 +110,14 @@ pub enum AuthMode {
 /// it. The external-tool bridge classifies each call; the gateway just
 /// carries the label through to the event so the frontend renders the right
 /// badge without re-inferring.
+///
+/// The serde form is a `.duck` persistence contract (issue #316): persisted
+/// recipe traces reuse this enum (`RecipeTraceEntry.operation_kind`,
+/// ADR-0078), so the `rename_all = "snake_case"` variant spellings (`read` /
+/// `write` / `execute` / `network`) are part of the recipe wire format,
+/// frozen by the backward-compatibility constraint. Renaming a variant or
+/// reworking the case convention breaks historical `.duck` readability;
+/// appending a variant is append-only-safe (no historical file carries it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
@@ -623,6 +631,33 @@ mod tests {
         fn request_count(&self) -> usize {
             self.requests.lock().unwrap().len()
         }
+    }
+
+    // --- wire format -------------------------------------------------------
+
+    /// The `.duck` persistence contract (issue #316, ADR-0078): persisted
+    /// recipe traces reuse `OperationKind`, so the `rename_all =
+    /// "snake_case"` variant spellings are frozen wire format. Migration
+    /// fixtures lock only `write` indirectly; this pins all four so a
+    /// `rename_all` rework or per-variant rename cannot slip through.
+    #[test]
+    fn operation_kind_serializes_to_frozen_snake_case_wire_form() {
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Read).unwrap(),
+            "\"read\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Write).unwrap(),
+            "\"write\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Execute).unwrap(),
+            "\"execute\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Network).unwrap(),
+            "\"network\""
+        );
     }
 
     // --- pure classify -----------------------------------------------------

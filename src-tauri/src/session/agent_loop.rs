@@ -537,7 +537,16 @@ impl From<&TraceEntry> for RecipeTraceEntry {
     ///
     /// The surviving strings are already bounded at capture time
     /// (`summarize_field` / `TRACE_EXCERPT_MAX`), so no re-truncation.
+    ///
+    /// Failure-message guard (issue #316): a failed call MUST carry its
+    /// result message -- the persisted excerpt is the cross-turn failure
+    /// retrospection anchor (ADR-0078). A silent failure panics in debug
+    /// builds rather than persisting an empty anchor.
     fn from(entry: &TraceEntry) -> Self {
+        debug_assert!(
+            entry.success || !entry.result_excerpt.is_empty(),
+            "a failed trace entry persists its result message (ADR-0078 failure anchor)"
+        );
         Self {
             name: entry.name.clone(),
             operation_kind: entry.operation_kind,
@@ -655,6 +664,49 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    /// The persisted-trace mapping contract (issue #316): a successful call's
+    /// excerpt is emptied (the success payload is data-bearing -- the .duck
+    /// carries none of it, ADR-0036), and a failed call carries its result
+    /// message verbatim.
+    #[test]
+    fn persisted_trace_mapping_empties_success_and_carries_failure_messages() {
+        let base = |success: bool, excerpt: &str| TraceEntry {
+            tool_use_id: "tu_1".into(),
+            name: "materialize".into(),
+            operation_kind: OperationKind::Write,
+            summary: "SELECT 1".into(),
+            success,
+            result_excerpt: excerpt.into(),
+        };
+        let ok = RecipeTraceEntry::from(&base(true, "42 rows"));
+        assert!(ok.success);
+        assert!(ok.result_excerpt.is_empty(), "success payload dropped");
+        let failed = RecipeTraceEntry::from(&base(false, "no such table"));
+        assert!(!failed.success);
+        assert_eq!(
+            failed.result_excerpt, "no such table",
+            "the failure message rides verbatim"
+        );
+    }
+
+    /// The failure-message guard (issue #316): the persisted excerpt is the
+    /// cross-turn failure retrospection anchor (ADR-0078), so a failed call
+    /// with no message panics in debug builds rather than persisting an
+    /// empty anchor.
+    #[test]
+    #[should_panic(expected = "a failed trace entry persists its result message")]
+    fn persisted_trace_mapping_rejects_a_silent_failure() {
+        let entry = TraceEntry {
+            tool_use_id: "tu_1".into(),
+            name: "explore".into(),
+            operation_kind: OperationKind::Read,
+            summary: "SELECT 1".into(),
+            success: false,
+            result_excerpt: String::new(),
+        };
+        let _ = RecipeTraceEntry::from(&entry);
     }
 
     /// Throwaway TurnDeps over a real in-memory connection. Mirrors the
