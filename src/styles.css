@@ -58,11 +58,12 @@
  * font-mono rides on each <code>) -- styles.css no longer carries either. */
 
 /* =========================================================================
- * Chat-style three-column shell (ADR-0045/0060/0062, issue #79).
- * Replaced the v0 single-column `main` scaffold. The
+ * Chat-style three-column shell (ADR-0045/0060/0062, issue #79; evolved by
+ * ADR-0083, issue #298). Replaced the v0 single-column `main` scaffold. The
  * session sidebar is col 1 (full height, independent -- R1: QuestionBar does
  * NOT span over it); the right block holds the thin top bar + the session
- * pane (rail + workspace + a QuestionBar that spans rail + workspace only).
+ * pane (in-rail QuestionBar + a workspace panel that defaults to collapsed,
+ * ADR-0083).
  *
  * ADR-0067 (issue #171): the shell-skeleton VISUAL rules -- .session-sidebar
  * bg/border/padding, .sidebar-new-button, .sidebar-error, .session-empty,
@@ -105,11 +106,17 @@
  * the grid transition. */
 .shell.sidebar-collapsed .session-sidebar { opacity: 0; pointer-events: none; }
 /* ADR-0054 level 2 (issue #84): thread rail collapsed -> workspace goes full
- * width. The QuestionBar still spans the (now single-column) pane via its
- * grid-column: 1 / -1 rule. Stacks with sidebar-collapsed (both classes can
- * apply at once). */
-.shell.rail-collapsed .session-pane { grid-template-columns: 1fr; }
-.shell.rail-collapsed .session-rail { opacity: 0; pointer-events: none; }
+ * width. Two explicit tracks are KEPT (0 + 1fr, not a single 1fr) so the
+ * workspace's grid-column: 2 placement stays valid and the width change
+ * interpolates with the pane's grid-template-columns transition. The
+ * QuestionBar (in-rail since ADR-0083, issue #298) reclaims the full pane via
+ * its grid-column: 1 / -1 override below; the rail zeroes its padding /
+ * border so the 0 track does not leak a strip into the workspace. Stacks with
+ * sidebar-collapsed (both classes can apply at once). */
+.shell.rail-collapsed .session-pane { grid-template-columns: 0 1fr; }
+.shell.rail-collapsed .session-rail { opacity: 0; pointer-events: none; padding: 0; border-right-width: 0; }
+.shell.rail-collapsed .session-workspace { grid-row: 2 / 3; }
+.shell.rail-collapsed .session-questionbar { grid-column: 1 / -1; }
 
 /* --- Col 1: session sidebar (ADR-0060) -- layout-only thin layer -------- */
 .session-sidebar {
@@ -265,17 +272,56 @@
  * stay on the elements for selector / test stability. */
 .cold-start-hero { position: absolute; inset: 0; overflow-y: auto; justify-content: center; }
 
-/* --- Nested grid: header + rail + workspace + QuestionBar (ADR-0062 R1) ---
- * Row 1 is the session header (session name + rail collapse toggle, spans the
- * full pane width); row 2 is rail + workspace; row 3 is QuestionBar (spans
- * rail + workspace, grid-column 1 / -1). The session sidebar is NOT under this
- * grid (it is the outer shell's col 1). */
+/* --- Nested grid: header + rail + workspace + QuestionBar (ADR-0083) ------
+ * Row 1 is the session header (rail toggle + session name + workspace toggle,
+ * spans the full pane width); col 1 is the conversation surface -- the rail
+ * (row 2) with the QuestionBar beneath it (row 3, IN-RAIL since ADR-0083
+ * issue #298; the ADR-0062 R1 full-pane span retired once the workspace
+ * defaulted to collapsed); col 2 is the workspace, spanning rows 2+3. The
+ * session sidebar is NOT under this grid (it is the outer shell's col 1).
+ *
+ * ADR-0083 workspace fold (issue #298): the pane carries .workspace-collapsed
+ * while the panel is folded away (cold-start default, session-ephemeral) --
+ * the rail owns the released space (1fr 0fr, the rail-as-primary form; the
+ * min-width + Tauri minWidth refinement lands with issue #302). */
 .session-pane {
   height: 100%;
   display: grid;
   grid-template-columns: 320px 1fr;
   grid-template-rows: auto 1fr auto;
   transition: grid-template-columns 180ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+/* Workspace folded (ADR-0083, issue #298): the second track collapses to 0
+ * and the rail takes the pane. The first track flips 320px -> 1fr
+ * (length <-> flex is NOT interpolatable, so it snaps) while the second
+ * track slides 1fr -> 0fr; the workspace's opacity / visibility fade
+ * (below) masks the first-track snap. */
+.shell .session-pane.workspace-collapsed { grid-template-columns: 1fr 0fr; }
+.shell .session-pane.workspace-collapsed .session-workspace {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  min-width: 0;
+  overflow: hidden;
+  /* Fade out, then flip visibility at the end (removes the folded panel from
+   * tab order + the a11y tree); the expanded rule's 0s delay flips it back
+   * instantly on open. */
+  transition: opacity 120ms ease, visibility 0s linear 120ms;
+}
+.shell .session-pane.workspace-collapsed .session-rail { border-right-color: transparent; }
+/* When BOTH collapses apply (rail pref + workspace fold) the workspace fold
+ * wins: the rail must stay on screen as the pane's only content (ADR-0083
+ * rail-as-primary). Higher specificity than the .shell.rail-collapsed rules
+ * above, so the rail re-appears + the tracks stay rail-first. */
+.shell.rail-collapsed .session-pane.workspace-collapsed { grid-template-columns: 1fr 0fr; }
+.shell.rail-collapsed .session-pane.workspace-collapsed .session-rail {
+  opacity: 1;
+  pointer-events: auto;
+  /* Restore the .session-rail base values the rail-collapsed rule above
+   * zeroed (padding + border-right-width) -- keep the two in sync. */
+  padding: 0.5rem;
+  border-right-width: 1px;
+  border-right-color: transparent;
 }
 /* Session header (row 1, spans rail + workspace): the session name + the rail
    collapse toggle. Moved out of the global topbar so session-scoped chrome
@@ -308,9 +354,15 @@
    p-2); the class hook had no selector / test dependent and is dropped. */
 
 .session-workspace {
-  grid-column: 2; grid-row: 2;
+  grid-column: 2;
+  /* Spans the rail's body + QuestionBar rows (ADR-0083): with the QuestionBar
+   * in-rail the panel owns the whole col-2 height. */
+  grid-row: 2 / 4;
   overflow-y: auto;
   display: flex; flex-direction: column;
+  /* Expanded-state motion pair of the .workspace-collapsed rule above: the
+   * visibility flip is instant on open (0s delay) so the panel fades in. */
+  transition: opacity 120ms ease, visibility 0s linear 0s;
 }
 /* ADR-0067 (issue #173): the workspace + textual-card VISUAL rules retired
  * into SessionPane.tsx + App.tsx as Tailwind utility + ADR-0050 token. The
@@ -329,13 +381,17 @@
   margin-left: auto;
 }
 
-/* QuestionBar area (ADR-0062 R1: spans rail + workspace). ADR-0067 (issue
-   #172): the .question-bar input/button visual rules (focus outline, primary
-   submit, outline cancel) retired into shadcn Input + Button variants on
-   QuestionBar.tsx; .session-questionbar stays as the grid-placement + chrome
-   layout shell. */
+/* QuestionBar area. ADR-0083 (issue #298, evolving ADR-0062 R1): the bar sits
+   IN the rail column (col 1, row 3) -- the composer belongs to the
+   conversation surface; the ADR-0062 R1 full-pane span retired once the
+   workspace defaulted to collapsed. The .shell.rail-collapsed override above
+   re-spans it (grid-column 1 / -1) so the input survives a rail fold.
+   ADR-0067 (issue #172): the .question-bar input/button visual rules (focus
+   outline, primary submit, outline cancel) retired into shadcn Input +
+   Button variants on QuestionBar.tsx; .session-questionbar stays as the
+   grid-placement + chrome layout shell. */
 .session-questionbar {
-  grid-column: 1 / -1; grid-row: 3;
+  grid-column: 1; grid-row: 3;
   border-top: 1px solid var(--border);
   background: var(--background);
   padding: 0.5rem 1rem;

@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { LiveTurnCard, TraceRowList } from "./TraceView";
+import { ResultPreviewCard } from "./ResultPreviewCard";
 import type { LiveTurn } from "../../session/useTurnFlow";
 import type { ApprovalResponse } from "../../types/approval";
 import type { DatasetDescriptor, StaleAnchor, StaleReason } from "../../types/dataset";
@@ -825,54 +826,68 @@ function TurnBody({
       if (!primary) return null;
       const active = primary.dataset.reference_name === selectedResult;
       return (
-        <p className="turn-outcome mt-1 ml-6 text-xs leading-snug">
-          {antecedents.length > 0 && (
-            <span className="antecedents block mb-0.5 text-muted-foreground">
-              <FormattedMessage
-                id="thread.antecedents"
-                defaultMessage="Derived from {names}"
-                values={{
-                  names: intl.formatList(
-                    antecedents.map((p) => p.dataset.reference_name),
-                    { type: "conjunction" },
-                  ),
-                }}
-              />
-            </span>
-          )}
-          {/* result-link is a real <button> (clickable, focusable) but stripped
+        <>
+          <p className="turn-outcome mt-1 ml-6 text-xs leading-snug">
+            {antecedents.length > 0 && (
+              <span className="antecedents block mb-0.5 text-muted-foreground">
+                <FormattedMessage
+                  id="thread.antecedents"
+                  defaultMessage="Derived from {names}"
+                  values={{
+                    names: intl.formatList(
+                      antecedents.map((p) => p.dataset.reference_name),
+                      { type: "conjunction" },
+                    ),
+                  }}
+                />
+              </span>
+            )}
+            {/* result-link is a real <button> (clickable, focusable) but stripped
               of native button chrome via [all:unset] so it reads as an inline
               link; subsequent utilities rebuild the box model + token color.
               `active`/`stale` are kept as hook classes (semantic + test
               selectors) -- their visual lands on the same element via the
               conditional utilities below. */}
-          <button
-            type="button"
-            className={cn(
-              "result-link [all:unset] cursor-pointer inline-block text-primary",
-              "px-1.5 py-0.5 rounded-md border border-transparent",
-              "hover:bg-accent",
-              active && "active font-semibold border-primary",
-              staleAnchor && "stale text-muted-foreground border-dashed",
+            <button
+              type="button"
+              className={cn(
+                "result-link [all:unset] cursor-pointer inline-block text-primary",
+                "px-1.5 py-0.5 rounded-md border border-transparent",
+                "hover:bg-accent",
+                active && "active font-semibold border-primary",
+                staleAnchor && "stale text-muted-foreground border-dashed",
+              )}
+              aria-current={active ? "true" : undefined}
+              onClick={() => onSelectResult(primary.dataset.reference_name)}
+            >
+              <FormattedMessage
+                id="thread.resultLink"
+                defaultMessage="Result: {name}"
+                values={{ name: primary.dataset.reference_name }}
+              />
+            </button>
+            {staleAnchor && (
+              <StaleChip
+                reason={staleAnchor.reason}
+                hasJumpTarget={hasJumpTarget}
+                onJump={onStaleChipJump}
+              />
             )}
-            aria-current={active ? "true" : undefined}
-            onClick={() => onSelectResult(primary.dataset.reference_name)}
-          >
-            <FormattedMessage
-              id="thread.resultLink"
-              defaultMessage="Result: {name}"
-              values={{ name: primary.dataset.reference_name }}
-            />
-          </button>
-          {staleAnchor && (
-            <StaleChip
-              reason={staleAnchor.reason}
-              hasJumpTarget={hasJumpTarget}
-              onJump={onStaleChipJump}
-            />
-          )}
-          <AssumptionNote assumption={assumption} />
-        </p>
+            <AssumptionNote assumption={assumption} />
+          </p>
+          {/* ADR-0083 (issue #298): the primary result's inline preview card --
+            the windowed sample (first rows, ADR-0026) for a rail-scan glance
+            at the answer. Clicking it selects the result (the caller opens
+            the workspace); the active state mirrors the viewed selection
+            back (dual-view linkage). Antecedent promotions carry no card --
+            the chain tail is the answer. */}
+          <ResultPreviewCard
+            dataset={primary.dataset}
+            active={active}
+            stale={!!staleAnchor}
+            onSelect={() => onSelectResult(primary.dataset.reference_name)}
+          />
+        </>
       );
     }
     case "Textual": {

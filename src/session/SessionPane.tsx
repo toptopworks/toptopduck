@@ -3,6 +3,7 @@ import { useIntl, FormattedMessage } from "react-intl";
 import { useQueryClient } from "@tanstack/react-query";
 import { fmtError, errorDetail, formatTurnFailure, turnFailureDetail } from "../lib/error-presentation";
 import { RailToggle } from "../shell/RailToggle";
+import { WorkspaceToggle } from "../shell/WorkspaceToggle";
 import { useSessionState } from "./useSessionState";
 import type { ApprovalEntry, UseApprovalEvents } from "./useApprovalEvents";
 import type { ApprovalResponse } from "../types/approval";
@@ -133,12 +134,14 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
   const pendingActiveDelete = s.pendingActiveDelete;
 
   return (
-    <div className="session-pane">
-      {/* Session header (row 1): session name + rail collapse toggle. Moved
-          here from the global topbar so session-scoped chrome lives with the
-          pane. The rail toggle always renders enabled here -- a SessionPane
+    <div className={cn("session-pane", s.workspaceCollapsed && "workspace-collapsed")}>
+      {/* Session header (row 1): rail toggle + session name + workspace toggle.
+          Moved here from the global topbar so session-scoped chrome lives with
+          the pane. The rail toggle always renders enabled here -- a SessionPane
           only mounts when its session exists, so there is always a rail to
-          fold (the cold-start hero has no SessionPane). */}
+          fold (the cold-start hero has no SessionPane). The workspace toggle
+          (ADR-0083, issue #298) sits at the header's right edge: the panel
+          defaults to collapsed and this is its manual open/close path. */}
       <div className="session-header" data-tauri-drag-region>
         <RailToggle
           collapsed={railCollapsed}
@@ -153,6 +156,7 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
           {sessionName ||
             intl.formatMessage({ id: "session.defaultName", defaultMessage: "New session" })}
         </span>
+        <WorkspaceToggle collapsed={s.workspaceCollapsed} onToggle={s.handleToggleWorkspace} />
       </div>
       {/* ADR-0058 L2 partition boundaries: Thread rail and ResultView each get
           their own ErrorBoundary so a render crash in one degrades only that
@@ -320,7 +324,8 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
         </div>
       </section>
 
-      {/* --- QuestionBar (ADR-0062 R1: spans rail + workspace only) --------- */}
+      {/* --- QuestionBar (ADR-0083: in-rail, col 1 row 3; the ADR-0062 R1
+            full-pane span retired once the workspace defaulted to collapsed) - */}
       {/* ADR-0071 (issue #238): the composer provider/model picker sits at the
           QuestionBar edge. It is app-level state rendered per-session (only the
           active pane is visible); the bundle is undefined until app-config

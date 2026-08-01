@@ -6,6 +6,8 @@ ADR-0060 把前端 shell 从两栏（0045）扩为三栏（+ 左会话栏），A
 
 ## R1 — QuestionBar 横向跨度：只跨 rail + workspace，会话栏独立通底
 
+> 被 [ADR-0083](./0083-conversation-stream-workspace-panel.md) 取代：R1 Decision「QuestionBar 只跨 rail + workspace」跨度演进为 **rail 内**（输入区收进 rail 列）——工作区默认折叠后全宽跨度失去前提。「会话栏独立通底」保留。详见 ADR-0083。
+
 0060 在最左加常驻会话栏后，0045「底 = QuestionBar（跨全宽）」读不通——「全宽」现在是整窗（含会话栏）还是活跃会话工作区（rail + workspace）？0058「shell 骨架（header / 会话 tabs / QuestionBar）」把 QuestionBar 归进顶层骨架，但该措辞是 0060 之前写的（还叫「会话 tabs」），三栏下同样读不清。
 
 **Decision**：QuestionBar 只跨 rail + workspace；会话栏独立通到窗口底边。
