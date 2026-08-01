@@ -151,7 +151,11 @@ export function SettingsView({
   section,
   onSectionChange,
   initialEditProfileId,
+  collapsed,
 }: {
+  // Collapse state (issue #287): when true the nav subtree goes inert so
+  // keyboard / screen-reader focus cannot land on the opacity-0 controls.
+  collapsed: boolean;
   appConfig: AppConfig;
   // Persist a full app-config; MUST return the IPC promise so commits can await
   // + catch failures (App passes commitAppConfig unwrapped).
@@ -316,6 +320,7 @@ export function SettingsView({
       <nav
         className="settings-nav border-border bg-muted/30 border-r"
         aria-label="Settings sections"
+        inert={collapsed}
       >
         {/* Rail top: back to workspace. */}
         <div className="settings-rail-top border-border border-b px-2 pt-2 pb-2">

@@ -190,6 +190,28 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     expect(document.querySelector(".topbar")).toBeInTheDocument();
   });
 
+  it("collapsed settings-nav is inert to prevent ghost focus (issue #287)", async () => {
+    vi.mocked(getAppConfig).mockResolvedValue(baseAppConfig());
+    render(<App />);
+    await waitFor(() => expect(getAppConfig).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    await waitFor(() =>
+      expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
+    );
+    const nav = document.querySelector(".settings-nav");
+    // Expanded settings-nav stays in the Tab sequence.
+    expect(nav?.hasAttribute("inert")).toBe(false);
+    // The sidebar-toggle slot is the settings-nav collapse toggle in settings
+    // mode (issue #285); collapsing marks the shell + inerts the nav subtree
+    // so focus cannot land on the opacity-0 nav controls (issue #287).
+    fireEvent.click(screen.getByRole("button", { name: "折叠设置导航" }));
+    expect(document.querySelector(".shell")?.classList.contains("settings-nav-collapsed")).toBe(true);
+    expect(nav?.hasAttribute("inert")).toBe(true);
+    // Expanding restores the Tab sequence.
+    fireEvent.click(screen.getByRole("button", { name: "展开设置导航" }));
+    expect(nav?.hasAttribute("inert")).toBe(false);
+  });
+
   it("ESC closes the overlay when not busy (ADR-0065 keyboard exit)", async () => {
     vi.mocked(getAppConfig).mockResolvedValue(baseAppConfig());
     render(<App />);

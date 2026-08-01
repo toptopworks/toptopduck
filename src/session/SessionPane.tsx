@@ -179,6 +179,7 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
       <section
         className="session-rail"
         aria-label={intl.formatMessage({ id: "session.rail.ariaLabel", defaultMessage: "Conversation timeline" })}
+        inert={railCollapsed}
       >
         <ErrorBoundary name="thread" onReset={resetSessionCache}>
           <Thread

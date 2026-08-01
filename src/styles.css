@@ -101,10 +101,12 @@
 }
 .shell.sidebar-collapsed { grid-template-columns: 0 1fr; }
 /* display:none would snap both the column width and the sidebar's fade (display
- * is not animatable), so this rides opacity + pointer-events instead -- the
- * element stays in flow at width 0 while its content fades out in step with
- * the grid transition. */
-.shell.sidebar-collapsed .session-sidebar { opacity: 0; pointer-events: none; }
+ * is not animatable), so this rides opacity instead -- the element stays in
+ * flow at width 0 while its content fades out in step with the grid transition.
+ * The collapsed <aside> also carries the HTML inert attribute (issue #287),
+ * which drops the subtree from the Tab sequence + blocks pointer events +
+ * hides it from the a11y tree (replacing the prior pointer-events:none). */
+.shell.sidebar-collapsed .session-sidebar { opacity: 0; }
 /* ADR-0054 level 2 (issue #84): thread rail collapsed -> workspace goes full
  * width. Two explicit tracks are KEPT (0 + 1fr, not a single 1fr) so the
  * workspace's grid-column: 2 placement stays valid and the width change
@@ -114,7 +116,7 @@
  * border so the 0 track does not leak a strip into the workspace. Stacks with
  * sidebar-collapsed (both classes can apply at once). */
 .shell.rail-collapsed .session-pane { grid-template-columns: 0 1fr; }
-.shell.rail-collapsed .session-rail { opacity: 0; pointer-events: none; padding: 0; border-right-width: 0; }
+.shell.rail-collapsed .session-rail { opacity: 0; padding: 0; border-right-width: 0; }
 .shell.rail-collapsed .session-workspace { grid-row: 2 / 3; }
 .shell.rail-collapsed .session-questionbar { grid-column: 1 / -1; }
 
@@ -233,14 +235,16 @@
  * the nav, so col 2 (.settings-content at 1fr) fills the overlay. The
  * transition lives on .settings-overlay + .settings-nav above (mirrors the
  * .shell session-sidebar collapse). display:none would snap both the column
- * width and the fade (display is not animatable), so this rides opacity +
- * pointer-events instead -- the nav stays in flow at width 0 while its content
- * fades out in step with the grid transition. The modifier sits on .shell so
- * it scopes exactly like the workspace sidebar-collapsed / rail-collapsed
- * classes (harmless outside settings-mode: the overlay mounts only while
- * settings are open). */
+ * width and the fade (display is not animatable), so this rides opacity
+ * instead -- the nav stays in flow at width 0 while its content fades out in
+ * step with the grid transition. The collapsed <nav> also carries the HTML
+ * inert attribute (issue #287), which drops the subtree from the Tab sequence
+ * + blocks pointer events + hides it from the a11y tree (replacing the prior
+ * pointer-events:none). The modifier sits on .shell so it scopes exactly like
+ * the workspace sidebar-collapsed / rail-collapsed classes (harmless outside
+ * settings-mode: the overlay mounts only while settings are open). */
 .shell.settings-nav-collapsed .settings-overlay { grid-template-columns: 0 1fr; }
-.shell.settings-nav-collapsed .settings-nav { opacity: 0; pointer-events: none; }
+.shell.settings-nav-collapsed .settings-nav { opacity: 0; }
 /* Profiles master-detail (issue #153, ADR-0064/0065). Two columns on desktop,
  * stacked on narrow widths. The <=640px stacking is a behavior-equivalence AC
  * (issue #170) and stays here as layout, not on the component. */

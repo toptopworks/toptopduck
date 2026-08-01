@@ -332,6 +332,7 @@ export default function App() {
                 {/* Col 1: session sidebar (ADR-0060) -- full height, independent
               column (R1: QuestionBar does NOT span over it). */}
                 <SessionSidebar
+                  collapsed={sidebarCollapsed}
                   sessions={sessions}
                   openSessions={openSessions}
                   activeSessionId={activeSessionId}
@@ -504,6 +505,7 @@ export default function App() {
 
                 {settingsView.open && appConfig && (
                   <SettingsView
+                    collapsed={settingsNavCollapsed}
                     appConfig={appConfig}
                     section={liveSettingsSection}
                     onSectionChange={setLiveSettingsSection}

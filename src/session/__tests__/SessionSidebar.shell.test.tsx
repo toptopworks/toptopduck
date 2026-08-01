@@ -36,6 +36,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
   it("session-entry.active lifts bg-accent + text-accent-foreground + left inset bar + aria-current (ADR-0072, issue #249)", () => {
     const { container } = renderShell(
       <SessionSidebar
+        collapsed={false}
         sessions={[]}
         openSessions={twoOpenSessions()}
         activeSessionId="sess-active"
@@ -72,6 +73,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
   it("session-entry.open:not(.active) lifts the left accent shadow with no tint (ADR-0072, issue #249)", () => {
     const { container } = renderShell(
       <SessionSidebar
+        collapsed={false}
         sessions={[]}
         openSessions={twoOpenSessions()}
         activeSessionId="sess-active"
@@ -106,6 +108,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
   it("session-entry-main renders a leading MessageSquare icon on every row (ADR-0072, issue #249)", () => {
     const { container } = renderShell(
       <SessionSidebar
+        collapsed={false}
         sessions={[]}
         openSessions={twoOpenSessions()}
         activeSessionId="sess-active"
@@ -151,6 +154,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     };
     const { container } = renderShell(
       <SessionSidebar
+        collapsed={false}
         sessions={[persisted]}
         openSessions={[]}
         activeSessionId={null}
@@ -189,6 +193,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
   it("session-menu popover carries absolute + bg-card + shadow + border", () => {
     const { container } = renderShell(
       <SessionSidebar
+        collapsed={false}
         sessions={[]}
         openSessions={twoOpenSessions()}
         activeSessionId="sess-active"
@@ -230,6 +235,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     };
     const { container } = renderShell(
       <SessionSidebar
+        collapsed={false}
         sessions={[persisted]}
         openSessions={[]}
         activeSessionId={null}
@@ -264,6 +270,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     const onOpenSearch = vi.fn();
     const { container } = renderShell(
       <SessionSidebar
+        collapsed={false}
         sessions={[]}
         openSessions={[]}
         activeSessionId={null}
@@ -313,6 +320,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     const onOpenSearch = vi.fn();
     const { container } = renderShell(
       <SessionSidebar
+        collapsed={false}
         sessions={[]}
         openSessions={[]}
         activeSessionId={null}
@@ -342,6 +350,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
   it("sidebar-new-button is a fused bg-secondary Pencil + text button, not solid primary (ADR-0072, issue #250)", () => {
     const { container } = renderShell(
       <SessionSidebar
+        collapsed={false}
         sessions={[]}
         openSessions={[]}
         activeSessionId={null}
@@ -399,6 +408,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
     // affordance has no anchor -- the empty-state row renders instead.
     const { container } = renderShell(
       <SessionSidebar
+        collapsed={false}
         sessions={[]}
         openSessions={[]}
         activeSessionId={null}
@@ -426,6 +436,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
     const onSwitchGrouping = vi.fn();
     const { container } = renderShell(
       <SessionSidebar
+        collapsed={false}
         sessions={[onePersisted()]}
         openSessions={[]}
         activeSessionId={null}
@@ -473,6 +484,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
   it("marks By time checked when grouping is time", () => {
     const { container } = renderShell(
       <SessionSidebar
+        collapsed={false}
         sessions={[onePersisted()]}
         openSessions={[]}
         activeSessionId={null}
@@ -508,6 +520,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
     // --ring token is the project focus-indicator standard).
     const { container } = renderShell(
       <SessionSidebar
+        collapsed={false}
         sessions={[onePersisted()]}
         openSessions={[]}
         activeSessionId={null}
@@ -544,6 +557,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
     const onSwitchGrouping = vi.fn();
     const { container } = renderShell(
       <SessionSidebar
+        collapsed={false}
         sessions={[onePersisted()]}
         openSessions={[]}
         activeSessionId={null}
@@ -577,6 +591,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
     // Escape precedent (userEvent is not installed in this repo).
     const { container } = renderShell(
       <SessionSidebar
+        collapsed={false}
         sessions={[onePersisted()]}
         openSessions={[]}
         activeSessionId={null}
@@ -612,6 +627,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
     // forcing the user to click a menu item or re-toggle the ⋯ button.
     const { container } = renderShell(
       <SessionSidebar
+        collapsed={false}
         sessions={[onePersisted()]}
         openSessions={[]}
         activeSessionId={null}
@@ -643,6 +659,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
   it("closes the entry context menu on Escape (issue #258)", () => {
     const { container } = renderShell(
       <SessionSidebar
+        collapsed={false}
         sessions={[onePersisted()]}
         openSessions={[]}
         activeSessionId={null}
@@ -704,6 +721,7 @@ describe("SessionSidebar connection footer (issue #282)", () => {
   } = {}) {
     const result = renderShell(
       <SessionSidebar
+        collapsed={false}
         sessions={[]}
         openSessions={[]}
         activeSessionId={null}
@@ -801,6 +819,7 @@ describe("SessionSidebar connection footer (issue #282)", () => {
 describe("SessionSidebar pending-approval coloring (ADR-0083, issue #297)", () => {
   function baseProps() {
     return {
+      collapsed: false,
       sessions: [] as SessionMetadata[],
       openSessions: twoOpenSessions(),
       activeSessionId: "sess-active",
