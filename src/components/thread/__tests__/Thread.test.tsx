@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
 import type { ReactElement } from "react";
@@ -244,8 +244,12 @@ describe("Thread", () => {
     expect(screen.getByText(/删除了「people」/)).toBeInTheDocument();
     // The turn's question still renders between them (ordering preserved).
     expect(screen.getByText("问 result_1")).toBeInTheDocument();
-    // Source markers carry no clickable result link (only the turn does).
-    expect(screen.getAllByRole("button").length).toBe(1);
+    // Source markers are non-interactive: no button inside a source entry --
+    // the turn's result link + preview card are the only buttons (ADR-0083).
+    for (const li of document.querySelectorAll(".source-entry")) {
+      expect(within(li as HTMLElement).queryByRole("button")).toBeNull();
+    }
+    expect(screen.getByRole("button", { name: /结果：result_1/ })).toBeInTheDocument();
   });
 
   it("renders a Replaced source event with its own marker verb (issue #41)", () => {
@@ -928,6 +932,159 @@ describe("Thread", () => {
       );
       expect(screen.getByText("第一问")).toBeInTheDocument();
       expect(container.querySelector(".live-turn-card")).not.toBeNull();
+    });
+  });
+
+  describe("result preview card (ADR-0083 / ADR-0026, issue #298)", () => {
+    // A Materialized turn carries an inline preview card: the windowed sample
+    // (first rows frozen at copy-in, ADR-0026) of the PRIMARY result, so a
+    // rail scan shows what the answer looks like without opening the
+    // workspace. The full wide table stays workspace-only.
+
+    it("renders the windowed sample of the primary result with a row-count footer", () => {
+      // mockDataset: columns id/name, 2 sample rows, row_count 5.
+      renderThread(
+        <Thread
+          entries={[turnEntry(materializedRecord("result_1", null))]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+        />,
+      );
+      const card = screen.getByRole("button", { name: /result_1 的预览/ });
+      expect(card).toBeInTheDocument();
+      // Column headers + every sample cell render.
+      expect(within(card as HTMLElement).getByText("id")).toBeInTheDocument();
+      expect(within(card as HTMLElement).getByText("name")).toBeInTheDocument();
+      expect(within(card as HTMLElement).getByText("Alice")).toBeInTheDocument();
+      expect(within(card as HTMLElement).getByText("Bob")).toBeInTheDocument();
+      // The footer names the window: first {shown} of {total} rows.
+      expect(within(card as HTMLElement).getByText("首 2 行，共 5 行")).toBeInTheDocument();
+    });
+
+    it("renders only the PRIMARY result's preview on a multi-promotion turn (ADR-0084)", () => {
+      const record: TurnRecord = {
+        question: "筛后聚合",
+        outcome: {
+          kind: "Materialized",
+          data: {
+            promotions: [
+              {
+                dataset: {
+                  ...mockDataset,
+                  reference_name: "result_1",
+                  sample: [["x"]],
+                  columns: [{ name: "mid", canonical_type: "VARCHAR" }],
+                },
+                sql: "SELECT 1",
+              },
+              { dataset: { ...mockDataset, reference_name: "result_2" }, sql: "SELECT 2" },
+            ],
+            viz: null,
+            assumption: null,
+          },
+        },
+        trace: [],
+      };
+      renderThread(
+        <Thread entries={[turnEntry(record)]} selectedResult={null} onSelectResult={() => {}} />,
+      );
+      // Exactly one preview card -- the chain tail (result_2). The antecedent
+      // (result_1) rides the muted "derived from" line, not a second card.
+      expect(screen.getByRole("button", { name: /result_2 的预览/ })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /result_1 的预览/ })).not.toBeInTheDocument();
+    });
+
+    it("clicking the preview card selects its result (dual-view seam)", () => {
+      const onSelectResult = vi.fn();
+      renderThread(
+        <Thread
+          entries={[turnEntry(materializedRecord("result_2", null))]}
+          selectedResult={null}
+          onSelectResult={onSelectResult}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: /result_2 的预览/ }));
+      expect(onSelectResult).toHaveBeenCalledWith("result_2");
+    });
+
+    it("marks the preview card of the viewed result active (dual-view linkage)", () => {
+      renderThread(
+        <Thread
+          entries={[turnEntry(materializedRecord("result_1", null))]}
+          selectedResult="result_1"
+          onSelectResult={() => {}}
+        />,
+      );
+      expect(screen.getByRole("button", { name: /result_1 的预览/ })).toHaveAttribute(
+        "aria-current",
+        "true",
+      );
+    });
+
+    it("renders an empty-state footer when the result has no rows", () => {
+      const record: TurnRecord = {
+        question: "空结果",
+        outcome: {
+          kind: "Materialized",
+          data: {
+            promotions: [
+              {
+                dataset: { ...mockDataset, reference_name: "result_1", row_count: 0, sample: [] },
+                sql: "SELECT 1 WHERE false",
+              },
+            ],
+            viz: null,
+            assumption: null,
+          },
+        },
+        trace: [],
+      };
+      renderThread(
+        <Thread entries={[turnEntry(record)]} selectedResult={null} onSelectResult={() => {}} />,
+      );
+      const card = screen.getByRole("button", { name: /result_1 的预览/ });
+      expect(within(card as HTMLElement).getByText("无数据行")).toBeInTheDocument();
+      // No header / cell grid for a rowless result.
+      expect(within(card as HTMLElement).queryByText("id")).not.toBeInTheDocument();
+    });
+
+    it("renders no preview card for non-materialized outcomes", () => {
+      renderThread(
+        <Thread
+          entries={[
+            turnEntry({
+              question: "纯文本回答",
+              outcome: {
+                kind: "Textual",
+                data: { text_kind: "Agent", body: "答案正文", assumption: null },
+              },
+              trace: [],
+            }),
+          ]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+        />,
+      );
+      expect(screen.queryByRole("button", { name: /的预览/ })).not.toBeInTheDocument();
+    });
+
+    it("ghosts the preview card on a stale turn", () => {
+      const staleByReference = new Map([
+        [
+          "result_1",
+          { reference_name: "people", display_name: "员工表", reason: "Replaced" as const },
+        ],
+      ]);
+      const { container } = renderThread(
+        <Thread
+          entries={[turnEntry(materializedRecord("result_1", null))]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+          staleByReference={staleByReference}
+        />,
+      );
+      const card = container.querySelector(".result-preview");
+      expect(card?.classList.contains("stale")).toBe(true);
     });
   });
 });

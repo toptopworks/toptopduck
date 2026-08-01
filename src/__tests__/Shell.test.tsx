@@ -1220,6 +1220,97 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     expect(shell?.classList.contains("rail-collapsed")).toBe(true);
   });
 
+  it("starts a session with the workspace collapsed (ADR-0083 cold start, issue #298)", async () => {
+    // The workspace panel defaults to COLLAPSED -- a fresh session (and every
+    // pane mount: new / resume / app start) begins folded; the header toggle
+    // is the manual open path.
+    render(<App />);
+    await openSession();
+    const pane = document.querySelector(".session-pane");
+    expect(pane?.classList.contains("workspace-collapsed")).toBe(true);
+    expect(screen.getByRole("button", { name: "展开工作区" })).toBeInTheDocument();
+  });
+
+  it("opens / closes the workspace via the header toggle (manual fold)", async () => {
+    render(<App />);
+    await openSession();
+    fireEvent.click(screen.getByRole("button", { name: "展开工作区" }));
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false);
+    // The toggle flips to its close label once open.
+    fireEvent.click(screen.getByRole("button", { name: "收起工作区" }));
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+  });
+
+  it("the first Materialized promotion auto-expands the workspace ONCE (ADR-0083)", async () => {
+    vi.mocked(askQuestion)
+      .mockResolvedValueOnce({
+        kind: "Materialized",
+        data: {
+          promotions: [{ dataset: { ...src("result_1"), row_count: 1 }, sql: "SELECT 1" }],
+          viz: null,
+          assumption: null,
+        },
+      })
+      .mockResolvedValueOnce({
+        kind: "Materialized",
+        data: {
+          promotions: [{ dataset: { ...src("result_2"), row_count: 1 }, sql: "SELECT 2" }],
+          viz: null,
+          assumption: null,
+        },
+      });
+    render(<App />);
+    await openSession();
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    // First promotion -> the panel opens with the produced dataset.
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "第一问" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false),
+    );
+    // The user folds it back; the one-shot is spent.
+    fireEvent.click(screen.getByRole("button", { name: "收起工作区" }));
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    // A SECOND promotion must not steal focus -- the fold stays.
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "第二问" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /结果：result_2/ })).toBeInTheDocument(),
+    );
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+  });
+
+  it("a rail preview-card click opens the workspace on the same dataset (dual view, issue #298)", async () => {
+    // The rail preview card and the workspace panel are dual views of the
+    // same dataset: clicking the card selects its result AND unfolds the
+    // workspace onto it (cold start is collapsed).
+    state.thread = [materializedTurn("result_1")];
+    render(<App />);
+    await openSession();
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    fireEvent.click(await screen.findByRole("button", { name: /result_1 的预览/ }));
+    // The fold opens and the workspace shows result_1's table (the viewed
+    // selection landed -- the card reads back as active).
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false);
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /结果：result_1/ })).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: /result_1 的预览/ })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+  });
+
+  it("a rail result-link click also unfolds the workspace (issue #298)", async () => {
+    state.thread = [materializedTurn("result_1")];
+    render(<App />);
+    await openSession();
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    fireEvent.click(await screen.findByRole("button", { name: /结果：result_1/ }));
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false);
+  });
+
   it("restores persisted collapse prefs from app-config on mount (ADR-0038/0054)", async () => {
     // A user who left both levels collapsed reopens to both collapsed -- the
     // prefs ride app-config (ADR-0038), restored once on the first resolve.

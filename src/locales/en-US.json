@@ -291,6 +291,9 @@
   "thread.outcome.materialized": "Result ready",
   "thread.outcome.refused": "Cannot fulfill",
   "thread.outcome.stale": "Result stale",
+  "thread.preview.aria": "Preview of {name} (first rows), open it in the workspace",
+  "thread.preview.empty": "No rows",
+  "thread.preview.footer": "First {shown} of {total} rows",
   "thread.resultLink": "Result: {name}",
   "thread.source.added": "Loaded \"{name}\"",
   "thread.source.deleted": "Deleted \"{name}\"",
@@ -336,5 +339,7 @@
   "window.close": "Close",
   "window.maximize": "Maximize",
   "window.minimize": "Minimize",
-  "window.restore": "Restore"
+  "window.restore": "Restore",
+  "workspace.collapse": "Close workspace",
+  "workspace.expand": "Open workspace"
 }

@@ -291,6 +291,9 @@
   "thread.outcome.materialized": "已出结果",
   "thread.outcome.refused": "无法处理",
   "thread.outcome.stale": "结果已失效",
+  "thread.preview.aria": "{name} 的预览（首行样本），在工作区中打开",
+  "thread.preview.empty": "无数据行",
+  "thread.preview.footer": "首 {shown} 行，共 {total} 行",
   "thread.resultLink": "结果：{name}",
   "thread.source.added": "加载了「{name}」",
   "thread.source.deleted": "删除了「{name}」",
@@ -336,5 +339,7 @@
   "window.close": "关闭",
   "window.maximize": "最大化",
   "window.minimize": "最小化",
-  "window.restore": "还原"
+  "window.restore": "还原",
+  "workspace.collapse": "收起工作区",
+  "workspace.expand": "展开工作区"
 }

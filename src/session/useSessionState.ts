@@ -18,6 +18,7 @@ import { sessionKeys } from "./queryKeys";
 import { useIngestFlow } from "./useIngestFlow";
 import { useTurnFlow, type LiveTurn } from "./useTurnFlow";
 import { useViewedResult } from "./useViewedResult";
+import { useWorkspaceCollapse } from "./useWorkspaceCollapse";
 import type { ApprovalEntry } from "./useApprovalEvents";
 import {
   deriveWorkspaceContent,
@@ -67,6 +68,9 @@ export interface UseSessionState {
   // Client UI state.
   viewedResult: ViewedResult | null;
   workspaceContent: WorkspaceContent;
+  /** ADR-0083 (issue #298): the workspace panel's fold. Cold-start collapsed;
+   *  the first result_N promotion auto-expands once, then it is manual. */
+  workspaceCollapsed: boolean;
   loading: boolean;
   /** The in-flight turn's latest progress event (ADR-0059): Thinking with the
    *  1-based step or the last tool-call event. null when no turn is running.
@@ -104,6 +108,8 @@ export interface UseSessionState {
     privacy: DatasetPrivacy,
   ) => void;
   handleSelectResult: (referenceName: string) => void;
+  /** The session header's workspace fold toggle (ADR-0083, issue #298). */
+  handleToggleWorkspace: () => void;
   clearError: () => void;
 }
 
@@ -154,6 +160,15 @@ export function useSessionState(
     clearForNewSource,
     suppressInit,
   } = useViewedResult(thread);
+  // Workspace fold (ADR-0083, issue #298): cold-start collapsed, the first
+  // promotion auto-expands once, then purely manual. Session-ephemeral plain
+  // state -- never persisted, reset on every pane mount (new / resume).
+  const {
+    workspaceCollapsed,
+    expandWorkspace,
+    toggleWorkspace,
+    notePromotion,
+  } = useWorkspaceCollapse();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<AppError | null>(null);
   const [pendingActiveDelete, setPendingActiveDelete] =
@@ -206,13 +221,25 @@ export function useSessionState(
   // distinct from the generic refreshServerState used by the ingest / dataset
   // mutations below. Driven through injected deps; this hook never reaches for
   // the raw queryClient / viewed setters for turn work.
+  // A settled Materialized turn moves viewedResult (the useViewedResult seam)
+  // AND spends the workspace's auto-expand one-shot (ADR-0083, issue #298):
+  // the session's first result_N opens the panel with the produced dataset,
+  // later promotions never steal focus. Composed here (not inside either
+  // hook) so each hook keeps owning exactly one state domain.
+  const markProducedWithExpand = useCallback(
+    (referenceName: string) => {
+      markProduced(referenceName);
+      notePromotion();
+    },
+    [markProduced, notePromotion],
+  );
   const { phase, liveTurn, handleAsk, handleCancel } = useTurnFlow(sessionId, {
     queryClient,
     intl,
     setLoading,
     setError,
     pollPersistError,
-    viewed: { markProduced, suppressInit },
+    viewed: { markProduced: markProducedWithExpand, suppressInit },
     approvals,
     onApprovalsSettled,
   });
@@ -347,6 +374,18 @@ export function useSessionState(
 
   const handleCancelActiveDelete = useCallback(() => setPendingActiveDelete(null), []);
 
+  // Rail result selection (preview card / result link, ADR-0083 issue #298):
+  // moves viewedResult (the pin rule lives in useViewedResult) AND opens the
+  // workspace when folded -- the rail and the panel are dual views of the same
+  // dataset, so a rail selection must surface its panel half.
+  const handleSelectResult = useCallback(
+    (referenceName: string) => {
+      selectResult(referenceName);
+      expandWorkspace();
+    },
+    [selectResult, expandWorkspace],
+  );
+
   const clearError = useCallback(() => setError(null), []);
 
   return {
@@ -356,6 +395,7 @@ export function useSessionState(
     staleByReference,
     viewedResult,
     workspaceContent,
+    workspaceCollapsed,
     loading,
     phase,
     liveTurn,
@@ -374,7 +414,8 @@ export function useSessionState(
     handleCancelActiveDelete,
     handleRename,
     handlePrivacyChange,
-    handleSelectResult: selectResult,
+    handleSelectResult,
+    handleToggleWorkspace: toggleWorkspace,
     clearError,
   };
 }
