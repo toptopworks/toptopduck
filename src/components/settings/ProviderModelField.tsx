@@ -12,7 +12,7 @@ import { Label } from "../ui/label";
 // model input OUT of ProviderEndpointFields so this atom owns the ADR-0070
 // preflight surface: a "Test connection" button that fires the test_profile IPC
 // (Rust reads the profile's stored key from the OS keychain + probes the
-// endpoint), classifies the result into ADR-0044's five states, and feeds the
+// endpoint), classifies the result into ADR-0044's six states, and feeds the
 // listed models to a dropdown when the probe succeeds. The model list is held
 // IN-MEMORY here only -- it never enters app-config (ADR-0038 stores
 // preferences, not probe snapshots); list failure or "not yet probed" falls back

@@ -686,6 +686,19 @@ mod tests {
     }
 
     #[test]
+    fn no_key_with_bad_scheme_is_key_rejected_before_invalid_endpoint() {
+        // AC: the key-existence check (-> KeyRejected) runs BEFORE the scheme
+        // gate (-> InvalidEndpoint) in probe -- a profile with no stored key
+        // AND a bad-scheme base_url is diagnosed "set a key", not "fix the
+        // protocol". Pins the ordering invariant the bad-scheme tests above
+        // (which all pass a key) do not exercise on their own; a future
+        // refactor flipping the order would otherwise silently reclassify
+        // this case with no test failure.
+        let outcome = run(Ok(None), Protocol::Anthropic, "file:///etc/passwd", "m");
+        assert_eq!(outcome, ProfileTestOutcome::KeyRejected);
+    }
+
+    #[test]
     fn list_models_does_not_forward_x_api_key_across_host_redirect() {
         // AC #244 (three-path uniform handling): the preflight's /models GET
         // path wires the same shared egress agent, so a 3xx redirect is NOT
