@@ -4,6 +4,9 @@
 // (SessionError tree + StoreCommandError), resume/turn progress side-channel
 // events, and persisted session sidebar metadata.
 
+import type { OperationKind } from "./approval";
+import type { TraceEntry } from "./thread";
+
 // --- Session-scoped command errors ---------------------------------------
 
 // Typed session-scoped command errors (issue #119). Mirrors the Rust
@@ -161,14 +164,29 @@ export interface ResumeProgress {
   event: ResumeEvent;
 }
 
-// One discrete turn-progress phase (ADR-0059). The ask call is blocking with
-// two main waits (LLM HTTP + SQL), neither with intrinsic continuous progress,
-// so the honest granularity is a discrete marker at each boundary (no fabricated
-// percentages, ADR-0017). `attempt` is 1-based and rises across blind retries.
-// Mirrors the Rust `TurnPhase` (serde externally-tagged, like ResumeEvent).
+// One discrete turn-progress event (ADR-0059, calibrated by ADR-0078,
+// issue #297). The ask call is blocking with no intrinsic continuous progress,
+// so the honest granularity is a discrete event at each boundary (no fabricated
+// percentages, ADR-0017). The original Thinking / Querying phase pair evolved
+// into the TOOL-CALL EVENT STREAM -- the trace is the stream's persisted form,
+// so the rail renders the in-flight turn's trace from the very events that
+// later land on TurnRecord.trace: Thinking brackets each provider round-trip
+// (`attempt` is the 1-based STEP, rising across round-trips), and the
+// ToolCallStarted / ToolCallCompleted pair wraps each dispatch (a gate-denied
+// call fires only the completion, success: false). Mirrors the Rust
+// `TurnPhase` (serde externally-tagged, like ResumeEvent); ToolCallCompleted
+// wraps a TraceEntry verbatim (a newtype variant serializes to the same flat
+// object), so the frontend appends the payload as its live trace entry.
 export type TurnPhase =
   | { Thinking: { attempt: number } }
-  | { Querying: { attempt: number } };
+  | {
+    ToolCallStarted: {
+      name: string;
+      operation_kind: OperationKind;
+      summary: string;
+    };
+  }
+  | { ToolCallCompleted: TraceEntry };
 
 // A `turn-progress` side-channel event addressed by sessionId (ADR-0059,
 // issue #76). Mirrors the Rust `TurnProgress`. The phase never enters the

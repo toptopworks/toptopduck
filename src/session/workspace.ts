@@ -42,9 +42,12 @@ export function lastTurnEntry(thread: ThreadEntry[]): TurnRecord | null {
  * Cancelled): everything except Materialized. Narrowing TurnRecord onto this
  * makes the "a Materialized never reaches the textual card" invariant a
  * type-level guarantee, so the card's switch can end in `default: never`
- * instead of a defensive `return null`. */
+ * instead of a defensive `return null`. The Omit-base keeps every other
+ * TurnRecord field (question + trace, issue #297) riding the narrowed type. */
 export type NonMaterializedOutcome = Exclude<TurnOutcome, { kind: "Materialized" }>;
-export type NonMaterializedTurn = { question: string; outcome: NonMaterializedOutcome };
+export type NonMaterializedTurn = Omit<TurnRecord, "outcome"> & {
+  outcome: NonMaterializedOutcome;
+};
 
 /** Is this turn's outcome a non-materialized kind (ADR-0028 B/C/D -- Textual /
  * Failed / Cancelled)? These occupy a thread slot but produce no result_N. A

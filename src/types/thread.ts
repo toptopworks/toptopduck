@@ -3,6 +3,7 @@
 // provider's textual / viz payloads, and the unified timeline entries (turns +
 // source lifecycle events, ADR-0040).
 
+import type { OperationKind } from "./approval";
 import type { DatasetDescriptor } from "./dataset";
 import type { SourceLifecycleEvent } from "./lifecycle";
 
@@ -85,12 +86,40 @@ export type TurnOutcome =
   | { kind: "Failed"; data: TurnFailure }
   | { kind: "Cancelled" };
 
+// The display form of one execution-trace entry (ADR-0078, issue #297): a
+// completed tool call as the rail's expanded trace + the in-flight
+// turn-progress stream render it. Mirrors the Rust TraceEntryView (flat
+// snake_case fields; operation_kind reuses the approval gateway's enum).
+// Field-for-field the persisted recipe form, so a live turn, its recorded
+// TurnRecord.trace, and its resumed reincarnation all render identically:
+// a successful call's result payload is dropped (the .duck carries none of
+// it, ADR-0036) while a failed call carries its bounded error / denial
+// message -- the cross-turn failure retrospection anchor.
+export interface TraceEntry {
+  // Tool name -- a built-in (explore / materialize / describe / sample) or an
+  // external MCP server's tool name.
+  name: string;
+  // Operation badge (ADR-0083) -- presentation only.
+  operation_kind: OperationKind;
+  // Short argument summary (the SQL or reference_name), NOT the full args.
+  summary: string;
+  // Whether the call succeeded. An approval denial records success: false
+  // with the denial message as the excerpt.
+  success: boolean;
+  // Bounded excerpt of a FAILED call's result; empty for a successful call.
+  result_excerpt: string;
+}
+
 // One conversation-thread entry (ADR-0028/0039): the verbatim user question
 // paired with its outcome. Every turn appends exactly one -- always visible.
 // Mirrors the Rust TurnRecord; nested under ThreadEntry.Turn.data (see below).
+// The trace is the turn's collapsible execution substructure (ADR-0078,
+// issue #297): the rail shows the question + outcome always and expands the
+// tool-call chain on demand. Empty for v1-era turns and zero-call turns.
 export interface TurnRecord {
   question: string;
   outcome: TurnOutcome;
+  trace: TraceEntry[];
 }
 
 // One entry of the unified conversation timeline (ADR-0040): a Turn (question +

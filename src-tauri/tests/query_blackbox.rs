@@ -21,9 +21,9 @@ use toptopduck_lib::provider::tool_calling::{
 };
 use toptopduck_lib::{
     ActiveResolution, ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState,
-    CancelToken, DatasetPrivacy, FakeProvider, LoadOutcome, ProviderError, ResumeEvent,
-    ResumeProgress, Session, SourceResolution, TextKind, ThreadEntry, TurnFailure, TurnOutcome,
-    TurnPhase, TurnProgress, TurnRecord,
+    CancelToken, DatasetPrivacy, FakeProvider, LoadOutcome, OperationKind, ProviderError,
+    ResumeEvent, ResumeProgress, Session, SourceResolution, TextKind, ThreadEntry, TraceEntryView,
+    TurnFailure, TurnOutcome, TurnPhase, TurnProgress, TurnRecord,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -1294,21 +1294,26 @@ fn a_real_long_duckdb_query_is_interruptible_via_cancel() {
     assert!(s.get("result_1").is_none()); // rolled back / never installed
 }
 
-// --- turn-progress phase production (ADR-0059, issue #76) ------------------
+// --- turn-progress event stream production (ADR-0059, issue #76; calibrated
+// by ADR-0078, issue #297) ---------------------------------------------------
 //
-// ask_with_phase surfaces the discrete Thinking / Querying wait boundaries so
-// the command layer can emit the side-channel `turn-progress` event. The phase
-// never enters the TurnOutcome contract; it is pure observer feedback. On the
-// multi-step agent loop the attempt number is the 1-based STEP (round-trip),
-// so a materialize turn reads Thinking{1} -> Querying{1} -> Thinking{2} (the
-// terminal-text round-trip). These tests pin the phase SEQUENCE the UI
-// renders from.
+// ask_with_phase surfaces the discrete turn-progress stream so the command
+// layer can emit the side-channel `turn-progress` event: Thinking before each
+// provider round-trip + the ToolCallStarted / ToolCallCompleted pair around
+// each dispatch (the retired Thinking / Querying phase pair evolved into this
+// tool-call event stream -- the trace is its persisted form). The events
+// never enter the TurnOutcome contract; they are pure observer feedback. On
+// the multi-step agent loop the Thinking attempt number is the 1-based STEP
+// (round-trip), so a materialize turn reads Thinking{1} -> Started ->
+// Completed -> Thinking{2} (the terminal-text round-trip). These tests pin
+// the event SEQUENCE the UI renders the live trace from.
 
 #[test]
-fn ask_with_phase_records_the_step_phases_on_a_result_turn() {
-    // ADR-0059/0081: a one-call result turn has three waits -- the first
-    // provider round-trip (Thinking{1}), the materialize dispatch
-    // (Querying{1}), and the terminal-text round-trip (Thinking{2}).
+fn ask_with_phase_records_the_tool_call_event_stream_on_a_result_turn() {
+    // ADR-0059/0078/0081: a one-call result turn emits the first provider
+    // round-trip (Thinking{1}), the materialize dispatch's started/completed
+    // pair, and the terminal-text round-trip (Thinking{2}). The completed
+    // payload mirrors the persisted trace shape (success excerpt emptied).
     let mut session = session_with(&[("建结果", "SELECT 1 AS n")]);
     let approval = ApprovalState::new();
     let sink = NullSink;
@@ -1322,17 +1327,29 @@ fn ask_with_phase_records_the_step_phases_on_a_result_turn() {
         phases,
         vec![
             TurnPhase::Thinking { attempt: 1 },
-            TurnPhase::Querying { attempt: 1 },
+            TurnPhase::ToolCallStarted {
+                name: "materialize".into(),
+                operation_kind: OperationKind::Write,
+                summary: "SELECT 1 AS n".into(),
+            },
+            TurnPhase::ToolCallCompleted(TraceEntryView {
+                name: "materialize".into(),
+                operation_kind: OperationKind::Write,
+                summary: "SELECT 1 AS n".into(),
+                success: true,
+                result_excerpt: String::new(),
+            }),
             TurnPhase::Thinking { attempt: 2 },
         ],
-        "a one-call result turn emits Thinking{{1}}, Querying{{1}}, Thinking{{2}}"
+        "a one-call result turn emits Thinking{{1}}, the materialize started/completed pair, Thinking{{2}}"
     );
 }
 
 #[test]
 fn ask_with_phase_records_only_thinking_on_a_textual_turn() {
-    // ADR-0059: a textual turn (terminal text, no tool calls) has only the
-    // provider wait -- no tool dispatch, so Querying never fires.
+    // ADR-0059/0078: a textual turn (terminal text, no tool calls) has only
+    // the provider wait -- no tool dispatch, so the tool-call event stream
+    // stays empty.
     let provider = FakeProvider::new().scripted_tool_turn("澄清", answer("哪个维度？"));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     let approval = ApprovalState::new();
@@ -1385,7 +1402,8 @@ fn turn_progress_events_for_one_turn_share_one_session_id() {
         matches!(outcome, TurnOutcome::Materialized { .. }),
         "got {outcome:?}"
     );
-    // A one-call result turn emits Thinking{1} + Querying{1} + Thinking{2}.
+    // A one-call result turn emits Thinking{1} + the materialize
+    // started/completed pair + Thinking{2} (ADR-0078 event stream).
     assert!(addressed.len() >= 2, "got {addressed:?}");
     assert!(
         addressed.iter().all(|p| p.session_id == SID),

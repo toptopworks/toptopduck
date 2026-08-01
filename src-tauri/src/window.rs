@@ -394,6 +394,9 @@ mod tests {
                 viz: None,
                 assumption: None,
             },
+            // The window assembler reads question + outcome only (ADR-0078
+            // summary-only far window), so test turns carry an empty trace.
+            trace: vec![],
         }
     }
 
@@ -526,6 +529,7 @@ mod tests {
                 viz: None,
                 assumption: None,
             },
+            trace: vec![],
         }];
         let payload = assemble("probe", &ws, &history);
         let find = |name: &str| {
@@ -667,6 +671,7 @@ mod tests {
                 body: "哪个维度？".into(),
                 assumption: None,
             },
+            trace: vec![],
         }
     }
 
@@ -679,6 +684,7 @@ mod tests {
             outcome: TurnOutcome::Failed(TurnFailure::Execute {
                 detail: "budget exhausted".into(),
             }),
+            trace: vec![],
         }
     }
 

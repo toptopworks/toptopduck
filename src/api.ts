@@ -254,10 +254,12 @@ export async function onResumeProgress(
   return listen<ResumeProgress>("resume-progress", (e) => cb(e.payload));
 }
 
-// Subscribe to turn-progress events (ADR-0059 discrete phase feedback, issue
-// #76). Each event carries the addressing sessionId + a Thinking/Querying
-// phase (with the 1-based attempt). The phase never enters the TurnOutcome
-// contract; it is observer feedback only.
+// Subscribe to turn-progress events (ADR-0059 discrete feedback, calibrated
+// to the tool-call event stream by ADR-0078, issue #297). Each event carries
+// the addressing sessionId + a TurnPhase event: Thinking (with the 1-based
+// step) or the ToolCallStarted / ToolCallCompleted pair around each dispatch.
+// The events never enter the TurnOutcome contract; they are observer
+// feedback only.
 export async function onTurnProgress(
   cb: (ev: TurnProgress) => void,
 ): Promise<UnlistenFn> {

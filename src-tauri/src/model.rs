@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::approval::OperationKind;
+
 /// One column's canonical schema (ADR-0032): the DuckDB physical type verbatim,
 /// under a single canonical name (no alias mixing). Nested STRUCT/LIST/MAP
 /// expansion arrives with JSON in slice 2; slice 1 (CSV) is flat types.
@@ -589,34 +591,89 @@ impl TurnOutcome {
 /// numbering; the others occupy a slot but consume no number. The question is
 /// the entry's label in the user's own words (ADR-0039: the step label is the
 /// verbatim question, never an LLM-generated title).
+///
+/// The [`trace`](Self::trace) is the turn's collapsible execution substructure
+/// (ADR-0078, issue #297): the display view of every tool call the turn made.
+/// The rail shows the question + outcome always and expands the trace on
+/// demand. This is the DISPLAY view -- bounded summaries + a failed-call
+/// excerpt only, the same shape the recipe persists ([`crate::persistence::
+/// recipe::RecipeTraceEntry`]); the full in-memory call payloads never cross
+/// IPC, and the far window still carries only the trace's summary (call
+/// count + failure summary), never the entries verbatim. The window assembler
+/// reads [`Self::question`] + [`Self::outcome`] alone, so the trace adds no
+/// LLM tokens. Empty for v1-era migrated turns and zero-call turns.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnRecord {
     pub question: String,
     pub outcome: TurnOutcome,
+    pub trace: Vec<TraceEntryView>,
 }
 
-/// One discrete progress phase of an in-flight turn (ADR-0059). The ask call is
-/// blocking (ADR-0009) with two main waits -- the LLM HTTP call and the SQL
-/// execution -- and neither has an intrinsic continuous progress, so the only
-/// honest granularity is a discrete phase marker at each boundary (ADR-0017
-/// honest, no fabricated percentages). The attempt number is the 1-based agent
-/// STEP (round-trip, ADR-0081), so a multi-step trajectory reads "step N"
-/// honestly. This rides the side-channel `turn-progress` event; it does NOT
-/// enter the [`TurnOutcome`] contract payload.
+/// The display form of one execution-trace entry (ADR-0078, issue #297): what
+/// the rail's expanded trace + the in-flight `turn-progress` tool-call events
+/// carry. Field-for-field the persisted [`crate::persistence::recipe::
+/// RecipeTraceEntry`] shape, so a live turn and its resumed reincarnation
+/// render identically: a successful call's result payload is dropped at
+/// capture (data-bearing; the `.duck` carries none of it, ADR-0036) while a
+/// failed call carries its bounded error / denial message -- the cross-turn
+/// failure retrospection anchor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceEntryView {
+    /// Tool name -- a built-in (`explore` / `materialize` / `describe` /
+    /// `sample`) or an external MCP server's tool name.
+    pub name: String,
+    /// Operation badge (ADR-0083 read/write/execute/network) -- presentation
+    /// only.
+    pub operation_kind: OperationKind,
+    /// Short argument summary (the SQL or reference_name), NOT the full args.
+    pub summary: String,
+    /// Whether the call succeeded. A tool-level error (incl. an approval
+    /// denial) routes back to the agent (ADR-0077); the trace records it.
+    pub success: bool,
+    /// Bounded excerpt of a FAILED call's result (error / denial message);
+    /// empty for a successful call.
+    pub result_excerpt: String,
+}
+
+/// One discrete progress event of an in-flight turn. ADR-0059 introduced the
+/// `turn-progress` side channel with `Thinking` / `Querying` phase markers;
+/// ADR-0078 (issue #297) calibrates it into a TOOL-CALL EVENT STREAM -- the
+/// trace is the stream's persisted form, so the rail renders the in-flight
+/// turn's trace progressively from the same events that later land on
+/// [`TurnRecord::trace`]. `Thinking` survives as the one wait that is not a
+/// tool call (the LLM round-trip); the retired `Querying` marker is superseded
+/// by the `ToolCallStarted` / `ToolCallCompleted` pair around each dispatch.
+/// The attempt number is the 1-based agent STEP (round-trip, ADR-0081), so a
+/// multi-step trajectory reads "step N" honestly. Rides the side-channel
+/// `turn-progress` event; does NOT enter the [`TurnOutcome`] contract payload.
 ///
 /// Externally-tagged on the wire (`{"Thinking":{"attempt":1}}`) to mirror the
 /// sibling [`crate::ResumeEvent`] resume-progress event shape.
+/// `ToolCallCompleted` wraps a [`TraceEntryView`] verbatim (a newtype variant
+/// serializes to the same flat object the struct fields would), so the
+/// frontend appends the payload as its live trace entry with zero mapping.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TurnPhase {
     /// About to call the provider (the LLM "thinking" wait). Fired once per
-    /// attempt, after the loop-top cancel pre-check, right before
-    /// `provider.generate`.
+    /// step, after the loop-top cancel pre-check, right before
+    /// `generate_tool_turn`.
     Thinking { attempt: u32 },
-    /// About to execute + materialize the SQL the provider returned (the query
-    /// wait). Fired only on the SQL branch, after the post-provider cancel
-    /// pre-check, right before `try_materialize`. A textual / failed / cancelled
-    /// turn never fires Querying.
-    Querying { attempt: u32 },
+    /// A tool call passed the approval gate (ADR-0080) and is about to
+    /// dispatch. Fired right before `tools::dispatch` -- AFTER the gate, so a
+    /// gated call surfaces as an `approval-request` event first and only
+    /// starts once allowed. The frontend renders the in-flight row (spinner);
+    /// `summary` matches the approval card's so the two merge into one row.
+    ToolCallStarted {
+        name: String,
+        operation_kind: OperationKind,
+        summary: String,
+    },
+    /// A tool call finished dispatch (or was denied at the gate): the trace
+    /// entry exactly as it lands on [`TurnRecord::trace`]. Fired once per
+    /// call, paired with its `ToolCallStarted` (a gate-denied call fires only
+    /// this, with `success: false`). The excerpt follows the persisted shape
+    /// -- empty on success, the bounded failure / denial message on failure.
+    ToolCallCompleted(TraceEntryView),
 }
 
 /// One `turn-progress` side-channel event (ADR-0059, issue #76). Wraps a

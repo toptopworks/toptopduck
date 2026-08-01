@@ -57,6 +57,12 @@ vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
   return {
     ...actual,
+    // The app-level approval channel (issue #297) mounts on App render;
+    // inert no-op listeners keep the real Tauri event listen (absent in
+    // jsdom) from rejecting unhandled.
+    onApprovalRequest: vi.fn(async () => () => {}),
+    onApprovalResolved: vi.fn(async () => () => {}),
+    respondToolApproval: vi.fn(async () => {}),
     closeSession: vi.fn(async () => {}),
     createSession: vi.fn(async () => "sess-1"),
     listWorkingSet: vi.fn(async () => []),

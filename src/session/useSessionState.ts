@@ -16,8 +16,9 @@ import { toAppError } from "../lib/error-presentation";
 import { loadErrorDisplay } from "../lib/loadErrorDisplay";
 import { sessionKeys } from "./queryKeys";
 import { useIngestFlow } from "./useIngestFlow";
-import { useTurnFlow } from "./useTurnFlow";
+import { useTurnFlow, type LiveTurn } from "./useTurnFlow";
 import { useViewedResult } from "./useViewedResult";
+import type { ApprovalEntry } from "./useApprovalEvents";
 import {
   deriveWorkspaceContent,
   type ViewedResult,
@@ -67,11 +68,17 @@ export interface UseSessionState {
   viewedResult: ViewedResult | null;
   workspaceContent: WorkspaceContent;
   loading: boolean;
-  /** The in-flight turn's discrete phase (ADR-0059): Thinking/Querying with a
-   *  1-based attempt. null when no turn is running. Client UI state only --
-   *  never enters TanStack Query / the thread cache (ADR-0051 single truth:
-   *  the thread holds completed TurnRecords; phase is a transient hint). */
+  /** The in-flight turn's latest progress event (ADR-0059): Thinking with the
+   *  1-based step or the last tool-call event. null when no turn is running.
+   *  Client UI state only -- never enters TanStack Query / the thread cache
+   *  (ADR-0051 single truth: the thread holds completed TurnRecords; phase is
+   *  a transient hint). Drives the QuestionBar's compact label. */
   phase: TurnPhase | null;
+  /** The in-flight turn's live trace (ADR-0078, issue #297): the rail renders
+   *  it as a progressive turn card (question + tool-call rows + approval
+   *  cards). null when no turn is running. Client UI state only; folds into
+   *  the optimistic TurnRecord.trace when the turn settles. */
+  liveTurn: LiveTurn | null;
   error: AppError | null;
   /** The most recent per-turn save failure as a typed SaveError (issue #120),
    *  rendered via the locale catalog in the session pane's persist-warning
@@ -104,6 +111,15 @@ export function useSessionState(
   sessionId: string,
   pendingIngestPath: string | null = null,
   onIngestConsumed: () => void = () => {},
+  /** This session's approval entries (the app-level useApprovalEvents slice,
+   *  ADR-0083 / issue #297): merged into the live trace by useTurnFlow so a
+   *  gated external call renders its in-flow card inside the turn. Undefined
+   *  (not a fresh []) by default so the hook's stable-empty fallback keeps
+   *  handleAsk's identity across renders. */
+  approvals?: ReadonlyArray<ApprovalEntry>,
+  /** Clears this session's approval entries once its turn settles (the
+   *  resolved cards fold into the optimistic thread record). */
+  onApprovalsSettled?: () => void,
 ): UseSessionState {
   const queryClient = useQueryClient();
   const intl = useIntl();
@@ -190,13 +206,15 @@ export function useSessionState(
   // distinct from the generic refreshServerState used by the ingest / dataset
   // mutations below. Driven through injected deps; this hook never reaches for
   // the raw queryClient / viewed setters for turn work.
-  const { phase, handleAsk, handleCancel } = useTurnFlow(sessionId, {
+  const { phase, liveTurn, handleAsk, handleCancel } = useTurnFlow(sessionId, {
     queryClient,
     intl,
     setLoading,
     setError,
     pollPersistError,
     viewed: { markProduced, suppressInit },
+    approvals,
+    onApprovalsSettled,
   });
 
   // Ingest orchestration (handleIngest + handleGuidedSubmit + handleGuidedCancel
@@ -340,6 +358,7 @@ export function useSessionState(
     workspaceContent,
     loading,
     phase,
+    liveTurn,
     error,
     persistError,
     guidance,

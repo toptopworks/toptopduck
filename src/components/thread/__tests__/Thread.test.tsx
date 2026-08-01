@@ -5,6 +5,7 @@ import { TooltipProvider } from "../../ui/tooltip";
 import type { ReactElement } from "react";
 import { catalogFor } from "../../../i18n";
 import { Thread } from "../Thread";
+import type { LiveTraceRow, LiveTurn } from "../../../session/useTurnFlow";
 import type { DatasetDescriptor } from "../../../types/dataset";
 import type { ThreadEntry, TurnRecord } from "../../../types/thread";
 
@@ -57,6 +58,7 @@ describe("Thread", () => {
           assumption,
         },
       },
+      trace: [],
     };
   }
 
@@ -84,6 +86,7 @@ describe("Thread", () => {
           assumption: null,
         },
       },
+      trace: [],
     };
     renderThread(
       <Thread entries={[turnEntry(record)]} selectedResult={null} onSelectResult={() => {}} />,
@@ -108,6 +111,7 @@ describe("Thread", () => {
           kind: "Textual",
           data: { text_kind: "Clarify", body: "按产品名还是客户名？", assumption: null },
         },
+        trace: [],
       },
       {
         question: "预测销量",
@@ -115,12 +119,14 @@ describe("Thread", () => {
           kind: "Textual",
           data: { text_kind: "Refuse", body: "预测不在 v1 能力范围内", assumption: null },
         },
+        trace: [],
       },
       {
         question: "坏查询",
         outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } },
+        trace: [],
       },
-      { question: "中途取消", outcome: { kind: "Cancelled" } },
+      { question: "中途取消", outcome: { kind: "Cancelled" }, trace: [] },
     ];
     renderThread(
       <Thread
@@ -165,6 +171,7 @@ describe("Thread", () => {
               kind: "Textual",
               data: { text_kind: "Agent", body: "共 128 位客户。", assumption: null },
             },
+            trace: [],
           }),
         ]}
         selectedResult={null}
@@ -353,9 +360,9 @@ describe("Thread", () => {
     // on the outcome icon, so the four are distinguishable without color sight.
     const records: TurnRecord[] = [
       materializedRecord("result_1", null),
-      { question: "q", outcome: { kind: "Textual", data: { text_kind: "Clarify", body: "b", assumption: null } } },
-      { question: "q", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "boom" } } } },
-      { question: "q", outcome: { kind: "Cancelled" } },
+      { question: "q", outcome: { kind: "Textual", data: { text_kind: "Clarify", body: "b", assumption: null } }, trace: [] },
+      { question: "q", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "boom" } } }, trace: [] },
+      { question: "q", outcome: { kind: "Cancelled" }, trace: [] },
     ];
     const { container } = renderThread(
       <Thread entries={records.map(turnEntry)} selectedResult={null} onSelectResult={() => {}} />,
@@ -376,8 +383,8 @@ describe("Thread", () => {
     // included a failure" context. v1 only weakens (CSS opacity on the card),
     // so the question + reason/marker stay in the DOM and are queryable.
     const records: TurnRecord[] = [
-      { question: "坏查询", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } } },
-      { question: "中途取消", outcome: { kind: "Cancelled" } },
+      { question: "坏查询", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } }, trace: [] },
+      { question: "中途取消", outcome: { kind: "Cancelled" }, trace: [] },
     ];
     const { container } = renderThread(
       <Thread entries={records.map(turnEntry)} selectedResult={null} onSelectResult={() => {}} />,
@@ -455,8 +462,8 @@ describe("Thread", () => {
       { reference_name: "orders", display_name: "订单表" },
     ];
     const records: TurnRecord[] = [
-      { question: "在订单表上统计总销售额", outcome: { kind: "Cancelled" } },
-      { question: "总共几行", outcome: { kind: "Cancelled" } },
+      { question: "在订单表上统计总销售额", outcome: { kind: "Cancelled" }, trace: [] },
+      { question: "总共几行", outcome: { kind: "Cancelled" }, trace: [] },
     ];
     const { container } = renderThread(
       <Thread
@@ -489,7 +496,7 @@ describe("Thread", () => {
     // recognize), never the matched token.
     const labels = [{ reference_name: "people", display_name: "员工表" }];
     const records: TurnRecord[] = [
-      { question: "在 people 上统计总销售额", outcome: { kind: "Cancelled" } },
+      { question: "在 people 上统计总销售额", outcome: { kind: "Cancelled" }, trace: [] },
     ];
     renderThread(
       <Thread
@@ -512,7 +519,7 @@ describe("Thread", () => {
       { reference_name: "orders", display_name: "订单表" },
     ];
     const records: TurnRecord[] = [
-      { question: "在订单表上统计", outcome: { kind: "Cancelled" } },
+      { question: "在订单表上统计", outcome: { kind: "Cancelled" }, trace: [] },
     ];
     renderThread(
       <Thread
@@ -567,9 +574,9 @@ describe("Thread", () => {
     // the [data-outcome] hue hooks retired from styles.css.
     const records: TurnRecord[] = [
       materializedRecord("result_1", null),
-      { question: "q", outcome: { kind: "Textual", data: { text_kind: "Clarify", body: "b", assumption: null } } },
-      { question: "q", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "boom" } } } },
-      { question: "q", outcome: { kind: "Cancelled" } },
+      { question: "q", outcome: { kind: "Textual", data: { text_kind: "Clarify", body: "b", assumption: null } }, trace: [] },
+      { question: "q", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "boom" } } }, trace: [] },
+      { question: "q", outcome: { kind: "Cancelled" }, trace: [] },
     ];
     const { container } = renderThread(
       <Thread entries={records.map(turnEntry)} selectedResult={null} onSelectResult={() => {}} />,
@@ -619,8 +626,8 @@ describe("Thread", () => {
     // ADR-0028 Why 2: recent intent stays visible even when it produced nothing.
     // The opacity-60 weak state now rides the card as a utility.
     const records: TurnRecord[] = [
-      { question: "坏查询", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } } },
-      { question: "中途取消", outcome: { kind: "Cancelled" } },
+      { question: "坏查询", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } }, trace: [] },
+      { question: "中途取消", outcome: { kind: "Cancelled" }, trace: [] },
     ];
     const { container } = renderThread(
       <Thread entries={records.map(turnEntry)} selectedResult={null} onSelectResult={() => {}} />,
@@ -737,5 +744,190 @@ describe("Thread", () => {
     const chip = container.querySelector(".stale-chip");
     expect(chip?.className.split(/\s+/)).toContain("disabled:opacity-[0.55]");
     expect(chip?.className.split(/\s+/)).toContain("disabled:cursor-not-allowed");
+  });
+
+  describe("collapsible execution trace (ADR-0078, issue #297)", () => {
+    // A failed explore + a successful materialize: the failure excerpt is the
+    // retrospection anchor the expanded trace exists for (ADR-0078); the
+    // success row carries no excerpt (persisted shape).
+    function tracedRecord(): TurnRecord {
+      return {
+        question: "多少行",
+        outcome: { kind: "Cancelled" },
+        trace: [
+          {
+            name: "explore",
+            operation_kind: "read",
+            summary: "SELECT count(*) FROM people",
+            success: false,
+            result_excerpt: "no such table",
+          },
+          {
+            name: "materialize",
+            operation_kind: "write",
+            summary: "SELECT 1",
+            success: true,
+            result_excerpt: "",
+          },
+        ],
+      };
+    }
+
+    it("defaults COLLAPSED: question + outcome always visible, trace rows hidden", () => {
+      renderThread(
+        <Thread
+          entries={[turnEntry(tracedRecord())]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+        />,
+      );
+      // The question + outcome stay visible (ADR-0039 handle, ADR-0028 always-
+      // visible); the trace toggle advertises the call count, rows hidden.
+      expect(screen.getByText("多少行")).toBeInTheDocument();
+      const toggle = screen.getByRole("button", { name: /轨迹 · 2 次调用/ });
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      expect(screen.queryByText("no such table")).not.toBeInTheDocument();
+      expect(screen.queryByText("SELECT count(*) FROM people")).not.toBeInTheDocument();
+    });
+
+    it("expands to the full tool-call chain on toggle (args, badge, failure excerpt)", () => {
+      renderThread(
+        <Thread
+          entries={[turnEntry(tracedRecord())]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: /轨迹 · 2 次调用/ }));
+      const toggle = screen.getByRole("button", { name: /轨迹 · 2 次调用/ });
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+      // Both calls render with their summaries + operation badges.
+      expect(screen.getByText("explore")).toBeInTheDocument();
+      expect(screen.getByText("materialize")).toBeInTheDocument();
+      expect(screen.getByText("SELECT count(*) FROM people")).toBeInTheDocument();
+      expect(screen.getByText("读")).toBeInTheDocument(); // read badge
+      expect(screen.getByText("写")).toBeInTheDocument(); // write badge
+      // The failure excerpt is the retrospection anchor; success carries none.
+      expect(screen.getByText("no such table")).toBeInTheDocument();
+    });
+
+    it("omits the toggle for a zero-call turn (no trace to expand)", () => {
+      renderThread(
+        <Thread
+          entries={[turnEntry({ question: "q", outcome: { kind: "Cancelled" }, trace: [] })]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+        />,
+      );
+      expect(screen.queryByRole("button", { name: /轨迹/ })).not.toBeInTheDocument();
+    });
+  });
+
+  describe("in-flight live turn card (ADR-0078/0083, issue #297)", () => {
+    function liveRow(over: Partial<LiveTraceRow> = {}): LiveTraceRow {
+      return {
+        key: "call-0",
+        name: "explore",
+        server: null,
+        operationKind: "read",
+        summary: "SELECT 1",
+        approval: null,
+        running: true,
+        success: null,
+        resultExcerpt: "",
+        ...over,
+      };
+    }
+
+    it("renders the asking question with a running glyph + thinking hint", () => {
+      const liveTurn: LiveTurn = { question: "统计一下", step: 1, rows: [] };
+      renderThread(
+        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
+      );
+      expect(screen.getByText("统计一下")).toBeInTheDocument();
+      expect(screen.getByText("思考中…")).toBeInTheDocument();
+    });
+
+    it("surfaces the step on a multi-round-trip turn (honest step N)", () => {
+      const liveTurn: LiveTurn = { question: "q", step: 2, rows: [] };
+      renderThread(
+        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
+      );
+      expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
+    });
+
+    it("renders a pending approval card whose three buttons answer by request id", () => {
+      const liveTurn: LiveTurn = {
+        question: "q",
+        step: 1,
+        rows: [
+          liveRow({
+            key: "req-1",
+            name: "fetch",
+            server: "acme",
+            operationKind: "network",
+            summary: "GET /x",
+            approval: { requestId: "req-1", response: null },
+            running: false,
+          }),
+        ],
+      };
+      const onRespondApproval = vi.fn();
+      renderThread(
+        <Thread
+          entries={[]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+          liveTurn={liveTurn}
+          onRespondApproval={onRespondApproval}
+        />,
+      );
+      expect(screen.getByText("等待审批")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "允许一次" }));
+      expect(onRespondApproval).toHaveBeenCalledWith("req-1", "allow_once");
+      fireEvent.click(screen.getByRole("button", { name: "始终允许" }));
+      expect(onRespondApproval).toHaveBeenCalledWith("req-1", "always_allow");
+      fireEvent.click(screen.getByRole("button", { name: "拒绝" }));
+      expect(onRespondApproval).toHaveBeenCalledWith("req-1", "deny");
+    });
+
+    it("flips an answered approval to its resolved badge in place", () => {
+      const liveTurn: LiveTurn = {
+        question: "q",
+        step: 1,
+        rows: [
+          liveRow({
+            key: "req-1",
+            name: "fetch",
+            server: "acme",
+            operationKind: "network",
+            summary: "GET /x",
+            approval: { requestId: "req-1", response: "deny" },
+            running: false,
+            success: false,
+            resultExcerpt: "denied by approval gateway",
+          }),
+        ],
+      };
+      renderThread(
+        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
+      );
+      // Resolved in place: the badge names the answer, the denial excerpt
+      // rides the row -- no buttons remain.
+      expect(screen.getByText("已拒绝")).toBeInTheDocument();
+      expect(screen.getByText("denied by approval gateway")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "允许一次" })).not.toBeInTheDocument();
+    });
+
+    it("appends after recorded entries and renders alone on a first-turn session", () => {
+      const liveTurn: LiveTurn = { question: "第一问", step: null, rows: [] };
+      // entries empty (a brand-new session's first ask): the live card still
+      // renders (the empty-thread bail-out must not swallow it).
+      const { container } = renderThread(
+        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
+      );
+      expect(screen.getByText("第一问")).toBeInTheDocument();
+      expect(container.querySelector(".live-turn-card")).not.toBeNull();
+    });
   });
 });

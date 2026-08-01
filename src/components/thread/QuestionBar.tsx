@@ -9,11 +9,13 @@ interface QuestionBarProps {
   /** Fire while a turn is in flight (ADR-0021 cancel). Hidden when not loading. */
   onCancel: () => void;
   loading: boolean;
-  /** The in-flight turn's discrete phase (ADR-0059): when non-null and loading,
-   *  the bar shows "Thinking (attempt N) / Querying" so the user sees the turn
-   *  moving through its LLM + SQL waits instead of a blank spinner. null/absent
-   *  when no turn is running (the listener clears it on outcome, incl. Cancelled).
-   *  Optional so call sites / tests that don't exercise phase feedback omit it. */
+  /** The in-flight turn's latest progress event (ADR-0059, calibrated by
+   *  ADR-0078): when non-null and loading, the bar shows a compact wait label
+   *  ("Thinking (attempt N)" / "Running") so the user sees the turn moving
+   *  instead of a blank spinner -- the per-call detail rides the rail's live
+   *  trace card (issue #297), not the bar. null/absent when no turn is running
+   *  (the listener clears it on outcome, incl. Cancelled). Optional so call
+   *  sites / tests that don't exercise phase feedback omit it. */
   phase?: TurnPhase | null;
 }
 
@@ -21,11 +23,12 @@ interface QuestionBarProps {
 // submit is ignored client-side; the orchestrator runs one turn at a time
 // (ADR-0021 single in-flight). While a turn runs the input is disabled and a
 // stop button replaces the submit so the user can cancel the in-flight query.
-// The discrete phase feedback (ADR-0059) renders alongside the stop button --
-// "Thinking (attempt N) / Querying" reflects the two honest boundaries (LLM
-// HTTP + SQL), not a fabricated percentage. The whole bar's chrome (placeholder,
-// aria-label, button labels, phase feedback) ships through the react-intl
-// catalog (ADR-0052); see the questionBar.* keys.
+// The discrete phase feedback (ADR-0059, calibrated to the tool-call event
+// stream by ADR-0078) renders alongside the stop button -- "Thinking
+// (attempt N)" for the LLM wait, "Running" while tool calls dispatch -- an
+// honest discrete label, not a fabricated percentage. The whole bar's chrome
+// (placeholder, aria-label, button labels, phase feedback) ships through the
+// react-intl catalog (ADR-0052); see the questionBar.* keys.
 export function QuestionBar({ onSubmit, onCancel, loading, phase = null }: QuestionBarProps) {
   const intl = useIntl();
   const [value, setValue] = useState("");
@@ -93,11 +96,14 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null }: Quest
   );
 }
 
-// Discrete phase label (ADR-0059 + 0017 honesty): Thinking / Querying with the
-// 1-based attempt shown ONLY on a blind retry (> 1). The first attempt renders
-// the bare verb; an "attempt 1" suffix would be noise that implies a retry
-// count. i18n'd via react-intl (ADR-0052); each formatMessage id is a static
-// literal at the call site so @formatjs/cli extract resolves them.
+// Discrete phase label (ADR-0059 + 0017 honesty, calibrated by ADR-0078,
+// issue #297): Thinking with the 1-based STEP shown only past the first
+// round-trip (> 1 -- the bare verb reads cleaner than an "attempt 1" suffix
+// that implies a retry count), and a bare "Running…" for the tool-call
+// events (the rail's live trace card shows the per-call detail; the bar's
+// label only signals which wait the turn is in). i18n'd via react-intl
+// (ADR-0052); each formatMessage id is a static literal at the call site so
+// @formatjs/cli extract resolves them.
 function phaseLabel(phase: TurnPhase, intl: IntlShape): string {
   if ("Thinking" in phase) {
     const { attempt } = phase.Thinking;
@@ -108,11 +114,7 @@ function phaseLabel(phase: TurnPhase, intl: IntlShape): string {
         )
       : intl.formatMessage({ id: "questionBar.phase.thinking", defaultMessage: "Thinking…" });
   }
-  const { attempt } = phase.Querying;
-  return attempt > 1
-    ? intl.formatMessage(
-        { id: "questionBar.phase.queryingRetry", defaultMessage: "Querying (attempt {attempt})…" },
-        { attempt },
-      )
-    : intl.formatMessage({ id: "questionBar.phase.querying", defaultMessage: "Querying…" });
+  // ToolCallStarted / ToolCallCompleted: the rail renders the call rows; the
+  // bar's compact label just names the running wait.
+  return intl.formatMessage({ id: "questionBar.phase.running", defaultMessage: "Running…" });
 }

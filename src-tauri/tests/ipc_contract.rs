@@ -425,16 +425,40 @@ fn turn_outcome_cancelled_is_a_unit_variant_with_no_data() {
 
 #[test]
 fn turn_record_pairs_question_and_outcome() {
-    // A thread entry (ADR-0028/0039): a flat { question, outcome } object where
-    // outcome keeps its own adjacent tag. This is the Turn shape a ThreadEntry
-    // wraps (see thread_entry_* below for the conversation() wire shape).
+    // A thread entry (ADR-0028/0039): a flat { question, outcome, trace }
+    // object where outcome keeps its own adjacent tag. This is the Turn shape
+    // a ThreadEntry wraps (see thread_entry_* below for the conversation()
+    // wire shape). The trace is the collapsible execution substructure
+    // (ADR-0078, issue #297) -- empty here; trace_entry_view_* pins the
+    // entry shape.
     use toptopduck_lib::{TurnFailure, TurnOutcome, TurnRecord};
     assert_wire(
         &TurnRecord {
             question: "总行数？".into(),
             outcome: TurnOutcome::Failed(TurnFailure::NotWired),
+            trace: vec![],
         },
-        r#"{"question":"总行数？","outcome":{"kind":"Failed","data":{"kind":"NotWired"}}}"#,
+        r#"{"question":"总行数？","outcome":{"kind":"Failed","data":{"kind":"NotWired"}},"trace":[]}"#,
+    );
+}
+
+#[test]
+fn trace_entry_view_is_a_flat_snake_case_object() {
+    // ADR-0078 (issue #297): the display trace entry -- flat snake_case fields
+    // like every other wire struct, operation_kind reusing the approval
+    // gateway's snake_case enum (read / write / execute / network). The same
+    // shape rides TurnRecord.trace AND the ToolCallCompleted progress event,
+    // so pin it once here.
+    use toptopduck_lib::{OperationKind, TraceEntryView};
+    assert_wire(
+        &TraceEntryView {
+            name: "explore".into(),
+            operation_kind: OperationKind::Read,
+            summary: "SELECT count(*) FROM orders".into(),
+            success: false,
+            result_excerpt: "no such table".into(),
+        },
+        r#"{"name":"explore","operation_kind":"read","summary":"SELECT count(*) FROM orders","success":false,"result_excerpt":"no such table"}"#,
     );
 }
 
@@ -512,8 +536,9 @@ fn thread_entry_turn_wraps_a_turn_record_under_data() {
             outcome: TurnOutcome::Failed(TurnFailure::StaleReference {
                 reference_name: "result_1".into(),
             }),
+            trace: vec![],
         }),
-        r#"{"entry":"Turn","data":{"question":"总行数？","outcome":{"kind":"Failed","data":{"kind":"StaleReference","data":{"reference_name":"result_1"}}}}}"#,
+        r#"{"entry":"Turn","data":{"question":"总行数？","outcome":{"kind":"Failed","data":{"kind":"StaleReference","data":{"reference_name":"result_1"}}},"trace":[]}}"#,
     );
 }
 
@@ -715,19 +740,37 @@ fn resume_error_serializes_adjacently_tagged() {
 // snake_case structs; the literals are the source of truth the frontend mirrors.
 
 #[test]
-fn turn_phase_serializes_externally_tagged_with_attempt() {
-    // ADR-0059 (issue #76): TurnPhase crosses IPC externally-tagged
-    // (`{"Thinking":{"attempt":1}}`), mirroring the sibling ResumeEvent shape.
-    // The frontend narrows on the variant discriminator; pin the tag + the
-    // 1-based attempt so a serde rename / tag-style change fails here.
-    use toptopduck_lib::TurnPhase;
+fn turn_phase_serializes_externally_tagged() {
+    // ADR-0059 (issue #76), calibrated by ADR-0078 (issue #297): TurnPhase
+    // crosses IPC externally-tagged (`{"Thinking":{"attempt":1}}`), mirroring
+    // the sibling ResumeEvent shape. The Thinking/Querying phase pair evolved
+    // into the tool-call event stream -- Thinking survives (the LLM wait),
+    // ToolCallStarted / ToolCallCompleted replace Querying, and the completed
+    // payload wraps the TraceEntryView verbatim. The frontend narrows on the
+    // variant discriminator; pin every tag so a serde rename / tag-style
+    // change fails here.
+    use toptopduck_lib::{OperationKind, TraceEntryView, TurnPhase};
     assert_wire(
         &TurnPhase::Thinking { attempt: 1 },
         r#"{"Thinking":{"attempt":1}}"#,
     );
     assert_wire(
-        &TurnPhase::Querying { attempt: 2 },
-        r#"{"Querying":{"attempt":2}}"#,
+        &TurnPhase::ToolCallStarted {
+            name: "materialize".into(),
+            operation_kind: OperationKind::Write,
+            summary: "SELECT 1".into(),
+        },
+        r#"{"ToolCallStarted":{"name":"materialize","operation_kind":"write","summary":"SELECT 1"}}"#,
+    );
+    assert_wire(
+        &TurnPhase::ToolCallCompleted(TraceEntryView {
+            name: "materialize".into(),
+            operation_kind: OperationKind::Write,
+            summary: "SELECT 1".into(),
+            success: true,
+            result_excerpt: String::new(),
+        }),
+        r#"{"ToolCallCompleted":{"name":"materialize","operation_kind":"write","summary":"SELECT 1","success":true,"result_excerpt":""}}"#,
     );
 }
 

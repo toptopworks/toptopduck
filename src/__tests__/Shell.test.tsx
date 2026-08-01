@@ -37,9 +37,9 @@ const state = vi.hoisted(() => ({
 }));
 
 // ADR-0059 turn-progress capture: the SessionPane mounts a long-lived listener
-// on mount. Capturing the callback here lets a test emit a Thinking/Querying
-// phase event and assert the QuestionBar renders the discrete feedback, then
-// assert it clears when the ask resolves.
+// on mount. Capturing the callback here lets a test emit a turn-progress event
+// (Thinking / the tool-call stream, ADR-0078) and assert the QuestionBar
+// renders the discrete feedback, then assert it clears when the ask resolves.
 const turnProgressCb = vi.hoisted(() => ({
   current: null as null | ((ev: TurnProgress) => void),
 }));
@@ -81,6 +81,12 @@ vi.mock("../api", async (importOriginal) => {
       resumeProgressCb.current = cb;
       return () => {};
     }),
+    // The app-level approval channel (issue #297) mounts on App render; no
+    // Shell.test scenario drives approvals, so inert no-op listeners keep the
+    // real @tauri-apps/api/event listen (absent in jsdom) from firing.
+    onApprovalRequest: vi.fn(async () => () => {}),
+    onApprovalResolved: vi.fn(async () => () => {}),
+    respondToolApproval: vi.fn(async () => {}),
     readRows: vi.fn(),
     getProviderConfig: vi.fn(async () => ({
       base_url: "https://api.anthropic.com",
@@ -159,6 +165,7 @@ function materializedTurn(referenceName: string): ThreadEntry {
           assumption: null,
         },
       },
+      trace: [],
     },
   };
 }
@@ -310,6 +317,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
             kind: "Textual",
             data: { text_kind: "Clarify", body: "请说明哪个名字", assumption: null },
           },
+          trace: [],
         },
       },
     ];
@@ -341,6 +349,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
             kind: "Failed",
             data: { kind: "Execute", data: { detail: "no_such_col" } },
           },
+          trace: [],
         },
       },
     ];
@@ -379,6 +388,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
             kind: "Textual",
             data: { text_kind: "Clarify", body: "请说明哪个名字", assumption: null },
           },
+          trace: [],
         },
       },
     ];
@@ -524,7 +534,7 @@ describe("App turn-progress phase feedback (issue #82 / ADR-0059)", () => {
     vi.stubGlobal("navigator", { language: "zh-CN" });
   });
 
-  it("renders Thinking / Querying phase labels during an in-flight ask", async () => {
+  it("renders Thinking / tool-call phase labels during an in-flight ask", async () => {
     const { resolve } = pendingAsk();
     render(<App />);
     await openSession();
@@ -534,27 +544,36 @@ describe("App turn-progress phase feedback (issue #82 / ADR-0059)", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "停止" })).toBeInTheDocument(),
     );
+    // Phase-label assertions scope to the QuestionBar: the rail's live turn
+    // card (issue #297) shows its own 思考中 hint from ask start, so a global
+    // text query would match two surfaces.
+    const bar = () => document.querySelector(".question-bar") as HTMLElement;
 
     // Thinking{attempt: 1} -> bare verb "思考中…" (no "第 1 次" noise).
     turnProgressCb.current!({
       session_id: "sess-1",
       phase: { Thinking: { attempt: 1 } },
     });
-    await waitFor(() => expect(screen.getByText("思考中…")).toBeInTheDocument());
+    await waitFor(() => expect(within(bar()).getByText("思考中…")).toBeInTheDocument());
 
-    // Querying{attempt: 2} -> blind retry surfaces "第 2 次" (守 0017 honest).
+    // A tool-call event (ADR-0078 stream) -> the bar's compact "执行中…"; the
+    // per-call detail rides the rail's live trace card, not the bar.
     turnProgressCb.current!({
       session_id: "sess-1",
-      phase: { Querying: { attempt: 2 } },
+      phase: {
+        ToolCallStarted: {
+          name: "materialize",
+          operation_kind: "write",
+          summary: "SELECT 1",
+        },
+      },
     });
-    await waitFor(() =>
-      expect(screen.getByText("查询中（第 2 次）…")).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(within(bar()).getByText("执行中…")).toBeInTheDocument());
 
     // Outcome lands -> phase clears (ADR-0059 handleAsk finally).
     resolve({ kind: "Cancelled" });
     await waitFor(() =>
-      expect(screen.queryByText(/查询中/)).not.toBeInTheDocument(),
+      expect(within(bar()).queryByText(/执行中/)).not.toBeInTheDocument(),
     );
   });
 
@@ -567,18 +586,23 @@ describe("App turn-progress phase feedback (issue #82 / ADR-0059)", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "停止" })).toBeInTheDocument(),
     );
-    // A phase for a DIFFERENT session is filtered out -- no indicator.
+    const bar = () => document.querySelector(".question-bar") as HTMLElement;
+    // A phase for a DIFFERENT session is filtered out -- the bar carries no
+    // indicator (the rail's live card shows its own ask-start 思考中 hint, so
+    // the filter contract is asserted on the bar surface).
     turnProgressCb.current!({
       session_id: "other-session",
       phase: { Thinking: { attempt: 1 } },
     });
-    expect(screen.queryByText(/思考中/)).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(bar()).queryByText(/思考中/)).not.toBeInTheDocument(),
+    );
     // The same phase for THIS session lights up.
     turnProgressCb.current!({
       session_id: "sess-1",
       phase: { Thinking: { attempt: 1 } },
     });
-    await waitFor(() => expect(screen.getByText("思考中…")).toBeInTheDocument());
+    await waitFor(() => expect(within(bar()).getByText("思考中…")).toBeInTheDocument());
     resolve({ kind: "Cancelled" });
   });
 });
@@ -685,7 +709,7 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
     );
     // Fix the data source, then retry.
     threadData = [
-      { entry: "Turn", data: { question: "你好", outcome: { kind: "Cancelled" } } },
+      { entry: "Turn", data: { question: "你好", outcome: { kind: "Cancelled" }, trace: [] } },
     ];
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
     // The remounted pane reads the refetched (clean) data -- the question
@@ -715,7 +739,7 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
     );
     // Fix the data, then retry.
     threadData = [
-      { entry: "Turn", data: { question: "你好", outcome: { kind: "Cancelled" } } },
+      { entry: "Turn", data: { question: "你好", outcome: { kind: "Cancelled" }, trace: [] } },
     ];
     const conversationCallsBefore = vi.mocked(conversation).mock.calls.length;
     removeSpy.mockClear(); // isolate retry's own removeQueries call
@@ -1340,7 +1364,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     state.thread = [
       {
         entry: "Turn",
-        data: { question: longQuestion, outcome: { kind: "Cancelled" } },
+        data: { question: longQuestion, outcome: { kind: "Cancelled" }, trace: [] },
       },
     ];
     render(<App />);

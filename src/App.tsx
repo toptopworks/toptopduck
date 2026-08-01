@@ -4,6 +4,7 @@ import { FormattedMessage, IntlProvider } from "react-intl";
 import { SessionPane } from "./session/SessionPane";
 import { SessionSearchDialog } from "./session/SessionSearchDialog";
 import { SessionSidebar } from "./session/SessionSidebar";
+import { useApprovalEvents } from "./session/useApprovalEvents";
 import { useShellError } from "./shell/useShellError";
 import { usePersistedSessions } from "./shell/usePersistedSessions";
 import { useShellSessions } from "./shell/useShellSessions";
@@ -190,6 +191,14 @@ export default function App() {
     handleOpenDuck,
   } = useShellSessions({ intl, queryClient, refreshSessions, setShellError });
 
+  // The tiered-approval side channel (ADR-0083, issue #297) is owned here at
+  // the shell root: ONE listener pair feeds the per-session entry map that
+  // BOTH the SessionPane of a suspended turn (in-flow approval cards) and the
+  // SessionSidebar (unanswered-entry coloring) read. The sidebar needs the
+  // cross-session view, so -- unlike the pane-local turn-progress listener
+  // (ADR-0059) -- this channel cannot live inside a pane.
+  const approvalEvents = useApprovalEvents();
+
   // ADR-0060 soft cap: a non-blocking badge in the top bar (not the sidebar)
   // signals memory pressure once the open keep-alive set reaches the cap; it
   // never forces a close.
@@ -329,10 +338,17 @@ export default function App() {
                   disabled={busy}
                   loadError={sessionsError}
                   grouping={sidebarGrouping}
+                  pendingApprovalSids={approvalEvents.pendingApprovalSids}
                   onNew={() => void openNew()}
                   onActivate={activateSession}
                   onOpenPersisted={(path, name) => void openPersisted(path, name)}
-                  onClose={(sid) => void closeOpen(sid)}
+                  onClose={(sid) => {
+                    void closeOpen(sid);
+                    // A closed session's cards can never be answered (close
+                    // fires cancel, the gate resolves to deny); drop them so
+                    // the coloring + a later reopen start clean.
+                    approvalEvents.clearSession(sid);
+                  }}
                   onDelete={(path, sid) => void deletePersisted(path, sid)}
                   onRename={(sid, path, newName) => void renameEntry(sid, path, newName)}
                   onSwitchGrouping={switchSidebarGrouping}
@@ -457,6 +473,7 @@ export default function App() {
                           railCollapsed={railCollapsed}
                           onToggleRail={toggleRailCollapse}
                           sessionName={s.name}
+                          approvalEvents={approvalEvents}
                           providerPicker={
                           // ADR-0071 (issue #238): the composer provider/model
                           // picker is app-level state (active profile + writes +
