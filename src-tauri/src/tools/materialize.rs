@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(
             p1.promotion
                 .as_ref()
-                .expect("promotes")
+                .expect("materialize promotes")
                 .dataset
                 .reference_name,
             "result_1"
@@ -401,7 +401,7 @@ mod tests {
             &mut materializer,
         )
         .unwrap();
-        let promotion2 = p2.promotion.as_ref().expect("promotes");
+        let promotion2 = p2.promotion.as_ref().expect("materialize promotes");
         // The fallback descriptor rides the side-effect channel too: the
         // colliding label did not stick, so the promotion carries result_2.
         assert_eq!(promotion2.dataset.reference_name, "result_2");
@@ -447,7 +447,7 @@ mod tests {
             &mut materializer,
         )
         .unwrap();
-        let promotion = payload.promotion.as_ref().expect("promotes");
+        let promotion = payload.promotion.as_ref().expect("materialize promotes");
         assert_eq!(promotion.dataset.reference_name, "result_1");
         assert_eq!(promotion.dataset.display_name, "result_1");
         let v = &payload.content;

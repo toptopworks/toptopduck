@@ -403,10 +403,11 @@ fn execute_call(
     }
     let success = !result.is_error;
     // The executor reports a promotion through the side-effect channel iff one
-    // landed (only `materialize`, only on success -- the executor builds it
-    // from the typed sql + descriptor, so there is no "success but no
-    // promotion" contract violation to guard). The loop is tool-agnostic: it
-    // pushes `outcome.promotion` without naming any tool (issue #336).
+    // landed (today, only `materialize` produces one, and only on success --
+    // the executor builds it from the typed sql + descriptor, so there is no
+    // "success but no promotion" contract violation to guard). The loop is
+    // tool-agnostic: it pushes `outcome.promotion` without naming any tool
+    // (issue #336).
     if let Some(promotion) = outcome.promotion {
         outputs.promotions.push(promotion);
     }
@@ -1451,8 +1452,8 @@ mod tests {
 
     // --- pure helpers -------------------------------------------------------
 
-    /// Characterization pin for `classify_call` (issue #336): the four built-in
-    /// tools each classify to a known `(ToolKey, OperationKind, summary)` triple,
+    /// Characterization pin for `classify_call` (issue #336): the built-in tools
+    /// each classify to a known `(ToolKey, OperationKind, summary)` triple,
     /// and an unknown name falls through to the external arm. Pinned BEFORE the
     /// metadata-table refactor (Move 1) so the table lookup must reproduce these
     /// exactly -- a dropped arm or a swapped summary field fails here, not in a

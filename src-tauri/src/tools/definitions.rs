@@ -201,26 +201,26 @@ pub(crate) fn sample_definition() -> ToolDefinition {
 /// definitions + dispatch + `classify_call` + a side-effect special-case.
 ///
 /// The `Builtin` prefix is deliberate: this is the static, compile-time table
-/// for the four DuckDB tools. External (MCP) tool metadata is discovered at run
-/// time from its server and does not live in this struct.
+/// for the built-in DuckDB tools. External (MCP) tool metadata is discovered at
+/// run time from its server and does not live in this struct.
 pub(crate) struct BuiltinToolSpec {
     /// The schema advertised to the runtime (name + description + JSON Schema).
-    pub definition: ToolDefinition,
+    pub(crate) definition: ToolDefinition,
     /// The approval-gateway operation badge (ADR-0083): Read for the read-shaped
     /// tools, Write for the sole promoting tool.
-    pub operation_kind: OperationKind,
+    pub(crate) operation_kind: OperationKind,
     /// The input field rendered as the call summary (the SQL or reference name).
-    pub summary_field: &'static str,
+    pub(crate) summary_field: &'static str,
     /// Best-effort placeholder when `summary_field` is absent on a mis-shaped
     /// call (the executor will itself refuse it).
-    pub summary_fallback: &'static str,
+    pub(crate) summary_fallback: &'static str,
 }
 
-/// The single-point built-in tool table (issue #336): the four DuckDB tools the
-/// gateway advertises, each with its schema + classification in one entry. Held
-/// in a process-level [`OnceLock`] (MSRV 1.77 -- `LazyLock` needs 1.80) so the
-/// table is built once and read by both [`builtin_definitions`] (schema view)
-/// and [`builtin_metadata`] (classification view) without re-spelling the four.
+/// The single-point built-in tool table (issue #336): the built-in DuckDB tools
+/// the gateway advertises, each with its schema + classification in one entry.
+/// Held in a process-level [`OnceLock`] (MSRV 1.77 -- `LazyLock` needs 1.80) so
+/// the table is built once and read by both [`builtin_definitions`] (schema view)
+/// and [`builtin_metadata`] (classification view) without re-spelling them.
 ///
 /// User-configured MCP servers (#301) and skill-declared tools join the
 /// advertised surface at the gateway aggregation layer in a later slice; this
@@ -268,8 +268,8 @@ pub(crate) fn builtin_metadata(name: &str) -> Option<&'static BuiltinToolSpec> {
 }
 
 /// The full built-in tool table as advertised to the runtime (ADR-0076): the
-/// schema view derived from [`builtin_tools`]. Cloning the four small
-/// definitions per call matches the prior freshly-constructed-vec cost; callers
+/// schema view derived from [`builtin_tools`]. Cloning the small definitions per
+/// call matches the prior freshly-constructed-vec cost; callers
 /// (the per-turn/per-session tool table) take a fresh copy with no shared
 /// mutable state crossing sessions.
 pub(crate) fn builtin_definitions() -> Vec<ToolDefinition> {
@@ -358,11 +358,11 @@ mod tests {
             spec_names, def_names,
             "metadata table and schema view must advertise the same tool set"
         );
-        assert_eq!(
-            spec_names.len(),
-            4,
-            "exactly four built-in tools in the metadata table"
-        );
+        // No count pin here: the cross-table name-set equality above + the
+        // distinctness test (`builtin_tool_names_are_distinct`) already guard a
+        // dropped/added tool. Hardcoding the count would fight this table's own
+        // reason to exist (a future fifth tool should land as one entry, not
+        // trip a count assertion).
     }
 
     /// `builtin_metadata` resolves each advertised name to its spec, and `None`

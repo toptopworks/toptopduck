@@ -44,8 +44,8 @@ pub fn builtin_table() -> Vec<ToolDefinition> {
 }
 
 /// The executor→dispatch internal contract (issue #336): the JSON content that
-/// reaches the model, paired with an optional side effect. Only `materialize`
-/// fills `promotion` today (a typed `Promotion` built from the in-hand
+/// reaches the model, paired with an optional side effect. Today, only
+/// `materialize` fills `promotion` (a typed `Promotion` built from the in-hand
 /// `dataset` + `sql`); the read-shaped tools set `promotion: None`. The dispatch
 /// wrapper assembles this into a [`ToolOutcome`] for the orchestration layer.
 ///
@@ -79,8 +79,9 @@ pub(crate) struct ToolOutcome {
     /// The model-facing result (success payload or error string). Unchanged in
     /// shape from the pre-refactor `ToolResult`.
     pub result: ToolResult,
-    /// The side effect the executor reported (`Some` only on a successful
-    /// `materialize`). The agent loop pushes it to the turn's promotion list.
+    /// The side effect the executor reported (today, `Some` only on a
+    /// successful `materialize`). The agent loop pushes it to the turn's
+    /// promotion list.
     pub promotion: Option<Promotion>,
 }
 
