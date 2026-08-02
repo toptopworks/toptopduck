@@ -1,0 +1,251 @@
+//! Per-CLI adapter data definitions (ADR-0081, issue #299).
+//!
+//! ADR-0081 Decision: every external CLI is a **pure data definition** -- the
+//! engine ([`crate::runtime::acp::engine`]) has zero per-CLI code branches.
+//! Adding a CLI = adding one [`AdapterSpec`] constructor here. The v1 engine
+//! drives only claude-code end-to-end (this slice, 9a); gemini-cli + codex land
+//! in #300 against the SAME engine, so the AC "适配器引擎零 per-CLI 代码分支"
+//! is structural: the engine takes a `&AdapterSpec` and never names a CLI.
+//!
+//! An [`AdapterSpec`] carries:
+//! - identification: a stable [`AdapterId`] + display name (the composer runtime
+//!   picker + the per-turn provenance, ADR-0078, read these);
+//! - detection: the candidate binary names a PATH scan resolves (the composer
+//!   grays out an absent CLI, ADR-0083);
+//! - launch: the argv prefix that puts the CLI into its ACP stdio mode (the
+//!   engine appends nothing -- the prefix IS the full argv the CLI needs to
+//!   speak ACP on stdio; per-CLI session addressing rides the MCP bridge
+//!   descriptor, not the CLI argv).
+//!
+//! The argv prefix is the ONE CLI-specific fact the ACP-over-stdio engine
+//! consumes; it is data (a `&'static [&'static str]`), not a code path.
+
+use std::path::PathBuf;
+
+// ---------------------------------------------------------------------------
+// Adapter spec
+// ---------------------------------------------------------------------------
+
+/// A stable identifier for a CLI adapter (per-turn provenance + the composer
+/// picker's key). Distinct from the binary name (claude-code ships as both
+/// `claude` and `claude-code` across installers) and from the display name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AdapterId(&'static str);
+
+impl AdapterId {
+    /// Build a new adapter id. Private -- the only ids are the ones this module
+    /// mints below ([`claude_code`], etc.), so a typo cannot introduce a
+    /// third-party id.
+    const fn new(name: &'static str) -> Self {
+        Self(name)
+    }
+
+    /// The id as a static string (provenance + IPC carry it verbatim).
+    pub fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl std::fmt::Display for AdapterId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+/// A pure-data CLI adapter definition (ADR-0081). The engine consumes this and
+/// nothing else per CLI; all per-CLI variation lives in fields here.
+#[derive(Debug, Clone)]
+pub struct AdapterSpec {
+    /// Stable id (provenance + IPC key).
+    pub id: AdapterId,
+    /// Human-readable name for the composer runtime picker (ADR-0083).
+    pub display_name: &'static str,
+    /// Candidate binary names for the PATH scan, in priority order. The first
+    /// that resolves wins. Multiple names cover installer variation (npm vs the
+    /// native installer ship different binary names).
+    pub binary_names: &'static [&'static str],
+    /// The argv prefix that puts the CLI into ACP stdio mode. The engine spawns
+    /// `<resolved-binary> <argv-prefix...>` and speaks ACP v1 over stdio. The
+    /// prefix is the full ACP-mode invocation; the engine appends nothing.
+    pub argv: &'static [&'static str],
+}
+
+impl AdapterSpec {
+    /// The composer picker + provenance key for this adapter.
+    pub fn adapter_id(&self) -> AdapterId {
+        self.id
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The v1 adapter: claude-code
+// ---------------------------------------------------------------------------
+
+/// The claude-code adapter (ADR-0081 v1 validation set). claude-code is
+/// installed as `claude` (native installer) or `claude-code` (npm wrapper); the
+/// PATH scan tries both. The argv prefix `["--acp"]` puts the CLI into its ACP
+/// stdio mode (the engine then drives session/new + session/prompt).
+///
+/// NOTE: the `--acp` flag spelling is pinned by claude-code's own CLI; slice 9c
+/// (live E2E) verifies it against a real install. If claude-code renames the
+/// flag, ONLY this constant changes -- the engine is untouched (ADR-0081 zero
+/// per-CLI code).
+pub fn claude_code() -> AdapterSpec {
+    AdapterSpec {
+        id: AdapterId::new("claude-code"),
+        display_name: "claude-code",
+        binary_names: &["claude", "claude-code"],
+        argv: &["--acp"],
+    }
+}
+
+/// All v1 adapters, in the composer picker's display order (ADR-0083). Adding a
+/// CLI = adding one entry here + one constructor above. #300 appends
+/// gemini-cli + codex to this list.
+pub fn v1_adapters() -> &'static [AdapterSpec] {
+    // A pure-data static backing slice. MSRV 1.77 disallows LazyLock (ADR-0076
+    // note); a plain `static` of const-constructible data is the right shape.
+    &V1_ADAPTERS
+}
+
+// `AdapterId::new` is a `const fn`; the struct fields are all `&'static`, so the
+// const-eval initializer is valid at MSRV 1.77. The `claude_code()` fn is kept
+// as the ergonomic single-adapter constructor; `v1_adapters()` is the picker
+// source.
+static V1_ADAPTERS: [AdapterSpec; 1] = [AdapterSpec {
+    id: AdapterId::new("claude-code"),
+    display_name: "claude-code",
+    binary_names: &["claude", "claude-code"],
+    argv: &["--acp"],
+}];
+
+// ---------------------------------------------------------------------------
+// Detection (PATH scan)
+// ---------------------------------------------------------------------------
+
+/// Resolve an adapter's binary to an absolute [`PathBuf`] by scanning `PATH`.
+///
+/// Returns the first of [`AdapterSpec::binary_names`] that resolves on `PATH`
+/// (priority order), or `None` when no candidate is on `PATH`. The composer
+/// runtime picker grays out an absent CLI from this result (ADR-0083 "已检测到
+/// 的可选，未检测到的呈禁选项"); the engine (slice 9c) refuses to run a turn
+/// against an absent CLI with a typed `NotWired`-equivalent failure.
+///
+/// Detection is `which`-style: each candidate is checked as an executable on
+/// each `PATH` entry, with the platform's executable suffix appended on
+/// Windows. No caching -- detection is cheap and the picker re-scans on demand
+/// (the user may install a CLI between scans).
+pub fn detect_adapter(spec: &AdapterSpec) -> Option<PathBuf> {
+    for name in spec.binary_names {
+        if let Some(path) = which(name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// `which`-style PATH lookup for a single binary name. Returns the first
+/// `PATH` entry that holds the binary as an executable. Windows appends the
+/// standard executable suffixes (`.exe` first; `.bat` / `.cmd` cover npm
+/// shims) when the bare name has no extension. Pure std -- no `which` crate
+/// dependency, consistent with the codebase's minimal-deps stance.
+fn which(name: &str) -> Option<PathBuf> {
+    let path_env = std::env::var_os("PATH")?;
+    // On Windows, a name with no extension is matched against the standard
+    // executable suffixes; POSIX needs no suffix.
+    let candidates: Vec<String> = if cfg!(windows) && PathBuf::from(name).extension().is_none() {
+        [".exe", ".bat", ".cmd"]
+            .iter()
+            .map(|ext| format!("{name}{ext}"))
+            .collect()
+    } else {
+        vec![name.to_string()]
+    };
+    for dir in std::env::split_paths(&path_env) {
+        for candidate in &candidates {
+            let resolved = dir.join(candidate);
+            // is_file guards against PATH entries pointing at a non-file (a
+            // stale dir, a dangling symlink). Executability is enforced by the
+            // spawn itself (Command surfaces a clear error if the bit is
+            // missing); the scan only needs "the file exists on PATH".
+            if resolved.is_file() {
+                return Some(resolved);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The claude-code adapter carries both installer binary names + the ACP
+    /// argv prefix. The engine reads these as data, never naming the CLI.
+    #[test]
+    fn claude_code_spec_carries_both_binary_names_and_acp_flag() {
+        let spec = claude_code();
+        assert_eq!(spec.id.as_str(), "claude-code");
+        assert_eq!(spec.display_name, "claude-code");
+        assert_eq!(spec.binary_names, &["claude", "claude-code"]);
+        assert_eq!(spec.argv, &["--acp"]);
+    }
+
+    /// v1_adapters lists claude-code (the v1 validation set). #300 appends the
+    /// other two ACP CLIs here.
+    #[test]
+    fn v1_adapters_lists_claude_code_only() {
+        let adapters = v1_adapters();
+        assert_eq!(
+            adapters.len(),
+            1,
+            "v1 ships claude-code only (#300 adds more)"
+        );
+        assert_eq!(adapters[0].id.as_str(), "claude-code");
+    }
+
+    /// detect_adapter returns Option regardless of install state -- the
+    /// structural guarantee the engine + the composer picker rely on (no
+    /// panic on an absent CLI).
+    #[test]
+    fn detect_adapter_returns_option_regardless_of_install() {
+        let spec = claude_code();
+        // `claude` / `claude-code` are not on the CI runner's PATH. A dev box
+        // with claude-code installed may resolve to Some; the assertion pins
+        // the Option shape, not the absence, so the test is portable.
+        let _ = detect_adapter(&spec);
+    }
+
+    /// which finds a binary that IS on PATH (the test runner's own tooling).
+    /// Uses `cargo` (always present in a cargo test run) to exercise the
+    /// resolution path positively, not just the absent path.
+    #[test]
+    fn which_resolves_a_present_binary() {
+        // `cargo` is on PATH in any `cargo test` invocation. The bare name on
+        // Windows resolves via the `.exe` suffix branch; on POSIX directly.
+        let found = which("cargo");
+        assert!(
+            found.is_some(),
+            "cargo must resolve on PATH in a cargo test"
+        );
+        assert!(
+            found.unwrap().is_file(),
+            "the resolved path must be an existing file"
+        );
+    }
+
+    /// which returns None for a binary that is definitely not on PATH.
+    #[test]
+    fn which_returns_none_for_definitely_absent_binary() {
+        let found = which("definitely-not-a-real-binary-xyz-12345");
+        assert!(found.is_none(), "an absent binary resolves to None");
+    }
+
+    /// AdapterId round-trips through Display + as_str (provenance + IPC).
+    #[test]
+    fn adapter_id_displays_as_its_str() {
+        let id = AdapterId::new("claude-code");
+        assert_eq!(id.as_str(), "claude-code");
+        assert_eq!(id.to_string(), "claude-code");
+    }
+}

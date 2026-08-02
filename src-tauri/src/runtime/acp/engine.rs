@@ -1,0 +1,1011 @@
+//! The generic ACP adapter engine (ADR-0081, issue #299).
+//!
+//! [`AcpEngine::run`] drives one agent turn against an external CLI over ACP v1
+//! (stdio JSON-RPC). It is the external-runtime counterpart to
+//! [`crate::session::agent_loop::AgentLoop::run`]: it takes a windowed turn
+//! input and returns the SAME [`LoopOutcome`] shape, so the wiring seam
+//! (`Session::ask_with_phase`, slice 9c) maps either runtime's outcome onto
+//! `TurnOutcome` identically.
+//!
+//! Per-turn sequence (ADR-0076 statelessness):
+//! 1. spawn the resolved CLI binary with [`AdapterSpec::argv`];
+//! 2. `initialize` (negotiate protocol version);
+//! 3. `session/new` -- inject the bridge MCP server descriptor (slice 9b fills
+//!    the real bridge; the descriptor is opaque data carried from the input);
+//! 4. `session/prompt` -- carry the full windowed context blocks; pump
+//!    `session/update` notifications into the execution trace (ADR-0078) + the
+//!    terminal agent text; service `session/request_permission` via the gateway
+//!    policy ([`crate::approval::classify`]);
+//! 5. the prompt response's [`StopReason`] terminates the turn and maps onto
+//!    [`Termination`].
+//!
+//! Execution-level safety net (ADR-0081): a step cap (tool-call count, default
+//! [`DEFAULT_STEP_CAP`]) + a wall-clock watchdog (default
+//! [`DEFAULT_WALL_CLOCK`]) fire `session/cancel`; a stuck agent that does not
+//! return within [`CANCEL_GRACE`] is killed (cancel = 整轮中止, ADR-0081).
+//! Cancel is responsive via a stdout-reader thread + a recv-timeout pump (a
+//! blocking `read_line` would not notice cancel).
+//!
+//! Promotions are empty in this slice: a `materialize` promotion is created
+//! gateway-side (the bridge → the app's MCP gateway →
+//! [`crate::tools::dispatch`]) and observed separately in slice 9c. The engine
+//! owns only the ACP-driving half of the turn.
+
+use std::collections::HashSet;
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use serde_json::Value;
+
+use crate::approval::{
+    classify, ApprovalResponse, ApprovalSink, Classification, OperationKind, ToolKey,
+};
+use crate::cancel::CancelToken;
+use crate::model::{TraceEntryView, TurnPhase};
+use crate::runtime::acp::adapter::AdapterSpec;
+use crate::runtime::acp::wire::{
+    self, CancelParams, ContentBlock, InitializeParams, McpServer, NewSessionParams, PromptParams,
+    Request, RequestId, RequestPermissionOutcome, RequestPermissionParams, RequestPermissionResult,
+    Response, SessionUpdate, SessionUpdateParams, StopReason, ToolCallContent, ToolCallStatus,
+};
+use crate::session::agent_loop::{
+    truncate_trace_excerpt, LoopOutcome, Termination, TraceEntry, DEFAULT_STEP_CAP,
+    DEFAULT_WALL_CLOCK,
+};
+
+/// Trace-excerpt bound for an ACP tool call's result content. Mirrors the
+/// built-in loop's `TRACE_EXCERPT_MAX` so a trace row from either runtime
+/// renders identically (ADR-0078 cross-runtime contract).
+const TRACE_EXCERPT_MAX: usize = 240;
+
+/// Pump poll interval: how long the pump blocks on the stdout-reader channel
+/// between cancel / step-cap checks. Short enough that a cancel surfaces in
+/// well under a second; long enough that an idle turn costs near-zero CPU.
+const PUMP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Grace period after the engine sends `session/cancel` for the agent to return
+/// the prompt response before the engine kills the process. Generous for a
+/// cooperative agent (it should respond near-instantly); bounded so a stuck
+/// agent cannot hang the turn past the watchdog.
+const CANCEL_GRACE: Duration = Duration::from_secs(5);
+
+/// One ACP turn input. The wiring seam (slice 9c) assembles `prompt_blocks`
+/// from the same window the built-in loop reads; `mcp_servers` is the bridge
+/// descriptor (the real one lands in slice 9b).
+#[derive(Debug, Clone)]
+pub struct AcpTurnInput {
+    /// The working directory passed to `session/new` (absolute).
+    pub cwd: String,
+    /// The MCP server descriptors injected at `session/new`. Slice 9b fills
+    /// the bridge; slice 9a tests pass a placeholder (the fake fixture ignores
+    /// it).
+    pub mcp_servers: Vec<McpServer>,
+    /// The full windowed context for this turn (the question + history), as
+    /// text content blocks. ADR-0076 statelessness: the whole context every
+    /// turn.
+    pub prompt_blocks: Vec<ContentBlock>,
+}
+
+/// The generic ACP adapter engine (ADR-0081). Holds the adapter spec (data),
+/// the shared cancel token, and the two execution-level caps. Built per turn;
+/// [`Self::run`] consumes it.
+pub struct AcpEngine {
+    adapter: AdapterSpec,
+    cancel: Arc<CancelToken>,
+    step_cap: u32,
+    wall_clock: Option<Duration>,
+}
+
+impl AcpEngine {
+    /// Build an engine with the ADR-0081 defaults (step cap 24, wall-clock
+    /// 120s) -- the SAME defaults as the built-in loop, so the two runtimes
+    /// share one execution-level safety net.
+    pub fn new(adapter: AdapterSpec, cancel: Arc<CancelToken>) -> Self {
+        Self {
+            adapter,
+            cancel,
+            step_cap: DEFAULT_STEP_CAP,
+            wall_clock: Some(DEFAULT_WALL_CLOCK),
+        }
+    }
+
+    /// Override the default caps (test seam: the step-cap test drives the step
+    /// cap deterministically; the watchdog test drives a short wall-clock).
+    pub fn with_caps(mut self, step_cap: u32, wall_clock: Option<Duration>) -> Self {
+        self.step_cap = step_cap;
+        self.wall_clock = wall_clock;
+        self
+    }
+
+    /// Drive one ACP turn. `binary` is the resolved CLI path (`detect_adapter`
+    /// in production, the fake-fixture path in tests) -- separating detection
+    /// from driving keeps the engine free of PATH-scan branches. Returns the
+    /// SAME [`LoopOutcome`] shape the built-in loop returns; `promotions` is
+    /// empty here (gateway-side in slice 9c) and `round_trips` is 1 (one
+    /// `session/prompt`).
+    pub fn run(
+        &self,
+        input: &AcpTurnInput,
+        binary: &Path,
+        approval: &crate::approval::ApprovalState,
+        sink: &dyn ApprovalSink,
+        mut on_phase: impl FnMut(TurnPhase),
+    ) -> LoopOutcome {
+        let cancel = Arc::clone(&self.cancel);
+        let guard = cancel.begin_turn();
+        // Wall-clock watchdog (ADR-0081): fires the shared token on expiry; the
+        // pump notices via cancel.is_requested() and sends session/cancel.
+        if let Some(timeout) = self.wall_clock {
+            let alive = guard.watchdog_alive();
+            let token = Arc::clone(&cancel);
+            thread::spawn(move || {
+                thread::sleep(timeout);
+                if alive.load(std::sync::atomic::Ordering::SeqCst) {
+                    token.request();
+                }
+            });
+        }
+        // Spawn the CLI. Any spawn failure lands as a transient turn failure
+        // (the engine never panics into the host).
+        let mut child = match spawn(binary, &self.adapter) {
+            Ok(c) => c,
+            Err(detail) => return self.outcome(Termination::Transient(detail), Vec::new(), 1),
+        };
+        let stdout = child.inner.stdout.take().expect("piped stdout");
+        let stdin = child.inner.stdin.take().expect("piped stdin");
+        let mut io = AcpIo::new(stdin, stdout);
+
+        // Handshake: initialize -> session/new. A failure here is a transient
+        // turn failure (the CLI is not an ACP agent / crashed).
+        let session_id = match handshake(&mut io, &self.cancel, input) {
+            Ok(id) => id,
+            Err(term) => {
+                let outcome = self.outcome(term, Vec::new(), 1);
+                child.kill_and_wait();
+                return outcome;
+            }
+        };
+
+        // Loop-top cancel check (mirrors the built-in loop's pre-step check).
+        if self.cancel.is_requested() {
+            let outcome = self.outcome(Termination::Cancelled, Vec::new(), 1);
+            child.kill_and_wait();
+            return outcome;
+        }
+        // ADR-0059: signal the "thinking" wait once before the prompt (the ACP
+        // turn is one prompt round -- attempt = 1).
+        on_phase(TurnPhase::Thinking { attempt: 1 });
+
+        let prompt = Request::new(
+            RequestId::Num(3),
+            "session/prompt",
+            PromptParams {
+                session_id: session_id.clone(),
+                blocks: input.prompt_blocks.clone(),
+            },
+        );
+        if io.write_json(&prompt).is_err() {
+            let outcome = self.outcome(
+                Termination::Transient("session/prompt: broken pipe before send".into()),
+                Vec::new(),
+                1,
+            );
+            child.kill_and_wait();
+            return outcome;
+        }
+
+        let mut pump = Pump {
+            trace: Vec::new(),
+            text: String::new(),
+            pending: Vec::new(),
+            tool_call_count: 0,
+            cancel_sent_at: None,
+            step_cap: self.step_cap,
+        };
+        let end = io.pump_until_prompt_response(
+            &self.cancel,
+            &self.adapter,
+            &session_id,
+            &mut pump,
+            approval,
+            sink,
+            &mut on_phase,
+        );
+
+        // Finalize any tool rows still open at turn end (best-effort success).
+        for row in pump.pending.drain(..) {
+            let entry = TraceEntry {
+                tool_use_id: row.tool_use_id,
+                name: row.name,
+                operation_kind: row.operation_kind,
+                summary: row.summary,
+                success: true,
+                result_excerpt: String::new(),
+            };
+            on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
+            pump.trace.push(entry);
+        }
+
+        let termination = match end {
+            PromptEnd::Stop(StopReason::Success | StopReason::Refusal) => {
+                Termination::Text(std::mem::take(&mut pump.text))
+            }
+            PromptEnd::Stop(StopReason::Cancelled) => Termination::Cancelled,
+            // The agent's own turn/token ceilings are execution-level caps;
+            // map onto our StepCap (the wiring seam renders Failed either way).
+            PromptEnd::Stop(StopReason::MaxTurns | StopReason::MaxTokens) => {
+                Termination::StepCap(self.step_cap)
+            }
+            PromptEnd::Cancelled => Termination::Cancelled,
+            // Reader EOF / pipe break before a response: a transient turn
+            // failure (the agent crashed or closed stdout).
+            PromptEnd::Eof => Termination::Transient("ACP agent closed stdout mid-turn".into()),
+            // The agent answered with a parse failure / RPC error / empty
+            // result -- surface the real diagnostic, NOT "closed stdout".
+            PromptEnd::Failed(reason) => Termination::Transient(reason),
+        };
+        let outcome = self.outcome(termination, pump.trace, 1);
+        child.kill_and_wait();
+        outcome
+    }
+
+    fn outcome(
+        &self,
+        termination: Termination,
+        trace: Vec<TraceEntry>,
+        round_trips: u32,
+    ) -> LoopOutcome {
+        LoopOutcome {
+            termination,
+            // Empty in slice 9a: a materialize promotion is gateway-side
+            // (bridge -> MCP gateway -> tools::dispatch), observed separately
+            // in slice 9c. The ACP engine drives only the ACP half.
+            promotions: Vec::new(),
+            trace,
+            round_trips,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handshake: initialize + session/new
+// ---------------------------------------------------------------------------
+
+fn handshake(
+    io: &mut AcpIo,
+    cancel: &CancelToken,
+    input: &AcpTurnInput,
+) -> Result<String, Termination> {
+    let init = io.request_roundtrip::<InitializeParams, wire::InitializeResult>(
+        cancel,
+        Request::new(
+            RequestId::Num(1),
+            "initialize",
+            InitializeParams {
+                protocol_version: wire::PROTOCOL_VERSION,
+                client_info: wire::Implementation::client(),
+            },
+        ),
+    )?;
+    match (init.result, init.error) {
+        (Some(_), _) => {}
+        (None, Some(e)) => {
+            return Err(Termination::Transient(format!(
+                "initialize error: {}",
+                e.message
+            )));
+        }
+        (None, None) => return Err(Termination::Transient("initialize: empty response".into())),
+    }
+    let new_resp = io.request_roundtrip::<NewSessionParams, wire::NewSessionResult>(
+        cancel,
+        Request::new(
+            RequestId::Num(2),
+            "session/new",
+            NewSessionParams {
+                cwd: input.cwd.clone(),
+                mcp_servers: input.mcp_servers.clone(),
+            },
+        ),
+    )?;
+    match (new_resp.result, new_resp.error) {
+        (Some(r), _) => Ok(r.session_id),
+        (None, Some(e)) => Err(Termination::Transient(format!(
+            "session/new error: {}",
+            e.message
+        ))),
+        (None, None) => Err(Termination::Transient("session/new: empty response".into())),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Child process wrapper
+// ---------------------------------------------------------------------------
+
+/// The spawned CLI child + its stdio. Dropping via [`Self::kill_and_wait`]
+/// kills + reaps the child (the engine never orphans an ACP agent).
+struct ChildHandle {
+    inner: Child,
+}
+
+impl ChildHandle {
+    fn kill_and_wait(&mut self) {
+        // Best-effort: ignore a kill error (the child may have already exited).
+        let _ = self.inner.kill();
+        let _ = self.inner.wait();
+    }
+}
+
+fn spawn(binary: &Path, adapter: &AdapterSpec) -> Result<ChildHandle, String> {
+    Command::new(binary)
+        .args(adapter.argv)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map(|inner| ChildHandle { inner })
+        .map_err(|e| format!("failed to spawn ACP agent `{}`: {e}", adapter.id))
+}
+
+// ---------------------------------------------------------------------------
+// NDJSON stdio I/O
+// ---------------------------------------------------------------------------
+
+/// A line-delimited JSON-RPC channel over the child's stdio. The stdout reader
+/// runs on its own thread (a blocking `read_line` would not notice cancel); the
+/// pump drains it via a `recv_timeout` channel.
+struct AcpIo {
+    stdin: ChildStdin,
+    rx: mpsc::Receiver<String>,
+}
+
+impl AcpIo {
+    fn new(stdin: ChildStdin, stdout: ChildStdout) -> Self {
+        let (tx, rx) = mpsc::channel::<String>();
+        // The reader thread owns stdout, reads line-by-line, and sends each raw
+        // line. EOF closes the channel (tx dropped) so the pump's recv returns
+        // Disconnected -> the engine treats it as agent EOF.
+        thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        let trimmed = line.trim_end_matches(['\n', '\r']);
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        if tx.send(trimmed.to_string()).is_err() {
+                            break; // pump gone
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self { stdin, rx }
+    }
+
+    /// Serialize + write one JSON-RPC message as a single NDJSON line. Flushes
+    /// so the agent receives it immediately (NDJSON is line-buffered).
+    fn write_json<T: serde::Serialize>(&mut self, msg: &T) -> Result<(), std::io::Error> {
+        let mut s = serde_json::to_string(msg)?;
+        s.push('\n');
+        self.stdin.write_all(s.as_bytes())?;
+        self.stdin.flush()
+    }
+
+    /// Send a request and pump incoming lines until its response arrives. A
+    /// stray notification / unrelated message during the handshake is dropped
+    /// (not an error) so a chatty agent cannot break it.
+    fn request_roundtrip<P: serde::Serialize, R: serde::de::DeserializeOwned>(
+        &mut self,
+        cancel: &CancelToken,
+        req: Request<P>,
+    ) -> Result<Response<R>, Termination> {
+        let target = serde_json::to_value(&req.id).unwrap_or(Value::Null);
+        self.write_json(&req)
+            .map_err(|e| Termination::Transient(format!("write: {e}")))?;
+        loop {
+            if cancel.is_requested() {
+                return Err(Termination::Cancelled);
+            }
+            match self.rx.recv_timeout(PUMP_POLL_INTERVAL) {
+                Ok(line) => {
+                    let v: Value = match serde_json::from_str(&line) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    if v.get("id") == Some(&target) && v.get("method").is_none() {
+                        return serde_json::from_value(v)
+                            .map_err(|e| Termination::Transient(format!("response parse: {e}")));
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(Termination::Transient("ACP agent closed stdout".into()));
+                }
+            }
+        }
+    }
+
+    /// Pump incoming lines from the moment `session/prompt` is sent until its
+    /// response (id=3) arrives, an abort fires, or the agent EOFs. Folds
+    /// `session/update` into the [`Pump`] state and services
+    /// `session/request_permission`. Sends `session/cancel` once on cancel /
+    /// step-cap trip and continues draining (the agent should then return the
+    /// prompt response with [`StopReason::Cancelled`]); gives up after
+    /// [`CANCEL_GRACE`] and returns [`PromptEnd::Cancelled`].
+    #[allow(clippy::too_many_arguments)]
+    fn pump_until_prompt_response(
+        &mut self,
+        cancel: &CancelToken,
+        adapter: &AdapterSpec,
+        session_id: &str,
+        pump: &mut Pump,
+        approval: &crate::approval::ApprovalState,
+        sink: &dyn ApprovalSink,
+        on_phase: &mut impl FnMut(TurnPhase),
+    ) -> PromptEnd {
+        let prompt_id_value = serde_json::to_value(RequestId::Num(3)).unwrap_or(Value::Null);
+        loop {
+            // Cancel / step-cap trip: send session/cancel once, record when.
+            let user_cancelled = cancel.is_requested();
+            let step_cap_tripped = pump.tool_call_count > pump.step_cap;
+            if (user_cancelled || step_cap_tripped) && pump.cancel_sent_at.is_none() {
+                let _ = self.write_json(&wire::Notification::new(
+                    "session/cancel",
+                    CancelParams {
+                        session_id: session_id.to_string(),
+                    },
+                ));
+                pump.cancel_sent_at = Some(Instant::now());
+            }
+            // Grace elapsed after cancel with no response -> give up (the
+            // caller kills the child).
+            if let Some(sent_at) = pump.cancel_sent_at {
+                if sent_at.elapsed() > CANCEL_GRACE {
+                    return PromptEnd::Cancelled;
+                }
+            }
+            match self.rx.recv_timeout(PUMP_POLL_INTERVAL) {
+                Ok(line) => {
+                    let v: Value = match serde_json::from_str(&line) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    // Response to the prompt?
+                    if v.get("id") == Some(&prompt_id_value) && v.get("method").is_none() {
+                        let resp: Response<wire::PromptResult> = match serde_json::from_value(v) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                return PromptEnd::Failed(format!("prompt response parse: {e}"))
+                            }
+                        };
+                        if let Some(err) = resp.error {
+                            return PromptEnd::Failed(format!("prompt error: {}", err.message));
+                        }
+                        match resp.result {
+                            Some(r) => return PromptEnd::Stop(r.stop_reason),
+                            None => {
+                                return PromptEnd::Failed("prompt response: empty result".into())
+                            }
+                        }
+                    }
+                    // Agent-initiated request (session/request_permission)?
+                    if let Some(method) = v.get("method").and_then(Value::as_str) {
+                        if v.get("id").is_some() && method == "session/request_permission" {
+                            let req_id = v["id"].clone();
+                            let params: RequestPermissionParams = match serde_json::from_value(
+                                v.get("params").cloned().unwrap_or(Value::Null),
+                            ) {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    // Malformed permission request: refuse with -32602
+                                    // so the agent is not left waiting, and no phantom
+                                    // decision is recorded against empty ids.
+                                    let _ = self.write_json(&Response::<Value> {
+                                        jsonrpc: "2.0".to_string(),
+                                        id: parse_id(&req_id),
+                                        result: None,
+                                        error: Some(wire::RpcError {
+                                            code: -32602,
+                                            message: "invalid params: session/request_permission"
+                                                .into(),
+                                            data: None,
+                                        }),
+                                    });
+                                    continue;
+                                }
+                            };
+                            let outcome =
+                                decide_permission(adapter, &params, approval, sink, cancel);
+                            let _ = self.write_json(&Response::<RequestPermissionResult> {
+                                jsonrpc: "2.0".to_string(),
+                                id: parse_id(&req_id),
+                                result: Some(RequestPermissionResult { outcome }),
+                                error: None,
+                            });
+                            continue;
+                        }
+                        if v.get("id").is_some() {
+                            // Unknown agent request -- respond method-not-found
+                            // so the agent is not left waiting.
+                            let _ = self.write_json(&Response::<Value> {
+                                jsonrpc: "2.0".to_string(),
+                                id: parse_id(&v["id"]),
+                                result: None,
+                                error: Some(wire::RpcError {
+                                    code: -32601,
+                                    message: "method not found".into(),
+                                    data: None,
+                                }),
+                            });
+                            continue;
+                        }
+                        // Notification -- route session/update; ignore others.
+                        if method == "session/update" {
+                            if let Ok(params) = serde_json::from_value::<SessionUpdateParams>(
+                                v.get("params").cloned().unwrap_or(Value::Null),
+                            ) {
+                                pump.fold_update(&params.update, on_phase);
+                            }
+                        }
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return if pump.cancel_sent_at.is_some() {
+                        PromptEnd::Cancelled
+                    } else {
+                        PromptEnd::Eof
+                    };
+                }
+            }
+        }
+    }
+}
+
+fn parse_id(v: &Value) -> RequestId {
+    match v {
+        Value::Number(n) => n.as_u64().map(RequestId::Num).unwrap_or(RequestId::Null),
+        Value::String(s) => RequestId::Str(s.clone()),
+        _ => RequestId::Null,
+    }
+}
+
+/// Why the prompt pump ended.
+enum PromptEnd {
+    /// The agent returned a stop reason.
+    Stop(StopReason),
+    /// The engine cancelled (user / watchdog / step cap) and drained / EOF'd.
+    Cancelled,
+    /// The agent closed stdout before responding.
+    Eof,
+    /// The agent returned a response the engine could not treat as a stop
+    /// (parse failure / RPC `error` / empty result). Carries the diagnostic so
+    /// the turn's `Transient` message names the real cause instead of
+    /// "closed stdout".
+    Failed(String),
+}
+
+// ---------------------------------------------------------------------------
+// Pump state -- fold session/update into the trace
+// ---------------------------------------------------------------------------
+
+/// The mutable per-turn state the pump accumulates. Mirrors the built-in
+/// loop's `CallOutputs` (trace + promotions); promotions stay empty (gateway
+/// side, slice 9c) so only the trace + terminal text live here.
+struct Pump {
+    trace: Vec<TraceEntry>,
+    text: String,
+    /// Tool calls that started but have not yet reached a terminal status.
+    pending: Vec<PendingToolCall>,
+    /// Distinct tool calls observed this turn (step-cap counter, ADR-0081).
+    tool_call_count: u32,
+    /// When `session/cancel` was sent, if it has been (grace tracking).
+    cancel_sent_at: Option<Instant>,
+    step_cap: u32,
+}
+
+/// A tool call that opened a trace row but has not finalized (Completed /
+/// Failed).
+struct PendingToolCall {
+    tool_use_id: String,
+    name: String,
+    operation_kind: OperationKind,
+    summary: String,
+    content: Vec<ToolCallContent>,
+}
+
+impl Pump {
+    fn fold_update(&mut self, update: &SessionUpdate, on_phase: &mut impl FnMut(TurnPhase)) {
+        match update {
+            SessionUpdate::AgentMessageChunk { content, .. } => {
+                for block in content {
+                    if let Some(text) = block.as_text() {
+                        self.text.push_str(text);
+                    }
+                }
+            }
+            SessionUpdate::ToolCall {
+                tool_call_id,
+                title,
+                status,
+                kind,
+                content,
+            } => {
+                self.tool_call_count += 1;
+                let (name, summary) = name_summary(title.as_deref(), tool_call_id);
+                let operation_kind = kind
+                    .map(|k| k.to_operation_kind())
+                    .unwrap_or(OperationKind::Read);
+                on_phase(TurnPhase::ToolCallStarted {
+                    name: name.clone(),
+                    operation_kind,
+                    summary: summary.clone(),
+                });
+                if matches!(status, ToolCallStatus::Completed | ToolCallStatus::Failed) {
+                    self.finalize_row(
+                        tool_call_id,
+                        &name,
+                        operation_kind,
+                        &summary,
+                        content,
+                        *status,
+                        on_phase,
+                    );
+                } else {
+                    self.pending.push(PendingToolCall {
+                        tool_use_id: tool_call_id.clone(),
+                        name,
+                        operation_kind,
+                        summary,
+                        content: content.clone(),
+                    });
+                }
+            }
+            SessionUpdate::ToolCallUpdate {
+                tool_call_id,
+                status,
+                title,
+                content,
+            } => {
+                let pos = self
+                    .pending
+                    .iter()
+                    .position(|p| &p.tool_use_id == tool_call_id);
+                if let Some(i) = pos {
+                    let mut row = self.pending.remove(i);
+                    if let Some(t) = title.as_deref() {
+                        if row.summary.is_empty() {
+                            row.summary = truncate_trace_excerpt(t, TRACE_EXCERPT_MAX);
+                            row.name = t.to_string();
+                        }
+                    }
+                    if !content.is_empty() {
+                        row.content = content.clone();
+                    }
+                    if let Some(final_status) = *status {
+                        if matches!(
+                            final_status,
+                            ToolCallStatus::Completed | ToolCallStatus::Failed
+                        ) {
+                            self.finalize_row(
+                                &row.tool_use_id,
+                                &row.name,
+                                row.operation_kind,
+                                &row.summary,
+                                &row.content,
+                                final_status,
+                                on_phase,
+                            );
+                            return;
+                        }
+                    }
+                    self.pending.insert(i, row);
+                }
+                // An update with no matching pending row (missed the start) is
+                // dropped -- the trace stays consistent with the starts seen.
+            }
+            SessionUpdate::Other => {}
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finalize_row(
+        &mut self,
+        tool_use_id: &str,
+        name: &str,
+        operation_kind: OperationKind,
+        summary: &str,
+        content: &[ToolCallContent],
+        status: ToolCallStatus,
+        on_phase: &mut impl FnMut(TurnPhase),
+    ) {
+        let success = matches!(status, ToolCallStatus::Completed);
+        let result_excerpt = if success {
+            String::new()
+        } else {
+            // Failure: keep the bounded text as the cross-turn failure anchor
+            // (ADR-0078). An empty failure excerpt would lose the anchor, so
+            // fall back to an honest "failed" marker.
+            let text = ToolCallContent::collect_text(content, TRACE_EXCERPT_MAX);
+            if text.is_empty() {
+                "failed".to_string()
+            } else {
+                text
+            }
+        };
+        let entry = TraceEntry {
+            tool_use_id: tool_use_id.to_string(),
+            name: name.to_string(),
+            operation_kind,
+            summary: summary.to_string(),
+            success,
+            result_excerpt,
+        };
+        on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
+        self.trace.push(entry);
+    }
+}
+
+/// Derive a (name, summary) pair from a tool call's title + id. The title is
+/// the human-readable description; we use it for both (the bridge's real tool
+/// name arrives MCP-side in slice 9b).
+fn name_summary(title: Option<&str>, id: &str) -> (String, String) {
+    match title.filter(|t| !t.is_empty()) {
+        Some(t) => {
+            let summary = truncate_trace_excerpt(t, TRACE_EXCERPT_MAX);
+            (t.to_string(), summary)
+        }
+        None => (id.to_string(), id.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Permission decision (ACP session/request_permission -> gateway policy)
+// ---------------------------------------------------------------------------
+
+/// Decide the response to an agent's `session/request_permission` (ADR-0081).
+/// Maps the tool call to a [`ToolKey`], asks the gateway policy
+/// ([`classify`]) whether it is auto-allowed, and selects an allow option if
+/// so (or a reject option on fail-fast, ADR-0077 -- the agent self-corrects
+/// from a rejection). On cancel, responds `Cancelled`.
+///
+/// Best-effort emits the in-flow approval card events (ADR-0083) so the
+/// frontend can surface that a permission was raised + auto-decided; a sink
+/// error must not change the decision.
+fn decide_permission(
+    adapter: &AdapterSpec,
+    params: &RequestPermissionParams,
+    approval: &crate::approval::ApprovalState,
+    sink: &dyn ApprovalSink,
+    cancel: &CancelToken,
+) -> RequestPermissionOutcome {
+    if cancel.is_requested() {
+        return RequestPermissionOutcome::Cancelled;
+    }
+    let tool_name = params
+        .tool_call
+        .title
+        .clone()
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| params.tool_call.tool_call_id.clone());
+    let key = ToolKey::external(adapter.id.as_str(), tool_name);
+    let mode = approval.auth_mode();
+    let trust: HashSet<ToolKey> = approval.trust_list().into_iter().collect();
+    let allowed = classify(&key, mode, &trust) == Classification::Allow;
+
+    let operation_kind = params
+        .tool_call
+        .kind
+        .map(|k| k.to_operation_kind())
+        .unwrap_or(OperationKind::Network);
+    let body = crate::approval::ApprovalRequestBody {
+        request_id: params.tool_call.tool_call_id.clone(),
+        server: key.server.clone(),
+        tool: key.tool.clone(),
+        operation_kind,
+        summary: params
+            .tool_call
+            .title
+            .clone()
+            .unwrap_or_else(|| params.tool_call.tool_call_id.clone()),
+    };
+    if allowed {
+        // The policy auto-allows; pick the first allow_* option.
+        sink.emit_request(&body);
+        let pick = params
+            .options
+            .iter()
+            .find(|o| matches!(o.kind, Some(k) if k.is_allow()));
+        let resp = match pick.map(|o| o.kind) {
+            Some(Some(wire::PermissionOptionKind::AllowAlways)) => ApprovalResponse::AlwaysAllow,
+            _ => ApprovalResponse::AllowOnce,
+        };
+        sink.emit_resolved(&body, resp);
+        match pick {
+            Some(o) => RequestPermissionOutcome::Selected {
+                option_id: o.id.clone(),
+            },
+            // Policy allows but the agent offered no allow option (malformed):
+            // refuse the call so the agent self-corrects.
+            None => RequestPermissionOutcome::Cancelled,
+        }
+    } else {
+        // Fail-fast: pick a reject option so the agent self-corrects
+        // (ADR-0077); else Cancelled (no reject available).
+        sink.emit_resolved(&body, ApprovalResponse::Deny);
+        match params
+            .options
+            .iter()
+            .find(|o| matches!(o.kind, Some(k) if !k.is_allow()))
+        {
+            Some(o) => RequestPermissionOutcome::Selected {
+                option_id: o.id.clone(),
+            },
+            None => RequestPermissionOutcome::Cancelled,
+        }
+    }
+}
+
+/// A test-only null sink (mirrors the built-in test facade): approvals against
+/// the built-in table classify Allow without ever emitting. Exposed so a
+/// future in-crate engine unit test can drive the pump without a recording
+/// sink.
+#[cfg(test)]
+pub(crate) struct NullAcpSink;
+
+#[cfg(test)]
+impl ApprovalSink for NullAcpSink {
+    fn emit_request(&self, _body: &crate::approval::ApprovalRequestBody) {}
+    fn emit_resolved(
+        &self,
+        _body: &crate::approval::ApprovalRequestBody,
+        _response: ApprovalResponse,
+    ) {
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::acp::wire::PermissionOptionKind;
+
+    /// name_summary prefers a non-empty title and bounds it; falls back to the
+    /// id when the title is missing / empty.
+    #[test]
+    fn name_summary_prefers_title_and_falls_back_to_id() {
+        let (name, summary) = name_summary(Some("explore SELECT 1"), "tc_1");
+        assert_eq!(name, "explore SELECT 1");
+        assert_eq!(summary, "explore SELECT 1");
+
+        let (name, summary) = name_summary(Some(""), "tc_2");
+        assert_eq!(name, "tc_2");
+        assert_eq!(summary, "tc_2");
+
+        let (name, _) = name_summary(None, "tc_3");
+        assert_eq!(name, "tc_3");
+    }
+
+    /// A very long title is bounded to the trace-excerpt cap.
+    #[test]
+    fn name_summary_bounds_a_long_title() {
+        let long = "x".repeat(TRACE_EXCERPT_MAX + 50);
+        let (_, summary) = name_summary(Some(&long), "tc");
+        assert!(summary.chars().count() <= TRACE_EXCERPT_MAX);
+        assert!(summary.ends_with('…'), "bounded summary ends with ellipsis");
+    }
+
+    /// decide_permission under no-confirmation selects an allow option.
+    #[test]
+    fn decide_permission_no_confirmation_selects_allow() {
+        use crate::approval::ApprovalState;
+        let adapter = crate::runtime::acp::adapter::claude_code();
+        let approval = ApprovalState::new();
+        approval.set_auth_mode(crate::approval::AuthMode::NoConfirmation);
+        let params = RequestPermissionParams {
+            session_id: "s".into(),
+            tool_call: wire::PermissionToolCall {
+                tool_call_id: "tc_1".into(),
+                title: Some("bash ls".into()),
+                kind: Some(wire::ToolKind::Execute),
+            },
+            options: vec![
+                wire::PermissionOption {
+                    id: "allow_once".into(),
+                    label: "Allow".into(),
+                    kind: Some(PermissionOptionKind::AllowOnce),
+                },
+                wire::PermissionOption {
+                    id: "reject".into(),
+                    label: "Reject".into(),
+                    kind: Some(PermissionOptionKind::RejectOnce),
+                },
+            ],
+        };
+        let outcome = decide_permission(
+            &adapter,
+            &params,
+            &approval,
+            &NullAcpSink,
+            &CancelToken::new(),
+        );
+        match outcome {
+            RequestPermissionOutcome::Selected { option_id } => {
+                assert_eq!(option_id, "allow_once");
+            }
+            other => panic!("expected Selected, got {other:?}"),
+        }
+    }
+
+    /// decide_permission under per-call + untrusted fail-fasts to a reject
+    /// option (the agent self-corrects, ADR-0077).
+    #[test]
+    fn decide_permission_per_call_untrusted_fail_fasts_to_reject() {
+        use crate::approval::ApprovalState;
+        let adapter = crate::runtime::acp::adapter::claude_code();
+        let approval = ApprovalState::new(); // PerCall, empty trust
+        let params = RequestPermissionParams {
+            session_id: "s".into(),
+            tool_call: wire::PermissionToolCall {
+                tool_call_id: "tc_1".into(),
+                title: Some("bash rm".into()),
+                kind: Some(wire::ToolKind::Execute),
+            },
+            options: vec![
+                wire::PermissionOption {
+                    id: "allow_once".into(),
+                    label: "Allow".into(),
+                    kind: Some(PermissionOptionKind::AllowOnce),
+                },
+                wire::PermissionOption {
+                    id: "reject".into(),
+                    label: "Reject".into(),
+                    kind: Some(PermissionOptionKind::RejectOnce),
+                },
+            ],
+        };
+        let outcome = decide_permission(
+            &adapter,
+            &params,
+            &approval,
+            &NullAcpSink,
+            &CancelToken::new(),
+        );
+        match outcome {
+            RequestPermissionOutcome::Selected { option_id } => {
+                assert_eq!(option_id, "reject", "fail-fast picks the reject option");
+            }
+            other => panic!("expected Selected reject, got {other:?}"),
+        }
+    }
+
+    /// A cancel in flight short-circuits permission to Cancelled.
+    #[test]
+    fn decide_permission_cancel_short_circuits() {
+        let adapter = crate::runtime::acp::adapter::claude_code();
+        let approval = crate::approval::ApprovalState::new();
+        let cancel = CancelToken::new();
+        cancel.request();
+        let params = RequestPermissionParams {
+            session_id: "s".into(),
+            tool_call: wire::PermissionToolCall {
+                tool_call_id: "tc_1".into(),
+                title: None,
+                kind: None,
+            },
+            options: Vec::new(),
+        };
+        let outcome = decide_permission(&adapter, &params, &approval, &NullAcpSink, &cancel);
+        assert_eq!(outcome, RequestPermissionOutcome::Cancelled);
+    }
+}
