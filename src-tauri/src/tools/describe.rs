@@ -15,21 +15,27 @@ use serde_json::{json, Value};
 
 use crate::session::materializer::TurnDeps;
 use crate::tools::definitions;
+use crate::tools::ToolPayload;
 
 /// Parse the tool input + return the dataset's cached shape.
 ///
 /// Returns `{ reference_name, columns, row_count }` on success, or a tool-level
 /// error string for an unknown or stale reference. No DuckDB query runs.
-pub(crate) fn dispatch(input: &Value, deps: &mut TurnDeps) -> Result<Value, String> {
+pub(crate) fn dispatch(input: &Value, deps: &mut TurnDeps) -> Result<ToolPayload, String> {
     let reference_name = definitions::get_str(input, "reference_name")?;
     let descriptor = deps
         .working_set
         .resolve_readable(&reference_name, "referenced")?;
-    Ok(json!({
-        "reference_name": descriptor.reference_name,
-        "columns": descriptor.columns.iter().map(definitions::column_json).collect::<Vec<_>>(),
-        "row_count": descriptor.row_count,
-    }))
+    // describe is a schema read off the working-set cache (no SQL), so it has
+    // no side effect to report.
+    Ok(ToolPayload {
+        content: json!({
+            "reference_name": descriptor.reference_name,
+            "columns": descriptor.columns.iter().map(definitions::column_json).collect::<Vec<_>>(),
+            "row_count": descriptor.row_count,
+        }),
+        promotion: None,
+    })
 }
 
 #[cfg(test)]
@@ -81,7 +87,10 @@ mod tests {
             ],
         );
         let mut deps = inert_deps(&conn, &mut ws, &sources);
-        let v = dispatch(&json!({"reference_name": "people"}), &mut deps).unwrap();
+        let payload = dispatch(&json!({"reference_name": "people"}), &mut deps).unwrap();
+        // describe is a schema read; no side effect to report.
+        assert!(payload.promotion.is_none());
+        let v = &payload.content;
         assert_eq!(v["reference_name"], "people");
         assert_eq!(v["row_count"], 42);
         assert_eq!(v["columns"][0]["name"], "id");

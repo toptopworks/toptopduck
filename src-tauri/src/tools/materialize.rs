@@ -22,9 +22,10 @@ use serde_json::{json, Value};
 
 use crate::cancel::CancelToken;
 use crate::guardrail::{ExecError, ExecErrorKind};
-use crate::model::DatasetDescriptor;
+use crate::model::{DatasetDescriptor, Promotion};
 use crate::session::materializer::{Materializer, TurnDeps};
 use crate::tools::definitions;
+use crate::tools::ToolPayload;
 
 /// Parse the tool input + drive the materializer to promote the SQL's result.
 ///
@@ -38,7 +39,7 @@ pub(crate) fn dispatch(
     deps: &mut TurnDeps,
     cancel: &CancelToken,
     materializer: &mut dyn Materializer,
-) -> Result<Value, String> {
+) -> Result<ToolPayload, String> {
     let sql = definitions::get_str(input, "sql")?;
     // Optional display label. The reference name (result_N) is stable and never
     // changes; the display name is a presentation alias. When omitted, the
@@ -77,7 +78,20 @@ pub(crate) fn dispatch(
         }
     }
 
-    Ok(descriptor_json(&descriptor))
+    // Side-effect channel (issue #336): the promotion is built from the typed
+    // `sql` (parsed above) + the typed `descriptor` (the materializer returned
+    // and the working set just registered) -- no JSON serialize/deserialize
+    // round trip. The content JSON is cloned out of the descriptor for the
+    // model-facing payload, then the descriptor itself moves into the
+    // Promotion the orchestration layer consumes, so the two stay in sync.
+    let content = descriptor_json(&descriptor);
+    Ok(ToolPayload {
+        content,
+        promotion: Some(Promotion {
+            dataset: descriptor,
+            sql,
+        }),
+    })
 }
 
 /// Apply the display label to the just-materialized working-set descriptor via
@@ -260,26 +274,42 @@ mod tests {
         let mut materializer = RealMaterializer;
 
         // First promotion -> result_1.
-        let v1 = dispatch(
+        let p1 = dispatch(
             &json!({"sql": "SELECT 1 AS x"}),
             &mut deps,
             &cancel,
             &mut materializer,
         )
         .unwrap();
+        // The side-effect channel carries the typed promotion (issue #336): the
+        // sql matches the call input verbatim, and the dataset matches what the
+        // working set just registered -- no JSON serialize/deserialize round
+        // trip to recover it.
+        let promotion1 = p1.promotion.as_ref().expect("materialize promotes");
+        assert_eq!(promotion1.sql, "SELECT 1 AS x");
+        assert_eq!(promotion1.dataset.reference_name, "result_1");
+        assert_eq!(
+            promotion1.dataset.display_name,
+            deps.working_set.get("result_1").unwrap().display_name
+        );
+        let v1 = &p1.content;
         assert_eq!(v1["reference_name"], "result_1");
         assert_eq!(v1["row_count"], 1);
         assert_eq!(v1["columns"][0]["name"], "x");
         assert_eq!(deps.working_set.next_result_number(), 2);
 
         // Second promotion -> result_2 (one past result_1, monotonic).
-        let v2 = dispatch(
+        let p2 = dispatch(
             &json!({"sql": "SELECT 2 AS y"}),
             &mut deps,
             &cancel,
             &mut materializer,
         )
         .unwrap();
+        let promotion2 = p2.promotion.as_ref().expect("materialize promotes");
+        assert_eq!(promotion2.sql, "SELECT 2 AS y");
+        assert_eq!(promotion2.dataset.reference_name, "result_2");
+        let v2 = &p2.content;
         assert_eq!(v2["reference_name"], "result_2");
         assert_eq!(deps.working_set.next_result_number(), 3);
         assert_eq!(deps.working_set.len(), 2, "both results registered");
@@ -300,13 +330,20 @@ mod tests {
         let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
-        let v = dispatch(
+        let payload = dispatch(
             &json!({"sql": "SELECT 1 AS x", "display_name": "my subset"}),
             &mut deps,
             &cancel,
             &mut materializer,
         )
         .unwrap();
+        // The promotion carries the post-label descriptor: the side-effect
+        // channel reflects the display name AFTER it was applied.
+        let promotion = payload.promotion.as_ref().expect("materialize promotes");
+        assert_eq!(promotion.dataset.reference_name, "result_1");
+        assert_eq!(promotion.dataset.display_name, "my subset");
+        assert_eq!(promotion.sql, "SELECT 1 AS x");
+        let v = &payload.content;
         assert_eq!(v["reference_name"], "result_1");
         assert_eq!(v["display_name"], "my subset");
         // The working-set descriptor carries the display label too.
@@ -335,26 +372,41 @@ mod tests {
         let mut materializer = RealMaterializer;
 
         // First promotion claims the display label "my label".
-        let v1 = dispatch(
+        let p1 = dispatch(
             &json!({"sql": "SELECT 1 AS x", "display_name": "my label"}),
             &mut deps,
             &cancel,
             &mut materializer,
         )
         .unwrap();
+        assert_eq!(
+            p1.promotion
+                .as_ref()
+                .expect("materialize promotes")
+                .dataset
+                .reference_name,
+            "result_1"
+        );
+        let v1 = &p1.content;
         assert_eq!(v1["reference_name"], "result_1");
         assert_eq!(v1["display_name"], "my label");
 
         // Second promotion reuses the SAME label -- ADR-0037 uniqueness refuses
         // it, so the label falls back to result_2. The promotion itself still
         // lands (result_2 is registered); only the label is dropped.
-        let v2 = dispatch(
+        let p2 = dispatch(
             &json!({"sql": "SELECT 2 AS y", "display_name": "my label"}),
             &mut deps,
             &cancel,
             &mut materializer,
         )
         .unwrap();
+        let promotion2 = p2.promotion.as_ref().expect("materialize promotes");
+        // The fallback descriptor rides the side-effect channel too: the
+        // colliding label did not stick, so the promotion carries result_2.
+        assert_eq!(promotion2.dataset.reference_name, "result_2");
+        assert_eq!(promotion2.dataset.display_name, "result_2");
+        let v2 = &p2.content;
         assert_eq!(v2["reference_name"], "result_2");
         assert_eq!(
             v2["display_name"], "result_2",
@@ -388,13 +440,17 @@ mod tests {
         let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
-        let v = dispatch(
+        let payload = dispatch(
             &json!({"sql": "SELECT 1 AS x", "display_name": "   "}),
             &mut deps,
             &cancel,
             &mut materializer,
         )
         .unwrap();
+        let promotion = payload.promotion.as_ref().expect("materialize promotes");
+        assert_eq!(promotion.dataset.reference_name, "result_1");
+        assert_eq!(promotion.dataset.display_name, "result_1");
+        let v = &payload.content;
         assert_eq!(v["reference_name"], "result_1");
         assert_eq!(
             v["display_name"], "result_1",
