@@ -20,3 +20,4 @@
 //! deliberately NOT used -- the app owns all authoritative state.
 
 pub mod acp;
+pub(crate) mod gateway;

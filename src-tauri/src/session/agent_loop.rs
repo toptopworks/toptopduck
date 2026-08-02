@@ -67,8 +67,10 @@ pub(crate) const DEFAULT_WALL_CLOCK: Duration = Duration::from_secs(120);
 
 /// Maximum length of a trace entry's result excerpt (ADR-0078). The full result
 /// rides the trace; the far window carries only a summary, so an excerpt is all
-/// the loop needs to keep for the collapsible trace.
-const TRACE_EXCERPT_MAX: usize = 240;
+/// the loop needs to keep for the collapsible trace. Shared across runtimes --
+/// the ACP gateway reuses it so a trace row renders identically regardless of
+/// which runtime produced it (ADR-0085 cross-runtime trace contract).
+pub(crate) const TRACE_EXCERPT_MAX: usize = 240;
 
 /// The Rust-native agent loop (ADR-0081). Holds the provider (borrowed, so the
 /// loop is cheap to build per turn), the shared cancel token (owned `Arc` so the
@@ -434,7 +436,7 @@ fn execute_call(
 /// no tool-name literal `match` here, so adding a built-in tool is one entry in
 /// `builtin_tools`, not a parallel edit to this function. An unknown name falls
 /// through to the external arm (the gateway surfaces the approval card for it).
-fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) {
+pub(crate) fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) {
     match definitions::builtin_metadata(&call.name) {
         Some(spec) => (
             ToolKey::builtin(spec.definition.name.as_str()),
