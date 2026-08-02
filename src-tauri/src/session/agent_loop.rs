@@ -476,6 +476,15 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Shared trace-excerpt truncation (ADR-0078). Exposed `pub(crate)` so the ACP
+/// adapter engine ([`crate::runtime::acp`], ADR-0081) bounds a tool-call's
+/// result excerpt with the SAME rule the built-in loop uses -- a trace row
+/// from either runtime renders identically (the badge + the failure anchor are
+/// the cross-runtime trace contract).
+pub(crate) fn truncate_trace_excerpt(s: &str, max: usize) -> String {
+    truncate(s, max)
+}
+
 // ---------------------------------------------------------------------------
 // Outcome types
 // ---------------------------------------------------------------------------
@@ -485,7 +494,7 @@ fn truncate(s: &str, max: usize) -> String {
 /// unit-testable without committing to `TurnOutcome`'s single-promotion shape
 /// (ADR-0084 carries the full promotion chain; ADR-0078 carries the trace).
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Termination {
+pub enum Termination {
     /// The model emitted a terminal text reply. Carries the verbatim text.
     /// Maps to `TurnOutcome::Textual` when the turn had no promotion, or
     /// `TurnOutcome::Materialized` when it also promoted >=1 result (the text
@@ -517,7 +526,7 @@ pub(crate) enum Termination {
 /// its persisted recipe form ([`RecipeTraceEntry`]) when the turn is recorded
 /// (issue #319) -- the mapping drops the ephemeral [`tool_use_id`](Self::tool_use_id).
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct TraceEntry {
+pub struct TraceEntry {
     pub tool_use_id: String,
     pub name: String,
     pub operation_kind: OperationKind,
@@ -591,7 +600,7 @@ impl From<&TraceEntry> for TraceEntryView {
 /// termination + promotions onto `TurnOutcome`, and carries the trace
 /// alongside to the turn's persisted audit (issue #319, ADR-0078).
 #[derive(Debug, Clone)]
-pub(crate) struct LoopOutcome {
+pub struct LoopOutcome {
     pub termination: Termination,
     /// Promotions this turn, in promotion order (each successful `materialize`
     /// call). ADR-0022 monotonic numbering applies (result_1, result_2, ...);
