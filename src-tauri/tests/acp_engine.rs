@@ -169,18 +169,58 @@ fn refusal_maps_to_text_outcome() {
 }
 
 /// A runaway trajectory (more tool calls than the step cap) trips the engine's
-/// own cancel; the outcome lands in the bounded set (no hang).
+/// own cancel; the cooperative fixture responds Cancelled, so the outcome is
+/// deterministically Cancelled (no race with the success response).
 #[test]
-fn step_cap_overflow_does_not_hang() {
+fn step_cap_overflow_trips_cancel_deterministically() {
     let (outcome, _) = run("step_cap_overflow", 5);
     assert!(
-        matches!(
-            outcome.termination,
-            Termination::Cancelled | Termination::StepCap(_) | Termination::Text(_)
-        ),
-        "step-cap trip lands in the bounded outcome set: {:?}",
+        matches!(outcome.termination, Termination::Cancelled),
+        "step-cap trip + cooperative fixture -> Cancelled: {:?}",
         outcome.termination
     );
+}
+
+/// The wall-clock watchdog fires the shared token on a stuck agent (one that
+/// never reaches a prompt response); the pump sends session/cancel and the
+/// cooperative fixture responds Cancelled. Exercises the watchdog path no
+/// other scenario reaches.
+#[test]
+fn wall_clock_watchdog_fires_cancel_on_a_stuck_agent() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = AcpEngine::new(claude_code(), Arc::clone(&cancel))
+        .with_caps(24, Some(std::time::Duration::from_millis(200)));
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("ACP_FAKE_SCENARIO", "stuck");
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &sink, |_| {});
+    assert!(
+        matches!(outcome.termination, Termination::Cancelled),
+        "watchdog on a stuck agent -> Cancelled: {:?}",
+        outcome.termination
+    );
+}
+
+/// A prompt-response RPC error surfaces as a Transient carrying the agent's
+/// message, NOT "closed stdout" (the diagnostic-misdirection regression fixed
+/// alongside this fixture).
+#[test]
+fn prompt_rpc_error_lands_as_transient_with_the_agent_message() {
+    let (outcome, _) = run("prompt_error", 24);
+    match &outcome.termination {
+        Termination::Transient(msg) => {
+            assert!(
+                msg.contains("agent internal error"),
+                "carries the agent's message: {msg}"
+            );
+            assert!(
+                !msg.contains("closed stdout"),
+                "must not misreport as EOF: {msg}"
+            );
+        }
+        other => panic!("expected Transient, got {other:?}"),
+    }
 }
 
 /// A mid-turn crash (the fixture closes stdout) lands as a transient failure,

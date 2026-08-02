@@ -164,15 +164,60 @@ fn play_scenario(
         }
         "step_cap_overflow" => {
             // Emit more tool-call starts than the step cap; the engine trips
-            // its own cap + cancels. 50 > the default 24.
+            // its own cap + sends session/cancel. Cooperate when cancel arrives
+            // (stop producing + respond Cancelled) so the outcome is
+            // deterministic instead of a race with the success response.
             for i in 1..=50u32 {
+                if *cancel_seen {
+                    respond_prompt(out, &id, StopReason::Cancelled);
+                    return;
+                }
                 notify(
                     out,
                     tool_call_start(&format!("tc_{i}"), &format!("call {i}"), ToolKind::Search),
                 );
+                if drain_once(reader, cancel_seen) {
+                    continue;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
             }
             notify(out, agent_message("ran many calls"));
             respond_prompt(out, &id, StopReason::Success);
+        }
+        "stuck" => {
+            // Never produce a prompt response; wait for the engine's wall-clock
+            // watchdog to fire the shared token, the pump to send session/cancel,
+            // then cooperate (respond Cancelled). Exercises the watchdog path no
+            // other scenario reaches.
+            loop {
+                if *cancel_seen {
+                    respond_prompt(out, &id, StopReason::Cancelled);
+                    return;
+                }
+                if drain_once(reader, cancel_seen) {
+                    continue;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+        "prompt_error" => {
+            // The agent returns a JSON-RPC error for session/prompt (no result).
+            // The engine maps it to a Transient carrying this message, NOT
+            // "closed stdout" (the diagnostic-misdirection regression fixed
+            // alongside this fixture).
+            respond(
+                out,
+                &Response::<serde_json::Value> {
+                    jsonrpc: "2.0".into(),
+                    id: id.clone(),
+                    result: None,
+                    error: Some(RpcError {
+                        code: -32603,
+                        message: "agent internal error".into(),
+                        data: None,
+                    }),
+                },
+            );
         }
         "cancel" => {
             // Spin emitting progress until the client sends session/cancel,

@@ -114,9 +114,8 @@ impl AcpEngine {
         }
     }
 
-    /// Override the default caps (test seam: a unit test drives the step cap
-    /// deterministically).
-    #[allow(dead_code)]
+    /// Override the default caps (test seam: the step-cap test drives the step
+    /// cap deterministically; the watchdog test drives a short wall-clock).
     pub fn with_caps(mut self, step_cap: u32, wall_clock: Option<Duration>) -> Self {
         self.step_cap = step_cap;
         self.wall_clock = wall_clock;
@@ -246,6 +245,9 @@ impl AcpEngine {
             // Reader EOF / pipe break before a response: a transient turn
             // failure (the agent crashed or closed stdout).
             PromptEnd::Eof => Termination::Transient("ACP agent closed stdout mid-turn".into()),
+            // The agent answered with a parse failure / RPC error / empty
+            // result -- surface the real diagnostic, NOT "closed stdout".
+            PromptEnd::Failed(reason) => Termination::Transient(reason),
         };
         let outcome = self.outcome(termination, pump.trace, 1);
         child.kill_and_wait();
@@ -483,32 +485,46 @@ impl AcpIo {
                     if v.get("id") == Some(&prompt_id_value) && v.get("method").is_none() {
                         let resp: Response<wire::PromptResult> = match serde_json::from_value(v) {
                             Ok(r) => r,
-                            Err(_) => return PromptEnd::Eof,
+                            Err(e) => {
+                                return PromptEnd::Failed(format!("prompt response parse: {e}"))
+                            }
                         };
-                        if resp.error.is_some() {
-                            return PromptEnd::Eof;
+                        if let Some(err) = resp.error {
+                            return PromptEnd::Failed(format!("prompt error: {}", err.message));
                         }
                         match resp.result {
                             Some(r) => return PromptEnd::Stop(r.stop_reason),
-                            None => return PromptEnd::Eof,
+                            None => {
+                                return PromptEnd::Failed("prompt response: empty result".into())
+                            }
                         }
                     }
                     // Agent-initiated request (session/request_permission)?
                     if let Some(method) = v.get("method").and_then(Value::as_str) {
                         if v.get("id").is_some() && method == "session/request_permission" {
                             let req_id = v["id"].clone();
-                            let params: RequestPermissionParams = serde_json::from_value(
+                            let params: RequestPermissionParams = match serde_json::from_value(
                                 v.get("params").cloned().unwrap_or(Value::Null),
-                            )
-                            .unwrap_or_else(|_| RequestPermissionParams {
-                                session_id: session_id.to_string(),
-                                tool_call: wire::PermissionToolCall {
-                                    tool_call_id: String::new(),
-                                    title: None,
-                                    kind: None,
-                                },
-                                options: Vec::new(),
-                            });
+                            ) {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    // Malformed permission request: refuse with -32602
+                                    // so the agent is not left waiting, and no phantom
+                                    // decision is recorded against empty ids.
+                                    let _ = self.write_json(&Response::<Value> {
+                                        jsonrpc: "2.0".to_string(),
+                                        id: parse_id(&req_id),
+                                        result: None,
+                                        error: Some(wire::RpcError {
+                                            code: -32602,
+                                            message: "invalid params: session/request_permission"
+                                                .into(),
+                                            data: None,
+                                        }),
+                                    });
+                                    continue;
+                                }
+                            };
                             let outcome =
                                 decide_permission(adapter, &params, approval, sink, cancel);
                             let _ = self.write_json(&Response::<RequestPermissionResult> {
@@ -573,6 +589,11 @@ enum PromptEnd {
     Cancelled,
     /// The agent closed stdout before responding.
     Eof,
+    /// The agent returned a response the engine could not treat as a stop
+    /// (parse failure / RPC `error` / empty result). Carries the diagnostic so
+    /// the turn's `Transient` message names the real cause instead of
+    /// "closed stdout".
+    Failed(String),
 }
 
 // ---------------------------------------------------------------------------
