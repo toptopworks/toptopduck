@@ -19,6 +19,7 @@ use crate::ingest::schema::quote_ident;
 use crate::model::ColumnSchema;
 use crate::session::materializer::TurnDeps;
 use crate::tools::definitions::{self, SAMPLE_DEFAULT_LIMIT, SAMPLE_MAX_LIMIT};
+use crate::tools::ToolPayload;
 
 /// Parse the tool input + read a bounded page of rows from the dataset.
 ///
@@ -26,7 +27,7 @@ use crate::tools::definitions::{self, SAMPLE_DEFAULT_LIMIT, SAMPLE_MAX_LIMIT};
 /// success, or a tool-level error string. The `limit` is clamped to the
 /// schema-declared cap so a hostile or over-eager caller cannot pull an
 /// unbounded payload into the LLM context.
-pub(crate) fn dispatch(input: &Value, deps: &mut TurnDeps) -> Result<Value, String> {
+pub(crate) fn dispatch(input: &Value, deps: &mut TurnDeps) -> Result<ToolPayload, String> {
     let reference_name = definitions::get_str(input, "reference_name")?;
     let offset = offset_param(input)?;
     let limit = limit_param(input)?;
@@ -50,14 +51,18 @@ pub(crate) fn dispatch(input: &Value, deps: &mut TurnDeps) -> Result<Value, Stri
         format!("dataset `{reference_name}` has no resolvable FROM form")
     })?;
     let rows = read_page(deps, &columns, &from, limit, offset)?;
-    Ok(json!({
-        "reference_name": reference_name,
-        "columns": columns.iter().map(definitions::column_json).collect::<Vec<_>>(),
-        "rows": rows,
-        "total": total,
-        "offset": offset,
-        "limit": limit,
-    }))
+    // sample is a read; it has no side effect to report.
+    Ok(ToolPayload {
+        content: json!({
+            "reference_name": reference_name,
+            "columns": columns.iter().map(definitions::column_json).collect::<Vec<_>>(),
+            "rows": rows,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+        }),
+        promotion: None,
+    })
 }
 
 /// Parsed `limit`, defaulted and clamped to [`SAMPLE_MAX_LIMIT`]. A non-positive
@@ -249,11 +254,14 @@ mod tests {
         });
         let sources = HashMap::new();
         let mut deps = inert_deps(&conn, &mut ws, &sources);
-        let v = dispatch(
+        let payload = dispatch(
             &json!({"reference_name": "result_1", "limit": 10}),
             &mut deps,
         )
         .unwrap();
+        // sample is a read; no side effect to report.
+        assert!(payload.promotion.is_none());
+        let v = &payload.content;
         assert_eq!(v["reference_name"], "result_1");
         assert_eq!(v["total"], 2);
         assert_eq!(v["offset"], 0);

@@ -44,7 +44,7 @@ use crate::approval::{
     ToolKey,
 };
 use crate::cancel::CancelToken;
-use crate::model::{DatasetDescriptor, Promotion, TraceEntryView, TurnPhase};
+use crate::model::{Promotion, TraceEntryView, TurnPhase};
 use crate::persistence::recipe::RecipeTraceEntry;
 use crate::provider::tool_calling::{
     ToolResult, ToolTurnMessage, ToolTurnReply, ToolTurnRequest, ToolUse,
@@ -383,10 +383,13 @@ fn execute_call(
         operation_kind,
         summary: summary.clone(),
     });
-    // ADR-0076: dispatch routes by name to the matching executor. The result is
-    // either a JSON payload (is_error=false) or an error string (is_error=true)
-    // -- both feed back to the model; the agent self-corrects on an error.
-    let result = tools::dispatch(call, deps, gate.cancel, materializer);
+    // ADR-0076: dispatch routes by name to the matching executor and surfaces
+    // the outcome as a typed channel (issue #336): the model-facing `result`
+    // (a JSON payload on success or an error string on failure -- both feed
+    // back to the model; the agent self-corrects on an error) plus the side
+    // effect the executor reported.
+    let outcome = tools::dispatch(call, deps, gate.cancel, materializer);
+    let result = outcome.result;
     // ADR-0077: a tool-level error routes back to the model. Log it so a
     // non-converging turn (StepCap) leaves an operator-visible trail of what
     // the model was being told, not just the final cap.
@@ -399,39 +402,13 @@ fn execute_call(
         );
     }
     let success = !result.is_error;
-    // Capture a promotion: a successful materialize registers the full
-    // descriptor in the working set; read it back for the promotions list. The
-    // dispatch content carries the reference_name the materializer installed.
-    // A `None` is a contract violation (the executor always emits
-    // `reference_name` on success, and the working set holds what it just
-    // registered) -- log it so a regression cannot silently drop a
-    // user-visible `result_N`. The SQL itself ran, so the success `ToolResult`
-    // still rides back to the model.
-    if success && call.name == definitions::TOOL_MATERIALIZE {
-        // The verbatim SQL the model materialized rides the promotion: the
-        // wiring seam records it on the Materialized outcome (the recipe's
-        // replayable chain reads it there), and the descriptor alone does not
-        // carry it. Absent `sql` is a contract violation the executor would
-        // have refused -- the empty string is a defensive fallback that never
-        // shadows a real failure.
-        let sql = call
-            .input
-            .get("sql")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        match promotion_from_result(&result.content, deps) {
-            Some(descriptor) => outputs.promotions.push(Promotion {
-                dataset: descriptor,
-                sql,
-            }),
-            None => log::error!(
-                target: "toptopduck::agent_loop",
-                "materialize reported success but the promotion could not be recovered; \
-                 content=`{}`",
-                truncate(&result.content, 200)
-            ),
-        }
+    // The executor reports a promotion through the side-effect channel iff one
+    // landed (only `materialize`, only on success -- the executor builds it
+    // from the typed sql + descriptor, so there is no "success but no
+    // promotion" contract violation to guard). The loop is tool-agnostic: it
+    // pushes `outcome.promotion` without naming any tool (issue #336).
+    if let Some(promotion) = outcome.promotion {
+        outputs.promotions.push(promotion);
     }
     let entry = TraceEntry {
         tool_use_id: call.id.clone(),
@@ -451,40 +428,29 @@ fn execute_call(
 
 /// Classify a tool call for the approval gateway + the trace: the [`ToolKey`]
 /// (built-in vs external server), the [`OperationKind`] badge (ADR-0083), and a
-/// short agent-readable summary of the arguments. Built-in tools key under the
-/// reserved `builtin` server (ADR-0080 Decision 1); an unknown name is treated
-/// as an external tool (the gateway surfaces the approval card for it).
+/// short agent-readable summary of the arguments. Built-in tools classify from
+/// the single metadata table ([`definitions::builtin_metadata`], issue #336) --
+/// no tool-name literal `match` here, so adding a built-in tool is one entry in
+/// `builtin_tools`, not a parallel edit to this function. An unknown name falls
+/// through to the external arm (the gateway surfaces the approval card for it).
 fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) {
-    let (tool, op, summary) = match call.name.as_str() {
-        definitions::TOOL_EXPLORE => (
-            definitions::TOOL_EXPLORE,
-            OperationKind::Read,
-            summarize_field(&call.input, "sql", "<no sql>"),
+    match definitions::builtin_metadata(&call.name) {
+        Some(spec) => (
+            ToolKey::builtin(spec.definition.name.as_str()),
+            spec.operation_kind,
+            summarize_field(&call.input, spec.summary_field, spec.summary_fallback),
         ),
-        definitions::TOOL_MATERIALIZE => (
-            definitions::TOOL_MATERIALIZE,
-            OperationKind::Write,
-            summarize_field(&call.input, "sql", "<no sql>"),
-        ),
-        definitions::TOOL_DESCRIBE => (
-            definitions::TOOL_DESCRIBE,
-            OperationKind::Read,
-            summarize_field(&call.input, "reference_name", "<no reference_name>"),
-        ),
-        definitions::TOOL_SAMPLE => (
-            definitions::TOOL_SAMPLE,
-            OperationKind::Read,
-            summarize_field(&call.input, "reference_name", "<no reference_name>"),
-        ),
-        other => {
-            return (
+        None => {
+            // External arm: an unknown name keys as external, badges Network,
+            // and the summary names the tool so an approval card can surface it.
+            let other = call.name.as_str();
+            (
                 ToolKey::external("unknown", other),
                 OperationKind::Network,
                 format!("external tool `{other}`"),
-            );
+            )
         }
-    };
-    (ToolKey::builtin(tool), op, summary)
+    }
 }
 
 /// Render one `input` field as the call summary, truncated. Falls back to
@@ -507,17 +473,6 @@ fn truncate(s: &str, max: usize) -> String {
         let head: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{head}…")
     }
-}
-
-/// Read the promoted descriptor out of a successful materialize result. The
-/// dispatch content is the JSON the materialize executor built (carries
-/// `reference_name`); the full descriptor lives in the working set, which the
-/// materializer just registered it under. Returns `None` on a parse failure (a
-/// logic bug -- the executor always emits the field on success).
-fn promotion_from_result(content: &str, deps: &TurnDeps) -> Option<DatasetDescriptor> {
-    let value: Value = serde_json::from_str(content).ok()?;
-    let name = value.get("reference_name")?.as_str()?;
-    deps.working_set.get(name).cloned()
 }
 
 // ---------------------------------------------------------------------------
@@ -1495,6 +1450,95 @@ mod tests {
     }
 
     // --- pure helpers -------------------------------------------------------
+
+    /// Characterization pin for `classify_call` (issue #336): the four built-in
+    /// tools each classify to a known `(ToolKey, OperationKind, summary)` triple,
+    /// and an unknown name falls through to the external arm. Pinned BEFORE the
+    /// metadata-table refactor (Move 1) so the table lookup must reproduce these
+    /// exactly -- a dropped arm or a swapped summary field fails here, not in a
+    /// live approval card. Covers a present-arg call per tool + the external arm.
+    #[test]
+    fn classify_call_pins_builtin_and_external_arms() {
+        // explore: builtin server, Read badge, sql summary.
+        let explore = classify_call(&ToolUse {
+            id: "1".into(),
+            name: "explore".into(),
+            input: json!({"sql": "SELECT 1"}),
+        });
+        assert!(explore.0.is_builtin());
+        assert_eq!(explore.0.tool, "explore");
+        assert_eq!(explore.1, OperationKind::Read);
+        assert_eq!(explore.2, "SELECT 1");
+
+        // materialize: builtin server, Write badge, sql summary.
+        let materialize = classify_call(&ToolUse {
+            id: "2".into(),
+            name: "materialize".into(),
+            input: json!({"sql": "SELECT 2"}),
+        });
+        assert!(materialize.0.is_builtin());
+        assert_eq!(materialize.0.tool, "materialize");
+        assert_eq!(materialize.1, OperationKind::Write);
+        assert_eq!(materialize.2, "SELECT 2");
+
+        // describe: builtin server, Read badge, reference_name summary.
+        let describe = classify_call(&ToolUse {
+            id: "3".into(),
+            name: "describe".into(),
+            input: json!({"reference_name": "result_1"}),
+        });
+        assert!(describe.0.is_builtin());
+        assert_eq!(describe.0.tool, "describe");
+        assert_eq!(describe.1, OperationKind::Read);
+        assert_eq!(describe.2, "result_1");
+
+        // sample: builtin server, Read badge, reference_name summary.
+        let sample = classify_call(&ToolUse {
+            id: "4".into(),
+            name: "sample".into(),
+            input: json!({"reference_name": "result_2"}),
+        });
+        assert!(sample.0.is_builtin());
+        assert_eq!(sample.0.tool, "sample");
+        assert_eq!(sample.1, OperationKind::Read);
+        assert_eq!(sample.2, "result_2");
+
+        // External arm: an unknown name keys as external, badges Network, and
+        // the summary names the tool so an approval card can surface it.
+        let unknown = classify_call(&ToolUse {
+            id: "5".into(),
+            name: "acme_fetch".into(),
+            input: json!({}),
+        });
+        assert!(!unknown.0.is_builtin());
+        assert_eq!(unknown.0.tool, "acme_fetch");
+        assert_eq!(unknown.1, OperationKind::Network);
+        assert!(
+            unknown.2.contains("acme_fetch"),
+            "external summary names the tool: {}",
+            unknown.2
+        );
+    }
+
+    /// A missing summary field falls back to the per-tool placeholder so an
+    /// approval card / trace row still renders (the executor will itself refuse
+    /// the mis-shaped call). Pinned so the metadata table's `summary_fallback`
+    /// reproduces the prior literals.
+    #[test]
+    fn classify_call_uses_per_tool_summary_fallback_when_field_absent() {
+        let explore = classify_call(&ToolUse {
+            id: "1".into(),
+            name: "explore".into(),
+            input: json!({}),
+        });
+        assert_eq!(explore.2, "<no sql>");
+        let describe = classify_call(&ToolUse {
+            id: "2".into(),
+            name: "describe".into(),
+            input: json!({}),
+        });
+        assert_eq!(describe.2, "<no reference_name>");
+    }
 
     #[test]
     fn classify_call_marks_materialize_as_write() {

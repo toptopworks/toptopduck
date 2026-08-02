@@ -30,6 +30,7 @@ use crate::sandbox_sql::{
 };
 use crate::session::materializer::TurnDeps;
 use crate::tools::definitions::{self, EXPLORE_DEFAULT_SAMPLE_ROWS, EXPLORE_MAX_SAMPLE_ROWS};
+use crate::tools::ToolPayload;
 
 /// The scratch table name on the explore sandbox. The sandbox is single-use
 /// (LocalFileSystem lockdown is irreversible, so the connection is dropped per
@@ -46,15 +47,20 @@ pub(crate) fn dispatch(
     input: &Value,
     deps: &mut TurnDeps,
     cancel: &CancelToken,
-) -> Result<Value, String> {
+) -> Result<ToolPayload, String> {
     let sql = definitions::get_str(input, "sql")?;
     let sample_rows = sample_rows_param(input)?;
     let shape = run_explore(&sql, sample_rows, deps, cancel)?;
-    Ok(json!({
-        "columns": shape.columns.iter().map(definitions::column_json).collect::<Vec<_>>(),
-        "row_count": shape.row_count,
-        "sample": shape.sample,
-    }))
+    // explore never promotes (it runs on a scratch sandbox that is dropped per
+    // call -- ADR-0077 namespace isolation), so the side-effect channel is None.
+    Ok(ToolPayload {
+        content: json!({
+            "columns": shape.columns.iter().map(definitions::column_json).collect::<Vec<_>>(),
+            "row_count": shape.row_count,
+            "sample": shape.sample,
+        }),
+        promotion: None,
+    })
 }
 
 /// Parsed `sample_rows`, defaulted and clamped to the schema-declared bounds.
@@ -278,12 +284,16 @@ mod tests {
         let sources = std::collections::HashMap::new();
         let mut deps = inert_deps(&conn, &mut ws, &sources);
         let cancel = CancelToken::new();
-        let v = dispatch(
+        let payload = dispatch(
             &json!({"sql": "SELECT * FROM result_1 WHERE id > 1 ORDER BY id"}),
             &mut deps,
             &cancel,
         )
         .unwrap();
+        // explore never promotes (scratch sandbox, dropped per call) -- the
+        // side-effect channel carries None even on a successful read.
+        assert!(payload.promotion.is_none());
+        let v = &payload.content;
 
         // Shape: two rows (id 2,3), both columns, sample carries both rows.
         assert_eq!(v["row_count"], 2);

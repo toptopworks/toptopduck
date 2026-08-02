@@ -13,6 +13,9 @@
 //! [`crate::session::materializer::Materializer`] and so inherits ADR-0022/0024/
 //! 0030 numbering + caps for free.
 
+use std::sync::OnceLock;
+
+use crate::approval::OperationKind;
 use crate::model::ColumnSchema;
 use crate::provider::tool_calling::ToolDefinition;
 use serde_json::{json, Value};
@@ -190,17 +193,90 @@ pub(crate) fn sample_definition() -> ToolDefinition {
     }
 }
 
-/// The full built-in tool table: the four DuckDB tools the gateway advertises
-/// to the runtime (ADR-0076). User-configured MCP servers (#301) and
-/// skill-declared tools join this table at the gateway aggregation layer in a
-/// later slice; this function is the built-in-only foundation.
+/// Static metadata for one built-in tool (issue #336): the schema-layer
+/// [`ToolDefinition`] paired with the orchestration-side classification -- the
+/// approval-gateway [`OperationKind`] badge and the trace/approval summary key
+/// (`summary_field` + its `summary_fallback`). One struct so adding a built-in
+/// tool is a single entry in [`builtin_tools`], not four parallel edits across
+/// definitions + dispatch + `classify_call` + a side-effect special-case.
+///
+/// The `Builtin` prefix is deliberate: this is the static, compile-time table
+/// for the four DuckDB tools. External (MCP) tool metadata is discovered at run
+/// time from its server and does not live in this struct.
+pub(crate) struct BuiltinToolSpec {
+    /// The schema advertised to the runtime (name + description + JSON Schema).
+    pub definition: ToolDefinition,
+    /// The approval-gateway operation badge (ADR-0083): Read for the read-shaped
+    /// tools, Write for the sole promoting tool.
+    pub operation_kind: OperationKind,
+    /// The input field rendered as the call summary (the SQL or reference name).
+    pub summary_field: &'static str,
+    /// Best-effort placeholder when `summary_field` is absent on a mis-shaped
+    /// call (the executor will itself refuse it).
+    pub summary_fallback: &'static str,
+}
+
+/// The single-point built-in tool table (issue #336): the four DuckDB tools the
+/// gateway advertises, each with its schema + classification in one entry. Held
+/// in a process-level [`OnceLock`] (MSRV 1.77 -- `LazyLock` needs 1.80) so the
+/// table is built once and read by both [`builtin_definitions`] (schema view)
+/// and [`builtin_metadata`] (classification view) without re-spelling the four.
+///
+/// User-configured MCP servers (#301) and skill-declared tools join the
+/// advertised surface at the gateway aggregation layer in a later slice; this
+/// table is the built-in-only foundation.
+pub(crate) fn builtin_tools() -> &'static [BuiltinToolSpec] {
+    static TOOLS: OnceLock<Vec<BuiltinToolSpec>> = OnceLock::new();
+    TOOLS.get_or_init(|| {
+        vec![
+            BuiltinToolSpec {
+                definition: explore_definition(),
+                operation_kind: OperationKind::Read,
+                summary_field: "sql",
+                summary_fallback: "<no sql>",
+            },
+            BuiltinToolSpec {
+                definition: materialize_definition(),
+                operation_kind: OperationKind::Write,
+                summary_field: "sql",
+                summary_fallback: "<no sql>",
+            },
+            BuiltinToolSpec {
+                definition: describe_definition(),
+                operation_kind: OperationKind::Read,
+                summary_field: "reference_name",
+                summary_fallback: "<no reference_name>",
+            },
+            BuiltinToolSpec {
+                definition: sample_definition(),
+                operation_kind: OperationKind::Read,
+                summary_field: "reference_name",
+                summary_fallback: "<no reference_name>",
+            },
+        ]
+    })
+}
+
+/// Look up a built-in tool's metadata by name (issue #336). Returns `None` for
+/// an unknown name so the caller (the agent-loop `classify_call`) can fall
+/// through to its external-tool arm. The borrow is `&'static` because
+/// [`builtin_tools`] lives in a process-level `OnceLock`.
+pub(crate) fn builtin_metadata(name: &str) -> Option<&'static BuiltinToolSpec> {
+    builtin_tools()
+        .iter()
+        .find(|spec| spec.definition.name == name)
+}
+
+/// The full built-in tool table as advertised to the runtime (ADR-0076): the
+/// schema view derived from [`builtin_tools`]. Cloning the four small
+/// definitions per call matches the prior freshly-constructed-vec cost; callers
+/// (the per-turn/per-session tool table) take a fresh copy with no shared
+/// mutable state crossing sessions.
 pub(crate) fn builtin_definitions() -> Vec<ToolDefinition> {
-    vec![
-        explore_definition(),
-        materialize_definition(),
-        describe_definition(),
-        sample_definition(),
-    ]
+    builtin_tools()
+        .iter()
+        .map(|spec| spec.definition.clone())
+        .collect()
 }
 
 /// Parse a JSON-typed string parameter out of a tool input value, returning a
@@ -260,6 +336,51 @@ mod tests {
         let unique: std::collections::HashSet<&str> = names.iter().copied().collect();
         assert_eq!(names.len(), unique.len(), "duplicate tool names: {names:?}");
         assert_eq!(names.len(), 4);
+    }
+
+    /// The metadata table ([`builtin_tools`]) and the schema view
+    /// ([`builtin_definitions`]) name the SAME four tools (issue #336). A drift
+    /// -- a tool in one but not the other -- would mean a tool the gateway
+    /// advertises but `classify_call` cannot classify (or vice versa), so the
+    /// approval card / trace would fall through to the external arm for a
+    /// built-in. Pinned so a future fifth tool added to only one table fails
+    /// here, not in a live mis-classified approval card.
+    #[test]
+    fn builtin_tools_table_matches_definitions_table() {
+        let spec_names: std::collections::HashSet<&str> = builtin_tools()
+            .iter()
+            .map(|s| s.definition.name.as_str())
+            .collect();
+        let defs = builtin_definitions();
+        let def_names: std::collections::HashSet<&str> =
+            defs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            spec_names, def_names,
+            "metadata table and schema view must advertise the same tool set"
+        );
+        assert_eq!(
+            spec_names.len(),
+            4,
+            "exactly four built-in tools in the metadata table"
+        );
+    }
+
+    /// `builtin_metadata` resolves each advertised name to its spec, and `None`
+    /// for an unknown name (the external-tool fall-through contract,
+    /// `classify_call` relies on).
+    #[test]
+    fn builtin_metadata_resolves_known_and_rejects_unknown() {
+        for def in builtin_definitions() {
+            assert!(
+                builtin_metadata(&def.name).is_some(),
+                "metadata lookup must resolve advertised tool `{}`",
+                def.name
+            );
+        }
+        assert!(
+            builtin_metadata("not_a_builtin_tool").is_none(),
+            "unknown name must miss so classify_call falls through to external"
+        );
     }
 
     /// `sql` is required on explore + materialize; `reference_name` on describe

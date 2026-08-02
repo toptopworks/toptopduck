@@ -27,6 +27,7 @@ pub mod read_paths;
 pub mod sample;
 
 use crate::cancel::CancelToken;
+use crate::model::Promotion;
 use crate::provider::tool_calling::{ToolDefinition, ToolResult, ToolUse};
 use crate::session::materializer::{Materializer, TurnDeps};
 use serde_json::Value;
@@ -42,14 +43,56 @@ pub fn builtin_table() -> Vec<ToolDefinition> {
     definitions::builtin_definitions()
 }
 
+/// The executor→dispatch internal contract (issue #336): the JSON content that
+/// reaches the model, paired with an optional side effect. Only `materialize`
+/// fills `promotion` today (a typed `Promotion` built from the in-hand
+/// `dataset` + `sql`); the read-shaped tools set `promotion: None`. The dispatch
+/// wrapper assembles this into a [`ToolOutcome`] for the orchestration layer.
+///
+/// `pub(super)` because this is the tools-module-internal seam between an
+/// executor and [`dispatch`]; the orchestration layer consumes [`ToolOutcome`],
+/// not this struct. The field names (`content` / `promotion`) intentionally
+/// mirror [`ToolOutcome`] so the wrapper is a plain re-pack.
+#[derive(Debug)]
+pub(super) struct ToolPayload {
+    /// The model-facing JSON payload (serialized to the `ToolResult.content`
+    /// string by [`dispatch`]).
+    pub content: Value,
+    /// A typed side effect the executor already holds (issue #336): a
+    /// `materialize` promotion, built from the typed descriptor + sql rather
+    /// than re-derived from the serialized content. `None` for the read tools.
+    pub promotion: Option<Promotion>,
+}
+
+/// The dispatch outcome the orchestration layer consumes (issue #336): the
+/// model-facing [`ToolResult`] paired with the side effect the executor
+/// reported. Wrapping the `ToolResult` (rather than replacing it) keeps the
+/// model envelope byte-identical -- the agent sees the same `content` /
+/// `is_error` it always did -- while the typed `promotion` flows to the agent
+/// loop without the prior JSON serialize → deserialize round trip.
+///
+/// No `Builtin` prefix: this is a domain-level seam a future external-runtime
+/// bridge can return the same shape against (ADR-0076), not a built-in-only
+/// type.
+#[derive(Debug)]
+pub(crate) struct ToolOutcome {
+    /// The model-facing result (success payload or error string). Unchanged in
+    /// shape from the pre-refactor `ToolResult`.
+    pub result: ToolResult,
+    /// The side effect the executor reported (`Some` only on a successful
+    /// `materialize`). The agent loop pushes it to the turn's promotion list.
+    pub promotion: Option<Promotion>,
+}
+
 /// Dispatch a model-emitted tool call to its executor (ADR-0076 gateway routing,
-/// issue #292).
+/// issue #292) and surface its side effect as a typed channel (issue #336).
 ///
 /// Routes by the tool name to the matching executor, then wraps the executor's
-/// outcome as a [`ToolResult`]: a JSON-serialized payload on success, or the
-/// error string with `is_error = true` (ADR-0077 -- the agent self-corrects from
-/// a tool-level error rather than the turn blindly retrying). An unknown tool
-/// name is itself a tool error so the model can stop calling it.
+/// [`ToolPayload`] as a [`ToolOutcome`]: a JSON-serialized [`ToolResult`] on
+/// success (with the executor's typed `promotion`, if any) or the error string
+/// with `is_error = true` (ADR-0077 -- the agent self-corrects from a tool-level
+/// error rather than the turn blindly retrying). An unknown tool name is itself a
+/// tool error so the model can stop calling it.
 ///
 /// `pub(crate)` because the signature borrows [`TurnDeps`] and [`Materializer`]
 /// (both `pub(crate)`) -- the only consumer today is the in-crate agent loop
@@ -60,8 +103,8 @@ pub(crate) fn dispatch(
     deps: &mut TurnDeps,
     cancel: &CancelToken,
     materializer: &mut dyn Materializer,
-) -> ToolResult {
-    let outcome: Result<Value, String> = match call.name.as_str() {
+) -> ToolOutcome {
+    let outcome: Result<ToolPayload, String> = match call.name.as_str() {
         definitions::TOOL_EXPLORE => explore::dispatch(&call.input, deps, cancel),
         definitions::TOOL_MATERIALIZE => {
             materialize::dispatch(&call.input, deps, cancel, materializer)
@@ -71,15 +114,21 @@ pub(crate) fn dispatch(
         other => Err(format!("unknown tool: `{other}`")),
     };
     match outcome {
-        Ok(payload) => ToolResult {
-            tool_use_id: call.id.clone(),
-            content: payload.to_string(),
-            is_error: false,
+        Ok(payload) => ToolOutcome {
+            result: ToolResult {
+                tool_use_id: call.id.clone(),
+                content: payload.content.to_string(),
+                is_error: false,
+            },
+            promotion: payload.promotion,
         },
-        Err(message) => ToolResult {
-            tool_use_id: call.id.clone(),
-            content: message,
-            is_error: true,
+        Err(message) => ToolOutcome {
+            result: ToolResult {
+                tool_use_id: call.id.clone(),
+                content: message,
+                is_error: true,
+            },
+            promotion: None,
         },
     }
 }
@@ -181,7 +230,7 @@ mod tests {
             name: "not_a_real_tool".into(),
             input: json!({}),
         };
-        let result = dispatch(&call, &mut deps, &cancel, &mut materializer);
+        let result = dispatch(&call, &mut deps, &cancel, &mut materializer).result;
         assert_eq!(result.tool_use_id, "tu_1");
         assert!(result.is_error, "unknown tool must be an error");
         assert!(
@@ -230,7 +279,7 @@ mod tests {
             name: "describe".into(),
             input: json!({"reference_name": "people"}),
         };
-        let result = dispatch(&call, &mut deps, &cancel, &mut materializer);
+        let result = dispatch(&call, &mut deps, &cancel, &mut materializer).result;
         assert_eq!(result.tool_use_id, "tu_2");
         assert!(
             !result.is_error,
@@ -261,7 +310,7 @@ mod tests {
             name: "describe".into(),
             input: json!({"reference_name": "ghost"}),
         };
-        let result = dispatch(&call, &mut deps, &cancel, &mut materializer);
+        let result = dispatch(&call, &mut deps, &cancel, &mut materializer).result;
         assert!(result.is_error, "unknown dataset is a tool error");
         assert!(
             result.content.contains("unknown dataset"),
@@ -320,7 +369,8 @@ mod tests {
             &mut deps,
             &cancel,
             &mut materializer,
-        );
+        )
+        .result;
         assert_eq!(explore.tool_use_id, "e1");
         assert!(
             !explore.is_error,
@@ -338,7 +388,8 @@ mod tests {
             &mut deps,
             &cancel,
             &mut materializer,
-        );
+        )
+        .result;
         assert_eq!(sample.tool_use_id, "s1");
         assert!(
             !sample.is_error,
@@ -346,8 +397,10 @@ mod tests {
             sample.content
         );
 
-        // materialize routes + succeeds (promotes the next result_N).
-        let materialize = dispatch(
+        // materialize routes + succeeds (promotes the next result_N) and the
+        // dispatch wrapper passes the executor's typed promotion through to the
+        // orchestration layer (issue #336).
+        let materialize_outcome = dispatch(
             &ToolUse {
                 id: "m1".into(),
                 name: "materialize".into(),
@@ -357,11 +410,15 @@ mod tests {
             &cancel,
             &mut materializer,
         );
-        assert_eq!(materialize.tool_use_id, "m1");
+        assert_eq!(materialize_outcome.result.tool_use_id, "m1");
         assert!(
-            !materialize.is_error,
+            !materialize_outcome.result.is_error,
             "materialize routes + succeeds: {}",
-            materialize.content
+            materialize_outcome.result.content
+        );
+        assert!(
+            materialize_outcome.promotion.is_some(),
+            "materialize outcome carries the promotion through the wrapper"
         );
     }
 }
