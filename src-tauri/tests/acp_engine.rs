@@ -15,7 +15,7 @@ use std::sync::Arc;
 use toptopduck_lib::approval::{ApprovalResponse, ApprovalSink, ApprovalState, AuthMode};
 use toptopduck_lib::cancel::CancelToken;
 use toptopduck_lib::model::TurnPhase;
-use toptopduck_lib::runtime::acp::adapter::{claude_code, AdapterSpec};
+use toptopduck_lib::runtime::acp::adapter::{claude_code, codex, gemini_cli, AdapterSpec};
 use toptopduck_lib::runtime::acp::engine::{AcpEngine, AcpTurnInput};
 use toptopduck_lib::runtime::acp::wire::{ContentBlock, McpServer};
 use toptopduck_lib::session::agent_loop::{LoopOutcome, Termination};
@@ -85,6 +85,22 @@ fn run(scenario: &str, step_cap: u32) -> (LoopOutcome, Vec<TurnPhase>) {
     std::env::set_var("ACP_FAKE_SCENARIO", scenario);
     let outcome = eng.run(&input(), &fake_cli(), &approval, &sink, |p| phases.push(p));
     (outcome, phases)
+}
+
+/// Drive one scenario through the engine built from an arbitrary `spec`. The
+/// default [`run`] hardcodes claude-code; this variant lets the isomorphism
+/// test exercise gemini-cli + codex against the SAME fixture binary. The fixture
+/// ignores argv, so claude-code/gemini-cli (`--acp`) and codex (empty argv) all
+/// spawn + pump through one code path.
+fn run_with_spec(spec: &AdapterSpec, scenario: &str, step_cap: u32) -> LoopOutcome {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = AcpEngine::new(spec.clone(), cancel)
+        .with_caps(step_cap, Some(std::time::Duration::from_secs(10)));
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("ACP_FAKE_SCENARIO", scenario);
+    eng.run(&input(), &fake_cli(), &approval, &sink, |_| {})
 }
 
 // ---------------------------------------------------------------------------
@@ -321,4 +337,53 @@ fn engine_runs_against_the_claude_code_spec() {
     assert_eq!(spec.adapter_id().as_str(), "claude-code");
     let (outcome, _) = run("text_reply", 24);
     assert!(matches!(outcome.termination, Termination::Text(_)));
+}
+
+/// #300 structural coverage of AC "the engine gains no per-CLI branch": drive
+/// the same text-reply (success path) and the same step-cap overflow (the
+/// step-cap cancel fallback path) through each of the three v1 specs
+/// (claude-code, gemini-cli, codex) and assert identical termination. The
+/// fixture ignores argv, so the `--acp` launch (claude-code / gemini-cli) vs the
+/// empty-argv launch (codex) all spawn + pump through the SAME engine entry
+/// point. Combined with the engine's spec-consumption surface being only `argv`
+/// (spawn) + `id` (error message + ToolKey) -- audited, never a dispatch --
+/// this pins ONE uniform outcome per scenario across all three specs, so a
+/// future per-CLI branch that changes outcomes would trip it.
+///
+/// What this does NOT prove: behavioral isomorphism of the REAL CLIs (cancel /
+/// step-cap / wall-clock fallback, the rest of AC #3). The fixture erases the
+/// very dimension (argv) a per-CLI branch would consume, so it cannot observe
+/// real-CLI divergence by design; that coverage is manual E2E per the PRD. The
+/// wall-clock fallback path across specs is also not exercised here (only the
+/// claude-code `wall_clock_watchdog_*` test drives it).
+#[test]
+fn engine_outcome_is_identical_across_all_three_specs() {
+    let specs = [claude_code(), gemini_cli(), codex()];
+    for spec in &specs {
+        // Success path: a clean text reply -> Text for every spec.
+        let outcome = run_with_spec(spec, "text_reply", 24);
+        match &outcome.termination {
+            Termination::Text(t) => assert_eq!(
+                t, "the answer is 42",
+                "{}: text_reply round-tripped through the pump",
+                spec.id
+            ),
+            other => panic!("{} text_reply -> Text, got {other:?}", spec.id),
+        }
+        assert!(
+            outcome.trace.is_empty(),
+            "{}: no tool calls -> empty trace",
+            spec.id
+        );
+
+        // Fallback path: a runaway trajectory trips the step cap -> Cancelled
+        // for every spec (cancel / step-cap behave isomorphically).
+        let outcome = run_with_spec(spec, "step_cap_overflow", 5);
+        assert!(
+            matches!(outcome.termination, Termination::Cancelled),
+            "{}: step-cap trip -> Cancelled, got {:?}",
+            spec.id,
+            outcome.termination
+        );
+    }
 }
