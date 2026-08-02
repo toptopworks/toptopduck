@@ -9,7 +9,7 @@ pub mod sandbox;
 pub mod snapshot;
 pub mod source_lifecycle;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -37,10 +37,16 @@ use crate::persistence::recipe::{
 };
 use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
 use crate::persistence::{read_duck, save_atomic, SaveError};
+use crate::provider::prompt::ResponseLocale;
 use crate::provider::{Provider, UnwiredProvider};
+use crate::runtime::acp::adapter::{detect_adapter, AdapterSpec};
+use crate::runtime::acp::engine::{AcpEngine, AcpTurnInput};
+use crate::runtime::acp::wire::McpServer;
+use crate::runtime::gateway::server::{bind_gateway, serve_connection, GatewayCtx, GatewayOutcome};
 use crate::session::agent_loop::{AgentLoop, LoopOutcome, Termination, TraceEntry};
 use crate::session::materializer::{Materializer, RealMaterializer, TurnDeps};
 use crate::session_store::ClosingFlag;
+use crate::tools::definitions::builtin_metadata;
 use crate::window;
 use crate::workingset::{WorkingSet, DEFAULT_RESULT_COUNT_CAP};
 
@@ -499,6 +505,15 @@ pub struct Session {
     /// path is the sole awaiter); a closed receiver (waiter timed out / gone) makes
     /// `send` return Err, which Drop swallows (Drop must not panic).
     drop_signal: Option<std::sync::mpsc::Sender<()>>,
+    /// The per-session external-runtime selector (issue #299 slice 9c). `None`
+    /// drives the built-in agent loop; `Some(spec)` drives the external ACP
+    /// engine for one CLI on the next turn. This is the minimal-temporary-entry
+    /// hook (issue #299: validation-period runtime selection takes a minimal
+    /// temporary entry; the real composer picker is #302) -- a `pub(crate)`
+    /// setter, NOT an IPC command, so no frontend / user can flip it until #302
+    /// ships the real picker. Integration tests toggle it; production stays
+    /// `None` (built-in).
+    external_runtime: Option<AdapterSpec>,
 }
 
 /// The persisted-form audit substructures for ONE timeline entry (ADR-0078,
@@ -575,6 +590,17 @@ impl Session {
         self.result_count_cap = cap;
     }
 
+    /// Set the per-session external-runtime selector (issue #299 slice 9c,
+    /// minimal-temporary-entry hook -- see [`Self::external_runtime`]). Pass
+    /// `Some(spec)` to drive the external ACP engine for the next turn, or
+    /// `None` to revert to the built-in loop. `pub` (NOT an IPC command) so
+    /// integration tests in `tests/` (a separate crate) can toggle it; no
+    /// frontend / user can flip it until #302 ships the real picker, because
+    /// no `#[tauri::command]` wraps it and it never crosses IPC.
+    pub fn set_external_runtime(&mut self, spec: Option<AdapterSpec>) {
+        self.external_runtime = spec;
+    }
+
     /// Build a session with an explicit provider (tests inject a scripted fake;
     /// the real LLM client wires in #29). The default [`Self::new`] uses
     /// [`UnwiredProvider`] -- every turn is refused until a provider is set.
@@ -629,6 +655,7 @@ impl Session {
             last_written_hash: None,
             pending_conflict: None,
             drop_signal: None,
+            external_runtime: None,
         })
     }
 
@@ -1732,7 +1759,7 @@ impl Session {
         question: &str,
         approval: &ApprovalState,
         sink: &dyn ApprovalSink,
-        on_phase: impl FnMut(TurnPhase),
+        on_phase: impl FnMut(TurnPhase) + Send,
     ) -> TurnOutcome {
         // Facade over the agent loop (ADR-0081, issue #318): assemble the
         // windowed tool-calling request (system prompt + tool table + windowed
@@ -1744,42 +1771,63 @@ impl Session {
         // orchestration -- ADR-0053 Decision 2).
         let turns = self.turns();
         let locale = self.provider.response_locale();
-        let request = window::assemble_tool_turn(question, &self.working_set, &turns, locale);
-        // Disjoint field borrows: the loop borrows `&*self.provider` while
-        // TurnDeps borrows `&self.conn` / `&self.source_files` /
-        // `&mut self.working_set` / `&self.temp_path` and the loop takes
-        // `&mut *self.materializer` -- distinct Session fields, so they
-        // coexist without widening to `&mut self`. The block scope drops the
-        // borrows before `record_turn` takes its own `&mut self`.
-        let (outcome, trace) = {
-            let mut deps = TurnDeps {
-                conn: &self.conn,
-                source_files: &self.source_files,
-                working_set: &mut self.working_set,
-                result_row_cap: self.result_row_cap,
-                result_count_cap: self.result_count_cap,
-                temp_path: &self.temp_path,
-            };
-            let mut loop_outcome = AgentLoop::new(&*self.provider, Arc::clone(&self.cancel)).run(
-                &request,
-                &mut deps,
-                &mut *self.materializer,
-                approval,
-                sink,
-                on_phase,
-            );
-            // The loop's real multi-call trace rides alongside the mapped
-            // outcome to record_turn (ADR-0078, issue #319): the mapper stays
-            // focused on the four-way classification, so the trace rides
-            // separately rather than folded into TurnOutcome -- which crosses
-            // IPC as the outcome contract alone; the trace's DISPLAY view
-            // lands on the TurnRecord at record_turn (issue #297), never on
-            // the outcome. `turn_outcome_from_loop` reads only `termination`
-            // + `promotions`, so the trace is moved out before the outcome is
-            // mapped (no clone on the per-turn record path); `mem::take`
-            // leaves an empty Vec the mapper ignores.
-            let trace = std::mem::take(&mut loop_outcome.trace);
-            (turn_outcome_from_loop(loop_outcome), trace)
+        // The external-runtime branch (issue #299 slice 9c, ADR-0085) replaces
+        // the built-in agent loop when an adapter is set; otherwise the built-in
+        // loop runs (ADR-0081). Both return a `(outcome, trace)` pair; the
+        // post-turn discard + `record_turn` path stays shared (ADR-0055 +
+        // ADR-0078). `on_phase` moves into exactly one arm (match arms are
+        // exclusive), so the built-in closure and the external engine cannot
+        // both hold it.
+        let (outcome, trace) = match self.external_runtime.clone() {
+            Some(adapter) => {
+                self.run_external_turn(question, &turns, locale, adapter, approval, sink, on_phase)
+            }
+            None => {
+                // Built-in agent loop (ADR-0081, issue #318): assemble the
+                // windowed tool-calling request, drive the loop with the shared
+                // session state, map the structured LoopOutcome onto TurnOutcome.
+                let request =
+                    window::assemble_tool_turn(question, &self.working_set, &turns, locale);
+                // Disjoint field borrows: the loop borrows `&*self.provider`
+                // while TurnDeps borrows `&self.conn` / `&self.source_files` /
+                // `&mut self.working_set` / `&self.temp_path` and the loop takes
+                // `&mut *self.materializer` -- distinct Session fields, so they
+                // coexist without widening to `&mut self`. The block scope drops
+                // the borrows before `record_turn` takes its own `&mut self`.
+                let (outcome, trace) = {
+                    let mut deps = TurnDeps {
+                        conn: &self.conn,
+                        source_files: &self.source_files,
+                        working_set: &mut self.working_set,
+                        result_row_cap: self.result_row_cap,
+                        result_count_cap: self.result_count_cap,
+                        temp_path: &self.temp_path,
+                    };
+                    let mut loop_outcome =
+                        AgentLoop::new(&*self.provider, Arc::clone(&self.cancel)).run(
+                            &request,
+                            &mut deps,
+                            &mut *self.materializer,
+                            approval,
+                            sink,
+                            on_phase,
+                        );
+                    // The loop's real multi-call trace rides alongside the
+                    // mapped outcome to record_turn (ADR-0078, issue #319): the
+                    // mapper stays focused on the four-way classification, so
+                    // the trace rides separately rather than folded into
+                    // TurnOutcome -- which crosses IPC as the outcome contract
+                    // alone; the trace's DISPLAY view lands on the TurnRecord
+                    // at record_turn (issue #297), never on the outcome.
+                    // `turn_outcome_from_loop` reads only `termination` +
+                    // `promotions`, so the trace is moved out before the outcome
+                    // is mapped (no clone on the per-turn record path);
+                    // `mem::take` leaves an empty Vec the mapper ignores.
+                    let trace = std::mem::take(&mut loop_outcome.trace);
+                    (turn_outcome_from_loop(loop_outcome), trace)
+                };
+                (outcome, trace)
+            }
         };
         // ADR-0055 post-turn discard: if `close_session` marked this session
         // closing while the turn was in flight (it also fired cancel, so the
@@ -1801,6 +1849,135 @@ impl Session {
             return outcome;
         }
         self.record_turn(question, outcome, trace)
+    }
+
+    /// Drive one external-runtime turn (issue #299 slice 9c, ADR-0085).
+    ///
+    /// Spawns the external CLI via [`AcpEngine`], which injects the bridge MCP
+    /// descriptor at `session/new`; the CLI launches the bridge, the bridge
+    /// connects back to a per-bridge gateway, and the gateway serves the
+    /// built-in tool table + routes every `tools/call` through the approval
+    /// gate + [`crate::tools::dispatch`] -- the same path the built-in loop
+    /// takes (ADR-0076 single enforcement point). The gateway serve loop and
+    /// the ACP engine run on two scoped threads (ADR-0085); this method joins
+    /// both, merges their outcomes (trace de-duplicated: gateway authoritative
+    /// for gateway-routed tools, ACP pump for the CLI's own built-in tools),
+    /// and returns the same `(TurnOutcome, trace)` shape the built-in branch
+    /// does so [`Self::ask_with_phase`]'s post-turn path is shared.
+    #[allow(clippy::too_many_arguments)]
+    fn run_external_turn<O: FnMut(TurnPhase) + Send>(
+        &mut self,
+        question: &str,
+        history: &[TurnRecord],
+        locale: ResponseLocale,
+        adapter: AdapterSpec,
+        approval: &ApprovalState,
+        sink: &dyn ApprovalSink,
+        on_phase: O,
+    ) -> (TurnOutcome, Vec<TraceEntry>) {
+        // 1. Resolve the CLI binary. Not-on-PATH -> a transient turn failure
+        //    (the engine never spawns; nothing to clean up).
+        let binary = match detect_adapter(&adapter) {
+            Some(p) => p,
+            None => {
+                return (
+                    TurnOutcome::Failed(TurnFailure::Execute {
+                        detail: format!("external runtime `{}` not found on PATH", adapter.id),
+                    }),
+                    Vec::new(),
+                );
+            }
+        };
+        // 2. Bind the per-bridge gateway (random localhost port + 64-hex
+        //    token). Bind failure is rare (OS port exhaustion) but surfaces
+        //    honestly.
+        let handle = match bind_gateway() {
+            Ok(h) => h,
+            Err(e) => {
+                return (
+                    TurnOutcome::Failed(TurnFailure::Execute {
+                        detail: format!("gateway bind failed: {e}"),
+                    }),
+                    Vec::new(),
+                );
+            }
+        };
+        // 3. Build the bridge MCP descriptor. The CLI launches this binary as
+        //    its MCP server; the bridge reads port + token from env and
+        //    connects back to the gateway (ADR-0085 per-bridge lifecycle).
+        let env = BTreeMap::from([
+            (ENV_PORT.to_string(), handle.port.to_string()),
+            (ENV_TOKEN.to_string(), handle.token.clone()),
+        ]);
+        let mcp_server =
+            McpServer::stdio_bridge(GATEWAY_SERVER_NAME, bridge_bin_path(), Vec::new(), env);
+        // 4. Assemble the prompt blocks (windowed context + schema; the
+        //    leading system-prompt block carries the M-contract, ADR-0081).
+        let prompt_blocks = window::assemble_acp_turn(question, &self.working_set, history, locale);
+        let input = AcpTurnInput {
+            cwd: self.temp_path.to_string_lossy().to_string(),
+            mcp_servers: vec![mcp_server],
+            prompt_blocks,
+        };
+        // 5. Drive the gateway serve + the ACP engine on two scoped threads.
+        //    The gateway borrows the session's live resources (conn / working
+        //    set / materializer / approval / sink / cancel) for `tools/call`
+        //    dispatch; the engine drives the ACP protocol with no session
+        //    borrows. Scoped threads let the non-`'static` borrows cross the
+        //    thread boundary; the two `&` params (approval / sink) are `Copy`
+        //    backed by `Sync` types, so both threads may hold them.
+        // The ACP engine runs on a scoped thread (it drives the CLI; the CLI
+        // spawns the bridge, the bridge connects back to the gateway). The
+        // gateway serve runs on THIS thread because `duckdb::Connection` is
+        // `!Sync` -- its statement cache + inner handle are `RefCell`-guarded,
+        // so `&Connection` is `!Send` and cannot cross a thread boundary. The
+        // engine holds no session borrows (owned input/binary/adapter + an
+        // `Arc` cancel clone + `&approval`/`&sink`, which are `Sync`-backed) +
+        // the `Send`-bounded `on_phase`, so it crosses cleanly; the serve loop
+        // keeps the session's live resources on the thread that owns them
+        // (ADR-0085: serve borrows in place, engine drives in parallel).
+        let (acp_outcome, gateway_result) = std::thread::scope(|s| {
+            let engine = AcpEngine::new(adapter, Arc::clone(&self.cancel));
+            let eng = s.spawn(move || engine.run(&input, &binary, approval, sink, on_phase));
+            let deps = TurnDeps {
+                conn: &self.conn,
+                source_files: &self.source_files,
+                working_set: &mut self.working_set,
+                result_row_cap: self.result_row_cap,
+                result_count_cap: self.result_count_cap,
+                temp_path: &self.temp_path,
+            };
+            let ctx = GatewayCtx {
+                deps,
+                materializer: &mut *self.materializer,
+                approval,
+                sink,
+                cancel: &self.cancel,
+            };
+            let gateway_result = serve_connection(handle, ctx);
+            (
+                eng.join().expect("acp engine thread panicked"),
+                gateway_result,
+            )
+        });
+        // 6. A serve error after spawn surfaces as a transient failure; the
+        //    ACP trace still rides (the CLI may have done work before the gap).
+        let gateway_outcome = match gateway_result {
+            Ok(o) => o,
+            Err(e) => {
+                return (
+                    TurnOutcome::Failed(TurnFailure::Execute {
+                        detail: format!("gateway serve failed: {e}"),
+                    }),
+                    acp_outcome.trace,
+                );
+            }
+        };
+        // 7. Merge + map onto TurnOutcome (same mapper + trace-extraction
+        //    pattern as the built-in branch).
+        let mut merged = merge_outcomes(gateway_outcome, acp_outcome);
+        let trace = std::mem::take(&mut merged.trace);
+        (turn_outcome_from_loop(merged), trace)
     }
 
     /// Append a turn to the conversation thread and return its outcome. Every
@@ -2414,6 +2591,76 @@ fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
         Termination::Transient(detail) => TurnOutcome::Failed(TurnFailure::Execute { detail }),
     }
 }
+
+/// Merge the gateway's per-connection outcome with the ACP engine's loop
+/// outcome into one [`LoopOutcome`] (issue #299 slice 9c, ADR-0085 +
+/// ADR-0078).
+///
+/// The trace is de-duplicated across the two sources: a gateway-routed tool
+/// (one of the built-in DuckDB set) appears in BOTH -- the gateway's
+/// `tools/call` dispatch record (authoritative, ADR-0076 audit) and the CLI's
+/// `session/update` tool-call notification. The gateway record wins for those
+/// (it ran the SQL, so its success flag + excerpt are the truth); the ACP
+/// pump's non-gateway entries (the CLI's own built-ins -- bash / edit / etc.,
+/// which never touch the gateway) are appended. Promotions are gateway-only
+/// (the ACP engine leaves them empty by design, slice 9a); termination +
+/// `round_trips` are ACP-only (the gateway serves tools, it does not produce
+/// a turn termination).
+///
+/// TODO(issue #299 E2E): a real claude-code drive may prefix MCP tool names
+/// (e.g. `mcp__<server>__explore`) in its `session/update` notifications, in
+/// which case the `builtin_metadata` filter would let a gateway-routed call
+/// through as "non-gateway" and double it. The slice 9c integration test
+/// drives a fake CLI that emits unprefixed names; real-CLI naming is verified
+/// in the manual E2E checklist, and a normalization layer lands as a
+/// follow-up if the E2E shows a prefix.
+fn merge_outcomes(gateway: GatewayOutcome, mut acp: LoopOutcome) -> LoopOutcome {
+    acp.promotions = gateway.promotions;
+    let non_gateway: Vec<TraceEntry> = acp
+        .trace
+        .into_iter()
+        .filter(|e| builtin_metadata(&e.name).is_none())
+        .collect();
+    let mut trace = gateway.trace;
+    trace.extend(non_gateway);
+    acp.trace = trace;
+    acp
+}
+
+/// Resolve the ACP bridge binary path (issue #299 slice 9c, ADR-0085).
+///
+/// Temporary: a compile-time constant into the cargo build's `target/` tree.
+/// Sufficient for dev E2E + integration tests (cargo sets
+/// `CARGO_BIN_EXE_toptopduck-acp-bridge` for same-package bin references, and
+/// the dev binary sits beside the test binary). Production Tauri sidecar
+/// bundling is a packaging-time decision (ADR-0085 Consequences: the bridge
+/// bin production path) -- the `[[bin]]` does not enter the default Tauri
+/// bundle, so a shipped app cannot yet resolve this path; a follow-up ADR
+/// wires the sidecar. Centralizing the lookup here means the follow-up
+/// changes one site.
+fn bridge_bin_path() -> String {
+    // Read at run time: `env!`/`option_env!` are compile-time, and cargo only
+    // sets `CARGO_BIN_EXE_toptopduck-acp-bridge` while compiling SAME-PACKAGE
+    // integration tests -- the lib build never sees it. Integration tests set
+    // `TOPTOPDUCK_ACP_BRIDGE_BIN` (serially, mirroring the 9a ACP_FAKE_SCENARIO
+    // env lock) to `env!("CARGO_BIN_EXE_toptopduck-acp-bridge")` before driving
+    // a turn; production sidecar wiring is a packaging-time follow-up
+    // (ADR-0085 Consequences: bridge bin production path), so a missing var
+    // surfaces an honest panic rather than a silent wrong path.
+    std::env::var("TOPTOPDUCK_ACP_BRIDGE_BIN")
+        .expect("TOPTOPDUCK_ACP_BRIDGE_BIN must point at the toptopduck-acp-bridge binary")
+}
+
+/// The bridge's port env var name. Mirrors the bridge binary's own const; the
+/// bin is a pure-std target that does not import lib, so the name is duplicated
+/// here -- a rename in either place fails the integration tests loudly rather
+/// than the bridge silently reading a stale name.
+const ENV_PORT: &str = "TOPTOPDUCK_GATEWAY_PORT";
+/// The bridge's token env var name (mirrors the bridge binary).
+const ENV_TOKEN: &str = "TOPTOPDUCK_GATEWAY_TOKEN";
+/// The MCP server name advertised in the bridge descriptor (the CLI sees this
+/// as the MCP server's `name`; cosmetic, pinned for trace clarity).
+const GATEWAY_SERVER_NAME: &str = "toptopduck-gateway";
 
 /// A no-op [`ApprovalSink`] for the [`Session::ask`] facade (tests and other
 /// callers outside the command boundary). Built-in tools classify Allow at the

@@ -21,6 +21,7 @@ use crate::provider::tool_calling::{ToolTurnMessage, ToolTurnRequest};
 use crate::provider::{
     ColumnRef, DatasetRef, ProviderRequest, ResponsePayload, TurnPayload, MAX_REPLY_TOKENS,
 };
+use crate::runtime::acp::wire::ContentBlock;
 use crate::workingset::WorkingSet;
 
 /// Recent-turn window size (ADR-0023): the most recent N turns ship the full
@@ -74,6 +75,57 @@ pub fn assemble_tool_turn(
         tools: crate::tools::builtin_table(),
         max_tokens: MAX_REPLY_TOKENS,
     }
+}
+
+/// Assemble the ACP turn's prompt blocks (ADR-0081, issue #299 slice 9c): the
+/// windowed context as text [`ContentBlock`]s for an external CLI runtime.
+///
+/// Mirrors [`assemble_tool_turn`]'s windowing -- the SAME system prompt spine
+/// (capability boundary + locale directive + schema context, via
+/// [`build_tool_system_prompt`]) and the SAME history rendering -- but emits
+/// ACP content blocks instead of a [`ToolTurnRequest`]. The external CLI
+/// brings its own tool table (its built-ins + the gateway MCP tools advertised
+/// through the bridge descriptor at `session/new`), so this assembly carries
+/// ONLY the task context, never a tool table: the schema + M-contract (the
+/// result_N naming discipline) ride the leading system-prompt block so the
+/// CLI writes correct SQL on the first tool call instead of guessing and
+/// wasting a round-trip (ADR-0081 "M-contract discipline lives in the system
+/// prompt").
+pub fn assemble_acp_turn(
+    question: &str,
+    working_set: &WorkingSet,
+    history: &[TurnRecord],
+    locale: ResponseLocale,
+) -> Vec<ContentBlock> {
+    let request = assemble(question, working_set, history);
+    let mut blocks = Vec::with_capacity(request.history.len() * 2 + 2);
+    // Leading system-prompt block: TOOL_CALLING_PROMPT + locale directive +
+    // schema context. The external CLI needs the schema + result_N naming up
+    // front (ADR-0081 M-contract); without it the first SQL has no anchor.
+    blocks.push(ContentBlock::text(build_tool_system_prompt(
+        &request, locale,
+    )));
+    // Windowed history as alternating user/assistant text blocks. Mirrors
+    // `tool_turn_messages` turn-for-turn but as flat text -- the external CLI
+    // does not see our tool-use message shape, only the rendered prose.
+    for turn in &request.history {
+        match turn {
+            TurnPayload::Full { question, response } => {
+                blocks.push(ContentBlock::text(question.clone()));
+                blocks.push(ContentBlock::text(render_response(response)));
+            }
+            TurnPayload::Summary {
+                question_excerpt,
+                result,
+            } => {
+                blocks.push(ContentBlock::text(question_excerpt.clone()));
+                blocks.push(ContentBlock::text(render_summary_turn_note(result)));
+            }
+        }
+    }
+    // The asking question as the final block.
+    blocks.push(ContentBlock::text(request.question));
+    blocks
 }
 
 /// Render the windowed history as tool-calling messages (ADR-0023/0039),
