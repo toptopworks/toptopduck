@@ -17,6 +17,8 @@
 //! the same framing the engine + the real CLI agents use over stdio.
 
 use std::io::{BufRead, BufReader, Write};
+use std::process::{ChildStdin, Command, Stdio};
+use std::sync::Mutex;
 
 use toptopduck_lib::runtime::acp::wire::{
     self, ContentBlock, InitializeResult, NewSessionResult, Notification, PermissionOption,
@@ -71,6 +73,19 @@ fn main() {
                 );
             }
             Some("session/new") => {
+                // When the descriptor names a real bridge binary (the
+                // gateway_tool_call scenario), spawn it now so it connects
+                // back to the gateway before session/prompt fires MCP at it.
+                // A placeholder path (no descriptor / missing file) is skipped
+                // so the no-bridge scenarios keep working unchanged.
+                if let Some(server) = v
+                    .get("params")
+                    .and_then(|p| p.get("mcpServers"))
+                    .and_then(|s| s.as_array())
+                    .and_then(|a| a.first())
+                {
+                    try_spawn_bridge(server);
+                }
                 respond(
                     &mut out,
                     &Response::<NewSessionResult> {
@@ -240,6 +255,34 @@ fn play_scenario(
             notify(out, agent_message("about to crash"));
             let _ = out.flush();
             std::process::exit(0);
+        }
+        "gateway_tool_call" => {
+            // Drive one tools/call through the spawned bridge -> the app's
+            // gateway -> tools::dispatch, then report it via session/update so
+            // the engine pump folds the call into the ACP trace. Exercises the
+            // full wiring: the bridge connects back, the gateway serves the
+            // MCP subset, and the dispatch lands in the gateway's trace (the
+            // turn assembler merges it -- de-duplicated against this pump's own
+            // tool_call notification, which carries the same builtin name).
+            bridge_write(&mcp_request(
+                1,
+                "initialize",
+                serde_json::json!({"protocolVersion":"2024-11-05","clientInfo":{"name":"acp-fake-cli","version":"0.0.0"}}),
+            ));
+            let _ = bridge_read();
+            bridge_write(&mcp_request(
+                2,
+                "tools/call",
+                serde_json::json!({"name":"explore","arguments":{"sql":"SELECT 1 AS x"}}),
+            ));
+            let _ = bridge_read();
+            notify(out, tool_call_start("gw_1", "explore", ToolKind::Search));
+            notify(
+                out,
+                tool_call_finish("gw_1", "explore", ToolKind::Search, "rows: 1"),
+            );
+            notify(out, agent_message("done via gateway"));
+            respond_prompt(out, &id, StopReason::Success);
         }
         other => {
             // Unknown scenario: respond success with a marker so a mis-spelled
@@ -422,4 +465,88 @@ fn drain_once(reader: &mut BufReader<std::io::StdinLock<'_>>, cancel_seen: &mut 
         outcome: RequestPermissionOutcome::Cancelled,
     };
     true
+}
+
+// ---------------------------------------------------------------------------
+// Bridge spawn + MCP client helpers (ADR-0085 wiring)
+// ---------------------------------------------------------------------------
+
+/// The spawned bridge child's stdio, stashed at `session/new` and read by the
+/// `gateway_tool_call` scenario. The child handle is dropped after taking its
+/// stdio: the bridge self-terminates on stdin EOF when this process exits, so
+/// the handle is not needed for cleanup. The `Mutex` keeps the `static` `Sync`
+/// without unsafe; the fake CLI is single-threaded, so there is never
+/// contention.
+struct BridgeProc {
+    stdin: ChildStdin,
+    stdout: BufReader<std::process::ChildStdout>,
+}
+
+static BRIDGE: Mutex<Option<BridgeProc>> = Mutex::new(None);
+
+/// Spawn the bridge binary named in the `session/new` descriptor (when it is a
+/// real path) and stash its stdio for the `gateway_tool_call` scenario. A
+/// missing / empty / non-existent command is a no-op so the placeholder
+/// descriptor and the no-bridge scenarios keep working unchanged.
+fn try_spawn_bridge(server: &serde_json::Value) {
+    let command = server
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if command.is_empty() || !std::path::Path::new(command).exists() {
+        return;
+    }
+    let mut cmd = Command::new(command);
+    if let Some(env) = server.get("env").and_then(serde_json::Value::as_object) {
+        for (k, v) in env {
+            if let Some(v) = v.as_str() {
+                cmd.env(k, v);
+            }
+        }
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    let Ok(mut child) = cmd.spawn() else {
+        return;
+    };
+    let stdin = child.stdin.take().expect("piped stdin");
+    let stdout = child.stdout.take().expect("piped stdout");
+    *BRIDGE.lock().unwrap() = Some(BridgeProc {
+        stdin,
+        stdout: BufReader::new(stdout),
+    });
+}
+
+/// Write one MCP request through the bridge as a single NDJSON line. A no-op
+/// when no bridge was spawned (the scenario stays linear -- it does not branch
+/// on every call).
+fn bridge_write(msg: &serde_json::Value) {
+    let mut guard = BRIDGE.lock().unwrap();
+    let Some(b) = guard.as_mut() else {
+        return;
+    };
+    if let Ok(s) = serde_json::to_string(msg) {
+        let _ = writeln!(b.stdin, "{s}");
+        let _ = b.stdin.flush();
+    }
+}
+
+/// Read one NDJSON line back from the bridge. `None` on EOF, parse failure, or
+/// no bridge -- the scenario treats a missing response as "the gateway did not
+/// serve" and proceeds; the integration test asserts on the observable trace,
+/// not on this helper's return.
+fn bridge_read() -> Option<serde_json::Value> {
+    let mut guard = BRIDGE.lock().unwrap();
+    let b = guard.as_mut()?;
+    let mut line = String::new();
+    if b.stdout.read_line(&mut line).unwrap_or(0) == 0 {
+        return None;
+    }
+    serde_json::from_str(line.trim_end()).ok()
+}
+
+/// Build a JSON-RPC 2.0 request envelope for the bridge MCP channel.
+fn mcp_request(id: u64, method: &str, params: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
 }

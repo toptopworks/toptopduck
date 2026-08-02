@@ -2,7 +2,7 @@
 //! (ADR-0085).
 //!
 //! [`bind_gateway`] binds a per-bridge listener on a random localhost port +
-//! mints a 256-bit token; [`serve_connection`] then accepts one bridge,
+//! mints a 64-hex token (244-bit entropy); [`serve_connection`] then accepts one bridge,
 //! verifies the token, and drives the MCP `initialize` / `tools/list` /
 //! `tools/call` subset against the session's live resources. The split keeps
 //! [`bind_gateway`] non-blocking (the caller needs the port to inject into the
@@ -18,6 +18,7 @@
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpListener;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -34,7 +35,7 @@ use crate::tools::{builtin_table, dispatch};
 use super::framing;
 
 /// A per-bridge-connection gateway endpoint: a bound listener, the OS-assigned
-/// port, and the 256-bit token a bridge must present on connect.
+/// port, and the 64-hex token (244-bit entropy) a bridge must present on connect.
 ///
 /// Built by [`bind_gateway`] and consumed by [`serve_connection`]. The listener
 /// accepts exactly one bridge connection (ADR-0085 per-bridge lifecycle) --
@@ -101,11 +102,47 @@ pub struct GatewayOutcome {
 /// thread and drives the ACP engine in parallel; the bridge's tool calls land
 /// their trace + promotions in the returned [`GatewayOutcome`] for the turn
 /// assembler to merge.
+/// Max wall-clock wait for a bridge to connect after [`serve_connection`] starts
+/// (ADR-0085 robustness). A blocking `accept` would hang the turn forever if the
+/// bridge never connects -- the engine returns, but the gateway never sees EOF
+/// -- so the accept is a non-blocking poll bounded by this deadline. The bridge
+/// connects in well under a second in the happy path; 30s absorbs a slow CI
+/// runner + process-spawn jitter without leaking a hung turn.
+const CONNECT_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long the non-blocking accept poll sleeps between cancel/deadline checks.
+/// Short enough that a cancel surfaces in well under a second; long enough that
+/// an idle wait costs near-zero CPU.
+const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// The accepted stream's read timeout. The serve loop checks cancel after each
+/// read returns, so a blocking `read_line` would not notice cancel mid-message;
+/// this bounds the cancel latency in the read loop to the same order as the
+/// accept poll. A `TimedOut` / `WouldBlock` from `read_line` is retried -- the
+/// partial line stays in the `BufReader`, so a slow multi-fragment frame still
+/// completes.
+const READ_TIMEOUT: Duration = Duration::from_millis(100);
+
 pub fn serve_connection(handle: GatewayHandle, mut ctx: GatewayCtx) -> io::Result<GatewayOutcome> {
     let GatewayHandle {
         token, listener, ..
     } = handle;
-    let (stream, _peer) = listener.accept()?;
+    let (stream, _peer) = match accept_bridge(&listener, ctx.cancel, CONNECT_DEADLINE)? {
+        // Cancel fired before any bridge connected: return the empty outcome so
+        // the turn assembler's termination (single-source ACP) decides the
+        // TurnOutcome (Cancelled), not a gateway serve error.
+        None => {
+            return Ok(GatewayOutcome {
+                trace: Vec::new(),
+                promotions: Vec::new(),
+            });
+        }
+        Some(pair) => pair,
+    };
+    // The listener accepted exactly one bridge (ADR-0085 per-bridge lifecycle);
+    // drop it to release the port + clear the kernel backlog.
+    drop(listener);
+    stream.set_read_timeout(Some(READ_TIMEOUT))?;
     let writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
     let mut writer = writer;
@@ -120,9 +157,17 @@ pub fn serve_connection(handle: GatewayHandle, mut ctx: GatewayCtx) -> io::Resul
         if ctx.cancel.is_requested() {
             return Ok(outcome);
         }
-        let msg = match framing::read_message(&mut reader)? {
-            Some(m) => m,
-            None => return Ok(outcome), // bridge closed
+        let msg = match framing::read_message(&mut reader) {
+            Ok(Some(m)) => m,
+            Ok(None) => return Ok(outcome), // bridge closed
+            // Read timeout (READ_TIMEOUT): retry so the loop-top cancel check
+            // fires. BufReader preserves any partial line across the timeout.
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
+            Err(e) => return Err(e),
         };
         let id = msg.get("id").cloned();
         let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
@@ -131,6 +176,43 @@ pub fn serve_connection(handle: GatewayHandle, mut ctx: GatewayCtx) -> io::Resul
             if let Some(envelope) = response.into_envelope(id) {
                 framing::write_message(&mut writer, &envelope)?;
             }
+        }
+    }
+}
+
+/// Poll the listener non-blocking until a bridge connects, cancel fires, or
+/// `deadline` elapses. Returns `Ok(None)` on cancel (the serve returns an empty
+/// outcome + the ACP termination decides the TurnOutcome), `Ok(Some)` on a
+/// connection, and `Err(TimedOut)` on the deadline (a missing bridge is a real
+/// failure -- the engine would otherwise wait on a serve that never progresses).
+fn accept_bridge(
+    listener: &TcpListener,
+    cancel: &CancelToken,
+    deadline: Duration,
+) -> io::Result<Option<(std::net::TcpStream, std::net::SocketAddr)>> {
+    listener.set_nonblocking(true)?;
+    let stop = Instant::now() + deadline;
+    loop {
+        if cancel.is_requested() {
+            return Ok(None);
+        }
+        match listener.accept() {
+            Ok((stream, peer)) => {
+                // Restore blocking semantics on the accepted stream; the
+                // listener itself is dropped after accept (one bridge only).
+                stream.set_nonblocking(false)?;
+                return Ok(Some((stream, peer)));
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if Instant::now() >= stop {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "bridge did not connect within deadline",
+                    ));
+                }
+                std::thread::sleep(ACCEPT_POLL_INTERVAL);
+            }
+            Err(e) => return Err(e),
         }
     }
 }
@@ -376,7 +458,7 @@ mod tests {
     fn bind_gateway_mints_port_and_64_hex_token() {
         let h = bind_gateway().expect("bind");
         assert!(h.port > 0, "OS assigns a real localhost port");
-        assert_eq!(h.token.len(), 64, "256-bit token = 64 hex chars");
+        assert_eq!(h.token.len(), 64, "244-bit entropy in 64 hex chars");
         assert!(
             h.token.chars().all(|c| c.is_ascii_hexdigit()),
             "token is lowercase hex"
@@ -580,6 +662,48 @@ mod tests {
         assert!(
             outcome.promotions.is_empty(),
             "no materialize -> no promotion"
+        );
+    }
+
+    // --- accept_bridge (connect deadline + cancel) -----------------------
+
+    /// With no bridge connecting, accept_bridge returns `Err(TimedOut)` within
+    /// ~deadline (not an infinite hang). Uses a short deadline so the test is
+    /// fast; production uses [`CONNECT_DEADLINE`].
+    #[test]
+    fn accept_bridge_times_out_when_no_bridge_connects() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let cancel = CancelToken::new();
+        let start = Instant::now();
+        let err = accept_bridge(&listener, &cancel, Duration::from_millis(200))
+            .expect_err("deadline -> Err");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(180),
+            "waited near the deadline: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "did not hang past the deadline: {elapsed:?}"
+        );
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    }
+
+    /// A pre-fired cancel returns `Ok(None)` promptly (no wait), so the serve
+    /// returns an empty outcome + the ACP termination decides the TurnOutcome.
+    #[test]
+    fn accept_bridge_returns_none_when_cancelled() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let cancel = CancelToken::new();
+        cancel.request();
+        let start = Instant::now();
+        let result = accept_bridge(&listener, &cancel, Duration::from_secs(30))
+            .expect("cancel is Ok(None), not Err");
+        assert!(result.is_none(), "cancel before connect -> None");
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "cancel returns promptly: {:?}",
+            start.elapsed()
         );
     }
 

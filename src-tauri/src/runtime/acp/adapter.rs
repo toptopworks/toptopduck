@@ -33,10 +33,11 @@ use std::path::PathBuf;
 pub struct AdapterId(&'static str);
 
 impl AdapterId {
-    /// Build a new adapter id. Private -- the only ids are the ones this module
-    /// mints below ([`claude_code`], etc.), so a typo cannot introduce a
-    /// third-party id.
-    const fn new(name: &'static str) -> Self {
+    /// Build a new adapter id. `pub` so the slice-9c integration test can mint a
+    /// fake-CLI adapter; production code still uses the constructors below
+    /// ([`claude_code`], etc.), so a stray id fails review rather than the
+    /// type system.
+    pub const fn new(name: &'static str) -> Self {
         Self(name)
     }
 
