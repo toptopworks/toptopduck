@@ -23,14 +23,13 @@ use duckdb::Connection;
 use serde_json::{json, Value};
 
 use crate::cancel::CancelToken;
-use crate::fs_acl::{AccessMode, FsAcl};
 use crate::ingest::schema::{canonical_type, quote_ident};
 use crate::model::ColumnSchema;
-use crate::provenance;
+use crate::sandbox_sql::{
+    preflight_read_sql, run_sandboxed_read, PreflightError, SandboxDeps, SandboxExecError,
+};
 use crate::session::materializer::TurnDeps;
-use crate::session::sandbox;
 use crate::tools::definitions::{self, EXPLORE_DEFAULT_SAMPLE_ROWS, EXPLORE_MAX_SAMPLE_ROWS};
-use crate::tools::read_paths::extract_read_paths;
 
 /// The scratch table name on the explore sandbox. The sandbox is single-use
 /// (LocalFileSystem lockdown is irreversible, so the connection is dropped per
@@ -81,133 +80,57 @@ struct ExploreShape {
     sample: Vec<Vec<String>>,
 }
 
-/// Run the explore query end to end. Holds the same sandbox-lifecycle invariants
-/// as the materialize path (stale check, sandbox setup, interrupt, cap+1 LIMIT,
-/// cancel checkpoints) so the two SQL-executing tools enforce uniformly.
+/// Run the explore query end to end. The gateway door (stale-ref + read_*
+/// whitelist) and the sandbox lifecycle + cap + cancel checkpoints are the
+/// shared spine with the materialize path ([`crate::sandbox_sql`]); explore's
+/// own work is the tail -- deriving a shape from the sandbox table without
+/// persisting anything.
 fn run_explore(
     sql: &str,
     sample_rows: i64,
     deps: &mut TurnDeps,
     cancel: &CancelToken,
 ) -> Result<ExploreShape, String> {
-    // A cancel that arrived before the call aborts immediately -- do not burn
-    // sandbox setup on a turn the user already stopped.
-    if cancel.is_requested() {
-        return Err("explore cancelled".to_string());
-    }
-
-    // Stale-reference refusal (ADR-0013 invariant 2): parse the SQL once before
-    // touching the sandbox so a stale result_N is rejected without setup cost.
-    // Explore never records provenance (no promotion), so only the stale-ref
-    // half of the analysis matters here.
-    let analyzed = provenance::analyze(sql, deps.working_set);
-    if let Some(stale_ref) = analyzed.stale_ref.as_ref() {
-        return Err(format!(
-            "stale reference: `{stale_ref}` has been invalidated and may not anchor a new query"
-        ));
-    }
-
-    // Gateway-layer file-reachability whitelist (ADR-0080, issue #293): every
-    // literal `read_*` path in the SQL is classified against the session source
-    // set (read-only) + working temp dir (read-write) before execution. An out-
-    // of-bounds / unresolvable path becomes a structured tool error the agent
-    // self-corrects from (ADR-0077) -- never the engine's opaque "... disabled
-    // by configuration". The engine-level `disabled_filesystems` lockdown below
-    // remains the file-reachability GUARANTEE for SQL-embedded read_*: the CTAS
-    // wrapping bars mutating file statements, narrowing the in-SELECT file
-    // surface to read_* functions, which the lockdown refuses. So this scan is
-    // additive guidance -- a path it misses is still refused by the lockdown,
-    // and an in-bounds read_* (the agent should use the "<ref>".data catalog)
-    // proceeds to the lockdown's honest refusal rather than reading the file.
-    let acl = FsAcl::new(deps.working_set, deps.temp_path);
-    for path in extract_read_paths(sql) {
-        if let Err(e) = acl.check(&path, AccessMode::Read) {
-            return Err(e.message());
+    // Gateway door (ADR-0013 stale-ref + ADR-0080 read_* whitelist), shared
+    // with the materialize path. Explore ignores the dependency set -- it
+    // never promotes, so it records no provenance.
+    preflight_read_sql(sql, deps.working_set, deps.temp_path).map_err(|e| match e {
+        PreflightError::StaleReference(s) => {
+            format!("stale reference: `{s}` has been invalidated and may not anchor a new query")
         }
-    }
+        PreflightError::FsAcl(s) => s,
+    })?;
 
-    // Scratch sandbox (same lifecycle as the materialize path): fresh instance,
-    // sources re-attached READ_ONLY, prior results mirrored in, then locked
-    // down so a read_* table function is refused. The sandbox is dropped at
-    // end of scope -- the scratch table dies with it, leaving no trace on admin
-    // (AC #1: turn-local, no naming, no working-set entry).
-    let sandbox_conn = sandbox::open().map_err(exec_err)?;
-    sandbox::attach_sources(&sandbox_conn, deps.working_set, deps.source_files)
-        .map_err(exec_err)?;
-    sandbox::mirror_results(&sandbox_conn, deps.conn, deps.working_set).map_err(exec_err)?;
-    sandbox::lockdown(&sandbox_conn).map_err(exec_err)?;
+    // Sandbox lifecycle + cap + cancel checkpoints, shared with the materialize
+    // path. The scratch table lives on the sandbox connection only (turn-local,
+    // no naming, no working-set entry -- AC #1).
+    let table = run_sandboxed_read(
+        sql,
+        SCRATCH_TABLE,
+        &SandboxDeps {
+            admin_conn: deps.conn,
+            source_files: deps.source_files,
+            working_set: deps.working_set,
+            result_row_cap: deps.result_row_cap,
+        },
+        cancel,
+    )
+    .map_err(|e| match e {
+        SandboxExecError::Cancelled => "explore cancelled".to_string(),
+        SandboxExecError::Resource { rows, cap } => format!(
+            "result row count ({rows}) exceeds the cap {cap}; add a LIMIT or narrow the query"
+        ),
+        SandboxExecError::Runtime(s) => format!("SQL failed: {s}"),
+    })?;
 
-    // A cancel that arrived during sandbox setup (before the query's interrupt
-    // handle is registered below) is reported honestly as a cancel. Without
-    // this check the only signal would be a later setup step's generic engine
-    // error; the user stopped the turn, so the agent loop (and the user)
-    // should see "cancelled", not a failure that never was (ADR-0077 honesty).
-    if cancel.is_requested() {
-        return Err("explore cancelled".to_string());
-    }
-
-    // Register the sandbox interrupt handle so a cancel can abort THIS query at
-    // source (ADR-0021 DuckDB interrupt). Scoped to the explore SQL only;
-    // cleared right after the CREATE so the post-query shape derivation (fast,
-    // on the sandbox) is never disrupted by a cancel.
-    cancel.set_interrupt(sandbox_conn.interrupt_handle());
-
-    // Resource cap (ADR-0005 L3, mirroring the materialize path): wrap the query
-    // and LIMIT to cap+1 so a runaway cross-join cannot balloon memory. A count
-    // of cap+1 after the CREATE means the true result exceeded the cap -> the
-    // tool refuses (silent truncation is forbidden, ADR-0030); the agent can
-    // re-explore with a tighter query.
-    let inner = sql.trim().trim_end_matches(';').trim_end();
-    let cap_plus_one = deps.result_row_cap.saturating_add(1);
-    let create_sql = format!(
-        "CREATE TABLE {} AS SELECT * FROM ({inner}) AS _src LIMIT {cap_plus_one}",
-        quote_ident(SCRATCH_TABLE),
-    );
-    let create_outcome = sandbox_conn.execute_batch(&create_sql);
-    cancel.clear_interrupt();
-
-    if let Err(e) = create_outcome {
-        // A cancel during the query surfaces as a generic DuckDB failure. If the
-        // flag is set, report a cancel rather than the engine's opaque message
-        // so the agent loop (and the user) sees an honest "cancelled".
-        if cancel.is_requested() {
-            return Err("explore cancelled".to_string());
-        }
-        return Err(format!("SQL failed: {}", e));
-    }
-
-    // Row-count governor on the sandbox: count == cap+1 -> the true result
-    // exceeded the cap. Refuse with a resource-cap message naming the cap so the
-    // agent can add its own LIMIT and re-explore.
-    let rows: i64 = sandbox_conn
-        .query_row(
-            &format!("SELECT COUNT(*) FROM {}", quote_ident(SCRATCH_TABLE)),
-            [],
-            |r| r.get(0),
-        )
-        .map_err(tool_err)?;
-    if rows as u64 > deps.result_row_cap {
-        return Err(format!(
-            "result row count ({rows}) exceeds the cap {}; add a LIMIT or narrow the query",
-            deps.result_row_cap
-        ));
-    }
-
-    // Cancel landed between the query's success and the shape derivation: report
-    // it honestly. The scratch table exists on the sandbox only -- dropping the
-    // sandbox cleans up, no admin rollback needed.
-    if cancel.is_requested() {
-        return Err("explore cancelled".to_string());
-    }
-
-    // Derive the shape from the sandbox table. No fingerprint (explore never
-    // persists), so this is the describe + sample primitives inline rather than
-    // snapshot::derive_table (which additionally dumps + hashes the table).
-    let columns = describe_scratch(&sandbox_conn)?;
-    let sample = read_sample(&sandbox_conn, &columns, sample_rows)?;
+    // Tail: derive the shape FROM THE SANDBOX (explore never persists). No
+    // fingerprint, so this is the describe + sample primitives inline rather
+    // than snapshot::derive_table (which additionally dumps + hashes).
+    let columns = describe_scratch(&table.conn, &table.name)?;
+    let sample = read_sample(&table.conn, &columns, sample_rows, &table.name)?;
     Ok(ExploreShape {
         columns,
-        row_count: rows.max(0) as u64,
+        row_count: table.rows,
         sample,
     })
 }
@@ -216,9 +139,9 @@ fn run_explore(
 /// snapshot::describe_table but is kept local because explore derives from a
 /// sandbox-local temp table under a tool-generated name (never a source or
 /// result the snapshot path handles).
-fn describe_scratch(conn: &Connection) -> Result<Vec<ColumnSchema>, String> {
+fn describe_scratch(conn: &Connection, table: &str) -> Result<Vec<ColumnSchema>, String> {
     let mut stmt = conn
-        .prepare(&format!("DESCRIBE {}", quote_ident(SCRATCH_TABLE)))
+        .prepare(&format!("DESCRIBE {}", quote_ident(table)))
         .map_err(tool_err)?;
     let mut rows = stmt.query([]).map_err(tool_err)?;
     let mut out = Vec::new();
@@ -241,6 +164,7 @@ fn read_sample(
     conn: &Connection,
     columns: &[ColumnSchema],
     limit: i64,
+    table: &str,
 ) -> Result<Vec<Vec<String>>, String> {
     if columns.is_empty() || limit == 0 {
         return Ok(Vec::new());
@@ -252,7 +176,7 @@ fn read_sample(
     let sql = format!(
         "SELECT {} FROM {} LIMIT {limit}",
         selects.join(", "),
-        quote_ident(SCRATCH_TABLE)
+        quote_ident(table)
     );
     let mut stmt = conn.prepare(&sql).map_err(tool_err)?;
     let mut rows = stmt.query([]).map_err(tool_err)?;
@@ -275,14 +199,6 @@ fn read_sample(
 /// not relevant here and is dropped.
 fn tool_err(detail: impl std::fmt::Display) -> String {
     format!("explore failed: {detail}")
-}
-
-/// Lift a sandbox-primitive [`crate::guardrail::ExecError`] into a tool-error
-/// string. `ExecError` carries a user-facing `detail` + a retry-routing `kind`
-/// and does not implement `Display`; the detail is the honest explanation the
-/// agent reads (ADR-0077), the kind is dropped (see [`tool_err`]).
-fn exec_err(e: crate::guardrail::ExecError) -> String {
-    tool_err(e.detail)
 }
 
 #[cfg(test)]
@@ -443,9 +359,11 @@ mod tests {
         );
     }
 
-    /// A cancel requested before the call aborts immediately as "explore
-    /// cancelled" -- the pre-setup checkpoint fires before any sandbox setup
-    /// runs, so a turn the user already stopped never burns setup cost. This is
+    /// A cancel requested before the call surfaces as "explore cancelled"
+    /// without driving a real query. The shared runner has no pre-check (the
+    /// agent loop's per-call check short-circuits a turn the user stopped
+    /// before dispatch), so sandbox setup runs -- cheaply, on an empty working
+    /// set -- and the mid-check after setup is what reports the cancel. This is
     /// the one cancel checkpoint reachable without driving a real query.
     #[test]
     fn explore_returns_cancelled_when_cancel_already_requested() {
@@ -457,7 +375,8 @@ mod tests {
         cancel.request();
         let err = dispatch(&json!({"sql": "SELECT 1"}), &mut deps, &cancel).unwrap_err();
         assert_eq!(err, "explore cancelled", "{err}");
-        // No sandbox setup ran -> no working-set entry produced.
+        // The mid-check aborted before the CREATE -> no scratch table, no
+        // working-set entry.
         assert_eq!(deps.working_set.len(), 0);
     }
 

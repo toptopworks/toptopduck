@@ -405,4 +405,190 @@ mod tests {
             "result_1"
         );
     }
+
+    /// AC (issue #334): a `read_*` call whose path resolves OUTSIDE the session
+    /// source set + working temp dir is refused by the gateway door BEFORE the
+    /// sandbox runs -- symmetric with `explore_refuses_out_of_bounds_read_path_
+    /// at_gateway`. Before #334 the materialize path skipped the FsAcl whitelist
+    /// (only explore ran it), so an out-of-bounds read_* hit the engine's opaque
+    /// "disabled by configuration"; now it returns the structured "outside the
+    /// allowed area" the agent can self-correct from (ADR-0077 / ADR-0080).
+    #[test]
+    fn materialize_refuses_out_of_bounds_read_path_at_gateway() {
+        use crate::session::materializer::RealMaterializer;
+        use std::fs;
+        use tempfile::TempDir;
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = crate::workingset::WorkingSet::default();
+        let sources = std::collections::HashMap::new();
+        let temp = TempDir::new().unwrap();
+        // A file that exists on disk but lives outside the session temp dir.
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("secret.csv");
+        fs::write(&outside_file, "x").unwrap();
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+        let cancel = CancelToken::new();
+        let mut materializer = RealMaterializer;
+        let err = dispatch(
+            &json!({"sql": format!("SELECT * FROM read_csv_auto('{}')", outside_file.to_string_lossy())}),
+            &mut deps,
+            &cancel,
+            &mut materializer,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("outside the allowed"),
+            "gateway names the out-of-bounds refusal: {err}"
+        );
+        assert!(
+            err.contains("secret.csv"),
+            "error names the offending path: {err}"
+        );
+        // No promotion landed: result_1 was never registered.
+        assert_eq!(deps.working_set.len(), 0);
+        assert_eq!(deps.working_set.next_result_number(), 1);
+    }
+
+    /// A cancel requested before the call surfaces as "materialize cancelled"
+    /// without driving a real promotion. Symmetric with explore's
+    /// `explore_returns_cancelled_when_cancel_already_requested`; the shared
+    /// runner's mid-check (after sandbox setup) is what reports it. Pins the
+    /// `SandboxExecError::Cancelled => ExecErrorKind::Cancelled` mapping on the
+    /// materialize dispatch path (ADR-0077 honest cancel).
+    #[test]
+    fn materialize_returns_cancelled_when_cancel_already_requested() {
+        use crate::session::materializer::RealMaterializer;
+        use tempfile::TempDir;
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = crate::workingset::WorkingSet::default();
+        let sources = std::collections::HashMap::new();
+        let temp = TempDir::new().unwrap();
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+        let cancel = CancelToken::new();
+        cancel.request();
+        let mut materializer = RealMaterializer;
+        let err = dispatch(
+            &json!({"sql": "SELECT 1 AS x"}),
+            &mut deps,
+            &cancel,
+            &mut materializer,
+        )
+        .unwrap_err();
+        assert_eq!(err, "materialize cancelled", "{err}");
+        // No promotion landed: result_1 was never registered.
+        assert_eq!(deps.working_set.len(), 0);
+        assert_eq!(deps.working_set.next_result_number(), 1);
+    }
+
+    /// A result whose row count exceeds `result_row_cap` is refused as a
+    /// Resource error naming the cap (ADR-0005/0030). Symmetric with explore's
+    /// `explore_refuses_result_exceeding_row_cap`; pins the
+    /// `SandboxExecError::Resource => ExecErrorKind::Resource` mapping on the
+    /// materialize dispatch path. Hand-builds TurnDeps for the one-off cap.
+    #[test]
+    fn materialize_refuses_result_exceeding_row_cap() {
+        use crate::session::materializer::RealMaterializer;
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = crate::workingset::WorkingSet::default();
+        let sources = std::collections::HashMap::new();
+        // cap = 2; range(3) yields 3 rows -> cap+1 land on the sandbox, COUNT
+        // (3) > cap (2) -> refused. Hand-built for the one-off bound.
+        let mut deps = crate::session::materializer::TurnDeps {
+            conn: &conn,
+            source_files: &sources,
+            working_set: &mut ws,
+            result_row_cap: 2,
+            result_count_cap: 100,
+            temp_path: std::path::Path::new("."),
+        };
+        let cancel = CancelToken::new();
+        let mut materializer = RealMaterializer;
+        let err = dispatch(
+            &json!({"sql": "SELECT 1 FROM range(3)"}),
+            &mut deps,
+            &cancel,
+            &mut materializer,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("result exceeds a resource cap"),
+            "error reads as a resource-cap refusal: {err}"
+        );
+        assert!(
+            err.contains("result_1"),
+            "error names the target result: {err}"
+        );
+        assert!(
+            err.contains("超过上限"),
+            "error carries the over-cap detail: {err}"
+        );
+        // No promotion landed.
+        assert_eq!(deps.working_set.len(), 0);
+        assert_eq!(deps.working_set.next_result_number(), 1);
+    }
+
+    /// A SQL anchored on a stale result_N is refused up front (ADR-0013
+    /// invariant 2). Symmetric with explore's
+    /// `explore_refuses_stale_reference_anchor`; pins the
+    /// `PreflightError::StaleReference => ExecErrorKind::StaleReference` mapping
+    /// on the materialize dispatch path. The pre-placed stale result_1 stays;
+    /// no new promotion lands.
+    #[test]
+    fn materialize_refuses_stale_reference_anchor() {
+        use crate::model::{
+            ColumnSchema, DatasetDescriptor, DatasetPrivacy, RectifyProvenance, StaleAnchor,
+            StaleReason,
+        };
+        use crate::session::materializer::RealMaterializer;
+        use tempfile::TempDir;
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = crate::workingset::WorkingSet::default();
+        ws.register_result(DatasetDescriptor {
+            reference_name: "result_1".into(),
+            display_name: "result_1".into(),
+            source_path: String::new(),
+            columns: vec![ColumnSchema {
+                name: "c".into(),
+                canonical_type: "INTEGER".into(),
+            }],
+            row_count: 0,
+            sample: Vec::new(),
+            fingerprint: String::new(),
+            rectify: RectifyProvenance::NotApplicable,
+            privacy: DatasetPrivacy::default(),
+            stale: Some(StaleAnchor {
+                reference_name: "people".into(),
+                display_name: "people".into(),
+                reason: StaleReason::Deleted,
+            }),
+        });
+        let sources = std::collections::HashMap::new();
+        let temp = TempDir::new().unwrap();
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+        let cancel = CancelToken::new();
+        let mut materializer = RealMaterializer;
+        let err = dispatch(
+            &json!({"sql": "SELECT * FROM result_1"}),
+            &mut deps,
+            &cancel,
+            &mut materializer,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("stale reference"),
+            "error reads as a stale-reference refusal: {err}"
+        );
+        assert!(
+            err.contains("result_1"),
+            "error names the stale anchor: {err}"
+        );
+        // The pre-placed stale result_1 is still the only member; no new
+        // promotion (result_2) landed.
+        assert_eq!(deps.working_set.len(), 1);
+        assert!(deps.working_set.get("result_2").is_none());
+    }
 }
