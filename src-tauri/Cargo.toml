@@ -22,6 +22,24 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "acp-fake-cli"
 path = "tests/fixtures/acp_fake_cli.rs"
 
+# ACP bridge process (ADR-0085, issue #299 slice 9b): a thin stdio<->TCP proxy
+# the external CLI launches as its MCP server (per the McpServer::stdio_bridge
+# descriptor). Pure std -- no lib import, no serde, no JSON parsing: it forwards
+# the MCP newline-delimited framing byte-for-byte both ways after a one-line
+# `BRIDGE_AUTH <token>` handshake that lets the gateway reject unauthed
+# connects. The CLI injects port + token via env (TOPTOPDUCK_GATEWAY_PORT /
+# TOPTOPDUCK_GATEWAY_TOKEN); the gateway mints both per turn (ADR-0085
+# per-bridge lifecycle).
+#
+# Same-crate bin targets link the lib by Cargo default, but this one references
+# none of it, so the release `lto = true` + `strip = true` profile (below) drops
+# every lib symbol -- Tauri + DuckDB do not bloat the shipped bridge. The Tauri
+# bundler ships only `src/main.rs`, so this bin never reaches end users;
+# integration tests resolve it via `env!("CARGO_BIN_EXE_toptopduck-acp-bridge")`.
+[[bin]]
+name = "toptopduck-acp-bridge"
+path = "src/bin/acp_bridge.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

@@ -434,7 +434,7 @@ fn execute_call(
 /// no tool-name literal `match` here, so adding a built-in tool is one entry in
 /// `builtin_tools`, not a parallel edit to this function. An unknown name falls
 /// through to the external arm (the gateway surfaces the approval card for it).
-fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) {
+pub(crate) fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) {
     match definitions::builtin_metadata(&call.name) {
         Some(spec) => (
             ToolKey::builtin(spec.definition.name.as_str()),
