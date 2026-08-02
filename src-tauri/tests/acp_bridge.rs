@@ -25,8 +25,8 @@ fn bridge_bin() -> Command {
 }
 
 /// The happy path: the bridge connects, writes `BRIDGE_AUTH <token>`, reads
-/// `BRIDGE_OK`, then pumps server bytes to stdout. Closing the TCP write side
-/// ends the pump and the bridge exits 0.
+/// `BRIDGE_OK`, then pumps server bytes to stdout. Closing the server TCP side
+/// ends the bridge's TCP read -> its pump thread sees EOF -> main returns 0.
 #[test]
 fn bridge_handshakes_then_pumps_server_to_stdout() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -58,16 +58,43 @@ fn bridge_handshakes_then_pumps_server_to_stdout() {
     stream.write_all(frame).expect("write frame");
     stream.flush().expect("flush");
 
+    // Drain stdout + stderr on background threads. Reading either pipe on the
+    // main thread is a classic deadlock risk: the main thread blocks on
+    // read_exact while the bridge blocks on a pipe write (or never sees a TCP
+    // EOF because the main thread never reaches `drop(stream)`), so neither
+    // progresses. Background threads keep both pipes draining and let the main
+    // thread proceed straight to `drop(stream)` -> bridge TCP-EOF exit. Both
+    // pipes return EOF when the bridge exits, so each join resolves then.
     let mut out = child.stdout.take().expect("stdout");
-    let mut buf = vec![0u8; frame.len()];
-    out.read_exact(&mut buf).expect("read stdout");
-    assert_eq!(&buf[..], &frame[..], "TCP->stdout pump preserves bytes");
+    let stdout = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        out.read_to_end(&mut buf).expect("read stdout");
+        buf
+    });
+    let mut err = child.stderr.take().expect("stderr");
+    let stderr = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = err.read_to_string(&mut buf);
+        buf
+    });
 
     // Closing the server side ends the bridge's TCP read -> its pump thread
-    // signals completion -> main returns SUCCESS.
+    // forwards the already-buffered frame, then sees EOF -> signals completion
+    // -> main returns SUCCESS.
     drop(stream);
     let status = child.wait().expect("wait");
-    assert!(status.success(), "clean pump end -> exit 0, got {status}");
+    let stdout_buf = stdout.join().expect("stdout thread");
+    let stderr_buf = stderr.join().expect("stderr thread");
+
+    assert!(
+        status.success(),
+        "clean pump end -> exit 0, got {status}; stderr: {stderr_buf}"
+    );
+    assert!(
+        stdout_buf.starts_with(&frame[..]),
+        "TCP->stdout pump preserves the frame; got {:?}",
+        String::from_utf8_lossy(&stdout_buf)
+    );
 }
 
 /// A handshake line that is not exactly `BRIDGE_OK` is a refuse; the bridge
