@@ -2,7 +2,7 @@
 
 ## Decision
 
-外部运行时经一个**薄桥接进程**回连 app 进程内的**网关**。桥接是被外部 CLI 按 MCP stdio 契约拉起的独立 cargo `[[bin]]`（纯 std main，零业务逻辑——纯字节流 proxy + token 验证，不 `use` lib，release LTO 把 Tauri/DuckDB dead-strip 出二进制）。网关是 app 进程内的 **per-bridge-connection TCP listener**（`127.0.0.1` + OS 随机端口），handler 线程 borrow 当前 turn 的 session 资源（`TurnDeps` / `Materializer` / `ApprovalState` / `sink`），serve MCP `initialize` + `tools/list`（聚合内置 DuckDB 工具，外部 MCP / 技能工具待相应源接入后并入工具表）+ `tools/call`（approval gate + `tools::dispatch`）。回连安全：256-bit token 经 env 注入桥接（不进 argv），首条消息验证，listener 单连接接受。framing = newline-delimited JSON-RPC（MCP 协议，桥接直通字节流，零翻译）。**审批两正交面**：ACP 面（`session/request_permission`，agent 自带工具，fail-fast）与网关面（MCP `tools/call`，经网关工具，复用 ADR-0080 分级审批 + 挂起）——两层管不同工具集，非冗余。`AcpEngine::run` 不接收 `TurnDeps`，保持纯 ACP 协议驱动；网关 server 是独立 API 对：`bind_gateway()` 非阻塞绑定随机 localhost 端口 + 铸 256-bit token（返回 `GatewayHandle { port, token, listener }`，调用者据此在 spawn 桥接前注入桥接描述符），`serve_connection(handle, ctx)` 阻塞驱动单连接生命周期（返回 `GatewayOutcome`）；由轮次编排层（`Session::ask_with_phase`）起停并与 `AcpEngine::run` 并行驱动。
+外部运行时经一个**薄桥接进程**回连 app 进程内的**网关**。桥接是被外部 CLI 按 MCP stdio 契约拉起的独立 cargo `[[bin]]`（纯 std main，零业务逻辑——纯字节流 proxy + token 验证，不 `use` lib，release LTO 把 Tauri/DuckDB dead-strip 出二进制）。网关是 app 进程内的 **per-bridge-connection TCP listener**（`127.0.0.1` + OS 随机端口），handler 线程 borrow 当前 turn 的 session 资源（`TurnDeps` / `Materializer` / `ApprovalState` / `sink`），serve MCP `initialize` + `tools/list`（聚合内置 DuckDB 工具，外部 MCP / 技能工具待相应源接入后并入工具表）+ `tools/call`（approval gate + `tools::dispatch`）。回连安全：64-hex / 244-bit entropy token 经 env 注入桥接（不进 argv），首条消息验证，listener 单连接接受。framing = newline-delimited JSON-RPC（MCP 协议，桥接直通字节流，零翻译）。**审批两正交面**：ACP 面（`session/request_permission`，agent 自带工具，fail-fast）与网关面（MCP `tools/call`，经网关工具，复用 ADR-0080 分级审批 + 挂起）——两层管不同工具集，非冗余。`AcpEngine::run` 不接收 `TurnDeps`，保持纯 ACP 协议驱动；网关 server 是独立 API 对：`bind_gateway()` 非阻塞绑定随机 localhost 端口 + 铸 64-hex / 244-bit entropy token（返回 `GatewayHandle { port, token, listener }`，调用者据此在 spawn 桥接前注入桥接描述符），`serve_connection(handle, ctx)` 阻塞驱动单连接生命周期（返回 `GatewayOutcome`）；由轮次编排层（`Session::ask_with_phase`）起停并与 `AcpEngine::run` 并行驱动。
 
 ## Context
 
@@ -12,7 +12,7 @@ ADR-0076 定双运行时 + app 所有的 MCP 网关，留"桥接进程分发形�
 
 1. **跨平台一致性**：localhost TCP 三平台（Windows / macOS / Linux）`std::net` 行为一致，零平台分支代码；命名管道 + Unix domain socket 双实现是双轨维护，违 DRY。回连通道是 toptopduck 内部传输，不值跨平台税。
 2. **关注分离**：ACP 引擎（协议驱动）与网关（工具执行）经回连通道解耦，各自独立可测；`AcpEngine::run` 不接收 `TurnDeps`，保持纯 ACP 驱动（可单测 ACP 行为），网关 server 独立可测（dispatch + approval），编排层（`Session::ask_with_phase`）拼两者。三层无环依赖。
-3. **安全模型匹配场景**：toptopduck 是单用户桌面 app，同机通常单用户；256-bit token + 单连接接受使同机 race 攻击（猜 token 或抢连）物理不可行。Unix socket 的 OS 文件权限 ACL 在多用户主机上更强，但其增益在桌面场景不兑现，不值得为它付双平台实现成本。
+3. **安全模型匹配场景**：toptopduck 是单用户桌面 app，同机通常单用户；64-hex / 244-bit entropy token + 单连接接受使同机 race 攻击（猜 token 或抢连）物理不可行。Unix socket 的 OS 文件权限 ACL 在多用户主机上更强，但其增益在桌面场景不兑现，不值得为它付双平台实现成本。
 4. **桥接零依赖**：纯 std main 不 `use` lib → release LTO 把 lib + Tauri + DuckDB dead-strip 出桥接二进制；启动快（CLI per-turn spawn 它），攻击面小，零状态一致性责任。
 5. **审批面正交**：经网关工具（内置 DuckDB + 外部 MCP + 技能）的唯一强制点在网关 `tools/call`（MCP 语义：工具调用是 `tools/call`，不需 permission）；agent 自带工具（claude-code 的 bash/edit 等，agent 自执行、不经网关）的唯一强制点在 ACP `session/request_permission`（app 经协议响应）。两层工具集不重叠，故非冗余。
 

@@ -509,7 +509,7 @@ pub struct Session {
     /// drives the built-in agent loop; `Some(spec)` drives the external ACP
     /// engine for one CLI on the next turn. This is the minimal-temporary-entry
     /// hook (issue #299: validation-period runtime selection takes a minimal
-    /// temporary entry; the real composer picker is #302) -- a `pub(crate)`
+    /// temporary entry; the real composer picker is #302) -- a `pub`
     /// setter, NOT an IPC command, so no frontend / user can flip it until #302
     /// ships the real picker. Integration tests toggle it; production stays
     /// `None` (built-in).
@@ -1904,13 +1904,23 @@ impl Session {
         };
         // 3. Build the bridge MCP descriptor. The CLI launches this binary as
         //    its MCP server; the bridge reads port + token from env and
-        //    connects back to the gateway (ADR-0085 per-bridge lifecycle).
+        //    connects back to the gateway (ADR-0085 per-bridge lifecycle). A
+        //    missing bin path surfaces as a transient turn failure (the gateway
+        //    was bound but never served; dropping the handle releases the port).
+        let bin_path = match bridge_bin_path() {
+            Ok(p) => p,
+            Err(detail) => {
+                return (
+                    TurnOutcome::Failed(TurnFailure::Execute { detail }),
+                    Vec::new(),
+                );
+            }
+        };
         let env = BTreeMap::from([
             (ENV_PORT.to_string(), handle.port.to_string()),
             (ENV_TOKEN.to_string(), handle.token.clone()),
         ]);
-        let mcp_server =
-            McpServer::stdio_bridge(GATEWAY_SERVER_NAME, bridge_bin_path(), Vec::new(), env);
+        let mcp_server = McpServer::stdio_bridge(GATEWAY_SERVER_NAME, bin_path, Vec::new(), env);
         // 4. Assemble the prompt blocks (windowed context + schema; the
         //    leading system-prompt block carries the M-contract, ADR-0081).
         let prompt_blocks = window::assemble_acp_turn(question, &self.working_set, history, locale);
@@ -2629,26 +2639,27 @@ fn merge_outcomes(gateway: GatewayOutcome, mut acp: LoopOutcome) -> LoopOutcome 
 
 /// Resolve the ACP bridge binary path (issue #299 slice 9c, ADR-0085).
 ///
-/// Temporary: a compile-time constant into the cargo build's `target/` tree.
-/// Sufficient for dev E2E + integration tests (cargo sets
-/// `CARGO_BIN_EXE_toptopduck-acp-bridge` for same-package bin references, and
-/// the dev binary sits beside the test binary). Production Tauri sidecar
-/// bundling is a packaging-time decision (ADR-0085 Consequences: the bridge
-/// bin production path) -- the `[[bin]]` does not enter the default Tauri
-/// bundle, so a shipped app cannot yet resolve this path; a follow-up ADR
-/// wires the sidecar. Centralizing the lookup here means the follow-up
-/// changes one site.
-fn bridge_bin_path() -> String {
-    // Read at run time: `env!`/`option_env!` are compile-time, and cargo only
-    // sets `CARGO_BIN_EXE_toptopduck-acp-bridge` while compiling SAME-PACKAGE
-    // integration tests -- the lib build never sees it. Integration tests set
-    // `TOPTOPDUCK_ACP_BRIDGE_BIN` (serially, mirroring the 9a ACP_FAKE_SCENARIO
-    // env lock) to `env!("CARGO_BIN_EXE_toptopduck-acp-bridge")` before driving
-    // a turn; production sidecar wiring is a packaging-time follow-up
-    // (ADR-0085 Consequences: bridge bin production path), so a missing var
-    // surfaces an honest panic rather than a silent wrong path.
-    std::env::var("TOPTOPDUCK_ACP_BRIDGE_BIN")
-        .expect("TOPTOPDUCK_ACP_BRIDGE_BIN must point at the toptopduck-acp-bridge binary")
+/// Returns `Err` with a turn-failure detail when `TOPTOPDUCK_ACP_BRIDGE_BIN` is
+/// unset so the orchestrator surfaces a `TurnOutcome::Failed(Execute)` --
+/// consistent with the `detect_adapter` and `bind_gateway` failure paths in
+/// [`Session::run_external_turn`] -- instead of poisoning the session mutex
+/// with a panic. The var is read at run time (`env!`/`option_env!` are
+/// compile-time, and cargo only sets `CARGO_BIN_EXE_toptopduck-acp-bridge`
+/// while compiling same-package integration tests, which the lib build never
+/// sees). Integration tests set it (serially, mirroring the 9a
+/// `ACP_FAKE_SCENARIO` env lock) to `env!("CARGO_BIN_EXE_toptopduck-acp-bridge")`
+/// before driving a turn. Production Tauri sidecar bundling is a packaging-time
+/// decision (ADR-0085 Consequences: the bridge bin production path) -- the
+/// `[[bin]]` does not enter the default Tauri bundle, so a shipped app cannot
+/// yet resolve this path; a follow-up ADR wires the sidecar. Centralizing the
+/// lookup here means the follow-up changes one site.
+fn bridge_bin_path() -> Result<String, String> {
+    std::env::var("TOPTOPDUCK_ACP_BRIDGE_BIN").map_err(|_| {
+        "TOPTOPDUCK_ACP_BRIDGE_BIN not set; the bridge binary path is injected by the \
+         orchestrator (integration tests today; the Tauri sidecar bundle is the \
+         ADR-0085 packaging-time follow-up)"
+            .to_string()
+    })
 }
 
 /// The bridge's port env var name. Mirrors the bridge binary's own const; the
@@ -2707,6 +2718,15 @@ mod tests {
     use serde_json::json;
     use tempfile::NamedTempFile;
 
+    // merge_outcomes (issue #299 slice 9c) + the agent-loop / gateway types it
+    // composes -- tested in isolation here so a regression in the dedup
+    // contract surfaces without driving the full Session -> AcpEngine -> bridge
+    // chain.
+    use super::merge_outcomes;
+    use crate::approval::OperationKind;
+    use crate::runtime::gateway::server::GatewayOutcome;
+    use crate::session::agent_loop::{LoopOutcome, Termination, TraceEntry};
+
     /// A materialize tool call promoting `sql` -- the tool-calling contract's
     /// equivalent of the retired single-shot `ProviderReply::Sql`.
     fn materialize_call(sql: &str) -> ToolTurnReply {
@@ -2760,6 +2780,108 @@ mod tests {
             other => panic!("ingest should load people.csv, got {other:?}"),
         }
         (session, dir)
+    }
+
+    // --- merge_outcomes (issue #299 slice 9c, ADR-0085 trace merge) -------
+
+    /// Build a trace entry with default fields (the merge tests vary only
+    /// `name` + `success`; the rest are inert for the dedup contract).
+    fn trace_entry(id: &str, name: &str, success: bool) -> TraceEntry {
+        TraceEntry {
+            tool_use_id: id.into(),
+            name: name.into(),
+            operation_kind: OperationKind::Read,
+            summary: format!("{name} summary"),
+            success,
+            result_excerpt: format!("{name} excerpt"),
+        }
+    }
+
+    /// A gateway outcome carrying `trace` + no promotions.
+    fn gateway_outcome(trace: Vec<TraceEntry>) -> GatewayOutcome {
+        GatewayOutcome {
+            trace,
+            promotions: Vec::new(),
+        }
+    }
+
+    /// An ACP loop outcome carrying `trace` + a textual termination.
+    fn acp_outcome(trace: Vec<TraceEntry>) -> LoopOutcome {
+        LoopOutcome {
+            termination: Termination::Text("acp reply".into()),
+            promotions: Vec::new(),
+            trace,
+            round_trips: 1,
+        }
+    }
+
+    /// A gateway-routed builtin (`explore`) appears in BOTH sources when the
+    /// CLI forwards its own tool-call notification; the gateway record wins
+    /// (it ran the SQL, so its `success` flag + excerpt are authoritative),
+    /// and the ACP duplicate is dropped.
+    #[test]
+    fn merge_outcomes_gateway_builtin_wins_over_acp_duplicate() {
+        let gateway = gateway_outcome(vec![trace_entry("g1", "explore", true)]);
+        let acp = acp_outcome(vec![trace_entry("a1", "explore", false)]);
+        let merged = merge_outcomes(gateway, acp);
+        assert_eq!(merged.trace.len(), 1, "the ACP duplicate is dropped");
+        assert_eq!(merged.trace[0].tool_use_id, "g1");
+        assert!(merged.trace[0].success, "the gateway success flag wins");
+    }
+
+    /// The CLI's own non-builtin tool calls (bash / edit / etc., which never
+    /// touch the gateway) ride the ACP pump and are appended to the merged
+    /// trace when the gateway has nothing for them.
+    #[test]
+    fn merge_outcomes_acp_non_builtin_appended() {
+        let gateway = gateway_outcome(Vec::new());
+        let acp = acp_outcome(vec![trace_entry("a1", "bash", true)]);
+        let merged = merge_outcomes(gateway, acp);
+        assert_eq!(merged.trace.len(), 1);
+        assert_eq!(merged.trace[0].name, "bash");
+    }
+
+    /// A mixed turn: the gateway routed an `explore` (builtin) AND the CLI
+    /// ran its own `bash` (non-builtin). The merged trace carries both in
+    /// gateway-first order.
+    #[test]
+    fn merge_outcomes_gateway_builtin_plus_acp_non_builtin() {
+        let gateway = gateway_outcome(vec![trace_entry("g1", "explore", true)]);
+        let acp = acp_outcome(vec![trace_entry("a1", "bash", true)]);
+        let merged = merge_outcomes(gateway, acp);
+        assert_eq!(merged.trace.len(), 2);
+        assert_eq!(merged.trace[0].name, "explore");
+        assert_eq!(merged.trace[1].name, "bash");
+    }
+
+    /// Termination + round_trips are ACP-only (the gateway serves tools, it
+    /// does not produce a turn termination). The merge preserves the ACP
+    /// values verbatim.
+    #[test]
+    fn merge_outcomes_termination_and_round_trips_from_acp() {
+        let gateway = gateway_outcome(Vec::new());
+        let acp = LoopOutcome {
+            termination: Termination::Text("done".into()),
+            promotions: Vec::new(),
+            trace: Vec::new(),
+            round_trips: 3,
+        };
+        let merged = merge_outcomes(gateway, acp);
+        assert_eq!(merged.termination, Termination::Text("done".into()));
+        assert_eq!(merged.round_trips, 3);
+    }
+
+    /// Promotions are gateway-only (the ACP engine leaves them empty by
+    /// design, slice 9a). The merge takes the gateway's promotions verbatim;
+    /// a non-empty fixture would require a `DatasetDescriptor`, and the
+    /// single-source rule is a one-line Rust assignment (`acp.promotions =
+    /// gateway.promotions`) whose semantics the type system guarantees.
+    #[test]
+    fn merge_outcomes_promotions_single_source_gateway() {
+        let gateway = gateway_outcome(Vec::new());
+        let acp = acp_outcome(Vec::new());
+        let merged = merge_outcomes(gateway, acp);
+        assert!(merged.promotions.is_empty());
     }
 
     #[test]

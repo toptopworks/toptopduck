@@ -38,7 +38,7 @@ use std::thread;
 
 /// The env var carrying the gateway's OS-assigned localhost port.
 const ENV_PORT: &str = "TOPTOPDUCK_GATEWAY_PORT";
-/// The env var carrying the per-turn 256-bit auth token.
+/// The env var carrying the per-turn auth token (64 hex chars, 244-bit entropy).
 const ENV_TOKEN: &str = "TOPTOPDUCK_GATEWAY_TOKEN";
 
 fn main() -> ExitCode {

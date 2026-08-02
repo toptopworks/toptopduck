@@ -2,7 +2,7 @@
 //! (ADR-0085).
 //!
 //! [`bind_gateway`] binds a per-bridge listener on a random localhost port +
-//! mints a 256-bit token; [`serve_connection`] then accepts one bridge,
+//! mints a 64-hex token (244-bit entropy); [`serve_connection`] then accepts one bridge,
 //! verifies the token, and drives the MCP `initialize` / `tools/list` /
 //! `tools/call` subset against the session's live resources. The split keeps
 //! [`bind_gateway`] non-blocking (the caller needs the port to inject into the
@@ -35,7 +35,7 @@ use crate::tools::{builtin_table, dispatch};
 use super::framing;
 
 /// A per-bridge-connection gateway endpoint: a bound listener, the OS-assigned
-/// port, and the 256-bit token a bridge must present on connect.
+/// port, and the 64-hex token (244-bit entropy) a bridge must present on connect.
 ///
 /// Built by [`bind_gateway`] and consumed by [`serve_connection`]. The listener
 /// accepts exactly one bridge connection (ADR-0085 per-bridge lifecycle) --
@@ -458,7 +458,7 @@ mod tests {
     fn bind_gateway_mints_port_and_64_hex_token() {
         let h = bind_gateway().expect("bind");
         assert!(h.port > 0, "OS assigns a real localhost port");
-        assert_eq!(h.token.len(), 64, "256-bit token = 64 hex chars");
+        assert_eq!(h.token.len(), 64, "244-bit entropy in 64 hex chars");
         assert!(
             h.token.chars().all(|c| c.is_ascii_hexdigit()),
             "token is lowercase hex"
