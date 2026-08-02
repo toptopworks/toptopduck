@@ -17,21 +17,24 @@ use serde_json::Value;
 /// (peer closed); returns `Err` on an invalid line.
 ///
 /// A blank line (some peers emit keepalive CRLFs between frames) is skipped --
-/// the caller loops to read the next real frame rather than treating the gap
-/// as a synthetic empty message.
+/// the reader loops internally to the next real frame rather than treating the
+/// gap as a synthetic empty message, so a peer flooding blank lines cannot
+/// overflow the stack.
 pub fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
-    let mut line = String::new();
-    let n = reader.read_line(&mut line)?;
-    if n == 0 {
-        return Ok(None);
+    loop {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            return Ok(None);
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            continue;
+        }
+        return serde_json::from_str(trimmed)
+            .map(Some)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
     }
-    let trimmed = line.trim_end_matches(['\r', '\n']);
-    if trimmed.is_empty() {
-        return read_message(reader);
-    }
-    serde_json::from_str(trimmed)
-        .map(Some)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 /// Write one newline-delimited JSON-RPC message. Serializes `msg` as compact

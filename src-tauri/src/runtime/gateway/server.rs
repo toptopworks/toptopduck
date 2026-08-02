@@ -25,19 +25,13 @@ use crate::approval::{ApprovalRequest, ApprovalSink, ApprovalState, GateCancelle
 use crate::cancel::CancelToken;
 use crate::model::Promotion;
 use crate::provider::tool_calling::{ToolDefinition, ToolUse};
-use crate::session::agent_loop::{classify_call, truncate_trace_excerpt, TraceEntry};
+use crate::session::agent_loop::{
+    classify_call, truncate_trace_excerpt, TraceEntry, TRACE_EXCERPT_MAX,
+};
 use crate::session::materializer::{Materializer, TurnDeps};
 use crate::tools::{builtin_table, dispatch};
 
 use super::framing;
-
-/// Trace-excerpt bound for a gateway tool call's result content. Mirrors the
-/// built-in loop's `TRACE_EXCERPT_MAX` so a trace row from the external runtime
-/// renders identically to one from the built-in loop (ADR-0078 cross-runtime
-/// trace contract). Kept local (the built-in loop's const is private) to mirror
-/// the ACP wire module's stance -- the value pins a contract, not a shared
-/// constant.
-const TRACE_EXCERPT_MAX: usize = 240;
 
 /// A per-bridge-connection gateway endpoint: a bound listener, the OS-assigned
 /// port, and the 256-bit token a bridge must present on connect.
@@ -48,11 +42,12 @@ const TRACE_EXCERPT_MAX: usize = 240;
 /// attempt finds no listener.
 pub struct GatewayHandle {
     /// The OS-assigned localhost port. Inject into the bridge descriptor
-    /// (`McpServer::stdio_bridge` env `PORT`) before the bridge is spawned.
+    /// (`McpServer::stdio_bridge` env `TOPTOPDUCK_GATEWAY_PORT`) before the
+    /// bridge is spawned.
     pub port: u16,
-    /// The 256-bit hex token. Inject into the bridge descriptor env `TOKEN`;
-    /// the bridge presents it as its first TCP line for [`serve_connection`]
-    /// to verify.
+    /// The 256-bit hex token. Inject into the bridge descriptor env
+    /// `TOPTOPDUCK_GATEWAY_TOKEN`; the bridge presents it as its first TCP line
+    /// for [`serve_connection`] to verify.
     pub token: String,
     listener: TcpListener,
 }

@@ -67,8 +67,10 @@ pub(crate) const DEFAULT_WALL_CLOCK: Duration = Duration::from_secs(120);
 
 /// Maximum length of a trace entry's result excerpt (ADR-0078). The full result
 /// rides the trace; the far window carries only a summary, so an excerpt is all
-/// the loop needs to keep for the collapsible trace.
-const TRACE_EXCERPT_MAX: usize = 240;
+/// the loop needs to keep for the collapsible trace. Shared across runtimes --
+/// the ACP gateway reuses it so a trace row renders identically regardless of
+/// which runtime produced it (ADR-0085 cross-runtime trace contract).
+pub(crate) const TRACE_EXCERPT_MAX: usize = 240;
 
 /// The Rust-native agent loop (ADR-0081). Holds the provider (borrowed, so the
 /// loop is cheap to build per turn), the shared cancel token (owned `Arc` so the
