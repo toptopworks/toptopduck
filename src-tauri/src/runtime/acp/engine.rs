@@ -55,13 +55,8 @@ use crate::runtime::acp::wire::{
 };
 use crate::session::agent_loop::{
     truncate_trace_excerpt, LoopOutcome, Termination, TraceEntry, DEFAULT_STEP_CAP,
-    DEFAULT_WALL_CLOCK,
+    DEFAULT_WALL_CLOCK, TRACE_EXCERPT_MAX,
 };
-
-/// Trace-excerpt bound for an ACP tool call's result content. Mirrors the
-/// built-in loop's `TRACE_EXCERPT_MAX` so a trace row from either runtime
-/// renders identically (ADR-0078 cross-runtime contract).
-const TRACE_EXCERPT_MAX: usize = 240;
 
 /// Pump poll interval: how long the pump blocks on the stdout-reader channel
 /// between cancel / step-cap checks. Short enough that a cancel surfaces in

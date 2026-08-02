@@ -45,7 +45,7 @@ pub struct GatewayHandle {
     /// (`McpServer::stdio_bridge` env `TOPTOPDUCK_GATEWAY_PORT`) before the
     /// bridge is spawned.
     pub port: u16,
-    /// The 256-bit hex token. Inject into the bridge descriptor env
+    /// The 64-hex token (244-bit entropy, two uuid v4). Inject into the bridge descriptor env
     /// `TOPTOPDUCK_GATEWAY_TOKEN`; the bridge presents it as its first TCP line
     /// for [`serve_connection`] to verify.
     pub token: String,
@@ -230,11 +230,19 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
         None => return Response::Error(-32602, "tools/call missing 'name'".into()),
     };
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+    // The gateway echoes the JSON-RPC id as the tool_use id so a debug trace
+    // can correlate the two. Normalize to a stable string -- JSON-RPC 2.0 id
+    // is string|number|null, and `Value::to_string()` would quote a string id
+    // (`"abc"` -> `"\"abc\""`), corrupting the trace's tool_use_id. null /
+    // missing / non-string-number map to "" (response-envelope correlation
+    // uses the raw `Value` at the caller, so function is unaffected).
+    let id = match msg.get("id") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        _ => String::new(),
+    };
     let call = ToolUse {
-        // The model-facing id pairs a result with its request; the gateway
-        // echoes the JSON-RPC id as the tool_use id so a debug trace can
-        // correlate the two.
-        id: msg.get("id").map(|v| v.to_string()).unwrap_or_default(),
+        id,
         name,
         input: arguments,
     };
@@ -282,9 +290,9 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
     }
 }
 
-/// Generate a 256-bit auth token as 64 hex chars. Two uuid v4 values (each 128
-/// bits of OS-CSPRNG randomness) concatenated; uuid is already a dependency
-/// (session ids), so this adds none.
+/// Generate a 64-hex auth token (244-bit entropy). Two uuid v4 values (122
+/// random bits each -- v4 carries 6 fixed version/variant bits) concatenated;
+/// uuid is already a dependency (session ids), so this adds none.
 fn generate_token() -> String {
     let a = uuid::Uuid::new_v4().simple().to_string();
     let b = uuid::Uuid::new_v4().simple().to_string();
@@ -572,6 +580,98 @@ mod tests {
         assert!(
             outcome.promotions.is_empty(),
             "no materialize -> no promotion"
+        );
+    }
+
+    // --- handle_tools_call ---------------------------------------------
+
+    /// The allow-path: a builtin tool (`explore`) classifies Allow (ADR-0080
+    /// Decision 1), the gate never emits, dispatch runs `SELECT 1`, and the
+    /// outcome carries one trace row + no promotion. Asserts the
+    /// classify -> gate -> dispatch -> trace mirror of `execute_call`
+    /// end-to-end -- the gap called out in the PR #339 review (I2).
+    #[test]
+    fn handle_tools_call_allow_path_runs_builtin_through_dispatch() {
+        let mut ctx = fresh_ctx();
+        let mut outcome = GatewayOutcome {
+            trace: Vec::new(),
+            promotions: Vec::new(),
+        };
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "explore", "arguments": {"sql": "SELECT 1 AS x"}}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], false, "explore SELECT 1 succeeds");
+                assert!(v["content"].is_array(), "explore returns a content array");
+            }
+            Response::Error(code, m) => {
+                panic!("allow-path must return Result, got error {code}: {m}")
+            }
+            Response::None => panic!("allow-path must return Result, got None"),
+        }
+        assert_eq!(outcome.trace.len(), 1, "one tool call -> one trace row");
+        let row = &outcome.trace[0];
+        assert_eq!(row.name, "explore");
+        assert!(row.success, "dispatch succeeded");
+        assert_eq!(
+            row.tool_use_id, "1",
+            "numeric JSON-RPC id normalizes to \"1\""
+        );
+        assert_eq!(row.summary, "SELECT 1 AS x", "summary is the sql field");
+        assert!(
+            outcome.promotions.is_empty(),
+            "explore produces no promotion"
+        );
+    }
+
+    /// Missing `params.name` is a JSON-RPC params error (-32602), not a dispatch.
+    #[test]
+    fn handle_tools_call_missing_name_returns_params_error() {
+        let mut ctx = fresh_ctx();
+        let mut outcome = GatewayOutcome {
+            trace: Vec::new(),
+            promotions: Vec::new(),
+        };
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {"arguments": {}}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Error(code, m) => {
+                assert_eq!(code, -32602);
+                assert!(m.contains("name"), "error names the missing field");
+            }
+            _ => panic!("missing name must return Error"),
+        }
+        assert!(outcome.trace.is_empty(), "no dispatch -> no trace");
+    }
+
+    /// A string JSON-RPC id round-trips into the trace without serde quoting
+    /// (PR #339 review A1: `Value::to_string()` would have wrapped it in
+    /// literal quotes).
+    #[test]
+    fn handle_tools_call_string_id_not_double_quoted() {
+        let mut ctx = fresh_ctx();
+        let mut outcome = GatewayOutcome {
+            trace: Vec::new(),
+            promotions: Vec::new(),
+        };
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": "req-abc",
+            "method": "tools/call",
+            "params": {"name": "explore", "arguments": {"sql": "SELECT 1"}}
+        });
+        handle_tools_call(&msg, &mut ctx, &mut outcome);
+        assert_eq!(
+            outcome.trace[0].tool_use_id, "req-abc",
+            "string id must not carry stray quotes"
         );
     }
 }
