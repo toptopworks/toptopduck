@@ -250,8 +250,13 @@ pub(crate) fn run_sandboxed_read(
 
 /// Lift a sandbox-primitive [`ExecError`] (open / attach / mirror / lockdown)
 /// into the runner's narrow [`SandboxExecError::Runtime`]. The honest detail
-/// rides the string; the retry-routing kind is dropped (each caller re-routes
-/// for its own surface).
+/// rides the string; the retry-routing kind is dropped at this boundary --
+/// explore wraps the string as a tool error, materialize re-infers the kind
+/// from the detail via `classify_duckdb_error`. Lossless today only because
+/// the primitives' detail strings carry the engine phrases verbatim and
+/// `classify_duckdb_error` matches by substring; a keyword-set change would
+/// silently degrade the kind on both callers, so this coupling is the one
+/// place to re-check if either side moves.
 fn runtime(e: ExecError) -> SandboxExecError {
     SandboxExecError::Runtime(e.detail)
 }

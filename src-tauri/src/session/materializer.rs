@@ -175,7 +175,7 @@ impl Materializer for RealMaterializer {
         // reads this on a later source delete to find dependents. Recorded
         // under `result_name` (stable identity) AFTER register_result, so the
         // member_names snapshot at analyze time already excluded this new
-        // result -- no self-dependency. `deps_analysis.refs` was pre-intersected
+        // result -- no self-dependency. `analysis.refs` was pre-intersected
         // with the then-live working set (members present at the parse moment).
         deps.working_set.register_result(descriptor.clone());
         deps.working_set

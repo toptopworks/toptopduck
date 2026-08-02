@@ -359,9 +359,11 @@ mod tests {
         );
     }
 
-    /// A cancel requested before the call aborts immediately as "explore
-    /// cancelled" -- the pre-setup checkpoint fires before any sandbox setup
-    /// runs, so a turn the user already stopped never burns setup cost. This is
+    /// A cancel requested before the call surfaces as "explore cancelled"
+    /// without driving a real query. The shared runner has no pre-check (the
+    /// agent loop's per-call check short-circuits a turn the user stopped
+    /// before dispatch), so sandbox setup runs -- cheaply, on an empty working
+    /// set -- and the mid-check after setup is what reports the cancel. This is
     /// the one cancel checkpoint reachable without driving a real query.
     #[test]
     fn explore_returns_cancelled_when_cancel_already_requested() {
@@ -373,7 +375,8 @@ mod tests {
         cancel.request();
         let err = dispatch(&json!({"sql": "SELECT 1"}), &mut deps, &cancel).unwrap_err();
         assert_eq!(err, "explore cancelled", "{err}");
-        // No sandbox setup ran -> no working-set entry produced.
+        // The mid-check aborted before the CREATE -> no scratch table, no
+        // working-set entry.
         assert_eq!(deps.working_set.len(), 0);
     }
 
