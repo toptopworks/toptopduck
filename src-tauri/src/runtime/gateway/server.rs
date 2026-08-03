@@ -405,28 +405,6 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
     }
 }
 
-/// Extract the first text block from a standard MCP tools/call envelope for
-/// the turn trace. The gateway relays the full envelope verbatim (structured
-/// content blocks preserved for the model); the trace excerpt is a flat
-/// summary, so a non-text or empty result falls back to a placeholder rather
-/// than serializing the whole envelope (which would re-introduce the
-/// double-encoding the verbatim relay avoids).
-fn mcp_text_excerpt(envelope: &Value) -> String {
-    envelope
-        .get("content")
-        .and_then(Value::as_array)
-        .and_then(|blocks| {
-            blocks.iter().find_map(|b| {
-                if b.get("type").and_then(Value::as_str) == Some("text") {
-                    b.get("text").and_then(Value::as_str).map(str::to_string)
-                } else {
-                    None
-                }
-            })
-        })
-        .unwrap_or_else(|| "<non-text MCP result>".to_string())
-}
-
 /// Resolve a routed external MCP call into the response envelope + the trace
 /// inputs (slice C-gw). Pure over the aggregator: takes the route result so
 /// the verbatim-relay + excerpt shape is unit-testable without a live server.
@@ -456,7 +434,7 @@ fn external_call_outcome(
         .get("isError")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let excerpt = mcp_text_excerpt(&envelope);
+    let excerpt = aggregator::first_text_block(&envelope);
     (envelope, is_error, excerpt)
 }
 
@@ -886,44 +864,6 @@ mod tests {
             outcome.trace[0].tool_use_id, "req-abc",
             "string id must not carry stray quotes"
         );
-    }
-
-    /// The trace excerpt reads the first text block from a relayed MCP
-    /// envelope; a non-text or empty result falls back to a placeholder so
-    /// the trace never re-serializes the whole envelope (the double-encoding
-    /// the verbatim relay avoids). Pins the helper the external-route path
-    /// in `handle_tools_call` relies on for its trace entry.
-    #[test]
-    fn mcp_text_excerpt_reads_first_text_block() {
-        // Single text block -> that text.
-        let single = json!({
-            "content": [{"type": "text", "text": "5"}],
-            "isError": false,
-        });
-        assert_eq!(mcp_text_excerpt(&single), "5");
-
-        // Multiple blocks -> first text block wins (a leading image is
-        // skipped).
-        let multi = json!({
-            "content": [
-                {"type": "image", "data": "..."},
-                {"type": "text", "text": "first text"},
-                {"type": "text", "text": "second text"},
-            ],
-            "isError": false,
-        });
-        assert_eq!(mcp_text_excerpt(&multi), "first text");
-
-        // No text block -> placeholder, NOT a JSON dump of the envelope.
-        let nontext = json!({
-            "content": [{"type": "image", "data": "..."}],
-            "isError": false,
-        });
-        assert_eq!(mcp_text_excerpt(&nontext), "<non-text MCP result>");
-
-        // Empty content array -> placeholder.
-        let empty = json!({"content": [], "isError": false});
-        assert_eq!(mcp_text_excerpt(&empty), "<non-text MCP result>");
     }
 
     // --- external_call_outcome (I1: verbatim-relay + excerpt contract) -----

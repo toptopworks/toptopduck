@@ -43,6 +43,44 @@ pub fn builtin_table() -> Vec<ToolDefinition> {
     definitions::builtin_definitions()
 }
 
+/// Convert the gateway's namespaced external MCP tool entries (the MCP
+/// `tools/list` shape: `{name, description, inputSchema}`, already namespaced
+/// to `mcp__<slug>__<tool>` by `McpAggregator::aggregated_tools`) to the
+/// provider-facing [`ToolDefinition`] table (ADR-0076, issue #301 slice
+/// C-loop). The built-in agent loop merges this alongside [`builtin_table`]
+/// so the model sees one tool surface whether the turn runs the built-in loop
+/// or the ACP external runtime (the gateway does the same merge on
+/// `tools/list`).
+///
+/// Best-effort over a malformed server entry: a missing `description` becomes
+/// an empty string (the model still sees the name + schema); a missing
+/// `inputSchema` becomes an empty object so the provider adapter's
+/// well-formedness check (object schema) still holds. A missing `name` becomes
+/// an empty string -- `namespace_tool_entries` already passes such an entry
+/// through unchanged, so the gateway surfaces it honestly rather than
+/// silently dropping it; the model gets an unnamed tool it will not call.
+pub(crate) fn external_tool_definitions(mcp_entries: &[Value]) -> Vec<ToolDefinition> {
+    mcp_entries
+        .iter()
+        .map(|entry| ToolDefinition {
+            name: entry
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            description: entry
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            input_schema: entry
+                .get("inputSchema")
+                .cloned()
+                .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
+        })
+        .collect()
+}
+
 /// The executor→dispatch internal contract (issue #336): the JSON content that
 /// reaches the model, paired with an optional side effect. Today, only
 /// `materialize` fills `promotion` (a typed `Promotion` built from the in-hand
@@ -213,6 +251,58 @@ mod tests {
                 "sample".to_string(),
             ]
         );
+    }
+
+    /// The MCP `tools/list` entries (already namespaced by the aggregator)
+    /// convert to the provider-facing `ToolDefinition` table (issue #301 slice
+    /// C-loop): name + description + inputSchema ride through verbatim.
+    #[test]
+    fn external_tool_definitions_converts_namespaced_entries() {
+        let entries = vec![
+            json!({
+                "name": "mcp__github__search",
+                "description": "search repos",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"q": {"type": "string"}}
+                }
+            }),
+            json!({
+                "name": "mcp__github__fetch",
+                "description": "fetch a repo",
+                "inputSchema": {"type": "object"}
+            }),
+        ];
+        let defs = external_tool_definitions(&entries);
+        assert_eq!(defs.len(), 2);
+        assert_eq!(defs[0].name, "mcp__github__search");
+        assert_eq!(defs[0].description, "search repos");
+        assert_eq!(defs[0].input_schema["type"], "object");
+        assert_eq!(defs[0].input_schema["properties"]["q"]["type"], "string");
+        assert_eq!(defs[1].name, "mcp__github__fetch");
+    }
+
+    /// A malformed entry (missing description + inputSchema) still yields a
+    /// well-formed `ToolDefinition` (issue #301 slice C-loop): empty
+    /// description + empty-object schema, so the provider adapter's
+    /// object-schema well-formedness check still holds and the model gets an
+    /// honest (if sparse) entry rather than a silently-dropped tool.
+    #[test]
+    fn external_tool_definitions_falls_back_for_malformed_entries() {
+        let entries = vec![json!({"name": "mcp__srv__minimal"})];
+        let defs = external_tool_definitions(&entries);
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "mcp__srv__minimal");
+        assert_eq!(defs[0].description, "");
+        assert!(defs[0].input_schema.is_object());
+    }
+
+    /// An empty entry slice yields an empty definition table (issue #301 slice
+    /// C-loop): the no-servers case is a no-op merge, not a sentinel or error.
+    #[test]
+    fn external_tool_definitions_empty_slice_yields_empty_table() {
+        let defs = external_tool_definitions(&[]);
+        assert!(defs.is_empty());
     }
 
     /// An unknown tool name returns a tool error (is_error = true) naming the
