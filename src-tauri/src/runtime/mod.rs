@@ -2,7 +2,7 @@
 //!
 //! The external runtime is the second of the two并存 runtimes (the built-in is
 //! [`crate::session::agent_loop::AgentLoop`]). The app spawns a third-party CLI
-//! agent process (claude-code v1; gemini-cli / codex in #300) and drives it over
+//! agent process (claude-code, gemini-cli, codex -- the ADR-0081 v1 set) and drives it over
 //! ACP v1 (stdio JSON-RPC). The engine here is the **generic, data-driven**
 //! half of ADR-0081 Decision: every CLI is a pure data definition
 //! ([`acp::adapter::AdapterSpec`]); the engine does detection / launch / parse
