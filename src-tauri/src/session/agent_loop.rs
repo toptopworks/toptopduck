@@ -44,6 +44,7 @@ use crate::approval::{
     ToolKey,
 };
 use crate::cancel::CancelToken;
+use crate::mcp::aggregator::{self, McpAggregator};
 use crate::model::{Promotion, TraceEntryView, TurnPhase};
 use crate::persistence::recipe::RecipeTraceEntry;
 use crate::provider::tool_calling::{
@@ -124,11 +125,13 @@ impl<'p> AgentLoop<'p> {
     /// `success: false`). The completed payload IS the trace entry that lands
     /// on `TurnRecord::trace`, so the frontend renders the in-flight trace
     /// progressively from the very events the turn later persists.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn run(
         self,
         request: &ToolTurnRequest,
         deps: &mut TurnDeps,
         materializer: &mut dyn Materializer,
+        mcp: &mut McpAggregator,
         approval: &ApprovalState,
         sink: &dyn ApprovalSink,
         mut on_phase: impl FnMut(TurnPhase),
@@ -236,6 +239,7 @@ impl<'p> AgentLoop<'p> {
                             call,
                             deps,
                             materializer,
+                            mcp,
                             &gate,
                             &mut outputs,
                             &mut on_phase,
@@ -334,6 +338,7 @@ fn execute_call(
     call: &ToolUse,
     deps: &mut TurnDeps,
     materializer: &mut dyn Materializer,
+    mcp: &mut McpAggregator,
     gate: &GateCtx<'_>,
     outputs: &mut CallOutputs,
     on_phase: &mut impl FnMut(TurnPhase),
@@ -385,12 +390,20 @@ fn execute_call(
         operation_kind,
         summary: summary.clone(),
     });
-    // ADR-0076: dispatch routes by name to the matching executor and surfaces
-    // the outcome as a typed channel (issue #336): the model-facing `result`
-    // (a JSON payload on success or an error string on failure -- both feed
-    // back to the model; the agent self-corrects on an error) plus the side
-    // effect the executor reported.
-    let outcome = tools::dispatch(call, deps, gate.cancel, materializer);
+    // ADR-0076 (slice C-loop): route by name shape. A namespaced
+    // `mcp__<slug>__<tool>` name goes to the matching external MCP server via
+    // the aggregator (the prefix is stripped server-side); a bare name goes to
+    // the built-in DuckDB executor. Both surface the outcome as the typed
+    // channel (issue #336): the model-facing `result` (JSON payload on success
+    // or an error string on failure -- both feed back to the model; the agent
+    // self-corrects on an error) plus the side effect the executor reported.
+    // The external path never promotes (external tools do not materialize a
+    // working-set result), so `promotion` is always `None` there.
+    let outcome = if aggregator::parse_namespaced(&call.name).is_some() {
+        route_external_call(call, mcp)
+    } else {
+        tools::dispatch(call, deps, gate.cancel, materializer)
+    };
     let result = outcome.result;
     // ADR-0077: a tool-level error routes back to the model. Log it so a
     // non-converging turn (StepCap) leaves an operator-visible trail of what
@@ -444,16 +457,81 @@ pub(crate) fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) 
             summarize_field(&call.input, spec.summary_field, spec.summary_fallback),
         ),
         None => {
-            // External arm: an unknown name keys as external, badges Network,
-            // and the summary names the tool so an approval card can surface it.
+            // External arm (issue #301 slice C-loop): a namespaced
+            // `mcp__<slug>__<tool>` name resolves the server slug for the
+            // approval key + trace so a card / row names the real server; a
+            // bare unknown name keeps the "unknown" server (per-session
+            // enablement + the bare-unknown classification land in slice D).
+            // Either way the call badges Network and the summary names the
+            // tool so an approval card can surface it.
             let other = call.name.as_str();
+            let server = aggregator::parse_namespaced(other)
+                .map(|(slug, _)| slug)
+                .unwrap_or_else(|| "unknown".to_string());
             (
-                ToolKey::external("unknown", other),
+                ToolKey::external(server.as_str(), other),
                 OperationKind::Network,
                 format!("external tool `{other}`"),
             )
         }
     }
+}
+
+/// Route a namespaced external MCP call through the aggregator and shape the
+/// outcome the loop consumes (issue #301 slice C-loop, mirrors the gateway's
+/// `external_call_outcome`). The aggregator strips the `mcp__<slug>__` prefix
+/// and forwards the native tool name + arguments to the matching server; the
+/// server's envelope is relayed as the model-facing `content` string (the
+/// first text block -- `ToolResult.content` is a flat string on this path, so
+/// a multi-block or non-text result reduces to its first text block, with a
+/// placeholder when there is none). A route failure (UnknownServer / Client
+/// fault) becomes a tool error the agent self-corrects from (ADR-0077). No
+/// promotion: external tools never materialize a working-set result.
+fn route_external_call(call: &ToolUse, mcp: &mut McpAggregator) -> tools::ToolOutcome {
+    let route_result = mcp.route(&call.name, &call.input);
+    let (content, is_error) = match route_result {
+        Ok(envelope) => {
+            let is_error = envelope
+                .get("isError")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            (mcp_first_text(&envelope), is_error)
+        }
+        Err(e) => (
+            format!("external tool `{}` failed: {}", call.name, e),
+            true,
+        ),
+    };
+    tools::ToolOutcome {
+        result: ToolResult {
+            tool_use_id: call.id.clone(),
+            content,
+            is_error,
+        },
+        promotion: None,
+    }
+}
+
+/// Extract the first text block from an MCP `tools/call` envelope for the
+/// model-facing result string (issue #301 slice C-loop). Mirrors the gateway's
+/// `mcp_text_excerpt` so the trace excerpt and the model's tool result agree
+/// on what the external server returned. A non-text or empty result falls back
+/// to a placeholder rather than serializing the whole envelope (the model
+/// would otherwise have to parse JSON out of a flat string).
+fn mcp_first_text(envelope: &Value) -> String {
+    envelope
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|blocks| {
+            blocks.iter().find_map(|b| {
+                if b.get("type").and_then(Value::as_str) == Some("text") {
+                    b.get("text").and_then(Value::as_str).map(str::to_string)
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_else(|| "<non-text MCP result>".to_string())
 }
 
 /// Render one `input` field as the call summary, truncated. Falls back to
@@ -685,6 +763,59 @@ mod tests {
         }
     }
 
+    /// mcp_first_text reads the first text block from an MCP tools/call
+    /// envelope (issue #301 slice C-loop): the first `type: text` block wins,
+    /// later text blocks are ignored (the model gets one string, not a
+    /// concatenation).
+    #[test]
+    fn mcp_first_text_reads_the_first_text_block() {
+        let envelope = serde_json::json!({
+            "content": [
+                {"type": "text", "text": "sum: 5"},
+                {"type": "text", "text": "ignored"}
+            ],
+            "isError": false
+        });
+        assert_eq!(mcp_first_text(&envelope), "sum: 5");
+    }
+
+    /// A non-text or empty result reduces to a placeholder (issue #301 slice
+    /// C-loop): the model still gets a string, never a serialization of the
+    /// whole envelope (which would force it to parse JSON out of a flat
+    /// content field).
+    #[test]
+    fn mcp_first_text_falls_back_when_no_text_block() {
+        let non_text = serde_json::json!({
+            "content": [{"type": "image", "data": "..."}],
+            "isError": false
+        });
+        assert_eq!(mcp_first_text(&non_text), "<non-text MCP result>");
+
+        let empty = serde_json::json!({"content": [], "isError": false});
+        assert_eq!(mcp_first_text(&empty), "<non-text MCP result>");
+    }
+
+    /// A route failure (unknown slug) surfaces as a tool error the agent
+    /// self-corrects from (ADR-0077) -- not a turn failure. The error names
+    /// the slug so the model gets actionable feedback.
+    #[test]
+    fn route_external_call_surfaces_an_unknown_slug_as_a_tool_error() {
+        let mut mcp = McpAggregator::empty();
+        let call = ToolUse {
+            id: "tu_1".into(),
+            name: "mcp__ghost__echo".into(),
+            input: serde_json::json!({}),
+        };
+        let outcome = route_external_call(&call, &mut mcp);
+        assert!(outcome.result.is_error, "unknown slug is a tool error");
+        assert!(
+            outcome.result.content.contains("ghost"),
+            "error names the slug: {}",
+            outcome.result.content
+        );
+        assert!(outcome.promotion.is_none());
+    }
+
     /// Build a minimal tool-turn request for `question` with the built-in tool
     /// table. The system prompt + max_tokens are inert for routing (the fake
     /// keys only on the first user message).
@@ -802,6 +933,7 @@ mod tests {
             &request("stream"),
             &mut d,
             &mut RealMaterializer,
+            &mut McpAggregator::empty(),
             &approval,
             &sink,
             |p| phases.lock().unwrap().push(p),
@@ -894,6 +1026,7 @@ mod tests {
             &request("deny"),
             &mut d,
             &mut RealMaterializer,
+            &mut McpAggregator::empty(),
             &approval,
             &*sink,
             {
@@ -988,6 +1121,7 @@ mod tests {
                 &request(question),
                 &mut d,
                 &mut RealMaterializer,
+                &mut McpAggregator::empty(),
                 &approval,
                 &sink,
                 |_| {},
@@ -1337,6 +1471,7 @@ mod tests {
                 &request("stuck"),
                 &mut d,
                 &mut RealMaterializer,
+                &mut McpAggregator::empty(),
                 &approval,
                 &sink,
                 |_| {},

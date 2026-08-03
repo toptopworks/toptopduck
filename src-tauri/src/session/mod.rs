@@ -1803,7 +1803,7 @@ impl Session {
                 // Built-in agent loop (ADR-0081, issue #318): assemble the
                 // windowed tool-calling request, drive the loop with the shared
                 // session state, map the structured LoopOutcome onto TurnOutcome.
-                let request =
+                let mut request =
                     window::assemble_tool_turn(question, &self.working_set, &turns, locale);
                 // Disjoint field borrows: the loop borrows `&*self.provider`
                 // while TurnDeps borrows `&self.conn` / `&self.source_files` /
@@ -1820,11 +1820,27 @@ impl Session {
                         result_count_cap: self.result_count_cap,
                         temp_path: &self.temp_path,
                     };
+                    // Connect the user's configured external MCP servers
+                    // (issue #301 slice C-loop): same per-turn lifecycle as
+                    // the gateway path (ADR-0076 Q2 -- spawn + initialize each
+                    // stdio server here, drop at scope end so the spawned
+                    // children die with the aggregator). The aggregator's
+                    // namespaced tools merge into the request's tool table so
+                    // the model sees one surface; execute_call routes a
+                    // namespaced call back through the aggregator.
+                    let mut mcp = crate::mcp::aggregator::McpAggregator::empty();
+                    mcp.connect_all(mcp_servers, keychain);
+                    request
+                        .tools
+                        .extend(crate::tools::external_tool_definitions(
+                            &mcp.aggregated_tools(),
+                        ));
                     let mut loop_outcome =
                         AgentLoop::new(&*self.provider, Arc::clone(&self.cancel)).run(
                             &request,
                             &mut deps,
                             &mut *self.materializer,
+                            &mut mcp,
                             approval,
                             sink,
                             on_phase,
