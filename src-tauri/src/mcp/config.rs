@@ -157,6 +157,17 @@ pub struct McpServerConfig {
     /// -- stable diffs across writes + stable round-trip in tests.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// The env_key names whose VALUES live in the OS keychain (issue #301,
+    /// ADR-0029). The gateway reads each via `get_mcp_secret(id, env_key)`
+    /// at spawn time and injects it into the child env alongside
+    /// [`Self::env`]; the values NEVER cross this config (structural +
+    /// read-time scan, ADR-0029/0036/0038). A separate list (not mixed into
+    /// `env`) keeps the config all-non-secret and the gateway injection
+    /// contract explicit. `#[serde(default)]` so a config written before
+    /// this field existed deserializes to empty (no secret env injected --
+    /// the server still runs with its non-secret env).
+    #[serde(default)]
+    pub keychain_env_keys: Vec<String>,
     /// Per-server call timeout in milliseconds (issue #301). `None` = the
     /// gateway's default timeout applies (the gateway client lands in a later
     /// slice); `Some(ms)` overrides per server. `#[serde(default)]` so a config
@@ -341,6 +352,7 @@ mod tests {
             display_name: "GitHub".into(),
             transport: McpTransport::stdio("/usr/local/bin/github-mcp", vec!["--stdio".into()]),
             env,
+            keychain_env_keys: Vec::new(),
             timeout_ms: None,
         };
         let json = serde_json::to_string(&cfg).unwrap();
@@ -380,6 +392,10 @@ mod tests {
         );
         assert!(cfg.env.is_empty(), "missing env -> empty default");
         assert!(
+            cfg.keychain_env_keys.is_empty(),
+            "missing keychain_env_keys -> empty default"
+        );
+        assert!(
             cfg.timeout_ms.is_none(),
             "missing timeout_ms -> None default"
         );
@@ -404,6 +420,7 @@ mod tests {
             display_name: "Alpha".into(),
             transport: McpTransport::stdio("/bin/a", Vec::new()),
             env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
             timeout_ms: None,
         });
         assert!(reg.get(&McpServerId("alpha".into())).is_some());
@@ -422,6 +439,7 @@ mod tests {
                     display_name: "First".into(),
                     transport: McpTransport::stdio("/bin/first", Vec::new()),
                     env: BTreeMap::new(),
+                    keychain_env_keys: Vec::new(),
                     timeout_ms: None,
                 },
                 McpServerConfig {
@@ -429,6 +447,7 @@ mod tests {
                     display_name: "Second".into(),
                     transport: McpTransport::stdio("/bin/second", Vec::new()),
                     env: BTreeMap::new(),
+                    keychain_env_keys: Vec::new(),
                     timeout_ms: None,
                 },
                 McpServerConfig {
@@ -436,6 +455,7 @@ mod tests {
                     display_name: "Unique".into(),
                     transport: McpTransport::stdio("/bin/u", Vec::new()),
                     env: BTreeMap::new(),
+                    keychain_env_keys: Vec::new(),
                     timeout_ms: None,
                 },
             ],
@@ -459,6 +479,7 @@ mod tests {
                 display_name: "Solo".into(),
                 transport: McpTransport::stdio("/bin/s", Vec::new()),
                 env: BTreeMap::new(),
+                keychain_env_keys: Vec::new(),
                 timeout_ms: None,
             }],
         };
@@ -480,6 +501,7 @@ mod tests {
             display_name: String::new(),
             transport: McpTransport::stdio("/bin/srv", Vec::new()),
             env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
             timeout_ms: None,
         };
         let stored = reg.upsert(incoming);
@@ -505,6 +527,7 @@ mod tests {
             display_name: String::new(),
             transport: McpTransport::stdio("/bin/srv", Vec::new()),
             env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
             timeout_ms: None,
         };
         let stored = reg.upsert(incoming);
@@ -522,6 +545,7 @@ mod tests {
             display_name: String::new(),
             transport: McpTransport::stdio("/bin/srv", Vec::new()),
             env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
             timeout_ms: None,
         };
         let stored = reg.upsert(incoming);
@@ -537,6 +561,7 @@ mod tests {
             display_name: "My GitHub".into(),
             transport: McpTransport::stdio("/bin/srv", Vec::new()),
             env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
             timeout_ms: None,
         };
         let stored = reg.upsert(incoming);
@@ -551,6 +576,7 @@ mod tests {
                 display_name: "Old".into(),
                 transport: McpTransport::stdio("/bin/old", Vec::new()),
                 env: BTreeMap::new(),
+                keychain_env_keys: Vec::new(),
                 timeout_ms: None,
             }],
         };
@@ -559,6 +585,7 @@ mod tests {
             display_name: "New".into(),
             transport: McpTransport::stdio("/bin/new", vec!["--flag".into()]),
             env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
             timeout_ms: None,
         };
         let stored = reg.upsert(updated);
@@ -582,6 +609,7 @@ mod tests {
                 display_name: "Alpha".into(),
                 transport: McpTransport::stdio("/bin/a", Vec::new()),
                 env: BTreeMap::new(),
+                keychain_env_keys: Vec::new(),
                 timeout_ms: None,
             }],
         };
@@ -590,6 +618,7 @@ mod tests {
             display_name: "Beta".into(),
             transport: McpTransport::stdio("/bin/b", Vec::new()),
             env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
             timeout_ms: None,
         };
         let stored = reg.upsert(beta);
@@ -607,6 +636,7 @@ mod tests {
                     display_name: "Alpha".into(),
                     transport: McpTransport::stdio("/bin/a", Vec::new()),
                     env: BTreeMap::new(),
+                    keychain_env_keys: Vec::new(),
                     timeout_ms: None,
                 },
                 McpServerConfig {
@@ -614,6 +644,7 @@ mod tests {
                     display_name: "Beta".into(),
                     transport: McpTransport::stdio("/bin/b", Vec::new()),
                     env: BTreeMap::new(),
+                    keychain_env_keys: Vec::new(),
                     timeout_ms: None,
                 },
             ],
@@ -631,6 +662,7 @@ mod tests {
                 display_name: "Solo".into(),
                 transport: McpTransport::stdio("/bin/s", Vec::new()),
                 env: BTreeMap::new(),
+                keychain_env_keys: Vec::new(),
                 timeout_ms: None,
             }],
         };
@@ -651,6 +683,7 @@ mod tests {
             display_name: "Slow".into(),
             transport: McpTransport::stdio("/bin/slow", Vec::new()),
             env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
             timeout_ms: Some(45_000),
         };
         let json = serde_json::to_value(&with_timeout).unwrap();
@@ -661,6 +694,7 @@ mod tests {
             display_name: "Default".into(),
             transport: McpTransport::stdio("/bin/default", Vec::new()),
             env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
             timeout_ms: None,
         };
         let json = serde_json::to_value(&null_timeout).unwrap();
@@ -686,6 +720,7 @@ mod tests {
             display_name: "Slow".into(),
             transport: McpTransport::stdio("/bin/slow", Vec::new()),
             env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
             timeout_ms: Some(45_000),
         };
         let stored = reg.upsert(with_timeout);
@@ -698,10 +733,51 @@ mod tests {
             display_name: "Slow".into(),
             transport: McpTransport::stdio("/bin/slow", Vec::new()),
             env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
             timeout_ms: None,
         };
         let stored = reg.upsert(without_timeout);
         assert_eq!(stored.timeout_ms, None);
         assert_eq!(reg.servers[0].timeout_ms, None);
+    }
+
+    // --- keychain_env_keys (C0) ---------------------------------------------
+
+    #[test]
+    fn server_config_keychain_env_keys_round_trips() {
+        // The list of keychain-backed env_key names serializes as a JSON
+        // array of strings. The values themselves never touch this config
+        // (ADR-0029 -- they live in the keychain under mcp-<id>-<env_key>);
+        // only the key NAMES ride here so the gateway knows which entries
+        // to read at spawn time. Empty serializes as [].
+        let cfg = McpServerConfig {
+            id: McpServerId("github-mcp".into()),
+            display_name: "GitHub".into(),
+            transport: McpTransport::stdio("/bin/srv", Vec::new()),
+            env: BTreeMap::new(),
+            keychain_env_keys: vec!["API_KEY".into(), "WEBHOOK_SECRET".into()],
+            timeout_ms: None,
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(
+            json["keychain_env_keys"],
+            serde_json::json!(["API_KEY", "WEBHOOK_SECRET"])
+        );
+        let back: McpServerConfig =
+            serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.keychain_env_keys, cfg.keychain_env_keys);
+
+        // Empty list round-trips as [].
+        let empty = McpServerConfig {
+            id: McpServerId("bare".into()),
+            display_name: "Bare".into(),
+            transport: McpTransport::stdio("/bin/bare", Vec::new()),
+            env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
+            timeout_ms: None,
+        };
+        let json = serde_json::to_value(&empty).unwrap();
+        assert!(json["keychain_env_keys"].is_array());
+        assert!(json["keychain_env_keys"].as_array().unwrap().is_empty());
     }
 }

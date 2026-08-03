@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 
 use crate::approval::{ApprovalRequest, ApprovalSink, ApprovalState, GateCancelled, GateOutcome};
 use crate::cancel::CancelToken;
+use crate::mcp::aggregator::{self, McpAggregator};
 use crate::model::Promotion;
 use crate::provider::tool_calling::{ToolDefinition, ToolUse};
 use crate::session::agent_loop::{
@@ -84,6 +85,11 @@ pub struct GatewayCtx<'a> {
     pub sink: &'a dyn ApprovalSink,
     /// The turn's shared cancel token; the gate suspends on it, dispatch checks it.
     pub cancel: &'a CancelToken,
+    /// The connected external MCP servers (slice C-gw). Owned (turn-local
+    /// spawn), unlike the borrowed fields above; the caller constructs +
+    /// drops it per turn. Empty when no servers are configured or the session
+    /// wiring has not connected any yet.
+    pub mcp: McpAggregator,
 }
 
 /// The trace + promotions a serve collected from the bridge's tool calls
@@ -272,16 +278,20 @@ fn handle_method(
 ) -> Response {
     match method {
         "initialize" => Response::Result(json!({
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": crate::mcp::MCP_PROTOCOL_VERSION,
             "capabilities": {"tools": {}},
             "serverInfo": {
                 "name": "toptopduck-gateway",
                 "version": env!("CARGO_PKG_VERSION"),
             }
         })),
-        "tools/list" => Response::Result(json!({
-            "tools": builtin_table().iter().map(tool_to_mcp).collect::<Vec<_>>()
-        })),
+        "tools/list" => {
+            // Built-in DuckDB tools + namespaced external MCP tools (slice
+            // C-gw): the bridge / LLM sees one merged table.
+            let mut tools: Vec<Value> = builtin_table().iter().map(tool_to_mcp).collect();
+            tools.extend(ctx.mcp.aggregated_tools());
+            Response::Result(json!({ "tools": tools }))
+        }
         "tools/call" => handle_tools_call(msg, ctx, outcome),
         // A notification (no id) -- no response. The caller's id-check
         // suppresses the envelope; this arm keeps the match exhaustive.
@@ -351,25 +361,103 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
             }))
         }
         Ok(GateOutcome::Allow) => {
-            let result = dispatch(&call, &mut ctx.deps, ctx.cancel, ctx.materializer);
-            if let Some(promotion) = result.promotion {
+            // Route by name shape (slice C-gw): a namespaced
+            // `mcp__<slug>__<tool>` name goes to the matching external server
+            // (envelope relayed verbatim via [`external_call_outcome`]); a bare
+            // name goes to the built-in executor (flat text wrapped into one
+            // text block). The two paths build DIFFERENT response envelopes --
+            // see [`external_call_outcome`] for why the external envelope is
+            // relayed verbatim rather than re-wrapped.
+            if aggregator::parse_namespaced(&call.name).is_some() {
+                let route_result = ctx.mcp.route(&call.name, &call.input);
+                let (envelope, is_error, excerpt) = external_call_outcome(&call.name, route_result);
+                outcome.trace.push(TraceEntry {
+                    tool_use_id: call.id.clone(),
+                    name: call.name.clone(),
+                    operation_kind,
+                    summary,
+                    success: !is_error,
+                    result_excerpt: truncate_trace_excerpt(&excerpt, TRACE_EXCERPT_MAX),
+                });
+                return Response::Result(envelope);
+            }
+            let dispatched = dispatch(&call, &mut ctx.deps, ctx.cancel, ctx.materializer);
+            if let Some(promotion) = dispatched.promotion {
                 outcome.promotions.push(promotion);
             }
-            let success = !result.result.is_error;
+            let is_error = dispatched.result.is_error;
             outcome.trace.push(TraceEntry {
                 tool_use_id: call.id.clone(),
                 name: call.name.clone(),
                 operation_kind,
                 summary,
-                success,
-                result_excerpt: truncate_trace_excerpt(&result.result.content, TRACE_EXCERPT_MAX),
+                success: !is_error,
+                result_excerpt: truncate_trace_excerpt(
+                    &dispatched.result.content,
+                    TRACE_EXCERPT_MAX,
+                ),
             });
             Response::Result(json!({
-                "content": [{"type": "text", "text": result.result.content}],
-                "isError": result.result.is_error,
+                "content": [{"type": "text", "text": dispatched.result.content}],
+                "isError": is_error,
             }))
         }
     }
+}
+
+/// Extract the first text block from a standard MCP tools/call envelope for
+/// the turn trace. The gateway relays the full envelope verbatim (structured
+/// content blocks preserved for the model); the trace excerpt is a flat
+/// summary, so a non-text or empty result falls back to a placeholder rather
+/// than serializing the whole envelope (which would re-introduce the
+/// double-encoding the verbatim relay avoids).
+fn mcp_text_excerpt(envelope: &Value) -> String {
+    envelope
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|blocks| {
+            blocks.iter().find_map(|b| {
+                if b.get("type").and_then(Value::as_str) == Some("text") {
+                    b.get("text").and_then(Value::as_str).map(str::to_string)
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_else(|| "<non-text MCP result>".to_string())
+}
+
+/// Resolve a routed external MCP call into the response envelope + the trace
+/// inputs (slice C-gw). Pure over the aggregator: takes the route result so
+/// the verbatim-relay + excerpt shape is unit-testable without a live server.
+///
+/// On success the server's envelope is returned VERBATIM -- the server's own
+/// `{content, isError}` shape, so structured content blocks (multi-block /
+/// non-text) survive. Re-wrapping it into a single text block would
+/// double-encode the content array and drop every non-text block the server
+/// emitted. On a route error the gateway builds an `isError` envelope naming
+/// the tool so the agent can self-correct (ADR-0077). Returns
+/// `(envelope, is_error, excerpt)` so the caller pushes one trace row and
+/// returns the envelope.
+fn external_call_outcome(
+    name: &str,
+    route_result: Result<Value, aggregator::RouteError>,
+) -> (Value, bool, String) {
+    let envelope = route_result.unwrap_or_else(|e| {
+        json!({
+            "content": [{
+                "type": "text",
+                "text": format!("external tool `{name}` failed: {e}"),
+            }],
+            "isError": true,
+        })
+    });
+    let is_error = envelope
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let excerpt = mcp_text_excerpt(&envelope);
+    (envelope, is_error, excerpt)
 }
 
 /// Generate a 64-hex auth token (244-bit entropy). Two uuid v4 values (122
@@ -449,6 +537,7 @@ mod tests {
             approval,
             sink,
             cancel,
+            mcp: McpAggregator::default(),
         }
     }
 
@@ -797,5 +886,123 @@ mod tests {
             outcome.trace[0].tool_use_id, "req-abc",
             "string id must not carry stray quotes"
         );
+    }
+
+    /// The trace excerpt reads the first text block from a relayed MCP
+    /// envelope; a non-text or empty result falls back to a placeholder so
+    /// the trace never re-serializes the whole envelope (the double-encoding
+    /// the verbatim relay avoids). Pins the helper the external-route path
+    /// in `handle_tools_call` relies on for its trace entry.
+    #[test]
+    fn mcp_text_excerpt_reads_first_text_block() {
+        // Single text block -> that text.
+        let single = json!({
+            "content": [{"type": "text", "text": "5"}],
+            "isError": false,
+        });
+        assert_eq!(mcp_text_excerpt(&single), "5");
+
+        // Multiple blocks -> first text block wins (a leading image is
+        // skipped).
+        let multi = json!({
+            "content": [
+                {"type": "image", "data": "..."},
+                {"type": "text", "text": "first text"},
+                {"type": "text", "text": "second text"},
+            ],
+            "isError": false,
+        });
+        assert_eq!(mcp_text_excerpt(&multi), "first text");
+
+        // No text block -> placeholder, NOT a JSON dump of the envelope.
+        let nontext = json!({
+            "content": [{"type": "image", "data": "..."}],
+            "isError": false,
+        });
+        assert_eq!(mcp_text_excerpt(&nontext), "<non-text MCP result>");
+
+        // Empty content array -> placeholder.
+        let empty = json!({"content": [], "isError": false});
+        assert_eq!(mcp_text_excerpt(&empty), "<non-text MCP result>");
+    }
+
+    // --- external_call_outcome (I1: verbatim-relay + excerpt contract) -----
+
+    /// A successful route relays the server's envelope VERBATIM -- the content
+    /// array + isError flag survive untouched, not re-wrapped into a text
+    /// block (which would double-encode). The excerpt is the first text block.
+    /// Pins the contract `handle_tools_call`'s external arm relies on.
+    #[test]
+    fn external_call_outcome_relays_envelope_verbatim_on_success() {
+        let envelope = json!({
+            "content": [{"type": "text", "text": "5"}],
+            "isError": false,
+        });
+        let (out, is_error, excerpt) =
+            external_call_outcome("mcp__fakemcp__add", Ok(envelope.clone()));
+        assert_eq!(out, envelope, "envelope relayed verbatim, not re-wrapped");
+        assert!(!is_error);
+        assert_eq!(excerpt, "5");
+    }
+
+    /// A multi-block envelope (image + text) is relayed verbatim; the excerpt
+    /// is the first TEXT block -- the leading image is skipped, not serialized
+    /// into the excerpt.
+    #[test]
+    fn external_call_outcome_preserves_non_text_blocks_and_excerpts_first_text() {
+        let envelope = json!({
+            "content": [
+                {"type": "image", "data": "..."},
+                {"type": "text", "text": "first text"},
+                {"type": "text", "text": "second text"},
+            ],
+            "isError": false,
+        });
+        let (out, is_error, excerpt) =
+            external_call_outcome("mcp__fakemcp__tool", Ok(envelope.clone()));
+        assert_eq!(out, envelope, "multi-block envelope relayed verbatim");
+        assert!(!is_error);
+        assert_eq!(excerpt, "first text");
+    }
+
+    /// A server-reported `isError` envelope is relayed verbatim (the gateway
+    /// does not mask the server's error); `is_error` tracks the flag so the
+    /// trace row records the failure.
+    #[test]
+    fn external_call_outcome_propagates_the_is_error_flag() {
+        let envelope = json!({
+            "content": [{"type": "text", "text": "tool blew up"}],
+            "isError": true,
+        });
+        let (out, is_error, excerpt) =
+            external_call_outcome("mcp__fakemcp__tool", Ok(envelope.clone()));
+        assert_eq!(out, envelope);
+        assert!(is_error);
+        assert_eq!(excerpt, "tool blew up");
+    }
+
+    /// A route error (unknown slug / client fault) builds an `isError` envelope
+    /// naming the tool so the agent can self-correct (ADR-0077); `is_error` is
+    /// true and the excerpt carries the failure text.
+    #[test]
+    fn external_call_outcome_builds_an_error_envelope_on_route_failure() {
+        let (out, is_error, excerpt) = external_call_outcome(
+            "mcp__ghost__echo",
+            Err(aggregator::RouteError::UnknownServer("ghost".into())),
+        );
+        assert!(is_error);
+        assert_eq!(out["isError"], true);
+        let text = out["content"][0]["text"]
+            .as_str()
+            .expect("error envelope has a text block");
+        assert!(
+            text.contains("mcp__ghost__echo"),
+            "error names the tool: {text}"
+        );
+        assert!(
+            text.contains("ghost"),
+            "error carries the route failure: {text}"
+        );
+        assert_eq!(excerpt, text, "excerpt is the error text");
     }
 }

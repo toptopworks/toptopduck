@@ -33,6 +33,13 @@ export interface McpServerConfig {
   // value MUST live in the OS keychain. Mirrors Rust BTreeMap (deterministic
   // serialization).
   env: Record<string, string>;
+  // The env_key names whose VALUES live in the OS keychain (issue #301,
+  // ADR-0029). The gateway reads each via get_mcp_secret at spawn time and
+  // injects it into the child env alongside `env`; the values NEVER cross
+  // config (structural + read-time scan). Mirrors Rust `Vec<String>` + bare
+  // serde(default) -- empty serializes as [] (the project convention), so
+  // this field is `string[]`, NOT optional.
+  keychain_env_keys: string[];
   // Per-server call timeout in milliseconds (ADR-0076, issue #301). `null` =
   // the gateway's default timeout applies (the gateway client lands in a later
   // slice); a number overrides per server. Mirrors Rust `Option<u32>` + bare

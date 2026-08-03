@@ -239,6 +239,20 @@ impl LiveProviderConfig {
         crate::mcp::secrets::clear_mcp_secret(&self.keychain, id, env_key)
     }
 
+    /// Read-only snapshot of the configured MCP servers (issue #301 slice
+    /// C-gw). The gateway reads this per external turn to connect each
+    /// configured server; the clone is cheap (a Vec of small config structs).
+    pub fn mcp_servers(&self) -> Vec<McpServerConfig> {
+        self.load().mcp_servers.servers.clone()
+    }
+
+    /// Borrow the OS keychain (ADR-0029). The gateway reads each server's
+    /// secret env values at spawn via [`mcp::secrets::get_mcp_secret`]; the
+    /// values never cross IPC back out.
+    pub fn keychain(&self) -> &KeychainStore {
+        &self.keychain
+    }
+
     // --- App-config (preferences + endpoint, ADR-0038) -----------------------
 
     /// Load the app-config. On the FIRST launch after the ADR-0038 move (the
@@ -862,6 +876,7 @@ mod tests {
             display_name: String::new(),
             transport: McpTransport::stdio("/bin/github-mcp", Vec::new()),
             env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
             timeout_ms: None,
         };
         let stored = live.upsert_mcp_server(incoming).expect("upsert");
@@ -881,6 +896,7 @@ mod tests {
             display_name: "Old".into(),
             transport: McpTransport::stdio("/bin/old", Vec::new()),
             env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
             timeout_ms: None,
         };
         live.upsert_mcp_server(first).expect("first upsert");
@@ -889,6 +905,7 @@ mod tests {
             display_name: "New".into(),
             transport: McpTransport::stdio("/bin/new", vec!["--flag".into()]),
             env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
             timeout_ms: None,
         };
         live.upsert_mcp_server(updated).expect("second upsert");
@@ -908,6 +925,7 @@ mod tests {
                 display_name: "GH".into(),
                 transport: McpTransport::stdio("/bin/srv", Vec::new()),
                 env: BTreeMap::new(),
+                keychain_env_keys: Vec::new(),
                 timeout_ms: None,
             })
             .expect("upsert");
@@ -939,6 +957,7 @@ mod tests {
                     display_name: label.clone(),
                     transport: McpTransport::stdio("/bin/srv", Vec::new()),
                     env: BTreeMap::new(),
+                    keychain_env_keys: Vec::new(),
                     timeout_ms: None,
                 };
                 thread::spawn(move || live.upsert_mcp_server(server).expect("upsert").id)
