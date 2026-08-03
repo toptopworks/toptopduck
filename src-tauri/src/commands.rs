@@ -30,6 +30,7 @@ use tauri::{Emitter, State};
 use crate::app_config::AppConfig;
 use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink, AuthMode, ToolKey};
 use crate::cancel::CancelToken;
+use crate::mcp::config::{McpServerConfig, McpServerId};
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, LoadOutcome, ProfileId, ProfileKeyStatus,
     ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView, RemoveSourceError, RowPage,
@@ -677,6 +678,60 @@ pub fn clear_profile_key(
 ) -> Result<bool, StoreCommandError> {
     let id = ProfileId(profile_id);
     live.clear_profile_key(&id)
+        .map_err(StoreCommandError::KeychainFailure)
+}
+
+/// Upsert one MCP server into app-config (issue #301, ADR-0076). The frontend
+/// sends a [`McpServerConfig`] with an EMPTY id for a new server (Rust mints a
+/// uuid v4) or the existing id for an edit; Rust fills an empty `display_name`
+/// from the id, then replaces/appends. Returns the finalized config (with the
+/// stable id) so the frontend can reference the server in subsequent secret /
+/// remove calls.
+#[tauri::command]
+pub fn upsert_mcp_server(
+    live: State<'_, LiveProviderConfig>,
+    server: McpServerConfig,
+) -> Result<McpServerConfig, StoreCommandError> {
+    live.upsert_mcp_server(server)
+        .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))
+}
+
+/// Remove the MCP server with the given id from app-config (issue #301).
+/// Idempotent: a missing id is success. Does NOT clear the server's keychain
+/// secrets (the frontend orchestrates clear-then-remove).
+#[tauri::command]
+pub fn remove_mcp_server(
+    live: State<'_, LiveProviderConfig>,
+    id: McpServerId,
+) -> Result<(), StoreCommandError> {
+    live.remove_mcp_server(&id)
+        .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))
+}
+
+/// Store one MCP server secret in the OS keychain under `mcp-<id>-<env_key>`
+/// (issue #301, ADR-0029 one-shot frontend -> Rust transfer). The value never
+/// crosses IPC back out.
+#[tauri::command]
+pub fn set_mcp_server_secret(
+    live: State<'_, LiveProviderConfig>,
+    id: McpServerId,
+    env_key: String,
+    value: String,
+) -> Result<(), StoreCommandError> {
+    live.set_mcp_secret(&id, &env_key, &value)
+        .map_err(StoreCommandError::KeychainFailure)
+}
+
+/// Remove one MCP server secret (idempotent). A real keychain error surfaces
+/// (ADR-0029 trust root) so the frontend can tell the user the secret did not
+/// come out.
+#[tauri::command]
+pub fn clear_mcp_server_secret(
+    live: State<'_, LiveProviderConfig>,
+    id: McpServerId,
+    env_key: String,
+) -> Result<(), StoreCommandError> {
+    live.clear_mcp_secret(&id, &env_key)
         .map_err(StoreCommandError::KeychainFailure)
 }
 

@@ -9,6 +9,7 @@ import type {
   RowPage,
   SheetGuidance,
 } from "./types/dataset";
+import type { McpServerConfig } from "./types/mcp";
 import type {
   ResumeProgress,
   SaveError,
@@ -325,6 +326,45 @@ export async function setAppConfig(config: AppConfig): Promise<AppConfig> {
 
 export async function recordRecentFile(path: string): Promise<void> {
   await invoke<void>("record_recent_file", { path });
+}
+
+// --- User-configured external MCP servers (ADR-0076, issue #301) ---------
+//
+// CRUD over a user's external MCP servers (app-config) + per-secret keychain
+// storage. The server config + its NON-SECRET env values live in app-config
+// (getAppConfig carries the registry as `mcp_servers`); a SECRET env value
+// lives in the OS keychain under mcp-<id>-<env_key> and crosses IPC exactly
+// once here (into Rust), never back out (ADR-0029 invariant 3). The settings UI
+// that drives these lands in #302.
+
+// Upsert one MCP server. Send an empty `id` for a new server (Rust mints a uuid
+// v4); send the existing id to edit. Rust fills `display_name` from the id when
+// empty. Returns the finalized config (with the stable id) so the UI can address
+// the server in subsequent secret / remove calls.
+export async function upsertMcpServer(server: McpServerConfig): Promise<McpServerConfig> {
+  return invoke<McpServerConfig>("upsert_mcp_server", { server });
+}
+
+// Remove the MCP server with the given id (idempotent). Does NOT clear the
+// server's keychain secrets -- the UI orchestrates clear-then-remove.
+export async function removeMcpServer(id: string): Promise<void> {
+  await invoke<void>("remove_mcp_server", { id });
+}
+
+// Store one MCP server secret in the OS keychain under mcp-<id>-<env_key>
+// (ADR-0029 one-shot transfer; the value never returns across IPC).
+export async function setMcpServerSecret(
+  id: string,
+  envKey: string,
+  value: string,
+): Promise<void> {
+  await invoke<void>("set_mcp_server_secret", { id, envKey, value });
+}
+
+// Remove one MCP server secret (idempotent). A keychain error rejects so the UI
+// can tell the user the secret did not come out (ADR-0029 trust root).
+export async function clearMcpServerSecret(id: string, envKey: string): Promise<void> {
+  await invoke<void>("clear_mcp_server_secret", { id, envKey });
 }
 
 // --- Tiered tool approval (ADR-0080, issue #294) -------------------------

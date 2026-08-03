@@ -156,6 +156,15 @@ pub struct McpServerConfig {
     /// -- stable diffs across writes + stable round-trip in tests.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Per-server call timeout in milliseconds (issue #301). `None` = the
+    /// gateway's default timeout applies (the gateway client lands in a later
+    /// slice); `Some(ms)` overrides per server. `#[serde(default)]` so a config
+    /// written before this field existed deserializes to `None` (forward-compat,
+    /// mirroring `AppConfig.last_dir`). The gateway enforces the value at
+    /// connect / call time -- this layer does NOT validate it (0 / huge values
+    /// surface as a gateway fault, not a config-layer reject).
+    #[serde(default)]
+    pub timeout_ms: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +198,33 @@ impl McpServerRegistry {
     /// Look up a server by id.
     pub fn get(&self, id: &McpServerId) -> Option<&McpServerConfig> {
         self.servers.iter().find(|s| &s.id == id)
+    }
+
+    /// Upsert one server: mint a uuid v4 (simple form) id when the incoming id
+    /// is empty (a new server from the frontend), fill `display_name` from the
+    /// id when empty, then replace an existing entry with the same id or append.
+    /// Returns the finalized config (with the stable id) so the IPC layer hands
+    /// the id back to the frontend for subsequent secret / remove calls.
+    pub fn upsert(&mut self, mut server: McpServerConfig) -> McpServerConfig {
+        if server.id.as_str().is_empty() {
+            server.id = McpServerId(uuid::Uuid::new_v4().simple().to_string());
+        }
+        if server.display_name.is_empty() {
+            server.display_name = server.id.as_str().to_string();
+        }
+        match self.servers.iter_mut().find(|s| s.id == server.id) {
+            Some(slot) => *slot = server.clone(),
+            None => self.servers.push(server.clone()),
+        }
+        server
+    }
+
+    /// Remove the server with the given id (idempotent: a missing id is a
+    /// no-op). Does NOT clear the server's keychain secrets -- the caller
+    /// orchestrates clear-then-remove so the secret env_keys (UI-side knowledge
+    /// until the gateway injection contract lands) stay explicit (issue #301).
+    pub fn remove(&mut self, id: &McpServerId) {
+        self.servers.retain(|s| &s.id != id);
     }
 }
 
@@ -303,6 +339,7 @@ mod tests {
             display_name: "GitHub".into(),
             transport: McpTransport::stdio("/usr/local/bin/github-mcp", vec!["--stdio".into()]),
             env,
+            timeout_ms: None,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: McpServerConfig = serde_json::from_str(&json).unwrap();
@@ -340,6 +377,10 @@ mod tests {
             "missing display_name -> empty default"
         );
         assert!(cfg.env.is_empty(), "missing env -> empty default");
+        assert!(
+            cfg.timeout_ms.is_none(),
+            "missing timeout_ms -> None default"
+        );
     }
 
     // --- McpServerRegistry -------------------------------------------------
@@ -361,6 +402,7 @@ mod tests {
             display_name: "Alpha".into(),
             transport: McpTransport::stdio("/bin/a", Vec::new()),
             env: BTreeMap::new(),
+            timeout_ms: None,
         });
         assert!(reg.get(&McpServerId("alpha".into())).is_some());
         assert!(reg.get(&McpServerId("missing".into())).is_none());
@@ -378,18 +420,21 @@ mod tests {
                     display_name: "First".into(),
                     transport: McpTransport::stdio("/bin/first", Vec::new()),
                     env: BTreeMap::new(),
+                    timeout_ms: None,
                 },
                 McpServerConfig {
                     id: McpServerId("dup".into()),
                     display_name: "Second".into(),
                     transport: McpTransport::stdio("/bin/second", Vec::new()),
                     env: BTreeMap::new(),
+                    timeout_ms: None,
                 },
                 McpServerConfig {
                     id: McpServerId("unique".into()),
                     display_name: "Unique".into(),
                     transport: McpTransport::stdio("/bin/u", Vec::new()),
                     env: BTreeMap::new(),
+                    timeout_ms: None,
                 },
             ],
         };
@@ -412,10 +457,229 @@ mod tests {
                 display_name: "Solo".into(),
                 transport: McpTransport::stdio("/bin/s", Vec::new()),
                 env: BTreeMap::new(),
+                timeout_ms: None,
             }],
         };
         let before = reg.clone();
         reg.normalize();
         assert_eq!(reg, before, "no dupes -> no change");
+    }
+
+    // --- upsert / remove (slice B) -----------------------------------------
+
+    #[test]
+    fn registry_upsert_mints_uuid_v4_when_id_empty() {
+        // A new server from the frontend carries an empty id; upsert mints a
+        // uuid v4 simple form (32 hex chars, no dashes) so the keychain account
+        // suffix + the IPC reference stay unique and parse-free.
+        let mut reg = McpServerRegistry::default();
+        let incoming = McpServerConfig {
+            id: McpServerId(String::new()),
+            display_name: String::new(),
+            transport: McpTransport::stdio("/bin/srv", Vec::new()),
+            env: BTreeMap::new(),
+            timeout_ms: None,
+        };
+        let stored = reg.upsert(incoming);
+        assert_ne!(stored.id.as_str(), "");
+        assert_eq!(
+            stored.id.as_str().len(),
+            32,
+            "uuid v4 simple = 32 hex chars"
+        );
+        assert!(stored.id.as_str().chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(reg.servers.len(), 1);
+        assert_eq!(reg.servers[0].id, stored.id);
+    }
+
+    #[test]
+    fn registry_upsert_fills_display_name_from_id_when_empty() {
+        let mut reg = McpServerRegistry::default();
+        let incoming = McpServerConfig {
+            id: McpServerId("github-mcp".into()),
+            display_name: String::new(),
+            transport: McpTransport::stdio("/bin/srv", Vec::new()),
+            env: BTreeMap::new(),
+            timeout_ms: None,
+        };
+        let stored = reg.upsert(incoming);
+        assert_eq!(stored.display_name, "github-mcp");
+        assert_eq!(reg.servers[0].display_name, "github-mcp");
+    }
+
+    #[test]
+    fn registry_upsert_keeps_display_name_when_provided() {
+        let mut reg = McpServerRegistry::default();
+        let incoming = McpServerConfig {
+            id: McpServerId("github-mcp".into()),
+            display_name: "My GitHub".into(),
+            transport: McpTransport::stdio("/bin/srv", Vec::new()),
+            env: BTreeMap::new(),
+            timeout_ms: None,
+        };
+        let stored = reg.upsert(incoming);
+        assert_eq!(stored.display_name, "My GitHub");
+    }
+
+    #[test]
+    fn registry_upsert_replaces_existing_by_id() {
+        let mut reg = McpServerRegistry {
+            servers: vec![McpServerConfig {
+                id: McpServerId("github-mcp".into()),
+                display_name: "Old".into(),
+                transport: McpTransport::stdio("/bin/old", Vec::new()),
+                env: BTreeMap::new(),
+                timeout_ms: None,
+            }],
+        };
+        let updated = McpServerConfig {
+            id: McpServerId("github-mcp".into()),
+            display_name: "New".into(),
+            transport: McpTransport::stdio("/bin/new", vec!["--flag".into()]),
+            env: BTreeMap::new(),
+            timeout_ms: None,
+        };
+        let stored = reg.upsert(updated);
+        assert_eq!(reg.servers.len(), 1, "replace not append");
+        assert_eq!(reg.servers[0].display_name, "New");
+        assert_eq!(stored.display_name, "New");
+        match &reg.servers[0].transport {
+            McpTransport::Stdio { command, args } => {
+                assert_eq!(command, "/bin/new");
+                assert_eq!(args.len(), 1);
+            }
+            _ => panic!("expected Stdio"),
+        }
+    }
+
+    #[test]
+    fn registry_upsert_appends_when_id_new() {
+        let mut reg = McpServerRegistry {
+            servers: vec![McpServerConfig {
+                id: McpServerId("alpha".into()),
+                display_name: "Alpha".into(),
+                transport: McpTransport::stdio("/bin/a", Vec::new()),
+                env: BTreeMap::new(),
+                timeout_ms: None,
+            }],
+        };
+        let beta = McpServerConfig {
+            id: McpServerId("beta".into()),
+            display_name: "Beta".into(),
+            transport: McpTransport::stdio("/bin/b", Vec::new()),
+            env: BTreeMap::new(),
+            timeout_ms: None,
+        };
+        let stored = reg.upsert(beta);
+        assert_eq!(reg.servers.len(), 2);
+        assert_eq!(reg.servers[1].id, McpServerId("beta".into()));
+        assert_eq!(stored.id, McpServerId("beta".into()));
+    }
+
+    #[test]
+    fn registry_remove_drops_by_id() {
+        let mut reg = McpServerRegistry {
+            servers: vec![
+                McpServerConfig {
+                    id: McpServerId("alpha".into()),
+                    display_name: "Alpha".into(),
+                    transport: McpTransport::stdio("/bin/a", Vec::new()),
+                    env: BTreeMap::new(),
+                    timeout_ms: None,
+                },
+                McpServerConfig {
+                    id: McpServerId("beta".into()),
+                    display_name: "Beta".into(),
+                    transport: McpTransport::stdio("/bin/b", Vec::new()),
+                    env: BTreeMap::new(),
+                    timeout_ms: None,
+                },
+            ],
+        };
+        reg.remove(&McpServerId("alpha".into()));
+        assert_eq!(reg.servers.len(), 1);
+        assert_eq!(reg.servers[0].id, McpServerId("beta".into()));
+    }
+
+    #[test]
+    fn registry_remove_missing_id_is_noop() {
+        let mut reg = McpServerRegistry {
+            servers: vec![McpServerConfig {
+                id: McpServerId("solo".into()),
+                display_name: "Solo".into(),
+                transport: McpTransport::stdio("/bin/s", Vec::new()),
+                env: BTreeMap::new(),
+                timeout_ms: None,
+            }],
+        };
+        reg.remove(&McpServerId("missing".into()));
+        assert_eq!(reg.servers.len(), 1, "missing id -> no-op");
+    }
+
+    // --- timeout_ms (T1) ----------------------------------------------------
+
+    #[test]
+    fn server_config_timeout_ms_round_trips_some_and_null() {
+        // Some -> JSON number; None -> JSON null. Mirrors the project's Option
+        // + bare serde(default) convention (AppConfig.last_dir): no
+        // skip_serializing_if, so the on-disk shape stays stable. Both
+        // round-trip.
+        let with_timeout = McpServerConfig {
+            id: McpServerId("slow-server".into()),
+            display_name: "Slow".into(),
+            transport: McpTransport::stdio("/bin/slow", Vec::new()),
+            env: BTreeMap::new(),
+            timeout_ms: Some(45_000),
+        };
+        let json = serde_json::to_value(&with_timeout).unwrap();
+        assert_eq!(json["timeout_ms"], 45_000);
+
+        let null_timeout = McpServerConfig {
+            id: McpServerId("default-server".into()),
+            display_name: "Default".into(),
+            transport: McpTransport::stdio("/bin/default", Vec::new()),
+            env: BTreeMap::new(),
+            timeout_ms: None,
+        };
+        let json = serde_json::to_value(&null_timeout).unwrap();
+        assert!(json["timeout_ms"].is_null());
+
+        let back: McpServerConfig =
+            serde_json::from_str(&serde_json::to_string(&with_timeout).unwrap()).unwrap();
+        assert_eq!(back.timeout_ms, Some(45_000));
+        let back: McpServerConfig =
+            serde_json::from_str(&serde_json::to_string(&null_timeout).unwrap()).unwrap();
+        assert_eq!(back.timeout_ms, None);
+    }
+
+    #[test]
+    fn registry_upsert_preserves_timeout_ms() {
+        // upsert is a passthrough for timeout_ms -- it does not mint or fill the
+        // field (unlike id / display_name). Whatever the frontend sent (Some or
+        // None) lands verbatim, and a replace keeps the NEW value (does not
+        // carry the old forward).
+        let mut reg = McpServerRegistry::default();
+        let with_timeout = McpServerConfig {
+            id: McpServerId("slow".into()),
+            display_name: "Slow".into(),
+            transport: McpTransport::stdio("/bin/slow", Vec::new()),
+            env: BTreeMap::new(),
+            timeout_ms: Some(45_000),
+        };
+        let stored = reg.upsert(with_timeout);
+        assert_eq!(stored.timeout_ms, Some(45_000));
+        assert_eq!(reg.servers[0].timeout_ms, Some(45_000));
+
+        // Replace with None -- the new value wins, the old Some does not carry.
+        let without_timeout = McpServerConfig {
+            id: McpServerId("slow".into()),
+            display_name: "Slow".into(),
+            transport: McpTransport::stdio("/bin/slow", Vec::new()),
+            env: BTreeMap::new(),
+            timeout_ms: None,
+        };
+        let stored = reg.upsert(without_timeout);
+        assert_eq!(stored.timeout_ms, None);
+        assert_eq!(reg.servers[0].timeout_ms, None);
     }
 }
