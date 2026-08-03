@@ -21,6 +21,7 @@ pub mod commands;
 pub mod fs_acl;
 pub mod guardrail;
 pub mod ingest;
+pub mod mcp;
 pub mod model;
 pub mod persistence;
 pub mod provenance;

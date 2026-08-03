@@ -426,6 +426,48 @@ mod tests {
     }
 
     #[test]
+    fn read_degrades_when_an_mcp_server_env_smuggles_a_secret() {
+        // Issue #301 AC#1 (secrets-never): a hand-edited config smuggling a
+        // secret-named value into an MCP server's `env` (e.g. `API_KEY`) is
+        // refused -- the recursive secret-name scan reaches into
+        // mcp_servers.servers[].env, catches the key, and honest-degrades to
+        // defaults. The structural defense (no secret field on McpServerConfig)
+        // + this read-time backstop together make secrets-never enforceable:
+        // the plaintext never sits on disk behind the type system. Secret env
+        // values must live in the OS keychain (`mcp-<id>-<env_key>`), never here.
+        let (_dir, path) = temp("config.json");
+        let smuggled = format!(
+            "{{\"format_version\":{v},\"mcp_servers\":{{\"servers\":[{{\"id\":\"github-mcp\",\"display_name\":\"GitHub\",\"transport\":{{\"type\":\"stdio\",\"command\":\"/bin/srv\"}},\"env\":{{\"API_KEY\":\"sk-leak\"}}}}]}}}}",
+            v = APP_CONFIG_FORMAT_VERSION
+        );
+        fs::write(&path, &smuggled).expect("write");
+        assert_eq!(read_at(&path), AppConfig::defaults());
+    }
+
+    #[test]
+    fn read_keeps_an_mcp_server_with_non_secret_env() {
+        // The complement of the smuggle test: an MCP server carrying a
+        // NON-secret env value (`LOG_LEVEL=info` -- no secret-name match) reads
+        // back faithfully. The secret scan is false-positive-free across the
+        // legitimate MCP env surface; only secret-named keys trip it.
+        let (_dir, path) = temp("config.json");
+        let json = format!(
+            "{{\"format_version\":{v},\"mcp_servers\":{{\"servers\":[{{\"id\":\"srv\",\"display_name\":\"Srv\",\"transport\":{{\"type\":\"stdio\",\"command\":\"/bin/srv\"}},\"env\":{{\"LOG_LEVEL\":\"info\"}}}}]}}}}",
+            v = APP_CONFIG_FORMAT_VERSION
+        );
+        fs::write(&path, &json).expect("write");
+        let cfg = read_at(&path);
+        assert_eq!(
+            cfg.mcp_servers.servers.len(),
+            1,
+            "non-secret env reads back"
+        );
+        let srv = &cfg.mcp_servers.servers[0];
+        assert_eq!(srv.id.as_str(), "srv");
+        assert_eq!(srv.env.get("LOG_LEVEL").map(String::as_str), Some("info"));
+    }
+
+    #[test]
     fn secret_scan_catches_casing_and_separator_variants() {
         // apiKey / API_KEY / api-key all collapse to the same token as api_key.
         assert!(is_secret_name("api_key"));
