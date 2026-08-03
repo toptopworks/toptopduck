@@ -8,11 +8,13 @@
 //! drives:
 //! - `initialize` -> an `InitializeResult` advertising protocolVersion
 //!   `2024-11-05` (the version the gateway pins).
-//! - `tools/list` -> a fixed two-tool table (`echo`, `add`).
+//! - `tools/list` -> a fixed three-tool table (`echo`, `add`, `echo_env`).
 //! - `tools/call` -> the result content; `add` sums `a + b`, `echo` echoes the
-//!   `message` argument. The gateway strips the `mcp__<slug>__` prefix before
-//!   routing, so this server only ever sees its native tool name -- a leaked
-//!   namespaced name in the call would surface as the `_` fallback branch.
+//!   `message` argument, `echo_env` reflects a child-process env var's value
+//!   (so the secret-injection integration test can verify a `keychain_env_keys`
+//!   value reached the spawn, ADR-0029). The gateway strips the `mcp__<slug>__`
+//!   prefix before routing, so this server only ever sees its native tool name
+//!   -- a leaked namespaced name in the call would surface as the `_` fallback.
 //!
 //! Pure `serde_json` (no `toptopduck_lib` import) so the fixture stays
 //! self-contained; the MCP wire shape is plain JSON-RPC over newline-delimited
@@ -65,6 +67,8 @@ fn main() {
                         {"name": "echo", "description": "echo the message field",
                          "inputSchema": {"type": "object"}},
                         {"name": "add", "description": "sum a and b",
+                         "inputSchema": {"type": "object"}},
+                        {"name": "echo_env", "description": "reflect a child env var",
                          "inputSchema": {"type": "object"}}
                     ]
                 }
@@ -78,9 +82,12 @@ fn main() {
     }
 }
 
-/// Build the `tools/call` result. `add` sums the integer `a` + `b` args; any
-/// other tool name (including the `echo` fixture + the `_` fallback if a
-/// namespaced name ever leaked through) echoes the `message` string arg.
+/// Build the `tools/call` result. `add` sums the integer `a` + `b` args;
+/// `echo_env` reflects the child process's env var named by the `key` arg
+/// (returns `<unset>` when absent, so the secret-injection test can distinguish
+/// "not injected" from an empty value); any other tool name (including the
+/// `echo` fixture + the `_` fallback if a namespaced name ever leaked through)
+/// echoes the `message` string arg.
 fn call_response(id: Option<Value>, req: &Value) -> Value {
     let params = req.get("params");
     let name = params
@@ -96,6 +103,10 @@ fn call_response(id: Option<Value>, req: &Value) -> Value {
             let a = args.get("a").and_then(Value::as_i64).unwrap_or(0);
             let b = args.get("b").and_then(Value::as_i64).unwrap_or(0);
             format!("{}", a + b)
+        }
+        "echo_env" => {
+            let key = args.get("key").and_then(Value::as_str).unwrap_or("");
+            std::env::var(key).unwrap_or_else(|_| "<unset>".into())
         }
         _ => {
             let msg = args.get("message").and_then(Value::as_str).unwrap_or("");

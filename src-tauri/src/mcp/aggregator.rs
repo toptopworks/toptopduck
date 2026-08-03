@@ -10,10 +10,10 @@
 //! stripped -- the server only ever sees its own native tool name).
 //!
 //! Turn-local (issue #301 Q2): the gateway constructs one `McpAggregator` per
-//! turn via [`McpAggregator::connect_one`] calls and drops it at turn end,
-//! killing every spawned child. A failed connect (unsupported transport in
-//! slice C1, spawn fault, tools/list error) logs + skips that server rather
-//! than failing the turn -- a misconfigured server must not brick the gateway.
+//! turn via [`McpAggregator::connect_all`] and drops it at turn end, killing
+//! every spawned child. A failed connect (unsupported transport in slice C1,
+//! spawn fault, tools/list error) logs + skips that server rather than failing
+//! the turn -- a misconfigured server must not brick the gateway.
 
 use serde_json::Value;
 
@@ -80,14 +80,21 @@ impl McpAggregator {
                 return;
             }
         };
-        let tools = client.list_tools().unwrap_or_else(|e| {
-            log::warn!(
-                target: "toptopduck::mcp",
-                "MCP server {} tools/list failed, advertising no tools: {e}",
-                config.id
-            );
-            Vec::new()
-        });
+        let tools = match client.list_tools() {
+            Ok(t) => t,
+            Err(e) => {
+                log::warn!(
+                    target: "toptopduck::mcp",
+                    "MCP server {} tools/list failed, skipping server: {e}",
+                    config.id
+                );
+                // Dropping `client` kills the spawned child (StdioClient::drop);
+                // a server whose tools/list is broken contributes nothing to the
+                // merged table, so it is not kept around for the turn (matching
+                // the connect-failure skip above).
+                return;
+            }
+        };
         let base = slugify(&config.display_name, &config.id);
         let slug = self.unique_slug(&base);
         self.servers.push(AggregatedServer {

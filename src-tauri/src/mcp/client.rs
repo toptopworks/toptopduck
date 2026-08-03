@@ -21,14 +21,8 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use serde_json::{json, Value};
 
 use crate::mcp::config::{McpServerConfig, McpTransport};
+use crate::mcp::MCP_PROTOCOL_VERSION;
 use crate::runtime::gateway::framing;
-
-/// The MCP protocol version the client advertises at initialize. Pinned to the
-/// gateway's server-side version (`server.rs` initialize response) so both ends
-/// of the gateway speak the same revision; the server may negotiate via its
-/// initialize result, which the gateway logs but does not otherwise act on in
-/// slice C1.
-const PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// One keychain-backed env value the gateway injects at spawn. The gateway
 /// resolves these from the OS keychain via
@@ -71,7 +65,7 @@ impl<R: BufRead, W: Write> McpClient<R, W> {
             "id": id,
             "method": "initialize",
             "params": {
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": {},
                 "clientInfo": {
                     "name": "toptopduck-gateway",
@@ -277,7 +271,7 @@ mod tests {
         let m1 = framing::read_message(&mut r).unwrap().unwrap();
         let m2 = framing::read_message(&mut r).unwrap().unwrap();
         assert_eq!(m1["method"], "initialize");
-        assert_eq!(m1["params"]["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(m1["params"]["protocolVersion"], MCP_PROTOCOL_VERSION);
         assert_eq!(m2["method"], "notifications/initialized");
     }
 

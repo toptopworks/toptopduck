@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use serde_json::json;
 
 use toptopduck_lib::mcp::aggregator::{McpAggregator, RouteError};
+use toptopduck_lib::mcp::client::SecretEnv;
 use toptopduck_lib::mcp::config::{McpServerConfig, McpServerId, McpTransport};
 use toptopduck_lib::provider::keychain::KeychainStore;
 
@@ -61,7 +62,8 @@ fn connect_all_aggregates_namespaced_tools_and_routes_calls() {
         names,
         vec![
             "mcp__fakemcp__add".to_string(),
-            "mcp__fakemcp__echo".to_string()
+            "mcp__fakemcp__echo".to_string(),
+            "mcp__fakemcp__echo_env".to_string(),
         ],
         "namespaced tool table"
     );
@@ -166,5 +168,67 @@ fn route_to_unknown_slug_surfaces_unknown_server_error() {
     assert!(
         matches!(err, RouteError::UnknownServer(ref s) if s == "ghost"),
         "unknown slug -> UnknownServer(\"ghost\"), got {err:?}"
+    );
+}
+
+#[test]
+fn connect_one_injects_secrets_into_the_child_env() {
+    // The gateway resolves `keychain_env_keys` at spawn (ADR-0029) and injects
+    // each value into the child env via `StdioClient::connect`. `connect_one`
+    // takes the already-resolved `SecretEnv` pairs (the keychain READ is
+    // exercised by the slice B unit tests); this test verifies the INJECTION --
+    // a declared secret reaches the spawned child, an undeclared key stays
+    // unset. Uses `connect_one` (not `connect_all`) to bypass the keychain (a
+    // real OS store, not an in-memory mock) and inject the pair directly. The
+    // key name is distinctive to avoid collision with a real env var on the
+    // host running the tests.
+    let secret_value = "test-secret-xyz";
+    let secrets: Vec<SecretEnv> = vec![("TOPTOPDUCK_TEST_MCP_SECRET".into(), secret_value.into())];
+    let config = McpServerConfig {
+        id: McpServerId("secret-srv".into()),
+        display_name: "SecretMCP".into(),
+        transport: McpTransport::stdio(FAKE_BIN, Vec::new()),
+        env: BTreeMap::new(),
+        keychain_env_keys: vec!["TOPTOPDUCK_TEST_MCP_SECRET".into()],
+        timeout_ms: None,
+    };
+    let mut agg = McpAggregator::empty();
+    agg.connect_one(&config, &secrets);
+
+    // The declared secret reaches the child env (the fake server's echo_env
+    // tool reflects std::env::var).
+    let result = agg
+        .route(
+            "mcp__secretmcp__echo_env",
+            &json!({"key": "TOPTOPDUCK_TEST_MCP_SECRET"}),
+        )
+        .expect("route ok");
+    let text = result
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|b| b.get("text"))
+        .and_then(|t| t.as_str())
+        .expect("content text");
+    assert_eq!(text, secret_value);
+
+    // An absent var reports `<unset>` -- this confirms echo_env distinguishes
+    // "set" from "unset" (so the positive assertion above is meaningful, not a
+    // tool that always echoes a value). The distinctive name guarantees the var
+    // is absent from the child env (which inherits the test process's env).
+    let unset = agg
+        .route(
+            "mcp__secretmcp__echo_env",
+            &json!({"key": "TOPTOPDUCK_TEST_MCP_NOT_INJECTED"}),
+        )
+        .expect("route ok");
+    let unset_text = unset
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|b| b.get("text"))
+        .and_then(|t| t.as_str())
+        .expect("content text");
+    assert_eq!(
+        unset_text, "<unset>",
+        "an absent env var reports <unset>, not a stale or fabricated value"
     );
 }

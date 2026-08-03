@@ -16,6 +16,17 @@
 //! - [`aggregator`]: the merged tool-table view + `tools/call` router over
 //!   connected external servers (slice C-gw, issue #301).
 
+/// The MCP protocol version the gateway speaks on both ends (ADR-0076). The
+/// client ([`client`]) advertises it at `initialize`; the server-side initialize
+/// response ([`crate::runtime::gateway`]) echoes it. Pinned in one place so the
+/// gateway's two ends never diverge; the server may negotiate via its
+/// initialize result, which the gateway logs but does not otherwise act on in
+/// slice C1. The `mcp-fake-server` test fixture mirrors this literal (see
+/// `tests/fixtures/mcp_fake_server.rs`) -- it is a separate `[[bin]]` with no
+/// lib import, so it cannot reference this constant and must be bumped in
+/// lock-step when this value changes.
+pub(crate) const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+
 pub mod aggregator;
 pub mod client;
 pub mod config;

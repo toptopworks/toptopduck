@@ -278,7 +278,7 @@ fn handle_method(
 ) -> Response {
     match method {
         "initialize" => Response::Result(json!({
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": crate::mcp::MCP_PROTOCOL_VERSION,
             "capabilities": {"tools": {}},
             "serverInfo": {
                 "name": "toptopduck-gateway",
@@ -362,34 +362,15 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
         }
         Ok(GateOutcome::Allow) => {
             // Route by name shape (slice C-gw): a namespaced
-            // mcp__<slug>__<tool> name goes to the matching external server;
-            // a bare name goes to the built-in executor. The two paths build
-            // DIFFERENT response envelopes:
-            //   - external: the server's tools/call result is already a
-            //     standard MCP envelope {content:[...], isError} -- relay it
-            //     VERBATIM so structured content blocks (multi-block / non-
-            //     text) survive. Re-wrapping it into a single text block
-            //     (an earlier draft did `server_result.to_string()`) would
-            //     double-encode the content array and drop every non-text
-            //     block the server emitted.
-            //   - built-in: the executor returns a flat text content, which
-            //     the MCP consumer expects wrapped into one text block.
+            // `mcp__<slug>__<tool>` name goes to the matching external server
+            // (envelope relayed verbatim via [`external_call_outcome`]); a bare
+            // name goes to the built-in executor (flat text wrapped into one
+            // text block). The two paths build DIFFERENT response envelopes --
+            // see [`external_call_outcome`] for why the external envelope is
+            // relayed verbatim rather than re-wrapped.
             if aggregator::parse_namespaced(&call.name).is_some() {
-                let envelope = match ctx.mcp.route(&call.name, &call.input) {
-                    Ok(server_result) => server_result,
-                    Err(e) => json!({
-                        "content": [{
-                            "type": "text",
-                            "text": format!("external tool `{}` failed: {e}", call.name),
-                        }],
-                        "isError": true,
-                    }),
-                };
-                let is_error = envelope
-                    .get("isError")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                let excerpt = mcp_text_excerpt(&envelope);
+                let route_result = ctx.mcp.route(&call.name, &call.input);
+                let (envelope, is_error, excerpt) = external_call_outcome(&call.name, route_result);
                 outcome.trace.push(TraceEntry {
                     tool_use_id: call.id.clone(),
                     name: call.name.clone(),
@@ -444,6 +425,39 @@ fn mcp_text_excerpt(envelope: &Value) -> String {
             })
         })
         .unwrap_or_else(|| "<non-text MCP result>".to_string())
+}
+
+/// Resolve a routed external MCP call into the response envelope + the trace
+/// inputs (slice C-gw). Pure over the aggregator: takes the route result so
+/// the verbatim-relay + excerpt shape is unit-testable without a live server.
+///
+/// On success the server's envelope is returned VERBATIM -- the server's own
+/// `{content, isError}` shape, so structured content blocks (multi-block /
+/// non-text) survive. Re-wrapping it into a single text block would
+/// double-encode the content array and drop every non-text block the server
+/// emitted. On a route error the gateway builds an `isError` envelope naming
+/// the tool so the agent can self-correct (ADR-0077). Returns
+/// `(envelope, is_error, excerpt)` so the caller pushes one trace row and
+/// returns the envelope.
+fn external_call_outcome(
+    name: &str,
+    route_result: Result<Value, aggregator::RouteError>,
+) -> (Value, bool, String) {
+    let envelope = route_result.unwrap_or_else(|e| {
+        json!({
+            "content": [{
+                "type": "text",
+                "text": format!("external tool `{name}` failed: {e}"),
+            }],
+            "isError": true,
+        })
+    });
+    let is_error = envelope
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let excerpt = mcp_text_excerpt(&envelope);
+    (envelope, is_error, excerpt)
 }
 
 /// Generate a 64-hex auth token (244-bit entropy). Two uuid v4 values (122
@@ -910,5 +924,85 @@ mod tests {
         // Empty content array -> placeholder.
         let empty = json!({"content": [], "isError": false});
         assert_eq!(mcp_text_excerpt(&empty), "<non-text MCP result>");
+    }
+
+    // --- external_call_outcome (I1: verbatim-relay + excerpt contract) -----
+
+    /// A successful route relays the server's envelope VERBATIM -- the content
+    /// array + isError flag survive untouched, not re-wrapped into a text
+    /// block (which would double-encode). The excerpt is the first text block.
+    /// Pins the contract `handle_tools_call`'s external arm relies on.
+    #[test]
+    fn external_call_outcome_relays_envelope_verbatim_on_success() {
+        let envelope = json!({
+            "content": [{"type": "text", "text": "5"}],
+            "isError": false,
+        });
+        let (out, is_error, excerpt) =
+            external_call_outcome("mcp__fakemcp__add", Ok(envelope.clone()));
+        assert_eq!(out, envelope, "envelope relayed verbatim, not re-wrapped");
+        assert!(!is_error);
+        assert_eq!(excerpt, "5");
+    }
+
+    /// A multi-block envelope (image + text) is relayed verbatim; the excerpt
+    /// is the first TEXT block -- the leading image is skipped, not serialized
+    /// into the excerpt.
+    #[test]
+    fn external_call_outcome_preserves_non_text_blocks_and_excerpts_first_text() {
+        let envelope = json!({
+            "content": [
+                {"type": "image", "data": "..."},
+                {"type": "text", "text": "first text"},
+                {"type": "text", "text": "second text"},
+            ],
+            "isError": false,
+        });
+        let (out, is_error, excerpt) =
+            external_call_outcome("mcp__fakemcp__tool", Ok(envelope.clone()));
+        assert_eq!(out, envelope, "multi-block envelope relayed verbatim");
+        assert!(!is_error);
+        assert_eq!(excerpt, "first text");
+    }
+
+    /// A server-reported `isError` envelope is relayed verbatim (the gateway
+    /// does not mask the server's error); `is_error` tracks the flag so the
+    /// trace row records the failure.
+    #[test]
+    fn external_call_outcome_propagates_the_is_error_flag() {
+        let envelope = json!({
+            "content": [{"type": "text", "text": "tool blew up"}],
+            "isError": true,
+        });
+        let (out, is_error, excerpt) =
+            external_call_outcome("mcp__fakemcp__tool", Ok(envelope.clone()));
+        assert_eq!(out, envelope);
+        assert!(is_error);
+        assert_eq!(excerpt, "tool blew up");
+    }
+
+    /// A route error (unknown slug / client fault) builds an `isError` envelope
+    /// naming the tool so the agent can self-correct (ADR-0077); `is_error` is
+    /// true and the excerpt carries the failure text.
+    #[test]
+    fn external_call_outcome_builds_an_error_envelope_on_route_failure() {
+        let (out, is_error, excerpt) = external_call_outcome(
+            "mcp__ghost__echo",
+            Err(aggregator::RouteError::UnknownServer("ghost".into())),
+        );
+        assert!(is_error);
+        assert_eq!(out["isError"], true);
+        let text = out["content"][0]["text"]
+            .as_str()
+            .expect("error envelope has a text block");
+        assert!(
+            text.contains("mcp__ghost__echo"),
+            "error names the tool: {text}"
+        );
+        assert!(
+            text.contains("ghost"),
+            "error carries the route failure: {text}"
+        );
+        assert_eq!(excerpt, text, "excerpt is the error text");
     }
 }
