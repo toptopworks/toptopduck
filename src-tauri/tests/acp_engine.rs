@@ -15,7 +15,9 @@ use std::sync::Arc;
 use toptopduck_lib::approval::{ApprovalResponse, ApprovalSink, ApprovalState, AuthMode};
 use toptopduck_lib::cancel::CancelToken;
 use toptopduck_lib::model::TurnPhase;
-use toptopduck_lib::runtime::acp::adapter::{claude_code, codex, gemini_cli, AdapterSpec};
+use toptopduck_lib::runtime::acp::adapter::{
+    claude_code, codex, gemini_cli, opencode, qwen_code, AdapterSpec,
+};
 use toptopduck_lib::runtime::acp::engine::{AcpEngine, AcpTurnInput};
 use toptopduck_lib::runtime::acp::wire::{ContentBlock, McpServer};
 use toptopduck_lib::session::agent_loop::{LoopOutcome, Termination};
@@ -341,11 +343,12 @@ fn engine_runs_against_the_claude_code_spec() {
 
 /// #300 structural coverage of AC "the engine gains no per-CLI branch": drive
 /// the same text-reply (success path) and the same step-cap overflow (the
-/// step-cap cancel fallback path) through each of the three v1 specs
-/// (claude-code, gemini-cli, codex) and assert identical termination + phase
-/// emission. The fixture ignores argv, so the per-spec launch shapes
-/// (claude-code `--acp`, gemini-cli `--experimental-acp`, codex empty argv)
-/// all spawn + pump through the SAME engine entry point. Combined with the
+/// step-cap cancel fallback path) through each of the five v1 specs
+/// (claude-code, gemini-cli, codex, qwen-code, opencode) and assert identical
+/// termination + phase emission. The fixture ignores argv, so the per-spec
+/// launch shapes (claude-code `--acp`, gemini-cli `--experimental-acp`, codex
+/// empty argv, qwen-code `--acp`, opencode `acp` subcommand) all spawn + pump
+/// through the SAME engine entry point. Combined with the
 /// engine's spec-consumption surface being only `argv` (spawn) + `id` (error
 /// message + ToolKey) -- audited, never a dispatch -- this pins ONE uniform
 /// outcome + phase stream per scenario across all three specs, so a future
@@ -359,8 +362,14 @@ fn engine_runs_against_the_claude_code_spec() {
 /// claude-code `wall_clock_watchdog_*` test drives it). The real-CLI E2E for
 /// AC #1-3 is tracked by #342.
 #[test]
-fn engine_outcome_is_identical_across_all_three_specs() {
-    let specs = [claude_code(), gemini_cli(), codex()];
+fn engine_outcome_is_identical_across_all_v1_specs() {
+    let specs = [
+        claude_code(),
+        gemini_cli(),
+        codex(),
+        qwen_code(),
+        opencode(),
+    ];
     for spec in &specs {
         // Success path: a clean text reply -> Text for every spec, and the
         // Thinking phase fires before the prompt for every spec (the phase

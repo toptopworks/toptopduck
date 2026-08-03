@@ -3,9 +3,10 @@
 //! ADR-0081 Decision: every external CLI is a **pure data definition** -- the
 //! engine ([`crate::runtime::acp::engine`]) has zero per-CLI code branches.
 //! Adding a CLI = adding one [`AdapterSpec`] constructor here. The v1 engine
-//! drives all three ACP CLIs (claude-code, gemini-cli, codex) against the SAME
-//! code path, so the AC "the adapter engine has zero per-CLI code branches" is
-//! structural: the engine takes a `&AdapterSpec` and never names a CLI.
+//! drives every ACP CLI (claude-code, gemini-cli, codex, qwen-code, opencode)
+//! against the SAME code path, so the AC "the adapter engine has zero per-CLI
+//! code branches" is structural: the engine takes a `&AdapterSpec` and never
+//! names a CLI.
 //!
 //! An [`AdapterSpec`] carries:
 //! - identification: a stable [`AdapterId`] + display name (the composer runtime
@@ -79,7 +80,7 @@ impl AdapterSpec {
 }
 
 // ---------------------------------------------------------------------------
-// The v1 adapters (claude-code, gemini-cli, codex)
+// The v1 adapters (claude-code, gemini-cli, codex, qwen-code, opencode)
 // ---------------------------------------------------------------------------
 
 /// The claude-code adapter (ADR-0081 v1 validation set). claude-code is
@@ -91,7 +92,7 @@ impl AdapterSpec {
 /// verifies it against a real install. If claude-code renames the flag, ONLY
 /// this constant changes -- the engine is untouched (ADR-0081 zero per-CLI
 /// code).
-pub fn claude_code() -> AdapterSpec {
+pub const fn claude_code() -> AdapterSpec {
     AdapterSpec {
         id: AdapterId::new("claude-code"),
         display_name: "claude-code",
@@ -111,7 +112,7 @@ pub fn claude_code() -> AdapterSpec {
 /// (its `config.js` option table; no alias). Live E2E verifies it against a
 /// real install. If gemini-cli renames or graduates the flag, ONLY this
 /// constant changes -- the engine is untouched (ADR-0081 zero per-CLI code).
-pub fn gemini_cli() -> AdapterSpec {
+pub const fn gemini_cli() -> AdapterSpec {
     AdapterSpec {
         id: AdapterId::new("gemini-cli"),
         display_name: "gemini-cli",
@@ -137,12 +138,50 @@ pub fn gemini_cli() -> AdapterSpec {
 /// the `codex-acp` package; live E2E verifies them against a real install. If
 /// codex later gains a native `--acp` flag, ONLY this constant changes -- the
 /// engine is untouched.
-pub fn codex() -> AdapterSpec {
+pub const fn codex() -> AdapterSpec {
     AdapterSpec {
         id: AdapterId::new("codex"),
         display_name: "codex",
         binary_names: &["codex-acp"],
         argv: &[],
+    }
+}
+
+/// The qwen-code adapter (issue #343). The npm package ships a single `qwen`
+/// binary; the argv prefix `["--acp"]` puts it into ACP stdio mode. Unlike
+/// gemini-cli's still-experimental `--experimental-acp`, qwen-code has graduated
+/// to the stable `--acp` spelling, so the prefix differs even though the launch
+/// shape is the same `<binary> <flag>` form as claude-code.
+///
+/// NOTE: the `--acp` spelling is pinned by qwen-code's own CLI; live E2E
+/// verifies it against a real install. If qwen-code renames the flag, ONLY this
+/// constant changes -- the engine is untouched (ADR-0081 zero per-CLI code).
+pub const fn qwen_code() -> AdapterSpec {
+    AdapterSpec {
+        id: AdapterId::new("qwen-code"),
+        display_name: "qwen-code",
+        binary_names: &["qwen"],
+        argv: &["--acp"],
+    }
+}
+
+/// The opencode adapter (issue #343). The npm package ships a single `opencode`
+/// binary; the argv prefix `["acp"]` puts it into ACP stdio mode. Unlike the
+/// other v1 adapters, opencode uses a SUBCOMMAND (`opencode acp`), not a
+/// `--flag` -- the first v1 adapter whose argv prefix is not a flag. The launch
+/// shape is still `<binary> <argv-prefix...>`, so the engine spawns it the same
+/// way; the subcommand-vs-flag distinction lives entirely in this constant
+/// (ADR-0081 zero per-CLI code).
+///
+/// NOTE: the `acp` subcommand is pinned by opencode's own CLI; live E2E
+/// verifies it against a real install. If opencode renames the subcommand or
+/// adds a `--flag` alias, ONLY this constant changes -- the engine is untouched.
+pub const fn opencode() -> AdapterSpec {
+    AdapterSpec {
+        id: AdapterId::new("opencode"),
+        display_name: "opencode",
+        binary_names: &["opencode"],
+        argv: &["acp"],
     }
 }
 
@@ -154,28 +193,16 @@ pub fn v1_adapters() -> &'static [AdapterSpec] {
     &V1_ADAPTERS
 }
 
-// `AdapterId::new` is a `const fn`; the struct fields are all `&'static`, so the
-// const-eval initializer is valid at MSRV 1.77. The per-adapter fns are kept as
-// ergonomic single-adapter constructors; `v1_adapters()` is the picker source.
-static V1_ADAPTERS: [AdapterSpec; 3] = [
-    AdapterSpec {
-        id: AdapterId::new("claude-code"),
-        display_name: "claude-code",
-        binary_names: &["claude", "claude-code"],
-        argv: &["--acp"],
-    },
-    AdapterSpec {
-        id: AdapterId::new("gemini-cli"),
-        display_name: "gemini-cli",
-        binary_names: &["gemini"],
-        argv: &["--experimental-acp"],
-    },
-    AdapterSpec {
-        id: AdapterId::new("codex"),
-        display_name: "codex",
-        binary_names: &["codex-acp"],
-        argv: &[],
-    },
+// The per-adapter constructors are `const fn`, so V1_ADAPTERS invokes them
+// directly -- no field duplication, no drift between a constructor and its
+// array entry. Adding a CLI = adding one `const fn` constructor + one call
+// here; `v1_adapters()` stays the picker source.
+static V1_ADAPTERS: [AdapterSpec; 5] = [
+    claude_code(),
+    gemini_cli(),
+    codex(),
+    qwen_code(),
+    opencode(),
 ];
 
 // ---------------------------------------------------------------------------
@@ -250,19 +277,29 @@ mod tests {
         assert_eq!(spec.argv, &["--acp"]);
     }
 
-    /// v1_adapters lists all three ACP CLIs in the composer picker's display
-    /// order (claude-code, gemini-cli, codex) -- the ADR-0081 v1 validation set.
+    /// v1_adapters is internally consistent: non-empty, unique ids, every entry
+    /// has a non-empty display name + binary names. Count-agnostic -- adding a
+    /// CLI (one `const fn` constructor + one V1_ADAPTERS entry) never touches
+    /// this test.
     #[test]
-    fn v1_adapters_lists_all_three_in_picker_order() {
+    fn v1_adapters_is_internally_consistent() {
         let adapters = v1_adapters();
+        assert!(!adapters.is_empty(), "v1 ships at least one adapter");
+        let unique: std::collections::HashSet<AdapterId> = adapters.iter().map(|a| a.id).collect();
         assert_eq!(
             adapters.len(),
-            3,
-            "v1 ships the three ACP CLIs (claude-code, gemini-cli, codex)"
+            unique.len(),
+            "duplicate adapter id in v1_adapters"
         );
-        assert_eq!(adapters[0].id.as_str(), "claude-code");
-        assert_eq!(adapters[1].id.as_str(), "gemini-cli");
-        assert_eq!(adapters[2].id.as_str(), "codex");
+        for a in adapters {
+            assert!(!a.display_name.is_empty(), "{:?}: empty display_name", a.id);
+            assert!(!a.binary_names.is_empty(), "{:?}: empty binary_names", a.id);
+            assert!(
+                !a.binary_names.iter().any(|n| n.is_empty()),
+                "{:?}: empty binary name in binary_names",
+                a.id
+            );
+        }
     }
 
     /// gemini-cli uses the `gemini` binary plus the `["--experimental-acp"]`
@@ -292,29 +329,29 @@ mod tests {
         assert!(spec.argv.is_empty(), "codex-acp needs no ACP flag");
     }
 
-    /// `v1_adapters()` matches the per-adapter constructors field-for-field.
-    /// The static array duplicates each constructor's fields (MSRV 1.77 forbids
-    /// a `const fn` dedup), so this test is the guard against silent drift: if
-    /// a flag or binary name changes in one place but not the other, this trips.
+    /// qwen-code uses the `qwen` binary plus the stable `["--acp"]` flag
+    /// (graduated from gemini-cli's experimental `--experimental-acp`). The
+    /// launch shape matches claude-code's `<binary> <flag>` form.
     #[test]
-    fn v1_adapters_matches_constructors_field_for_field() {
-        for ctor in [claude_code(), gemini_cli(), codex()] {
-            let listed = v1_adapters()
-                .iter()
-                .find(|a| a.id == ctor.id)
-                .unwrap_or_else(|| panic!("{} missing from v1_adapters", ctor.id));
-            assert_eq!(
-                listed.display_name, ctor.display_name,
-                "{} display_name",
-                ctor.id
-            );
-            assert_eq!(
-                listed.binary_names, ctor.binary_names,
-                "{} binary_names",
-                ctor.id
-            );
-            assert_eq!(listed.argv, ctor.argv, "{} argv", ctor.id);
-        }
+    fn qwen_code_spec_carries_qwen_binary_and_stable_acp_flag() {
+        let spec = qwen_code();
+        assert_eq!(spec.id.as_str(), "qwen-code");
+        assert_eq!(spec.display_name, "qwen-code");
+        assert_eq!(spec.binary_names, &["qwen"]);
+        assert_eq!(spec.argv, &["--acp"]);
+    }
+
+    /// opencode uses the `opencode` binary plus an `["acp"]` SUBCOMMAND, not a
+    /// `--flag` -- the first v1 adapter whose argv prefix is not a flag. The
+    /// engine's `<binary> <argv...>` spawn drives it verbatim; the
+    /// subcommand-vs-flag distinction lives in this data, not a code branch.
+    #[test]
+    fn opencode_spec_uses_acp_subcommand_not_a_flag() {
+        let spec = opencode();
+        assert_eq!(spec.id.as_str(), "opencode");
+        assert_eq!(spec.display_name, "opencode");
+        assert_eq!(spec.binary_names, &["opencode"]);
+        assert_eq!(spec.argv, &["acp"]);
     }
 
     /// detect_adapter returns Option regardless of install state -- the
