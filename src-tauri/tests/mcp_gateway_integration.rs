@@ -232,3 +232,71 @@ fn connect_one_injects_secrets_into_the_child_env() {
         "an absent env var reports <unset>, not a stale or fabricated value"
     );
 }
+
+#[test]
+fn connect_all_returns_per_server_connect_results_with_failure_reasons() {
+    // The per-server ConnectResult (issue #301 slice D) is the source of truth
+    // for list_mcp_server_status: a return-shape regression would silently
+    // break the status IPC. This pins the shape for the three reachable return
+    // paths in connect_one -- success, spawn failure, unsupported transport.
+    // (The fourth path, tools/list failure, needs a fixture that corrupts
+    // tools/list; its construction site is byte-identical to the other two
+    // skip paths and is shape-covered by them.)
+    let keychain = KeychainStore::new();
+    let mut agg = McpAggregator::empty();
+    let bad_spawn = McpServerConfig {
+        id: McpServerId("bad-spawn".into()),
+        display_name: "BadSpawn".into(),
+        transport: McpTransport::stdio("/no/such/toptopduck-binary", Vec::new()),
+        env: BTreeMap::new(),
+        keychain_env_keys: Vec::new(),
+        timeout_ms: None,
+    };
+    let unsupported = McpServerConfig {
+        id: McpServerId("unsupported".into()),
+        display_name: "Unsupported".into(),
+        transport: McpTransport::Sse {
+            url: "http://localhost:1".into(),
+        },
+        env: BTreeMap::new(),
+        keychain_env_keys: Vec::new(),
+        timeout_ms: None,
+    };
+    let good = fake_config("good", "Good");
+
+    // connect_all preserves the configured order in its returned Vec.
+    let results = agg.connect_all(&[bad_spawn, unsupported, good], &keychain);
+    assert_eq!(results.len(), 3, "one ConnectResult per configured server");
+
+    // Spawn failure -> connected:false, no tools, a carried reason.
+    let bad = &results[0];
+    assert_eq!(bad.id, McpServerId("bad-spawn".into()));
+    assert!(!bad.connected, "bad-spawn did not connect");
+    assert_eq!(bad.tool_count, 0);
+    assert!(bad.error.is_some(), "spawn failure carries a reason");
+
+    // Unsupported transport -> connected:false with the transport reason.
+    let unsup = &results[1];
+    assert_eq!(unsup.id, McpServerId("unsupported".into()));
+    assert!(!unsup.connected);
+    assert_eq!(unsup.tool_count, 0);
+    assert!(
+        unsup
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("unsupported transport"),
+        "unsupported-transport reason, got {:?}",
+        unsup.error
+    );
+
+    // Success -> connected:true with the live tool count + no error.
+    let ok = &results[2];
+    assert_eq!(ok.id, McpServerId("good".into()));
+    assert!(ok.connected, "good server connected");
+    assert_eq!(
+        ok.tool_count, 3,
+        "fake server advertises add + echo + echo_env"
+    );
+    assert!(ok.error.is_none(), "good server has no error");
+}

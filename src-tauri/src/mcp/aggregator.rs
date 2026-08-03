@@ -42,6 +42,30 @@ struct AggregatedServer {
     tools: Vec<Value>,
 }
 
+/// One configured server's per-turn connect outcome (issue #301 slice D). The
+/// command layer snapshots the [`McpAggregator::connect_all`] results into the
+/// `SessionHandle` so `list_mcp_server_status` reads the last turn's outcome
+/// without taking the session lock (which an in-flight turn holds) -- the
+/// status IPC is lock-light on the handle. `connected: false` covers every
+/// skip path (unsupported transport, spawn fault, tools/list fault) with the
+/// reason in `error`; `connected: true` carries the live tool count the
+/// gateway advertised that turn.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConnectResult {
+    /// The server's stable id (matches [`McpServerConfig::id`] + the
+    /// SessionHandle enablement set's key). The status IPC joins this id back
+    /// to app-config for the display label, so the label is not carried here.
+    pub id: McpServerId,
+    /// Whether the server connected + its tools were listed. `false` for every
+    /// skip path (the aggregator logs the detail; this is the boolean the UI
+    /// badges).
+    pub connected: bool,
+    /// The number of tools the server advertised (0 when not connected).
+    pub tool_count: usize,
+    /// The skip reason when `connected: false` (`None` on success).
+    pub error: Option<String>,
+}
+
 /// The merged view over every connected external MCP server (ADR-0076). Owns
 /// the spawned children; `Drop` kills them via [`StdioClient`]'s `Drop`.
 pub struct McpAggregator {
@@ -57,19 +81,31 @@ impl McpAggregator {
     }
 
     /// Spawn + initialize one server, list its tools, and add it under a
-    /// unique slug derived from its display name. A failure (unsupported
-    /// transport in slice C1, spawn fault, tools/list fault) logs + skips
-    /// the server -- the turn is not failed by a misconfigured server.
-    pub fn connect_one(&mut self, config: &McpServerConfig, secrets: &[SecretEnv]) {
+    /// unique slug derived from its display name (issue #301 slice D: returns
+    /// a [`ConnectResult`] so the caller can snapshot the per-turn outcome).
+    /// A failure (unsupported transport in slice C1, spawn fault, tools/list
+    /// fault) logs + skips the server -- the turn is not failed by a
+    /// misconfigured server -- and the `ConnectResult` carries `connected:
+    /// false` + the reason so the status IPC surfaces it without re-spawning.
+    pub fn connect_one(
+        &mut self,
+        config: &McpServerConfig,
+        secrets: &[SecretEnv],
+    ) -> ConnectResult {
         let mut client = match StdioClient::connect(config, secrets) {
             Ok(c) => c,
             Err(ClientError::UnsupportedTransport(t)) => {
                 log::warn!(
                     target: "toptopduck::mcp",
-                    "skipping MCP server {}: slice C1 supports stdio only (got {t})",
+                    "skipping MCP server {}: stdio is the only supported transport (got {t})",
                     config.id
                 );
-                return;
+                return ConnectResult {
+                    id: config.id.clone(),
+                    connected: false,
+                    tool_count: 0,
+                    error: Some(format!("unsupported transport: {t}")),
+                };
             }
             Err(e) => {
                 log::warn!(
@@ -77,7 +113,12 @@ impl McpAggregator {
                     "MCP server {} connect failed, skipping: {e}",
                     config.id
                 );
-                return;
+                return ConnectResult {
+                    id: config.id.clone(),
+                    connected: false,
+                    tool_count: 0,
+                    error: Some(e.to_string()),
+                };
             }
         };
         let tools = match client.list_tools() {
@@ -92,9 +133,15 @@ impl McpAggregator {
                 // a server whose tools/list is broken contributes nothing to the
                 // merged table, so it is not kept around for the turn (matching
                 // the connect-failure skip above).
-                return;
+                return ConnectResult {
+                    id: config.id.clone(),
+                    connected: false,
+                    tool_count: 0,
+                    error: Some(format!("tools/list failed: {e}")),
+                };
             }
         };
+        let tool_count = tools.len();
         let base = slugify(&config.display_name, &config.id);
         let slug = self.unique_slug(&base);
         self.servers.push(AggregatedServer {
@@ -102,20 +149,35 @@ impl McpAggregator {
             client,
             tools,
         });
+        ConnectResult {
+            id: config.id.clone(),
+            connected: true,
+            tool_count,
+            error: None,
+        }
     }
 
-    /// Spawn + initialize every configured server (issue #301 slice C-gw). Each
-    /// server's secret env values are read from the keychain at spawn
-    /// ([`get_mcp_secret`], ADR-0029 -- the value never crosses IPC) and passed
-    /// to [`Self::connect_one`] alongside the config's non-secret
+    /// Spawn + initialize every configured server (issue #301 slice C-gw) and
+    /// return each one's [`ConnectResult`] (slice D). Each server's secret env
+    /// values are read from the keychain at spawn ([`get_mcp_secret`],
+    /// ADR-0029 -- the value never crosses IPC) and passed to
+    /// [`Self::connect_one`] alongside the config's non-secret
     /// [`env`](McpServerConfig::env). A server that fails to connect is logged
     /// and skipped via [`Self::connect_one`] -- a misconfigured server does
-    /// not brick the turn.
-    pub fn connect_all(&mut self, servers: &[McpServerConfig], keychain: &KeychainStore) {
-        for server in servers {
-            let secrets = collect_secrets(keychain, server);
-            self.connect_one(server, &secrets);
-        }
+    /// not brick the turn -- and surfaces as `connected: false` in the
+    /// returned slice.
+    pub fn connect_all(
+        &mut self,
+        servers: &[McpServerConfig],
+        keychain: &KeychainStore,
+    ) -> Vec<ConnectResult> {
+        servers
+            .iter()
+            .map(|server| {
+                let secrets = collect_secrets(keychain, server);
+                self.connect_one(server, &secrets)
+            })
+            .collect()
     }
 
     /// The merged, namespaced tool entries to advertise alongside the built-in
