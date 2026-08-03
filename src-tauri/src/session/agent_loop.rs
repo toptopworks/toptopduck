@@ -478,8 +478,10 @@ pub(crate) fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) 
 }
 
 /// Route a namespaced external MCP call through the aggregator and shape the
-/// outcome the loop consumes (issue #301 slice C-loop, mirrors the gateway's
-/// `external_call_outcome`). The aggregator strips the `mcp__<slug>__` prefix
+/// outcome the loop consumes (issue #301 slice C-loop; unlike the gateway's
+/// `external_call_outcome`, this path flattens the envelope -- see
+/// `aggregator::first_text_block` for the asymmetry). The aggregator strips
+/// the `mcp__<slug>__` prefix
 /// and forwards the native tool name + arguments to the matching server; the
 /// server's envelope is relayed as the model-facing `content` string (the
 /// first text block -- `ToolResult.content` is a flat string on this path, so
@@ -495,12 +497,9 @@ fn route_external_call(call: &ToolUse, mcp: &mut McpAggregator) -> tools::ToolOu
                 .get("isError")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            (mcp_first_text(&envelope), is_error)
+            (aggregator::first_text_block(&envelope), is_error)
         }
-        Err(e) => (
-            format!("external tool `{}` failed: {}", call.name, e),
-            true,
-        ),
+        Err(e) => (format!("external tool `{}` failed: {}", call.name, e), true),
     };
     tools::ToolOutcome {
         result: ToolResult {
@@ -510,28 +509,6 @@ fn route_external_call(call: &ToolUse, mcp: &mut McpAggregator) -> tools::ToolOu
         },
         promotion: None,
     }
-}
-
-/// Extract the first text block from an MCP `tools/call` envelope for the
-/// model-facing result string (issue #301 slice C-loop). Mirrors the gateway's
-/// `mcp_text_excerpt` so the trace excerpt and the model's tool result agree
-/// on what the external server returned. A non-text or empty result falls back
-/// to a placeholder rather than serializing the whole envelope (the model
-/// would otherwise have to parse JSON out of a flat string).
-fn mcp_first_text(envelope: &Value) -> String {
-    envelope
-        .get("content")
-        .and_then(Value::as_array)
-        .and_then(|blocks| {
-            blocks.iter().find_map(|b| {
-                if b.get("type").and_then(Value::as_str) == Some("text") {
-                    b.get("text").and_then(Value::as_str).map(str::to_string)
-                } else {
-                    None
-                }
-            })
-        })
-        .unwrap_or_else(|| "<non-text MCP result>".to_string())
 }
 
 /// Render one `input` field as the call summary, truncated. Falls back to
@@ -761,38 +738,6 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-    }
-
-    /// mcp_first_text reads the first text block from an MCP tools/call
-    /// envelope (issue #301 slice C-loop): the first `type: text` block wins,
-    /// later text blocks are ignored (the model gets one string, not a
-    /// concatenation).
-    #[test]
-    fn mcp_first_text_reads_the_first_text_block() {
-        let envelope = serde_json::json!({
-            "content": [
-                {"type": "text", "text": "sum: 5"},
-                {"type": "text", "text": "ignored"}
-            ],
-            "isError": false
-        });
-        assert_eq!(mcp_first_text(&envelope), "sum: 5");
-    }
-
-    /// A non-text or empty result reduces to a placeholder (issue #301 slice
-    /// C-loop): the model still gets a string, never a serialization of the
-    /// whole envelope (which would force it to parse JSON out of a flat
-    /// content field).
-    #[test]
-    fn mcp_first_text_falls_back_when_no_text_block() {
-        let non_text = serde_json::json!({
-            "content": [{"type": "image", "data": "..."}],
-            "isError": false
-        });
-        assert_eq!(mcp_first_text(&non_text), "<non-text MCP result>");
-
-        let empty = serde_json::json!({"content": [], "isError": false});
-        assert_eq!(mcp_first_text(&empty), "<non-text MCP result>");
     }
 
     /// A route failure (unknown slug) surfaces as a tool error the agent

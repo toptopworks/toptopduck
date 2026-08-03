@@ -268,6 +268,36 @@ pub fn namespace_tool_entries(slug: &str, tools: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// Extract the first text block from a standard MCP `tools/call` envelope
+/// (ADR-0076, issue #301). Both runtimes reduce the envelope to a flat string
+/// via this helper, but in different roles whose asymmetry is deliberate:
+/// - The gateway uses it for the turn **trace excerpt** only; the full
+///   envelope is relayed to the model VERBATIM (structured content blocks
+///   preserved -- see `external_call_outcome` in `runtime::gateway::server`).
+/// - The built-in agent loop uses it for the **model-facing
+///   `ToolResult.content` itself**, which is a flat `String` on that path, so
+///   a multi-block or non-text result reduces to its first text block.
+///
+/// A non-text or empty result falls back to a placeholder rather than
+/// serializing the whole envelope (the model would otherwise have to parse
+/// JSON out of a flat string; the trace excerpt would re-introduce the
+/// double-encoding the gateway's verbatim relay avoids).
+pub fn first_text_block(envelope: &Value) -> String {
+    envelope
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|blocks| {
+            blocks.iter().find_map(|b| {
+                if b.get("type").and_then(Value::as_str) == Some("text") {
+                    b.get("text").and_then(Value::as_str).map(str::to_string)
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_else(|| "<non-text MCP result>".to_string())
+}
+
 /// A routing failure: the name was not namespaced, the slug did not match a
 /// connected server, or the server's call returned an error.
 #[derive(Debug, thiserror::Error)]
@@ -380,6 +410,47 @@ mod tests {
         let out = namespace_tool_entries("github", &tools);
         assert_eq!(out.len(), 1);
         assert!(out[0].get("name").is_none());
+    }
+
+    // --- first_text_block ----------------------------------------------------
+
+    /// `first_text_block` reads the first `type: text` block from an MCP
+    /// tools/call envelope (ADR-0076, issue #301): a single text block wins,
+    /// a leading non-text block is skipped to the first text block, and a
+    /// non-text / empty result falls back to a placeholder (never a JSON dump
+    /// of the envelope). Shared by the gateway (trace excerpt) and the
+    /// built-in agent loop (flat model-facing content).
+    #[test]
+    fn first_text_block_reads_first_text_and_falls_back() {
+        // Single text block -> that text.
+        let single = json!({
+            "content": [{"type": "text", "text": "5"}],
+            "isError": false,
+        });
+        assert_eq!(first_text_block(&single), "5");
+
+        // Multiple blocks -> first text block wins (a leading image is
+        // skipped; later text blocks are ignored).
+        let multi = json!({
+            "content": [
+                {"type": "image", "data": "..."},
+                {"type": "text", "text": "first text"},
+                {"type": "text", "text": "second text"},
+            ],
+            "isError": false,
+        });
+        assert_eq!(first_text_block(&multi), "first text");
+
+        // No text block -> placeholder, NOT a JSON dump of the envelope.
+        let nontext = json!({
+            "content": [{"type": "image", "data": "..."}],
+            "isError": false,
+        });
+        assert_eq!(first_text_block(&nontext), "<non-text MCP result>");
+
+        // Empty content array -> placeholder.
+        let empty = json!({"content": [], "isError": false});
+        assert_eq!(first_text_block(&empty), "<non-text MCP result>");
     }
 
     // --- aggregator merged-table shape --------------------------------------
