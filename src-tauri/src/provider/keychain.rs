@@ -80,6 +80,48 @@ impl KeychainStore {
         Self
     }
 
+    // --- Generic secret accessors -------------------------------------------
+    //
+    // Thin wrappers over the `keyring` crate's `Entry` API for an arbitrary
+    // account string under this app's single SERVICE. The provider's per-profile
+    // key slots (`key-<id>`) and the MCP server secret slots (`mcp-<id>-<env_key>`,
+    // issue #301) both build on top of these -- the account-format helpers live
+    // in their respective domains, the keychain mechanics live here (DRY).
+
+    /// Store `value` under `account` (ADR-0029 frontend-to-Rust one-shot).
+    /// Thereafter the value never crosses IPC back out.
+    pub fn set_secret(&self, account: &str, value: &str) -> Result<(), String> {
+        let entry = Entry::new(SERVICE, account).map_err(keychain_err)?;
+        entry.set_password(value).map_err(keychain_err)?;
+        Ok(())
+    }
+
+    /// Read the value under `account`: `Ok(None)` when nothing is stored, `Err`
+    /// when the OS keychain read failed (ADR-0029 trust root -- a failed read
+    /// surfaces rather than diagnosing as "nothing stored", issue #243).
+    pub fn get_secret(&self, account: &str) -> Result<Option<String>, String> {
+        let entry = Entry::new(SERVICE, account).map_err(keychain_err)?;
+        match entry.get_password() {
+            Ok(value) => Ok(Some(value)),
+            // No entry is not a failure: "nothing stored" is a legitimate state.
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(keychain_err(e)),
+        }
+    }
+
+    /// Remove the value under `account`. Idempotent: a missing entry is success.
+    /// Any other keychain error surfaces (ADR-0029 trust root -- a failed delete
+    /// must not read as "removed" while the value still sits in the keyring).
+    pub fn clear_secret(&self, account: &str) -> Result<(), String> {
+        let entry = Entry::new(SERVICE, account).map_err(keychain_err)?;
+        match entry.delete_credential() {
+            Ok(()) => Ok(()),
+            // Idempotent: clearing when nothing is stored is a no-op success.
+            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(keychain_err(e)),
+        }
+    }
+
     /// Whether an API key is stored for the given profile (ADR-0064 per-profile
     /// slot `key-<profile_id>`), or the keychain read failure when the OS
     /// keychain itself could not be read. The `get_provider_config` +
@@ -108,9 +150,7 @@ impl KeychainStore {
     /// (ADR-0029 frontend-to-Rust one-shot; ADR-0064 per-profile slot).
     /// Thereafter the frontend never receives it back.
     pub fn set_key_for(&self, profile_id: &ProfileId, key: &str) -> Result<(), String> {
-        let entry = Entry::new(SERVICE, &key_account(profile_id)).map_err(keychain_err)?;
-        entry.set_password(key).map_err(keychain_err)?;
-        Ok(())
+        self.set_secret(&key_account(profile_id), key)
     }
 
     /// Remove the stored key for the given profile. Idempotent: a missing entry
@@ -119,13 +159,7 @@ impl KeychainStore {
     /// delete must not silently read as "key removed" while the key still sits
     /// in the keyring.
     pub fn clear_key_for(&self, profile_id: &ProfileId) -> Result<(), String> {
-        let entry = Entry::new(SERVICE, &key_account(profile_id)).map_err(keychain_err)?;
-        match entry.delete_credential() {
-            Ok(()) => Ok(()),
-            // Idempotent: clearing when nothing is stored is a no-op success.
-            Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(keychain_err(e)),
-        }
+        self.clear_secret(&key_account(profile_id))
     }
 
     /// The stored API key for the given profile: `Ok(None)` when nothing is
@@ -137,14 +171,7 @@ impl KeychainStore {
     /// key (issue #243). The provider reads this per turn (stateless: each call
     /// opens the OS entry fresh) for the active profile.
     pub fn fetch_key_for(&self, profile_id: &ProfileId) -> Result<Option<String>, String> {
-        let entry = Entry::new(SERVICE, &key_account(profile_id)).map_err(keychain_err)?;
-        match entry.get_password() {
-            Ok(key) => Ok(Some(key)),
-            // No entry is not a failure: "nothing stored" is a legitimate
-            // state the callers classify as no-key (never a keychain fault).
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(keychain_err(e)),
-        }
+        self.get_secret(&key_account(profile_id))
     }
 
     /// Read the LEGACY provider-config blob (`{base_url, model}` JSON) that older

@@ -7,8 +7,11 @@
 //! tools into the advertised table.
 //!
 //! Submodules, one per concern, landed slice by slice:
-//! - [`config`]: the app-config model for a user-configured server (this slice,
-//!   issue #301 AC#1). The keychain secret store + the MCP client the gateway
-//!   drives land in later slices.
+//! - [`config`]: the app-config model for a user-configured server (slice A,
+//!   issue #301 AC#1) + the upsert/remove CRUD helpers (slice B).
+//! - [`secrets`]: the OS keychain secret store for a server's secret env values
+//!   (slice B, issue #301). The MCP client the gateway drives lands in a later
+//!   slice.
 
 pub mod config;
+pub mod secrets;

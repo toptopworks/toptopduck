@@ -829,6 +829,7 @@ mod tests {
                     vec!["--stdio".into()],
                 ),
                 env,
+                timeout_ms: None,
             });
         let json = serde_json::to_string(&cfg).expect("serialize");
         let back: AppConfig = serde_json::from_str(&json).expect("deserialize");
@@ -864,6 +865,7 @@ mod tests {
             display_name: name.into(),
             transport: McpTransport::stdio("/bin/srv", Vec::new()),
             env: std::collections::BTreeMap::new(),
+            timeout_ms: None,
         };
         cfg.mcp_servers.servers = vec![
             make("dup", "First"),

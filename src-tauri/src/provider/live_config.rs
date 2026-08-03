@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::app_config::{self, AppConfig, LocalePreference};
+use crate::mcp::config::{McpServerConfig, McpServerId};
 use crate::model::{ProfileId, Protocol};
 use crate::provider::keychain::{KeychainStore, ProviderConfigSource};
 use crate::provider::prompt::{resolve_locale_from_tag, ResponseLocale};
@@ -165,6 +166,77 @@ impl LiveProviderConfig {
     /// necessarily the active one).
     pub fn key_for_profile(&self, profile_id: &ProfileId) -> Result<Option<String>, String> {
         self.keychain.fetch_key_for(profile_id)
+    }
+
+    // --- MCP servers (issue #301, ADR-0076) ----------------------------------
+    //
+    // User-configured external MCP servers live in app-config (`mcp_servers`);
+    // their SECRET env values live in the OS keychain under `mcp-<id>-<env_key>`
+    // (mcp::secrets). These wrappers give the IPC commands a single entry point:
+    // upsert/remove touch app-config (write-locked via `store`), set/clear
+    // secret touch the keychain (stateless). remove does NOT clean up keychain
+    // entries -- the frontend orchestrates clear-then-remove; orphaned entries
+    // keyed by the removed server's (uuid) id are inert.
+
+    /// Upsert one MCP server into app-config: mint a uuid v4 id when the
+    /// incoming id is empty (a new server from the frontend), fill
+    /// `display_name` from the id when empty, replace an existing entry with the
+    /// same id or append. Returns the finalized config (with the stable id) so
+    /// the IPC hands it back to the frontend.
+    pub fn upsert_mcp_server(
+        &self,
+        server: McpServerConfig,
+    ) -> Result<McpServerConfig, app_config::WriteError> {
+        // Hold write_lock across the full load -> mutate -> store so a concurrent
+        // upsert / remove / record_recent_file cannot interleave and drop this
+        // server (a lost update would orphan its keychain anchor). store_inner --
+        // not store -- because the guard is already held and std::sync::Mutex is
+        // non-reentrant (mirrors record_recent_file).
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("app-config write_lock poisoned");
+        let mut cfg = self.load();
+        let stored = cfg.mcp_servers.upsert(server);
+        self.store_inner(cfg)?;
+        Ok(stored)
+    }
+
+    /// Remove the MCP server with the given id from app-config (idempotent: a
+    /// missing id is a no-op). Does NOT clear the server's keychain secrets --
+    /// the frontend orchestrates clear-then-remove; orphaned entries keyed by
+    /// the removed server's (uuid) id are inert.
+    pub fn remove_mcp_server(&self, id: &McpServerId) -> Result<(), app_config::WriteError> {
+        // Hold write_lock across the full load -> mutate -> store (same contract
+        // as upsert_mcp_server / record_recent_file); store_inner, not store --
+        // std::sync::Mutex is non-reentrant.
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("app-config write_lock poisoned");
+        let mut cfg = self.load();
+        cfg.mcp_servers.remove(id);
+        self.store_inner(cfg)?;
+        Ok(())
+    }
+
+    /// Store one MCP server secret in the OS keychain under
+    /// `mcp-<id>-<env_key>` (issue #301, ADR-0029 one-shot frontend -> Rust
+    /// transfer). The value never crosses IPC back out.
+    pub fn set_mcp_secret(
+        &self,
+        id: &McpServerId,
+        env_key: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        crate::mcp::secrets::set_mcp_secret(&self.keychain, id, env_key, value)
+    }
+
+    /// Remove one MCP server secret (idempotent). The trust-root rule applies
+    /// (ADR-0029): a real keychain error surfaces rather than reading as
+    /// "removed".
+    pub fn clear_mcp_secret(&self, id: &McpServerId, env_key: &str) -> Result<(), String> {
+        crate::mcp::secrets::clear_mcp_secret(&self.keychain, id, env_key)
     }
 
     // --- App-config (preferences + endpoint, ADR-0038) -----------------------
@@ -382,9 +454,11 @@ impl ProviderConfigSource for LiveProviderConfig {
 mod tests {
     use super::*;
     use crate::app_config::{EngineDefaults, LocalePreference, Theme};
+    use crate::mcp::config::{McpServerConfig, McpServerId, McpTransport};
     use crate::model::{
         ProfileId, Protocol, ProviderProfile, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
     };
+    use std::collections::BTreeMap;
 
     /// A LiveProviderConfig bound to a temp-dir config path (no real keychain
     /// dependency in tests; the keychain methods that touch the OS entry are not
@@ -773,5 +847,120 @@ mod tests {
         // Result-returning has_key_for contract.
         let (_dir, live) = live();
         assert_eq!(live.has_key(), Ok(false));
+    }
+
+    // --- MCP server CRUD (issue #301 slice B) -------------------------------
+
+    #[test]
+    fn upsert_mcp_server_mints_id_and_persists_across_loads() {
+        // The wrapper does load -> registry.upsert (mint id + fill
+        // display_name) -> store. A reload sees the finalized server, proving
+        // the write_lock-protected round-trip lands the new server on disk.
+        let (_dir, live) = live();
+        let incoming = McpServerConfig {
+            id: McpServerId(String::new()),
+            display_name: String::new(),
+            transport: McpTransport::stdio("/bin/github-mcp", Vec::new()),
+            env: BTreeMap::new(),
+            timeout_ms: None,
+        };
+        let stored = live.upsert_mcp_server(incoming).expect("upsert");
+        assert_ne!(stored.id.as_str(), "");
+        assert_eq!(stored.display_name, stored.id.as_str());
+        let reloaded = live.load();
+        assert_eq!(reloaded.mcp_servers.servers.len(), 1);
+        assert_eq!(reloaded.mcp_servers.servers[0].id, stored.id);
+    }
+
+    #[test]
+    fn upsert_mcp_server_replaces_existing_by_id() {
+        // Re-upserting with the same id replaces (not appends) + persists.
+        let (_dir, live) = live();
+        let first = McpServerConfig {
+            id: McpServerId("stable-id".into()),
+            display_name: "Old".into(),
+            transport: McpTransport::stdio("/bin/old", Vec::new()),
+            env: BTreeMap::new(),
+            timeout_ms: None,
+        };
+        live.upsert_mcp_server(first).expect("first upsert");
+        let updated = McpServerConfig {
+            id: McpServerId("stable-id".into()),
+            display_name: "New".into(),
+            transport: McpTransport::stdio("/bin/new", vec!["--flag".into()]),
+            env: BTreeMap::new(),
+            timeout_ms: None,
+        };
+        live.upsert_mcp_server(updated).expect("second upsert");
+        let reloaded = live.load();
+        assert_eq!(reloaded.mcp_servers.servers.len(), 1, "replace not append");
+        assert_eq!(reloaded.mcp_servers.servers[0].display_name, "New");
+    }
+
+    #[test]
+    fn remove_mcp_server_drops_from_persisted_config() {
+        // remove -> store -> reload sees the server gone. Idempotent on a
+        // missing id (no error, no change).
+        let (_dir, live) = live();
+        let stored = live
+            .upsert_mcp_server(McpServerConfig {
+                id: McpServerId(String::new()),
+                display_name: "GH".into(),
+                transport: McpTransport::stdio("/bin/srv", Vec::new()),
+                env: BTreeMap::new(),
+                timeout_ms: None,
+            })
+            .expect("upsert");
+        live.remove_mcp_server(&stored.id).expect("remove");
+        let reloaded = live.load();
+        assert!(reloaded.mcp_servers.servers.is_empty());
+        // Idempotent: removing the same id again is a no-op success.
+        live.remove_mcp_server(&stored.id).expect("remove again");
+    }
+
+    #[test]
+    fn upsert_mcp_server_concurrent_writers_do_not_lose_servers() {
+        // I1 regression: upsert_mcp_server holds write_lock across the full
+        // load -> mutate -> store (same contract as record_recent_file). Multiple
+        // concurrent upserts must each land their server (no lost-update) and the
+        // test must complete (no deadlock). Without the full-window lock two
+        // interleaved read-modify-write transactions would drop whichever wrote
+        // first, orphaning its keychain anchor.
+        use std::thread;
+
+        let (_dir, live) = live();
+        let labels: Vec<String> = (0..8).map(|i| format!("srv-{i}")).collect();
+        let handles: Vec<_> = labels
+            .iter()
+            .map(|label| {
+                let live = live.clone();
+                let server = McpServerConfig {
+                    id: McpServerId(String::new()),
+                    display_name: label.clone(),
+                    transport: McpTransport::stdio("/bin/srv", Vec::new()),
+                    env: BTreeMap::new(),
+                    timeout_ms: None,
+                };
+                thread::spawn(move || live.upsert_mcp_server(server).expect("upsert").id)
+            })
+            .collect();
+        let ids: Vec<McpServerId> = handles
+            .into_iter()
+            .map(|h| h.join().expect("worker thread panicked"))
+            .collect();
+        // Every minted id landed -- no lost update (order is scheduler-dependent,
+        // so check membership, not order).
+        let cfg = live.load();
+        assert_eq!(
+            cfg.mcp_servers.servers.len(),
+            labels.len(),
+            "concurrent upserts lost a server"
+        );
+        for id in &ids {
+            assert!(
+                cfg.mcp_servers.servers.iter().any(|s| &s.id == id),
+                "concurrent upsert lost server {id}"
+            );
+        }
     }
 }
