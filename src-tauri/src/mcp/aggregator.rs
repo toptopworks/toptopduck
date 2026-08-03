@@ -53,11 +53,9 @@ struct AggregatedServer {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ConnectResult {
     /// The server's stable id (matches [`McpServerConfig::id`] + the
-    /// SessionHandle enablement set's key).
+    /// SessionHandle enablement set's key). The status IPC joins this id back
+    /// to app-config for the display label, so the label is not carried here.
     pub id: McpServerId,
-    /// The renamable display label (mirrors [`McpServerConfig::display_name`])
-    /// so the status IPC does not need to join back to app-config to render.
-    pub display_name: String,
     /// Whether the server connected + its tools were listed. `false` for every
     /// skip path (the aggregator logs the detail; this is the boolean the UI
     /// badges).
@@ -99,12 +97,11 @@ impl McpAggregator {
             Err(ClientError::UnsupportedTransport(t)) => {
                 log::warn!(
                     target: "toptopduck::mcp",
-                    "skipping MCP server {}: slice C1 supports stdio only (got {t})",
+                    "skipping MCP server {}: stdio is the only supported transport (got {t})",
                     config.id
                 );
                 return ConnectResult {
                     id: config.id.clone(),
-                    display_name: config.display_name.clone(),
                     connected: false,
                     tool_count: 0,
                     error: Some(format!("unsupported transport: {t}")),
@@ -118,7 +115,6 @@ impl McpAggregator {
                 );
                 return ConnectResult {
                     id: config.id.clone(),
-                    display_name: config.display_name.clone(),
                     connected: false,
                     tool_count: 0,
                     error: Some(e.to_string()),
@@ -139,7 +135,6 @@ impl McpAggregator {
                 // the connect-failure skip above).
                 return ConnectResult {
                     id: config.id.clone(),
-                    display_name: config.display_name.clone(),
                     connected: false,
                     tool_count: 0,
                     error: Some(format!("tools/list failed: {e}")),
@@ -156,7 +151,6 @@ impl McpAggregator {
         });
         ConnectResult {
             id: config.id.clone(),
-            display_name: config.display_name.clone(),
             connected: true,
             tool_count,
             error: None,

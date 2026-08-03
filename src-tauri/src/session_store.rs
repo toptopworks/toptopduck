@@ -797,7 +797,6 @@ mod tests {
         // Reset clears the set + the connect cache (resume resets it, AC#3).
         handle.set_last_mcp_connect(vec![ConnectResult {
             id: srv_b.clone(),
-            display_name: "B".into(),
             connected: true,
             tool_count: 3,
             error: None,
