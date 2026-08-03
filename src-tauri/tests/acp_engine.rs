@@ -7,7 +7,7 @@
 //! step-cap trip, and mid-turn crash (EOF). The fake CLI + the engine share
 //! the `wire` types, so this is a faithful ACP v1 stdio round-trip -- the same
 //! path the real claude-code drive will take in slice 9c (manual E2E only, per
-//! the PRD's testing decisions; real three-CLI verification is #300).
+//! the PRD's testing decisions; real-CLI E2E verification is tracked by #342).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,7 +15,9 @@ use std::sync::Arc;
 use toptopduck_lib::approval::{ApprovalResponse, ApprovalSink, ApprovalState, AuthMode};
 use toptopduck_lib::cancel::CancelToken;
 use toptopduck_lib::model::TurnPhase;
-use toptopduck_lib::runtime::acp::adapter::{claude_code, codex, gemini_cli, AdapterSpec};
+use toptopduck_lib::runtime::acp::adapter::{
+    claude_code, codex, gemini_cli, opencode, qwen_code, AdapterSpec,
+};
 use toptopduck_lib::runtime::acp::engine::{AcpEngine, AcpTurnInput};
 use toptopduck_lib::runtime::acp::wire::{ContentBlock, McpServer};
 use toptopduck_lib::session::agent_loop::{LoopOutcome, Termination};
@@ -77,7 +79,7 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// outcome + the phase stream. Holds ENV_LOCK so the global `ACP_FAKE_SCENARIO`
 /// is not raced by concurrent tests. The fixture ignores argv, so any spec
 /// spawns + pumps through the same engine entry point; the isomorphism test
-/// relies on this to exercise all three specs uniformly.
+/// relies on this to exercise all v1 specs uniformly.
 fn run_with_spec(
     spec: &AdapterSpec,
     scenario: &str,
@@ -98,7 +100,7 @@ fn run_with_spec(
 /// The default scenario runner: claude-code (the v1 reference spec). Most
 /// scenarios assert behavior independent of which spec drives them, so they go
 /// through here; the isomorphism test calls [`run_with_spec`] directly to
-/// exercise all three.
+/// exercise all v1 specs.
 fn run(scenario: &str, step_cap: u32) -> (LoopOutcome, Vec<TurnPhase>) {
     run_with_spec(&claude_code(), scenario, step_cap)
 }
@@ -341,14 +343,15 @@ fn engine_runs_against_the_claude_code_spec() {
 
 /// #300 structural coverage of AC "the engine gains no per-CLI branch": drive
 /// the same text-reply (success path) and the same step-cap overflow (the
-/// step-cap cancel fallback path) through each of the three v1 specs
-/// (claude-code, gemini-cli, codex) and assert identical termination + phase
-/// emission. The fixture ignores argv, so the per-spec launch shapes
-/// (claude-code `--acp`, gemini-cli `--experimental-acp`, codex empty argv)
-/// all spawn + pump through the SAME engine entry point. Combined with the
+/// step-cap cancel fallback path) through each of the five v1 specs
+/// (claude-code, gemini-cli, codex, qwen-code, opencode) and assert identical
+/// termination + phase emission. The fixture ignores argv, so the per-spec
+/// launch shapes (claude-code `--acp`, gemini-cli `--experimental-acp`, codex
+/// empty argv, qwen-code `--acp`, opencode `acp` subcommand) all spawn + pump
+/// through the SAME engine entry point. Combined with the
 /// engine's spec-consumption surface being only `argv` (spawn) + `id` (error
 /// message + ToolKey) -- audited, never a dispatch -- this pins ONE uniform
-/// outcome + phase stream per scenario across all three specs, so a future
+/// outcome + phase stream per scenario across all v1 specs, so a future
 /// per-CLI branch that changes outcomes or phases would trip it.
 ///
 /// What this does NOT prove: behavioral isomorphism of the REAL CLIs (cancel /
@@ -359,8 +362,14 @@ fn engine_runs_against_the_claude_code_spec() {
 /// claude-code `wall_clock_watchdog_*` test drives it). The real-CLI E2E for
 /// AC #1-3 is tracked by #342.
 #[test]
-fn engine_outcome_is_identical_across_all_three_specs() {
-    let specs = [claude_code(), gemini_cli(), codex()];
+fn engine_outcome_is_identical_across_all_v1_specs() {
+    let specs = [
+        claude_code(),
+        gemini_cli(),
+        codex(),
+        qwen_code(),
+        opencode(),
+    ];
     for spec in &specs {
         // Success path: a clean text reply -> Text for every spec, and the
         // Thinking phase fires before the prompt for every spec (the phase
