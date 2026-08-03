@@ -1822,12 +1822,13 @@ impl Session {
                     };
                     // Connect the user's configured external MCP servers
                     // (issue #301 slice C-loop): same per-turn lifecycle as
-                    // the gateway path (ADR-0076 Q2 -- spawn + initialize each
-                    // stdio server here, drop at scope end so the spawned
-                    // children die with the aggregator). The aggregator's
-                    // namespaced tools merge into the request's tool table so
-                    // the model sees one surface; execute_call routes a
-                    // namespaced call back through the aggregator.
+                    // the gateway path (ADR-0076 Decision + ADR-0085
+                    // Consequences -- spawn + initialize each stdio server
+                    // here, drop at scope end so the spawned children die with
+                    // the aggregator). The aggregator's namespaced tools merge
+                    // into the request's tool table so the model sees one
+                    // surface; execute_call routes a namespaced call back
+                    // through the aggregator.
                     let mut mcp = crate::mcp::aggregator::McpAggregator::empty();
                     mcp.connect_all(mcp_servers, keychain);
                     request

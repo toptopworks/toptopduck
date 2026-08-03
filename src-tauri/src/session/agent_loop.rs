@@ -44,7 +44,7 @@ use crate::approval::{
     ToolKey,
 };
 use crate::cancel::CancelToken;
-use crate::mcp::aggregator::{self, McpAggregator};
+use crate::mcp::aggregator::{self, McpAggregator, RouteError};
 use crate::model::{Promotion, TraceEntryView, TurnPhase};
 use crate::persistence::recipe::RecipeTraceEntry;
 use crate::provider::tool_calling::{
@@ -125,6 +125,11 @@ impl<'p> AgentLoop<'p> {
     /// `success: false`). The completed payload IS the trace entry that lands
     /// on `TurnRecord::trace`, so the frontend renders the in-flight trace
     /// progressively from the very events the turn later persists.
+    // 8 borrowed/owned handles with distinct lifetimes (per-turn request +
+    // deps vs session-level approval + sink). A single call site means a
+    // builder struct would shuffle fields without clarifying the borrow split;
+    // `runtime/acp/engine.rs:441`/`:717` + `session/mod.rs:1900` use the same
+    // pattern.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn run(
         self,
@@ -460,16 +465,15 @@ pub(crate) fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) 
             // External arm (issue #301 slice C-loop): a namespaced
             // `mcp__<slug>__<tool>` name resolves the server slug for the
             // approval key + trace so a card / row names the real server; a
-            // bare unknown name keeps the "unknown" server (per-session
-            // enablement + the bare-unknown classification land in slice D).
-            // Either way the call badges Network and the summary names the
-            // tool so an approval card can surface it.
+            // bare unknown name keeps the "unknown" server. Either way the
+            // call badges Network and the summary names the tool so an
+            // approval card can surface it.
             let other = call.name.as_str();
             let server = aggregator::parse_namespaced(other)
                 .map(|(slug, _)| slug)
                 .unwrap_or_else(|| "unknown".to_string());
             (
-                ToolKey::external(server.as_str(), other),
+                ToolKey::external(server, other.to_string()),
                 OperationKind::Network,
                 format!("external tool `{other}`"),
             )
@@ -481,16 +485,31 @@ pub(crate) fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) 
 /// outcome the loop consumes (issue #301 slice C-loop; unlike the gateway's
 /// `external_call_outcome`, this path flattens the envelope -- see
 /// `aggregator::first_text_block` for the asymmetry). The aggregator strips
-/// the `mcp__<slug>__` prefix
-/// and forwards the native tool name + arguments to the matching server; the
-/// server's envelope is relayed as the model-facing `content` string (the
-/// first text block -- `ToolResult.content` is a flat string on this path, so
-/// a multi-block or non-text result reduces to its first text block, with a
-/// placeholder when there is none). A route failure (UnknownServer / Client
-/// fault) becomes a tool error the agent self-corrects from (ADR-0077). No
-/// promotion: external tools never materialize a working-set result.
+/// the `mcp__<slug>__` prefix and forwards the native tool name + arguments
+/// to the matching server; the server's envelope is relayed as the
+/// model-facing `content` string (the first text block --
+/// `ToolResult.content` is a flat string on this path, so a multi-block or
+/// non-text result reduces to its first text block, with a placeholder when
+/// there is none). A route failure (UnknownServer / Client fault) becomes a
+/// tool error the agent self-corrects from (ADR-0077). No promotion:
+/// external tools never materialize a working-set result.
 fn route_external_call(call: &ToolUse, mcp: &mut McpAggregator) -> tools::ToolOutcome {
-    let route_result = mcp.route(&call.name, &call.input);
+    shape_external_outcome(mcp.route(&call.name, &call.input), call)
+}
+
+/// Reduce a routed external MCP call's `Result` to the loop's `ToolOutcome`
+/// (issue #301 slice C-loop). Split from [`route_external_call`] so the
+/// envelope-shaping contract is unit-testable without a live server: a
+/// successful envelope flattens to its first text block + the server's
+/// `isError` flag (defaulting to `false` per the MCP spec -- a conformant
+/// server omits it on success); a server-side error envelope keeps the text
+/// (the model self-corrects, ADR-0077) but marks `is_error = true`; a route
+/// failure becomes a tool error naming the tool. No promotion in any branch
+/// (external tools never materialize a working-set result).
+fn shape_external_outcome(
+    route_result: Result<Value, RouteError>,
+    call: &ToolUse,
+) -> tools::ToolOutcome {
     let (content, is_error) = match route_result {
         Ok(envelope) => {
             let is_error = envelope
@@ -759,6 +778,71 @@ mod tests {
             outcome.result.content
         );
         assert!(outcome.promotion.is_none());
+    }
+
+    /// A successful route flattens the envelope to its first text block and
+    /// keeps the server's `isError: false` (issue #301 slice C-loop). Split
+    /// from `route_external_call` so the shaping contract is unit-testable
+    /// without a live server.
+    #[test]
+    fn shape_external_outcome_flattens_a_success_envelope() {
+        let call = ToolUse {
+            id: "tu_ok".into(),
+            name: "mcp__github__search".into(),
+            input: serde_json::json!({}),
+        };
+        let envelope = serde_json::json!({
+            "content": [{"type": "text", "text": "5 rows"}],
+            "isError": false,
+        });
+        let outcome = shape_external_outcome(Ok(envelope), &call);
+        assert!(!outcome.result.is_error, "isError:false -> success");
+        assert_eq!(outcome.result.content, "5 rows");
+        assert_eq!(outcome.result.tool_use_id, "tu_ok");
+        assert!(outcome.promotion.is_none(), "external tools never promote");
+    }
+
+    /// A server-side error envelope (`isError: true`) keeps the text block
+    /// (the model self-corrects, ADR-0077) but marks the result as an error.
+    #[test]
+    fn shape_external_outcome_marks_a_server_side_error_envelope() {
+        let call = ToolUse {
+            id: "tu_err".into(),
+            name: "mcp__github__search".into(),
+            input: serde_json::json!({}),
+        };
+        let envelope = serde_json::json!({
+            "content": [{"type": "text", "text": "rate limited"}],
+            "isError": true,
+        });
+        let outcome = shape_external_outcome(Ok(envelope), &call);
+        assert!(outcome.result.is_error, "isError:true -> tool error");
+        assert_eq!(outcome.result.content, "rate limited");
+        assert!(outcome.promotion.is_none());
+    }
+
+    /// A namespaced name classifies under its server slug (not "unknown") so
+    /// the approval card + trace name the real server; a bare unknown name
+    /// falls back to "unknown" (issue #301 slice C-loop).
+    #[test]
+    fn classify_call_keys_a_namespaced_name_under_its_slug() {
+        let namespaced = ToolUse {
+            id: "tu_1".into(),
+            name: "mcp__github__search".into(),
+            input: serde_json::json!({}),
+        };
+        let (key, kind, summary) = classify_call(&namespaced);
+        assert_eq!(key, ToolKey::external("github", "mcp__github__search"));
+        assert_eq!(kind, OperationKind::Network);
+        assert!(summary.contains("mcp__github__search"));
+
+        let bare = ToolUse {
+            id: "tu_2".into(),
+            name: "stray_tool".into(),
+            input: serde_json::json!({}),
+        };
+        let (key, _, _) = classify_call(&bare);
+        assert_eq!(key, ToolKey::external("unknown", "stray_tool"));
     }
 
     /// Build a minimal tool-turn request for `question` with the built-in tool

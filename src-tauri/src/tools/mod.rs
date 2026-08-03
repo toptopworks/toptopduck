@@ -297,6 +297,14 @@ mod tests {
         assert!(defs[0].input_schema.is_object());
     }
 
+    /// An empty entry slice yields an empty definition table (issue #301 slice
+    /// C-loop): the no-servers case is a no-op merge, not a sentinel or error.
+    #[test]
+    fn external_tool_definitions_empty_slice_yields_empty_table() {
+        let defs = external_tool_definitions(&[]);
+        assert!(defs.is_empty());
+    }
+
     /// An unknown tool name returns a tool error (is_error = true) naming the
     /// tool -- the model gets actionable feedback to stop calling it. No
     /// executor runs, so no DuckDB / working-set side effect.
