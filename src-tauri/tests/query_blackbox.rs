@@ -21,9 +21,9 @@ use toptopduck_lib::provider::tool_calling::{
 };
 use toptopduck_lib::{
     ActiveResolution, ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState,
-    CancelToken, DatasetPrivacy, FakeProvider, LoadOutcome, OperationKind, ProviderError,
-    ResumeEvent, ResumeProgress, Session, SourceResolution, TextKind, ThreadEntry, TraceEntryView,
-    TurnFailure, TurnOutcome, TurnPhase, TurnProgress, TurnRecord,
+    CancelToken, DatasetPrivacy, FakeProvider, KeychainStore, LoadOutcome, OperationKind,
+    ProviderError, ResumeEvent, ResumeProgress, Session, SourceResolution, TextKind, ThreadEntry,
+    TraceEntryView, TurnFailure, TurnOutcome, TurnPhase, TurnProgress, TurnRecord,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -1318,7 +1318,14 @@ fn ask_with_phase_records_the_tool_call_event_stream_on_a_result_turn() {
     let approval = ApprovalState::new();
     let sink = NullSink;
     let mut phases: Vec<TurnPhase> = Vec::new();
-    let outcome = session.ask_with_phase("建结果", &approval, &sink, |p| phases.push(p));
+    let outcome = session.ask_with_phase(
+        "建结果",
+        &approval,
+        &sink,
+        |p| phases.push(p),
+        &[],
+        &KeychainStore::new(),
+    );
     assert!(
         matches!(outcome, TurnOutcome::Materialized { .. }),
         "got {outcome:?}"
@@ -1356,7 +1363,14 @@ fn ask_with_phase_records_only_thinking_on_a_textual_turn() {
     let sink = NullSink;
 
     let mut phases: Vec<TurnPhase> = Vec::new();
-    let outcome = session.ask_with_phase("澄清", &approval, &sink, |p| phases.push(p));
+    let outcome = session.ask_with_phase(
+        "澄清",
+        &approval,
+        &sink,
+        |p| phases.push(p),
+        &[],
+        &KeychainStore::new(),
+    );
     assert!(
         matches!(outcome, TurnOutcome::Textual { .. }),
         "got {outcome:?}"
@@ -1392,12 +1406,19 @@ fn turn_progress_events_for_one_turn_share_one_session_id() {
     let approval = ApprovalState::new();
     let sink = NullSink;
     let mut addressed: Vec<TurnProgress> = Vec::new();
-    let outcome = session.ask_with_phase("建结果", &approval, &sink, |phase| {
-        addressed.push(TurnProgress {
-            session_id: SID.into(),
-            phase,
-        });
-    });
+    let outcome = session.ask_with_phase(
+        "建结果",
+        &approval,
+        &sink,
+        |phase| {
+            addressed.push(TurnProgress {
+                session_id: SID.into(),
+                phase,
+            });
+        },
+        &[],
+        &KeychainStore::new(),
+    );
     assert!(
         matches!(outcome, TurnOutcome::Materialized { .. }),
         "got {outcome:?}"

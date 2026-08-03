@@ -829,6 +829,7 @@ mod tests {
                     vec!["--stdio".into()],
                 ),
                 env,
+                keychain_env_keys: Vec::new(),
                 timeout_ms: None,
             });
         let json = serde_json::to_string(&cfg).expect("serialize");
@@ -865,6 +866,7 @@ mod tests {
             display_name: name.into(),
             transport: McpTransport::stdio("/bin/srv", Vec::new()),
             env: std::collections::BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
             timeout_ms: None,
         };
         cfg.mcp_servers.servers = vec![

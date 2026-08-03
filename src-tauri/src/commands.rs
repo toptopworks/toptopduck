@@ -451,6 +451,7 @@ pub fn remove_active_source(
 pub async fn ask(
     app: tauri::AppHandle,
     store: State<'_, Arc<SessionStore>>,
+    live: State<'_, LiveProviderConfig>,
     session_id: String,
     question: String,
 ) -> Result<TurnOutcome, SessionError> {
@@ -468,6 +469,15 @@ pub async fn ask(
     let approval = handle.approval_state();
     let sink = TauriApprovalSink::new(app.clone(), session_id.clone());
     let handle = Arc::clone(&handle);
+    // The user's configured external MCP servers ride the turn (issue #301
+    // slice C-gw): the gateway connects each one per turn (ADR-0076 Q2). A
+    // cheap LiveProviderConfig clone (stateless keychain + PathBuf) carries the
+    // keychain borrow into the spawn_blocking closure so get_mcp_secret can
+    // read each server's secret env at spawn (ADR-0029 -- the value never
+    // crosses IPC back out). mcp_servers is a fresh per-turn snapshot of the
+    // app-config file; a config edit between turns is reflected next turn.
+    let live = live.inner().clone();
+    let mcp_servers = live.mcp_servers();
     // ADR-0059: build the side-channel `turn-progress` emit callback here at the
     // command boundary (the only layer allowed to hold a Tauri AppHandle,
     // ADR-0029) and inject it into the turn via Session::ask_with_phase. Each
@@ -503,6 +513,8 @@ pub async fn ask(
                     );
                 }
             },
+            &mcp_servers,
+            live.keychain(),
         ))
     })
     .await

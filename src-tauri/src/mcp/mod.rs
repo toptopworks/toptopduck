@@ -10,8 +10,13 @@
 //! - [`config`]: the app-config model for a user-configured server (slice A,
 //!   issue #301 AC#1) + the upsert/remove CRUD helpers (slice B).
 //! - [`secrets`]: the OS keychain secret store for a server's secret env values
-//!   (slice B, issue #301). The MCP client the gateway drives lands in a later
-//!   slice.
+//!   (slice B, issue #301).
+//! - [`client`]: the stdio JSON-RPC client the gateway drives per turn (slice
+//!   C1, issue #301).
+//! - [`aggregator`]: the merged tool-table view + `tools/call` router over
+//!   connected external servers (slice C-gw, issue #301).
 
+pub mod aggregator;
+pub mod client;
 pub mod config;
 pub mod secrets;

@@ -22,6 +22,18 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "acp-fake-cli"
 path = "tests/fixtures/acp_fake_cli.rs"
 
+# MCP fake server fixture (issue #301 slice C-gw): a minimal stdio MCP server
+# the gateway aggregation / routing integration tests spawn via
+# `env!("CARGO_BIN_EXE_mcp-fake-server")`. Speaks the MCP stdio newline-delimited
+# JSON-RPC subset the gateway's StdioClient drives (initialize / tools/list /
+# tools/call). Lives under `tests/fixtures/` (subdir, no auto-discovery); pure
+# serde_json (no lib import) so the fixture stays self-contained. Built with the
+# normal `cargo test`; the Tauri bundler ships only `main.rs`, so this fixture
+# never reaches end users.
+[[bin]]
+name = "mcp-fake-server"
+path = "tests/fixtures/mcp_fake_server.rs"
+
 # ACP bridge process (ADR-0085, issue #299 slice 9b): a thin stdio<->TCP proxy
 # the external CLI launches as its MCP server (per the McpServer::stdio_bridge
 # descriptor). Pure std -- no lib import, no serde, no JSON parsing: it forwards

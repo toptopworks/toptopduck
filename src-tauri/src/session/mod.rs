@@ -25,6 +25,7 @@ use crate::guardrail::{apply_resource_caps, DEFAULT_MAX_RESULT_ROWS};
 use crate::ingest;
 use crate::ingest::schema::quote_ident;
 use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
+use crate::mcp::config::McpServerConfig;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
     RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, SourceLifecycleKind,
@@ -37,6 +38,7 @@ use crate::persistence::recipe::{
 };
 use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
 use crate::persistence::{read_duck, save_atomic, SaveError};
+use crate::provider::keychain::KeychainStore;
 use crate::provider::prompt::ResponseLocale;
 use crate::provider::{Provider, UnwiredProvider};
 use crate::runtime::acp::adapter::{detect_adapter, AdapterSpec};
@@ -1734,7 +1736,12 @@ impl Session {
     pub fn ask(&mut self, question: &str) -> TurnOutcome {
         let approval = ApprovalState::new();
         let sink = NullApprovalSink;
-        self.ask_with_phase(question, &approval, &sink, |_| {})
+        // No external MCP servers in the test / non-command path: built-in
+        // tools only. The keychain is an empty KeychainStore (a stateless unit
+        // struct, ADR-0029) -- get_mcp_secret reads None for every env key, so
+        // a server with keychain_env_keys still spawns, just secret-free.
+        let keychain = KeychainStore::new();
+        self.ask_with_phase(question, &approval, &sink, |_| {}, &[], &keychain)
     }
 
     /// Run one turn AND surface its discrete progress events (ADR-0059,
@@ -1760,6 +1767,8 @@ impl Session {
         approval: &ApprovalState,
         sink: &dyn ApprovalSink,
         on_phase: impl FnMut(TurnPhase) + Send,
+        mcp_servers: &[McpServerConfig],
+        keychain: &KeychainStore,
     ) -> TurnOutcome {
         // Facade over the agent loop (ADR-0081, issue #318): assemble the
         // windowed tool-calling request (system prompt + tool table + windowed
@@ -1779,9 +1788,17 @@ impl Session {
         // exclusive), so the built-in closure and the external engine cannot
         // both hold it.
         let (outcome, trace) = match self.external_runtime.clone() {
-            Some(adapter) => {
-                self.run_external_turn(question, &turns, locale, adapter, approval, sink, on_phase)
-            }
+            Some(adapter) => self.run_external_turn(
+                question,
+                &turns,
+                locale,
+                adapter,
+                approval,
+                sink,
+                on_phase,
+                mcp_servers,
+                keychain,
+            ),
             None => {
                 // Built-in agent loop (ADR-0081, issue #318): assemble the
                 // windowed tool-calling request, drive the loop with the shared
@@ -1874,6 +1891,8 @@ impl Session {
         approval: &ApprovalState,
         sink: &dyn ApprovalSink,
         on_phase: O,
+        mcp_servers: &[McpServerConfig],
+        keychain: &KeychainStore,
     ) -> (TurnOutcome, Vec<TraceEntry>) {
         // 1. Resolve the CLI binary. Not-on-PATH -> a transient turn failure
         //    (the engine never spawns; nothing to clean up).
@@ -1957,12 +1976,22 @@ impl Session {
                 result_count_cap: self.result_count_cap,
                 temp_path: &self.temp_path,
             };
+            // Connect the user's configured external MCP servers (issue #301
+            // slice C-gw). Per-turn (ADR-0076 Q2): spawn + initialize each
+            // stdio server here so the gateway advertises its tools alongside
+            // the built-in table and routes namespaced tools/call back through
+            // the aggregator. A failed connect logs + skips that server rather
+            // than failing the turn (McpAggregator::connect_all / connect_one);
+            // the spawned children die with the aggregator at scope end.
+            let mut mcp = crate::mcp::aggregator::McpAggregator::empty();
+            mcp.connect_all(mcp_servers, keychain);
             let ctx = GatewayCtx {
                 deps,
                 materializer: &mut *self.materializer,
                 approval,
                 sink,
                 cancel: &self.cancel,
+                mcp,
             };
             let gateway_result = serve_connection(handle, ctx);
             (
