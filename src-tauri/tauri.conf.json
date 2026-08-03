@@ -16,7 +16,7 @@
         "title": "toptopduck",
         "width": 1024,
         "height": 768,
-        "minWidth": 480,
+        "minWidth": 540,
         "minHeight": 360,
         "center": true,
         "visible": false,
