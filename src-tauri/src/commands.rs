@@ -478,6 +478,17 @@ pub async fn ask(
     // app-config file; a config edit between turns is reflected next turn.
     let live = live.inner().clone();
     let mcp_servers = live.mcp_servers();
+    // Issue #301 slice D, AC#3: filter the configured servers down to this
+    // session's enabled set. A fresh session has an empty enabled set, so no
+    // external server connects until the user toggles it on via
+    // toggle_mcp_server; a configured-but-not-enabled server is simply absent
+    // from the turn's connect_all (it does not spawn).
+    let enabled = handle.enabled_mcp_servers();
+    let active: Vec<McpServerConfig> = mcp_servers
+        .iter()
+        .filter(|srv| enabled.contains(&srv.id))
+        .cloned()
+        .collect();
     // ADR-0059: build the side-channel `turn-progress` emit callback here at the
     // command boundary (the only layer allowed to hold a Tauri AppHandle,
     // ADR-0029) and inject it into the turn via Session::ask_with_phase. Each
@@ -490,7 +501,7 @@ pub async fn ask(
     let sid = session_id.clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = handle.session_lock()?;
-        Ok::<TurnOutcome, SessionError>(s.ask_with_phase(
+        let outcome = s.ask_with_phase(
             &question,
             &approval,
             &sink,
@@ -513,9 +524,16 @@ pub async fn ask(
                     );
                 }
             },
-            &mcp_servers,
+            &active,
             live.keychain(),
-        ))
+        );
+        // Issue #301 slice D: mirror the Session's last-turn connect cache into
+        // the handle so list_mcp_server_status is lock-light (it never takes
+        // the session lock an in-flight turn holds). Done while s is still
+        // locked -- the write touches only the handle's own Mutex, no
+        // session-lock re-entry.
+        handle.set_last_mcp_connect(s.last_mcp_connect().to_vec());
+        Ok::<TurnOutcome, SessionError>(outcome)
     })
     .await
     .map_err(|e| SessionError::Engine(e.to_string()))??;
@@ -745,6 +763,85 @@ pub fn clear_mcp_server_secret(
 ) -> Result<(), StoreCommandError> {
     live.clear_mcp_secret(&id, &env_key)
         .map_err(StoreCommandError::KeychainFailure)
+}
+
+/// One row of the per-session MCP server status (issue #301 slice D, AC#3).
+/// The UI renders every configured server with its on/off toggle state + its
+/// last connect outcome + tool count. Joined at the command boundary from
+/// app-config (the full registry) + the handle's enablement set + the last
+/// turn's connect cache.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct McpServerStatusEntry {
+    /// The server's stable id (matches `McpServerConfig::id`).
+    pub id: McpServerId,
+    /// The renamable display label.
+    pub display_name: String,
+    /// Whether this session has the server enabled (the toggle state).
+    pub enabled: bool,
+    /// Whether the last turn's connect_all succeeded for this server. `false`
+    /// when the server is enabled-but-failed or has not connected yet this
+    /// session (cache miss).
+    pub connected: bool,
+    /// The tool count the server advertised at the last connect (0 when not
+    /// connected).
+    pub tool_count: usize,
+    /// The last connect's error message (`None` on success or when not
+    /// attempted).
+    pub error: Option<String>,
+}
+
+/// Toggle one MCP server's enabled state for this session (issue #301 slice D,
+/// AC#3). Server granularity: enabling a server includes all its tools in the
+/// next turn's aggregated tool table; disabling drops them all. The toggle
+/// takes effect on the next turn -- per-turn spawn (ADR-0076 Q2) means no live
+/// connection to tear down. Resume resets the set to empty (the user re-enables
+/// explicitly, ADR-0080 lineage).
+#[tauri::command]
+pub fn toggle_mcp_server(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+    server_id: McpServerId,
+    enabled: bool,
+) -> Result<(), SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    handle.set_mcp_enabled(server_id, enabled);
+    Ok(())
+}
+
+/// List every configured MCP server with this session's toggle state + last
+/// connect outcome (issue #301 slice D, AC#3). Lock-light: reads the handle's
+/// enablement set + connect cache, never the session lock (an in-flight turn
+/// holds it). A configured-but-not-enabled server appears with `enabled:
+/// false`; an enabled server that has not connected yet this session (or whose
+/// last connect failed) surfaces `connected: false` via the cache miss.
+#[tauri::command]
+pub fn list_mcp_server_status(
+    store: State<'_, Arc<SessionStore>>,
+    live: State<'_, LiveProviderConfig>,
+    session_id: String,
+) -> Result<Vec<McpServerStatusEntry>, SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    let enabled = handle.enabled_mcp_servers();
+    let last_connect = handle.last_mcp_connect();
+    let entries = live
+        .mcp_servers()
+        .into_iter()
+        .map(|srv| {
+            let is_enabled = enabled.contains(&srv.id);
+            let result = last_connect.iter().find(|r| r.id == srv.id);
+            McpServerStatusEntry {
+                id: srv.id,
+                display_name: srv.display_name,
+                enabled: is_enabled,
+                connected: result.map(|r| r.connected).unwrap_or(false),
+                tool_count: result.map(|r| r.tool_count).unwrap_or(0),
+                error: result.and_then(|r| r.error.clone()),
+            }
+        })
+        .collect();
+    Ok(entries)
 }
 
 /// Run a connection preflight against the named profile (ADR-0070, issue
@@ -1124,6 +1221,12 @@ pub async fn open_duck(
         // independent of the session swap -- the approval state lives on the
         // handle, not inside the Session mutex.
         handle_for_task.reset_approval();
+        // Issue #301 slice D, AC#3: reset the per-session MCP server
+        // enablement + connect cache alongside the approval posture. The
+        // enablement is session-level (not in the recipe / app-config), so a
+        // resumed session starts at the default empty set -- the user re-
+        // enables servers explicitly, mirroring how trust resets (ADR-0080).
+        handle_for_task.reset_mcp_enablement();
         Ok::<(), SessionError>(())
     })
     .await;

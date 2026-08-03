@@ -516,6 +516,14 @@ pub struct Session {
     /// ships the real picker. Integration tests toggle it; production stays
     /// `None` (built-in).
     external_runtime: Option<AdapterSpec>,
+    /// The last turn's per-server MCP connect outcomes (issue #301 slice D).
+    /// Updated at the top of each turn (the aggregator's `connect_all` result)
+    /// so the command layer can snapshot it into the SessionHandle for
+    /// `list_mcp_server_status` without taking the session lock a turn holds.
+    /// Empty until the first turn runs and after a resume (a fresh Session is
+    /// constructed by `open_duck`; the enablement set on the handle + this
+    /// cache reset together -- the ADR-0080 reset lineage, server-granularity cousin).
+    last_mcp_connect: Vec<crate::mcp::aggregator::ConnectResult>,
 }
 
 /// The persisted-form audit substructures for ONE timeline entry (ADR-0078,
@@ -658,6 +666,7 @@ impl Session {
             pending_conflict: None,
             drop_signal: None,
             external_runtime: None,
+            last_mcp_connect: Vec::new(),
         })
     }
 
@@ -667,6 +676,15 @@ impl Session {
     /// clone it to observe `is_in_flight` / drive `request` from another thread.
     pub fn cancel_token(&self) -> Arc<CancelToken> {
         Arc::clone(&self.cancel)
+    }
+
+    /// A snapshot of the last turn's per-server MCP connect outcomes (issue
+    /// #301 slice D). The command layer reads this after a turn to mirror into
+    /// the SessionHandle so `list_mcp_server_status` is lock-light (the status
+    /// IPC never takes the session lock an in-flight turn holds). Empty until
+    /// the first turn runs and after a resume (the Session is fresh).
+    pub fn last_mcp_connect(&self) -> &[crate::mcp::aggregator::ConnectResult] {
+        &self.last_mcp_connect
     }
 
     /// Attach the store-shared closing flag (ADR-0055). [`SessionStore::create`]
@@ -1812,6 +1830,27 @@ impl Session {
                 // coexist without widening to `&mut self`. The block scope drops
                 // the borrows before `record_turn` takes its own `&mut self`.
                 let (outcome, trace) = {
+                    // Connect the user's configured external MCP servers
+                    // (issue #301 slice C-loop / slice D): same per-turn
+                    // lifecycle as the gateway path (ADR-0076 Decision +
+                    // ADR-0085 Consequences -- spawn + initialize each stdio
+                    // server here, drop at scope end so the spawned children
+                    // die with the aggregator). The aggregator's namespaced
+                    // tools merge into the request's tool table so the model
+                    // sees one surface; execute_call routes a namespaced call
+                    // back through the aggregator. Slice D: connect_all returns
+                    // the per-server outcomes, snapshotted into
+                    // self.last_mcp_connect BEFORE deps borrows &mut
+                    // self.working_set (disjoint field, but the assignment
+                    // preceding the borrow keeps borrowck structural so the
+                    // command layer can mirror it into the SessionHandle).
+                    let mut mcp = crate::mcp::aggregator::McpAggregator::empty();
+                    self.last_mcp_connect = mcp.connect_all(mcp_servers, keychain);
+                    request
+                        .tools
+                        .extend(crate::tools::external_tool_definitions(
+                            &mcp.aggregated_tools(),
+                        ));
                     let mut deps = TurnDeps {
                         conn: &self.conn,
                         source_files: &self.source_files,
@@ -1820,22 +1859,6 @@ impl Session {
                         result_count_cap: self.result_count_cap,
                         temp_path: &self.temp_path,
                     };
-                    // Connect the user's configured external MCP servers
-                    // (issue #301 slice C-loop): same per-turn lifecycle as
-                    // the gateway path (ADR-0076 Decision + ADR-0085
-                    // Consequences -- spawn + initialize each stdio server
-                    // here, drop at scope end so the spawned children die with
-                    // the aggregator). The aggregator's namespaced tools merge
-                    // into the request's tool table so the model sees one
-                    // surface; execute_call routes a namespaced call back
-                    // through the aggregator.
-                    let mut mcp = crate::mcp::aggregator::McpAggregator::empty();
-                    mcp.connect_all(mcp_servers, keychain);
-                    request
-                        .tools
-                        .extend(crate::tools::external_tool_definitions(
-                            &mcp.aggregated_tools(),
-                        ));
                     let mut loop_outcome =
                         AgentLoop::new(&*self.provider, Arc::clone(&self.cancel)).run(
                             &request,
@@ -1985,6 +2008,19 @@ impl Session {
         let (acp_outcome, gateway_result) = std::thread::scope(|s| {
             let engine = AcpEngine::new(adapter, Arc::clone(&self.cancel));
             let eng = s.spawn(move || engine.run(&input, &binary, approval, sink, on_phase));
+            // Connect the user's configured external MCP servers (issue #301
+            // slice C-gw / slice D). Per-turn (ADR-0076 Q2): spawn + initialize
+            // each stdio server here so the gateway advertises its tools
+            // alongside the built-in table and routes namespaced tools/call
+            // back through the aggregator. A failed connect logs + skips that
+            // server rather than failing the turn (McpAggregator::connect_all
+            // / connect_one); the spawned children die with the aggregator at
+            // scope end. Slice D: connect_all returns the per-server outcomes,
+            // snapshotted into self.last_mcp_connect BEFORE deps borrows &mut
+            // self.working_set (disjoint field, assignment-first keeps borrowck
+            // structural for the command-layer mirror).
+            let mut mcp = crate::mcp::aggregator::McpAggregator::empty();
+            self.last_mcp_connect = mcp.connect_all(mcp_servers, keychain);
             let deps = TurnDeps {
                 conn: &self.conn,
                 source_files: &self.source_files,
@@ -1993,15 +2029,6 @@ impl Session {
                 result_count_cap: self.result_count_cap,
                 temp_path: &self.temp_path,
             };
-            // Connect the user's configured external MCP servers (issue #301
-            // slice C-gw). Per-turn (ADR-0076 Q2): spawn + initialize each
-            // stdio server here so the gateway advertises its tools alongside
-            // the built-in table and routes namespaced tools/call back through
-            // the aggregator. A failed connect logs + skips that server rather
-            // than failing the turn (McpAggregator::connect_all / connect_one);
-            // the spawned children die with the aggregator at scope end.
-            let mut mcp = crate::mcp::aggregator::McpAggregator::empty();
-            mcp.connect_all(mcp_servers, keychain);
             let ctx = GatewayCtx {
                 deps,
                 materializer: &mut *self.materializer,
