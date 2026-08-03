@@ -143,7 +143,8 @@ pub struct McpServerConfig {
     /// Renamable display label (ADR-0037 display half). Sans secret, sans
     /// transport semantics -- purely what the UI shows. `#[serde(default)]`
     /// so a partial hand-edit fills empty rather than rejecting the file; the
-    /// IPC layer (later slice) fills it from the id when empty.
+    /// registry upsert fills it from the id when empty
+    /// (see [`McpServerRegistry::upsert`]).
     #[serde(default)]
     pub display_name: String,
     /// How the gateway connects to the server.
@@ -174,7 +175,7 @@ pub struct McpServerConfig {
 /// The user-configured MCP server registry (issue #301): the named wrapper
 /// [`crate::app_config::AppConfig`] carries as its `mcp_servers` field. Parallels
 /// [`crate::model::ProviderConfig`] as a cohesive sub-structure with its own
-/// invariant + (later slice) CRUD helpers. Default is empty -- the app ships
+/// invariant + upsert/remove CRUD helpers. Default is empty -- the app ships
 /// with no preconfigured external servers; the user adds them from settings.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct McpServerRegistry {
@@ -201,12 +202,13 @@ impl McpServerRegistry {
     }
 
     /// Upsert one server: mint a uuid v4 (simple form) id when the incoming id
-    /// is empty (a new server from the frontend), fill `display_name` from the
-    /// id when empty, then replace an existing entry with the same id or append.
-    /// Returns the finalized config (with the stable id) so the IPC layer hands
-    /// the id back to the frontend for subsequent secret / remove calls.
+    /// is empty / whitespace-only (a new server from the frontend), fill
+    /// `display_name` from the id when empty, then replace an existing entry
+    /// with the same id or append. Returns the finalized config (with the
+    /// stable id) so the IPC layer hands the id back to the frontend for
+    /// subsequent secret / remove calls.
     pub fn upsert(&mut self, mut server: McpServerConfig) -> McpServerConfig {
-        if server.id.as_str().is_empty() {
+        if server.id.as_str().trim().is_empty() {
             server.id = McpServerId(uuid::Uuid::new_v4().simple().to_string());
         }
         if server.display_name.is_empty() {
@@ -488,6 +490,26 @@ mod tests {
             "uuid v4 simple = 32 hex chars"
         );
         assert!(stored.id.as_str().chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(reg.servers.len(), 1);
+        assert_eq!(reg.servers[0].id, stored.id);
+    }
+
+    #[test]
+    fn registry_upsert_mints_uuid_v4_when_id_whitespace_only() {
+        // A whitespace-only id is treated as "no id" -- upsert mints a uuid v4
+        // rather than keeping a blank keychain-account suffix anchor the frontend
+        // cannot reference and the gateway cannot inject.
+        let mut reg = McpServerRegistry::default();
+        let incoming = McpServerConfig {
+            id: McpServerId("   \t".into()),
+            display_name: String::new(),
+            transport: McpTransport::stdio("/bin/srv", Vec::new()),
+            env: BTreeMap::new(),
+            timeout_ms: None,
+        };
+        let stored = reg.upsert(incoming);
+        assert_ne!(stored.id.as_str(), "   \t");
+        assert_eq!(stored.id.as_str().len(), 32, "minted uuid v4 simple");
         assert_eq!(reg.servers.len(), 1);
         assert_eq!(reg.servers[0].id, stored.id);
     }

@@ -187,9 +187,18 @@ impl LiveProviderConfig {
         &self,
         server: McpServerConfig,
     ) -> Result<McpServerConfig, app_config::WriteError> {
+        // Hold write_lock across the full load -> mutate -> store so a concurrent
+        // upsert / remove / record_recent_file cannot interleave and drop this
+        // server (a lost update would orphan its keychain anchor). store_inner --
+        // not store -- because the guard is already held and std::sync::Mutex is
+        // non-reentrant (mirrors record_recent_file).
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("app-config write_lock poisoned");
         let mut cfg = self.load();
         let stored = cfg.mcp_servers.upsert(server);
-        self.store(cfg)?;
+        self.store_inner(cfg)?;
         Ok(stored)
     }
 
@@ -198,9 +207,16 @@ impl LiveProviderConfig {
     /// the frontend orchestrates clear-then-remove; orphaned entries keyed by
     /// the removed server's (uuid) id are inert.
     pub fn remove_mcp_server(&self, id: &McpServerId) -> Result<(), app_config::WriteError> {
+        // Hold write_lock across the full load -> mutate -> store (same contract
+        // as upsert_mcp_server / record_recent_file); store_inner, not store --
+        // std::sync::Mutex is non-reentrant.
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("app-config write_lock poisoned");
         let mut cfg = self.load();
         cfg.mcp_servers.remove(id);
-        self.store(cfg)?;
+        self.store_inner(cfg)?;
         Ok(())
     }
 
@@ -900,5 +916,51 @@ mod tests {
         assert!(reloaded.mcp_servers.servers.is_empty());
         // Idempotent: removing the same id again is a no-op success.
         live.remove_mcp_server(&stored.id).expect("remove again");
+    }
+
+    #[test]
+    fn upsert_mcp_server_concurrent_writers_do_not_lose_servers() {
+        // I1 regression: upsert_mcp_server holds write_lock across the full
+        // load -> mutate -> store (same contract as record_recent_file). Multiple
+        // concurrent upserts must each land their server (no lost-update) and the
+        // test must complete (no deadlock). Without the full-window lock two
+        // interleaved read-modify-write transactions would drop whichever wrote
+        // first, orphaning its keychain anchor.
+        use std::thread;
+
+        let (_dir, live) = live();
+        let labels: Vec<String> = (0..8).map(|i| format!("srv-{i}")).collect();
+        let handles: Vec<_> = labels
+            .iter()
+            .map(|label| {
+                let live = live.clone();
+                let server = McpServerConfig {
+                    id: McpServerId(String::new()),
+                    display_name: label.clone(),
+                    transport: McpTransport::stdio("/bin/srv", Vec::new()),
+                    env: BTreeMap::new(),
+                    timeout_ms: None,
+                };
+                thread::spawn(move || live.upsert_mcp_server(server).expect("upsert").id)
+            })
+            .collect();
+        let ids: Vec<McpServerId> = handles
+            .into_iter()
+            .map(|h| h.join().expect("worker thread panicked"))
+            .collect();
+        // Every minted id landed -- no lost update (order is scheduler-dependent,
+        // so check membership, not order).
+        let cfg = live.load();
+        assert_eq!(
+            cfg.mcp_servers.servers.len(),
+            labels.len(),
+            "concurrent upserts lost a server"
+        );
+        for id in &ids {
+            assert!(
+                cfg.mcp_servers.servers.iter().any(|s| &s.id == id),
+                "concurrent upsert lost server {id}"
+            );
+        }
     }
 }
