@@ -13,6 +13,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::guardrail::{DEFAULT_MAX_RESULT_ROWS, MAX_THREADS, MEMORY_LIMIT};
+use crate::mcp::config::McpServerRegistry;
 use crate::model::{ProviderConfig, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL};
 use crate::window::WINDOW_TURNS;
 
@@ -262,6 +263,13 @@ pub struct AppConfig {
     /// defaults rather than rejecting the whole document.
     #[serde(default)]
     pub shell: ShellPrefs,
+    /// User-configured external MCP servers (issue #301, ADR-0076).
+    /// Forward-compat: a pre-#301 file has no `mcp_servers` key, so
+    /// serde(default) fills an empty registry rather than rejecting the whole
+    /// document. Secret env values live in the OS keychain, never here
+    /// (ADR-0029/0036 -- see [`McpServerRegistry`]).
+    #[serde(default)]
+    pub mcp_servers: McpServerRegistry,
 }
 
 impl AppConfig {
@@ -280,6 +288,7 @@ impl AppConfig {
             tunables: Tunables::default(),
             recent_files: Vec::new(),
             shell: ShellPrefs::default(),
+            mcp_servers: McpServerRegistry::default(),
         }
     }
 
@@ -371,6 +380,12 @@ impl AppConfig {
         };
         self.engine.threads = self.engine.threads.max(1);
         self.tunables.window_turns = self.tunables.window_turns.max(1);
+        // Drop duplicate MCP server ids so the keychain-account suffix
+        // (`mcp-<id>-<env_key>`, issue #301) stays unambiguous. A hand-edited
+        // file with dupes keeps the first occurrence per id; the gateway
+        // surfaces a connection fault for any malformed entry at spawn time
+        // rather than the config layer guessing validity.
+        self.mcp_servers.normalize();
     }
 }
 
@@ -784,5 +799,83 @@ mod tests {
             result.is_err(),
             "unknown sidebar_grouping value must reject, not silently default"
         );
+    }
+
+    // --- mcp_servers (issue #301) -----------------------------------------
+
+    #[test]
+    fn mcp_servers_defaults_empty() {
+        // A fresh config ships with no preconfigured external servers -- the
+        // user adds them from settings. An empty registry is the honest-degrade
+        // target + the first-launch shape.
+        let cfg = AppConfig::defaults();
+        assert!(cfg.mcp_servers.servers.is_empty());
+    }
+
+    #[test]
+    fn mcp_servers_round_trips_a_configured_server() {
+        // A config with one stdio server (the common shape) survives a serde
+        // round trip identically -- the artifact is a faithful record.
+        let mut cfg = AppConfig::defaults();
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("LOG_LEVEL".into(), "info".into());
+        cfg.mcp_servers
+            .servers
+            .push(crate::mcp::config::McpServerConfig {
+                id: crate::mcp::config::McpServerId("github-mcp".into()),
+                display_name: "GitHub".into(),
+                transport: crate::mcp::config::McpTransport::stdio(
+                    "/usr/local/bin/github-mcp",
+                    vec!["--stdio".into()],
+                ),
+                env,
+            });
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: AppConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, cfg);
+        assert_eq!(back.mcp_servers.servers.len(), 1);
+    }
+
+    #[test]
+    fn mcp_servers_absent_fills_empty_for_forward_compat() {
+        // A pre-#301 app-config file has NO `mcp_servers` key. serde(default)
+        // on the field + McpServerRegistry::default must fill an empty registry
+        // rather than rejecting the whole document (the user's prior theme /
+        // locale / provider survive an app upgrade). Mirrors the shell-pref
+        // forward-compat pattern.
+        let json = r#"{"format_version":2,"theme":"dark"}"#;
+        let cfg: AppConfig = serde_json::from_str(json).expect("partial deserialize");
+        assert_eq!(cfg.theme, Theme::Dark);
+        assert!(
+            cfg.mcp_servers.servers.is_empty(),
+            "absent mcp_servers -> empty"
+        );
+    }
+
+    #[test]
+    fn normalize_dedupes_mcp_servers_by_id() {
+        // A hand-edited config with duplicate server ids is repaired on write:
+        // normalize drops the second occurrence, so the keychain-account suffix
+        // (`mcp-<id>-<env_key>`) stays unambiguous.
+        use crate::mcp::config::{McpServerConfig, McpServerId, McpTransport};
+        let mut cfg = AppConfig::defaults();
+        let make = |id: &str, name: &str| McpServerConfig {
+            id: McpServerId(id.into()),
+            display_name: name.into(),
+            transport: McpTransport::stdio("/bin/srv", Vec::new()),
+            env: std::collections::BTreeMap::new(),
+        };
+        cfg.mcp_servers.servers = vec![
+            make("dup", "First"),
+            make("dup", "Second"),
+            make("uniq", "Unique"),
+        ];
+        cfg.normalize();
+        assert_eq!(cfg.mcp_servers.servers.len(), 2, "duplicate id dropped");
+        assert_eq!(
+            cfg.mcp_servers.servers[0].display_name, "First",
+            "first kept"
+        );
+        assert_eq!(cfg.mcp_servers.servers[1].id, McpServerId("uniq".into()));
     }
 }
