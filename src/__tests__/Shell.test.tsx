@@ -1966,4 +1966,14 @@ describe("Composer control-row skeleton (ADR-0083, issue #350)", () => {
     ) as HTMLElement;
     expect(runtimeSlot.contains(trigger)).toBe(true);
   });
+
+  it("keeps the runtime slot empty while app-config is pending", async () => {
+    // beforeEach holds getAppConfig pending so appConfig stays at its
+    // useState(null) initial -- App does not pass the picker bundle, leaving
+    // the runtime slot empty until app-config resolves (SessionPane.tsx).
+    render(<App />);
+    await openSession();
+    const runtimeSlot = document.querySelector(".composer-slot-runtime");
+    expect(runtimeSlot).toBeEmptyDOMElement();
+  });
 });

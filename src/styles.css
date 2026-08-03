@@ -289,8 +289,9 @@
  * the rail owns the released space (the rail-as-primary form). The promoted
  * rail track keeps a min-width floor (issue #350): it grows to fill but never
  * narrows past the standard rail width, with the Tauri window minWidth
- * (tauri.conf.json: sidebar 220px + this floor) as the backstop (ADR-0054
- * three-level collapse). Exact px values stay a visual-polish item. */
+ * (tauri.conf.json minWidth = sidebar 220px + 320px floor = 540px) as the
+ * backstop (ADR-0054 three-level collapse). Exact px values stay a
+ * visual-polish item. */
 .session-pane {
   height: 100%;
   display: grid;

@@ -325,16 +325,12 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
         </div>
       </section>
 
-      {/* --- Composer control row (ADR-0083, issue #350: in-rail, col 1 row 3;
-            the ADR-0062 R1 full-pane span retired once the workspace defaulted
-            to collapsed). The row is the three-slot skeleton + the flex-1
-            question input: [+] session-context panel / approval mode / runtime,
-            in that fixed order (ADR-0083 puts the assembly entries at the
-            turn-launch point). The [+] and approval-mode slots are empty
-            placeholders until #302 lights them up; the runtime slot is occupied
-            by the existing provider/model picker (ADR-0071) until the runtime
-            chip evolves. The row is a flex (utility on the grid-placement
-            chrome) so the slots sit beside the flex-1 QuestionBar. */}
+      {/* --- Composer control row (ADR-0083, issue #350: in-rail, col 1 row 3).
+            Three-slot skeleton + the flex-1 question input, in fixed order:
+            [+] session-context / approval mode / runtime (ADR-0083 puts the
+            assembly entries at the turn-launch point). [+] and approval-mode
+            stay empty placeholders until #302; runtime hosts the existing
+            provider/model picker (ADR-0071) until the runtime chip evolves. */}
       <div className="session-questionbar flex items-center gap-2">
         {/* [+] session-context panel slot (ADR-0083) -- empty placeholder
             until #302 lights it up. */}
