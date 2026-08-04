@@ -69,6 +69,22 @@ const PUMP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// agent cannot hang the turn past the watchdog.
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
 
+/// Upper bound on reaping the ACP agent after SIGKILL. `Child::wait` blocks
+/// until the child is reaped; on Linux the stdio bridge (spawned by the agent
+/// as its MCP server) inherits the agent's stdout write-end, so the engine's
+/// reader pipe does not EOF and the inherited-stderr chain can keep the process
+/// tree alive long enough to wedge `wait` past the wall-clock watchdog. Poll
+/// `try_wait` (WNOHANG) under this grace instead: SIGKILL is delivered
+/// immediately so the agent is normally reaped on the first poll, and a wedged
+/// reap cannot hang the turn (a transient zombie is reaped at process exit).
+/// This bounded reaping is what lets the engine thread rejoin + serve's
+/// `engine_done` flag fire under the watchdog on Linux (issue #357).
+const KILL_REAP_DEADLINE: Duration = Duration::from_secs(2);
+
+/// Poll interval for the bounded reap. Short enough that the turn reclaims the
+/// agent promptly when SIGKILL lands; [`KILL_REAP_DEADLINE`] is the real cap.
+const KILL_REAP_POLL: Duration = Duration::from_millis(10);
+
 /// One ACP turn input. The wiring seam (slice 9c) assembles `prompt_blocks`
 /// from the same window the built-in loop reads; `mcp_servers` is the bridge
 /// descriptor (the real one lands in slice 9b).
@@ -211,7 +227,6 @@ impl AcpEngine {
             sink,
             &mut on_phase,
         );
-
         // Finalize any tool rows still open at turn end (best-effort success).
         for row in pump.pending.drain(..) {
             let entry = TraceEntry {
@@ -332,7 +347,16 @@ impl ChildHandle {
     fn kill_and_wait(&mut self) {
         // Best-effort: ignore a kill error (the child may have already exited).
         let _ = self.inner.kill();
-        let _ = self.inner.wait();
+        // Bounded reap (issue #357): poll try_wait (WNOHANG) instead of a
+        // blocking wait so a wedged reap cannot hang the turn. See
+        // KILL_REAP_DEADLINE for the Linux process-tree rationale.
+        let deadline = Instant::now() + KILL_REAP_DEADLINE;
+        while Instant::now() < deadline {
+            match self.inner.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) => std::thread::sleep(KILL_REAP_POLL),
+            }
+        }
     }
 }
 
