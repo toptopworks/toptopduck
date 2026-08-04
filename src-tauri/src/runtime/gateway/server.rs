@@ -18,6 +18,7 @@
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -100,14 +101,6 @@ pub struct GatewayOutcome {
     pub promotions: Vec<Promotion>,
 }
 
-/// Accept one bridge connection, verify its token, and drive the MCP subset
-/// (`initialize` / `tools/list` / `tools/call`) until the bridge disconnects
-/// or the cancel token fires.
-///
-/// Blocks for the connection's lifetime. The caller spawns it on a scoped
-/// thread and drives the ACP engine in parallel; the bridge's tool calls land
-/// their trace + promotions in the returned [`GatewayOutcome`] for the turn
-/// assembler to merge.
 /// Max wall-clock wait for a bridge to connect after [`serve_connection`] starts
 /// (ADR-0085 robustness). A blocking `accept` would hang the turn forever if the
 /// bridge never connects -- the engine returns, but the gateway never sees EOF
@@ -129,7 +122,30 @@ const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// completes.
 const READ_TIMEOUT: Duration = Duration::from_millis(100);
 
-pub fn serve_connection(handle: GatewayHandle, mut ctx: GatewayCtx) -> io::Result<GatewayOutcome> {
+/// Accept one bridge connection, verify its token, and drive the MCP subset
+/// (`initialize` / `tools/list` / `tools/call`) until the bridge disconnects
+/// (read EOF), the cancel token fires, OR the engine-completion flag
+/// (`engine_done`) is set.
+///
+/// `engine_done` is the deterministic terminator: the caller sets it when the
+/// ACP engine's prompt pump returns. The pump returning means the CLI sent its
+/// final `session/prompt` response, so every `tools/call` it sent was already
+/// served synchronously (the CLI blocks on each tools/call reply before sending
+/// the next message) -- serve has no in-flight request to drop, so returning on
+/// the flag is safe. This removes the implicit dependency on the bridge closing
+/// the TCP connection to terminate the serve loop (ADR-0085 serve-termination
+/// consequence): the bridge is spawned by the external CLI, so whether its stdin
+/// write-end closes promptly depends on the spawner, not on this process.
+///
+/// Blocks for the connection's lifetime. The caller spawns it on a scoped
+/// thread and drives the ACP engine in parallel; the bridge's tool calls land
+/// their trace + promotions in the returned [`GatewayOutcome`] for the turn
+/// assembler to merge.
+pub fn serve_connection(
+    handle: GatewayHandle,
+    mut ctx: GatewayCtx,
+    engine_done: &AtomicBool,
+) -> io::Result<GatewayOutcome> {
     let GatewayHandle {
         token, listener, ..
     } = handle;
@@ -163,9 +179,21 @@ pub fn serve_connection(handle: GatewayHandle, mut ctx: GatewayCtx) -> io::Resul
         if ctx.cancel.is_requested() {
             return Ok(outcome);
         }
+        // Engine-completion signal (ADR-0085 serve-termination consequence):
+        // the prompt pump returned -> the CLI sent its final session/prompt
+        // response -> every tools/call it sent was already served
+        // synchronously, so no in-flight request is dropped by returning now.
+        // This is what unblocks the serve when the bridge keeps the TCP
+        // connection open (e.g. a stdio-spawn fd leak on Linux); the loop-top
+        // check fires within one READ_TIMEOUT of the flag being set.
+        if engine_done.load(Ordering::SeqCst) {
+            return Ok(outcome);
+        }
         let msg = match framing::read_message(&mut reader) {
             Ok(Some(m)) => m,
-            Ok(None) => return Ok(outcome), // bridge closed
+            Ok(None) => {
+                return Ok(outcome);
+            } // bridge closed
             // Read timeout (READ_TIMEOUT): retry so the loop-top cancel check
             // fires. BufReader preserves any partial line across the timeout.
             Err(e)
@@ -459,6 +487,8 @@ mod tests {
     use std::io::Cursor;
     use std::net::TcpStream;
     use std::path::PathBuf;
+    use std::sync::mpsc;
+    use std::sync::Arc;
     use std::thread;
     use tempfile::TempDir;
 
@@ -719,12 +749,110 @@ mod tests {
             // `s` drops here -> gateway read EOF -> serve_connection returns.
         });
 
-        let outcome = serve_connection(handle, ctx).expect("serve");
+        let outcome = serve_connection(handle, ctx, &AtomicBool::new(false)).expect("serve");
 
         client.join().expect("client thread panicked");
         assert!(
             outcome.trace.is_empty(),
             "no tools/call in this run -> empty trace"
+        );
+        assert!(
+            outcome.promotions.is_empty(),
+            "no materialize -> no promotion"
+        );
+    }
+
+    /// The deterministic terminator (issue #357): with the bridge socket held
+    /// OPEN (no EOF), serve_connection still returns promptly when
+    /// `engine_done` is set -- it does not wait for the bridge to disconnect.
+    /// Without this flag the serve would block on `read_message` until the
+    /// 120s wall-clock watchdog cancelled it; the flag is what makes serve's
+    /// return depend on the engine, not the bridge. Drives initialize +
+    /// tools/list first so the outcome reflects requests served BEFORE the flag
+    /// fired (the "no in-flight request dropped" invariant).
+    ///
+    /// serve runs on the test thread (its ctx borrows a `!Sync` DuckDB
+    /// `Connection`, same constraint as the production scope-body serve); the
+    /// bridge stand-in + the engine stand-in run on spawned threads.
+    #[test]
+    fn serve_connection_returns_on_engine_done_without_bridge_eof() {
+        let ctx = fresh_ctx();
+        let handle = bind_gateway().expect("bind");
+        let port = handle.port;
+        let token = handle.token.clone();
+        let engine_done = Arc::new(AtomicBool::new(false));
+        let done_for_engine = Arc::clone(&engine_done);
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
+        let (close_tx, close_rx) = mpsc::channel::<()>();
+
+        // The bridge stand-in: connect, handshake, drive initialize + tools/list
+        // (both served synchronously), then HOLD the socket open. Without
+        // engine_done this is exactly the stall the issue describes -- serve
+        // parked on read_message with no EOF.
+        let client = thread::spawn(move || {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            let mut r = std::io::BufReader::new(s.try_clone().expect("clone"));
+            s.write_all(format!("BRIDGE_AUTH {token}\n").as_bytes())
+                .expect("auth write");
+            let mut line = String::new();
+            r.read_line(&mut line).expect("ok line");
+            assert_eq!(line, "BRIDGE_OK\n");
+            framing::write_message(
+                &mut s,
+                &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}),
+            )
+            .expect("send init");
+            let init = framing::read_message(&mut r)
+                .expect("read init")
+                .expect("resp");
+            assert_eq!(init["id"], 1);
+            framing::write_message(
+                &mut s,
+                &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+            )
+            .expect("send list");
+            let list = framing::read_message(&mut r)
+                .expect("read list")
+                .expect("resp");
+            assert_eq!(list["id"], 2);
+            // Both requests served; tell the engine stand-in to arm the flag,
+            // then hold the socket open (park on close_rx) so serve cannot
+            // EOF-return -- the flag must be what unblocks it.
+            let _ = ready_tx.send(());
+            let _ = close_rx.recv();
+            // `s` drops -> stream closes, but serve has already returned.
+        });
+
+        // Engine stand-in: wait for the init + list exchanges, let serve park
+        // on read_message, then arm the completion flag. Mirrors the engine
+        // thread setting engine_done when its prompt pump returns.
+        let engine = thread::spawn(move || {
+            ready_rx.recv().expect("client ready");
+            thread::sleep(Duration::from_millis(150));
+            done_for_engine.store(true, Ordering::SeqCst);
+        });
+
+        // serve runs on THIS thread (ctx borrows the !Sync Connection, same
+        // shape as the production scope-body serve). Time the full call so the
+        // assertion covers connect + handshake + exchange + flag-driven return.
+        let start = Instant::now();
+        let outcome = serve_connection(handle, ctx, &engine_done).expect("serve");
+        let elapsed = start.elapsed();
+        // Release the client's held socket now that serve has returned.
+        let _ = close_tx.send(());
+        client.join().expect("client thread panicked");
+        engine.join().expect("engine thread panicked");
+
+        // The loop-top check fires within one READ_TIMEOUT (100ms) of the flag
+        // store; the connect + exchange + 150ms park budget stays well under
+        // 2s. The prior behavior parked until the 120s wall-clock watchdog.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "serve returned promptly on engine_done, not the watchdog: {elapsed:?}"
+        );
+        assert!(
+            outcome.trace.is_empty(),
+            "no tools/call -> empty trace (init + list do not touch it)"
         );
         assert!(
             outcome.promotions.is_empty(),

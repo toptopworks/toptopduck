@@ -12,6 +12,7 @@ pub mod source_lifecycle;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use calamine::Data;
@@ -2007,7 +2008,24 @@ impl Session {
         // (ADR-0085: serve borrows in place, engine drives in parallel).
         let (acp_outcome, gateway_result) = std::thread::scope(|s| {
             let engine = AcpEngine::new(adapter, Arc::clone(&self.cancel));
-            let eng = s.spawn(move || engine.run(&input, &binary, approval, sink, on_phase));
+            // Deterministic serve terminator (issue #357 / ADR-0085): a one-shot
+            // flag the engine thread sets when its prompt pump returns. The pump
+            // returning means the CLI sent its final session/prompt response,
+            // so every tools/call it sent was already served synchronously --
+            // serve_connection polls this at its loop top + returns the outcome
+            // without waiting for the bridge to close the TCP connection. On
+            // Linux the stdio-spawned bridge inherits a leaked stdin write-end
+            // (Rust std limitation) and never EOFs, so without this flag serve
+            // would park until the 120s wall-clock watchdog cancelled it.
+            // Production Node-spawned bridges do not leak the fd, but relying on
+            // the bridge to close promptly is a correctness gap the flag closes.
+            let engine_done = Arc::new(AtomicBool::new(false));
+            let done_flag = Arc::clone(&engine_done);
+            let eng = s.spawn(move || {
+                let outcome = engine.run(&input, &binary, approval, sink, on_phase);
+                done_flag.store(true, Ordering::SeqCst);
+                outcome
+            });
             // Connect the user's configured external MCP servers (issue #301
             // slice C-gw / slice D). Per-turn (ADR-0076 Q2): spawn + initialize
             // each stdio server here so the gateway advertises its tools
@@ -2037,7 +2055,7 @@ impl Session {
                 cancel: &self.cancel,
                 mcp,
             };
-            let gateway_result = serve_connection(handle, ctx);
+            let gateway_result = serve_connection(handle, ctx, &engine_done);
             (
                 eng.join().expect("acp engine thread panicked"),
                 gateway_result,
