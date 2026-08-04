@@ -17,4 +17,8 @@ export const sessionKeys = {
     referenceName: string,
     offset: number,
   ) => ["session", sessionId, "rows", referenceName, offset] as const,
+  /** Per-session MCP server status (issue #301 slice D) -- the composer "+"
+   *  panel's enablement read + badge count (ADR-0083, issue #351). Lives under
+   *  the session prefix so a close's removeQueries drops it with the rest. */
+  mcpStatus: (sessionId: string) => ["session", sessionId, "mcpStatus"] as const,
 } as const;

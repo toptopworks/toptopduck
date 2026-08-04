@@ -98,12 +98,16 @@ vi.mock("../api", async (importOriginal) => {
     // ColdStartHero + ComposerProviderPicker (mounted via SessionPane) on App
     // mount. Default empty; no Shell.test override relies on a populated overlay.
     listProviderProfiles: vi.fn(async () => []),
+    // Per-session MCP status feeds the composer "+" badge (issue #351).
+    // Default empty read; the badge tests override it.
+    listMcpServerStatus: vi.fn(async () => []),
     getAppConfig: vi.fn(async () => null),
     setAppConfig: vi.fn(async (cfg: AppConfig) => cfg),
   };
 });
 
 import App from "../App";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   activeDataset,
   askQuestion,
@@ -116,6 +120,7 @@ import {
   getAppConfig,
   getProviderConfig,
   ingestFile,
+  listMcpServerStatus,
   listSessions,
   listWorkingSet,
   openDuck,
@@ -124,6 +129,7 @@ import {
   setAppConfig,
 } from "../api";
 import type { AppConfig } from "../types/app-config";
+import type { McpServerConfig, McpServerStatusEntry } from "../types/mcp";
 
 // ADR-0061 cold start: <App/> renders no session on mount, so a session-internal
 // assertion first opens one via the sidebar "+ 新建会话" button (scoped by class
@@ -228,8 +234,10 @@ describe("App three-column shell (issue #79 ACs)", () => {
   it("shows the hero empty state when no result is viewed (ADR-0062 R2 hero)", async () => {
     render(<App />);
     await openSession();
-    // Hero drop zone is visible in the default 结果 tab.
-    expect(screen.getByText(/拖入或选择一个数据文件开始分析/)).toBeInTheDocument();
+    // The hero's drop hint is visible in the default 结果 tab. The
+    // standalone pick button retired into the composer "+" file section
+    // (issue #351); the hero keeps the drag-and-drop shortcut copy.
+    expect(screen.getByText(/把数据文件拖到窗口/)).toBeInTheDocument();
   });
 
   it("derives result content after a Materialized ask (R2 result state)", async () => {
@@ -1180,7 +1188,26 @@ function baseAppConfig(
     tunables: { window_turns: 6, far_window: 12 },
     recent_files: [],
     shell: { ...shell, sidebar_grouping: "flat" },
+    mcp_servers: { servers: [] },
   };
+}
+
+// A minimal configured MCP server (issue #301 wire shape) so a composer "+"
+// test can flip the registry non-empty and leave the degraded mode.
+function mcpServer(id: string): McpServerConfig {
+  return {
+    id,
+    display_name: id,
+    transport: { type: "stdio", command: "/bin/srv", args: [] },
+    env: {},
+    keychain_env_keys: [],
+    timeout_ms: null,
+  };
+}
+
+// A per-session MCP status row (issue #301 slice D shape).
+function mcpStatus(id: string, enabled: boolean): McpServerStatusEntry {
+  return { id, display_name: id, enabled, connected: false, tool_count: 0, error: null };
 }
 
 describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
@@ -1899,12 +1926,13 @@ describe("App Ctrl/⌘+K session-search modal (ADR-0072, issue #252)", () => {
   });
 });
 
-describe("Composer control-row skeleton (ADR-0083, issue #350)", () => {
+describe("Composer control row (ADR-0083, issues #350/#351)", () => {
   // The QuestionBar row evolves into the composer control row: three slots
   // ([+] session-context panel / approval mode / runtime) + the flex-1
-  // question input. [+] and approval mode stay empty placeholders until #302
-  // lights them up; the runtime slot is occupied by the existing
-  // provider/model picker (ADR-0071) until the runtime chip evolves.
+  // question input. Issue #351 lights the add slot (panel shell + file
+  // section + degraded mode + badge); approval mode stays an empty
+  // placeholder until #302 lights it up; the runtime slot is occupied by the
+  // existing provider/model picker (ADR-0071) until the runtime chip evolves.
   beforeEach(() => {
     vi.clearAllMocks();
     state.workingSet = [];
@@ -1915,6 +1943,19 @@ describe("Composer control-row skeleton (ADR-0083, issue #350)", () => {
     // useState(null) initial and the picker bundle stays absent (per-test
     // overrides resolve it).
     vi.mocked(getAppConfig).mockImplementation(() => new Promise<AppConfig>(() => {}));
+    // Same trap for the session-scoped mocks the pane rides: the resume /
+    // delete / error-boundary / soft-cap describes swap implementations that
+    // survive clearAllMocks, and this describe's ingest / badge assertions
+    // depend on the exact sessionId + clean reads. Pin the factory behavior
+    // back (mirrors the error-boundary describe's conversation reset).
+    vi.mocked(createSession).mockResolvedValue("sess-1");
+    vi.mocked(conversation).mockImplementation(async () => state.thread);
+    vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
+    vi.mocked(activeDataset).mockImplementation(async () => null);
+    vi.mocked(listMcpServerStatus).mockResolvedValue([]);
+    // The dialog starts cancelled; the ingest tests override per test.
+    vi.mocked(open).mockResolvedValue(null);
+    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("people") });
     vi.stubGlobal("navigator", { language: "zh-CN" });
   });
 
@@ -1944,12 +1985,71 @@ describe("Composer control-row skeleton (ADR-0083, issue #350)", () => {
     ).toBeTruthy();
   });
 
-  it("the [+] and approval-mode slots are empty placeholders until #302 lights them up", async () => {
+  it("the [+] slot hosts the context-panel trigger; approval-mode stays an empty placeholder", async () => {
     render(<App />);
     await openSession();
     const bar = document.querySelector(".session-questionbar");
-    expect(bar?.querySelector(".composer-slot-add")).toBeEmptyDOMElement();
+    // Issue #351 lights the add slot: with app-config still pending (no
+    // configured MCP, no skill system) the trigger is the degraded pure
+    // add-files button.
+    const addSlot = bar?.querySelector(".composer-slot-add");
+    const trigger = screen.getByRole("button", { name: "添加文件" });
+    expect(addSlot?.contains(trigger)).toBe(true);
     expect(bar?.querySelector(".composer-slot-approval")).toBeEmptyDOMElement();
+  });
+
+  it("degraded [+] opens the multi-select dialog and ingests every picked file", async () => {
+    vi.mocked(open).mockResolvedValue(["/a.csv", "/b.csv"]);
+    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("people") });
+    render(<App />);
+    await openSession();
+
+    fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+
+    // The batch rides the existing ingest pipeline, one call per file, in
+    // pick order (handleIngestMany, issue #351).
+    await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-1", "/a.csv"));
+    await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-1", "/b.csv"));
+  });
+
+  it("with configured MCP servers [+] opens the three-section panel shell", async () => {
+    vi.mocked(getAppConfig).mockResolvedValue({
+      ...baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+      mcp_servers: { servers: [mcpServer("srv")] },
+    });
+    render(<App />);
+    await openSession();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "添加会话上下文" }),
+    );
+
+    // File section live; skills + MCP sections disabled placeholders.
+    expect(
+      await screen.findByRole("button", { name: "选择数据文件…" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("技能")).toBeInTheDocument();
+    expect(screen.getByText("MCP 工具")).toBeInTheDocument();
+    expect(screen.getAllByText("即将开放")).toHaveLength(2);
+  });
+
+  it("badges the session-enabled MCP count on the [+] trigger", async () => {
+    vi.mocked(getAppConfig).mockResolvedValue({
+      ...baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+      mcp_servers: { servers: [mcpServer("srv"), mcpServer("srv2")] },
+    });
+    vi.mocked(listMcpServerStatus).mockResolvedValue([
+      mcpStatus("srv", true),
+      mcpStatus("srv2", false),
+    ]);
+    render(<App />);
+    await openSession();
+
+    // One of the two configured servers is enabled for this session -> the
+    // badge carries the count (and rides the accessible name).
+    expect(
+      await screen.findByRole("button", { name: "添加会话上下文（已挂 1 项）" }),
+    ).toBeInTheDocument();
   });
 
   it("hosts the provider/model picker inside the runtime slot once app-config resolves", async () => {

@@ -48,3 +48,32 @@ export interface McpServerConfig {
   // optional. The gateway enforces the value at connect / call time.
   timeout_ms: number | null;
 }
+
+// The user-configured MCP server registry carried by AppConfig.mcp_servers
+// (issue #301). Mirrors the Rust McpServerRegistry: insertion-ordered server
+// list, unique-id invariant enforced server-side on every write.
+export interface McpServerRegistry {
+  servers: McpServerConfig[];
+}
+
+// One row of the per-session MCP server status (issue #301 slice D, AC#3).
+// Mirrors the Rust McpServerStatusEntry joined at the command boundary from
+// the app-config registry + the session's enablement set + the last turn's
+// connect cache. list_mcp_server_status returns one entry per CONFIGURED
+// server, enabled or not.
+export interface McpServerStatusEntry {
+  // The server's stable id (matches McpServerConfig.id).
+  id: string;
+  // The renamable display label.
+  display_name: string;
+  // Whether THIS session has the server enabled (the toggle state).
+  enabled: boolean;
+  // Whether the last turn's connect succeeded for this server (false when
+  // enabled-but-failed or not connected yet this session).
+  connected: boolean;
+  // The tool count the server advertised at the last connect (0 when not
+  // connected).
+  tool_count: number;
+  // The last connect's error message (null on success or when not attempted).
+  error: string | null;
+}

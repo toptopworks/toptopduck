@@ -6,7 +6,8 @@ import type { ReactNode } from "react";
 import type { DatasetDescriptor } from "../types/dataset";
 import type { TurnOutcome } from "../types/thread";
 
-// FileDropzone touches Tauri APIs that don't exist under jsdom; stub them first.
+// The composer "+" context panel (the retired FileDropzone's successor, issue
+// #351) touches Tauri APIs that don't exist under jsdom; stub them first.
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({
@@ -39,6 +40,10 @@ vi.mock("../api", async (importOriginal) => {
     // ADR-0059: the turn-progress listener mounts with every SessionPane.
     // Stub it (no-op unlisten) so jsdom doesn't hit the real Tauri listen.
     onTurnProgress: vi.fn(async () => () => {}),
+    // The composer "+" panel queries the per-session MCP status on mount
+    // (issue #351); no App.test flow exercises MCP, so an empty read keeps
+    // jsdom off the real invoke.
+    listMcpServerStatus: vi.fn(async () => []),
     readRows: vi.fn(),
     getProviderConfig: vi.fn(async () => ({
       base_url: "https://api.anthropic.com",
@@ -198,8 +203,10 @@ describe("App guided-load flow", () => {
     await waitFor(() => expect(listWorkingSet).toHaveBeenCalled());
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
-    // Pick a file -> ingestFile returns NeedsGuidance -> dialog opens (AC2 seam).
-    fireEvent.click(screen.getByRole("button", { name: /选择数据文件/ }));
+    // Pick a file via the composer "+" (issue #351: the pane is app-config-less
+    // here, so "+" is the degraded pure add-files button) -> ingestFile returns
+    // NeedsGuidance -> dialog opens (AC2 seam).
+    fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
     await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
     expect(screen.getByText(/引导加载：m/)).toBeInTheDocument();
 

@@ -96,6 +96,9 @@ export interface UseSessionState {
   handleAsk: (question: string) => Promise<void>;
   handleCancel: () => Promise<void>;
   handleIngest: (path: string) => void;
+  /** Multi-file ingest from the composer "+" file section (ADR-0083, issue
+   *  #351). Sequential with halt-on-guidance/error; see useIngestFlow. */
+  handleIngestMany: (paths: string[]) => void;
   handleGuidedSubmit: (sheetGuidance: SheetGuidance[]) => void;
   handleGuidedCancel: () => void;
   handleRename: (referenceName: string, newDisplay: string) => void;
@@ -256,7 +259,7 @@ export function useSessionState(
   // harmless), the inverse of useTurnFlow above which must leave thread
   // un-invalidated. Driven through injected deps; this hook never reaches for
   // the raw guidance setter or the viewed setter for ingest work.
-  const { guidance, handleIngest, handleGuidedSubmit, handleGuidedCancel } = useIngestFlow(
+  const { guidance, handleIngest, handleIngestMany, handleGuidedSubmit, handleGuidedCancel } = useIngestFlow(
     sessionId,
     pendingIngestPath,
     onIngestConsumed,
@@ -416,6 +419,7 @@ export function useSessionState(
     handleAsk,
     handleCancel,
     handleIngest,
+    handleIngestMany,
     handleGuidedSubmit,
     handleGuidedCancel,
     handleReplace,

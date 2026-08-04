@@ -253,6 +253,113 @@ describe("useIngestFlow", () => {
     });
   });
 
+  describe("handleIngestMany - multi-file batch (issue #351)", () => {
+    it("ingests every file sequentially, refreshing ONCE after the batch", async () => {
+      const { deps, refreshServerState, viewed } = setup();
+      vi.mocked(ingestFile).mockResolvedValue(loaded("result_1"));
+      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+
+      await act(async () => {
+        await result.current.handleIngestMany(["/a.csv", "/b.csv", "/c.csv"]);
+      });
+
+      expect(ingestFile).toHaveBeenCalledTimes(3);
+      expect(ingestFile).toHaveBeenNthCalledWith(1, SID, "/a.csv");
+      expect(ingestFile).toHaveBeenNthCalledWith(2, SID, "/b.csv");
+      expect(ingestFile).toHaveBeenNthCalledWith(3, SID, "/c.csv");
+      // One refresh + one viewed clear for the whole batch, not per file.
+      expect(refreshServerState).toHaveBeenCalledTimes(1);
+      expect(refreshServerState).toHaveBeenCalledWith("load");
+      expect(viewed.clearForNewSource).toHaveBeenCalledTimes(1);
+      expect(result.current.guidance).toBeNull();
+    });
+
+    it("stops the batch on NeedsGuidance and opens the guidance dialog", async () => {
+      const { deps, refreshServerState, viewed } = setup();
+      vi.mocked(ingestFile)
+        .mockResolvedValueOnce(loaded("result_1"))
+        .mockResolvedValueOnce(needsGuidance());
+      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+
+      await act(async () => {
+        await result.current.handleIngestMany(["/a.csv", "/x.xlsx", "/c.csv"]);
+      });
+
+      // The third file is never attempted -- the batch halts at the guidance.
+      expect(ingestFile).toHaveBeenCalledTimes(2);
+      expect(result.current.guidance).toEqual({
+        request: guidanceRequest,
+        path: "/x.xlsx",
+      });
+      // The first file DID load, so the working set still refreshes once.
+      expect(refreshServerState).toHaveBeenCalledTimes(1);
+      expect(viewed.clearForNewSource).toHaveBeenCalledTimes(1);
+    });
+
+    it("stops the batch on Error but keeps the earlier Loaded files", async () => {
+      const { deps, setError, refreshServerState, viewed } = setup();
+      vi.mocked(ingestFile)
+        .mockResolvedValueOnce(loaded("result_1"))
+        .mockResolvedValueOnce(loadError);
+      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+
+      await act(async () => {
+        await result.current.handleIngestMany(["/a.csv", "/bad.csv", "/c.csv"]);
+      });
+
+      expect(ingestFile).toHaveBeenCalledTimes(2);
+      expect(setError).toHaveBeenLastCalledWith(
+        expect.objectContaining({ kind: "load", detail: "bad" }),
+      );
+      // The first file loaded before the error -> refresh + clear still run so
+      // it is visible, alongside the error banner.
+      expect(refreshServerState).toHaveBeenCalledTimes(1);
+      expect(viewed.clearForNewSource).toHaveBeenCalledTimes(1);
+      expect(result.current.guidance).toBeNull();
+    });
+
+    it("does not refresh when the FIRST file already fails (nothing loaded)", async () => {
+      const { deps, refreshServerState, viewed } = setup();
+      vi.mocked(ingestFile).mockResolvedValue(loadError);
+      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+
+      await act(async () => {
+        await result.current.handleIngestMany(["/bad.csv", "/b.csv"]);
+      });
+
+      expect(ingestFile).toHaveBeenCalledTimes(1);
+      expect(refreshServerState).not.toHaveBeenCalled();
+      expect(viewed.clearForNewSource).not.toHaveBeenCalled();
+    });
+
+    it("is a no-op for an empty path list", async () => {
+      const { deps, setLoading, refreshServerState } = setup();
+      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+
+      await act(async () => {
+        await result.current.handleIngestMany([]);
+      });
+
+      expect(ingestFile).not.toHaveBeenCalled();
+      expect(refreshServerState).not.toHaveBeenCalled();
+      // No loading churn for a no-op batch.
+      expect(setLoading).not.toHaveBeenCalled();
+    });
+
+    it("surfaces an IPC reject via toAppError tagged 'load' and clears loading", async () => {
+      const { deps, setError, setLoading } = setup();
+      vi.mocked(ingestFile).mockRejectedValue(new Error("ipc down"));
+      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+
+      await act(async () => {
+        await result.current.handleIngestMany(["/a.csv"]);
+      });
+
+      expect(setError).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "load" }));
+      expect(setLoading).toHaveBeenLastCalledWith(false);
+    });
+  });
+
   describe("handleGuidedSubmit - Loaded branch", () => {
     it("clears guidance + refreshes with 'load' + clears viewed", async () => {
       const { deps, refreshServerState, viewed } = setup();

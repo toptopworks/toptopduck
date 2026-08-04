@@ -9,7 +9,7 @@ import type {
   RowPage,
   SheetGuidance,
 } from "./types/dataset";
-import type { McpServerConfig } from "./types/mcp";
+import type { McpServerConfig, McpServerStatusEntry } from "./types/mcp";
 import type {
   ResumeProgress,
   SaveError,
@@ -365,6 +365,16 @@ export async function setMcpServerSecret(
 // can tell the user the secret did not come out (ADR-0029 trust root).
 export async function clearMcpServerSecret(id: string, envKey: string): Promise<void> {
   await invoke<void>("clear_mcp_server_secret", { id, envKey });
+}
+
+// List every configured MCP server with THIS session's enablement + last
+// connect outcome (issue #301 slice D, AC#3; consumed by the composer "+"
+// panel badge, ADR-0083 issue #351). Session-scoped (ADR-0056): enablement is
+// per session. Lock-light server-side -- safe to call while a turn is in
+// flight. A reject (e.g. the session closed mid-flight) degrades the caller
+// to an empty read, never a user-facing error.
+export async function listMcpServerStatus(sessionId: string): Promise<McpServerStatusEntry[]> {
+  return invoke<McpServerStatusEntry[]>("list_mcp_server_status", { sessionId });
 }
 
 // --- Tiered tool approval (ADR-0080, issue #294) -------------------------

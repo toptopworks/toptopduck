@@ -61,6 +61,7 @@ const { appConfigWith } = vi.hoisted(() => {
       tunables: { window_turns: 6, far_window: 12 },
       recent_files: [] as string[],
       shell: { sidebar_collapsed: false, rail_collapsed: false, sidebar_grouping: "flat" },
+      mcp_servers: { servers: [] },
     };
   }
   return { appConfigWith };
