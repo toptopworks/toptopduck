@@ -127,12 +127,20 @@ fn handshake(
 /// is `StdoutLock` (a `LineWriter`), which only drains its internal buffer past
 /// a newline; a partial chunk read off the socket (TCP may segment a JSON-RPC
 /// frame mid-line) would sit in that buffer until the *next* newline arrives,
-/// so the fixture's `read_line` on the far side of the bridge pipe stalls.
+/// so the gateway's `read_message` on the far side of the bridge pipe stalls.
 /// `io::copy` would also eventually flush once the rest of the line arrived,
-/// but under the fixture's tight request/response interleaving the deferred
-/// drain deadlocks the turn (issue #357: the Linux CI suite parked for the full
+/// but under the gateway's request/response interleaving (each `tools/call`
+/// reply must land before the next message is read) the deferred drain
+/// deadlocks the turn (issue #357: the Linux CI suite parked for the full
 /// wall-clock watchdog). Flushing per forwarded chunk drains the pipe promptly
 /// regardless of how the kernel segments the stream.
+///
+/// Pump I/O errors are swallowed (`Err(_) => break`, `let _ = flush`): the
+/// bridge is transport-only (ADR-0085) with no logging surface, and either
+/// half's failure ends the process -- the next `read`/`write_all` hits the
+/// same error and breaks, or the peer-direction completion signal fires the
+/// exit. Distinguishing clean EOF from a hard I/O failure adds no actionable
+/// signal since the binary only returns an `ExitCode`.
 fn pump(mut tcp_to_stdout: impl Read + Send + 'static, mut stdin_to_tcp: TcpStream) -> ExitCode {
     let (tx, rx) = mpsc::channel();
     let tcp_done = tx.clone();

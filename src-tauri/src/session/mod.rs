@@ -2019,6 +2019,12 @@ impl Session {
             // would park until the 120s wall-clock watchdog cancelled it.
             // Production Node-spawned bridges do not leak the fd, but relying on
             // the bridge to close promptly is a correctness gap the flag closes.
+            // The engine thread sets the flag when its prompt pump returns. The
+            // flag is an `Arc<AtomicBool>` (not a borrowed `&AtomicBool`) because
+            // `thread::scope`'s `spawn` requires the closure's captures to be
+            // valid for the full `'scope` lifetime, and the borrow checker will
+            // not promote a borrow of a scope-body-local to `'scope` -- so the
+            // shared reference must be heap-backed. `Arc` is the minimal form.
             let engine_done = Arc::new(AtomicBool::new(false));
             let done_flag = Arc::clone(&engine_done);
             let eng = s.spawn(move || {

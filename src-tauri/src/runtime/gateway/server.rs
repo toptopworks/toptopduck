@@ -137,6 +137,11 @@ const READ_TIMEOUT: Duration = Duration::from_millis(100);
 /// consequence): the bridge is spawned by the external CLI, so whether its stdin
 /// write-end closes promptly depends on the spawner, not on this process.
 ///
+/// Rot-risk: this premise holds for ACP v1's request/response ordering. If a
+/// future protocol revision allows pipelining (sending the next message before
+/// the prior response) or adds cancellation notifications, this early return
+/// could drop an in-flight tools/call -- re-evaluate then.
+///
 /// Blocks for the connection's lifetime. The caller spawns it on a scoped
 /// thread and drives the ACP engine in parallel; the bridge's tool calls land
 /// their trace + promotions in the returned [`GatewayOutcome`] for the turn
