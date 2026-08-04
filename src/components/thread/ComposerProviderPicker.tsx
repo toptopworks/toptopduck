@@ -1,12 +1,23 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { Cpu } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Check, Cpu, RefreshCw } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { fmtError } from "../../lib/error-presentation";
-import { listProviderProfiles } from "../../api";
+import { log } from "../../lib/log";
+import {
+  getSessionRuntime,
+  listAdapters,
+  listProviderProfiles,
+  rescanAdapters,
+  setSessionRuntime,
+} from "../../api";
+import { adapterKeys, sessionKeys } from "../../session/queryKeys";
 import type { ProfileKeyStatus, ProviderConfig } from "../../types/provider";
+import type { AdapterEntry, SessionRuntimeChoice } from "../../types/runtime";
+import { RUNTIME_CHOICE_DEFAULT } from "../../types/runtime";
 import {
   PRESET_CUSTOM,
   derivePresetId,
@@ -19,31 +30,46 @@ import { Label } from "../ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
-// Composer provider/model picker (issue #238, ADR-0071). The three-tier
-// provider/model switch surface at the QuestionBar edge:
-//   - icon trigger (lucide Cpu -- a unified entry glyph, NOT a provider logo;
-//     ADR-0071 avoids provider trademarks),
-//   - hover Tooltip -- lightweight "{provider} . {model}" preview (+ an honest
-//     "no key" mark when the active profile has no key, ADR-0019),
-//   - click Popover -- the heavy panel: provider (active profile) dropdown +
-//     model field + key status + "Open settings" entry.
+// Composer runtime picker (issue #238 / #353, ADR-0071/0076/0081/0083). A
+// dual-segment popover at the QuestionBar edge that selects which runtime
+// drives the NEXT turn:
+//   - built-in group (ADR-0081) -- the BYOK Rust agent loop on the active
+//     profile + model. The profile RECORDS come from the parent's provider
+//     prop; the model + key-status surfaces are ADR-0071's picker, kept as
+//     the built-in group's body.
+//   - external group (ADR-0085) -- the v1 ACP adapters (`list_adapters`,
+//     dynamic, NOT hardcoded): detected rows are selectable, undetected rows
+//     render disabled + "not installed", and the ↻ entry re-runs the PATH
+//     scan (`rescan_adapters`). Adding a CLI upstream grows the list with
+//     zero frontend change.
 //
-// State ownership: the profile RECORDS come from the
-// parent's provider prop (single source of truth, app-config); the per-profile
-// has_key overlay is fetched on mount via listProviderProfiles AND on a
-// profileKeyEpoch bump from the parent (a switch moves the active pointer, not
-// the keys, so it is never refetched on a switch -- but a Settings Save may
-// change a slot, so App bumps the epoch on settings-close to refetch without a
-// remount; ADR-0019 honest gate). Writes
-// route through the parent: onSwitchActive -> active_profile; onSwitchModel ->
-// the active profile's model field (ADR-0064: model is per-profile; the
-// composer commits via commitAppConfig, live_config reads it fresh next turn).
-// The "Open settings" entry closes the popover BEFORE opening the overlay --
-// PopoverContent is portaled to document.body, so it would otherwise stay
-// visible atop the settings view (ADR-0065 hides the session shell via CSS,
-// not the portal host).
+// Trigger: a lucide Cpu icon button (a unified entry glyph, NOT a provider
+// logo; ADR-0071). Hover Tooltip: an honest "{provider} · {model}" preview for
+// the built-in runtime (+ an honest "no key" mark when the active profile has
+// no key, ADR-0019) or the external adapter name. Click Popover: the heavy
+// dual-segment panel.
+//
+// Runtime state ownership: the per-session CHOICE is backend truth, read via
+// `getSessionRuntime` under the session-prefix query (a close drops it with
+// the rest; a resume lands the reset built-in value via the fresh SessionPane
+// mount, mirroring authMode). Writes go through `setSessionRuntime` and take
+// effect at the NEXT turn boundary -- the in-flight turn, if any, finishes on
+// the runtime it started on. A rejected write (session dropped mid-flight,
+// mid-resume swap) keeps the server posture -- the picker resyncs via
+// refetch and never shows a runtime the backend did not grant.
+//
+// Profile + model + key-status ownership is unchanged from ADR-0071: profile
+// records are single-sourced from the provider prop; the per-profile has_key
+// overlay is fetched on mount AND on a profileKeyEpoch bump; writes route
+// through onSwitchActive / onSwitchModel. The "Open settings" entry closes the
+// popover BEFORE opening the overlay -- PopoverContent is portaled to
+// document.body, so it would otherwise stay visible atop the settings view
+// (ADR-0065 hides the session shell via CSS, not the portal host).
 
 export type ComposerProviderPickerProps = {
+  // The session whose runtime this picker reads / switches. Runtime selection
+  // is per-session assembly posture (ADR-0083), like the auth-mode chip.
+  sessionId: string;
   // The non-secret provider config (profiles list + active id), single-sourced
   // by the parent from app-config. This component never mutates it.
   provider: ProviderConfig;
@@ -65,6 +91,7 @@ export type ComposerProviderPickerProps = {
 };
 
 export function ComposerProviderPicker({
+  sessionId,
   provider,
   onSwitchActive,
   onSwitchModel,
@@ -106,6 +133,75 @@ export function ComposerProviderPicker({
       cancelled = true;
     };
   }, [profileKeyEpoch]);
+
+  // Per-session runtime choice (issue #353). Backend truth, read under the
+  // session-prefix query so a close drops it with the rest and a resume lands
+  // the reset built-in value via the fresh SessionPane mount (mirrors authMode).
+  const queryClient = useQueryClient();
+  const { data: runtimeData } = useQuery({
+    queryKey: sessionKeys.runtime(sessionId),
+    queryFn: () => getSessionRuntime(sessionId),
+  });
+  const runtime: SessionRuntimeChoice = runtimeData ?? RUNTIME_CHOICE_DEFAULT;
+  const isExternal = runtime.kind === "external";
+  const activeAdapterId = isExternal ? runtime.data : null;
+
+  // The v1 adapter table (session-agnostic, ADR-0081/0083). Detected rows are
+  // selectable; undetected render disabled + "not installed". The ↻ entry
+  // re-runs the PATH scan via rescanAdapters and seeds the cache. Detection is
+  // uncached server-side, so list + rescan share one key and the ↻ is the
+  // explicit user-driven refresh.
+  const { data: adapterData } = useQuery({
+    queryKey: adapterKeys.all(),
+    queryFn: listAdapters,
+  });
+  const adapters: AdapterEntry[] = adapterData ?? [];
+  const activeAdapter = isExternal
+    ? (adapters.find((a) => a.id === activeAdapterId) ?? null)
+    : null;
+
+  // Guards the write window: a click that lands while the set IPC is in flight
+  // is dropped instead of re-firing (the disabled attr is the visual half of
+  // the same gate). Rescan has its own guard so the two IPCs never share a flag.
+  const [switching, setSwitching] = useState(false);
+  const [rescanning, setRescanning] = useState(false);
+
+  async function selectRuntime(next: SessionRuntimeChoice) {
+    if (switching) return;
+    setSwitching(true);
+    try {
+      await setSessionRuntime(sessionId, next);
+      // The write is the truth source: seed the cache directly (no extra IPC
+      // round-trip; a later remount refetches the same value).
+      queryClient.setQueryData(sessionKeys.runtime(sessionId), next);
+    } catch (e) {
+      // Keep the server posture: refetch so the picker re-reads the backend
+      // truth instead of showing a selection the write never granted.
+      log.warn(
+        "ComposerProviderPicker",
+        "set session runtime failed; resyncing from the session",
+        fmtError(e, intl),
+      );
+      void queryClient.invalidateQueries({
+        queryKey: sessionKeys.runtime(sessionId),
+      });
+    } finally {
+      setSwitching(false);
+    }
+  }
+
+  async function rescan() {
+    if (rescanning) return;
+    setRescanning(true);
+    try {
+      const fresh = await rescanAdapters();
+      queryClient.setQueryData(adapterKeys.all(), fresh);
+    } catch (e) {
+      log.warn("ComposerProviderPicker", "adapter rescan failed", fmtError(e, intl));
+    } finally {
+      setRescanning(false);
+    }
+  }
 
   const activeProfile = provider.profiles.find(
     (p) => p.id === provider.active_profile,
@@ -152,11 +248,23 @@ export function ComposerProviderPicker({
     id: "settings.profiles.keychainUnavailable",
     defaultMessage: "Keychain unavailable",
   });
-  const tooltipText = keychainFault
+  // The external-runtime tooltip names the selected adapter (the closed chip
+  // shows the Cpu glyph alone; the tooltip is where the user reads WHICH
+  // runtime the next turn will use). Falls back to the raw id if the adapter
+  // row has not loaded yet.
+  const externalTooltip = intl.formatMessage(
+    {
+      id: "composer.runtimePicker.tooltip.external",
+      defaultMessage: "External runtime: {adapter}",
+    },
+    { adapter: activeAdapter?.display_name ?? activeAdapterId ?? "" },
+  );
+  const builtInTooltip = keychainFault
     ? `${summary} · ${keychainUnavailableMark}`
     : hasKey
       ? summary
       : `${summary} · ${noKeyMark}`;
+  const tooltipText = isExternal ? externalTooltip : builtInTooltip;
 
   // Model field draft. The popover's model input commits on blur / Enter, NOT
   // per keystroke -- a model id is multi-character and per-keystroke writes
@@ -210,10 +318,17 @@ export function ComposerProviderPicker({
               // is an icon button sized to the QuestionBar row; bg-card + border
               // ride the ADR-0050 token.
               className="composer-picker-trigger inline-flex items-center justify-center size-9 rounded-md border border-border bg-card text-foreground hover:bg-muted transition-colors cursor-pointer"
-              aria-label={intl.formatMessage({
-                id: "composer.providerPicker.triggerAria",
-                defaultMessage: "Provider and model",
-              })}
+              aria-label={intl.formatMessage(
+                {
+                  id: "composer.providerPicker.triggerAria",
+                  defaultMessage: "Runtime: {label}",
+                },
+                {
+                  label: isExternal
+                    ? (activeAdapter?.display_name ?? activeAdapterId ?? "")
+                    : providerName,
+                },
+              )}
             >
               <Cpu className="size-4" aria-hidden />
             </button>
@@ -224,116 +339,221 @@ export function ComposerProviderPicker({
 
       <PopoverContent align="start" className="w-80">
         <div className="grid gap-3">
-          {/* Zone 1: provider (active profile) dropdown -- switches active_profile. */}
-          <Label className="grid gap-1">
-            <FormattedMessage
-              id="composer.providerPicker.profileLabel"
-              defaultMessage="Profile"
-            />
-            {/* Native <select> (precedent: ProviderPresetField) styled to match
-                Input. No Radix Select primitive for a single picker (KISS). */}
-            <select
-              value={provider.active_profile}
-              onChange={(e) => onSwitchActive(e.target.value)}
-              className={cn(
-                "border-input flex h-9 w-full min-w-0 rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none",
-                "focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]",
-              )}
+          {/* --- Built-in runtime group (ADR-0081, issue #353) -----------------
+              The BYOK Rust agent loop on the active profile + model. The
+              header is a select affordance (click reverts to built-in); the
+              profile + model + key-status body is ADR-0071's picker, kept
+              intact so the user configures the built-in profile here. */}
+          <section className="grid gap-2">
+            <button
+              type="button"
+              disabled={switching}
+              onClick={() => void selectRuntime({ kind: "built_in" })}
+              aria-pressed={!isExternal}
+              className="flex items-center gap-2 text-sm font-medium cursor-pointer disabled:pointer-events-none disabled:opacity-50"
             >
-              {provider.profiles.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.display_name.trim() || unnamed}
-                </option>
-              ))}
-            </select>
-          </Label>
-
-          {/* Zone 2: model field. Hand-typed input + a <datalist> offering the
-              active preset's default_model. NO network request (no list-models
-              probe) -- opening the popover never blocks on the network; model
-              accuracy is the Settings preflight's job (#236, ADR-0070). */}
-          <Label className="grid gap-1">
-            <FormattedMessage id="settings.profiles.model" defaultMessage="Model" />
-            <Input
-              type="text"
-              list={datalistId}
-              value={modelDraft}
-              onChange={(e) => setModelDraft(e.target.value)}
-              onBlur={commitModel}
-              onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
-                if (e.key === "Enter") {
-                  // The portaled input is not inside the QuestionBar form, but
-                  // Enter should commit rather than do anything unexpected.
-                  e.preventDefault();
-                  commitModel();
-                }
-              }}
-            />
-            <datalist id={datalistId}>
-              {/* Offer the preset's default model only when the active profile
-                  is on a named preset (Custom has no canonical default). */}
-              {preset && <option value={preset.default_model} />}
-            </datalist>
-            <span className="text-muted-foreground text-xs">
+              <RuntimeDot selected={!isExternal} />
               <FormattedMessage
-                id="composer.providerPicker.modelHint"
-                defaultMessage="Type a model id, or pick the preset default."
+                id="composer.runtimePicker.builtinTitle"
+                defaultMessage="Built-in"
               />
-            </span>
-          </Label>
-
-          {/* Zone 3: key status. Honest mark when the active profile has no key
-              (ADR-0019) -- the badge + the explicit "asking will fail" line. */}
-          <div className="flex items-center gap-2 text-sm">
-            {keychainFault ? (
-              <Badge variant="outline" title={keychainFault}>
-                <FormattedMessage
-                  id="settings.profiles.keychainUnavailable"
-                  defaultMessage="Keychain unavailable"
-                />
-              </Badge>
-            ) : (
-              <Badge variant={hasKey ? "secondary" : "outline"}>
-                {hasKey ? (
-                  <FormattedMessage
-                    id="settings.profiles.keySet"
-                    defaultMessage="Key set"
-                  />
-                ) : (
-                  <FormattedMessage
-                    id="settings.profiles.keyMissing"
-                    defaultMessage="No key"
-                  />
+            </button>
+            {/* Profile dropdown -- switches active_profile. */}
+            <Label className="grid gap-1">
+              <FormattedMessage
+                id="composer.providerPicker.profileLabel"
+                defaultMessage="Profile"
+              />
+              {/* Native <select> (precedent: ProviderPresetField) styled to
+                  match Input. No Radix Select primitive for a single picker
+                  (KISS). */}
+              <select
+                value={provider.active_profile}
+                onChange={(e) => onSwitchActive(e.target.value)}
+                className={cn(
+                  "border-input flex h-9 w-full min-w-0 rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none",
+                  "focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]",
                 )}
-              </Badge>
-            )}
-            {keychainFault ? (
-              <span className="text-muted-foreground">
-                <FormattedMessage
-                  id="settings.profiles.keychainUnavailableHint"
-                  defaultMessage="The OS keychain could not be read (it may be locked, or the service is down). Check the OS keychain, then retry."
-                />
-              </span>
-            ) : !hasKey ? (
-              <span className="text-muted-foreground">
-                <FormattedMessage
-                  id="settings.profiles.key.hintUnset"
-                  defaultMessage="No key saved for this profile — asking with this profile active will return a “not configured” failure."
-                />
-              </span>
-            ) : null}
-          </div>
-          {keysError && <p className="text-destructive text-sm">{keysError}</p>}
+              >
+                {provider.profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.display_name.trim() || unnamed}
+                  </option>
+                ))}
+              </select>
+            </Label>
 
-          {/* Zone 4: open settings entry (ADR-0065 overlay). */}
-          <Button type="button" variant="outline" size="sm" onClick={handleOpenSettings}>
-            <FormattedMessage
-              id="composer.providerPicker.openSettings"
-              defaultMessage="Open settings"
-            />
-          </Button>
+            {/* Model field. Hand-typed input + a <datalist> offering the
+                active preset's default_model. NO network request (no
+                list-models probe) -- opening the popover never blocks on the
+                network; model accuracy is the Settings preflight's job
+                (#236, ADR-0070). */}
+            <Label className="grid gap-1">
+              <FormattedMessage id="settings.profiles.model" defaultMessage="Model" />
+              <Input
+                type="text"
+                list={datalistId}
+                value={modelDraft}
+                onChange={(e) => setModelDraft(e.target.value)}
+                onBlur={commitModel}
+                onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
+                  if (e.key === "Enter") {
+                    // The portaled input is not inside the QuestionBar form,
+                    // but Enter should commit rather than do anything
+                    // unexpected.
+                    e.preventDefault();
+                    commitModel();
+                  }
+                }}
+              />
+              <datalist id={datalistId}>
+                {/* Offer the preset's default model only when the active
+                    profile is on a named preset (Custom has no canonical
+                    default). */}
+                {preset && <option value={preset.default_model} />}
+              </datalist>
+              <span className="text-muted-foreground text-xs">
+                <FormattedMessage
+                  id="composer.providerPicker.modelHint"
+                  defaultMessage="Type a model id, or pick the preset default."
+                />
+              </span>
+            </Label>
+
+            {/* Key status. Honest mark when the active profile has no key
+                (ADR-0019) -- the badge + the explicit "asking will fail"
+                line, the built-in group's "unconfigured + guidance" surface. */}
+            <div className="flex items-center gap-2 text-sm">
+              {keychainFault ? (
+                <Badge variant="outline" title={keychainFault}>
+                  <FormattedMessage
+                    id="settings.profiles.keychainUnavailable"
+                    defaultMessage="Keychain unavailable"
+                  />
+                </Badge>
+              ) : (
+                <Badge variant={hasKey ? "secondary" : "outline"}>
+                  {hasKey ? (
+                    <FormattedMessage
+                      id="settings.profiles.keySet"
+                      defaultMessage="Key set"
+                    />
+                  ) : (
+                    <FormattedMessage
+                      id="settings.profiles.keyMissing"
+                      defaultMessage="No key"
+                    />
+                  )}
+                </Badge>
+              )}
+              {keychainFault ? (
+                <span className="text-muted-foreground">
+                  <FormattedMessage
+                    id="settings.profiles.keychainUnavailableHint"
+                    defaultMessage="The OS keychain could not be read (it may be locked, or the service is down). Check the OS keychain, then retry."
+                  />
+                </span>
+              ) : !hasKey ? (
+                <span className="text-muted-foreground">
+                  <FormattedMessage
+                    id="settings.profiles.key.hintUnset"
+                    defaultMessage="No key saved for this profile — asking with this profile active will return a “not configured” failure."
+                  />
+                </span>
+              ) : null}
+            </div>
+            {keysError && <p className="text-destructive text-sm">{keysError}</p>}
+
+            {/* Open settings entry (ADR-0065 overlay). */}
+            <Button type="button" variant="outline" size="sm" onClick={handleOpenSettings}>
+              <FormattedMessage
+                id="composer.providerPicker.openSettings"
+                defaultMessage="Open settings"
+              />
+            </Button>
+          </section>
+
+          {/* --- External runtime group (ADR-0085, issue #353) ----------------
+              The v1 ACP adapters, read dynamically from list_adapters (never
+              hardcoded). Detected rows are selectable; undetected rows render
+              disabled + "not installed". The ↻ entry re-runs the PATH scan. */}
+          <div className="border-t border-border" />
+          <section className="grid gap-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium">
+                <FormattedMessage
+                  id="composer.runtimePicker.externalTitle"
+                  defaultMessage="External"
+                />
+              </span>
+              <button
+                type="button"
+                onClick={() => void rescan()}
+                disabled={rescanning}
+                className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted cursor-pointer disabled:pointer-events-none disabled:opacity-50"
+                aria-label={intl.formatMessage({
+                  id: "composer.runtimePicker.rescanAria",
+                  defaultMessage: "Rescan adapters",
+                })}
+              >
+                <RefreshCw
+                  className={cn("size-3.5", rescanning && "animate-spin")}
+                  aria-hidden
+                />
+              </button>
+            </div>
+            {adapters.map((a) => {
+              const selected = isExternal && activeAdapterId === a.id;
+              return (
+                <button
+                  key={a.id}
+                  type="button"
+                  disabled={!a.detected || switching}
+                  onClick={() => void selectRuntime({ kind: "external", data: a.id })}
+                  aria-pressed={selected}
+                  className={cn(
+                    "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm cursor-pointer disabled:pointer-events-none disabled:opacity-50",
+                    selected ? "bg-muted" : "hover:bg-muted",
+                  )}
+                >
+                  <RuntimeDot selected={selected} />
+                  <span className="flex-1 text-left text-foreground">
+                    {a.display_name}
+                  </span>
+                  {!a.detected && (
+                    <span className="text-xs text-muted-foreground">
+                      <FormattedMessage
+                        id="composer.runtimePicker.notInstalled"
+                        defaultMessage="Not installed"
+                      />
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </section>
         </div>
       </PopoverContent>
     </Popover>
+  );
+}
+
+// A radio-style selection dot for the runtime groups: a filled ring with a
+// check when selected, a hollow ring otherwise. aria-hidden -- the selecting
+// button carries aria-pressed, so the dot is purely visual (announcing it
+// would duplicate the pressed state).
+function RuntimeDot({ selected }: { selected: boolean }) {
+  return (
+    <span
+      className={cn(
+        "inline-flex size-4 shrink-0 items-center justify-center rounded-full border",
+        selected
+          ? "border-primary text-primary"
+          : "border-muted-foreground/50 text-transparent",
+      )}
+      aria-hidden
+    >
+      <Check className="size-3" />
+    </span>
   );
 }

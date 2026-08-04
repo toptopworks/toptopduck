@@ -50,6 +50,7 @@ use crate::cancel::CancelToken;
 use crate::mcp::aggregator::ConnectResult;
 use crate::mcp::config::McpServerId;
 use crate::provider::Provider;
+use crate::runtime::acp::adapter::AdapterSpec;
 use crate::session::Session;
 
 /// IPC error string carried by [`SessionError::NotFound`] -- the wording the
@@ -268,6 +269,17 @@ pub struct SessionHandle {
     /// holds. Empty until the first turn + reset on resume alongside the
     /// enablement set (the Session is fresh, no connect has run yet).
     last_mcp_connect: Mutex<Vec<ConnectResult>>,
+    /// The per-session runtime selector for the next turn (issue #353,
+    /// ADR-0076/0081/0083). `None` drives the built-in BYOK agent loop (the
+    /// default); `Some(spec)` drives the external ACP engine for the one CLI.
+    /// Lives on the handle (NOT inside the `Session` mutex) so the composer
+    /// picker's get/set are lock-light -- a write never blocks on an in-flight
+    /// turn; `ask` mirrors the choice into the Session at turn top
+    /// (`Session::set_external_runtime`), so a switch takes effect exactly at
+    /// the turn boundary. Reset on resume via [`Self::reset_runtime_choice`]
+    /// (the ADR-0080 reset lineage: a session-level assembly posture, not in
+    /// the recipe / app-config).
+    runtime: Mutex<Option<AdapterSpec>>,
 }
 
 impl SessionHandle {
@@ -459,6 +471,39 @@ impl SessionHandle {
             .lock()
             .expect("last_mcp_connect lock poisoned") = results;
     }
+
+    // --- Runtime selector (issue #353, ADR-0076/0081/0083) ------------------
+    //
+    // The session's execution-runtime posture: the built-in BYOK agent loop
+    // (None, the default) or one external ACP CLI adapter (Some). Session-level
+    // + resume-resetting like the approval posture + the MCP enablement set --
+    // an explicit user assembly choice that never survives a resume. The
+    // command layer mirrors the choice into the Session at each turn top, so
+    // the switch lands at the turn boundary, never mid-turn.
+
+    /// The runtime selected for the next turn (issue #353). `None` = the
+    /// built-in runtime. Lock-light: reads the handle's own Mutex, never the
+    /// session lock an in-flight turn holds.
+    pub fn runtime_choice(&self) -> Option<AdapterSpec> {
+        self.runtime.lock().expect("runtime lock poisoned").clone()
+    }
+
+    /// Set the runtime for the next turn(s) (issue #353). `None` reverts to
+    /// the built-in runtime; `Some(spec)` selects the external ACP engine for
+    /// the one CLI. Takes effect at the next turn boundary (`ask` reads this
+    /// at turn top); an in-flight turn is untouched.
+    pub fn set_runtime_choice(&self, spec: Option<AdapterSpec>) {
+        *self.runtime.lock().expect("runtime lock poisoned") = spec;
+    }
+
+    /// Reset the runtime choice to the built-in default (issue #353). Called
+    /// by `open_duck` after a successful resume alongside
+    /// [`Self::reset_approval`] + [`Self::reset_mcp_enablement`] -- the
+    /// runtime posture is session-level and must not survive a resume (it is
+    /// not in the recipe / app-config).
+    pub fn reset_runtime_choice(&self) {
+        *self.runtime.lock().expect("runtime lock poisoned") = None;
+    }
 }
 
 /// The multi-session map (ADR-0056). Managed once as Tauri state; every
@@ -517,6 +562,9 @@ impl SessionStore {
             approval: Arc::new(crate::approval::ApprovalState::new()),
             enabled_mcp: Mutex::new(HashSet::new()),
             last_mcp_connect: Mutex::new(Vec::new()),
+            // Issue #353: the built-in runtime is the honest default (ADR-0081);
+            // an external CLI is an explicit per-session pick, reset on resume.
+            runtime: Mutex::new(None),
         });
         // Generate the id only after the resource exists; insert under the
         // write lock; return the id only after the insert lands.
@@ -888,5 +936,39 @@ mod tests {
 
         let err = worker.join().expect("gate thread").expect_err("cancelled");
         assert_eq!(err, GateCancelled);
+    }
+
+    /// The runtime choice defaults to the built-in runtime (None), round-trips
+    /// an external adapter spec, and resets to the default (issue #353). The
+    /// choice lives on the handle, so a fresh session starts built-in and a
+    /// resume's `reset_runtime_choice` returns it there.
+    #[test]
+    fn runtime_choice_defaults_to_none_round_trips_and_resets() {
+        let store = SessionStore::new();
+        let id = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+            )
+            .expect("create session");
+        let handle = store.get(&id).expect("get handle");
+
+        assert!(
+            handle.runtime_choice().is_none(),
+            "a fresh session defaults to the built-in runtime"
+        );
+
+        let spec = crate::runtime::acp::adapter::claude_code();
+        handle.set_runtime_choice(Some(spec));
+        let chosen = handle
+            .runtime_choice()
+            .expect("an external choice round-trips");
+        assert_eq!(chosen.id.as_str(), "claude-code");
+
+        handle.reset_runtime_choice();
+        assert!(
+            handle.runtime_choice().is_none(),
+            "reset returns the choice to the built-in default"
+        );
     }
 }

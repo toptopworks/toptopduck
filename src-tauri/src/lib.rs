@@ -334,6 +334,10 @@ pub fn run() {
             commands::set_authorization_mode,
             commands::list_session_trust,
             commands::revoke_session_trust,
+            commands::list_adapters,
+            commands::rescan_adapters,
+            commands::get_session_runtime,
+            commands::set_session_runtime,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

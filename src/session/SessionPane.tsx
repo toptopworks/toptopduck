@@ -48,11 +48,13 @@ interface SessionPaneProps {
    *  cleared and a remount cannot re-ingest (#81 A1). */
   onIngestConsumed: () => void;
   /** App-level provider/model picker occupying the composer control row's
-   *  runtime slot (ADR-0071, issue #238; slot skeleton ADR-0083, issue #350).
-   *  Optional because it depends on app-config having resolved (App passes it
-   *  only when appConfig is non-null); absent, the runtime slot stays empty.
-   *  Bundled as one slot so the all-or-nothing render stays a single guard. */
-  providerPicker?: ComposerProviderPickerProps;
+   *  runtime slot (ADR-0071, issue #238; slot skeleton ADR-0083, issue #350;
+   *  runtime selector evolution issue #353). Optional because it depends on
+   *  app-config having resolved (App passes it only when appConfig is
+   *  non-null); absent, the runtime slot stays empty. Bundled as one slot so
+   *  the all-or-nothing render stays a single guard. `sessionId` is injected
+   *  at the render site (SessionPane owns it), so the bundle type omits it. */
+  providerPicker?: Omit<ComposerProviderPickerProps, "sessionId">;
   /** The app-config MCP registry has at least one configured server (App
    *  derives it; undefined reads as "not configured" until app-config
    *  resolves). Drives the composer "+" panel's degraded decision (ADR-0083,
@@ -359,12 +361,17 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
         <div className="composer-slot-approval">
           <ComposerAuthModeChip sessionId={sessionId} />
         </div>
-        {/* Runtime selector slot. ADR-0071 (issue #238): the provider/model
-            picker is app-level state rendered per-session (only the active
-            pane is visible); the bundle is undefined until app-config
-            resolves, leaving the slot empty until then. */}
+        {/* Runtime selector slot. ADR-0071 (issue #238) + issue #353: the
+            provider/model picker evolved into a dual-segment runtime picker
+            (built-in BYOK loop + external v1 adapters). The bundle is app-
+            level state (provider + writes + settings-open path) rendered
+            per-session; sessionId is injected here so the picker owns its
+            per-session runtime choice. Undefined until app-config resolves,
+            leaving the slot empty until then. */}
         <div className="composer-slot-runtime">
-          {providerPicker && <ComposerProviderPicker {...providerPicker} />}
+          {providerPicker && (
+            <ComposerProviderPicker sessionId={sessionId} {...providerPicker} />
+          )}
         </div>
         <div className="flex-1 min-w-0">
           <QuestionBar
