@@ -1557,8 +1557,8 @@ fn resolve_runtime_choice(
 /// expose `list_adapters` with detection to the frontend). Session-AGNOSTIC:
 /// the adapter table + the PATH scan are process-global, not per-session.
 /// Read-only -- cannot refuse. The composer runtime picker renders this
-/// verbatim; adding a CLI upstream
-/// (`v1_adapters()`) grows the list with zero frontend change.
+/// verbatim; adding a CLI upstream (`v1_adapters()`) grows the list with
+/// zero frontend change.
 #[tauri::command]
 pub fn list_adapters() -> Vec<AdapterEntry> {
     scan_adapters()
@@ -1590,9 +1590,8 @@ pub fn get_session_runtime(
 /// Set the session's runtime selection (issue #353, AC: a switch takes effect
 /// at the turn boundary). The choice lands on the handle (lock-light, never
 /// blocks on an in-flight turn); `ask` mirrors it into the Session at the NEXT
-/// turn top, so the
-/// switch takes effect exactly at the turn boundary -- the in-flight turn, if
-/// any, finishes on the runtime it started on. Selecting an unknown adapter
+/// turn top, so the switch takes effect exactly at the turn boundary --
+/// the in-flight turn, if any, finishes on the runtime it started on. Selecting an unknown adapter
 /// id rejects (the picker only offers `list_adapters` ids). Rejected while
 /// resuming (the session contents are mid-swap).
 #[tauri::command]

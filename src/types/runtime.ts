@@ -29,4 +29,6 @@ export interface AdapterEntry {
 // fresh pane's read lands): the built-in BYOK loop (ADR-0081). A single TS
 // expression of the backend's `None` / `BuiltIn` default, mirroring how the
 // auth-mode chip renders `AUTH_MODE_DEFAULT` before its read resolves.
-export const RUNTIME_CHOICE_DEFAULT: SessionRuntimeChoice = { kind: "built_in" };
+export const RUNTIME_CHOICE_DEFAULT = {
+  kind: "built_in",
+} as const satisfies SessionRuntimeChoice;

@@ -601,13 +601,12 @@ impl Session {
         self.result_count_cap = cap;
     }
 
-    /// Set the per-session external-runtime selector (issue #299 slice 9c,
-    /// minimal-temporary-entry hook -- see [`Self::external_runtime`]). Pass
-    /// `Some(spec)` to drive the external ACP engine for the next turn, or
-    /// `None` to revert to the built-in loop. The production path is the `ask`
-    /// command mirroring the handle-held runtime choice here at turn top
-    /// (issue #353); this direct setter stays `pub` so integration tests in
-    /// `tests/` (a separate crate) can toggle the selector without IPC.
+    /// Set the per-session external-runtime selector (issue #299 slice 9c).
+    /// Pass `Some(spec)` to drive the external ACP engine for the next turn,
+    /// or `None` to revert to the built-in loop. The production path is the
+    /// `ask` command mirroring the handle-held runtime choice here at turn
+    /// top (issue #353); this direct setter stays `pub` so integration tests
+    /// in `tests/` (a separate crate) can toggle the selector without IPC.
     pub fn set_external_runtime(&mut self, spec: Option<AdapterSpec>) {
         self.external_runtime = spec;
     }
