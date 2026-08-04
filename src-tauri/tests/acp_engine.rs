@@ -313,15 +313,19 @@ fn user_cancel_aborts_the_whole_turn() {
     let eng = engine(Arc::clone(&cancel), 24);
     let approval = ApprovalState::new();
     let sink = RecordingSink::default();
-    let cancel_for_thread = Arc::clone(&cancel);
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("ACP_FAKE_SCENARIO", "cancel");
     // Fire cancel shortly after run starts (the fixture emits "working..."
-    // until cancel arrives). The delay covers spawn + handshake.
+    // until cancel arrives). Spawned AFTER ENV_LOCK + env so a wait on the
+    // lock does not eat the cancel window: begin_turn (inside run) clears
+    // any stale `requested` at turn start, so a cancel fired while blocked
+    // on the lock would be wiped before the turn observes it. The 200ms
+    // delay covers spawn + handshake.
+    let cancel_for_thread = Arc::clone(&cancel);
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(200));
         cancel_for_thread.request();
     });
-    let _g = ENV_LOCK.lock().unwrap();
-    std::env::set_var("ACP_FAKE_SCENARIO", "cancel");
     let outcome = eng.run(&input(), &fake_cli(), &approval, &sink, |_| {});
     assert!(
         matches!(outcome.termination, Termination::Cancelled),
