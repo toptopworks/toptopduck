@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useIntl } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -8,25 +8,29 @@ import { fmtError } from "../../lib/error-presentation";
 import { log } from "../../lib/log";
 import { sessionKeys } from "../../session/queryKeys";
 import type { AuthMode } from "../../types/approval";
+import { AUTH_MODE_DEFAULT } from "../../types/approval";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
-// Composer authorization-mode chip (ADR-0080 Decision 4, issue #352). The
-// session's execution posture at the turn-launch point (ADR-0083 puts the
+// Composer authorization-mode chip (ADR-0080, issue #352). The session's
+// execution posture at the turn-launch point (ADR-0083 puts the
 // execution-posture switches on the composer button row, distinct from the
 // "+" context additions): a two-position toggle between confirm-each-call
 // (the default) and no-confirmation (every external tool call auto-passes
 // through the gateway). The posture is session-scoped and resume-resetting --
 // the backend (`open_duck` -> `reset_approval`) returns it to per_call on a
-// resume, and this chip re-reads it via the session-keyed query (a resume's
-// invalidateQueries / a fresh pane mount both land the backend truth). The
-// no-confirmation face rides the --warning token: the posture is an explicit
-// informed widening, and the warning hue marks it while it is on (ADR-0080
-// Decision 4 / ADR-0083).
+// resume, and this chip re-reads it via the session-keyed query (a resume
+// mints a NEW session id whose fresh SessionPane mount issues the read; the
+// resume-path invalidateQueries fires against a not-yet-mounted key and is a
+// no-op). The no-confirmation face rides the --warning token: the posture is
+// an explicit informed widening, and the warning hue marks it while it is on
+// (ADR-0080 / ADR-0083).
 //
 // Reads + writes go through the get/set authorization-mode IPC (#294); a
 // rejected write (session dropped mid-flight, mid-resume swap) keeps the
 // server posture -- the chip resyncs via refetch and never shows a posture
-// the backend did not grant.
+// the backend did not grant. A rejected READ is surfaced via log.warn (without
+// it the chip would sit silently on the safe per_call default with no signal
+// that the backend is unreachable).
 
 export type ComposerAuthModeChipProps = {
   /** The session whose posture this chip reads / switches. */
@@ -52,17 +56,31 @@ export function ComposerAuthModeChip({ sessionId }: ComposerAuthModeChipProps) {
   const [switching, setSwitching] = useState(false);
 
   // The session's posture (backend truth). Under the session prefix so a
-  // close's removeQueries drops it with the rest and a resume's
-  // invalidateQueries refetches the reset-to-default.
-  const { data } = useQuery({
+  // close's removeQueries drops it with the rest; a resume lands the reset
+  // value via the fresh SessionPane mount (see file header).
+  const { data, isError, error } = useQuery({
     queryKey: sessionKeys.authMode(sessionId),
     queryFn: () => getAuthorizationMode(sessionId),
   });
-  // The backend default is per_call (fresh session, resume landing, or the
-  // read still settling): the honest-default face renders immediately, never
-  // a blank slot.
-  const mode: AuthMode = data ?? "per_call";
+  // AUTH_MODE_DEFAULT is the single TS expression of the backend's
+  // #[default] PerCall (ADR-0080): the honest-default face renders immediately
+  // while the read settles, never a blank slot.
+  const mode: AuthMode = data ?? AUTH_MODE_DEFAULT;
   const noConfirmation = mode === "no_confirmation";
+
+  // A persistently failing read (IPC panic, serialization crash, stale sid)
+  // would otherwise leave the chip silently on the safe per_call face with no
+  // signal -- log it so the operator can tell a real per_call posture from a
+  // chip that lost its backend (ADR-0080 fail-safe default stays).
+  useEffect(() => {
+    if (isError) {
+      log.warn(
+        "ComposerAuthModeChip",
+        "auth-mode read failed; showing default",
+        fmtError(error, intl),
+      );
+    }
+  }, [isError, error, intl]);
 
   const modeLabel = noConfirmation
     ? intl.formatMessage({

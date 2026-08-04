@@ -8,8 +8,8 @@ import { ComposerAuthModeChip } from "../ComposerAuthModeChip";
 import { getAuthorizationMode, setAuthorizationMode } from "../../../api";
 import { TooltipProvider } from "../../ui/tooltip";
 
-// ComposerAuthModeChip is the composer authorization-posture toggle (ADR-0080
-// Decision 4, issue #352): a two-position chip (confirm-each-call <->
+// ComposerAuthModeChip is the composer authorization-posture toggle (ADR-0080,
+// issue #352): a two-position chip (confirm-each-call <->
 // no-confirmation) that reads / writes the session's auth mode through the
 // get/set authorization-mode IPC (#294). The no-confirmation position rides
 // the --warning token. Routes its chrome through react-intl (ADR-0052);
@@ -44,7 +44,7 @@ function renderChip(sessionId: string = "sess-1") {
 const PER_CALL_NAME = "Authorization mode: Confirm each call";
 const NO_CONFIRM_NAME = "Authorization mode: No confirmation";
 
-describe("ComposerAuthModeChip (ADR-0080 Decision 4, issue #352)", () => {
+describe("ComposerAuthModeChip (ADR-0080, issue #352)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(getAuthorizationMode).mockResolvedValue("per_call");

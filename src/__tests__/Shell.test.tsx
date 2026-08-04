@@ -2014,7 +2014,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     expect(approvalSlot?.contains(chip)).toBe(true);
   });
 
-  it("toggles the auth-mode chip to no-confirmation with the warning color (ADR-0080 Decision 4)", async () => {
+  it("toggles the auth-mode chip to no-confirmation with the warning color (ADR-0080)", async () => {
     render(<App />);
     await openSession();
     const chip = await screen.findByRole("button", { name: "授权模式：逐次确认" });
@@ -2032,10 +2032,13 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     expect(flipped.className).toContain("text-warning");
   });
 
-  it("resume re-reads the posture and lands per-call (resume resets, ADR-0080)", async () => {
+  it("resume renders the backend's actual posture for the NEW sid (ADR-0080 reset)", async () => {
     // The backend resets the posture on a successful resume (open_duck ->
     // reset_approval); the frontend contract is that the resumed session's
-    // chip re-reads it for the NEW sid and renders the landed value.
+    // chip re-reads it for the NEW sid and renders the landed value -- NOT a
+    // hardcoded default. Pin a non-default read (no_confirmation) so a
+    // regression that ignores the backend would fail (the beforeEach default
+    // is per_call, which a hardcoded-default chip would also render).
     vi.mocked(listSessions).mockResolvedValue([
       {
         session_id: "/x/persisted.duck",
@@ -2047,6 +2050,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     ]);
     vi.mocked(createSession).mockResolvedValue("sess-resume");
     vi.mocked(openDuck).mockResolvedValue(undefined);
+    vi.mocked(getAuthorizationMode).mockResolvedValue("no_confirmation");
 
     render(<App />);
     await waitFor(() => expect(screen.getByText("季报")).toBeInTheDocument());
@@ -2055,9 +2059,35 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     await waitFor(() =>
       expect(getAuthorizationMode).toHaveBeenCalledWith("sess-resume"),
     );
+    // The chip renders the backend's actual answer for the NEW sid, not a
+    // hardcoded per_call default.
     expect(
-      await screen.findByRole("button", { name: "授权模式：逐次确认" }),
+      await screen.findByRole("button", { name: "授权模式：免确认" }),
     ).toBeInTheDocument();
+  });
+
+  it("close drops the auth-mode cache slice with the session prefix (ADR-0080, issue #352)", async () => {
+    // The auth-mode cache lives under ["session", sid, "authMode"]; a close's
+    // removeQueries(["session", sid]) must drop it so a stale no_confirmation
+    // never silently re-arms on a reopened session. The contract holds by
+    // prefix-sharing today; this spy pins it so a future key-shape drift
+    // (authMode escaping the ["session", sid, ...] prefix) would fail.
+    const removeSpy = vi.spyOn(QueryClient.prototype, "removeQueries");
+    render(<App />);
+    await openSession();
+    // The chip populated the authMode cache for sess-1.
+    await screen.findByRole("button", { name: "授权模式：逐次确认" });
+    removeSpy.mockClear(); // isolate close's own removeQueries call
+    // Open the context menu on the one open entry, then Close.
+    fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
+    fireEvent.click(screen.getByRole("menuitem", { name: "关闭" }));
+    // ADR-0080 / ADR-0055: close called removeQueries with the session prefix,
+    // which drops authMode with the rest of the slice.
+    await waitFor(() =>
+      expect(removeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ queryKey: ["session", "sess-1"] }),
+      ),
+    );
   });
 
   it("degraded [+] opens the multi-select dialog and ingests every picked file", async () => {

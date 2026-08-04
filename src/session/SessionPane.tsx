@@ -352,8 +352,8 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
           />
         </div>
         {/* Approval-mode chip (ADR-0083, issue #352): the session's
-            authorization posture (ADR-0080 Decision 4) -- confirm-each-call
-            <-> no-confirmation, the latter marked with the --warning token.
+            authorization posture (ADR-0080) -- confirm-each-call <->
+            no-confirmation, the latter marked with the --warning token.
             Session-scoped + resume-resetting; the chip owns its read / write
             through the get/set authorization-mode IPC. */}
         <div className="composer-slot-approval">
