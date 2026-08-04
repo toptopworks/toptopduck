@@ -101,6 +101,11 @@ vi.mock("../api", async (importOriginal) => {
     // Per-session MCP status feeds the composer "+" badge (issue #351).
     // Default empty read; the badge tests override it.
     listMcpServerStatus: vi.fn(async () => []),
+    // The composer auth-mode chip reads / writes the session's authorization
+    // posture (issue #352). Default per_call read + no-op write; the chip
+    // tests override per scenario.
+    getAuthorizationMode: vi.fn(async () => "per_call" as const),
+    setAuthorizationMode: vi.fn(async () => {}),
     getAppConfig: vi.fn(async () => null),
     setAppConfig: vi.fn(async (cfg: AppConfig) => cfg),
   };
@@ -118,6 +123,7 @@ import {
   createSession,
   deleteSession,
   getAppConfig,
+  getAuthorizationMode,
   getProviderConfig,
   ingestFile,
   listMcpServerStatus,
@@ -127,6 +133,7 @@ import {
   readRows,
   renameSession,
   setAppConfig,
+  setAuthorizationMode,
 } from "../api";
 import type { AppConfig } from "../types/app-config";
 import type { McpServerConfig, McpServerStatusEntry } from "../types/mcp";
@@ -1953,6 +1960,10 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
     vi.mocked(activeDataset).mockImplementation(async () => null);
     vi.mocked(listMcpServerStatus).mockResolvedValue([]);
+    // Same pin for the auth-mode chip IPC pair (issue #352): the resume
+    // describe's overrides survive clearAllMocks.
+    vi.mocked(getAuthorizationMode).mockResolvedValue("per_call");
+    vi.mocked(setAuthorizationMode).mockResolvedValue(undefined);
     // The dialog starts cancelled; the ingest tests override per test.
     vi.mocked(open).mockResolvedValue(null);
     vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("people") });
@@ -1985,7 +1996,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     ).toBeTruthy();
   });
 
-  it("the [+] slot hosts the context-panel trigger; approval-mode stays an empty placeholder", async () => {
+  it("the [+] slot hosts the context-panel trigger; the approval slot hosts the auth-mode chip", async () => {
     render(<App />);
     await openSession();
     const bar = document.querySelector(".session-questionbar");
@@ -1995,7 +2006,58 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     const addSlot = bar?.querySelector(".composer-slot-add");
     const trigger = screen.getByRole("button", { name: "添加文件" });
     expect(addSlot?.contains(trigger)).toBe(true);
-    expect(bar?.querySelector(".composer-slot-approval")).toBeEmptyDOMElement();
+    // Issue #352 lights the approval slot: the chip reads the session's
+    // posture (per_call default) and renders INSIDE the slot, not as a loose
+    // sibling.
+    const chip = await screen.findByRole("button", { name: "授权模式：逐次确认" });
+    const approvalSlot = bar?.querySelector(".composer-slot-approval");
+    expect(approvalSlot?.contains(chip)).toBe(true);
+  });
+
+  it("toggles the auth-mode chip to no-confirmation with the warning color (ADR-0080 Decision 4)", async () => {
+    render(<App />);
+    await openSession();
+    const chip = await screen.findByRole("button", { name: "授权模式：逐次确认" });
+
+    fireEvent.click(chip);
+
+    await waitFor(() =>
+      expect(setAuthorizationMode).toHaveBeenCalledWith("sess-1", "no_confirmation"),
+    );
+    // The flipped face reads 免确认 and rides the --warning token (border /
+    // fill / text all consume it).
+    const flipped = await screen.findByRole("button", { name: "授权模式：免确认" });
+    expect(flipped.className).toContain("border-warning/40");
+    expect(flipped.className).toContain("bg-warning/10");
+    expect(flipped.className).toContain("text-warning");
+  });
+
+  it("resume re-reads the posture and lands per-call (resume resets, ADR-0080)", async () => {
+    // The backend resets the posture on a successful resume (open_duck ->
+    // reset_approval); the frontend contract is that the resumed session's
+    // chip re-reads it for the NEW sid and renders the landed value.
+    vi.mocked(listSessions).mockResolvedValue([
+      {
+        session_id: "/x/persisted.duck",
+        display_name: "季报",
+        last_modified_at: Date.now(),
+        source_summary: { first_source_name: "people", source_count: 1, turn_count: 1 },
+        format_version: 1,
+      },
+    ]);
+    vi.mocked(createSession).mockResolvedValue("sess-resume");
+    vi.mocked(openDuck).mockResolvedValue(undefined);
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("季报")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("季报"));
+
+    await waitFor(() =>
+      expect(getAuthorizationMode).toHaveBeenCalledWith("sess-resume"),
+    );
+    expect(
+      await screen.findByRole("button", { name: "授权模式：逐次确认" }),
+    ).toBeInTheDocument();
   });
 
   it("degraded [+] opens the multi-select dialog and ingests every picked file", async () => {

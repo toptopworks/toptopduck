@@ -13,6 +13,7 @@ import { ErrorBanner } from "../components/common/ErrorBanner";
 import { ErrorBoundary } from "../components/common/ErrorBoundary";
 import { GuidedLoadDialog } from "../components/dataset/GuidedLoadDialog";
 import { QuestionBar } from "../components/thread/QuestionBar";
+import { ComposerAuthModeChip } from "../components/thread/ComposerAuthModeChip";
 import { ComposerContextPanel } from "../components/thread/ComposerContextPanel";
 import {
   ComposerProviderPicker,
@@ -333,8 +334,8 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
             Three-slot skeleton + the flex-1 question input, in fixed order:
             [+] session-context / approval mode / runtime (ADR-0083 puts the
             assembly entries at the turn-launch point). [+] hosts the context
-            panel shell + file section (issue #351); approval-mode stays an
-            empty placeholder until #302 lights it up; runtime hosts the
+            panel shell + file section (issue #351); approval-mode hosts the
+            authorization-posture chip (issue #352); runtime hosts the
             existing provider/model picker (ADR-0071) until the runtime chip
             evolves. */}
       <div className="session-questionbar flex items-center gap-2">
@@ -350,9 +351,14 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
             mcpConfigured={mcpConfigured}
           />
         </div>
-        {/* Approval-mode chip slot (ADR-0083) -- empty placeholder until #302
-            lights it up. */}
-        <div className="composer-slot-approval" />
+        {/* Approval-mode chip (ADR-0083, issue #352): the session's
+            authorization posture (ADR-0080 Decision 4) -- confirm-each-call
+            <-> no-confirmation, the latter marked with the --warning token.
+            Session-scoped + resume-resetting; the chip owns its read / write
+            through the get/set authorization-mode IPC. */}
+        <div className="composer-slot-approval">
+          <ComposerAuthModeChip sessionId={sessionId} />
+        </div>
         {/* Runtime selector slot. ADR-0071 (issue #238): the provider/model
             picker is app-level state rendered per-session (only the active
             pane is visible); the bundle is undefined until app-config

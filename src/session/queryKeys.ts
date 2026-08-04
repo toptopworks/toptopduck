@@ -21,4 +21,9 @@ export const sessionKeys = {
    *  panel's enablement read + badge count (ADR-0083, issue #351). Lives under
    *  the session prefix so a close's removeQueries drops it with the rest. */
   mcpStatus: (sessionId: string) => ["session", sessionId, "mcpStatus"] as const,
+  /** Per-session authorization posture (ADR-0080 Decision 4, issue #352) --
+   *  the composer auth-mode chip's read. Lives under the session prefix so a
+   *  close's removeQueries drops it with the rest AND a resume's
+   *  invalidateQueries refetches the backend's reset-to-default. */
+  authMode: (sessionId: string) => ["session", sessionId, "authMode"] as const,
 } as const;

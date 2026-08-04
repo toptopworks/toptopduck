@@ -44,6 +44,11 @@ vi.mock("../api", async (importOriginal) => {
     // (issue #351); no App.test flow exercises MCP, so an empty read keeps
     // jsdom off the real invoke.
     listMcpServerStatus: vi.fn(async () => []),
+    // The composer auth-mode chip queries the session's authorization posture
+    // on mount (issue #352); no App.test flow exercises the toggle, so a
+    // per_call default read + no-op write keep jsdom off the real invoke.
+    getAuthorizationMode: vi.fn(async () => "per_call" as const),
+    setAuthorizationMode: vi.fn(async () => {}),
     readRows: vi.fn(),
     getProviderConfig: vi.fn(async () => ({
       base_url: "https://api.anthropic.com",
