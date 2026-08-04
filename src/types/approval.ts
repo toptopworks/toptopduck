@@ -17,10 +17,16 @@ export interface ToolKey {
   tool: string;
 }
 
-// Session-level authorization posture (ADR-0080 Decision 4). Default is
-// `per_call`; `no_confirmation` is an explicit, session-scoped,
-// resume-resetting posture that auto-passes every external tool call.
+// Session-level authorization posture (ADR-0080). Default is `per_call`;
+// `no_confirmation` is an explicit, session-scoped, resume-resetting posture
+// that auto-passes every external tool call.
 export type AuthMode = "per_call" | "no_confirmation";
+
+// The backend's default authorization posture (ADR-0080). Mirrors the Rust
+// `AuthMode::default()` (`#[default] PerCall`, src-tauri/src/approval.rs) -- the
+// single TS expression of this invariant so consumers (e.g. the composer chip)
+// do not each hardcode the literal.
+export const AUTH_MODE_DEFAULT: AuthMode = "per_call";
 
 // Operation category for the approval-card badge (ADR-0083 read / write /
 // execute / network). Presentation-only -- the gateway does not branch on it.
