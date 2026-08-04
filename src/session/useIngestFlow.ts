@@ -3,9 +3,10 @@ import type { IntlShape } from "react-intl";
 import { ingestFile, ingestFileGuided } from "../api";
 import { toAppError } from "../lib/error-presentation";
 import { loadErrorDisplay } from "../lib/loadErrorDisplay";
+import { log } from "../lib/log";
 import type { UseViewedResult } from "./useViewedResult";
 import type { AppError, SessionFlowKind } from "../types/error";
-import type { GuidanceRequest, SheetGuidance } from "../types/dataset";
+import type { GuidanceRequest, LoadOutcome, SheetGuidance } from "../types/dataset";
 
 // The ingest-orchestration domain (issue #231), extracted from useSessionState
 // (slice 3 of the three-slice deepening). This hook owns the guidance dialog
@@ -55,9 +56,22 @@ export interface UseIngestFlow {
   // and external callers (WorkspaceResult onIngest) accept it through
   // TypeScript's void-return covariance once useSessionState re-exports it.
   handleIngest: (path: string) => Promise<void>;
+  /** Multi-file ingest (ADR-0083, issue #351): the composer "+" file section
+   *  picks N files and hands them here. Files ingest SEQUENTIALLY through the
+   *  same LoadOutcome routing as handleIngest; the batch HALTS on the first
+   *  NeedsGuidance (the guidance dialog opens for that file) or Error (the
+   *  banner shows), leaving the remaining files un-attempted -- a dialog or
+   *  banner already owns the user's attention, and continuing underneath it
+   *  would race the shared loading / error state. Loaded files before the halt
+   *  stay: the refresh + viewed clear run once for the whole batch. */
+  handleIngestMany: (paths: string[]) => Promise<void>;
   handleGuidedSubmit: (sheetGuidance: SheetGuidance[]) => Promise<void>;
   handleGuidedCancel: () => void;
 }
+
+// Which route a single file's LoadOutcome took (issue #351): the batch loop
+// continues only on Loaded; the other two routes halt it (see handleIngestMany).
+type IngestRoute = LoadOutcome["kind"];
 
 export function useIngestFlow(
   sessionId: string,
@@ -76,6 +90,32 @@ export function useIngestFlow(
   const { clearForNewSource } = viewed;
   const [guidance, setGuidance] = useState<{ request: GuidanceRequest; path: string } | null>(null);
 
+  // Route ONE file's LoadOutcome into its side effects (issue #351 split):
+  // - Loaded -> no side effect here (the caller refreshes + clears viewed).
+  // - NeedsGuidance -> open the guidance dialog (this hook's state).
+  // - Error -> loadErrorDisplay, tagged "load".
+  // Returns the route kind so the caller decides refresh + (batch) continuation.
+  const routeIngestOutcome = useCallback(
+    (result: LoadOutcome, path: string): IngestRoute => {
+      if (result.kind === "Loaded") {
+        return "Loaded";
+      } else if (result.kind === "NeedsGuidance") {
+        setGuidance({ request: result.data, path });
+        return "NeedsGuidance";
+      } else if (result.kind === "Error") {
+        setError({ ...loadErrorDisplay(result.data, intl), kind: "load" });
+        return "Error";
+      } else {
+        // Exhaustiveness guard: LoadOutcome crosses IPC unchecked, so a
+        // future backend variant must throw at the boundary rather than
+        // silently fall through (mirrors loadErrorDisplay / toAppError).
+        const unhandled: never = result;
+        throw new Error(`unhandled LoadOutcome kind: ${JSON.stringify(unhandled)}`);
+      }
+    },
+    [intl, setError],
+  );
+
   // Load one source (PRD ingest entrypoint). Routes the LoadOutcome:
   // - Loaded -> generic refresh + clear viewed (a fresh source has no result).
   // - NeedsGuidance -> open the guidance dialog (this hook's state).
@@ -85,21 +125,11 @@ export function useIngestFlow(
       setLoading(true);
       setError(null);
       try {
-        const result = await ingestFile(sessionId, path);
-        if (result.kind === "Loaded") {
+        const route = routeIngestOutcome(await ingestFile(sessionId, path), path);
+        if (route === "Loaded") {
           await refreshServerState("load");
           // A freshly-added source has no result yet -> hero / active default.
           clearForNewSource();
-        } else if (result.kind === "NeedsGuidance") {
-          setGuidance({ request: result.data, path });
-        } else if (result.kind === "Error") {
-          setError({ ...loadErrorDisplay(result.data, intl), kind: "load" });
-        } else {
-          // Exhaustiveness guard: LoadOutcome crosses IPC unchecked, so a
-          // future backend variant must throw at the boundary rather than
-          // silently fall through (mirrors loadErrorDisplay / toAppError).
-          const unhandled: never = result;
-          throw new Error(`unhandled LoadOutcome kind: ${JSON.stringify(unhandled)}`);
         }
       } catch (e) {
         setError(toAppError(e, intl, "load"));
@@ -108,7 +138,52 @@ export function useIngestFlow(
         void pollPersistError();
       }
     },
-    [sessionId, refreshServerState, pollPersistError, intl, setLoading, setError, clearForNewSource],
+    [sessionId, routeIngestOutcome, refreshServerState, pollPersistError, intl, setLoading, setError, clearForNewSource],
+  );
+
+  // Load a multi-select batch (ADR-0083, issue #351) -- see the interface doc
+  // for the halt semantics. One refresh + one viewed clear for the whole
+  // batch (not per file), and only when at least one file actually loaded.
+  const handleIngestMany = useCallback(
+    async (paths: string[]) => {
+      if (paths.length === 0) return;
+      setLoading(true);
+      setError(null);
+      let loadedAny = false;
+      try {
+        for (let i = 0; i < paths.length; i++) {
+          const path = paths[i];
+          const route = routeIngestOutcome(await ingestFile(sessionId, path), path);
+          if (route !== "Loaded") {
+            // The batch halts here (see iface doc) -- a dialog or banner now
+            // owns the user's attention. Remaining files are skipped without
+            // a user-facing signal; surface the skip as a diagnostic so it is
+            // observable in logs (ADR-0029: operation semantics only, no
+            // source DATA -- the path itself is intentionally not logged).
+            const remaining = paths.length - i - 1;
+            if (remaining > 0) {
+              log.warn("useIngestFlow", "batch halted; remaining files skipped", {
+                haltedAtIndex: i,
+                route,
+                remaining,
+              });
+            }
+            break;
+          }
+          loadedAny = true;
+        }
+        if (loadedAny) {
+          await refreshServerState("load");
+          clearForNewSource();
+        }
+      } catch (e) {
+        setError(toAppError(e, intl, "load"));
+      } finally {
+        setLoading(false);
+        void pollPersistError();
+      }
+    },
+    [sessionId, routeIngestOutcome, refreshServerState, pollPersistError, intl, setLoading, setError, clearForNewSource],
   );
 
   // Consume a drop-on-cold-start file (ADR-0061, #81 A1). The shell mints the
@@ -173,5 +248,5 @@ export function useIngestFlow(
 
   const handleGuidedCancel = useCallback(() => setGuidance(null), []);
 
-  return { guidance, handleIngest, handleGuidedSubmit, handleGuidedCancel };
+  return { guidance, handleIngest, handleIngestMany, handleGuidedSubmit, handleGuidedCancel };
 }

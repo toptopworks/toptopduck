@@ -7,6 +7,7 @@
 // Window geometry is owned by tauri_plugin_window_state (issue #268), not
 // app-config.
 
+import type { McpServerRegistry } from "./mcp";
 import type { ProviderConfig } from "./provider";
 
 // UI theme preference (ADR-0050). Crosses IPC as the bare lowercase variant.
@@ -89,4 +90,9 @@ export interface AppConfig {
   recent_files: string[];
   // Shell collapse preferences (ADR-0054, issue #84).
   shell: ShellPrefs;
+  // User-configured external MCP servers (issue #301, ADR-0076). Secret env
+  // values live in the OS keychain, never here (ADR-0029/0036). serde(default)
+  // fills an empty registry for a pre-#301 file, but serialization ALWAYS
+  // carries the field, so the wire shape is non-optional here too.
+  mcp_servers: McpServerRegistry;
 }

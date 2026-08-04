@@ -11,9 +11,9 @@ import { ActiveSourceDeleteDialog } from "../components/dataset/ActiveSourceDele
 import { DatasetDetail } from "../components/dataset/DatasetDetail";
 import { ErrorBanner } from "../components/common/ErrorBanner";
 import { ErrorBoundary } from "../components/common/ErrorBoundary";
-import { FileDropzone } from "../components/dataset/FileDropzone";
 import { GuidedLoadDialog } from "../components/dataset/GuidedLoadDialog";
 import { QuestionBar } from "../components/thread/QuestionBar";
+import { ComposerContextPanel } from "../components/thread/ComposerContextPanel";
 import {
   ComposerProviderPicker,
   type ComposerProviderPickerProps,
@@ -52,6 +52,12 @@ interface SessionPaneProps {
    *  only when appConfig is non-null); absent, the runtime slot stays empty.
    *  Bundled as one slot so the all-or-nothing render stays a single guard. */
   providerPicker?: ComposerProviderPickerProps;
+  /** The app-config MCP registry has at least one configured server (App
+   *  derives it; undefined reads as "not configured" until app-config
+   *  resolves). Drives the composer "+" panel's degraded decision (ADR-0083,
+   *  issue #351): with no configured MCP and no skill system yet, "+" is a
+   *  pure add-files button instead of the three-section panel. */
+  mcpConfigured?: boolean;
   /** Rail collapse state + toggle (ADR-0054 level 2). Shell-owned pref
    *  rendered per-session: every SessionPane reads the same railCollapsed
    *  (the pref is app-wide), but only the active pane's header is visible
@@ -74,7 +80,7 @@ interface SessionPaneProps {
 // stable prop for useSessionState / useTurnFlow (no every-render fresh []).
 const NO_APPROVALS: ApprovalEntry[] = [];
 
-export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, providerPicker, railCollapsed, onToggleRail, sessionName, approvalEvents }: SessionPaneProps) {
+export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, providerPicker, mcpConfigured = false, railCollapsed, onToggleRail, sessionName, approvalEvents }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
   // the pane acts on its own session only). The respond / clearSession
@@ -305,8 +311,6 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
             <WorkspaceResult
               content={s.workspaceContent}
               sessionId={sessionId}
-              onIngest={s.handleIngest}
-              loading={s.loading}
               hasData={s.datasets.length > 0}
               onResetRegion={resetSessionCache}
             />
@@ -328,13 +332,24 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
       {/* --- Composer control row (ADR-0083, issue #350: in-rail, col 1 row 3).
             Three-slot skeleton + the flex-1 question input, in fixed order:
             [+] session-context / approval mode / runtime (ADR-0083 puts the
-            assembly entries at the turn-launch point). [+] and approval-mode
-            stay empty placeholders until #302; runtime hosts the existing
-            provider/model picker (ADR-0071) until the runtime chip evolves. */}
+            assembly entries at the turn-launch point). [+] hosts the context
+            panel shell + file section (issue #351); approval-mode stays an
+            empty placeholder until #302 lights it up; runtime hosts the
+            existing provider/model picker (ADR-0071) until the runtime chip
+            evolves. */}
       <div className="session-questionbar flex items-center gap-2">
-        {/* [+] session-context panel slot (ADR-0083) -- empty placeholder
-            until #302 lights it up. */}
-        <div className="composer-slot-add" />
+        {/* [+] session-context panel (ADR-0083, issue #351): three-section
+            shell (files live; skills / MCP disabled placeholders) with the
+            degraded pure-add-files mode. The retired workspace-hero picker
+            moved here; window drag-and-drop is untouched. */}
+        <div className="composer-slot-add">
+          <ComposerContextPanel
+            sessionId={sessionId}
+            onIngestFiles={s.handleIngestMany}
+            loading={s.loading}
+            mcpConfigured={mcpConfigured}
+          />
+        </div>
         {/* Approval-mode chip slot (ADR-0083) -- empty placeholder until #302
             lights it up. */}
         <div className="composer-slot-approval" />
@@ -383,15 +398,11 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
 function WorkspaceResult({
   content,
   sessionId,
-  onIngest,
-  loading,
   hasData,
   onResetRegion,
 }: {
   content: WorkspaceContent;
   sessionId: string;
-  onIngest: (path: string) => void;
-  loading: boolean;
   hasData: boolean;
   /** ADR-0058 L2 result-partition retry: remove the session slice so a
    *  remounted ResultView re-fetches fresh rows instead of re-throwing against
@@ -400,15 +411,16 @@ function WorkspaceResult({
 }) {
   switch (content.kind) {
     case "hero":
-      // Hero empty state (ADR-0061): the primary "load data" CTA. FileDropzone
-      // drives both the drop target and the file picker. After a source is
-      // loaded (hasData) the prompt pivots to "ask a question".
+      // Hero empty state (ADR-0061). The standalone "pick a data file" button
+      // that lived here retired into the composer "+" panel's file section
+      // (ADR-0083, issue #351); window-level drag-and-drop stays the shortcut
+      // path, so the hero is now the drop hint + the ask-a-question pivot once
+      // a source is loaded (hasData).
       // ADR-0067 (issue #173): the .workspace-hero visual rule (flex column,
       // centered, gap, padding, text-align) retired from styles.css onto
       // utility; the .workspace-hero hook stays for selector stability.
       return (
         <div className="workspace-hero flex flex-col items-center gap-4 p-8 text-center">
-          <FileDropzone onIngest={onIngest} loading={loading} />
           <p className="text-muted-foreground">
             {hasData ? (
               <FormattedMessage
