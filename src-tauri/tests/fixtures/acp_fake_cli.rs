@@ -27,6 +27,13 @@ use toptopduck_lib::runtime::acp::wire::{
     SessionUpdateParams, StopReason, ToolCallContent, ToolCallStatus, ToolKind,
 };
 
+/// Tool-call starts emitted by the `step_cap_overflow` scenario. Must exceed
+/// any caller's step cap (the integration tests pass `cap=5`) so the engine's
+/// `tool_call_count` crosses the cap and fires `session/cancel`; any fewer and
+/// the scenario would block on `drain_once` waiting for a cancel that never
+/// arrives.
+const OVERFLOW_COUNT: u32 = 50;
+
 fn main() {
     let scenario = std::env::var("ACP_FAKE_SCENARIO").unwrap_or_else(|_| "text_reply".into());
     let mut out = std::io::stdout();
@@ -187,13 +194,12 @@ fn play_scenario(
             // exercise. Emitting all starts up front lets the engine's
             // tool_call_count cross the cap and fire cancel promptly; the
             // drain then finds it in milliseconds.
-            for i in 1..=50u32 {
+            for i in 1..=OVERFLOW_COUNT {
                 notify(
                     out,
                     tool_call_start(&format!("tc_{i}"), &format!("call {i}"), ToolKind::Search),
                 );
             }
-            let _ = out.flush();
             // Drain until session/cancel arrives (the engine sends it as soon
             // as tool_call_count exceeds the step cap), then cooperate.
             // Blocking is safe here -- the engine is guaranteed to send
