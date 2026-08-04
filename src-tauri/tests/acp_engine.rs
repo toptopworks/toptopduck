@@ -84,7 +84,7 @@ fn run_with_spec(
     spec: &AdapterSpec,
     scenario: &str,
     step_cap: u32,
-) -> (LoopOutcome, Vec<TurnPhase>) {
+) -> (LoopOutcome, Vec<TurnPhase>, std::time::Instant) {
     let cancel = Arc::new(CancelToken::new());
     let eng = AcpEngine::new(spec.clone(), cancel)
         .with_caps(step_cap, Some(std::time::Duration::from_secs(10)));
@@ -93,8 +93,13 @@ fn run_with_spec(
     let mut phases = Vec::new();
     let _g = ENV_LOCK.lock().unwrap();
     std::env::set_var("ACP_FAKE_SCENARIO", scenario);
+    // Start the clock AFTER acquiring ENV_LOCK: under the default parallel
+    // runner many tests queue on this lock, and a start taken outside the
+    // lock would charge that wait to this turn, masking the watchdog bound
+    // (assert_not_via_watchdog measures the turn itself, not queue time).
+    let start = std::time::Instant::now();
     let outcome = eng.run(&input(), &fake_cli(), &approval, &sink, |p| phases.push(p));
-    (outcome, phases)
+    (outcome, phases, start)
 }
 
 /// The default scenario runner: claude-code (the v1 reference spec). Most
@@ -102,7 +107,22 @@ fn run_with_spec(
 /// through here; the isomorphism test calls [`run_with_spec`] directly to
 /// exercise all v1 specs.
 fn run(scenario: &str, step_cap: u32) -> (LoopOutcome, Vec<TurnPhase>) {
-    run_with_spec(&claude_code(), scenario, step_cap)
+    let (outcome, phases, _) = run_with_spec(&claude_code(), scenario, step_cap);
+    (outcome, phases)
+}
+
+/// Assert a cancel/step-cap test resolved via the intended path, not the 10s
+/// wall-clock watchdog. Both paths yield `Termination::Cancelled`, so the
+/// termination assertion alone cannot tell them apart (the original #356 bug:
+/// the suite silently fell back to the watchdog). The intended paths finish in
+/// well under 1s; a 2s bound turns any watchdog fallback into a loud failure.
+fn assert_not_via_watchdog(label: &str, start: std::time::Instant) {
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "{label}: took {elapsed:?} -- resolved via the wall-clock watchdog, \
+         not the intended cancel/step-cap path",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -191,12 +211,16 @@ fn refusal_maps_to_text_outcome() {
 /// deterministically Cancelled (no race with the success response).
 #[test]
 fn step_cap_overflow_trips_cancel_deterministically() {
-    let (outcome, _) = run("step_cap_overflow", 5);
+    let (outcome, _, start) = run_with_spec(&claude_code(), "step_cap_overflow", 5);
     assert!(
         matches!(outcome.termination, Termination::Cancelled),
         "step-cap trip + cooperative fixture -> Cancelled: {:?}",
         outcome.termination
     );
+    // The 10s wall-clock watchdog also collapses to Cancelled, so the
+    // termination match alone cannot tell the paths apart (the #356
+    // regression). The step-cap path resolves in well under 1s; pin it.
+    assert_not_via_watchdog("step_cap_overflow", start);
 }
 
 /// The wall-clock watchdog fires the shared token on a stuck agent (one that
@@ -313,21 +337,29 @@ fn user_cancel_aborts_the_whole_turn() {
     let eng = engine(Arc::clone(&cancel), 24);
     let approval = ApprovalState::new();
     let sink = RecordingSink::default();
-    let cancel_for_thread = Arc::clone(&cancel);
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("ACP_FAKE_SCENARIO", "cancel");
     // Fire cancel shortly after run starts (the fixture emits "working..."
-    // until cancel arrives). The delay covers spawn + handshake.
+    // until cancel arrives). Spawned AFTER ENV_LOCK + env so a wait on the
+    // lock does not eat the cancel window: begin_turn (inside run) clears
+    // any stale `requested` at turn start, so a cancel fired while blocked
+    // on the lock would be wiped before the turn observes it. The 200ms
+    // delay covers spawn + handshake.
+    let cancel_for_thread = Arc::clone(&cancel);
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(200));
         cancel_for_thread.request();
     });
-    let _g = ENV_LOCK.lock().unwrap();
-    std::env::set_var("ACP_FAKE_SCENARIO", "cancel");
+    let start = std::time::Instant::now();
     let outcome = eng.run(&input(), &fake_cli(), &approval, &sink, |_| {});
     assert!(
         matches!(outcome.termination, Termination::Cancelled),
         "user cancel -> Cancelled: {:?}",
         outcome.termination
     );
+    // The user-cancel path resolves in ~200ms (the spawn delay); a watchdog
+    // fallback takes ~10s. Same rationale as the step-cap test above.
+    assert_not_via_watchdog("user_cancel", start);
 }
 
 /// The engine takes the adapter spec as data and never names the CLI: the same
@@ -374,7 +406,7 @@ fn engine_outcome_is_identical_across_all_v1_specs() {
         // Success path: a clean text reply -> Text for every spec, and the
         // Thinking phase fires before the prompt for every spec (the phase
         // stream is spec-independent too).
-        let (outcome, phases) = run_with_spec(spec, "text_reply", 24);
+        let (outcome, phases, _) = run_with_spec(spec, "text_reply", 24);
         match &outcome.termination {
             Termination::Text(t) => assert_eq!(
                 t, "the answer is 42",
@@ -397,13 +429,15 @@ fn engine_outcome_is_identical_across_all_v1_specs() {
         );
 
         // Fallback path: a runaway trajectory trips the step cap -> Cancelled
-        // for every spec (cancel / step-cap behave isomorphically).
-        let (outcome, _) = run_with_spec(spec, "step_cap_overflow", 5);
+        // for every spec (cancel / step-cap behave isomorphically). Timed so
+        // a watchdog fallback fails the test, not just slows it (#356).
+        let (outcome, _, start) = run_with_spec(spec, "step_cap_overflow", 5);
         assert!(
             matches!(outcome.termination, Termination::Cancelled),
             "{}: step-cap trip -> Cancelled, got {:?}",
             spec.id,
             outcome.termination
         );
+        assert_not_via_watchdog(&format!("{} step_cap_overflow", spec.id), start);
     }
 }

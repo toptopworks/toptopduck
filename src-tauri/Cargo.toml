@@ -4,6 +4,13 @@ version = "0.1.0"
 description = "Local-first AI data analysis desktop tool"
 edition = "2021"
 rust-version = "1.77"
+# The crate declares multiple [[bin]] targets below (acp-fake-cli / mcp-fake-server
+# test fixtures + toptopduck-acp-bridge process), so a bare `cargo run` -- and
+# `tauri dev`, which shells out to cargo for the main app binary -- cannot infer
+# which to launch. `default-run` pins the desktop app entry so both resolve
+# without `--bin`; the fixtures stay reachable via `cargo run --bin <name>` / the
+# CARGO_BIN_EXE_* test macro.
+default-run = "toptopduck"
 
 [lib]
 name = "toptopduck_lib"

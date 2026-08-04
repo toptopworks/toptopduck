@@ -27,6 +27,13 @@ use toptopduck_lib::runtime::acp::wire::{
     SessionUpdateParams, StopReason, ToolCallContent, ToolCallStatus, ToolKind,
 };
 
+/// Tool-call starts emitted by the `step_cap_overflow` scenario. Must exceed
+/// any caller's step cap (the integration tests pass `cap=5`) so the engine's
+/// `tool_call_count` crosses the cap and fires `session/cancel`; any fewer and
+/// the scenario would block on `drain_once` waiting for a cancel that never
+/// arrives.
+const OVERFLOW_COUNT: u32 = 50;
+
 fn main() {
     let scenario = std::env::var("ACP_FAKE_SCENARIO").unwrap_or_else(|_| "text_reply".into());
     let mut out = std::io::stdout();
@@ -178,23 +185,34 @@ fn play_scenario(
             respond_prompt(out, &id, StopReason::Success);
         }
         "step_cap_overflow" => {
-            // Emit more tool-call starts than the step cap; the engine trips
-            // its own cap + sends session/cancel. Cooperate when cancel arrives
-            // (stop producing + respond Cancelled) so the outcome is
-            // deterministic instead of a race with the success response.
-            for i in 1..=50u32 {
-                if *cancel_seen {
-                    respond_prompt(out, &id, StopReason::Cancelled);
-                    return;
-                }
+            // Emit more tool-call starts than the step cap, THEN drain for
+            // session/cancel. Emitting + draining interleaved deadlocks:
+            // drain_once blocks on read_line before the engine has anything
+            // to send (the cap is only tripped after enough starts cross the
+            // wire), so the turn would only ever resolve via the wall-clock
+            // watchdog, not the step-cap path this scenario exists to
+            // exercise. Emitting all starts up front lets the engine's
+            // tool_call_count cross the cap and fire cancel promptly; the
+            // drain then finds it in milliseconds.
+            for i in 1..=OVERFLOW_COUNT {
                 notify(
                     out,
                     tool_call_start(&format!("tc_{i}"), &format!("call {i}"), ToolKind::Search),
                 );
-                if drain_once(reader, cancel_seen) {
-                    continue;
+            }
+            // Drain until session/cancel arrives (the engine sends it as soon
+            // as tool_call_count exceeds the step cap), then cooperate.
+            // Blocking is safe here -- the engine is guaranteed to send
+            // cancel once the cap is exceeded; an EOF before cancel stops
+            // producing so the scenario terminates deterministically.
+            while !*cancel_seen {
+                if !drain_once(reader, cancel_seen) {
+                    break;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            if *cancel_seen {
+                respond_prompt(out, &id, StopReason::Cancelled);
+                return;
             }
             notify(out, agent_message("ran many calls"));
             respond_prompt(out, &id, StopReason::Success);
