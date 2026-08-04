@@ -46,11 +46,11 @@ interface SessionPaneProps {
   /** Shell callback after the pending ingest is kicked off, so OpenSession is
    *  cleared and a remount cannot re-ingest (#81 A1). */
   onIngestConsumed: () => void;
-  /** App-level provider/model picker rendered at the QuestionBar edge
-   *  (ADR-0071, issue #238). Optional because it depends on app-config having
-   *  resolved (App passes it only when appConfig is non-null); absent, the
-   *  QuestionBar renders alone. Bundled as one slot so the all-or-nothing
-   *  render stays a single guard. */
+  /** App-level provider/model picker occupying the composer control row's
+   *  runtime slot (ADR-0071, issue #238; slot skeleton ADR-0083, issue #350).
+   *  Optional because it depends on app-config having resolved (App passes it
+   *  only when appConfig is non-null); absent, the runtime slot stays empty.
+   *  Bundled as one slot so the all-or-nothing render stays a single guard. */
   providerPicker?: ComposerProviderPickerProps;
   /** Rail collapse state + toggle (ADR-0054 level 2). Shell-owned pref
    *  rendered per-session: every SessionPane reads the same railCollapsed
@@ -325,16 +325,26 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
         </div>
       </section>
 
-      {/* --- QuestionBar (ADR-0083: in-rail, col 1 row 3; the ADR-0062 R1
-            full-pane span retired once the workspace defaulted to collapsed) - */}
-      {/* ADR-0071 (issue #238): the composer provider/model picker sits at the
-          QuestionBar edge. It is app-level state rendered per-session (only the
-          active pane is visible); the bundle is undefined until app-config
-          resolves, in which case the QuestionBar renders alone. The row is a
-          flex (utility on the grid-placement chrome) so the fixed-width trigger
-          sits beside the flex-1 QuestionBar. */}
+      {/* --- Composer control row (ADR-0083, issue #350: in-rail, col 1 row 3).
+            Three-slot skeleton + the flex-1 question input, in fixed order:
+            [+] session-context / approval mode / runtime (ADR-0083 puts the
+            assembly entries at the turn-launch point). [+] and approval-mode
+            stay empty placeholders until #302; runtime hosts the existing
+            provider/model picker (ADR-0071) until the runtime chip evolves. */}
       <div className="session-questionbar flex items-center gap-2">
-        {providerPicker && <ComposerProviderPicker {...providerPicker} />}
+        {/* [+] session-context panel slot (ADR-0083) -- empty placeholder
+            until #302 lights it up. */}
+        <div className="composer-slot-add" />
+        {/* Approval-mode chip slot (ADR-0083) -- empty placeholder until #302
+            lights it up. */}
+        <div className="composer-slot-approval" />
+        {/* Runtime selector slot. ADR-0071 (issue #238): the provider/model
+            picker is app-level state rendered per-session (only the active
+            pane is visible); the bundle is undefined until app-config
+            resolves, leaving the slot empty until then. */}
+        <div className="composer-slot-runtime">
+          {providerPicker && <ComposerProviderPicker {...providerPicker} />}
+        </div>
         <div className="flex-1 min-w-0">
           <QuestionBar
             onSubmit={s.handleAsk}

@@ -286,8 +286,12 @@
  *
  * ADR-0083 workspace fold (issue #298): the pane carries .workspace-collapsed
  * while the panel is folded away (cold-start default, session-ephemeral) --
- * the rail owns the released space (1fr 0fr, the rail-as-primary form; the
- * min-width + Tauri minWidth refinement lands with issue #302). */
+ * the rail owns the released space (the rail-as-primary form). The promoted
+ * rail track keeps a min-width floor (issue #350): it grows to fill but never
+ * narrows past the standard rail width, with the Tauri window minWidth
+ * (tauri.conf.json minWidth = sidebar 220px + 320px floor = 540px) as the
+ * backstop (ADR-0054 three-level collapse). Exact px values stay a
+ * visual-polish item. */
 .session-pane {
   height: 100%;
   display: grid;
@@ -296,11 +300,14 @@
   transition: grid-template-columns 180ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 /* Workspace folded (ADR-0083, issue #298): the second track collapses to 0
- * and the rail takes the pane. The first track flips 320px -> 1fr
+ * and the rail takes the pane as the primary surface (rail-as-primary,
+ * issue #350). The first track flips 320px -> minmax(320px, 1fr)
  * (length <-> flex is NOT interpolatable, so it snaps) while the second
  * track slides 1fr -> 0fr; the workspace's opacity / visibility fade
- * (below) masks the first-track snap. */
-.shell .session-pane.workspace-collapsed { grid-template-columns: 1fr 0fr; }
+ * (below) masks the first-track snap. The minmax floor is deliberately the
+ * same value as the fixed-width track above: the promoted rail grows with
+ * the pane but never narrows past the width it has in the split layout. */
+.shell .session-pane.workspace-collapsed { grid-template-columns: minmax(320px, 1fr) 0fr; }
 .shell .session-pane.workspace-collapsed .session-workspace {
   opacity: 0;
   visibility: hidden;
@@ -317,7 +324,7 @@
  * wins: the rail must stay on screen as the pane's only content (ADR-0083
  * rail-as-primary). Higher specificity than the .shell.rail-collapsed rules
  * above, so the rail re-appears + the tracks stay rail-first. */
-.shell.rail-collapsed .session-pane.workspace-collapsed { grid-template-columns: 1fr 0fr; }
+.shell.rail-collapsed .session-pane.workspace-collapsed { grid-template-columns: minmax(320px, 1fr) 0fr; }
 .shell.rail-collapsed .session-pane.workspace-collapsed .session-rail {
   opacity: 1;
   pointer-events: auto;
@@ -385,11 +392,15 @@
   margin-left: auto;
 }
 
-/* QuestionBar area. ADR-0083 (issue #298, evolving ADR-0062 R1): the bar sits
-   IN the rail column (col 1, row 3) -- the composer belongs to the
+/* Composer control row. ADR-0083 (issue #298, evolving ADR-0062 R1): the bar
+   sits IN the rail column (col 1, row 3) -- the composer belongs to the
    conversation surface; the ADR-0062 R1 full-pane span retired once the
    workspace defaulted to collapsed. The .shell.rail-collapsed override above
    re-spans it (grid-column 1 / -1) so the input survives a rail fold.
+   Issue #350: the row's children are the three-slot skeleton ([+] /
+   approval mode / runtime -- the .composer-slot-* hooks ride SessionPane)
+   + the flex-1 question input; the rail-as-primary width floor above is
+   what fits the three entries when the workspace folds.
    ADR-0067 (issue #172): the .question-bar input/button visual rules (focus
    outline, primary submit, outline cancel) retired into shadcn Input +
    Button variants on QuestionBar.tsx; .session-questionbar stays as the

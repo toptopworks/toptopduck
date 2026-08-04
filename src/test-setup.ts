@@ -1,11 +1,15 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
-import { afterEach } from "vitest";
+import { afterEach, vi } from "vitest";
 
 // Clear the rendered DOM between tests so queries never see stale components
 // from a prior test (e.g. two tests rendering a dialog with the same button).
+// Restore any vi.stubGlobal mocks (e.g. navigator.language) so a stub set in
+// one describe cannot leak into another that reads the global without
+// re-stubbing (unstubGlobals is not set in vite.config.ts).
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
 });
 
 // Radix Select (settings redesign, ADR-0075 / issue #281) exercises pointer +

@@ -1898,3 +1898,82 @@ describe("App Ctrl/⌘+K session-search modal (ADR-0072, issue #252)", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 });
+
+describe("Composer control-row skeleton (ADR-0083, issue #350)", () => {
+  // The QuestionBar row evolves into the composer control row: three slots
+  // ([+] session-context panel / approval mode / runtime) + the flex-1
+  // question input. [+] and approval mode stay empty placeholders until #302
+  // lights them up; the runtime slot is occupied by the existing
+  // provider/model picker (ADR-0071) until the runtime chip evolves.
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    // clearAllMocks only clears call history, not implementations set by prior
+    // describes -- hold getAppConfig pending so appConfig stays at its
+    // useState(null) initial and the picker bundle stays absent (per-test
+    // overrides resolve it).
+    vi.mocked(getAppConfig).mockImplementation(() => new Promise<AppConfig>(() => {}));
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("renders the three composer slots before the question input", async () => {
+    render(<App />);
+    await openSession();
+    const bar = document.querySelector(".session-questionbar");
+    expect(bar).toBeInTheDocument();
+    const addSlot = bar?.querySelector(".composer-slot-add");
+    const approvalSlot = bar?.querySelector(".composer-slot-approval");
+    const runtimeSlot = bar?.querySelector(".composer-slot-runtime");
+    expect(addSlot).toBeInTheDocument();
+    expect(approvalSlot).toBeInTheDocument();
+    expect(runtimeSlot).toBeInTheDocument();
+    // The slot order is fixed (ADR-0083): [+] / approval mode / runtime, all
+    // ahead of the question input.
+    const input = screen.getByRole("textbox", { name: "提问" });
+    const FOLLOWING = Node.DOCUMENT_POSITION_FOLLOWING;
+    expect(
+      (addSlot as HTMLElement).compareDocumentPosition(approvalSlot as HTMLElement) & FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      (approvalSlot as HTMLElement).compareDocumentPosition(runtimeSlot as HTMLElement) & FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      (runtimeSlot as HTMLElement).compareDocumentPosition(input) & FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("the [+] and approval-mode slots are empty placeholders until #302 lights them up", async () => {
+    render(<App />);
+    await openSession();
+    const bar = document.querySelector(".session-questionbar");
+    expect(bar?.querySelector(".composer-slot-add")).toBeEmptyDOMElement();
+    expect(bar?.querySelector(".composer-slot-approval")).toBeEmptyDOMElement();
+  });
+
+  it("hosts the provider/model picker inside the runtime slot once app-config resolves", async () => {
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+    );
+    render(<App />);
+    await openSession();
+    // The picker trigger (ADR-0071) lands inside the runtime slot of the
+    // composer row -- not as a loose sibling of the input.
+    const trigger = await screen.findByRole("button", { name: "接入档案与模型" });
+    const runtimeSlot = document.querySelector(
+      ".session-questionbar .composer-slot-runtime",
+    ) as HTMLElement;
+    expect(runtimeSlot.contains(trigger)).toBe(true);
+  });
+
+  it("keeps the runtime slot empty while app-config is pending", async () => {
+    // beforeEach holds getAppConfig pending so appConfig stays at its
+    // useState(null) initial -- App does not pass the picker bundle, leaving
+    // the runtime slot empty until app-config resolves (SessionPane.tsx).
+    render(<App />);
+    await openSession();
+    const runtimeSlot = document.querySelector(".composer-slot-runtime");
+    expect(runtimeSlot).toBeEmptyDOMElement();
+  });
+});
