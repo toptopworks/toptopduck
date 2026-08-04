@@ -106,6 +106,14 @@ vi.mock("../api", async (importOriginal) => {
     // tests override per scenario.
     getAuthorizationMode: vi.fn(async () => "per_call" as const),
     setAuthorizationMode: vi.fn(async () => {}),
+    // The composer runtime picker reads / writes the session's runtime choice
+    // + the v1 adapter table (issue #353). Default built-in read + empty
+    // adapter list + no-op write/rescan; no Shell.test scenario drives a
+    // runtime switch, so the defaults keep the picker quiet.
+    getSessionRuntime: vi.fn(async () => ({ kind: "built_in" }) as const),
+    setSessionRuntime: vi.fn(async () => {}),
+    listAdapters: vi.fn(async () => [] as const),
+    rescanAdapters: vi.fn(async () => [] as const),
     getAppConfig: vi.fn(async () => null),
     setAppConfig: vi.fn(async (cfg: AppConfig) => cfg),
   };
@@ -125,15 +133,19 @@ import {
   getAppConfig,
   getAuthorizationMode,
   getProviderConfig,
+  getSessionRuntime,
   ingestFile,
+  listAdapters,
   listMcpServerStatus,
   listSessions,
   listWorkingSet,
   openDuck,
   readRows,
   renameSession,
+  rescanAdapters,
   setAppConfig,
   setAuthorizationMode,
+  setSessionRuntime,
 } from "../api";
 import type { AppConfig } from "../types/app-config";
 import type { McpServerConfig, McpServerStatusEntry } from "../types/mcp";
@@ -1964,6 +1976,11 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     // describe's overrides survive clearAllMocks.
     vi.mocked(getAuthorizationMode).mockResolvedValue("per_call");
     vi.mocked(setAuthorizationMode).mockResolvedValue(undefined);
+    // Same pin for the runtime picker IPC quartet (issue #353).
+    vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
+    vi.mocked(setSessionRuntime).mockResolvedValue(undefined);
+    vi.mocked(listAdapters).mockResolvedValue([]);
+    vi.mocked(rescanAdapters).mockResolvedValue([]);
     // The dialog starts cancelled; the ingest tests override per test.
     vi.mocked(open).mockResolvedValue(null);
     vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("people") });
@@ -2150,9 +2167,11 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     );
     render(<App />);
     await openSession();
-    // The picker trigger (ADR-0071) lands inside the runtime slot of the
-    // composer row -- not as a loose sibling of the input.
-    const trigger = await screen.findByRole("button", { name: "接入档案与模型" });
+    // The picker trigger (ADR-0071 + issue #353) lands inside the runtime
+    // slot of the composer row -- not as a loose sibling of the input. Its
+    // accessible name carries the active runtime (built-in -> the active
+    // provider's preset name).
+    const trigger = await screen.findByRole("button", { name: "运行时：Anthropic" });
     const runtimeSlot = document.querySelector(
       ".session-questionbar .composer-slot-runtime",
     ) as HTMLElement;

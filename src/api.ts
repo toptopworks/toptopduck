@@ -31,6 +31,7 @@ import type {
   AuthMode,
   ToolKey,
 } from "./types/approval";
+import type { AdapterEntry, SessionRuntimeChoice } from "./types/runtime";
 
 // Multi-session addressing (ADR-0056): every session-scoped function takes
 // `sessionId` as its first parameter -- the backend looks up the target
@@ -447,4 +448,45 @@ export async function onApprovalResolved(
   cb: (ev: ApprovalResolvedPayload) => void,
 ): Promise<UnlistenFn> {
   return listen<ApprovalResolvedPayload>("approval-resolved", (e) => cb(e.payload));
+}
+
+// --- Runtime selector (issue #353, ADR-0076/0081/0083) ---------------------
+//
+// Session-AGNOSTIC adapter table (list / rescan) + per-session runtime choice
+// (get / set). The composer runtime picker reads the table + the choice and
+// writes a switch back; the next turn dispatches on the selection at the turn
+// boundary (built-in BYOK loop vs external ACP engine).
+
+// List every v1 adapter with its live PATH-scan detection state. The picker
+// renders this verbatim -- adding a CLI upstream grows the list with zero
+// frontend change. Read-only; never refuses.
+export async function listAdapters(): Promise<AdapterEntry[]> {
+  return invoke<AdapterEntry[]>("list_adapters");
+}
+
+// Re-run the adapter PATH scan on demand (the picker's ↻ entry). Same
+// projection as listAdapters -- detection is uncached -- but its own command
+// so a user-driven re-detect is an explicit wire action.
+export async function rescanAdapters(): Promise<AdapterEntry[]> {
+  return invoke<AdapterEntry[]>("rescan_adapters");
+}
+
+// Read the session's runtime choice. Returns `built_in` for a fresh / resumed
+// session (the honest default, ADR-0081). Lock-light server-side -- safe to
+// call while a turn is in flight.
+export async function getSessionRuntime(
+  sessionId: string,
+): Promise<SessionRuntimeChoice> {
+  return invoke<SessionRuntimeChoice>("get_session_runtime", { sessionId });
+}
+
+// Set the session's runtime choice. Takes effect at the next turn boundary
+// (the in-flight turn, if any, finishes on the runtime it started on). An
+// unknown adapter id rejects -- the picker only offers `listAdapters` ids, so
+// a reject is a stale / buggy client; the chip resyncs off the reject.
+export async function setSessionRuntime(
+  sessionId: string,
+  runtime: SessionRuntimeChoice,
+): Promise<void> {
+  await invoke<void>("set_session_runtime", { sessionId, runtime });
 }

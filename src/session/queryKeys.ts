@@ -27,4 +27,17 @@ export const sessionKeys = {
    *  the fresh SessionPane mount (the resume-path invalidateQueries fires
    *  against a not-yet-mounted key and is a no-op). */
   authMode: (sessionId: string) => ["session", sessionId, "authMode"] as const,
+  /** Per-session runtime choice (issue #353) -- the composer runtime picker's
+   *  read. Lives under the session prefix so a close's removeQueries drops it
+   *  with the rest; a resume lands the reset (built-in) value via the fresh
+   *  SessionPane mount, mirroring authMode. */
+  runtime: (sessionId: string) => ["session", sessionId, "runtime"] as const,
+} as const;
+
+/** Session-AGNOSTIC adapter table (issue #353) -- the composer runtime picker's
+ *  list / rescan read. NOT under the session prefix: the v1 adapter table +
+ *  the PATH scan are process-global, shared by every mounted picker. Kept
+ *  here for discoverability alongside the session keys. */
+export const adapterKeys = {
+  all: () => ["adapters"] as const,
 } as const;

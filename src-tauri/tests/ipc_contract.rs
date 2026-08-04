@@ -1008,3 +1008,20 @@ fn profile_test_outcome_serializes_adjacently_tagged() {
         r#"{"kind":"Incompatible","data":{"detail":"HTTP 502: bad gateway"}}"#,
     );
 }
+
+/// The session runtime choice (issue #353) is `tag="kind", content="data"`
+/// with `rename_all="snake_case"`: the built-in default serializes as a bare
+/// `{"kind":"built_in"}` (no content key for a unit variant), and an external
+/// adapter carries its id under `data` (the repo's generic content key, shared
+/// with every other tagged enum). `src/types/runtime.ts` mirrors these
+/// literals; pin them so a serde attribute change fails before the hand-mirror
+/// can drift.
+#[test]
+fn session_runtime_choice_wire_shape() {
+    use toptopduck_lib::commands::SessionRuntimeChoice;
+    assert_wire(&SessionRuntimeChoice::BuiltIn, r#"{"kind":"built_in"}"#);
+    assert_wire(
+        &SessionRuntimeChoice::External("claude-code".into()),
+        r#"{"kind":"external","data":"claude-code"}"#,
+    );
+}

@@ -56,7 +56,7 @@ impl std::fmt::Display for AdapterId {
 
 /// A pure-data CLI adapter definition (ADR-0081). The engine consumes this and
 /// nothing else per CLI; all per-CLI variation lives in fields here.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdapterSpec {
     /// Stable id (provenance + IPC key).
     pub id: AdapterId,

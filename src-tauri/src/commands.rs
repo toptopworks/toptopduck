@@ -38,6 +38,7 @@ use crate::model::{
 };
 use crate::persistence::{list_session_metadata, SaveError, SessionMetadata};
 use crate::provider::live_config::LiveProviderConfig;
+use crate::runtime::acp::adapter::{detect_adapter, v1_adapters, AdapterSpec};
 use crate::session::{RenameSessionError, ResumeEvent, ResumeProgress, Session};
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
 
@@ -501,6 +502,13 @@ pub async fn ask(
     let sid = session_id.clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = handle.session_lock()?;
+        // Issue #353: feed the session's runtime choice into the turn's
+        // dispatch at the turn boundary. The choice lives on the handle
+        // (lock-light writes via set_session_runtime); the Session consumes
+        // it for THIS turn only -- a switch lands between turns, never
+        // mid-turn, and a resumed Session (fresh, built-in default) reads
+        // the reset choice.
+        s.set_external_runtime(handle.runtime_choice());
         let outcome = s.ask_with_phase(
             &question,
             &approval,
@@ -1227,6 +1235,12 @@ pub async fn open_duck(
         // resumed session starts at the default empty set -- the user re-
         // enables servers explicitly, mirroring how trust resets (ADR-0080).
         handle_for_task.reset_mcp_enablement();
+        // Issue #353: reset the per-session runtime choice alongside the
+        // approval posture + MCP enablement. The runtime is a session-level
+        // assembly posture (not in the recipe / app-config), so a resumed
+        // session starts on the built-in default -- the user re-picks an
+        // external runtime explicitly (the ADR-0080 reset lineage).
+        handle_for_task.reset_runtime_choice();
         Ok::<(), SessionError>(())
     })
     .await;
@@ -1445,6 +1459,155 @@ pub fn revoke_session_trust(
     Ok(())
 }
 
+// --- Runtime selector (issue #353, ADR-0076/0081/0083) ----------------------
+//
+// The composer runtime picker's IPC surface: the v1 adapter table with live
+// PATH-scan detection (list / rescan) + the per-session runtime choice
+// (get / set). The choice rides the SessionHandle (lock-light); `ask` mirrors
+// it into the Session at turn top, so a switch takes effect exactly at the
+// turn boundary. Adding a CLI never touches this surface -- the adapter table
+// is the pure-data `v1_adapters()` projection (ADR-0081 zero per-CLI code).
+
+/// The session's runtime selection for the next turn (issue #353, ADR-0076/
+/// 0081/0083), in wire form. Adjacently tagged like the rest of the wire
+/// contract: `{"kind":"built_in"}` for the built-in BYOK loop (the default),
+/// `{"kind":"external","data":"<id>"}` for one external ACP CLI whose id
+/// resolves against [`v1_adapters`]. The `kind` values are snake_case to
+/// match the auth-mode chip's IPC enum (`AuthMode`); the `content` key is the
+/// repo's generic `"data"` (consistent with every other tagged enum here).
+/// The frontend mirrors the shape in `src/types/runtime.ts`; the wire
+/// literals are pinned in `tests/ipc_contract.rs`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "data")]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRuntimeChoice {
+    /// The built-in BYOK Rust agent loop (ADR-0081) -- the honest default.
+    BuiltIn,
+    /// The external ACP engine driving the named adapter id (ADR-0085).
+    External(String),
+}
+
+/// One v1 adapter projected for the composer runtime picker (issue #353,
+/// ADR-0083): the stable id (the `set_session_runtime` key), the display name
+/// (the row label), and the current PATH-scan detection state. Detected rows
+/// are selectable; undetected rows render disabled + "not installed" -- the
+/// picker never hardcodes the list, it renders this table verbatim.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AdapterEntry {
+    /// The adapter's stable id (provenance + set key; [`AdapterSpec::id`]).
+    pub id: String,
+    /// Human-readable picker label ([`AdapterSpec::display_name`]).
+    pub display_name: String,
+    /// Whether the PATH scan resolved one of the adapter's binary names.
+    pub detected: bool,
+}
+
+/// Project every v1 adapter to a picker entry with a FRESH PATH-scan
+/// detection state (ADR-0083). Detection is deliberately uncached -- the
+/// composer re-scans on demand (the user may install a CLI between scans) --
+/// so `list_adapters` and `rescan_adapters` share this one projection.
+fn scan_adapters() -> Vec<AdapterEntry> {
+    v1_adapters()
+        .iter()
+        .map(|spec| AdapterEntry {
+            id: spec.id.as_str().to_string(),
+            display_name: spec.display_name.to_string(),
+            detected: detect_adapter(spec).is_some(),
+        })
+        .collect()
+}
+
+/// Resolve a wire adapter id to its v1 [`AdapterSpec`]. Unknown ids resolve
+/// to `None` and the command boundary rejects them -- the frontend only ever
+/// offers ids that `list_adapters` returned, so an unknown id is a stale /
+/// buggy client, not a user mistake.
+fn resolve_adapter(id: &str) -> Option<AdapterSpec> {
+    v1_adapters()
+        .iter()
+        .find(|spec| spec.id.as_str() == id)
+        .cloned()
+}
+
+/// Map the handle's storage form (`None` = built-in) onto the wire choice.
+fn runtime_choice_to_wire(spec: Option<AdapterSpec>) -> SessionRuntimeChoice {
+    match spec {
+        None => SessionRuntimeChoice::BuiltIn,
+        Some(spec) => SessionRuntimeChoice::External(spec.id.as_str().to_string()),
+    }
+}
+
+/// Resolve a wire choice onto the handle's storage form. An unknown external
+/// adapter id rejects with the English technical detail (the frontend renders
+/// its resync path off the reject, ADR-0052 -- the wording never crosses IPC
+/// as user-facing text).
+fn resolve_runtime_choice(
+    runtime: SessionRuntimeChoice,
+) -> Result<Option<AdapterSpec>, SessionError> {
+    Ok(match runtime {
+        SessionRuntimeChoice::BuiltIn => None,
+        SessionRuntimeChoice::External(adapter_id) => {
+            Some(resolve_adapter(&adapter_id).ok_or_else(|| {
+                SessionError::Engine(format!("unknown adapter id `{adapter_id}`"))
+            })?)
+        }
+    })
+}
+
+/// List every v1 adapter with its live detection state (issue #353, AC:
+/// expose `list_adapters` with detection to the frontend). Session-AGNOSTIC:
+/// the adapter table + the PATH scan are process-global, not per-session.
+/// Read-only -- cannot refuse. The composer runtime picker renders this
+/// verbatim; adding a CLI upstream (`v1_adapters()`) grows the list with
+/// zero frontend change.
+#[tauri::command]
+pub fn list_adapters() -> Vec<AdapterEntry> {
+    scan_adapters()
+}
+
+/// Re-run the adapter PATH scan on demand (issue #353, AC: rescan IPC) -- the
+/// composer's ↻ entry. Detection is uncached, so this is the same projection
+/// as [`list_adapters`], exposed as its own command so the user-driven
+/// re-detect is an explicit wire action (and a future cached scan has the
+/// invalidation seam already).
+#[tauri::command]
+pub fn rescan_adapters() -> Vec<AdapterEntry> {
+    scan_adapters()
+}
+
+/// Read the session's runtime selection (issue #353). Lock-light: reads the
+/// handle's choice, never the session lock an in-flight turn holds. Returns
+/// the built-in default for a fresh / resumed session.
+#[tauri::command]
+pub fn get_session_runtime(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+) -> Result<SessionRuntimeChoice, SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    Ok(runtime_choice_to_wire(handle.runtime_choice()))
+}
+
+/// Set the session's runtime selection (issue #353, AC: a switch takes effect
+/// at the turn boundary). The choice lands on the handle (lock-light, never
+/// blocks on an in-flight turn); `ask` mirrors it into the Session at the NEXT
+/// turn top, so the switch takes effect exactly at the turn boundary --
+/// the in-flight turn, if any, finishes on the runtime it started on. Selecting an unknown adapter
+/// id rejects (the picker only offers `list_adapters` ids). Rejected while
+/// resuming (the session contents are mid-swap).
+#[tauri::command]
+pub fn set_session_runtime(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+    runtime: SessionRuntimeChoice,
+) -> Result<(), SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    reject_if_resuming(&handle)?;
+    let spec = resolve_runtime_choice(runtime)?;
+    handle.set_runtime_choice(spec);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1622,5 +1785,79 @@ mod tests {
             rename_persisted_session_blocking(&file, "new name").expect_err("held key rejects");
         assert_eq!(err, StoreCommandError::OpenConflict);
         release(&canonical);
+    }
+
+    // --- Runtime selector helpers (issue #353) ------------------------------
+
+    /// scan_adapters projects exactly the v1 table (count-agnostic), each entry
+    /// carrying its id + display name + a fresh PATH-scan detection flag. The
+    /// composer picker renders this table verbatim -- a CLI added upstream
+    /// never touches the picker.
+    #[test]
+    fn scan_adapters_projects_the_v1_table_with_detection_state() {
+        let entries = scan_adapters();
+        let adapters = v1_adapters();
+        assert_eq!(entries.len(), adapters.len(), "one entry per v1 adapter");
+        for (entry, spec) in entries.iter().zip(adapters.iter()) {
+            assert_eq!(entry.id, spec.id.as_str(), "id round-trips");
+            assert_eq!(
+                entry.display_name, spec.display_name,
+                "display_name round-trips"
+            );
+            assert_eq!(
+                entry.detected,
+                detect_adapter(spec).is_some(),
+                "detected mirrors the live PATH scan"
+            );
+        }
+    }
+
+    /// resolve_adapter round-trips every known id and rejects an unknown one --
+    /// the picker only offers v1 ids, so an unknown id is a stale / buggy
+    /// client and the command boundary must surface it (no silent fallback to
+    /// the built-in runtime).
+    #[test]
+    fn resolve_adapter_round_trips_known_ids_and_rejects_unknown() {
+        for spec in v1_adapters() {
+            let resolved = resolve_adapter(spec.id.as_str()).expect("known id resolves");
+            assert_eq!(resolved.id, spec.id);
+        }
+        assert!(
+            resolve_adapter("definitely-not-an-adapter").is_none(),
+            "unknown ids do not resolve"
+        );
+    }
+
+    /// The wire <-> storage mapping round-trips every choice shape (issue #353):
+    /// built-in maps to / from None, a known external id maps to / from its
+    /// spec, and an unknown external id rejects. The compose picker offers only
+    /// known ids, so the reject branch is the buggy-client backstop.
+    #[test]
+    fn runtime_choice_maps_round_trips_and_rejects_unknown_ids() {
+        // None <-> BuiltIn.
+        assert_eq!(runtime_choice_to_wire(None), SessionRuntimeChoice::BuiltIn);
+        assert_eq!(
+            resolve_runtime_choice(SessionRuntimeChoice::BuiltIn).unwrap(),
+            None
+        );
+        // A known external id round-trips through both maps.
+        let spec = v1_adapters()[0].clone();
+        assert_eq!(
+            runtime_choice_to_wire(Some(spec.clone())),
+            SessionRuntimeChoice::External(spec.id.as_str().to_string())
+        );
+        let back = resolve_runtime_choice(SessionRuntimeChoice::External(spec.id.as_str().into()))
+            .expect("known id resolves");
+        assert_eq!(back.unwrap().id, spec.id);
+        // An unknown external id rejects (Engine -- the frontend resync path
+        // drives off the reject).
+        let err = resolve_runtime_choice(SessionRuntimeChoice::External(
+            "definitely-not-an-adapter".into(),
+        ))
+        .expect_err("unknown id rejects");
+        assert!(
+            matches!(err, SessionError::Engine(_)),
+            "unknown adapter id surfaces as Engine, got {err:?}"
+        );
     }
 }

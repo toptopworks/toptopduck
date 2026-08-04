@@ -510,12 +510,12 @@ pub struct Session {
     drop_signal: Option<std::sync::mpsc::Sender<()>>,
     /// The per-session external-runtime selector (issue #299 slice 9c). `None`
     /// drives the built-in agent loop; `Some(spec)` drives the external ACP
-    /// engine for one CLI on the next turn. This is the minimal-temporary-entry
-    /// hook (issue #299: validation-period runtime selection takes a minimal
-    /// temporary entry; the real composer picker is #302) -- a `pub`
-    /// setter, NOT an IPC command, so no frontend / user can flip it until #302
-    /// ships the real picker. Integration tests toggle it; production stays
-    /// `None` (built-in).
+    /// engine for one CLI on the next turn. Issue #353 wired this to the
+    /// composer runtime picker: the command layer mirrors the session's
+    /// handle-held runtime choice into this field at each turn top (see the
+    /// `ask` command), so the dispatch below reads exactly the runtime the
+    /// user picked, and a switch lands at the turn boundary. Integration
+    /// tests still toggle it directly via [`Self::set_external_runtime`].
     external_runtime: Option<AdapterSpec>,
     /// The last turn's per-server MCP connect outcomes (issue #301 slice D).
     /// Updated at the top of each turn (the aggregator's `connect_all` result)
@@ -601,13 +601,12 @@ impl Session {
         self.result_count_cap = cap;
     }
 
-    /// Set the per-session external-runtime selector (issue #299 slice 9c,
-    /// minimal-temporary-entry hook -- see [`Self::external_runtime`]). Pass
-    /// `Some(spec)` to drive the external ACP engine for the next turn, or
-    /// `None` to revert to the built-in loop. `pub` (NOT an IPC command) so
-    /// integration tests in `tests/` (a separate crate) can toggle it; no
-    /// frontend / user can flip it until #302 ships the real picker, because
-    /// no `#[tauri::command]` wraps it and it never crosses IPC.
+    /// Set the per-session external-runtime selector (issue #299 slice 9c).
+    /// Pass `Some(spec)` to drive the external ACP engine for the next turn,
+    /// or `None` to revert to the built-in loop. The production path is the
+    /// `ask` command mirroring the handle-held runtime choice here at turn
+    /// top (issue #353); this direct setter stays `pub` so integration tests
+    /// in `tests/` (a separate crate) can toggle the selector without IPC.
     pub fn set_external_runtime(&mut self, spec: Option<AdapterSpec>) {
         self.external_runtime = spec;
     }
