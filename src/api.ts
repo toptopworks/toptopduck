@@ -371,8 +371,9 @@ export async function clearMcpServerSecret(id: string, envKey: string): Promise<
 // connect outcome (issue #301 slice D, AC#3; consumed by the composer "+"
 // panel badge, ADR-0083 issue #351). Session-scoped (ADR-0056): enablement is
 // per session. Lock-light server-side -- safe to call while a turn is in
-// flight. A reject (e.g. the session closed mid-flight) degrades the caller
-// to an empty read, never a user-facing error.
+// flight. A reject (e.g. the session closed mid-flight) propagates to the
+// caller; the panel coalesces an undefined read to an empty count, so a
+// mid-flight session-close never surfaces a user-facing error.
 export async function listMcpServerStatus(sessionId: string): Promise<McpServerStatusEntry[]> {
   return invoke<McpServerStatusEntry[]>("list_mcp_server_status", { sessionId });
 }

@@ -3,6 +3,7 @@ import type { IntlShape } from "react-intl";
 import { ingestFile, ingestFileGuided } from "../api";
 import { toAppError } from "../lib/error-presentation";
 import { loadErrorDisplay } from "../lib/loadErrorDisplay";
+import { log } from "../lib/log";
 import type { UseViewedResult } from "./useViewedResult";
 import type { AppError, SessionFlowKind } from "../types/error";
 import type { GuidanceRequest, LoadOutcome, SheetGuidance } from "../types/dataset";
@@ -150,9 +151,25 @@ export function useIngestFlow(
       setError(null);
       let loadedAny = false;
       try {
-        for (const path of paths) {
+        for (let i = 0; i < paths.length; i++) {
+          const path = paths[i];
           const route = routeIngestOutcome(await ingestFile(sessionId, path), path);
-          if (route !== "Loaded") break;
+          if (route !== "Loaded") {
+            // The batch halts here (see iface doc) -- a dialog or banner now
+            // owns the user's attention. Remaining files are skipped without
+            // a user-facing signal; surface the skip as a diagnostic so it is
+            // observable in logs (ADR-0029: operation semantics only, no
+            // source DATA -- the path itself is intentionally not logged).
+            const remaining = paths.length - i - 1;
+            if (remaining > 0) {
+              log.warn("useIngestFlow", "batch halted; remaining files skipped", {
+                haltedAtIndex: i,
+                route,
+                remaining,
+              });
+            }
+            break;
+          }
           loadedAny = true;
         }
         if (loadedAny) {

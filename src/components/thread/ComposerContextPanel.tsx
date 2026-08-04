@@ -60,8 +60,9 @@ export function ComposerContextPanel({
   // Per-session MCP status (issue #301 slice D): the badge counts the servers
   // THIS session enabled. The query is lock-light server-side, so one read per
   // mounted pane is cheap; a reject (session closed mid-flight) degrades to
-  // data-undefined -> count 0, never a user-facing error. The MCP section's
-  // toggle (a later #301 slice) invalidates this key after flipping a server.
+  // data-undefined -> count 0, never a user-facing error.
+  // TODO(#301 follow-up): invalidate mcpStatus after the MCP section's toggle
+  // flips a server, so the badge re-reads without a remount.
   const { data: mcpStatus } = useQuery({
     queryKey: sessionKeys.mcpStatus(sessionId),
     queryFn: () => listMcpServerStatus(sessionId),

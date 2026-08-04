@@ -26,7 +26,21 @@ vi.mock("../../api", async (importOriginal) => {
   };
 });
 
+// useIngestFlow logs the batch-halt skip via the shared log sink (issue #351
+// I1); mock it so the plugin-log IPC never fires under jsdom and the halt
+// tests can assert the diagnostic is emitted.
+vi.mock("../../lib/log", () => ({
+  log: {
+    trace: vi.fn(),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+
 import { ingestFile, ingestFileGuided } from "../../api";
+import { log } from "../../lib/log";
 
 const SID = "sess-1";
 
@@ -294,6 +308,12 @@ describe("useIngestFlow", () => {
       // The first file DID load, so the working set still refreshes once.
       expect(refreshServerState).toHaveBeenCalledTimes(1);
       expect(viewed.clearForNewSource).toHaveBeenCalledTimes(1);
+      // The skip is observable: one file (c.csv) remained past the halt.
+      expect(log.warn).toHaveBeenCalledWith(
+        "useIngestFlow",
+        "batch halted; remaining files skipped",
+        { haltedAtIndex: 1, route: "NeedsGuidance", remaining: 1 },
+      );
     });
 
     it("stops the batch on Error but keeps the earlier Loaded files", async () => {
@@ -316,6 +336,12 @@ describe("useIngestFlow", () => {
       expect(refreshServerState).toHaveBeenCalledTimes(1);
       expect(viewed.clearForNewSource).toHaveBeenCalledTimes(1);
       expect(result.current.guidance).toBeNull();
+      // The skip is observable: one file (c.csv) remained past the halt.
+      expect(log.warn).toHaveBeenCalledWith(
+        "useIngestFlow",
+        "batch halted; remaining files skipped",
+        { haltedAtIndex: 1, route: "Error", remaining: 1 },
+      );
     });
 
     it("does not refresh when the FIRST file already fails (nothing loaded)", async () => {
@@ -330,6 +356,22 @@ describe("useIngestFlow", () => {
       expect(ingestFile).toHaveBeenCalledTimes(1);
       expect(refreshServerState).not.toHaveBeenCalled();
       expect(viewed.clearForNewSource).not.toHaveBeenCalled();
+    });
+
+    it("does not log a skip when the halting file is the last in the batch", async () => {
+      // Nothing is actually skipped (remaining = 0), so the diagnostic stays
+      // silent -- the user already sees the guidance dialog for that file.
+      const { deps } = setup();
+      vi.mocked(ingestFile)
+        .mockResolvedValueOnce(loaded("result_1"))
+        .mockResolvedValueOnce(needsGuidance());
+      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+
+      await act(async () => {
+        await result.current.handleIngestMany(["/a.csv", "/x.xlsx"]);
+      });
+
+      expect(log.warn).not.toHaveBeenCalled();
     });
 
     it("is a no-op for an empty path list", async () => {
