@@ -149,3 +149,93 @@ fn bridge_exits_1_when_env_missing() {
         "missing env -> exit 1, got {status}"
     );
 }
+
+/// Regression for issue #357: the TCP -> stdout pump must flush per forwarded
+/// chunk, not defer like `io::copy`. The stdout sink is `StdoutLock` (a
+/// `LineWriter`), which only drains its buffer past a newline; if a partial
+/// JSON-RPC frame (TCP-segmented mid-line) sits in that buffer, the gateway's
+/// `read_message` on the far side of the pipe stalls and the turn deadlocks.
+/// This test splits one frame at a non-newline byte boundary across two TCP
+/// writes with a pause between, and asserts the FIRST segment lands on the
+/// bridge's stdout before the second write -- the behavior `io::copy` would
+/// NOT exhibit (it would buffer the partial line in the `LineWriter` until the
+/// newline arrives, and this assertion would time out).
+#[test]
+fn pump_flushes_each_chunk_under_mid_line_tcp_segmentation() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let token = "deadbeef";
+
+    let mut child = bridge_bin()
+        .env(ENV_PORT, port.to_string())
+        .env(ENV_TOKEN, token)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn bridge");
+
+    let (mut stream, _) = listener.accept().expect("accept");
+    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read auth");
+    assert_eq!(line, format!("BRIDGE_AUTH {token}\n"));
+    stream.write_all(b"BRIDGE_OK\n").expect("write ok");
+
+    // Split one frame at a non-newline byte boundary. Part 1 carries no
+    // newline; a `LineWriter` sink holds it until part 2 brings the newline.
+    let frame = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n";
+    let split = frame.len() / 2;
+    let (part1, part2) = frame.split_at(split);
+
+    // Stream the bridge's stdout on a background thread, forwarding each read
+    // to a channel. A blocking read on the main thread would deadlock against
+    // the bridge's pipe write if the pump buffered part 1.
+    let mut out = child.stdout.take().expect("stdout");
+    let (chunk_tx, chunk_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 1024];
+        loop {
+            match out.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if chunk_tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let mut err = child.stderr.take().expect("stderr");
+    let stderr = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = err.read_to_string(&mut buf);
+        buf
+    });
+
+    // Send part 1 (no newline) + flush. Per-chunk flush forwards it at once;
+    // `io::copy` would buffer it in the LineWriter.
+    stream.write_all(part1).expect("write part1");
+    stream.flush().expect("flush part1");
+
+    // The first stdout chunk must arrive within the timeout. Under `io::copy`
+    // the LineWriter holds part 1 and this recv times out -- that is the
+    // regression this test pins.
+    let first = chunk_rx
+        .recv_timeout(std::time::Duration::from_millis(500))
+        .expect("per-chunk flush forwards part 1 before part 2 is written");
+    assert_eq!(first, part1, "first forwarded chunk is part 1 verbatim");
+
+    // Part 2 completes the frame; drop the TCP side to end the bridge's read.
+    stream.write_all(part2).expect("write part2");
+    stream.flush().expect("flush part2");
+    drop(stream);
+
+    let status = child.wait().expect("wait");
+    let stderr_buf = stderr.join().expect("stderr thread");
+    assert!(
+        status.success(),
+        "clean pump end -> exit 0, got {status}; stderr: {stderr_buf}"
+    );
+}

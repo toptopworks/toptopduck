@@ -122,6 +122,25 @@ fn handshake(
 /// is locked inside the thread. TCP -> stdout runs on a second spawned thread
 /// for symmetry (and so a server-side close ends the process even while stdin
 /// is still open). A shared `mpsc::channel` signals completion from either.
+///
+/// Each chunk is `write_all` + `flush`, NOT `io::copy`. The TCP -> stdout sink
+/// is `StdoutLock` (a `LineWriter`), which only drains its internal buffer past
+/// a newline; a partial chunk read off the socket (TCP may segment a JSON-RPC
+/// frame mid-line) would sit in that buffer until the *next* newline arrives,
+/// so the gateway's `read_message` on the far side of the bridge pipe stalls.
+/// `io::copy` would also eventually flush once the rest of the line arrived,
+/// but under the gateway's request/response interleaving (each `tools/call`
+/// reply must land before the next message is read) the deferred drain
+/// deadlocks the turn (issue #357: the Linux CI suite parked for the full
+/// wall-clock watchdog). Flushing per forwarded chunk drains the pipe promptly
+/// regardless of how the kernel segments the stream.
+///
+/// Pump I/O errors are swallowed (`Err(_) => break`, `let _ = flush`): the
+/// bridge is transport-only (ADR-0085) with no logging surface, and either
+/// half's failure ends the process -- the next `read`/`write_all` hits the
+/// same error and breaks, or the peer-direction completion signal fires the
+/// exit. Distinguishing clean EOF from a hard I/O failure adds no actionable
+/// signal since the binary only returns an `ExitCode`.
 fn pump(mut tcp_to_stdout: impl Read + Send + 'static, mut stdin_to_tcp: TcpStream) -> ExitCode {
     let (tx, rx) = mpsc::channel();
     let tcp_done = tx.clone();
@@ -130,15 +149,38 @@ fn pump(mut tcp_to_stdout: impl Read + Send + 'static, mut stdin_to_tcp: TcpStre
     thread::spawn(move || {
         let stdout = io::stdout();
         let mut out = stdout.lock();
-        let _ = io::copy(&mut tcp_to_stdout, &mut out);
-        let _ = out.flush();
+        let mut buf = [0u8; 1024];
+        loop {
+            match tcp_to_stdout.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if out.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                    let _ = out.flush();
+                }
+                Err(_) => break,
+            }
+        }
         let _ = tcp_done.send(());
     });
 
     thread::spawn(move || {
         let stdin = io::stdin();
         let mut inp = stdin.lock();
-        let _ = io::copy(&mut inp, &mut stdin_to_tcp);
+        let mut buf = [0u8; 1024];
+        loop {
+            match inp.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if stdin_to_tcp.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                    let _ = stdin_to_tcp.flush();
+                }
+                Err(_) => break,
+            }
+        }
         // Half-close the write side so the gateway's read loop sees EOF and can
         // return cleanly; if the gateway already closed first this is a no-op.
         let _ = stdin_to_tcp.shutdown(Shutdown::Write);
@@ -146,7 +188,7 @@ fn pump(mut tcp_to_stdout: impl Read + Send + 'static, mut stdin_to_tcp: TcpStre
     });
 
     // Block until either direction finishes, then let the process exit -- the
-    // other thread is still blocked in io::copy and gets reaped by the OS.
+    // other thread is still blocked in its read and gets reaped by the OS.
     let _ = rx.recv();
     ExitCode::SUCCESS
 }
