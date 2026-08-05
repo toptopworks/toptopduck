@@ -6,6 +6,7 @@
 import type { OperationKind } from "./approval";
 import type { DatasetDescriptor } from "./dataset";
 import type { SourceLifecycleEvent } from "./lifecycle";
+import type { SkillLifecycleEvent } from "./skills";
 
 // Which kind of textual response a turn produced (ADR-0009 textual branch,
 // evolved by ADR-0077/0081): a plain agent answer (the tool-calling
@@ -122,11 +123,13 @@ export interface TurnRecord {
   trace: TraceEntry[];
 }
 
-// One entry of the unified conversation timeline (ADR-0040): a Turn (question +
-// outcome) OR a source lifecycle event. Adjacently-tagged (`{entry, data}`) so
-// the frontend narrows on `entry`. Mirrors the Rust ThreadEntry; the
-// conversation() command returns ThreadEntry[]. Only the Turn variant enters the
-// LLM window -- the backend filters source events out before assembly.
+// One entry of the unified conversation timeline (ADR-0040/0086): a Turn
+// (question + outcome), a source lifecycle event, OR a skill lifecycle event.
+// Adjacently-tagged (`{entry, data}`) so the frontend narrows on `entry`.
+// Mirrors the Rust ThreadEntry; the conversation() command returns
+// ThreadEntry[]. Only the Turn variant enters the LLM window -- the backend
+// filters source + skill events out before assembly.
 export type ThreadEntry =
   | { entry: "Turn"; data: TurnRecord }
-  | { entry: "Source"; data: SourceLifecycleEvent };
+  | { entry: "Source"; data: SourceLifecycleEvent }
+  | { entry: "Skill"; data: SkillLifecycleEvent };

@@ -5,6 +5,7 @@
 // events, and persisted session sidebar metadata.
 
 import type { OperationKind } from "./approval";
+import type { SkillMountError } from "./skills";
 import type { TraceEntry } from "./thread";
 
 // --- Session-scoped command errors ---------------------------------------
@@ -17,8 +18,9 @@ import type { TraceEntry } from "./thread";
 // matching backend Chinese. `Resume` wraps the typed `ResumeError` (issue #120);
 // `RemoveSource` / `RenameDataset` / `RenameSession` / `Turn` wrap their typed
 // source-management sub-errors (issue #121), recursed by the frontend the same
-// way; `Engine` is the catch-all for internal failures and carries a free-text
-// detail under `data` (technical, never an API key per ADR-0029).
+// way; `SkillMount` wraps the typed `SkillMountError` (issue #363); `Engine`
+// is the catch-all for internal failures and carries a free-text detail under
+// `data` (technical, never an API key per ADR-0029).
 export type SessionError =
   | { kind: "InvalidId" }
   | { kind: "NotFound" }
@@ -29,6 +31,7 @@ export type SessionError =
   | { kind: "RenameDataset"; data: RenameError }
   | { kind: "RenameSession"; data: RenameSessionError }
   | { kind: "Turn"; data: TurnError }
+  | { kind: "SkillMount"; data: SkillMountError }
   | { kind: "Engine"; data: string };
 
 // Why a source removal was rejected (issues #38/#39/#40, ADR-0040). Mirrors the

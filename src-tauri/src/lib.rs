@@ -369,6 +369,9 @@ pub fn run() {
             commands::create_skill,
             commands::update_skill,
             commands::delete_skill,
+            commands::mount_skill,
+            commands::unmount_skill,
+            commands::list_mounted_skills,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

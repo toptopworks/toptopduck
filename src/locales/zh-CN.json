@@ -86,6 +86,8 @@
   "error.skill.nameTaken": "名为「{name}」的技能已存在",
   "error.skill.notFound": "不存在名为「{name}」的技能",
   "error.skill.readOnly": "链接技能只读，请编辑源目录",
+  "error.skillMount.alreadyMounted": "技能「{name}」已挂载",
+  "error.skillMount.notMounted": "技能「{name}」未挂载",
   "error.store.configWriteFailure": "保存设置失败",
   "error.store.ioFailure": "文件操作失败",
   "error.store.keychainFailure": "系统钥匙串访问失败",

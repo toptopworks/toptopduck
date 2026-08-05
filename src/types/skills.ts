@@ -95,3 +95,40 @@ export type SkillError =
   | { kind: "NameTaken"; data: string }
   | { kind: "ReadOnly"; data: string }
   | { kind: "FsFailure"; data: string };
+
+// Which kind of skill lifecycle mutation produced an event (ADR-0086, issue
+// #363). Two-state only: a skill is either Mounted into the session's active
+// set or Unmounted from it. A content change is NOT a lifecycle event -- it is
+// captured per-turn by each SkillProvenance's content_hash. Mirrors the Rust
+// SkillLifecycleKind as a bare variant string.
+export type SkillLifecycleKind = "Mount" | "Unmount";
+
+// A skill lifecycle event (ADR-0086, issue #363): first-class timeline slot,
+// never a turn. Carries only the spec `name` (the stable identity) -- the
+// prompt fragment / MCP references live in the registry and are looked up at
+// assembly time, never snapshotted into the timeline. Mirrors the Rust
+// SkillLifecycleEvent. The active skill set is folded from the Mount/Unmount
+// sequence, never stored as a snapshot.
+export interface SkillLifecycleEvent {
+  kind: SkillLifecycleKind;
+  // The skill's spec name (kebab-case identity, equal to the directory name).
+  name: string;
+}
+
+// One skill recorded on a turn's provenance (ADR-0086, issue #363). Mirrors
+// the Rust SkillProvenance. `content_hash` is the SHA-256 of the skill's
+// SKILL.md bytes at the turn's assembly time, or "" when no baseline exists
+// (a v3->v4 migration product -- never trips the stale-degrade check).
+export interface SkillProvenance {
+  // The skill's spec name (kebab-case identity).
+  name: string;
+  // SHA-256 of the SKILL.md bytes at assembly time, or "" for migrated turns.
+  content_hash: string;
+}
+
+// Typed reject for skill mount / unmount (issue #363, ADR-0086). Wraps under
+// SessionError.SkillMount (adjacently tagged) so the frontend narrows on
+// `data.kind`. Mirrors the Rust SkillMountError.
+export type SkillMountError =
+  | { kind: "AlreadyMounted"; data: { name: string } }
+  | { kind: "NotMounted"; data: { name: string } };

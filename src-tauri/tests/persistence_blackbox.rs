@@ -206,6 +206,7 @@ fn resume_restores_working_set_history_and_active() {
         .map(|e| match e {
             ThreadEntry::Turn(t) => t.question.clone(),
             ThreadEntry::Source(ev) => format!("<{}>", ev.reference_name),
+            ThreadEntry::Skill(ev) => format!("[{}]", ev.name),
         })
         .collect();
     let before_result_count = session
@@ -238,6 +239,7 @@ fn resume_restores_working_set_history_and_active() {
         .map(|e| match e {
             ThreadEntry::Turn(t) => t.question.clone(),
             ThreadEntry::Source(ev) => format!("<{}>", ev.reference_name),
+            ThreadEntry::Skill(ev) => format!("[{}]", ev.name),
         })
         .collect();
     assert_eq!(

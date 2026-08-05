@@ -1663,6 +1663,71 @@ pub fn delete_skill(root: State<'_, SkillsRoot>, name: String) -> Result<(), Ski
     crate::skills::registry::delete_skill(&root.0, &name)
 }
 
+// --- Skills mount / unmount (issue #363, ADR-0086) --------------------------
+//
+// Session-SCOPED skill lifecycle (distinct from the registry CRUD above): the
+// backend records each Mount / Unmount on the session timeline + folds the
+// active set from the event sequence (no snapshot). The frontend's `loading`
+// flag is the primary defense against mounting / unmounting during a turn;
+// `reject_if_in_flight` is the Rust-side backstop (a second window / IPC
+// replay / automation that triggers mount while an approval-pending turn
+// holds the session lock). Rejects are the typed
+// [`SkillMountError`](crate::session::skills::SkillMountError) (wrapped in
+// [`SessionError::SkillMount`]) so the frontend renders each refusal through
+// the locale catalog.
+
+/// Mount a skill into the session's active set (issue #363, ADR-0086). Appends
+/// a `Mount` event to the timeline + atomically persists the recipe. Refuses a
+/// redundant mount (`AlreadyMounted`) and rejects during resume / an in-flight
+/// turn (the loading gate, AC #5).
+#[tauri::command]
+pub fn mount_skill(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+    name: String,
+) -> Result<(), SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    reject_if_resuming(&handle)?;
+    reject_if_in_flight(&handle)?;
+    let mut s = handle.session_lock()?;
+    s.mount_skill(&name).map_err(SessionError::SkillMount)
+}
+
+/// Unmount a skill from the session's active set (issue #363, ADR-0086).
+/// Appends an `Unmount` event + atomically persists. Refuses an unmount of a
+/// name not in the set (`NotMounted`) and rejects during resume / an in-flight
+/// turn (the loading gate, AC #5).
+#[tauri::command]
+pub fn unmount_skill(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+    name: String,
+) -> Result<(), SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    reject_if_resuming(&handle)?;
+    reject_if_in_flight(&handle)?;
+    let mut s = handle.session_lock()?;
+    s.unmount_skill(&name).map_err(SessionError::SkillMount)
+}
+
+/// The session's currently-mounted skill names, in first-mount insertion order
+/// (issue #363). Read-only; the frontend uses this to render the active-set
+/// chip list + drive the mount/unmount button states. The fold over the
+/// timeline is the source of truth; this returns the live memoization.
+#[tauri::command]
+pub fn list_mounted_skills(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+) -> Result<Vec<String>, SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    reject_if_resuming(&handle)?;
+    let s = handle.session_lock()?;
+    Ok(s.mounted_skills())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

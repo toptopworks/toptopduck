@@ -86,6 +86,8 @@
   "error.skill.nameTaken": "A skill named \"{name}\" already exists",
   "error.skill.notFound": "No skill named \"{name}\"",
   "error.skill.readOnly": "Linked skills are read-only; edit the source instead",
+  "error.skillMount.alreadyMounted": "Skill \"{name}\" is already mounted",
+  "error.skillMount.notMounted": "Skill \"{name}\" is not mounted",
   "error.store.configWriteFailure": "Failed to save settings",
   "error.store.ioFailure": "A file operation failed",
   "error.store.keychainFailure": "Failed to access the OS keychain",
