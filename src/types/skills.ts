@@ -36,6 +36,36 @@ export interface SkillEntry {
   link_target: string | null;
 }
 
+// One spec-invalid skill directory the registry scan skipped (issue #373).
+// Mirrors the Rust SkippedSkill. `dir` is the directory name (parallel to
+// SkillEntry.name); `reason` is the English technical detail rendered verbatim
+// -- the locale catalog owns the section title / intro wording, NOT this
+// string (ADR-0052 layer 4).
+export interface SkippedSkill {
+  // The directory name under the skills root (its file_name, not the full
+  // OS path).
+  dir: string;
+  // The English technical reason the directory failed spec validation,
+  // rendered verbatim. This is the SkillError Display string, so the value
+  // carries the variant prefix (e.g. "invalid skill: frontmatter name `X`
+  // does not match its directory name `Y`"; a read failure carries the full
+  // OS path, parallel to SkillEntry.link_target).
+  reason: string;
+}
+
+// The result of a registry scan (issue #373): the spec-valid skills plus the
+// directories the scan skipped. Mirrors the Rust SkillListing. `skills` keeps
+// the sorted / deduplicated semantics; `ignored` is sorted by directory name
+// for a stable listing. The frontend renders the ignored section ONLY when
+// `ignored` is non-empty (a clean registry never shows the section).
+export interface SkillListing {
+  // Spec-valid skills, sorted by name.
+  skills: SkillEntry[];
+  // Directories the scan skipped, each with the English technical reason.
+  // Sorted by directory name. Empty for a clean registry.
+  ignored: SkippedSkill[];
+}
+
 // The editable payload of update_skill. Addressed by the command's separate
 // `name` parameter (the CURRENT directory name); `name` here is the identity to
 // WRITE -- equal to the current one for a plain edit, different for a rename.

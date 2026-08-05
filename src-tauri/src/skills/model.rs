@@ -63,6 +63,45 @@ pub struct SkillEntry {
     pub link_target: Option<String>,
 }
 
+/// One spec-invalid skill directory the registry scan skipped, with the
+/// English technical reason (issue #373). The settings UI surfaces these so a
+/// user who copied in a broken directory -- frontmatter `name` / directory
+/// mismatch, missing `SKILL.md`, blank body -- sees WHY it disappeared
+/// instead of debugging from a silent warn line. `dir` is the directory's
+/// `file_name` (the same shape as `SkillEntry::name` for spec-valid skills);
+/// `reason` is the English technical detail rendered verbatim (ADR-0052
+/// layer 4 -- user-facing wording lives in the locale catalog as the section
+/// title / intro, but the reason itself is the dynamic backend detail).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SkippedSkill {
+    /// The directory name under the skills root (its `file_name`, not the
+    /// full OS path -- the UI lists names, parallel to `SkillEntry::name`).
+    pub dir: String,
+    /// The English technical reason the directory failed spec validation,
+    /// rendered verbatim. This is the [`SkillError`] Display string, so the
+    /// value carries the variant prefix (e.g. `"invalid skill: frontmatter
+    /// name \`X\` does not match its directory name \`Y\`"`, `"invalid skill:
+    /// cannot read \`<root>/<dir>/SKILL.md\`: <io error>"` -- a read failure
+    /// carries the full OS path, parallel to [`SkillEntry::link_target`]).
+    /// Display is the IPC contract for THIS surface; see [`SkillError`] for
+    /// the full set of paths Display text crosses.
+    pub reason: String,
+}
+
+/// The result of a registry scan (issue #373): the spec-valid skills plus the
+/// directories skipped for spec violations. The `skills` list keeps its
+/// sorted semantics (by name); `ignored` is sorted by directory name for a
+/// stable listing. `ignored` may be empty; it never contains a directory that
+/// also appears in `skills` (a directory either loads or it does not).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SkillListing {
+    /// Spec-valid skills, sorted by name -- the existing list semantics.
+    pub skills: Vec<SkillEntry>,
+    /// Directories the scan skipped, each with the English technical reason.
+    /// Sorted by directory name for a deterministic listing.
+    pub ignored: Vec<SkippedSkill>,
+}
+
 /// The editable payload of `update_skill` (issue #362). Addressed by the command's
 /// separate `name` parameter (the CURRENT directory name); `name` here is the
 /// identity to WRITE -- equal to the current one for a plain edit, different for
@@ -91,7 +130,14 @@ pub struct SkillUpdate {
 /// StoreCommandError so the frontend's fmtError dispatch stays unambiguous
 /// (ADR-0069 invariant). The data strings carry the English technical detail
 /// for the fold; user-facing wording lives in the locale catalog (ADR-0052).
-/// `Display` is Rust-log-only -- NOT the IPC contract.
+/// `Display` text crosses IPC in two places, both rendering English detail
+/// verbatim: primarily [`SkippedSkill::reason`] (the diagnostic fold for
+/// spec-invalid directories the scan skipped, issue #373), and the
+/// [`SkillError::FsFailure`] `data` string when `update_skill`'s rollback
+/// folds the inner error's Display into its message (issue #362). The plain
+/// typed-reject path serializes each variant's inner payload string as serde
+/// `data` -- that payload is the raw detail, NOT the Display string, so a
+/// `kind`-dispatch consumer never reads Display.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum SkillError {
