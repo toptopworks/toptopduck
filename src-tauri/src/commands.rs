@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 
 use crate::app_config::AppConfig;
 use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink, AuthMode, ToolKey};
@@ -42,7 +42,9 @@ use crate::runtime::acp::adapter::{detect_adapter, v1_adapters, AdapterSpec};
 use crate::session::{RenameSessionError, ResumeEvent, ResumeProgress, Session};
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
 use crate::skills::{
-    resolve_prompt_fragments, SkillEntry, SkillError, SkillListing, SkillUpdate, SkillsRoot,
+    discover_skill_sources, import_skills as import_skills_impl, resolve_prompt_fragments,
+    ImportItem, ImportMode, ImportOutcome, SkillEntry, SkillError, SkillListing, SkillSource,
+    SkillSourceCandidate, SkillUpdate, SkillsRoot,
 };
 
 /// ADR-0063: the close-and-wait-release variant's wait ceiling. Aligned to
@@ -1679,6 +1681,91 @@ pub fn update_skill(
 #[tauri::command]
 pub fn delete_skill(root: State<'_, SkillsRoot>, name: String) -> Result<(), SkillError> {
     crate::skills::registry::delete_skill(&root.0, &name)
+}
+
+/// Discover external skill sources for the import dialog (issue #367,
+/// ADR-0086). Resolves the standard agent skill libraries -- Claude Code
+/// (`~/.claude/skills`), Codex CLI (`~/.codex/skills`) -- off the Tauri
+/// home-dir path, appends the user-supplied `custom_paths` (each an absolute
+/// OS path the frontend collected via the directory picker), and projects the
+/// union through [`discover_skill_sources`]. A source that does not exist is
+/// dropped silently (the "show only if it exists" rule); each surviving
+/// source's resident skills are classified `importable` / `already_exists` /
+/// `invalid` against the CURRENT registry name set (a snapshot taken fresh per
+/// call so a create / delete between calls is reflected). Read-only -- never
+/// refuses.
+#[tauri::command]
+pub fn list_skill_sources(
+    app: tauri::AppHandle,
+    root: State<'_, SkillsRoot>,
+    custom_paths: Vec<String>,
+) -> Vec<SkillSource> {
+    // The existing-name snapshot is read once per call so a create / delete
+    // that lands between this call and the subsequent `import_skills` is
+    // reflected (import re-checks at commit too -- the snapshot is for the
+    // dialog's PREVIEW only, never an authority).
+    let existing: std::collections::HashSet<String> = crate::skills::registry::list_skills(&root.0)
+        .skills
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
+    let candidates = build_skill_source_candidates(&app, &custom_paths);
+    discover_skill_sources(&candidates, &existing)
+}
+
+/// Import a batch of skills into the registry (issue #367, ADR-0086). Each
+/// item is an absolute source directory; `mode` is shared across the batch
+/// (the dialog's bottom dropdown). The result parallels the input so a
+/// per-item failure never aborts the rest -- the frontend folds each `Failed`
+/// through `fmtError` and invalidates the skills query once for the whole
+/// batch. Each item is re-validated + name-re-checked at commit time (no
+/// cached discovery status crosses the wire).
+#[tauri::command]
+pub fn import_skills(
+    root: State<'_, SkillsRoot>,
+    items: Vec<ImportItem>,
+    mode: ImportMode,
+) -> Vec<ImportOutcome> {
+    import_skills_impl(&root.0, &items, mode)
+}
+
+/// Build the candidate source list for discovery (issue #367). The two
+/// standard agent skill libraries live under the home dir; each `custom_paths`
+/// entry is appended as its own candidate (id = path string for stable
+/// expand/collapse state across re-discoveries, label = the directory's file
+/// name so the row reads naturally). Duplicates are harmless -- discovery
+/// deduplicates by existence + the frontend keys off the id.
+fn build_skill_source_candidates(
+    app: &tauri::AppHandle,
+    custom_paths: &[String],
+) -> Vec<SkillSourceCandidate> {
+    let mut candidates = Vec::new();
+    let home = app.path().home_dir().ok();
+    if let Some(home) = home.as_deref() {
+        candidates.push(SkillSourceCandidate {
+            id: "claude-code".into(),
+            label: "Claude Code".into(),
+            path: home.join(".claude").join("skills"),
+        });
+        candidates.push(SkillSourceCandidate {
+            id: "codex-cli".into(),
+            label: "Codex CLI".into(),
+            path: home.join(".codex").join("skills"),
+        });
+    }
+    for raw in custom_paths {
+        let path = std::path::PathBuf::from(raw);
+        let label = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| raw.clone());
+        candidates.push(SkillSourceCandidate {
+            id: raw.clone(),
+            label,
+            path,
+        });
+    }
+    candidates
 }
 
 // --- Skills mount / unmount (issue #363, ADR-0086) --------------------------

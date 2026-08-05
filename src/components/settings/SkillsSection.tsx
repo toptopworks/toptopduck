@@ -11,6 +11,7 @@ import type {
   SkippedSkill,
 } from "../../types/skills";
 import { createSkill, deleteSkill, listSkills, updateSkill } from "../../api";
+import { ImportSkillsDialog } from "./ImportSkillsDialog";
 import { fmtError } from "../../lib/error-presentation";
 import { skillKeys } from "../../session/queryKeys";
 import { cn } from "../../lib/utils";
@@ -43,7 +44,9 @@ import { PaneHeader, SettingsCard } from "./settings-chrome";
 // create / update / delete through TanStack mutations that invalidate the one
 // skills query. `local` skills open a full-edit drawer; `linked` skills open a
 // read-only drawer with an "open source location" reveal. The Import header
-// button is rendered disabled -- the two-stage import dialog lands in #367.
+// button opens the two-stage drill-down import dialog (issue #367), which
+// links / copies skills from external agent libraries and invalidates the same
+// skills query on success.
 
 type AcquiredFilter = "all" | SkillAcquired;
 
@@ -95,6 +98,7 @@ export function SkillsSection({ configuredMcpIds }: { configuredMcpIds: string[]
   const [filter, setFilter] = useState<AcquiredFilter>("all");
   const [drawer, setDrawer] = useState<DrawerState>({ mode: "closed" });
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const invalidate = () => {
@@ -223,11 +227,10 @@ export function SkillsSection({ configuredMcpIds }: { configuredMcpIds: string[]
               type="button"
               size="sm"
               variant="outline"
-              disabled
-              title={intl.formatMessage({
-                id: "settings.skills.importDisabled",
-                defaultMessage: "Importing from external agent libraries arrives in a follow-up",
-              })}
+              onClick={() => {
+                setError(null);
+                setImportOpen(true);
+              }}
             >
               <Download className="size-4" aria-hidden />
               <FormattedMessage id="settings.skills.import" defaultMessage="Import" />
@@ -379,6 +382,12 @@ export function SkillsSection({ configuredMcpIds }: { configuredMcpIds: string[]
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
+      )}
+
+      {importOpen && (
+        <ImportSkillsDialog
+          onClose={() => setImportOpen(false)}
+        />
       )}
     </div>
   );

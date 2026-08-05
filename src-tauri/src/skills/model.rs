@@ -233,6 +233,141 @@ pub fn validate_body(body: &str) -> Result<(), SkillError> {
     Ok(())
 }
 
+// --- Skill import (issue #367, ADR-0086) ------------------------------------
+//
+// The import dialog discovers Agent Skills spec directories under external
+// agent libraries (Claude Code `~/.claude/skills`, Codex CLI `~/.codex/skills`,
+// + user-added custom paths) and imports each selected skill into the registry
+// either as a link (symlink / Windows junction -> `acquired: linked`, read-
+// only) or a copy (recursive directory copy -> `acquired: local`, editable).
+// Discovery is a pure projection the command layer drives with resolved
+// candidate paths; import re-validates + re-checks the registry at commit time
+// so a source that changed between discovery and commit never overwrites a
+// name that landed in the interim.
+
+/// One candidate source the command layer hands to discovery (issue #367).
+/// Built from the standard agent skill libraries + any user-added custom
+/// paths. NOT a wire type -- it lives only between the command (which resolves
+/// paths off `app.path().home_dir()`) and the pure discovery function. A
+/// candidate whose `path` does not exist on disk is dropped by discovery (the
+/// "show only if it exists" rule, ADR-0086 D10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillSourceCandidate {
+    /// Stable id for dedupe + the frontend's expand/collapse state. Standard
+    /// sources carry fixed ids; a custom source's id is its path string.
+    pub id: String,
+    /// Display label (source name).
+    pub label: String,
+    /// Candidate directory path (need not exist).
+    pub path: PathBuf,
+}
+
+/// One discovered skill source -- a directory that EXISTS on disk and might
+/// hold Agent Skills spec directories (issue #367). The dialog renders the
+/// list of these (collapsed) + drills into the skills of an expanded one.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SkillSource {
+    /// Stable id (mirrors the candidate's); the dialog keys expand/collapse
+    /// state off it.
+    pub id: String,
+    /// Display label.
+    pub label: String,
+    /// Absolute OS path of the source directory.
+    pub path: String,
+    /// Skill directories found under this source, with import readiness. May
+    /// be empty (the source exists but holds no spec-shaped children).
+    pub skills: Vec<DiscoveredSkill>,
+}
+
+/// One skill directory under a discovered source, with its import readiness
+/// (issue #367). The dialog renders one checkbox row per entry: `importable`
+/// is checked-able; `already_exists` carries a badge and is excluded from the
+/// selectable set (the registry is never overwritten); `invalid` is disabled
+/// with a tooltip carrying the English technical reason (the locale catalog
+/// owns the section / hint wording, NOT the per-row reason -- ADR-0052 layer
+/// 4, same split as [`SkippedSkill::reason`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DiscoveredSkill {
+    /// The spec name (= the directory's `file_name`); identity, kebab-case.
+    pub name: String,
+    /// The spec description, when the frontmatter parsed far enough to read
+    /// one. Present for `importable` / `already_exists`; may be `None` for a
+    /// partial `invalid` parse.
+    pub description: Option<String>,
+    /// Absolute OS path of the skill's source directory (the symlink / copy
+    /// source; the only anchor that survives a source change between
+    /// discovery and commit).
+    pub source_dir: String,
+    /// Import readiness classification.
+    pub status: DiscoveredSkillStatus,
+    /// English technical reason for `invalid`; `None` otherwise. Verbatim
+    /// [`SkillError`] Display (parallel to [`SkippedSkill::reason`]).
+    pub reason: Option<String>,
+}
+
+/// Import readiness classification (issue #367). Mirrors the Rust enum as a
+/// bare snake_case variant string (the `#[serde(rename_all = "snake_case")]`
+/// convention).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveredSkillStatus {
+    /// Spec-valid source directory whose name is free in the registry -- the
+    /// checkbox is enabled.
+    Importable,
+    /// A skill with this name is already in the registry -- excluded from
+    /// import (the registry is never overwritten), shown with an "already
+    /// exists" badge.
+    AlreadyExists,
+    /// The source directory failed spec validation -- checkbox disabled with
+    /// a tooltip carrying the reason.
+    Invalid,
+}
+
+/// Import mode for a batch (issue #367). The dialog's bottom dropdown selects
+/// one mode for every selected skill. `link` is the default (the AC: "导入后
+/// 技能以 acquired: linked 进注册表"); `copy` is the fallback when the platform
+/// / target refuses a link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportMode {
+    /// Create a symlink (Unix) / directory junction (Windows) onto the
+    /// external source. The skill enters the registry as `acquired: linked`
+    /// (read-only; delete removes the link only).
+    Link,
+    /// Recursively copy the source directory. The skill enters the registry
+    /// as `acquired: local` (editable; delete removes the copy).
+    Copy,
+}
+
+/// One item in an import batch (issue #367): the absolute source directory of
+/// a skill to import. The wire payload is the path ALONE -- the backend re-
+/// validates the source + re-checks the registry at import time (a source may
+/// have changed between discovery and commit), so no name / status is cached
+/// on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ImportItem {
+    /// Absolute OS path of the skill's source directory.
+    pub source_dir: String,
+}
+
+/// The per-item outcome of an import batch (issue #367). Adjacently tagged
+/// (`{kind, data}`) so the frontend can fold each failure through `fmtError`
+/// while the successes invalidate the skills query. `Failed` nests the typed
+/// [`SkillError`] (already adjacently tagged) as its `data` -- the frontend
+/// reaches the reject detail through `outcome.data`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "data")]
+pub enum ImportOutcome {
+    /// The skill was linked / copied into the registry; carries the entry read
+    /// back from disk.
+    #[serde(rename = "imported")]
+    Imported(SkillEntry),
+    /// The import refused (spec-invalid at commit time, name-taken race, fs
+    /// failure, link refused); carries the typed reject.
+    #[serde(rename = "failed")]
+    Failed(SkillError),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,5 +470,57 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(value["compatibility"].is_null());
         assert!(value["license"].is_string());
+    }
+
+    #[test]
+    fn import_outcome_round_trips_both_arms() {
+        // Imported arm: { kind: "imported", data: <SkillEntry> }.
+        let entry = SkillEntry {
+            name: "pdf-tools".into(),
+            description: "Work with PDF files.".into(),
+            acquired: Acquired::Linked,
+            license: None,
+            compatibility: None,
+            mcp_servers: Vec::new(),
+            body: "Body.\n".into(),
+            link_target: Some("/home/u/.claude/skills/pdf-tools".into()),
+            content_hash: "abc".into(),
+        };
+        let imported = ImportOutcome::Imported(entry.clone());
+        let json = serde_json::to_value(&imported).unwrap();
+        assert_eq!(json["kind"], "imported");
+        assert_eq!(json["data"]["name"], "pdf-tools");
+        // Failed arm: { kind: "failed", data: <SkillError {kind, data}> } --
+        // the typed reject nests inside `data`, so a frontend narrowing on
+        // `outcome.kind` reaches the reject detail through `outcome.data`.
+        let failed = ImportOutcome::Failed(SkillError::NameTaken("taken".into()));
+        let json = serde_json::to_value(&failed).unwrap();
+        assert_eq!(json["kind"], "failed");
+        assert_eq!(json["data"]["kind"], "NameTaken");
+        assert_eq!(json["data"]["data"], "taken");
+    }
+
+    #[test]
+    fn import_mode_and_status_serialize_snake_case() {
+        assert_eq!(
+            serde_json::to_value(ImportMode::Link).unwrap(),
+            serde_json::Value::String("link".into())
+        );
+        assert_eq!(
+            serde_json::to_value(ImportMode::Copy).unwrap(),
+            serde_json::Value::String("copy".into())
+        );
+        assert_eq!(
+            serde_json::to_value(DiscoveredSkillStatus::AlreadyExists).unwrap(),
+            serde_json::Value::String("already_exists".into())
+        );
+        assert_eq!(
+            serde_json::to_value(DiscoveredSkillStatus::Importable).unwrap(),
+            serde_json::Value::String("importable".into())
+        );
+        assert_eq!(
+            serde_json::to_value(DiscoveredSkillStatus::Invalid).unwrap(),
+            serde_json::Value::String("invalid".into())
+        );
     }
 }

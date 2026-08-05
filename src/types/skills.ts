@@ -137,3 +137,78 @@ export interface SkillProvenance {
 export type SkillMountError =
   | { kind: "AlreadyMounted"; data: { name: string } }
   | { kind: "NotMounted"; data: { name: string } };
+
+// --- Skill import (issue #367, ADR-0086) -----------------------------------
+//
+// The import dialog discovers Agent Skills spec directories under external
+// agent libraries (Claude Code ~/.claude/skills, Codex CLI ~/.codex/skills,
+// + user-added custom paths) and imports each selected skill into the registry
+// either as a link (acquired: linked, read-only) or a copy (acquired: local,
+// editable). Mirrors the Rust crate::skills::model import wire shapes.
+
+// Import readiness for one discovered skill directory (issue #367). Mirrors
+// the Rust DiscoveredSkillStatus as a bare snake_case variant string.
+// - importable: spec-valid + the name is free in the registry.
+// - already_exists: a skill with this name is in the registry (excluded from
+//   import; the registry is never overwritten).
+// - invalid: the directory failed spec validation (checkbox disabled + a
+//   tooltip carrying the English reason).
+export type DiscoveredSkillStatus = "importable" | "already_exists" | "invalid";
+
+// One skill directory found under a discovered source, with its import
+// readiness (issue #367). Mirrors the Rust DiscoveredSkill. `source_dir` is
+// the ONLY anchor that survives a source change between discovery and commit
+// -- the backend re-validates + re-checks the registry at import time, so no
+// name / status is cached on the wire beyond the preview classification.
+export interface DiscoveredSkill {
+  // The spec name (= the directory's file_name); kebab-case identity.
+  name: string;
+  // The spec description, when the frontmatter parsed far enough. Present for
+  // importable / already_exists; null for a partial invalid parse.
+  description: string | null;
+  // Absolute OS path of the skill's source directory (the link / copy source).
+  source_dir: string;
+  // Import readiness classification.
+  status: DiscoveredSkillStatus;
+  // English technical reason for `invalid`; null otherwise. Rendered verbatim
+  // as the disabled row's tooltip (ADR-0052 layer 4 -- the locale catalog owns
+  // the section / hint wording, NOT the per-row reason).
+  reason: string | null;
+}
+
+// One discovered skill source (issue #367) -- a directory that exists on disk
+// and might hold Agent Skills spec directories. The dialog renders the list of
+// these (collapsed) and drills into the skills of an expanded one. Mirrors the
+// Rust SkillSource.
+export interface SkillSource {
+  // Stable id (standard sources carry fixed ids "claude-code" / "codex-cli";
+  // a custom source's id is its path string). The dialog keys expand/collapse
+  // state off it.
+  id: string;
+  // Display label (source name).
+  label: string;
+  // Absolute OS path of the source directory.
+  path: string;
+  // Skill directories found under this source, sorted by name. May be empty.
+  skills: DiscoveredSkill[];
+}
+
+// Import mode for a batch (issue #367). Mirrors the Rust ImportMode as a bare
+// snake_case variant string. The dialog's bottom dropdown selects one mode for
+// every selected skill.
+export type ImportMode = "link" | "copy";
+
+// One item in an import batch (issue #367). Mirrors the Rust ImportItem. The
+// absolute source directory alone -- the backend re-validates + re-checks the
+// registry at commit time.
+export interface ImportItem {
+  source_dir: string;
+}
+
+// The per-item outcome of an import batch (issue #367). Mirrors the Rust
+// ImportOutcome as an adjacently-tagged union. `failed` nests the typed
+// SkillError (already adjacently tagged) as its `data`, so the frontend
+// reaches the reject detail through `data.kind` + `data.data`.
+export type ImportOutcome =
+  | { kind: "imported"; data: SkillEntry }
+  | { kind: "failed"; data: SkillError };

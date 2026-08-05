@@ -78,7 +78,9 @@ pub use session_store::{
     ClosingFlag, SessionError, SessionHandle, SessionId, SessionStore, UNKNOWN_SESSION,
 };
 pub use skills::{
-    Acquired, SkillEntry, SkillError, SkillListing, SkillUpdate, SkillsRoot, SkippedSkill,
+    Acquired, DiscoveredSkill, DiscoveredSkillStatus, ImportItem, ImportMode, ImportOutcome,
+    SkillEntry, SkillError, SkillListing, SkillSource, SkillSourceCandidate, SkillUpdate,
+    SkillsRoot, SkippedSkill,
 };
 
 use std::sync::Arc;
@@ -370,6 +372,8 @@ pub fn run() {
             commands::create_skill,
             commands::update_skill,
             commands::delete_skill,
+            commands::list_skill_sources,
+            commands::import_skills,
             commands::mount_skill,
             commands::unmount_skill,
             commands::list_mounted_skills,

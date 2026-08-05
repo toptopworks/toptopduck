@@ -10,7 +10,15 @@ import type {
   SheetGuidance,
 } from "./types/dataset";
 import type { McpServerConfig, McpServerStatusEntry } from "./types/mcp";
-import type { SkillEntry, SkillListing, SkillUpdate } from "./types/skills";
+import type {
+  ImportItem,
+  ImportMode,
+  ImportOutcome,
+  SkillEntry,
+  SkillListing,
+  SkillSource,
+  SkillUpdate,
+} from "./types/skills";
 import type {
   ResumeProgress,
   SaveError,
@@ -420,6 +428,37 @@ export async function updateSkill(name: string, update: SkillUpdate): Promise<Sk
 // a linked skill's LINK is removed without touching the external source.
 export async function deleteSkill(name: string): Promise<void> {
   await invoke<void>("delete_skill", { name });
+}
+
+// --- Skill import (issue #367, ADR-0086) -------------------------------------
+//
+// The import dialog discovers external agent skill libraries (Claude Code
+// ~/.claude/skills, Codex CLI ~/.codex/skills + user-added custom paths) and
+// imports each selected skill as a link (acquired: linked) or a copy
+// (acquired: local). Session-AGNOSTIC + read-only discovery; the import
+// command re-validates + re-checks the registry at commit time.
+
+// Discover external skill sources for the import dialog (issue #367). The
+// backend resolves the standard agent libraries off the home dir + appends
+// each `customPaths` entry (absolute OS paths the dialog collected via the
+// directory picker). A source that does not exist is dropped silently (the
+// "show only if it exists" rule). Each surviving source's skills are
+// classified importable / already_exists / invalid against the CURRENT
+// registry name set. Read-only -- never refuses.
+export async function listSkillSources(customPaths: string[]): Promise<SkillSource[]> {
+  return invoke<SkillSource[]>("list_skill_sources", { customPaths });
+}
+
+// Import a batch of skills into the registry (issue #367). Each item is an
+// absolute source directory; `mode` is shared across the batch (the dialog's
+// bottom dropdown). The result parallels the input so a per-item failure never
+// aborts the rest -- the caller folds each `failed` through fmtError. Each
+// item is re-validated + name-re-checked at commit time.
+export async function importSkills(
+  items: ImportItem[],
+  mode: ImportMode,
+): Promise<ImportOutcome[]> {
+  return invoke<ImportOutcome[]>("import_skills", { items, mode });
 }
 
 // --- Skill mount model (issue #363, #365; ADR-0086) -----------------------
