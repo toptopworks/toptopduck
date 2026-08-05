@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Cpu,
   KeyRound,
+  Puzzle,
   ShieldCheck,
   SlidersHorizontal,
 } from "lucide-react";
@@ -29,6 +30,7 @@ import { EngineSection } from "./EngineSection";
 import { GeneralSection } from "./GeneralSection";
 import { ProfilesSection, type ProfilesControls } from "./ProfilesSection";
 import { PrivacySection } from "./PrivacySection";
+import { SkillsSection } from "./SkillsSection";
 import { SETTINGS_SECTIONS, type SettingsSection } from "./sections";
 
 // In-app overlay settings view (ADR-0065 shell + ADR-0075 chrome/persistence,
@@ -64,6 +66,8 @@ function SectionIcon({ section }: { section: SettingsSection }) {
   switch (section) {
     case "general":
       return <SlidersHorizontal className="size-4 shrink-0" aria-hidden />;
+    case "skills":
+      return <Puzzle className="size-4 shrink-0" aria-hidden />;
     case "profiles":
       return <KeyRound className="size-4 shrink-0" aria-hidden />;
     case "engine":
@@ -84,6 +88,8 @@ function SectionLabel({ section }: { section: SettingsSection }) {
   switch (section) {
     case "general":
       return <FormattedMessage id="settings.nav.general" defaultMessage="General" />;
+    case "skills":
+      return <FormattedMessage id="settings.nav.skills" defaultMessage="Skills" />;
     case "profiles":
       return <FormattedMessage id="settings.nav.profiles" defaultMessage="Profiles" />;
     case "engine":
@@ -120,6 +126,10 @@ function SectionContent({
   switch (section) {
     case "general":
       return <GeneralSection appConfig={appConfig} onCommitImmediate={onCommit} />;
+    case "skills":
+      return (
+        <SkillsSection configuredMcpIds={appConfig.mcp_servers.servers.map((s) => s.id)} />
+      );
     case "profiles":
       return (
         <ProfilesSection

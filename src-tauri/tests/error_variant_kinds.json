@@ -50,6 +50,14 @@
     "Resuming",
     "Turn"
   ],
+  "SkillError": [
+    "FsFailure",
+    "InvalidName",
+    "InvalidSkill",
+    "NameTaken",
+    "NoSuchSkill",
+    "ReadOnly"
+  ],
   "StoreCommandError": [
     "BlankName",
     "ConfigWriteFailure",

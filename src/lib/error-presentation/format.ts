@@ -18,7 +18,8 @@ import type {
   StoreCommandError,
   TurnError,
 } from "../../types/session";
-import { isSaveError, isSessionError, isStoreCommandError } from "./guards";
+import type { SkillError } from "../../types/skills";
+import { isSaveError, isSessionError, isSkillError, isStoreCommandError } from "./guards";
 
 // Format a DuckLoadError through the locale catalog (issue #120). The
 // version-mismatch "please upgrade" hint interpolates the found / supported
@@ -173,6 +174,55 @@ function formatStoreCommandError(e: StoreCommandError, intl: IntlShape): string 
     default: {
       const unhandled: never = e;
       throw new Error(`unhandled StoreCommandError kind: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+// Format a SkillError through the locale catalog (issue #362). NoSuchSkill
+// interpolates the skill name; the other variants render a generic message and
+// their English data rides the technical-details fold (the reason detail / the
+// offending name -- ADR-0029: no secrets cross this path).
+function formatSkillError(e: SkillError, intl: IntlShape): string {
+  switch (e.kind) {
+    case "InvalidName":
+      return intl.formatMessage({
+        id: "error.skill.invalidName",
+        defaultMessage: "Skill name must be kebab-case (lowercase a-z / 0-9 + hyphens) and at most 64 chars",
+      });
+    case "InvalidSkill":
+      return intl.formatMessage({
+        id: "error.skill.invalidSkill",
+        defaultMessage: "The skill file is missing required fields or a body",
+      });
+    case "NoSuchSkill":
+      return intl.formatMessage(
+        {
+          id: "error.skill.notFound",
+          defaultMessage: "No skill named \"{name}\"",
+        },
+        { name: e.data },
+      );
+    case "NameTaken":
+      return intl.formatMessage(
+        {
+          id: "error.skill.nameTaken",
+          defaultMessage: "A skill named \"{name}\" already exists",
+        },
+        { name: e.data },
+      );
+    case "ReadOnly":
+      return intl.formatMessage({
+        id: "error.skill.readOnly",
+        defaultMessage: "Linked skills are read-only; edit the source instead",
+      });
+    case "FsFailure":
+      return intl.formatMessage({
+        id: "error.skill.fsFailure",
+        defaultMessage: "A skill file operation failed",
+      });
+    default: {
+      const unhandled: never = e;
+      throw new Error(`unhandled SkillError kind: ${JSON.stringify(unhandled)}`);
     }
   }
 }
@@ -355,6 +405,9 @@ export function fmtError(e: unknown, intl: IntlShape): string {
   if (isStoreCommandError(e)) {
     return formatStoreCommandError(e, intl);
   }
+  if (isSkillError(e)) {
+    return formatSkillError(e, intl);
+  }
   if (e instanceof Error) return e.message;
   if (typeof e === "string") return e;
   // Opaque object: stringify best-effort. A cyclic reject would throw, so fall
@@ -400,6 +453,15 @@ export function errorDetail(e: unknown): string | null {
       return e.data;
     }
     return null;
+  }
+  if (isSkillError(e)) {
+    // Every SkillError variant carries a string under data (the reason detail
+    // or the offending name) -- all useful in the fold except NoSuchSkill /
+    // NameTaken, whose name already rides the message.
+    if (e.kind === "NoSuchSkill" || e.kind === "NameTaken") {
+      return null;
+    }
+    return e.data;
   }
   return null;
 }

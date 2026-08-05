@@ -354,6 +354,74 @@ fn store_command_error_serializes_adjacently_tagged() {
 }
 
 #[test]
+fn skill_error_serializes_adjacently_tagged() {
+    // SkillError (skills registry commands, issue #362) crosses IPC as the
+    // reject of create_skill / update_skill / delete_skill. Every variant
+    // carries the English detail under data; the kind set is disjoint from
+    // every other typed error enum so the frontend dispatch stays unambiguous.
+    use toptopduck_lib::SkillError;
+    assert_wire(
+        &SkillError::InvalidName("bad reason".into()),
+        r#"{"kind":"InvalidName","data":"bad reason"}"#,
+    );
+    assert_wire(
+        &SkillError::InvalidSkill("blank body".into()),
+        r#"{"kind":"InvalidSkill","data":"blank body"}"#,
+    );
+    assert_wire(
+        &SkillError::NoSuchSkill("ghost".into()),
+        r#"{"kind":"NoSuchSkill","data":"ghost"}"#,
+    );
+    assert_wire(
+        &SkillError::NameTaken("taken".into()),
+        r#"{"kind":"NameTaken","data":"taken"}"#,
+    );
+    assert_wire(
+        &SkillError::ReadOnly("external".into()),
+        r#"{"kind":"ReadOnly","data":"external"}"#,
+    );
+    assert_wire(
+        &SkillError::FsFailure("disk full".into()),
+        r#"{"kind":"FsFailure","data":"disk full"}"#,
+    );
+}
+
+#[test]
+fn skill_entry_serializes_with_snake_case_acquired() {
+    // SkillEntry (list_skills / the mutating commands' return, issue #362):
+    // `acquired` is the only enum on the wire -- snake_case like every other
+    // bare-variant field the frontend reads. Option fields ride JSON null,
+    // Vec fields [] (the project's no-skip_serializing_if convention).
+    use toptopduck_lib::{Acquired, SkillEntry};
+    assert_wire(
+        &SkillEntry {
+            name: "pdf-tools".into(),
+            description: "Work with PDF files.".into(),
+            acquired: Acquired::Linked,
+            license: None,
+            compatibility: None,
+            mcp_servers: vec!["github-mcp".into()],
+            body: "Body.\n".into(),
+            link_target: Some("/src/pdf-tools".into()),
+        },
+        r#"{"name":"pdf-tools","description":"Work with PDF files.","acquired":"linked","license":null,"compatibility":null,"mcp_servers":["github-mcp"],"body":"Body.\n","link_target":"/src/pdf-tools"}"#,
+    );
+    assert_wire(
+        &SkillEntry {
+            name: "mine".into(),
+            description: "Authored in-app.".into(),
+            acquired: Acquired::Local,
+            license: Some("MIT".into()),
+            compatibility: Some("requires network".into()),
+            mcp_servers: Vec::new(),
+            body: "Body.\n".into(),
+            link_target: None,
+        },
+        r#"{"name":"mine","description":"Authored in-app.","acquired":"local","license":"MIT","compatibility":"requires network","mcp_servers":[],"body":"Body.\n","link_target":null}"#,
+    );
+}
+
+#[test]
 fn text_kind_serializes_as_a_bare_variant_string() {
     // TextKind is a plain (untagged) enum, so each variant crosses IPC as its
     // bare name string -- the shape src/types.ts mirrors for the textual

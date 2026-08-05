@@ -10,6 +10,7 @@ import type {
   SheetGuidance,
 } from "./types/dataset";
 import type { McpServerConfig, McpServerStatusEntry } from "./types/mcp";
+import type { SkillEntry, SkillUpdate } from "./types/skills";
 import type {
   ResumeProgress,
   SaveError,
@@ -377,6 +378,44 @@ export async function clearMcpServerSecret(id: string, envKey: string): Promise<
 // mid-flight session-close never surfaces a user-facing error.
 export async function listMcpServerStatus(sessionId: string): Promise<McpServerStatusEntry[]> {
   return invoke<McpServerStatusEntry[]>("list_mcp_server_status", { sessionId });
+}
+
+// --- Skills registry (issue #362, ADR-0086) --------------------------------
+//
+// CRUD over the Agent Skills registry under <app_data_dir>/skills.
+// Session-AGNOSTIC: the registry is process-global (one root shared by every
+// session). The directory scan IS the registry (no sidecar, no app-config
+// entry). Rejects are the typed SkillError (adjacently tagged like every other
+// typed IPC error) so the settings page renders each refusal through the locale
+// catalog (ADR-0052). The settings SkillsSection that drives these lands in
+// this slice; the composer "+" panel + mount model arrive in later #303 slices.
+
+// List every spec-valid skill in the registry (acquired derived by the loader).
+// Directories that fail the spec are skipped server-side; a never-created
+// registry lists empty. Read-only -- never refuses.
+export async function listSkills(): Promise<SkillEntry[]> {
+  return invoke<SkillEntry[]>("list_skills");
+}
+
+// Mint a new local skill: <root>/<name>/SKILL.md with the given description +
+// the skeleton body. The name must be kebab-case (<= 64) and free. Returns the
+// entry read back from disk.
+export async function createSkill(name: string, description: string): Promise<SkillEntry> {
+  return invoke<SkillEntry>("create_skill", { name, description });
+}
+
+// Rewrite one local skill's SKILL.md (frontmatter + body) atomically. `name`
+// addresses the current directory; `update.name` is the identity to write -- a
+// different value renames the directory. Refuses a linked skill (read-only),
+// an unknown skill, and a taken rename target.
+export async function updateSkill(name: string, update: SkillUpdate): Promise<SkillEntry> {
+  return invoke<SkillEntry>("update_skill", { name, update });
+}
+
+// Delete a skill. A local skill's directory is removed with all its contents;
+// a linked skill's LINK is removed without touching the external source.
+export async function deleteSkill(name: string): Promise<void> {
+  await invoke<void>("delete_skill", { name });
 }
 
 // --- Tiered tool approval (ADR-0080, issue #294) -------------------------

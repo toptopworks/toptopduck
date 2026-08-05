@@ -41,6 +41,7 @@ use crate::provider::live_config::LiveProviderConfig;
 use crate::runtime::acp::adapter::{detect_adapter, v1_adapters, AdapterSpec};
 use crate::session::{RenameSessionError, ResumeEvent, ResumeProgress, Session};
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
+use crate::skills::{SkillEntry, SkillError, SkillUpdate, SkillsRoot};
 
 /// ADR-0063: the close-and-wait-release variant's wait ceiling. Aligned to
 /// ADR-0021's `REQUEST_TIMEOUT` (120s, the in-flight ask's longest possible
@@ -1606,6 +1607,58 @@ pub fn set_session_runtime(
     let spec = resolve_runtime_choice(runtime)?;
     handle.set_runtime_choice(spec);
     Ok(())
+}
+
+// --- Skills registry (issue #362, ADR-0086) ---------------------------------
+//
+// CRUD over the Agent Skills registry under `<app_data_dir>/skills`.
+// Session-AGNOSTIC: the registry is process-global (one root shared by every
+// session), addressed through the managed [`SkillsRoot`] state. The directory
+// scan IS the registry (no sidecar, no app-config entry); a directory is a
+// skill iff it holds a spec-valid `SKILL.md`. Rejects are the typed
+// [`SkillError`] (adjacently tagged like every other typed IPC error) so the
+// frontend renders each refusal through the locale catalog (ADR-0052).
+
+/// List every spec-valid skill in the registry (issue #362). Directories that
+/// fail the spec are skipped server-side with a warning; a never-created
+/// registry lists empty. Read-only -- cannot refuse.
+#[tauri::command]
+pub fn list_skills(root: State<'_, SkillsRoot>) -> Vec<SkillEntry> {
+    crate::skills::registry::list_skills(&root.0)
+}
+
+/// Mint a new `local` skill (issue #362): `<root>/<name>/SKILL.md` with the
+/// given description + the skeleton body. The name must be spec-shaped
+/// (kebab-case, <= 64) and free; the registry root is minted lazily on first
+/// create. Returns the entry read back from disk.
+#[tauri::command]
+pub fn create_skill(
+    root: State<'_, SkillsRoot>,
+    name: String,
+    description: String,
+) -> Result<SkillEntry, SkillError> {
+    crate::skills::registry::create_skill(&root.0, &name, &description)
+}
+
+/// Rewrite one `local` skill's `SKILL.md` (frontmatter + body) atomically
+/// (issue #362). `name` addresses the current directory; `update.name` is the
+/// identity to write -- a different value renames the directory. Refuses a
+/// `linked` skill (read-only), an unknown skill, and a taken rename target.
+#[tauri::command]
+pub fn update_skill(
+    root: State<'_, SkillsRoot>,
+    name: String,
+    update: SkillUpdate,
+) -> Result<SkillEntry, SkillError> {
+    crate::skills::registry::update_skill(&root.0, &name, update)
+}
+
+/// Delete a skill from the registry (issue #362). A `local` skill's directory
+/// is removed with all its contents; a `linked` skill's LINK is removed
+/// without touching the external source directory.
+#[tauri::command]
+pub fn delete_skill(root: State<'_, SkillsRoot>, name: String) -> Result<(), SkillError> {
+    crate::skills::registry::delete_skill(&root.0, &name)
 }
 
 #[cfg(test)]

@@ -16,6 +16,7 @@ import type {
   StoreCommandError,
   TurnError,
 } from "../../types/session";
+import type { SkillError } from "../../types/skills";
 
 // Narrow an unknown IPC reject to a SessionError (issue #119). A session-
 // scoped command rejects with the adjacently-tagged `{ kind, data? }` shape;
@@ -246,6 +247,29 @@ export function isTurnError(e: unknown): e is TurnError {
   switch (kind) {
     case "UnknownDataset":
     case "Execute":
+      return typeof (e as { data?: unknown }).data === "string";
+    default:
+      return false;
+  }
+}
+
+// Narrow an unknown IPC reject to a SkillError (issue #362). Rejects from the
+// skills registry commands (list never refuses; create / update / delete do).
+// Every variant carries a string under data (the English technical detail /
+// the offending name). Same L1 defensive shape as the other guards: a
+// variant's data is verified before the guard promises it. The kind set is
+// disjoint from SessionError / SaveError / StoreCommandError, so checking it
+// after those three in fmtError is unambiguous (ADR-0069 invariant).
+export function isSkillError(e: unknown): e is SkillError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "InvalidName":
+    case "InvalidSkill":
+    case "NoSuchSkill":
+    case "NameTaken":
+    case "ReadOnly":
+    case "FsFailure":
       return typeof (e as { data?: unknown }).data === "string";
     default:
       return false;

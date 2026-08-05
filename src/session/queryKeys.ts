@@ -41,3 +41,11 @@ export const sessionKeys = {
 export const adapterKeys = {
   all: () => ["adapters"] as const,
 } as const;
+
+/** Session-AGNOSTIC skills registry (issue #362, ADR-0086) -- the settings
+ *  SkillsSection list read + the create / update / delete invalidation target.
+ *  NOT under the session prefix: the registry is process-global (one root
+ *  shared by every session). A close's removeQueries does not touch it. */
+export const skillKeys = {
+  all: () => ["skills"] as const,
+} as const;

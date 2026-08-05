@@ -6,8 +6,9 @@
 // pane now self-persists through the parent's commit helper, so this module only
 // carries the section id set + order.
 
-/** The four settings panes (ADR-0065): General / Profiles / Engine / Privacy. */
-export type SettingsSection = "general" | "profiles" | "engine" | "privacy";
+/** The settings panes (ADR-0065 + #362 skills): General / Skills / Profiles /
+ *  Engine / Privacy. */
+export type SettingsSection = "general" | "skills" | "profiles" | "engine" | "privacy";
 
 /** The ordered set of settings sections rendered into the left rail. Drives
  *  ORDER + state only; the visible label for each id is rendered by SectionLabel
@@ -16,6 +17,7 @@ export type SettingsSection = "general" | "profiles" | "engine" | "privacy";
  *  id, or a helper returning {id}, would let the i18n:check CI gate fail). */
 export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSection> = [
   "general",
+  "skills",
   "profiles",
   "engine",
   "privacy",
