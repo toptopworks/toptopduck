@@ -387,8 +387,9 @@ export async function listMcpServerStatus(sessionId: string): Promise<McpServerS
 // session). The directory scan IS the registry (no sidecar, no app-config
 // entry). Rejects are the typed SkillError (adjacently tagged like every other
 // typed IPC error) so the settings page renders each refusal through the locale
-// catalog (ADR-0052). The settings SkillsSection that drives these lands in
-// this slice; the composer "+" panel + mount model arrive in later #303 slices.
+// catalog (ADR-0052). The composer "+" panel reads the registry through the
+// same IPC (issue #365); the per-session mount model lives in the block below
+// (issue #363).
 
 // List every spec-valid skill in the registry PLUS the directories the scan
 // skipped (acquired derived by the loader). Directories that fail the spec
@@ -431,15 +432,15 @@ export async function deleteSkill(name: string): Promise<void> {
 // (reject_if_resuming + reject_if_in_flight), so the toggle the frontend
 // renders is also disabled under the same `loading` gate the composer already
 // honors (issue #365 AC #5). Rejects ride SessionError.SkillMount (typed
-// AlreadyMounted / NotMounted); a stale-cache re-mount after a session close
-// lands as a generic SessionError and the panel coalesces it to no-op.
+// AlreadyMounted / NotMounted).
 
 // The session's currently-mounted skill names, in first-mount insertion order
 // (issue #363). Read-only; the composer "+" panel + the badge both derive the
 // active set from this. Lock-light server-side -- safe to call while a turn is
-// in flight. A reject (session closed mid-flight) propagates to the caller;
-// the panel coalesces an undefined read to an empty set, never a user-facing
-// error.
+// in flight. A reject (e.g. session closed mid-flight) propagates to the
+// caller; the skills section renders the cached / undefined read as an empty
+// set for numeric coherence (badge count + checkbox state) and surfaces the
+// reject through its alert slot.
 export async function listMountedSkills(sessionId: string): Promise<string[]> {
   return invoke<string[]>("list_mounted_skills", { sessionId });
 }

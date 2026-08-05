@@ -47,34 +47,53 @@ export function ComposerSkillsSection({
   const intl = useIntl();
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
-  // One pending name at a time -- the toggle the user just clicked stays
-  // disabled until its IPC settles, so a double-click cannot enqueue a
-  // redundant mount / unmount. Other rows stay interactive (the backend
-  // serializes mutations through the session lock; rapid cross-row toggles are
-  // fine).
-  const [pendingName, setPendingName] = useState<string | null>(null);
+  // One pending name per row -- each in-flight toggle disables ONLY its own
+  // checkbox, so rapid cross-row toggles proceed in parallel (the backend
+  // serializes the writes through the session lock). A double-click on the
+  // SAME row still cannot enqueue a redundant write: that row stays disabled
+  // until its own IPC settles.
+  const [pendingNames, setPendingNames] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
+
+  // Mark / clear a row as in-flight. Functional updaters so two concurrent
+  // toggles cannot clobber each other's entry; `clearPending` returns the same
+  // Set reference when nothing is pending so downstream `useMemo`/render
+  // bail-outs keep working.
+  function markPending(name: string) {
+    setPendingNames((prev) => new Set(prev).add(name));
+  }
+  function clearPending(name: string) {
+    setPendingNames((prev) => {
+      if (!prev.has(name)) return prev;
+      const next = new Set(prev);
+      next.delete(name);
+      return next;
+    });
+  }
 
   // The process-global registry (one root shared by every session). The parent
   // ComposerContextPanel reads the same key for its degraded decision, so the
   // first mount pays the IPC + every later consumer rides the cache.
-  const { data: listing } = useQuery({
+  const { data: listing, isLoading } = useQuery({
     queryKey: skillKeys.all(),
     queryFn: listSkills,
   });
   // The session's active mount set (folded from the timeline on the backend).
   // Shares the cache with the parent's badge read; mount / unmount invalidate
-  // it so the badge re-reads without a remount (ADR-0083).
-  const { data: mounted } = useQuery({
+  // it so the badge re-reads without a remount (ADR-0083). A query reject
+  // surfaces through `displayError` below so a background refetch failure
+  // never rolls the checkbox back silently.
+  const { data: mounted, error: mountedQueryError } = useQuery({
     queryKey: sessionKeys.mountedSkills(sessionId),
     queryFn: () => listMountedSkills(sessionId),
   });
 
   const mountedSet = useMemo(() => new Set(mounted ?? []), [mounted]);
 
-  // Resync the cache + clear the error after a mount / unmount settle. Central
-  // here so both mutations share the identical post-write behavior (seed the
-  // cache for an instant flip, then invalidate so the backend truth lands).
+  // Resync the cache + clear the mutation error after a mount / unmount settle.
+  // Central here so both mutations share the identical post-write behavior
+  // (seed the cache for an instant flip, then invalidate so the backend truth
+  // lands).
   function applyMountDelta(delta: (prev: string[] | undefined) => string[]) {
     setError(null);
     queryClient.setQueryData<string[]>(sessionKeys.mountedSkills(sessionId), delta);
@@ -83,30 +102,30 @@ export function ComposerSkillsSection({
 
   const mountMutation = useMutation({
     mutationFn: (name: string) => mountSkill(sessionId, name),
-    onMutate: (name) => setPendingName(name),
+    onMutate: (name) => markPending(name),
     onSuccess: (_data, name) =>
       applyMountDelta((prev) => (prev?.includes(name) ? prev : [...(prev ?? []), name])),
     onError: (e) => {
       setError(fmtError(e, intl));
       void queryClient.invalidateQueries({ queryKey: sessionKeys.mountedSkills(sessionId) });
     },
-    onSettled: () => setPendingName(null),
+    onSettled: (_d, _e, name) => clearPending(name),
   });
 
   const unmountMutation = useMutation({
     mutationFn: (name: string) => unmountSkill(sessionId, name),
-    onMutate: (name) => setPendingName(name),
+    onMutate: (name) => markPending(name),
     onSuccess: (_data, name) =>
       applyMountDelta((prev) => prev?.filter((n) => n !== name) ?? []),
     onError: (e) => {
       setError(fmtError(e, intl));
       void queryClient.invalidateQueries({ queryKey: sessionKeys.mountedSkills(sessionId) });
     },
-    onSettled: () => setPendingName(null),
+    onSettled: (_d, _e, name) => clearPending(name),
   });
 
   function toggle(skill: SkillEntry) {
-    if (loading || pendingName !== null) return;
+    if (loading || pendingNames.has(skill.name)) return;
     if (mountedSet.has(skill.name)) {
       unmountMutation.mutate(skill.name);
     } else {
@@ -121,8 +140,14 @@ export function ComposerSkillsSection({
     return registry.filter((s) => s.name.toLowerCase().includes(q));
   }, [registry, search]);
 
-  const empty = registry.length === 0;
+  // Suppress the empty-state hint while the registry is still loading so the
+  // first paint does not flicker "No skills yet" before the IPC resolves.
+  const empty = !isLoading && registry.length === 0;
   const noMatches = !empty && filtered.length === 0;
+  // Mutation error takes precedence (the user's just-attempted write), then a
+  // query reject from a background refetch. Either lands in the same alert
+  // slot so a failure is never silent.
+  const displayError = error ?? (mountedQueryError ? fmtError(mountedQueryError, intl) : null);
 
   return (
     <section className="composer-skill-section grid gap-1.5">
@@ -132,11 +157,10 @@ export function ComposerSkillsSection({
           defaultMessage="Skills"
         />
       </span>
-      {/* Compact search -- filters by name only (the list shows name + checkbox,
-          no description to also match against). The aria-label reuses the
+      {/* Compact search -- filters by name only. The aria-label reuses the
           placeholder id: a placeholder alone is not a substitute for an
-          accessible name (it vanishes on input), and the compact popover has no
-          room for a visible <label>. */}
+          accessible name (it vanishes on input), and the compact popover has
+          no room for a visible <label>. */}
       <input
         type="search"
         value={search}
@@ -154,7 +178,7 @@ export function ComposerSkillsSection({
       <ul className="grid max-h-44 gap-0.5 overflow-y-auto pr-0.5">
         {filtered.map((skill) => {
           const isMounted = mountedSet.has(skill.name);
-          const pending = pendingName === skill.name;
+          const pending = pendingNames.has(skill.name);
           const disabled = loading || pending;
           return (
             <li key={skill.name}>
@@ -195,9 +219,9 @@ export function ComposerSkillsSection({
           />
         </span>
       )}
-      {error && (
+      {displayError && (
         <p className="text-destructive px-2 text-xs" role="alert">
-          {error}
+          {displayError}
         </p>
       )}
       {/* Footer: hop to the settings SkillsSection. The shell owns the

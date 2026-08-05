@@ -175,11 +175,12 @@ describe("ComposerContextPanel (ADR-0083, issue #351)", () => {
       expect(
         await screen.findByRole("button", { name: "Select data files…" }),
       ).toBeInTheDocument();
-      // Section 2: skills -- live (issue #365). The compact list renders even
-      // when the registry is empty (the empty-state hint shows).
+      // Section 2: skills -- live (issue #365). The compact list renders the
+      // empty-state hint once the registry read resolves (no flicker during
+      // the loading phase, issue #365 review A1).
       expect(screen.getByText("Skills")).toBeInTheDocument();
       expect(
-        screen.getByText("No skills yet. Add one in Settings."),
+        await screen.findByText("No skills yet. Add one in Settings."),
       ).toBeInTheDocument();
       // Section 3: MCP tools -- still a disabled placeholder until #301.
       expect(screen.getByText("MCP tools")).toBeInTheDocument();
@@ -370,6 +371,29 @@ describe("ComposerContextPanel (ADR-0083, issue #351)", () => {
       );
     });
 
+    it("surfaces a rejected mount as an alert (no silent failure)", async () => {
+      // AC#3 honest-degrade contract: a mount reject (AlreadyMounted on a stale
+      // cache, SessionError::InFlight from a race, etc.) must reach the alert
+      // slot, not vanish. fmtError renders the typed reject; the section's
+      // `role="alert"` is the user-visible surface.
+      vi.mocked(listSkills).mockResolvedValue(listing([skill("alpha")]));
+      vi.mocked(mountSkill).mockRejectedValueOnce(new Error("AlreadyMounted"));
+      renderPanel({ mcpConfigured: true });
+
+      fireEvent.click(screen.getByRole("button", { name: "Add session context" }));
+      fireEvent.click(
+        await screen.findByRole("checkbox", { name: "Mount skill alpha" }),
+      );
+
+      expect(await screen.findByRole("alert")).toBeInTheDocument();
+      // The row unlocks once the mutation settles (clearPending onSettled).
+      await waitFor(() =>
+        expect(
+          screen.getByRole("checkbox", { name: "Mount skill alpha" }),
+        ).not.toBeDisabled(),
+      );
+    });
+
     it("filters the list by name as the user types", async () => {
       vi.mocked(listSkills).mockResolvedValue(
         listing([skill("alpha"), skill("beta"), skill("gamma")]),
@@ -408,6 +432,34 @@ describe("ComposerContextPanel (ADR-0083, issue #351)", () => {
       );
 
       expect(mountSkill).not.toHaveBeenCalled();
+    });
+
+    it("does not enqueue a second mount on a rapid double-click", async () => {
+      // The pending-name guard: a double-click on the SAME row cannot queue a
+      // redundant IPC. The mount never resolves so pendingNames stays set; the
+      // second click's `toggle` short-circuits on `pendingNames.has(name)`,
+      // and the row's `disabled` attribute agrees.
+      vi.mocked(listSkills).mockResolvedValue(listing([skill("alpha")]));
+      vi.mocked(mountSkill).mockImplementationOnce(
+        () => new Promise<void>(() => {}),
+      );
+      renderPanel({ mcpConfigured: true });
+
+      fireEvent.click(screen.getByRole("button", { name: "Add session context" }));
+      const checkbox = await screen.findByRole("checkbox", {
+        name: "Mount skill alpha",
+      });
+
+      fireEvent.click(checkbox);
+      // Let the first mutate + onMutate land (mutationFn invoked, the row's
+      // pendingName set + `disabled` attribute applied).
+      await waitFor(() => expect(mountSkill).toHaveBeenCalledTimes(1));
+
+      fireEvent.click(checkbox);
+
+      // The pending-name guard (and the row's now-disabled flag) keeps the
+      // second click from queuing a redundant IPC.
+      expect(mountSkill).toHaveBeenCalledTimes(1);
     });
 
     it("fires onOpenSettingsSkills when the Manage skills footer is clicked", async () => {
