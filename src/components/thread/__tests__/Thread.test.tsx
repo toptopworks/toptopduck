@@ -547,6 +547,35 @@ describe("Thread", () => {
     });
   });
 
+  it("omits MCP detail from a Mount tooltip when the skill declares no servers (issue #366)", async () => {
+    // A Mount whose skill is in the registry but declares zero MCP servers
+    // carries no declaration to disclose, so the tooltip mirrors the bare
+    // verb + name -- a regression that drops the length > 0 guard (showing
+    // "Declares MCP:" with an empty list) fails here. The default registry
+    // entry has no servers, so this is the common path.
+    const entries: ThreadEntry[] = [
+      { entry: "Skill", data: { kind: "Mount", name: "plain-skill" } },
+    ];
+    const skillIndex = new Map([["plain-skill", skillEntry("plain-skill")]]); // empty mcp_servers
+    const { container } = renderThread(
+      <Thread
+        entries={entries}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        skillIndex={skillIndex}
+      />,
+    );
+    const markerText = container.querySelector(
+      `.skill-entry[data-skill-kind="mount"] .skill-text`,
+    ) as HTMLElement;
+    fireEvent.pointerMove(markerText);
+    await waitFor(() => {
+      const tip = screen.getByRole("tooltip");
+      expect(tip.textContent).toContain("plain-skill");
+      expect(tip.textContent).not.toContain("声明 MCP");
+    });
+  });
+
   it("does not surface MCP detail on an Unmount marker (the declaration is no longer operative)", async () => {
     // Unmount means the skill left the active set; its MCP declaration no
     // longer applies, so the tooltip carries the verb + name only -- a

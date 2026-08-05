@@ -1,7 +1,8 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useIntl, FormattedMessage } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { fmtError, errorDetail, formatTurnFailure, turnFailureDetail } from "../lib/error-presentation";
+import { log } from "../lib/log";
 import { listSkills } from "../api";
 import { RailToggle } from "../shell/RailToggle";
 import { WorkspaceToggle } from "../shell/WorkspaceToggle";
@@ -160,6 +161,16 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
     for (const skill of skills) m.set(skill.name, skill);
     return m;
   }, [skillListing.data?.skills]);
+  // Observable honest-degrade: listSkills never rejects in practice, but a
+  // transport failure would otherwise leave the rail silently enriched-less
+  // with no signal. ComposerSkillsSection / SkillsSection surface their query
+  // errors in the UI; the rail trades UI surfacing for readability, so the
+  // log is the only trace (ADR-0029).
+  useEffect(() => {
+    if (skillListing.error !== null) {
+      log.warn("SessionPane", "skill registry query failed", skillListing.error);
+    }
+  }, [skillListing.error]);
   // Hoisted so the ActiveSourceDeleteDialog filter callback reads it without a
   // non-null assertion: TS narrows a const across the JSX guard + closure, but
   // not a member access like s.pendingActiveDelete.

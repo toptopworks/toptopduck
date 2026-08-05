@@ -474,7 +474,9 @@ function SkillMarker({
   // Disclosed only on a Mount whose skill is still carried -- the declaration
   // is operative only while the skill is active; an Unmount's declaration is
   // no longer in force, and a missing skill has no declaration to read.
-  const mcpServers = !missing && event.kind === "Mount" && skill ? skill.mcp_servers : [];
+  // (The `skill` truthiness check covers both "not wired" and "wired but
+  // missing" -- either way `skill` is undefined and the guard short-circuits.)
+  const mcpServers = event.kind === "Mount" && skill ? skill.mcp_servers : [];
   const missingSuffix = missing ? (
     <FormattedMessage
       id="thread.skill.missingSuffix"
@@ -495,20 +497,18 @@ function SkillMarker({
   // truncated by the fixed skill-row width still discloses the state on
   // hover) plus the MCP declaration when operative. Declared once so the
   // visible copy and the tooltip copy cannot drift apart.
-  const tooltipText =
-    mcpDetail !== null ? (
-      <>
-        {text}
-        {missingSuffix}
-        <br />
-        {mcpDetail}
-      </>
-    ) : (
-      <>
-        {text}
-        {missingSuffix}
-      </>
-    );
+  const tooltipText = (
+    <>
+      {text}
+      {missingSuffix}
+      {mcpDetail !== null && (
+        <>
+          <br />
+          {mcpDetail}
+        </>
+      )}
+    </>
+  );
   return (
     <p
       className={cn(
