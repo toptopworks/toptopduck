@@ -32,6 +32,7 @@ pub mod session;
 pub mod session_store;
 pub mod skills;
 pub mod tools;
+pub mod util;
 pub mod window;
 pub mod workingset;
 

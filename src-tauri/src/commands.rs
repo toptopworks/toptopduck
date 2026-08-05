@@ -41,7 +41,9 @@ use crate::provider::live_config::LiveProviderConfig;
 use crate::runtime::acp::adapter::{detect_adapter, v1_adapters, AdapterSpec};
 use crate::session::{RenameSessionError, ResumeEvent, ResumeProgress, Session};
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
-use crate::skills::{SkillEntry, SkillError, SkillListing, SkillUpdate, SkillsRoot};
+use crate::skills::{
+    resolve_prompt_fragments, SkillEntry, SkillError, SkillListing, SkillUpdate, SkillsRoot,
+};
 
 /// ADR-0063: the close-and-wait-release variant's wait ceiling. Aligned to
 /// ADR-0021's `REQUEST_TIMEOUT` (120s, the in-flight ask's longest possible
@@ -454,6 +456,7 @@ pub async fn ask(
     app: tauri::AppHandle,
     store: State<'_, Arc<SessionStore>>,
     live: State<'_, LiveProviderConfig>,
+    skills_root: State<'_, SkillsRoot>,
     session_id: String,
     question: String,
 ) -> Result<TurnOutcome, SessionError> {
@@ -501,6 +504,11 @@ pub async fn ask(
     // per wait boundary + per tool call, across every loop step).
     let app_for_cb = app.clone();
     let sid = session_id.clone();
+    // Clone the skills-root path off the managed State so it can move into the
+    // spawn_blocking closure (the State borrow does not cross the await). The
+    // registry root is read below to resolve each mounted skill's SKILL.md body
+    // + whole-file SHA-256 for prompt injection + provenance (issue #364).
+    let skills_root = skills_root.0.clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = handle.session_lock()?;
         // Issue #353: feed the session's runtime choice into the turn's
@@ -510,6 +518,15 @@ pub async fn ask(
         // mid-turn, and a resumed Session (fresh, built-in default) reads
         // the reset choice.
         s.set_external_runtime(handle.runtime_choice());
+        // Issue #364 (ADR-0086): resolve the session's mounted skills into
+        // prompt fragments (name + verbatim body + whole-file SHA-256) here
+        // at the command boundary, where the registry root lives, so the
+        // session stays I/O-free for skill content (it consumes fragments,
+        // mirroring the mcp_servers "data passed in" pattern). The session
+        // lock is held, so the mounted set cannot change between this read
+        // and the turn.
+        let mounted = s.mounted_skills();
+        let skill_fragments = resolve_prompt_fragments(&skills_root, &mounted);
         let outcome = s.ask_with_phase(
             &question,
             &approval,
@@ -535,6 +552,7 @@ pub async fn ask(
             },
             &active,
             live.keychain(),
+            &skill_fragments,
         );
         // Issue #301 slice D: mirror the Session's last-turn connect cache into
         // the handle so list_mcp_server_status is lock-light (it never takes

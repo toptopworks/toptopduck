@@ -1325,6 +1325,7 @@ fn ask_with_phase_records_the_tool_call_event_stream_on_a_result_turn() {
         |p| phases.push(p),
         &[],
         &KeychainStore::new(),
+        &[],
     );
     assert!(
         matches!(outcome, TurnOutcome::Materialized { .. }),
@@ -1370,6 +1371,7 @@ fn ask_with_phase_records_only_thinking_on_a_textual_turn() {
         |p| phases.push(p),
         &[],
         &KeychainStore::new(),
+        &[],
     );
     assert!(
         matches!(outcome, TurnOutcome::Textual { .. }),
@@ -1418,6 +1420,7 @@ fn turn_progress_events_for_one_turn_share_one_session_id() {
         },
         &[],
         &KeychainStore::new(),
+        &[],
     );
     assert!(
         matches!(outcome, TurnOutcome::Materialized { .. }),
