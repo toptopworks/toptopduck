@@ -91,6 +91,32 @@ pub fn create_skill(root: &Path, name: &str, description: &str) -> Result<SkillE
     load_skill(&dir)
 }
 
+/// RAII guard for an in-flight rename in [`update_skill`]: if still armed on
+/// drop, restore the original name (panic-safe best effort -- a rollback
+/// failure is logged because Drop cannot surface it). The normal Err path
+/// disarms and rolls back manually so the rollback failure can be folded
+/// into the returned error.
+struct RenameGuard {
+    from: PathBuf,
+    to: PathBuf,
+    armed: bool,
+}
+
+impl Drop for RenameGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Err(re) = fs::rename(&self.to, &self.from) {
+                log::warn!(
+                    target: "skills",
+                    "panic rollback of `{}` -> `{}` failed: {re}",
+                    self.to.display(),
+                    self.from.display()
+                );
+            }
+        }
+    }
+}
+
 /// Rewrite one `local` skill's `SKILL.md` (frontmatter + body) atomically.
 /// `name` addresses the CURRENT directory; `update.name` is the identity to
 /// WRITE -- a different value renames the directory first (refusing a taken
@@ -114,17 +140,29 @@ pub fn update_skill(
     validate_body(&update.body)?;
 
     // Rename first when the identity changes, then rewrite in the new home.
-    let renamed = if update.name != name {
+    // The guard keeps the registry self-consistent if the rewrite path errors
+    // or unwinds: armed through the closure, disarmed on the Ok path; on the
+    // Err path the manual rollback folds its own failure into the returned
+    // error, and an armed drop (e.g. a panic mid-closure) is the last-ditch
+    // best-effort rollback with a log warn.
+    let mut guard = if update.name != name {
         let target = root.join(&update.name);
         if target.exists() {
             return Err(SkillError::NameTaken(update.name.clone()));
         }
         fs::rename(&dir, &target).map_err(|e| fs_err("rename skill directory", &target, e))?;
-        Some(target)
+        Some(RenameGuard {
+            from: dir.clone(),
+            to: target,
+            armed: true,
+        })
     } else {
         None
     };
-    let work_dir = renamed.clone().unwrap_or_else(|| dir.clone());
+    let work_dir = guard
+        .as_ref()
+        .map(|g| g.to.clone())
+        .unwrap_or_else(|| dir.clone());
 
     let result = (|| -> Result<SkillEntry, SkillError> {
         let md_path = work_dir.join(SKILL_MD);
@@ -145,17 +183,21 @@ pub fn update_skill(
         load_skill(&work_dir)
     })();
     match result {
-        Ok(entry) => Ok(entry),
+        Ok(entry) => {
+            if let Some(g) = guard.as_mut() {
+                g.armed = false;
+            }
+            Ok(entry)
+        }
         Err(e) => {
-            if let Some(from) = renamed {
-                // Compensate the rename so the registry stays consistent
-                // (best effort -- a failure here is logged, not masked).
-                if let Err(re) = fs::rename(&from, &dir) {
-                    log::warn!(
-                        target: "skills",
-                        "failed to roll back rename of `{}` after write failure: {re}",
-                        from.display()
-                    );
+            if let Some(g) = guard.as_mut() {
+                g.armed = false;
+                if let Err(re) = fs::rename(&g.to, &g.from) {
+                    return Err(SkillError::FsFailure(format!(
+                        "{e}; ALSO failed to roll back rename `{}` -> `{}`: {re}",
+                        g.to.display(),
+                        g.from.display()
+                    )));
                 }
             }
             Err(e)
@@ -604,6 +646,42 @@ mod tests {
         let err = update_skill(root, "source-skill", payload).unwrap_err();
         assert_eq!(err, SkillError::NameTaken("occupied".into()));
         assert!(root.join("source-skill").exists(), "original must survive");
+    }
+
+    #[test]
+    fn rename_guard_rolls_back_on_drop_when_armed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let from = root.join("from");
+        let to = root.join("to");
+        fs::create_dir(&from).unwrap();
+        fs::rename(&from, &to).unwrap();
+        // Armed on drop (panic analog): the original name is restored.
+        drop(RenameGuard {
+            from: from.clone(),
+            to: to.clone(),
+            armed: true,
+        });
+        assert!(from.is_dir(), "armed guard must roll back");
+        assert!(!to.exists(), "armed guard must remove the renamed target");
+    }
+
+    #[test]
+    fn rename_guard_leaves_rename_in_place_when_disarmed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let from = root.join("from");
+        let to = root.join("to");
+        fs::create_dir(&from).unwrap();
+        fs::rename(&from, &to).unwrap();
+        let mut g = RenameGuard {
+            from,
+            to: to.clone(),
+            armed: true,
+        };
+        g.armed = false;
+        drop(g);
+        assert!(to.is_dir(), "disarmed guard must leave the rename in place");
     }
 
     #[test]
