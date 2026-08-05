@@ -37,7 +37,7 @@ export interface SkillEntry {
   // SHA-256 hex of the WHOLE SKILL.md bytes (frontmatter + body) at the
   // registry scan (ADR-0086, issue #381). The drift anchor the TurnCard
   // compares each turn's SkillProvenance.content_hash against to surface
-  // "已修改" when a skill changed after a recorded turn.
+  // a "modified" drift badge when a skill changed after a recorded turn.
   content_hash: string;
 }
 

@@ -1326,7 +1326,7 @@ describe("Thread", () => {
     });
   });
 
-  // Issue #381: TurnCard surfaces "已修改" for skills whose content_hash drifted
+  // Issue #381: TurnCard surfaces a "modified" badge for skills whose content_hash drifted
   // since the turn was recorded. The check compares each turn.provenance.skills
   // entry against the registry's current SkillEntry.content_hash.
   describe("TurnCard skill provenance drift (issue #381)", () => {
@@ -1355,7 +1355,7 @@ describe("Thread", () => {
       return new Map(skills.map((s) => [s.name, s]));
     }
 
-    it("surfaces 已修改 when the skill's content_hash changed since the turn", () => {
+    it("surfaces the modified badge when the skill's content_hash changed since the turn", () => {
       const index = skillIndex(registrySkill("sql-coach", "registry-hash"));
       renderThread(
         <Thread

@@ -114,7 +114,7 @@ export interface TraceEntry {
 // Per-turn skill provenance crossing IPC (issue #381): the active skills at
 // the turn's assembly time, each with its content_hash so the TurnCard can
 // drift-compare against the registry's current SkillEntry.content_hash and
-// surface "已修改" when a skill changed after a recorded turn. Mirrors the
+// surface a "modified" drift badge when a skill changed after a recorded turn. Mirrors the
 // Rust crate::model::TurnProvenance -- the IPC wire is intentionally narrower
 // than the persisted recipe::TurnProvenance (which also carries the runtime
 // kind); the runtime is backend audit only, never crosses to the webview.

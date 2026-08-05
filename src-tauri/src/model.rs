@@ -608,7 +608,7 @@ impl TurnOutcome {
 /// stale-degrade anchor -- the frontend drift-compares it against the
 /// registry's current
 /// [`SkillEntry::content_hash`](crate::skills::model::SkillEntry::content_hash)
-/// and surfaces "已修改" on a mismatch (issue #381); an empty hash means no
+/// and surfaces a "modified" drift badge on a mismatch (issue #381); an empty hash means no
 /// baseline (a v3->v4 migration product, or the skill's `SKILL.md` was
 /// unreadable at turn time), so the check never trips and a migrated recipe
 /// never false-positives.
@@ -630,7 +630,7 @@ pub struct SkillProvenance {
 
 /// Per-turn skill provenance crossing IPC (issue #381): the active skills at
 /// the turn's assembly time, each with its [`SkillProvenance::content_hash`] so
-/// the frontend drift-compares against the registry and surfaces "已修改" for
+/// the frontend drift-compares against the registry and surfaces a "modified" badge for
 /// a skill whose content changed after this turn. Mirrors the skills half of
 /// the persisted [`crate::persistence::recipe::TurnProvenance`] (which also
 /// carries the runtime kind); the IPC wire is intentionally narrower -- the

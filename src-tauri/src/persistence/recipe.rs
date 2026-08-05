@@ -216,10 +216,11 @@ pub struct TurnProvenance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<RuntimeKind>,
     /// The active skills at this turn's assembly time (ADR-0079/0086, issue
-    /// #363), each carrying its `content_hash` so resume can honestly degrade
-    /// when a skill's content drifted or the skill left the registry. Empty
-    /// when no skills were mounted or skill tracking is not yet wired (the
-    /// live path fills this once #364 wires skill prompt injection).
+    /// #363), each carrying its `content_hash` so the frontend can drift-compare
+    /// against the registry's current hash and surface a "modified" badge when
+    /// a skill changed after this turn. Empty when no skills were mounted or
+    /// skill tracking is not yet wired (the live path fills this once #364
+    /// wires skill prompt injection).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<SkillProvenance>,
 }

@@ -805,7 +805,7 @@ function StaleChip({
 // was recorded. Each provenance skill carries its SKILL.md SHA-256 at assembly
 // time; the registry's current SkillEntry.content_hash is the same hash
 // recomputed at load. A mismatch means the skill was edited after this answer
-// -- the TurnCard surfaces "已修改" so a reader can tell the answer may be
+// -- the TurnCard surfaces a drift badge so a reader can tell the answer may be
 // stale. An empty content_hash (v3->v4 migration, no baseline) never trips the
 // check; a name the registry no longer carries is the SkillMarker's "no longer
 // exists" case (issue #366), not a content drift -- omitted here.
