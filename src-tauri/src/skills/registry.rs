@@ -65,13 +65,15 @@ pub fn list_skills(root: &Path) -> SkillListing {
                     path.display()
                 );
                 // The directory name is the user-facing handle (parallel to
-                // SkillEntry::name); fall back to a sentinel for a non-UTF-8
-                // name so the row still renders instead of vanishing twice.
+                // SkillEntry::name). `to_string_lossy` keeps each non-UTF-8
+                // name distinct (different byte sequences map to different
+                // lossy strings) so two non-UTF-8 directories never collapse
+                // into one row + React key; a path with no file_name
+                // component falls back to a positional sentinel.
                 let dir = path
                     .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("<non-utf8-name>")
-                    .to_string();
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| format!("<unnamed-entry-{}>", ignored.len()));
                 ignored.push(SkippedSkill {
                     dir,
                     reason: e.to_string(),

@@ -77,12 +77,14 @@ pub struct SkippedSkill {
     /// The directory name under the skills root (its `file_name`, not the
     /// full OS path -- the UI lists names, parallel to `SkillEntry::name`).
     pub dir: String,
-    /// The English technical reason the directory failed spec validation
-    /// (e.g. "frontmatter name `X` does not match its directory name `Y`",
-    /// "cannot read `…/SKILL.md`: …"). This is the
-    /// [`SkillError`] Display string -- Display IS the IPC contract for THIS
-    /// surface (the typed-reject path still reads serde `kind`, never this
-    /// string; the two surfaces are disjoint).
+    /// The English technical reason the directory failed spec validation,
+    /// rendered verbatim. This is the [`SkillError`] Display string, so the
+    /// value carries the variant prefix (e.g. `"invalid skill: frontmatter
+    /// name \`X\` does not match its directory name \`Y\`"`, `"invalid skill:
+    /// cannot read \`<root>/<dir>/SKILL.md\`: <io error>"` -- a read failure
+    /// carries the full OS path, parallel to [`SkillEntry::link_target`]).
+    /// Display is the IPC contract for THIS surface; see [`SkillError`] for
+    /// the full set of paths Display text crosses.
     pub reason: String,
 }
 
@@ -128,10 +130,14 @@ pub struct SkillUpdate {
 /// StoreCommandError so the frontend's fmtError dispatch stays unambiguous
 /// (ADR-0069 invariant). The data strings carry the English technical detail
 /// for the fold; user-facing wording lives in the locale catalog (ADR-0052).
-/// `Display` crosses IPC ONLY via [`SkippedSkill::reason`] -- the diagnostic
-/// fold for spec-invalid directories the scan skipped (issue #373), where the
-/// frontend renders the English detail verbatim. The typed-reject path reads
-/// the serde `kind`, never this string -- the two IPC surfaces are disjoint.
+/// `Display` text crosses IPC in two places, both rendering English detail
+/// verbatim: primarily [`SkippedSkill::reason`] (the diagnostic fold for
+/// spec-invalid directories the scan skipped, issue #373), and the
+/// [`SkillError::FsFailure`] `data` string when `update_skill`'s rollback
+/// folds the inner error's Display into its message (issue #362). The plain
+/// typed-reject path serializes each variant's inner payload string as serde
+/// `data` -- that payload is the raw detail, NOT the Display string, so a
+/// `kind`-dispatch consumer never reads Display.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum SkillError {

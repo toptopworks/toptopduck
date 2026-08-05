@@ -45,8 +45,11 @@ export interface SkippedSkill {
   // The directory name under the skills root (its file_name, not the full
   // OS path).
   dir: string;
-  // The English technical reason the directory failed spec validation
-  // (e.g. "frontmatter name `X` does not match its directory name `Y`").
+  // The English technical reason the directory failed spec validation,
+  // rendered verbatim. This is the SkillError Display string, so the value
+  // carries the variant prefix (e.g. "invalid skill: frontmatter name `X`
+  // does not match its directory name `Y`"; a read failure carries the full
+  // OS path, parallel to SkillEntry.link_target).
   reason: string;
 }
 
