@@ -315,6 +315,7 @@ function SourceRow({
   onToggleSourceAll,
   onToggleSkill,
 }: SourceRowProps) {
+  const intl = useIntl();
   const importableDirs = source.skills
     .filter((s) => s.status === "importable")
     .map((s) => s.source_dir);
@@ -324,7 +325,10 @@ function SourceRow({
 
   return (
     <div className="border-border rounded-lg border">
-      {/* Collapsed header: select-all checkbox + label + path + count + arrow. */}
+      {/* Collapsed header: select-all checkbox + single expand toggle carrying
+          label + path + count badge + chevron (one aria-expanded element, not
+          two — P2 fix). The aria-label carries the expand/collapse action so
+          the path / badge text never leaks into the accessible name. */}
       <div className="hover:bg-accent/50 flex items-center gap-2 px-3 py-2.5">
         <input
           type="checkbox"
@@ -338,29 +342,37 @@ function SourceRow({
           type="button"
           onClick={onToggleExpand}
           aria-expanded={expanded}
+          aria-label={
+            expanded
+              ? intl.formatMessage(
+                  {
+                    id: "settings.skills.importCollapse",
+                    defaultMessage: "Collapse {label}",
+                  },
+                  { label: source.label },
+                )
+              : intl.formatMessage(
+                  {
+                    id: "settings.skills.importExpand",
+                    defaultMessage: "Expand {label}",
+                  },
+                  { label: source.label },
+                )
+          }
           className="flex min-w-0 flex-1 items-center gap-2 text-left"
         >
           <span className="truncate text-sm font-medium">{source.label}</span>
           <span className="text-muted-foreground truncate font-mono text-xs">
             {source.path}
           </span>
-        </button>
-        <Badge variant="secondary" className="shrink-0">
-          {source.skills.length}
-        </Badge>
-        <button
-          type="button"
-          onClick={onToggleExpand}
-          aria-expanded={expanded}
-          aria-label={
-            expanded
-              ? "Collapse source"
-              : "Expand source"
-          }
-          className="text-muted-foreground hover:text-foreground shrink-0"
-        >
+          <Badge variant="secondary" className="ml-auto shrink-0">
+            {source.skills.length}
+          </Badge>
           <ChevronRight
-            className={cn("size-4 transition-transform", expanded && "rotate-90")}
+            className={cn(
+              "size-4 shrink-0 transition-transform",
+              expanded && "rotate-90",
+            )}
             aria-hidden
           />
         </button>

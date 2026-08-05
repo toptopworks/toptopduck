@@ -92,8 +92,8 @@ describe("ImportSkillsDialog (issue #367)", () => {
     renderWithProviders(<ImportSkillsDialog onClose={() => {}} />);
     await screen.findByText("Claude Code");
 
-    // Click the expand arrow (the rotate-on-expand chevron button).
-    fireEvent.click(screen.getByRole("button", { name: "Expand source" }));
+    // Click the expand toggle (aria-label "Expand {label}" via i18n).
+    fireEvent.click(screen.getByRole("button", { name: /expand/i }));
 
     expect(await screen.findByText("alpha")).toBeInTheDocument();
     expect(screen.getByText("First skill.")).toBeInTheDocument();
@@ -112,7 +112,7 @@ describe("ImportSkillsDialog (issue #367)", () => {
     vi.mocked(listSkillSources).mockResolvedValue([claudeSource]);
     renderWithProviders(<ImportSkillsDialog onClose={() => {}} />);
     await screen.findByText("Claude Code");
-    fireEvent.click(screen.getByRole("button", { name: "Expand source" }));
+    fireEvent.click(screen.getByRole("button", { name: /expand/i }));
 
     const alpha = await screen.findByText("alpha");
     // Import is gray at zero selections.
@@ -132,7 +132,7 @@ describe("ImportSkillsDialog (issue #367)", () => {
     vi.mocked(listSkillSources).mockResolvedValue([claudeSource]);
     renderWithProviders(<ImportSkillsDialog onClose={() => {}} />);
     await screen.findByText("Claude Code");
-    fireEvent.click(screen.getByRole("button", { name: "Expand source" }));
+    fireEvent.click(screen.getByRole("button", { name: /expand/i }));
     await screen.findByText("alpha");
 
     // The already-exists + invalid rows' checkboxes are disabled.
@@ -148,7 +148,7 @@ describe("ImportSkillsDialog (issue #367)", () => {
     vi.mocked(listSkillSources).mockResolvedValue([claudeSource]);
     renderWithProviders(<ImportSkillsDialog onClose={() => {}} />);
     await screen.findByText("Claude Code");
-    fireEvent.click(screen.getByRole("button", { name: "Expand source" }));
+    fireEvent.click(screen.getByRole("button", { name: /expand/i }));
     await screen.findByText("alpha");
 
     // The source-header select-all checkbox is labelled by the source label.
@@ -186,7 +186,7 @@ describe("ImportSkillsDialog (issue #367)", () => {
     const onClose = vi.fn();
     renderWithProviders(<ImportSkillsDialog onClose={onClose} />);
     await screen.findByText("Claude Code");
-    fireEvent.click(screen.getByRole("button", { name: "Expand source" }));
+    fireEvent.click(screen.getByRole("button", { name: /expand/i }));
     fireEvent.click(await screen.findByText("alpha"));
 
     fireEvent.click(screen.getByTestId("import-action"));
@@ -204,7 +204,7 @@ describe("ImportSkillsDialog (issue #367)", () => {
     vi.mocked(importSkills).mockResolvedValue([]);
     renderWithProviders(<ImportSkillsDialog onClose={() => {}} />);
     await screen.findByText("Claude Code");
-    fireEvent.click(screen.getByRole("button", { name: "Expand source" }));
+    fireEvent.click(screen.getByRole("button", { name: /expand/i }));
     fireEvent.click(await screen.findByText("alpha"));
 
     fireEvent.change(screen.getByTestId("import-mode-select"), {
@@ -230,7 +230,7 @@ describe("ImportSkillsDialog (issue #367)", () => {
     const onClose = vi.fn();
     renderWithProviders(<ImportSkillsDialog onClose={onClose} />);
     await screen.findByText("Claude Code");
-    fireEvent.click(screen.getByRole("button", { name: "Expand source" }));
+    fireEvent.click(screen.getByRole("button", { name: /expand/i }));
     fireEvent.click(await screen.findByText("alpha"));
     fireEvent.click(screen.getByTestId("import-action"));
 
