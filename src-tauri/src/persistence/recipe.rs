@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::approval::OperationKind;
 use crate::model::{
-    RectifyProvenance, SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, TextKind,
-    TurnFailure,
+    RectifyProvenance, SkillLifecycleEvent, SkillLifecycleKind, SourceLifecycleEvent,
+    SourceLifecycleKind, StaleAnchor, TextKind, TurnFailure,
 };
 
 /// Recipe format version (ADR-0036). Opening routes on this value: equal
@@ -49,7 +49,20 @@ use crate::model::{
 /// lossless: a v2 Materialized turn (single reference) wraps into a
 /// one-element promotions list; older clients reading a v3 file hit the
 /// existing higher-version honest-refuse path (ADR-0036).
-pub const RECIPE_FORMAT_VERSION: u32 = 3;
+///
+/// v4 (ADR-0086, issue #363) adds skill lifecycle to the timeline + sharpens
+/// turn provenance: a new [`RecipeEntry::Skill`] variant (isomorphic to
+/// [`RecipeEntry::Source`]) records each Mount / Unmount, and
+/// [`TurnProvenance::skills`] changes from `Vec<String>` to
+/// `Vec<`[`SkillProvenance`]`>` (each carrying its `content_hash` at assembly
+/// time). The active skill set is NOT a stored snapshot -- it is folded from
+/// the timeline's Mount/Unmount sequence ([`Recipe::mounted_skills`]). The
+/// v3->v4 mapping is lossless for every real recipe: a v3 turn's `skills`
+/// array of bare names rewrites to `{name, content_hash: ""}` objects (empty
+/// hash = no baseline, never trips the stale-degrade check); older clients
+/// reading a v4 file hit the existing higher-version honest-refuse path
+/// (ADR-0036).
+pub const RECIPE_FORMAT_VERSION: u32 = 4;
 
 /// One source Dataset's portable reference (ADR-0034/0036/0042). Paths use
 /// the **hybrid representation** ADR-0036 §4 mandates: `source_path` is always
@@ -101,18 +114,27 @@ pub struct ProductiveTurn {
     pub assumption: Option<String>,
 }
 
-/// The recipe's conversation timeline (ADR-0028/0039/0040): every turn AND
-/// every source lifecycle event, always visible, in order. A trimmed mirror
-/// of [`crate::model::ThreadEntry`] -- a Turn entry drops materialized
-/// descriptor fields resume re-derives; a Source entry passes through
-/// verbatim (ADR-0040 first-class timeline slot, never enters the LLM
-/// window). Adjacently-tagged so a future reader narrows on `entry`
-/// uniformly, mirroring the IPC `ThreadEntry` shape.
+/// The recipe's conversation timeline (ADR-0028/0039/0040/0086): every turn,
+/// every source lifecycle event, and every skill lifecycle event -- always
+/// visible, in order. A trimmed mirror of [`crate::model::ThreadEntry`]: a
+/// Turn entry drops materialized descriptor fields resume re-derives; a Source
+/// entry passes through verbatim (ADR-0040 first-class timeline slot, never
+/// enters the LLM window); a Skill entry passes through verbatim too
+/// (ADR-0086, isomorphic to Source -- the active skill set is FOLDED from the
+/// event sequence by [`Recipe::mounted_skills`], never snapshotted).
+/// Adjacently-tagged so a future reader narrows on `entry` uniformly, mirroring
+/// the IPC `ThreadEntry` shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "entry", content = "data")]
 pub enum RecipeEntry {
     Turn(RecipeTurn),
     Source(SourceLifecycleEvent),
+    /// A skill lifecycle event (ADR-0086, issue #363). Isomorphic to
+    /// [`Self::Source`]: first-class timeline slot (always visible), never a
+    /// turn (never enters the LLM window, never advances `result_N`). The
+    /// active skill set at any point is the fold of the Mount/Unmount
+    /// sequence up to that point -- see [`Recipe::mounted_skills`].
+    Skill(SkillLifecycleEvent),
 }
 
 /// One entry in a turn's persisted execution trace (ADR-0078). The trace is a
@@ -193,10 +215,37 @@ pub struct TurnProvenance {
     /// before runtime tracking (v1 migrated, or live turns predating #319).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<RuntimeKind>,
-    /// The active skill ids at this turn's assembly time (ADR-0079/0040).
-    /// Empty when no skills were mounted or skill tracking is not yet wired.
+    /// The active skills at this turn's assembly time (ADR-0079/0086, issue
+    /// #363), each carrying its `content_hash` so resume can honestly degrade
+    /// when a skill's content drifted or the skill left the registry. Empty
+    /// when no skills were mounted or skill tracking is not yet wired (the
+    /// live path fills this once #364 wires skill prompt injection).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skills: Vec<String>,
+    pub skills: Vec<SkillProvenance>,
+}
+
+/// One skill recorded on a turn's provenance (ADR-0086, issue #363): the spec
+/// `name` (stable identity, equal to the directory name) + the SHA-256 of the
+/// skill's `SKILL.md` bytes at the turn's assembly time. The hash is the
+/// stale-degrade anchor -- on resume, the engine recomputes the skill's
+/// current hash and compares: a name missing from the registry means the skill
+/// no longer exists (honest degrade, the UI names it gone); a hash difference
+/// means the skill was modified after this turn (the UI surfaces "modified
+/// since this answer"); an empty hash means no baseline (a v3->v4 migration
+/// product), so the check is not tripped and a migrated recipe never
+/// false-positives.
+///
+/// An empty `content_hash` is the v3->v4 migration output (a v3 `skills`
+/// array of bare names has no hash to carry); a live v4 turn always records
+/// the real SHA-256.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillProvenance {
+    /// The skill's spec `name` (kebab-case identity, ADR-0086 Decision 2).
+    pub name: String,
+    /// SHA-256 of the skill's `SKILL.md` bytes at the turn's assembly time, or
+    /// the empty string when no baseline exists (v3->v4 migration output --
+    /// never trips the stale-degrade check).
+    pub content_hash: String,
 }
 
 impl TurnProvenance {
@@ -480,6 +529,17 @@ pub enum RecipeError {
         index: usize,
         kind: SourceLifecycleKind,
     },
+    /// A skill-lifecycle event in `history` carries an empty `name` (ADR-0086,
+    /// issue #363). Mirrors [`Self::EmptySourceEventReference`]: an empty
+    /// skill name is unambiguous corruption (the spec requires a non-empty
+    /// kebab-case name equal to the directory), full Mount/Unmount ordering
+    /// consistency stays the write path's job. Carries the offending event's
+    /// history `index` and `kind` so a hand-edited recipe's corruption can be
+    /// pinpointed.
+    EmptySkillEventName {
+        index: usize,
+        kind: SkillLifecycleKind,
+    },
 }
 
 impl std::fmt::Display for RecipeError {
@@ -496,6 +556,10 @@ impl std::fmt::Display for RecipeError {
             Self::EmptySourceEventReference { index, kind } => write!(
                 f,
                 "history 第 {index} 个条目是引用名为空的源生命周期事件（{kind:?}）"
+            ),
+            Self::EmptySkillEventName { index, kind } => write!(
+                f,
+                "history 第 {index} 个条目是名字为空的技能生命周期事件（{kind:?}）"
             ),
         }
     }
@@ -524,6 +588,8 @@ impl Recipe {
     /// - Every source-lifecycle event in `history` carries a non-empty
     ///   `reference_name` (minimal reference-name check; full lifecycle ordering is
     ///   the write path's responsibility).
+    /// - Every skill-lifecycle event in `history` carries a non-empty `name`
+    ///   (ADR-0086; full Mount/Unmount ordering is the write path's job).
     pub fn build(
         session_name: String,
         sources: Vec<SourceRef>,
@@ -554,6 +620,14 @@ impl Recipe {
                 RecipeEntry::Source(ev) => {
                     if ev.reference_name.is_empty() {
                         return Err(RecipeError::EmptySourceEventReference {
+                            index,
+                            kind: ev.kind,
+                        });
+                    }
+                }
+                RecipeEntry::Skill(ev) => {
+                    if ev.name.is_empty() {
+                        return Err(RecipeError::EmptySkillEventName {
                             index,
                             kind: ev.kind,
                         });
@@ -619,9 +693,43 @@ impl Recipe {
                     }
                     _ => Vec::new(),
                 },
-                RecipeEntry::Source(_) => Vec::new(),
+                RecipeEntry::Source(_) | RecipeEntry::Skill(_) => Vec::new(),
             })
             .collect()
+    }
+
+    /// The active skill set, folded from the timeline's Mount/Unmount sequence
+    /// (ADR-0086, issue #363). NOT a stored snapshot -- the timeline is the
+    /// single source of truth, and the set is re-derived on every read:
+    /// - `Mount(name)` inserts `name` (idempotent -- a re-mount of an already-
+    ///   mounted name is a no-op; the live write path refuses it, but a hand-
+    ///   edited recipe could carry one and the fold stays well-defined).
+    /// - `Unmount(name)` removes `name` (idempotent -- an Unmount of a name
+    ///   not in the set is a no-op; same hand-edit resilience).
+    ///
+    /// The result preserves first-Mount insertion order so a deterministic
+    /// assembly sequence reads it. Used by resume to rebuild the live
+    /// `Session.mounted_skills` cache and by the `list_mounted_skills` IPC to
+    /// render the active-set chip list; per-turn assembly will consume it via
+    /// `TurnProvenance::skills` once #364 wires real content hashes.
+    ///
+    /// A `mount -> unmount -> remount` sequence yields just `[name]` (the
+    /// remount re-adds what the unmount removed) -- the AC pinned in tests.
+    pub fn mounted_skills(&self) -> Vec<String> {
+        let mut mounted: Vec<String> = Vec::new();
+        for entry in &self.history {
+            if let RecipeEntry::Skill(ev) = entry {
+                match ev.kind {
+                    SkillLifecycleKind::Mount => {
+                        if !mounted.iter().any(|n| n == &ev.name) {
+                            mounted.push(ev.name.clone());
+                        }
+                    }
+                    SkillLifecycleKind::Unmount => mounted.retain(|n| n != &ev.name),
+                }
+            }
+        }
+        mounted
     }
 }
 
@@ -693,12 +801,13 @@ mod tests {
     }
 
     #[test]
-    fn recipe_format_version_is_three() {
-        // ADR-0084: v3 carries format_version = 3 (a result turn persists its
-        // full promotion chain). Pin the constant so the open-path version
-        // check stays in sync with what save writes.
-        assert_eq!(RECIPE_FORMAT_VERSION, 3);
-        assert_eq!(build_recipe().format_version, 3);
+    fn recipe_format_version_is_four() {
+        // ADR-0086 (issue #363): v4 carries format_version = 4 (skill lifecycle
+        // entries on the timeline + per-skill content_hash on turn provenance).
+        // Pin the constant so the open-path version check stays in sync with
+        // what save writes.
+        assert_eq!(RECIPE_FORMAT_VERSION, 4);
+        assert_eq!(build_recipe().format_version, 4);
     }
 
     #[test]
@@ -1211,7 +1320,10 @@ mod tests {
         let trace = synthetic_materialize_trace("SELECT COUNT(*) AS n FROM \"people\".data");
         let provenance = TurnProvenance {
             runtime: Some(RuntimeKind::BuiltIn),
-            skills: vec!["sql-coach".into()],
+            skills: vec![SkillProvenance {
+                name: "sql-coach".into(),
+                content_hash: "abc123".into(),
+            }],
         };
         let turn = RecipeTurn::with_audit(
             "多少人",
@@ -1235,18 +1347,32 @@ mod tests {
     #[test]
     fn provenance_round_trips_with_runtime_and_skills() {
         // A live agent-loop turn's provenance (ADR-0078/0081, issue #319)
-        // carries a typed runtime + the active skill ids. The shape
-        // round-trips so resume reproduces the audit anchor "how was this
-        // produced" after reopen.
+        // carries a typed runtime + the active skill provenance (each with its
+        // content_hash, ADR-0086 issue #363). The shape round-trips so resume
+        // reproduces the audit anchor "how was this produced" after reopen.
         let provenance = TurnProvenance {
             runtime: Some(RuntimeKind::BuiltIn),
-            skills: vec!["sql-coach".into()],
+            skills: vec![
+                SkillProvenance {
+                    name: "sql-coach".into(),
+                    content_hash: "abc123".into(),
+                },
+                SkillProvenance {
+                    name: "chart-helper".into(),
+                    content_hash: String::new(),
+                },
+            ],
         };
         let json = serde_json::to_string(&provenance).expect("serialize");
         let back: TurnProvenance = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, provenance);
         assert_eq!(back.runtime, Some(RuntimeKind::BuiltIn));
-        assert_eq!(back.skills, vec!["sql-coach".to_string()]);
+        assert_eq!(back.skills.len(), 2);
+        assert_eq!(back.skills[0].name, "sql-coach");
+        assert_eq!(back.skills[0].content_hash, "abc123");
+        // An empty content_hash (the v3->v4 migration output) round-trips
+        // verbatim -- never silently dropped or replaced with a sentinel.
+        assert_eq!(back.skills[1].content_hash, "");
     }
 
     #[test]
@@ -1265,10 +1391,177 @@ mod tests {
         assert!(
             !TurnProvenance {
                 runtime: None,
-                skills: vec!["s".into()],
+                skills: vec![SkillProvenance {
+                    name: "s".into(),
+                    content_hash: String::new(),
+                }],
             }
             .is_empty(),
             "a skill list is non-empty",
         );
+    }
+
+    // --- v4 skill lifecycle (ADR-0086, issue #363) --------------------------
+
+    #[test]
+    fn recipe_round_trips_with_a_skill_lifecycle_event() {
+        // ADR-0086: a Skill entry rides the timeline isomorphic to a Source
+        // entry (always visible, never a turn) and survives a serialize ->
+        // deserialize cycle byte-for-byte so the active set folds identically
+        // after reopen.
+        let recipe = Recipe {
+            format_version: RECIPE_FORMAT_VERSION,
+            session_name: "skills".into(),
+            sources: Vec::new(),
+            history: vec![
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Mount,
+                    name: "sql-coach".into(),
+                }),
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Unmount,
+                    name: "sql-coach".into(),
+                }),
+            ],
+            active: None,
+        };
+        let json = serde_json::to_string(&recipe).expect("serialize");
+        let back: Recipe = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, recipe);
+    }
+
+    #[test]
+    fn mounted_skills_folds_mount_unmount_in_order() {
+        // ADR-0086: the active set is folded from the timeline, NOT snapshotted.
+        // A simple mount -> unmount sequence yields an empty set; the AC's
+        // mount -> unmount -> remount sequence yields the remounted name only.
+        let recipe = Recipe {
+            format_version: RECIPE_FORMAT_VERSION,
+            session_name: "fold".into(),
+            sources: Vec::new(),
+            history: vec![
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Mount,
+                    name: "sql-coach".into(),
+                }),
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Unmount,
+                    name: "sql-coach".into(),
+                }),
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Mount,
+                    name: "sql-coach".into(),
+                }),
+            ],
+            active: None,
+        };
+        assert_eq!(
+            recipe.mounted_skills(),
+            vec!["sql-coach".to_string()],
+            "remount re-adds what unmount removed",
+        );
+    }
+
+    #[test]
+    fn mounted_skills_preserves_first_mount_insertion_order() {
+        // Two distinct mounts keep their first-mount order across a later
+        // unmount of the first, so the assembly sequence reads deterministically.
+        let recipe = Recipe {
+            format_version: RECIPE_FORMAT_VERSION,
+            session_name: "order".into(),
+            sources: Vec::new(),
+            history: vec![
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Mount,
+                    name: "a".into(),
+                }),
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Mount,
+                    name: "b".into(),
+                }),
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Unmount,
+                    name: "a".into(),
+                }),
+            ],
+            active: None,
+        };
+        assert_eq!(recipe.mounted_skills(), vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn mounted_skills_is_empty_when_no_skill_events() {
+        // A recipe with no skill events folds to the empty set (every session's
+        // default posture -- no skills mounted).
+        let recipe = Recipe {
+            format_version: RECIPE_FORMAT_VERSION,
+            session_name: "none".into(),
+            sources: Vec::new(),
+            history: Vec::new(),
+            active: None,
+        };
+        assert!(recipe.mounted_skills().is_empty());
+    }
+
+    #[test]
+    fn build_rejects_an_empty_skill_event_name() {
+        // ADR-0086: a skill lifecycle event with an empty name is unambiguous
+        // corruption (the spec requires a non-empty kebab-case name); build
+        // surfaces it rather than persisting a recipe the fold cannot resolve.
+        // Mirrors the Source-name refusal.
+        let err = Recipe::build(
+            "empty-skill".into(),
+            Vec::new(),
+            vec![RecipeEntry::Skill(SkillLifecycleEvent {
+                kind: SkillLifecycleKind::Mount,
+                name: String::new(),
+            })],
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RecipeError::EmptySkillEventName {
+                    index: 0,
+                    kind: SkillLifecycleKind::Mount,
+                }
+            ),
+            "expected EmptySkillEventName {{ index: 0, kind: Mount }}, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn productive_chain_skips_skill_lifecycle_entries() {
+        // ADR-0086: a Skill entry is never a productive turn -- the replay
+        // chain ignores it (only Materialized turns re-materialize). A skill
+        // event interleaved with a result turn does not pollute the chain.
+        let recipe = Recipe {
+            format_version: RECIPE_FORMAT_VERSION,
+            session_name: "skip-skill".into(),
+            sources: vec![csv_source("people", "fp")],
+            history: vec![
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Mount,
+                    name: "sql-coach".into(),
+                }),
+                RecipeEntry::Turn(RecipeTurn::new(
+                    "q",
+                    RecipeOutcome::Materialized {
+                        promotions: vec![RecipePromotion {
+                            reference_name: "result_1".into(),
+                            display_name: "result_1".into(),
+                            sql: "SELECT 1".into(),
+                            stale: None,
+                        }],
+                        assumption: None,
+                    },
+                )),
+            ],
+            active: Some("people".into()),
+        };
+        let chain = recipe.productive_chain();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].reference_name, "result_1");
     }
 }

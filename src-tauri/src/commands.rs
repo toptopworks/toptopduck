@@ -1663,6 +1663,71 @@ pub fn delete_skill(root: State<'_, SkillsRoot>, name: String) -> Result<(), Ski
     crate::skills::registry::delete_skill(&root.0, &name)
 }
 
+// --- Skills mount / unmount (issue #363, ADR-0086) --------------------------
+//
+// Session-SCOPED skill lifecycle (distinct from the registry CRUD above): the
+// backend records each Mount / Unmount on the session timeline + folds the
+// active set from the event sequence (no snapshot). The frontend's `loading`
+// flag is the primary defense against mounting / unmounting during a turn;
+// `reject_if_in_flight` is the Rust-side backstop (a second window / IPC
+// replay / automation that triggers mount while an approval-pending turn
+// holds the session lock). Rejects are the typed
+// [`SkillMountError`](crate::session::skills::SkillMountError) (wrapped in
+// [`SessionError::SkillMount`]) so the frontend renders each refusal through
+// the locale catalog.
+
+/// Mount a skill into the session's active set (issue #363, ADR-0086). Appends
+/// a `Mount` event to the timeline + atomically persists the recipe. Refuses a
+/// redundant mount (`AlreadyMounted`) and rejects during resume / an in-flight
+/// turn (the loading gate, AC #5).
+#[tauri::command]
+pub fn mount_skill(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+    name: String,
+) -> Result<(), SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    reject_if_resuming(&handle)?;
+    reject_if_in_flight(&handle)?;
+    let mut s = handle.session_lock()?;
+    s.mount_skill(&name).map_err(SessionError::SkillMount)
+}
+
+/// Unmount a skill from the session's active set (issue #363, ADR-0086).
+/// Appends an `Unmount` event + atomically persists. Refuses an unmount of a
+/// name not in the set (`NotMounted`) and rejects during resume / an in-flight
+/// turn (the loading gate, AC #5).
+#[tauri::command]
+pub fn unmount_skill(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+    name: String,
+) -> Result<(), SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    reject_if_resuming(&handle)?;
+    reject_if_in_flight(&handle)?;
+    let mut s = handle.session_lock()?;
+    s.unmount_skill(&name).map_err(SessionError::SkillMount)
+}
+
+/// The session's currently-mounted skill names, in first-mount insertion order
+/// (issue #363). Read-only; the frontend uses this to render the active-set
+/// chip list + drive the mount/unmount button states. The fold over the
+/// timeline is the source of truth; this returns the live memoization.
+#[tauri::command]
+pub fn list_mounted_skills(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+) -> Result<Vec<String>, SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    reject_if_resuming(&handle)?;
+    let s = handle.session_lock()?;
+    Ok(s.mounted_skills())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1785,6 +1850,75 @@ mod tests {
         assert_eq!(
             err,
             SessionError::RemoveSource(RemoveSourceError::NotFound("nope".into())),
+        );
+    }
+
+    // --- Skill lifecycle command wiring (issue #363, ADR-0086) -------------
+
+    /// `mount_skill`'s command body routes `Session::mount_skill`'s typed
+    /// `SkillMountError` through `.map_err(SessionError::SkillMount)`. The
+    /// command's `State` arg blocks a direct call (same approach as
+    /// set_privacy_unknown_reference above), so exercise the mapping at the
+    /// layer the command wraps. AC#5's loading gate (resuming / in-flight) is
+    /// pinned by `reject_if_resuming_blocks_while_the_session_is_resuming` and
+    /// `second_ask_on_same_session_rejects_while_one_is_in_flight` above; the
+    /// command body's `?` propagation is compile-time enforced, so a dropped
+    /// reject fails the build rather than silently passing the gate.
+    #[test]
+    fn mount_skill_command_maps_already_mounted_to_session_skill_mount_error() {
+        let store = SessionStore::new();
+        let id = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+            )
+            .expect("create session");
+        let handle = store.get(&id).expect("handle");
+        let mut s = handle.session_lock().expect("lock");
+        s.mount_skill("sql-coach").expect("first mount");
+        // Reproduce the command body's `.map_err(SessionError::SkillMount)`
+        // wrapping (the `State` arg blocks calling the command directly).
+        let err = s
+            .mount_skill("sql-coach")
+            .map_err(SessionError::SkillMount)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SessionError::SkillMount(
+                    crate::session::skills::SkillMountError::AlreadyMounted { ref name }
+                ) if name == "sql-coach"
+            ),
+            "expected SessionError::SkillMount(AlreadyMounted), got {err:?}",
+        );
+    }
+
+    /// `unmount_skill`'s command body routes `Session::unmount_skill`'s typed
+    /// `SkillMountError` through the same `.map_err(SessionError::SkillMount)`
+    /// wrapping; the `NotMounted` refuse is symmetric with `AlreadyMounted`.
+    #[test]
+    fn unmount_skill_command_maps_not_mounted_to_session_skill_mount_error() {
+        let store = SessionStore::new();
+        let id = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+            )
+            .expect("create session");
+        let handle = store.get(&id).expect("handle");
+        let mut s = handle.session_lock().expect("lock");
+        let err = s
+            .unmount_skill("ghost")
+            .map_err(SessionError::SkillMount)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SessionError::SkillMount(
+                    crate::session::skills::SkillMountError::NotMounted { ref name }
+                ) if name == "ghost"
+            ),
+            "expected SessionError::SkillMount(NotMounted), got {err:?}",
         );
     }
 

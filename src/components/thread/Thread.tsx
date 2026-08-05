@@ -205,6 +205,12 @@ export function Thread({
               </li>
             );
           }
+          // Skill lifecycle events (ADR-0086, issue #363) ride the timeline
+          // isomorphic to source events but are NOT rendered in this slice --
+          // the thread rail's skill-event marker lands in #366. Skip them
+          // here so the source-event rendering below stays typed to its
+          // SourceLifecycleEvent shape without a narrowing fallback.
+          if (entry.entry === "Skill") return null;
           const staleCount =
             entry.data.kind === "Added"
               ? 0

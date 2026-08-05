@@ -82,6 +82,7 @@ pub fn migrate_to_current(value: Value, from_version: u32) -> Result<Value, Migr
             0 => transforms::v0_to_v1(current)?,
             1 => transforms::v1_to_v2(current)?,
             2 => transforms::v2_to_v3(current)?,
+            3 => transforms::v3_to_v4(current)?,
             other => {
                 return Err(MigrationError::NoTransform {
                     from: other,
@@ -316,6 +317,77 @@ mod transforms {
             "promotions".to_string(),
             Value::Array(vec![Value::Object(promotion)]),
         );
+    }
+
+    /// v3 -> v4 (ADR-0086, issue #363): sharpen turn provenance's skill list
+    /// from a bare-name string array to the typed `{name, content_hash}` shape.
+    /// A v3 turn's `provenance.skills` is `["sql-coach", ...]`; v4 wraps each
+    /// name into `{"name": <name>, "content_hash": ""}` -- empty hash = no
+    /// baseline (the migration cannot retroactively compute a hash for the
+    /// skill content at a past turn), so the stale-degrade check on resume
+    /// never false-positives on migrated turns. Every other field is
+    /// untouched. The new `RecipeEntry::Skill` variant needs no migration
+    /// work: a v3 recipe has no Skill entries (skill lifecycle lands with v4),
+    /// so the timeline is unchanged.
+    ///
+    /// For every real recipe this transform is a no-op: production recipes
+    /// never carried skill data under v3 (the field stayed empty until the
+    /// live path filled it in #364), so `provenance.skills` is either absent
+    /// or `[]` -- both pass through unchanged. The string-array shape only
+    /// ever existed as the v3 serde form; the migration is the contract guard
+    /// for the day a v3 recipe with non-empty skills surfaces (a test fixture
+    /// or a hand edit).
+    ///
+    /// Stamps no version itself -- [`migrate_to_current`] stamps after each
+    /// step so the version always reflects the shape.
+    pub(super) fn v3_to_v4(mut value: Value) -> Result<Value, MigrationError> {
+        if let Some(history) = value.get_mut("history").and_then(|h| h.as_array_mut()) {
+            for entry in history.iter_mut() {
+                rewrite_provenance_skills_in_place(entry);
+            }
+        }
+        Ok(value)
+    }
+
+    /// Rewrite one Turn entry's `provenance.skills` from the v3 bare-name
+    /// string array to the v4 typed object array, in place (ADR-0086). No-op
+    /// for Source entries (no `data.provenance`), and for turns whose
+    /// `provenance` or `provenance.skills` is absent / not the expected shape
+    /// (`#[serde(default)]` deserializes a missing field as empty, and a
+    /// malformed shape surfaces as an honest typed-deserialize error
+    /// downstream -- the transform stays side-effect-free rather than
+    /// guessing). Per-entry defensive so the caller loop stays a flat map.
+    fn rewrite_provenance_skills_in_place(entry: &mut Value) {
+        // A Turn entry's provenance lives at `data.provenance` (the
+        // adjacently-tagged RecipeEntry shape `{entry, data}`). Source / Skill
+        // entries have no provenance and skip.
+        let Some(provenance) = entry.get_mut("data").and_then(|d| d.get_mut("provenance")) else {
+            return;
+        };
+        let Some(skills) = provenance.get_mut("skills").and_then(Value::as_array_mut) else {
+            // Absent or not-an-array -> `#[serde(default)]` deserializes empty;
+            // leave the field alone and let the typed reader handle it.
+            return;
+        };
+        // A v3 entry's `skills[i]` is a bare string; wrap each into the v4
+        // object shape. A non-string element is corrupt and left as-is -- the
+        // typed deserialize rejects it downstream (honest parse, not a guess).
+        // A `log::warn!` mirrors v1_to_v2's diagnostic on unexpected shapes so
+        // the skip is forensically traceable, not silent.
+        for skill in skills.iter_mut() {
+            let Some(name) = skill.as_str() else {
+                log::warn!(
+                    "v3->v4 migration: provenance.skills entry is not a string; \
+                     leaving for typed deserialize"
+                );
+                continue;
+            };
+            let wrapped = serde_json::json!({
+                "name": name,
+                "content_hash": "",
+            });
+            *skill = wrapped;
+        }
     }
 }
 
@@ -1038,5 +1110,188 @@ mod tests {
             Some("把 id 当作主键"),
             "the turn-level assumption rides the primary promotion on replay",
         );
+    }
+
+    // --- v3 -> v4 (ADR-0086, issue #363) --------------------------------------
+
+    /// Build a synthetic v3 Turn entry: the adjacently-tagged outcome with the
+    /// v3 promotions chain shape, plus a v3 provenance carrying a TYPED runtime
+    /// and a non-empty `skills` STRING ARRAY (the pre-v4 shape -- bare names,
+    /// no content_hash). This is the only shape the v3->v4 transform reshapes.
+    fn v3_turn_with_skills(question: &str, skills: &[&str]) -> Value {
+        serde_json::json!({
+            "entry": "Turn",
+            "data": {
+                "question": question,
+                "outcome": {
+                    "kind": "Textual",
+                    "data": {
+                        "text_kind": "Agent",
+                        "body": "ok",
+                        "assumption": null,
+                    },
+                },
+                "provenance": {
+                    "runtime": "BuiltIn",
+                    "skills": skills,
+                },
+            },
+        })
+    }
+
+    #[test]
+    fn v3_to_v4_rewrites_bare_skill_names_into_typed_objects_with_empty_hash() {
+        // ADR-0086: a v3 provenance.skills string array rewrites into the v4
+        // typed `{name, content_hash: ""}` object array. Each name survives;
+        // the content_hash is "" (no baseline -- never trips the stale-degrade
+        // check on resume).
+        let v3 = serde_json::json!({
+            "format_version": 3,
+            "session_name": "v3",
+            "sources": [],
+            "history": [v3_turn_with_skills("q", &["sql-coach", "chart-helper"])],
+            "active": null,
+        });
+        let v4 = transforms::v3_to_v4(v3).expect("migrate");
+        let skills = &v4["history"][0]["data"]["provenance"]["skills"];
+        let arr = skills.as_array().expect("skills still an array");
+        assert_eq!(arr.len(), 2, "no skills lost or gained");
+        assert_eq!(arr[0]["name"], "sql-coach");
+        assert_eq!(arr[0]["content_hash"], "");
+        assert_eq!(arr[1]["name"], "chart-helper");
+        assert_eq!(arr[1]["content_hash"], "");
+    }
+
+    #[test]
+    fn v3_to_v4_is_a_noop_when_provenance_skills_is_empty() {
+        // Every real v3 recipe carries an empty skills array (or omits the
+        // field entirely). Both shapes pass through unchanged -- the transform
+        // only reshapes the bare-name form.
+        let v3 = serde_json::json!({
+            "format_version": 3,
+            "session_name": "v3-empty",
+            "sources": [],
+            "history": [{
+                "entry": "Turn",
+                "data": {
+                    "question": "q",
+                    "outcome": {"kind": "Cancelled"},
+                    "provenance": {"runtime": "BuiltIn", "skills": []},
+                },
+            }],
+            "active": null,
+        });
+        let v4 = transforms::v3_to_v4(v3.clone()).expect("migrate");
+        assert_eq!(
+            v4["history"][0]["data"]["provenance"]["skills"],
+            serde_json::json!([]),
+            "empty skills array passes through unchanged",
+        );
+    }
+
+    #[test]
+    fn v3_to_v4_leaves_entries_without_provenance_untouched() {
+        // Source / Skill entries have no `data.provenance`; a Turn entry may
+        // omit it too (`#[serde(default)]`). All three skip the rewrite.
+        let v3 = serde_json::json!({
+            "format_version": 3,
+            "session_name": "v3-mixed",
+            "sources": [],
+            "history": [
+                {
+                    "entry": "Source",
+                    "data": {
+                        "kind": "Added",
+                        "reference_name": "people",
+                        "display_name": "people",
+                    },
+                },
+                {
+                    "entry": "Turn",
+                    "data": {
+                        "question": "q",
+                        "outcome": {"kind": "Cancelled"},
+                    },
+                },
+            ],
+            "active": null,
+        });
+        let v4 = transforms::v3_to_v4(v3.clone()).expect("migrate");
+        assert_eq!(v4["history"], v3["history"], "no field added or removed");
+    }
+
+    #[test]
+    fn migrate_to_current_from_v3_round_trips_through_recipe_deserialize() {
+        // End-to-end: a synthetic v3 fixture migrates to v4 and deserializes
+        // as the current Recipe. The skill array rewrites into typed objects
+        // with empty content_hash; a v3 recipe with no Skill entries folds to
+        // the empty mounted set.
+        use crate::persistence::recipe::{Recipe, RecipeEntry};
+        let v3 = serde_json::json!({
+            "format_version": 3,
+            "session_name": "v3 分析",
+            "sources": [{
+                "reference_name": "people",
+                "display_name": "people",
+                "source_path": "/data/people.csv",
+                "fingerprint": "fp",
+            }],
+            "history": [v3_turn_with_skills("多少人", &["sql-coach"])],
+            "active": "people",
+        });
+        let v4 = migrate_to_current(v3, 3).expect("migrate");
+        let recipe: Recipe =
+            serde_json::from_value(v4).expect("migrated shape deserializes as the current Recipe");
+        assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
+        let turn = match &recipe.history[0] {
+            RecipeEntry::Turn(t) => t,
+            other => panic!("expected Turn, got {other:?}"),
+        };
+        assert_eq!(turn.provenance.skills.len(), 1);
+        assert_eq!(turn.provenance.skills[0].name, "sql-coach");
+        assert_eq!(
+            turn.provenance.skills[0].content_hash, "",
+            "migrated skills carry an empty hash (no baseline)",
+        );
+        // No Skill lifecycle entries in a v3 recipe -> empty mounted set.
+        assert!(recipe.mounted_skills().is_empty());
+    }
+
+    #[test]
+    fn v3_to_v4_skips_non_string_elements_in_provenance_skills() {
+        // ADR-0086 / I-4: a corrupt v3 entry whose `provenance.skills` carries
+        // a non-string element (a hand edit or a buggy writer) skips the non-
+        // string element -- leaves it as-is for the typed deserialize to
+        // reject -- and wraps the well-formed strings. The transform never
+        // guesses a shape; the skip emits a `log::warn!` for forensic parity
+        // with v1_to_v2.
+        let v3 = serde_json::json!({
+            "format_version": 3,
+            "session_name": "v3-corrupt",
+            "sources": [],
+            "history": [{
+                "entry": "Turn",
+                "data": {
+                    "question": "q",
+                    "outcome": {"kind": "Cancelled"},
+                    "provenance": {
+                        "runtime": "BuiltIn",
+                        "skills": ["ok", 42, "also-ok"],
+                    },
+                },
+            }],
+            "active": null,
+        });
+        let v4 = transforms::v3_to_v4(v3).expect("migrate");
+        let skills = &v4["history"][0]["data"]["provenance"]["skills"];
+        let arr = skills.as_array().expect("skills still an array");
+        assert_eq!(arr.len(), 3, "no elements lost or gained");
+        assert_eq!(arr[0]["name"], "ok");
+        assert_eq!(arr[0]["content_hash"], "");
+        // The non-string element passes through untouched for the typed
+        // deserializer to reject (honest parse, not a migration-time guess).
+        assert_eq!(arr[1], 42, "non-string element left as-is");
+        assert_eq!(arr[2]["name"], "also-ok");
+        assert_eq!(arr[2]["content_hash"], "");
     }
 }

@@ -509,6 +509,7 @@ impl<'a> Resumer<'a> {
                     }))
                 }
                 RecipeEntry::Source(ev) => Ok(ThreadEntry::Source(ev.clone())),
+                RecipeEntry::Skill(ev) => Ok(ThreadEntry::Skill(ev.clone())),
             })
             .collect::<Result<Vec<_>, ResumeError>>()?;
         Ok(timeline)

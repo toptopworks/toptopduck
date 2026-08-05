@@ -124,7 +124,7 @@ fn turns(entries: &[ThreadEntry]) -> Vec<TurnRecord> {
         .iter()
         .filter_map(|e| match e {
             ThreadEntry::Turn(t) => Some(t.clone()),
-            ThreadEntry::Source(_) => None,
+            ThreadEntry::Source(_) | ThreadEntry::Skill(_) => None,
         })
         .collect()
 }

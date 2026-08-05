@@ -18,7 +18,7 @@ import type {
   StoreCommandError,
   TurnError,
 } from "../../types/session";
-import type { SkillError } from "../../types/skills";
+import type { SkillError, SkillMountError } from "../../types/skills";
 import { isSaveError, isSessionError, isSkillError, isStoreCommandError } from "./guards";
 
 // Format a DuckLoadError through the locale catalog (issue #120). The
@@ -312,6 +312,34 @@ function formatRenameDatasetError(e: RenameError, intl: IntlShape): string {
 // #121). UnknownDataset shares the merged `error.dataset.notFound` id; Execute
 // renders a generic message and the engine detail rides the technical-details
 // fold (the detail is a DuckDB read error, never an API key per ADR-0029).
+// Format a SkillMountError (issue #363, ADR-0086), reached via SessionError::
+// SkillMount. AlreadyMounted / NotMounted name the offending skill in the
+// primary message; both are self-contained (no fold detail).
+function formatSkillMountError(e: SkillMountError, intl: IntlShape): string {
+  switch (e.kind) {
+    case "AlreadyMounted":
+      return intl.formatMessage(
+        {
+          id: "error.skillMount.alreadyMounted",
+          defaultMessage: "Skill \"{name}\" is already mounted",
+        },
+        { name: e.data.name },
+      );
+    case "NotMounted":
+      return intl.formatMessage(
+        {
+          id: "error.skillMount.notMounted",
+          defaultMessage: "Skill \"{name}\" is not mounted",
+        },
+        { name: e.data.name },
+      );
+    default: {
+      const unhandled: never = e;
+      throw new Error(`unhandled SkillMountError kind: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
 function formatTurnError(e: TurnError, intl: IntlShape): string {
   switch (e.kind) {
     case "UnknownDataset":
@@ -385,6 +413,8 @@ export function fmtError(e: unknown, intl: IntlShape): string {
         });
       case "Turn":
         return formatTurnError(e.data, intl);
+      case "SkillMount":
+        return formatSkillMountError(e.data, intl);
       default: {
         // Exhaustiveness guard (issue #121): a future SessionError variant must
         // trip the compiler here, not silently fall through to the opaque JSON

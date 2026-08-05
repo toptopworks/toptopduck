@@ -6,6 +6,7 @@ pub mod agent_loop;
 pub mod materializer;
 pub mod resume;
 pub mod sandbox;
+pub mod skills;
 pub mod snapshot;
 pub mod source_lifecycle;
 
@@ -525,6 +526,16 @@ pub struct Session {
     /// constructed by `open_duck`; the enablement set on the handle + this
     /// cache reset together -- the ADR-0080 reset lineage, server-granularity cousin).
     last_mcp_connect: Vec<crate::mcp::aggregator::ConnectResult>,
+    /// The session's currently-mounted skills (ADR-0086, issue #363). A live
+    /// memoization of the timeline's Mount/Unmount fold -- [`Self::build_recipe`]
+    /// is the single source of truth (the recipe never stores a snapshot, only
+    /// the event sequence), and this cache stays in sync because every mount /
+    /// unmount mutates both together. Seeded by `open_duck` from the recipe
+    /// fold on resume. Looked up by the assembly path's skill set builder
+    /// (wired in #364) and by the `list_mounted_skills` IPC command. Names are
+    /// unique, in first-mount insertion order (mirrors
+    /// [`crate::persistence::recipe::Recipe::mounted_skills`]).
+    mounted_skills: Vec<String>,
 }
 
 /// The persisted-form audit substructures for ONE timeline entry (ADR-0078,
@@ -567,14 +578,14 @@ impl TurnAudit {
 
     /// The audit harvested from one persisted recipe entry (resume, ADR-0078):
     /// a turn's trace + provenance round-trip verbatim from the .duck; a
-    /// source entry carries no audit.
+    /// source or skill entry carries no audit (lifecycle events are not turns).
     fn from_recipe_entry(entry: &RecipeEntry) -> Self {
         match entry {
             RecipeEntry::Turn(t) => Self {
                 trace: t.trace.clone(),
                 provenance: t.provenance.clone(),
             },
-            RecipeEntry::Source(_) => Self::default(),
+            RecipeEntry::Source(_) | RecipeEntry::Skill(_) => Self::default(),
         }
     }
 }
@@ -667,6 +678,7 @@ impl Session {
             drop_signal: None,
             external_runtime: None,
             last_mcp_connect: Vec::new(),
+            mounted_skills: Vec::new(),
         })
     }
 
@@ -943,6 +955,13 @@ impl Session {
                 .collect();
             session.history = timeline;
             session.turn_audit = audit;
+            // ADR-0086 (issue #363): seed the live mounted-skills cache from
+            // the recipe's Mount/Unmount fold. The recipe never stores a
+            // snapshot -- the timeline IS the source of truth -- so the cache
+            // is rebuilt deterministically on every resume. Honest degrade
+            // applies at assembly time (a name missing from the registry is
+            // surfaced then); here every folded name lands regardless.
+            session.mounted_skills = recipe.mounted_skills();
         }
 
         // Phase 5: re-bind the .duck path + persist the post-resume state.
@@ -2282,6 +2301,7 @@ impl Session {
                     )))
                 }
                 ThreadEntry::Source(ev) => Some(RecipeEntry::Source(ev.clone())),
+                ThreadEntry::Skill(ev) => Some(RecipeEntry::Skill(ev.clone())),
             })
             .collect();
 
@@ -2530,17 +2550,17 @@ impl Session {
     }
 
     /// The turn-only view of the timeline, cloned out for the window assembler
-    /// (ADR-0040): source lifecycle events share the timeline but the LLM
-    /// payload is built from turns alone. A clone (not a borrow) so the slice
-    /// the assembler reads is `&[TurnRecord]` unchanged -- the assembler and its
-    /// tests stay source-event-agnostic. The clone is negligible (a small
+    /// (ADR-0040): source + skill lifecycle events share the timeline but the
+    /// LLM payload is built from turns alone. A clone (not a borrow) so the
+    /// slice the assembler reads is `&[TurnRecord]` unchanged -- the assembler
+    /// and its tests stay event-agnostic. The clone is negligible (a small
     /// thread, once per turn / active read) next to the LLM call it feeds.
     fn turns(&self) -> Vec<TurnRecord> {
         self.history
             .iter()
             .filter_map(|entry| match entry {
                 ThreadEntry::Turn(record) => Some(record.clone()),
-                ThreadEntry::Source(_) => None,
+                ThreadEntry::Source(_) | ThreadEntry::Skill(_) => None,
             })
             .collect()
     }

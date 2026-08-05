@@ -16,7 +16,7 @@ import type {
   StoreCommandError,
   TurnError,
 } from "../../types/session";
-import type { SkillError } from "../../types/skills";
+import type { SkillError, SkillMountError } from "../../types/skills";
 
 // Narrow an unknown IPC reject to a SessionError (issue #119). A session-
 // scoped command rejects with the adjacently-tagged `{ kind, data? }` shape;
@@ -50,8 +50,32 @@ export function isSessionError(e: unknown): e is SessionError {
     }
     case "Turn":
       return isTurnError((e as { data?: unknown }).data);
+    case "SkillMount":
+      return isSkillMountError((e as { data?: unknown }).data);
     case "Engine":
       return typeof (e as { data?: unknown }).data === "string";
+    default:
+      return false;
+  }
+}
+
+// Narrow an unknown IPC reject to a SkillMountError (issue #363). Rides
+// SessionError.SkillMount -- the typed refuse for mount_skill / unmount_skill.
+// Defensive L1 shape: verify data.kind + data.data.name before promising the
+// shape, so fmtError / errorDetail never read an unverified field.
+export function isSkillMountError(e: unknown): e is SkillMountError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "AlreadyMounted":
+    case "NotMounted": {
+      const d = (e as { data?: unknown }).data;
+      return (
+        typeof d === "object" &&
+        d !== null &&
+        typeof (d as { name?: unknown }).name === "string"
+      );
+    }
     default:
       return false;
   }

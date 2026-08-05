@@ -159,6 +159,13 @@ pub enum SessionError {
     /// [`TurnError`](crate::model::TurnError) here.
     #[error("{0}")]
     Turn(crate::model::TurnError),
+    /// A skill mount / unmount was refused (issue #363, ADR-0086):
+    /// `mount_skill` / `unmount_skill` wrap the typed
+    /// [`SkillMountError`](crate::session::skills::SkillMountError) here instead
+    /// of flattening it to [`Self::Engine`] (string), so the frontend recurses
+    /// `SkillMount.data.kind` and renders the skill-domain locale message.
+    #[error("{0}")]
+    SkillMount(crate::session::skills::SkillMountError),
     /// An engine / internal failure (mutex poison, join error, etc.) -- the
     /// catch-all for failures that are not one of the addressing / guard
     /// states above. Carries the underlying detail string.

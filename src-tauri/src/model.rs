@@ -732,19 +732,56 @@ pub struct SourceLifecycleEvent {
     pub display_name: String,
 }
 
-/// One entry of the unified conversation timeline (ADR-0040): either a Turn
-/// (question + outcome, ADR-0028/0039) or a source lifecycle event. Both occupy
-/// a timeline slot and are always visible; only the Turn variant enters the LLM
-/// turn window. Adjacently-tagged (`#[serde(tag = "entry", content = "data")]`)
-/// so the frontend narrows on `entry` uniformly. The conversation() command
-/// returns `Vec<ThreadEntry>`; the window assembler receives only the turns
-/// (filtered by the session before assembly), so source events never reach the
-/// provider payload.
+/// Which kind of skill lifecycle mutation produced an event (ADR-0086, issue
+/// #363). The lifecycle is intentionally two-state: a skill is either Mounted
+/// into the session's active set or Unmounted from it. A skill CONTENT change
+/// is NOT a lifecycle event -- it is captured per-turn by each
+/// [`crate::persistence::recipe::SkillProvenance`]'s `content_hash`, so the
+/// timeline stays free of content churn (only membership changes are events).
+/// Mirrors the spec's two-state identity (Mount/Unmount); the frontend narrows
+/// on the bare variant string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SkillLifecycleKind {
+    /// A skill entered the session's active set. Subsequent turns assemble with
+    /// this skill's prompt fragment + MCP server references until it is
+    /// Unmounted or the session ends.
+    Mount,
+    /// A skill left the session's active set. Subsequent turns no longer
+    /// assemble with it; the Unmount event itself stays in the timeline for
+    /// audit (the active set is folded from the full event sequence).
+    Unmount,
+}
+
+/// A skill lifecycle event (ADR-0086, issue #363): first-class in the thread,
+/// never a turn. Carries only the spec `name` (the skill's stable identity,
+/// equal to its directory name) -- the prompt fragment / MCP references live in
+/// the registry and are looked up at assembly time, never snapshotted into the
+/// timeline (a skill's content evolution is captured per-turn by
+/// [`crate::persistence::recipe::SkillProvenance::content_hash`], not by
+/// lifecycle events). Isomorphic to [`SourceLifecycleEvent`]: always visible,
+/// occupies a timeline slot, but never enters the LLM window or advances
+/// `result_N`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillLifecycleEvent {
+    pub kind: SkillLifecycleKind,
+    /// The skill's spec `name` (kebab-case identity, ADR-0086 Decision 2).
+    pub name: String,
+}
+
+/// One entry of the unified conversation timeline (ADR-0040 / ADR-0086): either
+/// a Turn (question + outcome, ADR-0028/0039), a source lifecycle event, or a
+/// skill lifecycle event. All three occupy a timeline slot and are always
+/// visible; only the Turn variant enters the LLM turn window. Adjacently-tagged
+/// (`#[serde(tag = "entry", content = "data")]`) so the frontend narrows on
+/// `entry` uniformly. The conversation() command returns `Vec<ThreadEntry>`; the
+/// window assembler receives only the turns (filtered by the session before
+/// assembly), so source and skill events never reach the provider payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "entry", content = "data")]
 pub enum ThreadEntry {
     Turn(TurnRecord),
     Source(SourceLifecycleEvent),
+    Skill(SkillLifecycleEvent),
 }
 
 /// Why a source removal was rejected (issues #38/#39/#40). Two honest refusals
