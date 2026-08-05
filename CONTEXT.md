@@ -74,9 +74,9 @@ _Avoid_: 代理(proxy)——那是网关的别名；适配器(adapter)——那�
 _Avoid_: 命令(command)、扩展(extension)、接口(interface)
 
 **技能 (Skill)**:
-可挂载到会话的命名能力包 = 提示片段 + 可选的工具/MCP 声明（Markdown + frontmatter 格式）；由 app 在轮次装配阶段统一注入，与运行时无涉。技能改变 agent 的「答法」，不动会话的工作集与 recipe 结构。全局技能库 + 每会话多挂载、中途可增减。
+可挂载到会话的命名能力包 = 提示片段（Markdown 正文）+ 可选的 MCP server 引用，遵循 [Agent Skills 规范](https://agentskills.io/specification)：一技能 = 一目录 + `SKILL.md`（YAML frontmatter + Markdown 正文），`name`（kebab-case、≤64、等于目录名）即其稳定身份。技能住全局技能库（单一注册表），每会话可多挂载、中途增减；由 app 在轮次装配阶段统一注入（提示片段进系统提示、MCP 引用进有效工具集），与运行时无涉——改变 agent 的「答法」，不动工作集与 recipe 结构。
 _Avoid_: 插件(plugin)、模板(template)、宏(macro)
 
 **技能生命周期事件 (Skill Lifecycle Event)**:
-对会话活跃技能集的一次用户驱动突变——挂载 / 卸载。与源生命周期事件同构：在 thread 中恒可见、占时序位置，但**非轮次**、不占计步序、不以轮次身份进远窗——而进窗口装配器的当前状态视图（轮次装配用彼时活跃的技能集）。活跃技能集记入轮次装配上下文（审计依据）。
+对会话活跃技能集的一次用户驱动突变——挂载（Mount）/ 卸载（Unmount），仅两态（技能内容变化不是生命周期事件，由各轮 provenance 的 content_hash 捕获）。与源生命周期事件同构：在 thread 中恒可见、占时序位置，但**非轮次**、不占计步序、不以轮次身份进远窗——而进窗口装配器的当前状态视图（轮次装配用彼时活跃的技能集）。活跃技能集记入轮次装配上下文（审计依据）。
 _Avoid_: 操作(operation)、配置变更(config change)——太泛
