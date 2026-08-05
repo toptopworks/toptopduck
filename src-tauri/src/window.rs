@@ -22,6 +22,7 @@ use crate::provider::{
     ColumnRef, DatasetRef, ProviderRequest, ResponsePayload, TurnPayload, MAX_REPLY_TOKENS,
 };
 use crate::runtime::acp::wire::ContentBlock;
+use crate::skills::SkillPromptFragment;
 use crate::workingset::WorkingSet;
 
 /// Recent-turn window size (ADR-0023): the most recent N turns ship the full
@@ -51,13 +52,17 @@ pub fn assemble(
     }
 }
 
-/// Assemble the tool-calling request for one agent turn (ADR-0081, issue #318):
-/// the tool-use system prompt (capability boundary + locale directive + the
-/// windowed schema context), the windowed conversation as user/assistant
-/// message turns closed by the asking question, and the built-in tool table.
-/// Pure over the same state as [`assemble`] -- the single-SQL payload is built
-/// first and reused as the schema-context source, so the two paths can never
-/// disagree on which datasets / samples / privacy pruning the model sees.
+/// Assemble the tool-calling request for one agent turn (ADR-0081, issue #318;
+/// ADR-0086, issue #364): the tool-use system prompt (capability boundary +
+/// mounted-skill fragments + locale directive + the windowed schema context),
+/// the windowed conversation as user/assistant message turns closed by the
+/// asking question, and the built-in tool table. Pure over the same state as
+/// [`assemble`] -- the single-SQL payload is built first and reused as the
+/// schema-context source, so the two paths can never disagree on which
+/// datasets / samples / privacy pruning the model sees.
+///
+/// `skills` is the session's resolved mounted-skill fragments (issue #364);
+/// an empty slice adds nothing, preserving the pre-skill prompt shape.
 ///
 /// The agent loop owns the request for the whole turn: each round-trip re-sends
 /// this system + tool table with the conversation extended by the prior tool
@@ -67,10 +72,11 @@ pub fn assemble_tool_turn(
     working_set: &WorkingSet,
     history: &[TurnRecord],
     locale: ResponseLocale,
+    skills: &[SkillPromptFragment],
 ) -> ToolTurnRequest {
     let request = assemble(question, working_set, history);
     ToolTurnRequest {
-        system: build_tool_system_prompt(&request, locale),
+        system: build_tool_system_prompt(&request, locale, skills),
         messages: tool_turn_messages(&request),
         tools: crate::tools::builtin_table(),
         max_tokens: MAX_REPLY_TOKENS,
@@ -81,13 +87,13 @@ pub fn assemble_tool_turn(
 /// windowed context as text [`ContentBlock`]s for an external CLI runtime.
 ///
 /// Mirrors [`assemble_tool_turn`]'s windowing -- the SAME system prompt spine
-/// (capability boundary + locale directive + schema context, via
-/// [`build_tool_system_prompt`]) and the SAME history rendering -- but emits
-/// ACP content blocks instead of a [`ToolTurnRequest`]. The external CLI
-/// brings its own tool table (its built-ins + the gateway MCP tools advertised
-/// through the bridge descriptor at `session/new`), so this assembly carries
-/// ONLY the task context, never a tool table: the schema + M-contract (the
-/// result_N naming discipline) ride the leading system-prompt block so the
+/// (capability boundary + mounted-skill fragments + locale directive + schema
+/// context, via [`build_tool_system_prompt`]) and the SAME history rendering --
+/// but emits ACP content blocks instead of a [`ToolTurnRequest`]. The external
+/// CLI brings its own tool table (its built-ins + the gateway MCP tools
+/// advertised through the bridge descriptor at `session/new`), so this assembly
+/// carries ONLY the task context, never a tool table: the schema + M-contract
+/// (the result_N naming discipline) ride the leading system-prompt block so the
 /// CLI writes correct SQL on the first tool call instead of guessing and
 /// wasting a round-trip (ADR-0081 "M-contract discipline lives in the system
 /// prompt").
@@ -96,14 +102,16 @@ pub fn assemble_acp_turn(
     working_set: &WorkingSet,
     history: &[TurnRecord],
     locale: ResponseLocale,
+    skills: &[SkillPromptFragment],
 ) -> Vec<ContentBlock> {
     let request = assemble(question, working_set, history);
     let mut blocks = Vec::with_capacity(request.history.len() * 2 + 2);
-    // Leading system-prompt block: TOOL_CALLING_PROMPT + locale directive +
-    // schema context. The external CLI needs the schema + result_N naming up
-    // front (ADR-0081 M-contract); without it the first SQL has no anchor.
+    // Leading system-prompt block: TOOL_CALLING_PROMPT + skill fragments +
+    // locale directive + schema context. The external CLI needs the schema +
+    // result_N naming up front (ADR-0081 M-contract); without it the first SQL
+    // has no anchor.
     blocks.push(ContentBlock::text(build_tool_system_prompt(
-        &request, locale,
+        &request, locale, skills,
     )));
     // Windowed history as alternating user/assistant text blocks. Mirrors
     // `tool_turn_messages` turn-for-turn but as flat text -- the external CLI

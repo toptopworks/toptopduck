@@ -36,7 +36,7 @@ use crate::model::{
 };
 use crate::persistence::recipe::{
     Recipe, RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTraceEntry, RecipeTurn, RuntimeKind,
-    SourceRef, TurnProvenance,
+    SkillProvenance, SourceRef, TurnProvenance,
 };
 use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
 use crate::persistence::{read_duck, save_atomic, SaveError};
@@ -50,6 +50,7 @@ use crate::runtime::gateway::server::{bind_gateway, serve_connection, GatewayCtx
 use crate::session::agent_loop::{AgentLoop, LoopOutcome, Termination, TraceEntry};
 use crate::session::materializer::{Materializer, RealMaterializer, TurnDeps};
 use crate::session_store::ClosingFlag;
+use crate::skills::SkillPromptFragment;
 use crate::tools::definitions::builtin_metadata;
 use crate::window;
 use crate::workingset::{WorkingSet, DEFAULT_RESULT_COUNT_CAP};
@@ -562,16 +563,17 @@ struct TurnAudit {
 
 impl TurnAudit {
     /// The audit for a turn the built-in agent loop just recorded (ADR-0078/
-    /// 0081, issue #319): the loop's real multi-call trace mapped to its
-    /// persisted form + the BuiltIn runtime. Skills stay empty until skill
-    /// tracking lands (the skill surface is defined by ADR-0079); the field
-    /// is default-omitted from the .duck while empty.
-    fn builtin(trace: Vec<TraceEntry>) -> Self {
+    /// 0081, issue #319; ADR-0086, issue #364): the loop's real multi-call trace
+    /// mapped to its persisted form + the BuiltIn runtime + the mounted skills'
+    /// provenance (each skill's `name` + `content_hash` snapshotted at the
+    /// turn's assembly time). `skills` is empty when no skills were mounted
+    /// (the field is default-omitted from the .duck while empty).
+    fn builtin(trace: Vec<TraceEntry>, skills: Vec<SkillProvenance>) -> Self {
         Self {
             trace: trace.iter().map(RecipeTraceEntry::from).collect(),
             provenance: TurnProvenance {
                 runtime: Some(RuntimeKind::BuiltIn),
-                skills: Vec::new(),
+                skills,
             },
         }
     }
@@ -1778,7 +1780,9 @@ impl Session {
         // struct, ADR-0029) -- get_mcp_secret reads None for every env key, so
         // a server with keychain_env_keys still spawns, just secret-free.
         let keychain = KeychainStore::new();
-        self.ask_with_phase(question, &approval, &sink, |_| {}, &[], &keychain)
+        // No mounted skills either: tests that need skill injection call
+        // ask_with_phase directly with resolved fragments (issue #364).
+        self.ask_with_phase(question, &approval, &sink, |_| {}, &[], &keychain, &[])
     }
 
     /// Run one turn AND surface its discrete progress events (ADR-0059,
@@ -1798,6 +1802,7 @@ impl Session {
     /// the approval-card events. Both live at the command boundary (the only
     /// layer holding an AppHandle, ADR-0029) and are borrowed per turn, so the
     /// Session stays unparameterized across `commands.rs`.
+    #[allow(clippy::too_many_arguments)]
     pub fn ask_with_phase(
         &mut self,
         question: &str,
@@ -1806,6 +1811,7 @@ impl Session {
         on_phase: impl FnMut(TurnPhase) + Send,
         mcp_servers: &[McpServerConfig],
         keychain: &KeychainStore,
+        skills: &[SkillPromptFragment],
     ) -> TurnOutcome {
         // Facade over the agent loop (ADR-0081, issue #318): assemble the
         // windowed tool-calling request (system prompt + tool table + windowed
@@ -1817,6 +1823,19 @@ impl Session {
         // orchestration -- ADR-0053 Decision 2).
         let turns = self.turns();
         let locale = self.provider.response_locale();
+        // ADR-0086 (issue #364): the mounted-skill fragments both ride the
+        // system prompt (base prompt + skill bodies + locale + schema) and
+        // snapshot into the turn's provenance (name + content_hash) for resume.
+        // Computed once here so both branches see the same assembly-time
+        // snapshot; an empty slice stays empty end-to-end (no skill section in
+        // the prompt, no skills in the provenance -- the pre-skill path).
+        let skill_provenance: Vec<SkillProvenance> = skills
+            .iter()
+            .map(|f| SkillProvenance {
+                name: f.name.clone(),
+                content_hash: f.content_hash.clone(),
+            })
+            .collect();
         // The external-runtime branch (issue #299 slice 9c, ADR-0085) replaces
         // the built-in agent loop when an adapter is set; otherwise the built-in
         // loop runs (ADR-0081). Both return a `(outcome, trace)` pair; the
@@ -1835,13 +1854,14 @@ impl Session {
                 on_phase,
                 mcp_servers,
                 keychain,
+                skills,
             ),
             None => {
                 // Built-in agent loop (ADR-0081, issue #318): assemble the
                 // windowed tool-calling request, drive the loop with the shared
                 // session state, map the structured LoopOutcome onto TurnOutcome.
                 let mut request =
-                    window::assemble_tool_turn(question, &self.working_set, &turns, locale);
+                    window::assemble_tool_turn(question, &self.working_set, &turns, locale, skills);
                 // Disjoint field borrows: the loop borrows `&*self.provider`
                 // while TurnDeps borrows `&self.conn` / `&self.source_files` /
                 // `&mut self.working_set` / `&self.temp_path` and the loop takes
@@ -1924,7 +1944,7 @@ impl Session {
             );
             return outcome;
         }
-        self.record_turn(question, outcome, trace)
+        self.record_turn(question, outcome, trace, skill_provenance)
     }
 
     /// Drive one external-runtime turn (issue #299 slice 9c, ADR-0085).
@@ -1952,6 +1972,7 @@ impl Session {
         on_phase: O,
         mcp_servers: &[McpServerConfig],
         keychain: &KeychainStore,
+        skills: &[SkillPromptFragment],
     ) -> (TurnOutcome, Vec<TraceEntry>) {
         // 1. Resolve the CLI binary. Not-on-PATH -> a transient turn failure
         //    (the engine never spawns; nothing to clean up).
@@ -2001,7 +2022,8 @@ impl Session {
         let mcp_server = McpServer::stdio_bridge(GATEWAY_SERVER_NAME, bin_path, Vec::new(), env);
         // 4. Assemble the prompt blocks (windowed context + schema; the
         //    leading system-prompt block carries the M-contract, ADR-0081).
-        let prompt_blocks = window::assemble_acp_turn(question, &self.working_set, history, locale);
+        let prompt_blocks =
+            window::assemble_acp_turn(question, &self.working_set, history, locale, skills);
         let input = AcpTurnInput {
             cwd: self.temp_path.to_string_lossy().to_string(),
             mcp_servers: vec![mcp_server],
@@ -2118,6 +2140,7 @@ impl Session {
         question: &str,
         outcome: TurnOutcome,
         trace: Vec<TraceEntry>,
+        skills: Vec<SkillProvenance>,
     ) -> TurnOutcome {
         // ADR-0078 (issue #297): the DISPLAY view of the trace rides the
         // TurnRecord so the rail can expand a completed turn's tool-call chain
@@ -2132,10 +2155,12 @@ impl Session {
         }));
         // ADR-0078 (issue #319): index-aligned with the history push above --
         // the loop's real multi-call trace (mapped to the recipe form) + the
-        // BuiltIn runtime provenance. The PERSISTED form rides the Session
-        // (the recipe is the trace's .duck layer, read by build_recipe); the
-        // TurnRecord's display view above is the same bounded shape.
-        self.turn_audit.push(TurnAudit::builtin(trace));
+        // BuiltIn runtime provenance + the mounted-skills provenance
+        // (ADR-0086, issue #364: each skill's name + content_hash snapshotted
+        // at assembly time). The PERSISTED form rides the Session (the recipe
+        // is the trace's .duck layer, read by build_recipe); the TurnRecord's
+        // display view above is the same bounded shape.
+        self.turn_audit.push(TurnAudit::builtin(trace, skills));
         // ADR-0034 per-terminal-turn atomic write: the recipe is rewritten
         // whole-file at the bound path (temp + rename). No-op when no .duck
         // is bound; a failure is logged (the prior file is intact and the

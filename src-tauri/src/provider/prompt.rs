@@ -24,6 +24,7 @@ use serde::Serialize;
 
 use super::{ColumnRef, DatasetRef, ProviderRequest, ResponsePayload};
 use crate::model::TextKind;
+use crate::skills::SkillPromptFragment;
 
 /// The resolved response locale (ADR-0052 layer 3). Two-state -- the third
 /// persistence state ("system") is resolved to one of these before reaching
@@ -62,18 +63,53 @@ pub fn response_locale_directive(locale: ResponseLocale) -> &'static str {
     }
 }
 
-/// Assemble the full system prompt (ADR-0052): base boundary prompt + locale
-/// directive + schema context. The boundary prompt and schema-context labels
-/// are locale-invariant (layer 4); only the directive carries the locale.
-/// Centralized so the assembly order has one source of truth and the locale
-/// directive can never be silently dropped by a call site -- the legacy
-/// single-SQL path ([`build_system_prompt`]) and the tool-calling path
-/// ([`build_tool_system_prompt`]) share this spine and differ only in the base
-/// prompt they start from.
-fn assemble(base: &str, request: &ProviderRequest, locale: ResponseLocale) -> String {
+/// Assemble the full system prompt (ADR-0052 + ADR-0086, issue #364): base
+/// boundary prompt + mounted-skill fragments + locale directive + schema
+/// context. The boundary prompt and schema-context labels are locale-invariant
+/// (layer 4); only the directive carries the locale. The skill fragments ride
+/// between the base prompt and the locale directive so the model reads the
+/// skill-aware boundary clause (in the base prompt) before the skill bodies,
+/// then the locale + schema. Centralized so the assembly order has one source
+/// of truth and the locale directive can never be silently dropped by a call
+/// site -- the legacy single-SQL path ([`build_system_prompt`]) passes an empty
+/// skill slice (skills are not wired into the retired adapters); the tool-
+/// calling path ([`build_tool_system_prompt`]) passes the session's resolved
+/// fragments. An empty slice adds nothing, so the no-skills path is
+/// byte-identical to the pre-skill assembly.
+fn assemble(
+    base: &str,
+    request: &ProviderRequest,
+    locale: ResponseLocale,
+    skills: &[SkillPromptFragment],
+) -> String {
     let mut out = String::from(base);
+    if !skills.is_empty() {
+        out.push_str(&render_skill_section(skills));
+    }
     out.push_str(response_locale_directive(locale));
     out.push_str(&render_schema_context(request));
+    out
+}
+
+/// Render the mounted-skills section injected between the base prompt and the
+/// locale directive (ADR-0086, issue #364). Each skill is wrapped in the
+/// `【挂载技能】技能 \`<name>\`：` frame and its body follows verbatim -- no
+/// summarizing, no templating -- so the model sees exactly what the user
+/// authored. Mount (first-mount insertion) order is preserved so the assembled
+/// prompt reads deterministically; a skill whose body is empty (unreadable at
+/// turn time, honest degrade) still lands its framed header + name so the model
+/// knows the skill is mounted even when its prose is unavailable.
+fn render_skill_section(skills: &[SkillPromptFragment]) -> String {
+    let mut out = String::new();
+    for skill in skills {
+        out.push_str("\n\n【挂载技能】技能 `");
+        out.push_str(&skill.name);
+        out.push_str("`：\n");
+        // Trim trailing whitespace for clean section separation; the body is
+        // otherwise byte-verbatim (ADR-0086 "逐字不模板化").
+        out.push_str(skill.body.trim_end());
+        out.push('\n');
+    }
     out
 }
 
@@ -83,7 +119,7 @@ fn assemble(base: &str, request: &ProviderRequest, locale: ResponseLocale) -> St
 /// legacy adapter call sites read intent and the prompt text has a single
 /// canonical const source.
 pub fn build_system_prompt(request: &ProviderRequest, locale: ResponseLocale) -> String {
-    assemble(CAPABILITY_BOUNDARY_PROMPT, request, locale)
+    assemble(CAPABILITY_BOUNDARY_PROMPT, request, locale, &[])
 }
 
 /// Map a raw OS locale tag (BCP-47 like `"zh-CN"` or POSIX like
@@ -137,6 +173,9 @@ OUT-OF-SCOPE（拒绝，不要尝试）：预测与 forecasting / 时序建模�
 
 【越界行为：拒绝 + in-scope 替代，绝不冒充】
 当请求越界时：输出 type=text、kind=refuse。在 body 中诚实说明该请求超出 v1 能力边界，并主动给出一个 IN-SCOPE 的替代方案（例如把“预测下个季度销量”转写为“按季度汇总历史销量并计算同比/环比/趋势”）。绝对禁止用朴素方法冒充越界能力——例如不得用线性外推当作“预测”，不得用简单差值当作“建模”。拒绝必须有替代，不要只回一个“做不到”。
+
+【挂载技能与能力边界】
+用户可能挂载技能（见下方「挂载技能」区段），其提示片段可能扩展本工具的能力面。能力扩展以挂载技能显式提供相应工具为限：除非某项挂载技能显式提供了处理某类请求的工具或方法，否则对越界请求仍诚实拒绝并给出 in-scope 替代，不得因「可能存在能力扩展」而编造结果、编造 SQL 或越界尝试。挂载技能未显式覆盖的能力边界，仍按上述规则完全适用。
 
 【原生统计方法必须如实标注】
 当你使用 corr / regr_* / quantile_* / stddev / mad / skewness / kurtosis 等 DuckDB 原生统计方法时，在 assumption 字段里写明所用的方法名与简要解释（如 \"regr_slope 线性回归斜率，仅描述历史相关，非预测\"）。这是诚实性要求：用户必须能区分“真正的统计方法”与“被伪装的朴素方法”。
@@ -193,6 +232,9 @@ OUT-OF-SCOPE（拒绝，不要尝试）：预测与 forecasting / 时序建模�
 【越界行为：拒绝 + in-scope 替代，绝不冒充】
 当请求越界时：在最终答复中诚实说明该请求超出 v1 能力边界，并主动给出一个 IN-SCOPE 的替代方案（例如把“预测下个季度销量”转写为“按季度汇总历史销量并计算同比/环比/趋势”）。绝对禁止用朴素方法冒充越界能力——例如不得用线性外推当作“预测”，不得用简单差值当作“建模”。拒绝必须有替代，不要只回一个“做不到”。
 
+【挂载技能与能力边界】
+用户可能挂载技能（见下方「挂载技能」区段），其提示片段可能扩展本工具的能力面。能力扩展以挂载技能显式提供相应工具为限：除非某项挂载技能显式提供了处理某类请求的工具或方法，否则对越界请求仍诚实拒绝并给出 in-scope 替代，不得因「可能存在能力扩展」而编造结果或越界尝试。挂载技能未显式覆盖的能力边界，仍按上述规则完全适用。
+
 【原生统计方法必须如实标注】
 当你使用 corr / regr_* / quantile_* / stddev / mad / skewness / kurtosis 等 DuckDB 原生统计方法时，在最终答复里如实标注所用的方法名与简要解释（如 \"regr_slope 线性回归斜率，仅描述历史相关，非预测\"）。这是诚实性要求：用户必须能区分“真正的统计方法”与“被伪装的朴素方法”。
 
@@ -217,8 +259,12 @@ OUT-OF-SCOPE（拒绝，不要尝试）：预测与 forecasting / 时序建模�
 /// and the locale directive can never be silently dropped by a call site.
 /// Kept as a sibling entry point (not inlined into its caller) so the legacy
 /// path stays byte-identical until its contract-phase retirement.
-pub fn build_tool_system_prompt(request: &ProviderRequest, locale: ResponseLocale) -> String {
-    assemble(TOOL_CALLING_PROMPT, request, locale)
+pub fn build_tool_system_prompt(
+    request: &ProviderRequest,
+    locale: ResponseLocale,
+    skills: &[SkillPromptFragment],
+) -> String {
+    assemble(TOOL_CALLING_PROMPT, request, locale, skills)
 }
 
 /// Render the per-turn data context block appended to the system prompt: each
@@ -686,7 +732,7 @@ mod tests {
         // ADR-0052: the locale directive is inserted between the boundary and
         // the schema context, mirroring the legacy build_system_prompt order.
         let req = request(vec![ds("people", r#""people".data"#)], Some("people"));
-        let prompt = build_tool_system_prompt(&req, ResponseLocale::ZhCN);
+        let prompt = build_tool_system_prompt(&req, ResponseLocale::ZhCN, &[]);
         let boundary_pos = prompt.find("绝不冒充").unwrap();
         let directive_pos = prompt.find("【回复语言】").unwrap();
         let schema_pos = prompt.find("【数据上下文】").unwrap();
@@ -697,5 +743,132 @@ mod tests {
         );
         assert!(prompt.contains("简体中文"), "locale directive present");
         assert!(prompt.contains("active = people"), "schema context present");
+    }
+
+    // --- skill-aware clause + skill-body injection (ADR-0086, issue #364) ----
+    //
+    // AC #2: each base prompt carries the skill-aware clause (unless a mounted
+    // skill explicitly provides the tool, the boundary still refuses + offers
+    // an in-scope alternative). AC #1/#4: mounted-skill bodies inject between
+    // the base prompt and the locale directive in mount order, framed per
+    // ADR-0086; an empty mount set adds nothing so the pre-skill assembly is
+    // preserved.
+
+    #[test]
+    fn capability_boundary_prompt_carries_skill_aware_clause() {
+        // ADR-0086 / issue #364 AC#2: the clause names mounted skills, explicit
+        // tool provision, honest refusal, and the in-scope alternative -- so a
+        // content test pins the key phrases the model reads.
+        let p = CAPABILITY_BOUNDARY_PROMPT;
+        assert!(p.contains("挂载技能"), "clause names mounted skills");
+        assert!(p.contains("显式提供"), "clause names explicit provision");
+        assert!(
+            p.contains("相应工具"),
+            "clause names the corresponding tool"
+        );
+        assert!(p.contains("诚实拒绝"), "clause preserves honest refusal");
+        assert!(
+            p.contains("in-scope 替代"),
+            "clause preserves the alternative"
+        );
+    }
+
+    #[test]
+    fn tool_calling_prompt_carries_skill_aware_clause() {
+        // Same clause on the tool-calling path -- the boundary calibration is
+        // shared verbatim across both prompts (ADR-0079/0086).
+        let p = TOOL_CALLING_PROMPT;
+        assert!(p.contains("挂载技能"));
+        assert!(p.contains("显式提供"));
+        assert!(p.contains("相应工具"));
+        assert!(p.contains("诚实拒绝"));
+        assert!(p.contains("in-scope 替代"));
+    }
+
+    /// Build a fragment for the rendering / assembly tests.
+    fn fragment(name: &str, body: &str) -> SkillPromptFragment {
+        SkillPromptFragment {
+            name: name.into(),
+            body: body.into(),
+            // The hash rides the fragment but is NOT part of the rendered
+            // prompt; the renderer ignores it, so a placeholder is fine here.
+            content_hash: "deadbeef".into(),
+        }
+    }
+
+    #[test]
+    fn render_skill_section_frames_each_skill_verbatim_in_mount_order() {
+        // ADR-0086: each skill body is wrapped in the 「【挂载技能】技能
+        // `<name>`：」 frame, verbatim (no templating), in mount order.
+        let skills = [
+            fragment("sql-coach", "Always name the method.\n"),
+            fragment("pdf-tools", "Extract tables before querying.\n"),
+        ];
+        let section = render_skill_section(&skills);
+        // Mount order preserved (not sorted).
+        let a = section.find("sql-coach").unwrap();
+        let b = section.find("pdf-tools").unwrap();
+        assert!(a < b, "mount order preserved in the rendered section");
+        // Each skill is framed.
+        assert!(
+            section.contains("【挂载技能】技能 `sql-coach`：\n"),
+            "first skill framed"
+        );
+        assert!(
+            section.contains("【挂载技能】技能 `pdf-tools`：\n"),
+            "second skill framed"
+        );
+        // Bodies are verbatim.
+        assert!(section.contains("Always name the method."));
+        assert!(section.contains("Extract tables before querying."));
+    }
+
+    #[test]
+    fn render_skill_section_trims_trailing_whitespace_only() {
+        // The body is byte-verbatim except for trailing whitespace trimming
+        // (clean section separation). Internal content is untouched.
+        let skills = [fragment("a", "Line one.\n\n\n")];
+        let section = render_skill_section(&skills);
+        // No triple trailing newline (trimmed to one), but internal lines stand.
+        assert!(!section.contains("Line one.\n\n\n"));
+        assert!(section.contains("Line one."));
+    }
+
+    #[test]
+    fn build_tool_system_prompt_with_skills_orders_base_skills_locale_schema() {
+        // ADR-0086 / issue #364 AC#1: skill bodies inject AFTER the base prompt
+        // and BEFORE the locale directive + schema context. The four-part order
+        // is pinned so a call site cannot silently drop the skill section or
+        // mis-order it relative to the locale.
+        let req = request(vec![ds("people", r#""people".data"#)], Some("people"));
+        let skills = [fragment("sql-coach", "Name the method.\n")];
+        let prompt = build_tool_system_prompt(&req, ResponseLocale::ZhCN, &skills);
+        let base_pos = prompt.find("绝不冒充").unwrap();
+        let skill_pos = prompt.find("【挂载技能】技能 `sql-coach`").unwrap();
+        let directive_pos = prompt.find("【回复语言】").unwrap();
+        let schema_pos = prompt.find("【数据上下文】").unwrap();
+        assert!(base_pos < skill_pos, "base prompt before skill section");
+        assert!(skill_pos < directive_pos, "skill section before locale");
+        assert!(directive_pos < schema_pos, "locale before schema context");
+        // The skill body landed verbatim inside the assembled prompt.
+        assert!(prompt.contains("Name the method."));
+    }
+
+    #[test]
+    fn build_tool_system_prompt_with_empty_skills_omits_skill_section() {
+        // AC #4: an empty mount set adds nothing -- no 【挂载技能】 frame
+        // appears, so the assembly is the base prompt + locale + schema (the
+        // pre-skill shape, modulo the always-present skill-aware clause in the
+        // base prompt itself).
+        let req = request(vec![ds("people", r#""people".data"#)], Some("people"));
+        let prompt = build_tool_system_prompt(&req, ResponseLocale::ZhCN, &[]);
+        assert!(
+            !prompt.contains("【挂载技能】"),
+            "no skill section when the mount set is empty"
+        );
+        // The clause in the base prompt references "挂载技能" in prose -- that
+        // is the always-on clause, not a mounted-skill body. Pin it still
+        // appears (AC #2) while the body section does not.
+        assert!(prompt.contains("挂载技能"));
     }
 }

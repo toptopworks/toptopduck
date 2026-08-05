@@ -20,11 +20,16 @@
 //!   spec fields survive an edit verbatim.
 //! - [`registry`]: the root-parameterized scan + create / update / delete
 //!   (Tauri-state-free, so the whole surface tests against a tempdir).
+//! - [`prompt`]: per-turn skill resolution for prompt injection + provenance
+//!   (issue #364) -- resolves each mounted skill into its verbatim body + the
+//!   SHA-256 of the whole `SKILL.md`.
 
 pub mod frontmatter;
 pub mod model;
+pub mod prompt;
 pub mod registry;
 
 pub use model::{
     Acquired, SkillEntry, SkillError, SkillListing, SkillUpdate, SkillsRoot, SkippedSkill,
 };
+pub use prompt::{resolve_prompt_fragments, SkillPromptFragment};
