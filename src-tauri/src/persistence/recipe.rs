@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::approval::OperationKind;
 use crate::model::{
-    RectifyProvenance, SkillLifecycleEvent, SkillLifecycleKind, SourceLifecycleEvent,
-    SourceLifecycleKind, StaleAnchor, TextKind, TurnFailure,
+    RectifyProvenance, SkillLifecycleEvent, SkillLifecycleKind, SkillProvenance,
+    SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, TextKind, TurnFailure,
 };
 
 /// Recipe format version (ADR-0036). Opening routes on this value: equal
@@ -216,36 +216,13 @@ pub struct TurnProvenance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<RuntimeKind>,
     /// The active skills at this turn's assembly time (ADR-0079/0086, issue
-    /// #363), each carrying its `content_hash` so resume can honestly degrade
-    /// when a skill's content drifted or the skill left the registry. Empty
-    /// when no skills were mounted or skill tracking is not yet wired (the
-    /// live path fills this once #364 wires skill prompt injection).
+    /// #363), each carrying its `content_hash` so the frontend can drift-compare
+    /// against the registry's current hash and surface a "modified" badge when
+    /// a skill changed after this turn. Empty when no skills were mounted or
+    /// skill tracking is not yet wired (the live path fills this once #364
+    /// wires skill prompt injection).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<SkillProvenance>,
-}
-
-/// One skill recorded on a turn's provenance (ADR-0086, issue #363): the spec
-/// `name` (stable identity, equal to the directory name) + the SHA-256 of the
-/// skill's `SKILL.md` bytes at the turn's assembly time. The hash is the
-/// stale-degrade anchor -- on resume, the engine recomputes the skill's
-/// current hash and compares: a name missing from the registry means the skill
-/// no longer exists (honest degrade, the UI names it gone); a hash difference
-/// means the skill was modified after this turn (the UI surfaces "modified
-/// since this answer"); an empty hash means no baseline (a v3->v4 migration
-/// product), so the check is not tripped and a migrated recipe never
-/// false-positives.
-///
-/// An empty `content_hash` is the v3->v4 migration output (a v3 `skills`
-/// array of bare names has no hash to carry); a live v4 turn always records
-/// the real SHA-256.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SkillProvenance {
-    /// The skill's spec `name` (kebab-case identity, ADR-0086 Decision 2).
-    pub name: String,
-    /// SHA-256 of the skill's `SKILL.md` bytes at the turn's assembly time, or
-    /// the empty string when no baseline exists (v3->v4 migration output --
-    /// never trips the stale-degrade check).
-    pub content_hash: String,
 }
 
 impl TurnProvenance {

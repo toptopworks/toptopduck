@@ -440,7 +440,12 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       // refetch.
       const newEntry: ThreadEntry = {
         entry: "Turn",
-        data: { question, outcome, trace: settledTrace },
+        // Issue #381: the optimistic entry's provenance is empty -- the frontend
+        // does not know the assembly-time content_hashes (the backend records
+        // them in record_turn). The refetch replaces this entry with the real
+        // TurnRecord carrying the live provenance, so the drift check activates
+        // only after the refetch lands.
+        data: { question, outcome, trace: settledTrace, provenance: { skills: [] } },
       };
       queryClient.setQueryData<ThreadEntry[]>(sessionKeys.thread(sessionId), (old) =>
         old ? [...old, newEntry] : [newEntry],

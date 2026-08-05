@@ -5,6 +5,7 @@ import {
   ChevronRight,
   CircleOff,
   MessageCircleQuestion,
+  PencilLine,
   Plug,
   Plus,
   RefreshCw,
@@ -218,6 +219,7 @@ export function Thread({
                     jumpTargetIdx === null ? undefined : () => jumpToSource(jumpTargetIdx)
                   }
                   mentionedDataset={findMentionedDataset(entry.data.question, datasetLabels)}
+                  skillIndex={skillIndex}
                 />
               </li>
             );
@@ -799,6 +801,28 @@ function StaleChip({
   );
 }
 
+// Issue #381: the turn's mounted skills whose content changed after this turn
+// was recorded. Each provenance skill carries its SKILL.md SHA-256 at assembly
+// time; the registry's current SkillEntry.content_hash is the same hash
+// recomputed at load. A mismatch means the skill was edited after this answer
+// -- the TurnCard surfaces a drift badge so a reader can tell the answer may be
+// stale. An empty content_hash (v3->v4 migration, no baseline) never trips the
+// check; a name the registry no longer carries is the SkillMarker's "no longer
+// exists" case (issue #366), not a content drift -- omitted here.
+function selectDriftedSkills(
+  record: TurnRecord,
+  skillIndex: ReadonlyMap<string, SkillEntry> | undefined,
+): string[] {
+  return record.provenance.skills
+    .filter((s) => {
+      if (s.content_hash === "") return false;
+      const current = skillIndex?.get(s.name);
+      if (!current) return false;
+      return current.content_hash !== s.content_hash;
+    })
+    .map((s) => s.name);
+}
+
 interface TurnCardProps {
   record: TurnRecord;
   selectedResult: string | null;
@@ -812,6 +836,11 @@ interface TurnCardProps {
    * when hasJumpTarget is false (the chip is disabled, so no handler is wired). */
   onStaleChipJump: (() => void) | undefined;
   mentionedDataset: DatasetLabel | null;
+  /** The registry index for skill drift detection (issue #381). undefined when
+   *  the caller does not wire the registry: drift detection is skipped (honest
+   *  degrade -- the timeline stays readable, mirroring SkillMarker's #366
+   *  no-index posture). */
+  skillIndex: ReadonlyMap<string, SkillEntry> | undefined;
 }
 
 // One turn rendered as a single-row head (ADR-0047): outcome glyph + verbatim
@@ -832,9 +861,11 @@ function TurnCard({
   hasJumpTarget,
   onStaleChipJump,
   mentionedDataset,
+  skillIndex,
 }: TurnCardProps) {
   const intl = useIntl();
   const isStale = !!staleAnchor;
+  const drifted = selectDriftedSkills(record, skillIndex);
   const { Icon, label, tone } = outcomeVisual(intl, record.outcome, isStale);
   // ADR-0028 Why 2: Failed/Cancelled are weakened but not collapsed (opacity-
   // 60); a stale Materialized turn ghosts further (opacity-50, ADR-0041/0047).
@@ -915,6 +946,23 @@ function TurnCard({
           </Tooltip>
         )}
       </div>
+      {drifted.length > 0 && (
+        <p className="skill-drift m-0 mt-0.5 ml-6 flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+          {drifted.map((name) => (
+            <span
+              key={name}
+              className="skill-drift-name inline-flex items-center gap-0.5 rounded-sm bg-muted px-1 py-0.5"
+            >
+              <PencilLine aria-hidden="true" className="w-3 h-3 shrink-0" />
+              <span className="truncate">{name}</span>
+              <FormattedMessage
+                id="thread.skill.modifiedSuffix"
+                defaultMessage=" · modified since this answer"
+              />
+            </span>
+          ))}
+        </p>
+      )}
       {hasTrace && (
         // The trace toggle: a compact chevron + call count between the head
         // and the answer. aria-expanded conveys the fold state; the chevron

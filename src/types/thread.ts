@@ -6,7 +6,7 @@
 import type { OperationKind } from "./approval";
 import type { DatasetDescriptor } from "./dataset";
 import type { SourceLifecycleEvent } from "./lifecycle";
-import type { SkillLifecycleEvent } from "./skills";
+import type { SkillLifecycleEvent, SkillProvenance } from "./skills";
 
 // Which kind of textual response a turn produced (ADR-0009 textual branch,
 // evolved by ADR-0077/0081): a plain agent answer (the tool-calling
@@ -111,6 +111,17 @@ export interface TraceEntry {
   result_excerpt: string;
 }
 
+// Per-turn skill provenance crossing IPC (issue #381): the active skills at
+// the turn's assembly time, each with its content_hash so the TurnCard can
+// drift-compare against the registry's current SkillEntry.content_hash and
+// surface a "modified" drift badge when a skill changed after a recorded turn. Mirrors the
+// Rust crate::model::TurnProvenance -- the IPC wire is intentionally narrower
+// than the persisted recipe::TurnProvenance (which also carries the runtime
+// kind); the runtime is backend audit only, never crosses to the webview.
+export interface TurnProvenance {
+  skills: SkillProvenance[];
+}
+
 // One conversation-thread entry (ADR-0028/0039): the verbatim user question
 // paired with its outcome. Every turn appends exactly one -- always visible.
 // Mirrors the Rust TurnRecord; nested under ThreadEntry.Turn.data (see below).
@@ -121,6 +132,10 @@ export interface TurnRecord {
   question: string;
   outcome: TurnOutcome;
   trace: TraceEntry[];
+  // Issue #381: the turn's skill provenance for drift comparison against the
+  // registry. Empty `skills` for turns that mounted no skill and for v3->v4
+  // migrated turns (no baseline -- never trips the drift check).
+  provenance: TurnProvenance;
 }
 
 // One entry of the unified conversation timeline (ADR-0040/0086): a Turn

@@ -29,13 +29,13 @@ use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::mcp::config::McpServerConfig;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
-    RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, SourceLifecycleKind,
-    TextKind, ThreadEntry, TraceEntryView, TurnError, TurnFailure, TurnOutcome, TurnPhase,
-    TurnRecord,
+    RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, SkillProvenance,
+    SourceLifecycleKind, TextKind, ThreadEntry, TraceEntryView, TurnError, TurnFailure,
+    TurnOutcome, TurnPhase, TurnProvenance, TurnRecord,
 };
 use crate::persistence::recipe::{
     Recipe, RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTraceEntry, RecipeTurn, RuntimeKind,
-    SkillProvenance, SourceRef, TurnProvenance,
+    SourceRef, TurnProvenance as PersistedTurnProvenance,
 };
 use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
 use crate::persistence::{read_duck, save_atomic, SaveError};
@@ -555,8 +555,11 @@ struct TurnAudit {
     /// The turn's persisted execution trace (ADR-0078); empty for no-tool
     /// turns and source lifecycle entries.
     trace: Vec<RecipeTraceEntry>,
-    /// The turn's runtime + skill provenance (ADR-0078/0081).
-    provenance: TurnProvenance,
+    /// The turn's runtime + skill provenance (ADR-0078/0081). The PERSISTED
+    /// shape (recipe::TurnProvenance, aliased here) -- wider than the IPC
+    /// [`TurnProvenance`]: also carries the runtime kind for the .duck audit
+    /// anchor. The IPC TurnRecord narrows to skills only (issue #381).
+    provenance: PersistedTurnProvenance,
 }
 
 impl TurnAudit {
@@ -569,7 +572,7 @@ impl TurnAudit {
     fn builtin(trace: Vec<TraceEntry>, skills: Vec<SkillProvenance>) -> Self {
         Self {
             trace: trace.iter().map(RecipeTraceEntry::from).collect(),
-            provenance: TurnProvenance {
+            provenance: PersistedTurnProvenance {
                 runtime: Some(RuntimeKind::BuiltIn),
                 skills,
             },
@@ -2150,6 +2153,13 @@ impl Session {
             question: question.to_string(),
             outcome: outcome.clone(),
             trace: trace_view,
+            // Issue #381: the IPC provenance narrows to skills only (the
+            // runtime kind stays in the persisted TurnAudit below -- backend
+            // audit, never crosses to the webview). `skills` is already the
+            // model::SkillProvenance shape record_turn receives.
+            provenance: TurnProvenance {
+                skills: skills.clone(),
+            },
         }));
         // ADR-0078 (issue #319): index-aligned with the history push above --
         // the loop's real multi-call trace (mapped to the recipe form) + the

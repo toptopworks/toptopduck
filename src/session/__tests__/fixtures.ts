@@ -34,7 +34,7 @@ export function materialized(referenceName: string): ThreadEntry {
           assumption: null,
         },
       },
-      trace: [],
+      trace: [], provenance: { skills: [] },
     },
   };
 }
@@ -45,7 +45,7 @@ export function textual(body: string): ThreadEntry {
     data: {
       question: "q",
       outcome: { kind: "Textual", data: { text_kind: "Clarify", body, assumption: null } },
-      trace: [],
+      trace: [], provenance: { skills: [] },
     },
   };
 }

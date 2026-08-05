@@ -602,11 +602,54 @@ impl TurnOutcome {
 /// count + failure summary), never the entries verbatim. The window assembler
 /// reads [`Self::question`] + [`Self::outcome`] alone, so the trace adds no
 /// LLM tokens. Empty for v1-era migrated turns and zero-call turns.
+/// One skill recorded on a turn's provenance (ADR-0086, issue #363/#381): the
+/// spec `name` (stable identity, equal to the directory name) + the SHA-256 of
+/// the skill's `SKILL.md` bytes at the turn's assembly time. The hash is the
+/// stale-degrade anchor -- the frontend drift-compares it against the
+/// registry's current
+/// [`SkillEntry::content_hash`](crate::skills::model::SkillEntry::content_hash)
+/// and surfaces a "modified" drift badge on a mismatch (issue #381); an empty hash means no
+/// baseline (a v3->v4 migration product, or the skill's `SKILL.md` was
+/// unreadable at turn time), so the check never trips and a migrated recipe
+/// never false-positives.
+///
+/// This is the IPC + persistence shared type --
+/// [`crate::persistence::recipe`] re-uses it for its own (wider) provenance
+/// struct, so the wire shape and the `.duck` shape stay byte-identical
+/// (issue #381 lifts it from recipe to model so the IPC [`TurnRecord`] carries
+/// it without forking a parallel type).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillProvenance {
+    /// The skill's spec `name` (kebab-case identity, ADR-0086 Decision 2).
+    pub name: String,
+    /// SHA-256 hex of the `SKILL.md` bytes at the turn's assembly time, or the
+    /// empty string when no baseline exists (v3->v4 migration output, or the
+    /// file was unreadable at turn time -- never trips the drift check).
+    pub content_hash: String,
+}
+
+/// Per-turn skill provenance crossing IPC (issue #381): the active skills at
+/// the turn's assembly time, each with its [`SkillProvenance::content_hash`] so
+/// the frontend drift-compares against the registry and surfaces a "modified" badge for
+/// a skill whose content changed after this turn. Mirrors the skills half of
+/// the persisted [`crate::persistence::recipe::TurnProvenance`] (which also
+/// carries the runtime kind); the IPC wire is intentionally narrower -- the
+/// runtime is backend audit only, never crosses to the webview. Empty `skills`
+/// for turns that mounted no skill and for v3->v4 migrated turns (no baseline).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TurnProvenance {
+    pub skills: Vec<SkillProvenance>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnRecord {
     pub question: String,
     pub outcome: TurnOutcome,
     pub trace: Vec<TraceEntryView>,
+    /// The turn's skill provenance (issue #381): each mounted skill at assembly
+    /// time, with its `content_hash` for drift comparison against the registry.
+    /// Empty for turns that mounted no skill and for v3->v4 migrated turns.
+    pub provenance: TurnProvenance,
 }
 
 /// The display form of one execution-trace entry (ADR-0078, issue #297): what

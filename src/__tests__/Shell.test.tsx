@@ -198,7 +198,7 @@ function materializedTurn(referenceName: string): ThreadEntry {
           assumption: null,
         },
       },
-      trace: [],
+      trace: [], provenance: { skills: [] },
     },
   };
 }
@@ -360,7 +360,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
             kind: "Textual",
             data: { text_kind: "Clarify", body: "请说明哪个名字", assumption: null },
           },
-          trace: [],
+          trace: [], provenance: { skills: [] },
         },
       },
     ];
@@ -392,7 +392,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
             kind: "Failed",
             data: { kind: "Execute", data: { detail: "no_such_col" } },
           },
-          trace: [],
+          trace: [], provenance: { skills: [] },
         },
       },
     ];
@@ -431,7 +431,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
             kind: "Textual",
             data: { text_kind: "Clarify", body: "请说明哪个名字", assumption: null },
           },
-          trace: [],
+          trace: [], provenance: { skills: [] },
         },
       },
     ];
@@ -752,7 +752,7 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
     );
     // Fix the data source, then retry.
     threadData = [
-      { entry: "Turn", data: { question: "你好", outcome: { kind: "Cancelled" }, trace: [] } },
+      { entry: "Turn", data: { question: "你好", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } } },
     ];
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
     // The remounted pane reads the refetched (clean) data -- the question
@@ -782,7 +782,7 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
     );
     // Fix the data, then retry.
     threadData = [
-      { entry: "Turn", data: { question: "你好", outcome: { kind: "Cancelled" }, trace: [] } },
+      { entry: "Turn", data: { question: "你好", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } } },
     ];
     const conversationCallsBefore = vi.mocked(conversation).mock.calls.length;
     removeSpy.mockClear(); // isolate retry's own removeQueries call
@@ -1584,7 +1584,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     state.thread = [
       {
         entry: "Turn",
-        data: { question: longQuestion, outcome: { kind: "Cancelled" }, trace: [] },
+        data: { question: longQuestion, outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
       },
     ];
     render(<App />);

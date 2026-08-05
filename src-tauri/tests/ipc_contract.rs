@@ -426,8 +426,9 @@ fn skill_entry_serializes_with_snake_case_acquired() {
             mcp_servers: vec!["github-mcp".into()],
             body: "Body.\n".into(),
             link_target: Some("/src/pdf-tools".into()),
+            content_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
         },
-        r#"{"name":"pdf-tools","description":"Work with PDF files.","acquired":"linked","license":null,"compatibility":null,"mcp_servers":["github-mcp"],"body":"Body.\n","link_target":"/src/pdf-tools"}"#,
+        r#"{"name":"pdf-tools","description":"Work with PDF files.","acquired":"linked","license":null,"compatibility":null,"mcp_servers":["github-mcp"],"body":"Body.\n","link_target":"/src/pdf-tools","content_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#,
     );
     assert_wire(
         &SkillEntry {
@@ -439,8 +440,9 @@ fn skill_entry_serializes_with_snake_case_acquired() {
             mcp_servers: Vec::new(),
             body: "Body.\n".into(),
             link_target: None,
+            content_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
         },
-        r#"{"name":"mine","description":"Authored in-app.","acquired":"local","license":"MIT","compatibility":"requires network","mcp_servers":[],"body":"Body.\n","link_target":null}"#,
+        r#"{"name":"mine","description":"Authored in-app.","acquired":"local","license":"MIT","compatibility":"requires network","mcp_servers":[],"body":"Body.\n","link_target":null,"content_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#,
     );
 }
 
@@ -490,6 +492,8 @@ fn skill_listing_wraps_skills_and_ignored() {
                 mcp_servers: Vec::new(),
                 body: "Body.\n".into(),
                 link_target: None,
+                content_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .into(),
             }],
             ignored: vec![SkippedSkill {
                 dir: "mismatch-dir".into(),
@@ -497,7 +501,7 @@ fn skill_listing_wraps_skills_and_ignored() {
                     .into(),
             }],
         },
-        r#"{"skills":[{"name":"pdf-tools","description":"Work with PDF files.","acquired":"local","license":null,"compatibility":null,"mcp_servers":[],"body":"Body.\n","link_target":null}],"ignored":[{"dir":"mismatch-dir","reason":"frontmatter name `other` does not match its directory name `mismatch-dir`"}]}"#,
+        r#"{"skills":[{"name":"pdf-tools","description":"Work with PDF files.","acquired":"local","license":null,"compatibility":null,"mcp_servers":[],"body":"Body.\n","link_target":null,"content_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}],"ignored":[{"dir":"mismatch-dir","reason":"frontmatter name `other` does not match its directory name `mismatch-dir`"}]}"#,
     );
 }
 
@@ -579,14 +583,15 @@ fn turn_record_pairs_question_and_outcome() {
     // wire shape). The trace is the collapsible execution substructure
     // (ADR-0078, issue #297) -- empty here; trace_entry_view_* pins the
     // entry shape.
-    use toptopduck_lib::{TurnFailure, TurnOutcome, TurnRecord};
+    use toptopduck_lib::{TurnFailure, TurnOutcome, TurnProvenance, TurnRecord};
     assert_wire(
         &TurnRecord {
             question: "总行数？".into(),
             outcome: TurnOutcome::Failed(TurnFailure::NotWired),
             trace: vec![],
+            provenance: TurnProvenance::default(),
         },
-        r#"{"question":"总行数？","outcome":{"kind":"Failed","data":{"kind":"NotWired"}},"trace":[]}"#,
+        r#"{"question":"总行数？","outcome":{"kind":"Failed","data":{"kind":"NotWired"}},"trace":[],"provenance":{"skills":[]}}"#,
     );
 }
 
@@ -677,7 +682,7 @@ fn thread_entry_turn_wraps_a_turn_record_under_data() {
     // ADR-0040: the unified timeline entry. Adjacently-tagged on `entry`:
     // a Turn wraps the full TurnRecord (which keeps its own {question,outcome}
     // shape) under `data`. This is what conversation() returns for turns.
-    use toptopduck_lib::{ThreadEntry, TurnFailure, TurnOutcome, TurnRecord};
+    use toptopduck_lib::{ThreadEntry, TurnFailure, TurnOutcome, TurnProvenance, TurnRecord};
     assert_wire(
         &ThreadEntry::Turn(TurnRecord {
             question: "总行数？".into(),
@@ -685,8 +690,9 @@ fn thread_entry_turn_wraps_a_turn_record_under_data() {
                 reference_name: "result_1".into(),
             }),
             trace: vec![],
+            provenance: TurnProvenance::default(),
         }),
-        r#"{"entry":"Turn","data":{"question":"总行数？","outcome":{"kind":"Failed","data":{"kind":"StaleReference","data":{"reference_name":"result_1"}}},"trace":[]}}"#,
+        r#"{"entry":"Turn","data":{"question":"总行数？","outcome":{"kind":"Failed","data":{"kind":"StaleReference","data":{"reference_name":"result_1"}}},"trace":[],"provenance":{"skills":[]}}}"#,
     );
 }
 

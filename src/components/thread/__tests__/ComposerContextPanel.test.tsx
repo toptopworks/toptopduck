@@ -64,6 +64,7 @@ function skill(
     mcp_servers: [],
     body: "body",
     link_target: null,
+    content_hash: "deadbeef",
     ...overrides,
   };
 }

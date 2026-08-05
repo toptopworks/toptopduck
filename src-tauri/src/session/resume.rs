@@ -29,7 +29,7 @@ use super::{ActiveAbandoned, ActiveResolution, ResumeError, ResumeEvent};
 use crate::cancel::CancelToken;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, RectifyProvenance, ThreadEntry, TraceEntryView, TurnFailure,
-    TurnOutcome, TurnRecord,
+    TurnOutcome, TurnProvenance, TurnRecord,
 };
 use crate::persistence::recipe::{Recipe, RecipeEntry, RecipeOutcome, RecipeTraceEntry};
 use crate::persistence::registry::{release, try_acquire};
@@ -506,6 +506,15 @@ impl<'a> Resumer<'a> {
                         // v1-era migrated turns (their RecipeTurn carries no
                         // trace; the v2+ synthetic single-call trace does).
                         trace: turn.trace.iter().map(TraceEntryView::from).collect(),
+                        // Issue #381: the IPC provenance narrows to skills
+                        // (recipe::TurnProvenance also carries runtime, which
+                        // stays backend-side). RecipeTurn.skills is already the
+                        // model::SkillProvenance shape, so a verbatim clone
+                        // preserves each skill's assembly-time content_hash
+                        // for the frontend drift check.
+                        provenance: TurnProvenance {
+                            skills: turn.provenance.skills.clone(),
+                        },
                     }))
                 }
                 RecipeEntry::Source(ev) => Ok(ThreadEntry::Source(ev.clone())),

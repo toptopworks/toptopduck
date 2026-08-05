@@ -17,6 +17,7 @@ use super::model::{
     validate_body, validate_description, validate_skill_name, Acquired, SkillEntry, SkillError,
     SkillListing, SkillUpdate, SkippedSkill,
 };
+use crate::util::sha256_hex;
 
 /// The markdown body a freshly minted skill starts with. The spec requires a
 /// non-blank body (it is the prompt fragment); the drawer invites the real
@@ -288,9 +289,15 @@ fn load_skill(dir: &Path) -> Result<SkillEntry, SkillError> {
         })?
         .to_string();
     let md_path = dir.join(SKILL_MD);
-    let raw = fs::read_to_string(&md_path).map_err(|e| {
+    // Read raw bytes so the content_hash covers the exact bytes the assembly
+    // path (skills/prompt.rs) hashes -- a SKILL.md whose body holds non-UTF-8
+    // bytes stays loaded (lossy-decoded) rather than failing the whole read,
+    // keeping the drift signal truthful. Matches the prompt.rs read + lossy
+    // pattern; the frontmatter parser takes the lossy-decoded text.
+    let bytes = fs::read(&md_path).map_err(|e| {
         SkillError::InvalidSkill(format!("cannot read `{}`: {e}", md_path.display()))
     })?;
+    let raw = String::from_utf8_lossy(&bytes);
     let parsed = frontmatter::parse_skill_md(&raw).map_err(SkillError::InvalidSkill)?;
 
     let fm = &parsed.frontmatter;
@@ -332,6 +339,7 @@ fn load_skill(dir: &Path) -> Result<SkillEntry, SkillError> {
         mcp_servers: frontmatter::mcp_servers(fm),
         body: parsed.body,
         link_target,
+        content_hash: sha256_hex(&bytes),
     })
 }
 
@@ -630,6 +638,22 @@ mod tests {
         let listed = list_skills(&root).skills;
         assert_eq!(listed.len(), 1);
         assert!(listed[0].mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn load_skill_content_hash_hashes_the_raw_file_bytes() {
+        // Regression for the registry/assembly hash symmetry (issue #381,
+        // ADR-0086): load_skill must hash the exact file bytes -- the same
+        // input the assembly path (skills/prompt.rs resolve_one) hashes via
+        // the shared crate::util::sha256_hex, so an unedited skill yields
+        // identical hashes both places and the drift signal stays exact.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dir = put_skill(root, "sql-coach", "", "Body text.\n");
+        let entry = load_skill(&dir).expect("load_skill succeeds");
+        let bytes = fs::read(dir.join(SKILL_MD)).expect("read SKILL.md bytes");
+        assert_eq!(entry.content_hash, sha256_hex(&bytes));
+        assert_eq!(entry.content_hash.len(), 64);
     }
 
     #[test]
