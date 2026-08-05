@@ -299,6 +299,29 @@ fn remove_source_error_serializes_adjacently_tagged() {
 }
 
 #[test]
+fn skill_mount_error_serializes_adjacently_tagged() {
+    // SkillMountError (issue #363, ADR-0086) crosses IPC wrapped in
+    // SessionError::SkillMount. Both variants are struct variants carrying the
+    // offending skill name under data, so the frontend narrows on `kind` and
+    // renders the shared `error.skillMount.*` locale message. Pin the wire
+    // shape src/types/skills.ts mirrors so a serde drift fails here before the
+    // frontend's isSkillMountError narrows on a stale contract.
+    use toptopduck_lib::session::skills::SkillMountError;
+    assert_wire(
+        &SkillMountError::AlreadyMounted {
+            name: "sql-coach".into(),
+        },
+        r#"{"kind":"AlreadyMounted","data":{"name":"sql-coach"}}"#,
+    );
+    assert_wire(
+        &SkillMountError::NotMounted {
+            name: "sql-coach".into(),
+        },
+        r#"{"kind":"NotMounted","data":{"name":"sql-coach"}}"#,
+    );
+}
+
+#[test]
 fn rename_error_serializes_adjacently_tagged() {
     // RenameError (dataset display-label rename, ADR-0037) crosses IPC wrapped
     // in SessionError::RenameDataset (issue #121). NotFound / DisplayTaken are

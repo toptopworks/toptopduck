@@ -372,8 +372,14 @@ mod transforms {
         // A v3 entry's `skills[i]` is a bare string; wrap each into the v4
         // object shape. A non-string element is corrupt and left as-is -- the
         // typed deserialize rejects it downstream (honest parse, not a guess).
+        // A `log::warn!` mirrors v1_to_v2's diagnostic on unexpected shapes so
+        // the skip is forensically traceable, not silent.
         for skill in skills.iter_mut() {
             let Some(name) = skill.as_str() else {
+                log::warn!(
+                    "v3->v4 migration: provenance.skills entry is not a string; \
+                     leaving for typed deserialize"
+                );
                 continue;
             };
             let wrapped = serde_json::json!({
@@ -1249,5 +1255,43 @@ mod tests {
         );
         // No Skill lifecycle entries in a v3 recipe -> empty mounted set.
         assert!(recipe.mounted_skills().is_empty());
+    }
+
+    #[test]
+    fn v3_to_v4_skips_non_string_elements_in_provenance_skills() {
+        // ADR-0086 / I-4: a corrupt v3 entry whose `provenance.skills` carries
+        // a non-string element (a hand edit or a buggy writer) skips the non-
+        // string element -- leaves it as-is for the typed deserialize to
+        // reject -- and wraps the well-formed strings. The transform never
+        // guesses a shape; the skip emits a `log::warn!` for forensic parity
+        // with v1_to_v2.
+        let v3 = serde_json::json!({
+            "format_version": 3,
+            "session_name": "v3-corrupt",
+            "sources": [],
+            "history": [{
+                "entry": "Turn",
+                "data": {
+                    "question": "q",
+                    "outcome": {"kind": "Cancelled"},
+                    "provenance": {
+                        "runtime": "BuiltIn",
+                        "skills": ["ok", 42, "also-ok"],
+                    },
+                },
+            }],
+            "active": null,
+        });
+        let v4 = transforms::v3_to_v4(v3).expect("migrate");
+        let skills = &v4["history"][0]["data"]["provenance"]["skills"];
+        let arr = skills.as_array().expect("skills still an array");
+        assert_eq!(arr.len(), 3, "no elements lost or gained");
+        assert_eq!(arr[0]["name"], "ok");
+        assert_eq!(arr[0]["content_hash"], "");
+        // The non-string element passes through untouched for the typed
+        // deserializer to reject (honest parse, not a migration-time guess).
+        assert_eq!(arr[1], 42, "non-string element left as-is");
+        assert_eq!(arr[2]["name"], "also-ok");
+        assert_eq!(arr[2]["content_hash"], "");
     }
 }

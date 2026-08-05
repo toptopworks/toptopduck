@@ -281,6 +281,58 @@ fn resume_restores_working_set_history_and_active() {
 }
 
 #[test]
+fn resume_rebuilds_mounted_skills_from_timeline_fold() {
+    // AC#5 (ADR-0086, issue #363): the live `Session.mounted_skills` cache is
+    // re-seeded from `Recipe::mounted_skills()` -- the fold over the
+    // timeline's Mount/Unmount sequence -- NOT from a stored snapshot. A
+    // session that mounts two skills and unmounts the first must, after close
+    // + resume, yield the same single-skill active set (the surviving skill,
+    // in first-mount insertion order). The timeline's Skill events are also
+    // restored verbatim so the fold has the same input.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let mut session = build_session(&duck);
+    session.mount_skill("sql-coach").expect("mount sql-coach");
+    session
+        .mount_skill("chart-helper")
+        .expect("mount chart-helper");
+    session
+        .unmount_skill("sql-coach")
+        .expect("unmount sql-coach");
+    let before_mounted = session.mounted_skills();
+    assert_eq!(
+        before_mounted,
+        vec!["chart-helper".to_string()],
+        "live cache after the mount/unmount sequence",
+    );
+    let before_skill_events = session
+        .conversation()
+        .iter()
+        .filter(|e| matches!(e, ThreadEntry::Skill(_)))
+        .count();
+    assert_eq!(before_skill_events, 3, "Mount + Mount + Unmount");
+    drop(session);
+
+    let (_events, cb) = collect_events();
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("resume");
+
+    assert_eq!(
+        resumed.mounted_skills(),
+        before_mounted,
+        "resume rebuilds the live cache from the timeline fold, not a snapshot",
+    );
+    let after_skill_events = resumed
+        .conversation()
+        .iter()
+        .filter(|e| matches!(e, ThreadEntry::Skill(_)))
+        .count();
+    assert_eq!(
+        after_skill_events, before_skill_events,
+        "skill lifecycle events restored verbatim on the timeline",
+    );
+}
+
+#[test]
 fn duck_file_carries_no_secrets_or_materialized_data() {
     // AC: the .duck is a recipe text; assert it carries no API key, no
     // materialized result columns / sample / row-count, and no viz spec

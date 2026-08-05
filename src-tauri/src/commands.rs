@@ -1853,6 +1853,75 @@ mod tests {
         );
     }
 
+    // --- Skill lifecycle command wiring (issue #363, ADR-0086) -------------
+
+    /// `mount_skill`'s command body routes `Session::mount_skill`'s typed
+    /// `SkillMountError` through `.map_err(SessionError::SkillMount)`. The
+    /// command's `State` arg blocks a direct call (same approach as
+    /// set_privacy_unknown_reference above), so exercise the mapping at the
+    /// layer the command wraps. AC#5's loading gate (resuming / in-flight) is
+    /// pinned by `reject_if_resuming_blocks_while_the_session_is_resuming` and
+    /// `second_ask_on_same_session_rejects_while_one_is_in_flight` above; the
+    /// command body's `?` propagation is compile-time enforced, so a dropped
+    /// reject fails the build rather than silently passing the gate.
+    #[test]
+    fn mount_skill_command_maps_already_mounted_to_session_skill_mount_error() {
+        let store = SessionStore::new();
+        let id = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+            )
+            .expect("create session");
+        let handle = store.get(&id).expect("handle");
+        let mut s = handle.session_lock().expect("lock");
+        s.mount_skill("sql-coach").expect("first mount");
+        // Reproduce the command body's `.map_err(SessionError::SkillMount)`
+        // wrapping (the `State` arg blocks calling the command directly).
+        let err = s
+            .mount_skill("sql-coach")
+            .map_err(SessionError::SkillMount)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SessionError::SkillMount(
+                    crate::session::skills::SkillMountError::AlreadyMounted { ref name }
+                ) if name == "sql-coach"
+            ),
+            "expected SessionError::SkillMount(AlreadyMounted), got {err:?}",
+        );
+    }
+
+    /// `unmount_skill`'s command body routes `Session::unmount_skill`'s typed
+    /// `SkillMountError` through the same `.map_err(SessionError::SkillMount)`
+    /// wrapping; the `NotMounted` refuse is symmetric with `AlreadyMounted`.
+    #[test]
+    fn unmount_skill_command_maps_not_mounted_to_session_skill_mount_error() {
+        let store = SessionStore::new();
+        let id = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+            )
+            .expect("create session");
+        let handle = store.get(&id).expect("handle");
+        let mut s = handle.session_lock().expect("lock");
+        let err = s
+            .unmount_skill("ghost")
+            .map_err(SessionError::SkillMount)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SessionError::SkillMount(
+                    crate::session::skills::SkillMountError::NotMounted { ref name }
+                ) if name == "ghost"
+            ),
+            "expected SessionError::SkillMount(NotMounted), got {err:?}",
+        );
+    }
+
     /// Blank name short-circuits to BlankName BEFORE canonicalize runs (issue
     /// #130). The path's parent does not exist, so a reorder that canonicalized
     /// first would surface IoFailure instead -- pinning the result as BlankName

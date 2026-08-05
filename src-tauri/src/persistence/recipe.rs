@@ -238,7 +238,7 @@ pub struct TurnProvenance {
 /// An empty `content_hash` is the v3->v4 migration output (a v3 `skills`
 /// array of bare names has no hash to carry); a live v4 turn always records
 /// the real SHA-256.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillProvenance {
     /// The skill's spec `name` (kebab-case identity, ADR-0086 Decision 2).
     pub name: String,
@@ -709,8 +709,9 @@ impl Recipe {
     ///
     /// The result preserves first-Mount insertion order so a deterministic
     /// assembly sequence reads it. Used by resume to rebuild the live
-    /// `Session.mounted_skills` cache and by [`Self::turns`]'s caller when
-    /// assembling the per-turn skill set.
+    /// `Session.mounted_skills` cache and by the `list_mounted_skills` IPC to
+    /// render the active-set chip list; per-turn assembly will consume it via
+    /// `TurnProvenance::skills` once #364 wires real content hashes.
     ///
     /// A `mount -> unmount -> remount` sequence yields just `[name]` (the
     /// remount re-adds what the unmount removed) -- the AC pinned in tests.
