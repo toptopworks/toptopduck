@@ -7,6 +7,7 @@ import { catalogFor } from "../../../i18n";
 import { Thread } from "../Thread";
 import type { LiveTraceRow, LiveTurn } from "../../../session/useTurnFlow";
 import type { DatasetDescriptor } from "../../../types/dataset";
+import type { SkillEntry } from "../../../types/skills";
 import type { ThreadEntry, TurnRecord } from "../../../types/thread";
 
 // A materialized-record fixture (reference_name overridden per test) -- the
@@ -66,6 +67,23 @@ describe("Thread", () => {
   // returns (ADR-0040). Keeps the turn-focused tests readable.
   function turnEntry(record: TurnRecord): ThreadEntry {
     return { entry: "Turn", data: record };
+  }
+
+  // Build a registry SkillEntry with only the fields the skill-marker render
+  // path reads (name + mcp_servers). The other declaration fields are filled
+  // with benign defaults -- the marker never inspects them, and keeping the
+  // helper narrow keeps the tests focused on the marker behavior under test.
+  function skillEntry(name: string, mcpServers: string[] = []): SkillEntry {
+    return {
+      name,
+      description: `${name} description.`,
+      acquired: "local",
+      license: null,
+      compatibility: null,
+      mcp_servers: mcpServers,
+      body: "",
+      link_target: null,
+    };
   }
 
   it("renders a multi-promotion turn as a primary result link + a muted antecedents line (ADR-0084)", () => {
@@ -454,6 +472,181 @@ describe("Thread", () => {
       expect(tip.textContent).toContain("员工表");
       expect(tip.textContent).toContain("失效 2");
     });
+  });
+
+  it("renders skill lifecycle markers as thin bars distinct from turn cards (issue #366)", () => {
+    // The two skill lifecycle kinds (Mount / Unmount) ride the timeline
+    // isomorphic to source events but as a distinct species -- thin, non-
+    // interactive markers (data-skill-kind + .skill-lifecycle), never turn
+    // cards. Each carries its kind's glyph + an i18n'd verb + the spec name
+    // (the stable identity the timeline carries, never a snapshot).
+    const entries: ThreadEntry[] = [
+      { entry: "Skill", data: { kind: "Mount", name: "pdf-tools" } },
+      { entry: "Skill", data: { kind: "Unmount", name: "pdf-tools" } },
+    ];
+    const skillIndex = new Map([["pdf-tools", skillEntry("pdf-tools")]]);
+    const { container } = renderThread(
+      <Thread
+        entries={entries}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        skillIndex={skillIndex}
+      />,
+    );
+    // Two distinct markers by kind; never rendered as .turn-entry.
+    const markers = container.querySelectorAll(".skill-entry");
+    expect(Array.from(markers).map((li) => li.getAttribute("data-skill-kind"))).toEqual([
+      "mount",
+      "unmount",
+    ]);
+    expect(container.querySelectorAll(".turn-entry")).toHaveLength(0);
+    // Each kind's i18n'd verb rides one ICU message with the spec name.
+    expect(screen.getByText(/挂载技能「pdf-tools」/)).toBeInTheDocument();
+    expect(screen.getByText(/卸载技能「pdf-tools」/)).toBeInTheDocument();
+    // Mount = active tone (border-l-primary); Unmount = weakened tone.
+    const mountBar = container.querySelector(
+      `.skill-entry[data-skill-kind="mount"] .skill-lifecycle`,
+    ) as HTMLElement;
+    const unmountBar = container.querySelector(
+      `.skill-entry[data-skill-kind="unmount"] .skill-lifecycle`,
+    ) as HTMLElement;
+    expect(mountBar.className.split(/\s+/)).toContain("border-l-primary");
+    expect(unmountBar.className.split(/\s+/)).toContain("border-l-muted-foreground");
+  });
+
+  it("discloses a mounted skill's declared MCP servers in the marker tooltip (issue #366)", async () => {
+    // A Mount marker's tooltip carries the skill's declared MCP server ids
+    // (looked up from the registry, never snapshotted into the event) so a
+    // long skill name does not erase which servers the mount activates. The
+    // visible text still shows the verb + name; the MCP detail is hover-only.
+    const entries: ThreadEntry[] = [
+      { entry: "Skill", data: { kind: "Mount", name: "pdf-tools" } },
+    ];
+    const skillIndex = new Map([
+      ["pdf-tools", skillEntry("pdf-tools", ["github-mcp", "fs-server"])],
+    ]);
+    const { container } = renderThread(
+      <Thread
+        entries={entries}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        skillIndex={skillIndex}
+      />,
+    );
+    const markerText = container.querySelector(
+      `.skill-entry[data-skill-kind="mount"] .skill-text`,
+    ) as HTMLElement;
+    // Native title is gone (Radix Tooltip carries it, ADR-0050).
+    expect(markerText.getAttribute("title")).toBeNull();
+    fireEvent.pointerMove(markerText);
+    await waitFor(() => {
+      const tip = screen.getByRole("tooltip");
+      expect(tip.textContent).toContain("pdf-tools");
+      expect(tip.textContent).toContain("github-mcp");
+      expect(tip.textContent).toContain("fs-server");
+    });
+  });
+
+  it("omits MCP detail from a Mount tooltip when the skill declares no servers (issue #366)", async () => {
+    // A Mount whose skill is in the registry but declares zero MCP servers
+    // carries no declaration to disclose, so the tooltip mirrors the bare
+    // verb + name -- a regression that drops the length > 0 guard (showing
+    // "Declares MCP:" with an empty list) fails here. The default registry
+    // entry has no servers, so this is the common path.
+    const entries: ThreadEntry[] = [
+      { entry: "Skill", data: { kind: "Mount", name: "plain-skill" } },
+    ];
+    const skillIndex = new Map([["plain-skill", skillEntry("plain-skill")]]); // empty mcp_servers
+    const { container } = renderThread(
+      <Thread
+        entries={entries}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        skillIndex={skillIndex}
+      />,
+    );
+    const markerText = container.querySelector(
+      `.skill-entry[data-skill-kind="mount"] .skill-text`,
+    ) as HTMLElement;
+    fireEvent.pointerMove(markerText);
+    await waitFor(() => {
+      const tip = screen.getByRole("tooltip");
+      expect(tip.textContent).toContain("plain-skill");
+      expect(tip.textContent).not.toContain("声明 MCP");
+    });
+  });
+
+  it("does not surface MCP detail on an Unmount marker (the declaration is no longer operative)", async () => {
+    // Unmount means the skill left the active set; its MCP declaration no
+    // longer applies, so the tooltip carries the verb + name only -- a
+    // regression that copy-pastes the Mount tooltip branch fails here.
+    const entries: ThreadEntry[] = [
+      { entry: "Skill", data: { kind: "Unmount", name: "pdf-tools" } },
+    ];
+    const skillIndex = new Map([
+      ["pdf-tools", skillEntry("pdf-tools", ["github-mcp"])],
+    ]);
+    const { container } = renderThread(
+      <Thread
+        entries={entries}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        skillIndex={skillIndex}
+      />,
+    );
+    const markerText = container.querySelector(
+      `.skill-entry[data-skill-kind="unmount"] .skill-text`,
+    ) as HTMLElement;
+    fireEvent.pointerMove(markerText);
+    await waitFor(() => {
+      const tip = screen.getByRole("tooltip");
+      expect(tip.textContent).toContain("pdf-tools");
+      expect(tip.textContent).not.toContain("github-mcp");
+    });
+  });
+
+  it("flags a skill the registry no longer carries with a missing-skill warning (issue #366)", () => {
+    // Resume honest-degrade (ADR-0086): a Mount/Unmount event whose name left
+    // the registry (deleted / renamed / external library uninstalled) renders
+    // a destructive tone + a warning glyph + a "已不存在" suffix. The event
+    // stays in the timeline (it happened) but the reader sees the skill is
+    // gone; the base text keeps the verbatim name (the timeline's record).
+    const entries: ThreadEntry[] = [
+      { entry: "Skill", data: { kind: "Mount", name: "ghost-skill" } },
+    ];
+    // Empty registry: "ghost-skill" is not carried.
+    const skillIndex = new Map<string, SkillEntry>();
+    const { container } = renderThread(
+      <Thread
+        entries={entries}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        skillIndex={skillIndex}
+      />,
+    );
+    const marker = container.querySelector(
+      `.skill-entry[data-skill-kind="mount"] .skill-lifecycle`,
+    ) as HTMLElement;
+    expect(marker.className.split(/\s+/)).toContain("border-l-destructive");
+    expect(marker.className.split(/\s+/)).toContain("text-destructive");
+    expect(screen.getByText(/已不存在/)).toBeInTheDocument();
+  });
+
+  it("renders skill markers from the event alone when no registry index is wired (issue #366)", () => {
+    // Honest degrade: a call site that does not pass skillIndex still gets a
+    // readable marker (verb + name from the event). Without a registry to
+    // check against, NO missing-skill warning is raised and NO MCP detail is
+    // promised -- the timeline is always readable, the registry only enriches.
+    const entries: ThreadEntry[] = [
+      { entry: "Skill", data: { kind: "Mount", name: "pdf-tools" } },
+    ];
+    const { container } = renderThread(
+      <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
+    );
+    expect(screen.getByText(/挂载技能「pdf-tools」/)).toBeInTheDocument();
+    expect(screen.queryByText(/已不存在/)).not.toBeInTheDocument();
+    // No tooltip provider lookup needed -- the marker text is the bare verb.
+    expect(container.querySelector(".skill-entry")).not.toBeNull();
   });
 
   it("shows the active chip only when the question explicitly names a dataset (issue #80, ADR-0047)", async () => {

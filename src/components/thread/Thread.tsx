@@ -5,11 +5,13 @@ import {
   ChevronRight,
   CircleOff,
   MessageCircleQuestion,
+  Plug,
   Plus,
   RefreshCw,
   Table2,
   Trash2,
   TriangleAlert,
+  Unplug,
   type LucideIcon,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -21,6 +23,11 @@ import type { LiveTurn } from "../../session/useTurnFlow";
 import type { ApprovalResponse } from "../../types/approval";
 import type { DatasetDescriptor, StaleAnchor, StaleReason } from "../../types/dataset";
 import type { SourceLifecycleEvent, SourceLifecycleKind } from "../../types/lifecycle";
+import type {
+  SkillEntry,
+  SkillLifecycleEvent,
+  SkillLifecycleKind,
+} from "../../types/skills";
 import type { ThreadEntry, TurnOutcome, TurnRecord } from "../../types/thread";
 import { formatTurnFailure, turnFailureDetail } from "../../lib/error-presentation";
 import { TechnicalDetailsFold } from "../common/TechnicalDetailsFold";
@@ -71,6 +78,15 @@ interface ThreadProps {
    * lights up only when the user typed a dataset name. Optional for tests that
    * do not exercise the chip; defaults to empty (no chips rendered). */
   datasetLabels?: ReadonlyArray<DatasetLabel>;
+  /** The process-global skill registry keyed by spec name (ADR-0086, issue
+   *  #366): a Skill lifecycle marker looks up its name here to surface the
+   *  declared MCP server ids in its tooltip AND to detect a name the registry
+   *  no longer carries (resume honest-degrade -- a skill deleted / renamed /
+   *  uninstalled external library since the event was recorded). undefined
+   *  when the caller does not wire the registry: the marker then renders the
+   *  verb + name from the event alone (no MCP tooltip, no missing-skill
+   *  warning). The timeline stays readable; the registry only enriches it. */
+  skillIndex?: ReadonlyMap<string, SkillEntry>;
   /** The in-flight turn's live trace (ADR-0078, issue #297): when non-null the
    * thread renders a progressive turn card at its tail (question + tool-call
    * rows + approval cards). Client UI state only -- the settled turn replaces
@@ -110,6 +126,7 @@ export function Thread({
   onSelectResult,
   staleByReference = new Map(),
   datasetLabels = [],
+  skillIndex,
   liveTurn = null,
   onRespondApproval = NOOP_RESPOND,
 }: ThreadProps) {
@@ -205,12 +222,24 @@ export function Thread({
               </li>
             );
           }
-          // Skill lifecycle events (ADR-0086, issue #363) ride the timeline
-          // isomorphic to source events but are NOT rendered in this slice --
-          // the thread rail's skill-event marker lands in #366. Skip them
-          // here so the source-event rendering below stays typed to its
-          // SourceLifecycleEvent shape without a narrowing fallback.
-          if (entry.entry === "Skill") return null;
+          // Skill lifecycle events (ADR-0086, issue #366): thin markers
+          // isomorphic to source events, a distinct species from a turn (no
+          // question, no outcome glyph). Mount = active tone + Plug glyph;
+          // Unmount = weakened tone + Unplug glyph; a name the registry no
+          // longer carries (resume drift) flips the marker to a destructive
+          // warning. The registry lookup is optional -- without skillIndex
+          // the marker renders the verb + name from the event alone.
+          if (entry.entry === "Skill") {
+            return (
+              <li
+                key={i}
+                className="skill-entry"
+                data-skill-kind={entry.data.kind.toLowerCase()}
+              >
+                <SkillMarker event={entry.data} skillIndex={skillIndex} />
+              </li>
+            );
+          }
           const staleCount =
             entry.data.kind === "Added"
               ? 0
@@ -399,6 +428,143 @@ function sourceMarkerText(
     default: {
       const unhandled: never = kind;
       throw new Error(`unhandled source lifecycle kind: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+// A skill lifecycle event rendered as a non-interactive timeline marker
+// (ADR-0086, issue #366): a sibling species to SourceMarker -- thin, full-
+// width, no question / outcome glyph. Mount = active (Plug + border-l-
+// primary); Unmount = weakened (Unplug + border-l-muted-foreground). A name
+// the registry no longer carries (resume drift: deleted / renamed / external
+// library uninstalled since the event was recorded) overrides the kind tone
+// to a destructive warning + TriangleAlert glyph + " · no longer exists"
+// suffix, so the event stays in the timeline (it happened) but the reader
+// sees the skill is gone. When the registry index is not wired by the
+// caller, the marker renders the verb + name from the event alone -- no MCP
+// tooltip, no missing-skill warning (honest degrade: the timeline is always
+// readable, the registry only enriches it).
+function SkillMarker({
+  event,
+  skillIndex,
+}: {
+  event: SkillLifecycleEvent;
+  skillIndex: ReadonlyMap<string, SkillEntry> | undefined;
+}) {
+  const intl = useIntl();
+  // The verb + name come from the event alone -- always present, even when
+  // the registry has no entry (the timeline's record is the source of truth,
+  // not the current registry state).
+  const { Icon, text } = skillMarkerText(intl, event.kind, event.name);
+  const skill = skillIndex?.get(event.name);
+  // Three-way lookup distinguishes "registry not wired" (honest degrade, no
+  // drift signal) from "registry wired but name absent" (drift warning). The
+  // missing branch fires only when the caller passed an index AND the name
+  // is not in it -- a caller that skips the index opts out of drift detection.
+  const missing = skillIndex !== undefined && skill === undefined;
+  // Each branch is a literal utility so the Tailwind scanner keeps the class;
+  // a computed `border-l-${x}` string would be tree-shaken away. Missing
+  // overrides the kind tone (destructive > kind) so drift is unmistakable.
+  const borderTone = missing
+    ? "border-l-destructive"
+    : event.kind === "Mount"
+      ? "border-l-primary"
+      : "border-l-muted-foreground"; // Unmount (exhaustive over SkillLifecycleKind).
+  // The MCP declaration is registry state, not carried by the event.
+  // Disclosed only on a Mount whose skill is still carried -- the declaration
+  // is operative only while the skill is active; an Unmount's declaration is
+  // no longer in force, and a missing skill has no declaration to read.
+  // (The `skill` truthiness check covers both "not wired" and "wired but
+  // missing" -- either way `skill` is undefined and the guard short-circuits.)
+  const mcpServers = event.kind === "Mount" && skill ? skill.mcp_servers : [];
+  const missingSuffix = missing ? (
+    <FormattedMessage
+      id="thread.skill.missingSuffix"
+      defaultMessage=" · no longer exists"
+    />
+  ) : null;
+  const mcpDetail = mcpServers.length > 0 ? (
+    <FormattedMessage
+      id="thread.skill.declaresMcp"
+      defaultMessage="Declares MCP: {servers}"
+      values={{ servers: mcpServers.join(", ") }}
+    />
+  ) : null;
+  // TriangleAlert overrides the kind glyph on drift; the kind glyph stays
+  // when the skill is still in the registry.
+  const MarkerIcon = missing ? TriangleAlert : Icon;
+  // The tooltip carries the verbatim name + drift suffix (so a marker
+  // truncated by the fixed skill-row width still discloses the state on
+  // hover) plus the MCP declaration when operative. Declared once so the
+  // visible copy and the tooltip copy cannot drift apart.
+  const tooltipText = (
+    <>
+      {text}
+      {missingSuffix}
+      {mcpDetail !== null && (
+        <>
+          <br />
+          {mcpDetail}
+        </>
+      )}
+    </>
+  );
+  return (
+    <p
+      className={cn(
+        "skill-lifecycle flex items-center gap-1 m-0 py-1 px-1.5",
+        "text-xs border-l-2 rounded-r-md bg-muted",
+        // Kind tone rides text-muted-foreground by default; missing flips to
+        // text-destructive so the warning reads at a glance.
+        missing ? "text-destructive" : "text-muted-foreground",
+        // Hook class kept for kind-targeted selectors/tests
+        // (.skill-lifecycle.mount/unmount etc.), matching SourceMarker.
+        event.kind.toLowerCase(),
+        borderTone,
+      )}
+    >
+      <MarkerIcon className="skill-icon w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+      <TruncatingTooltip text={tooltipText} className="skill-text min-w-0 truncate">
+        {text}
+        {missingSuffix && <span className="skill-missing">{missingSuffix}</span>}
+      </TruncatingTooltip>
+    </p>
+  );
+}
+
+// Lucide glyph + i18n'd text per skill lifecycle kind (ADR-0086, issue #366).
+// The verb + spec name ride one ICU message so the quoting / spacing stays
+// locale-correct (ADR-0052), mirroring sourceMarkerText. When a new kind is
+// added to SkillLifecycleKind, this switch's `never` check fails compilation
+// -- the only way to keep the thread rail's kind set in lockstep with the
+// wire enum. `types/skills.ts` is the hand-maintained mirror of the Rust
+// enum, so the TS compiler won't catch a missing branch without this `never`
+// check.
+function skillMarkerText(
+  intl: IntlShape,
+  kind: SkillLifecycleKind,
+  name: string,
+): { Icon: LucideIcon; text: string } {
+  switch (kind) {
+    case "Mount":
+      return {
+        Icon: Plug,
+        text: intl.formatMessage(
+          { id: "thread.skill.mount", defaultMessage: "Mounted skill \"{name}\"" },
+          { name },
+        ),
+      };
+    case "Unmount":
+      return {
+        Icon: Unplug,
+        text: intl.formatMessage(
+          { id: "thread.skill.unmount", defaultMessage: "Unmounted skill \"{name}\"" },
+          { name },
+        ),
+      };
+    default: {
+      const unhandled: never = kind;
+      throw new Error(`unhandled skill lifecycle kind: ${JSON.stringify(unhandled)}`);
     }
   }
 }
