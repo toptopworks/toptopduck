@@ -76,7 +76,9 @@ pub use session::{
 pub use session_store::{
     ClosingFlag, SessionError, SessionHandle, SessionId, SessionStore, UNKNOWN_SESSION,
 };
-pub use skills::{Acquired, SkillEntry, SkillError, SkillUpdate, SkillsRoot};
+pub use skills::{
+    Acquired, SkillEntry, SkillError, SkillListing, SkillUpdate, SkillsRoot, SkippedSkill,
+};
 
 use std::sync::Arc;
 use tauri::Manager;

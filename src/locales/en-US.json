@@ -286,6 +286,8 @@
   "settings.skills.filterLabel": "Filter by acquired",
   "settings.skills.filterLinked": "Linked",
   "settings.skills.filterLocal": "Local",
+  "settings.skills.ignoredDescription": "These directories failed spec validation and were skipped during the scan. Fix the directory or its SKILL.md and rescan.",
+  "settings.skills.ignoredTitle": "Ignored directories",
   "settings.skills.import": "Import",
   "settings.skills.importDisabled": "Importing from external agent libraries arrives in a follow-up",
   "settings.skills.new": "New",

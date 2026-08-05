@@ -15,7 +15,7 @@ use serde_yaml::Value;
 use super::frontmatter;
 use super::model::{
     validate_body, validate_description, validate_skill_name, Acquired, SkillEntry, SkillError,
-    SkillUpdate,
+    SkillListing, SkillUpdate, SkippedSkill,
 };
 
 /// The markdown body a freshly minted skill starts with. The spec requires a
@@ -29,16 +29,24 @@ const SKILL_MD: &str = "SKILL.md";
 /// the rename is intra-volume (mirrors `crate::persistence::io`).
 const TMP_SUFFIX: &str = ".tmp";
 
-/// Every spec-valid skill under `root`, sorted by name for a stable listing.
-/// A missing root lists empty (a never-created registry is a valid state).
-/// Directories that fail the spec (no `SKILL.md`, malformed frontmatter,
-/// name / directory mismatch, blank body) are SKIPPED with a warning -- the
-/// listing never fabricates an entry and one broken skill never hides the rest.
-pub fn list_skills(root: &Path) -> Vec<SkillEntry> {
+/// Every spec-valid skill under `root`, sorted by name for a stable listing,
+/// plus the directories the scan SKIPPED with their English technical reason
+/// (issue #373). A missing root lists empty (a never-created registry is a
+/// valid state). Directories that fail the spec (no `SKILL.md`, malformed
+/// frontmatter, name / directory mismatch, blank body) are skipped -- the
+/// listing never fabricates an entry and one broken skill never hides the
+/// rest. Each skip is logged server-side AND surfaced in `ignored` so the
+/// settings UI can show WHY a directory disappeared instead of debugging from
+/// silence; `ignored` is sorted by directory name for a deterministic listing.
+pub fn list_skills(root: &Path) -> SkillListing {
     let Ok(entries) = fs::read_dir(root) else {
-        return Vec::new();
+        return SkillListing {
+            skills: Vec::new(),
+            ignored: Vec::new(),
+        };
     };
     let mut skills = Vec::new();
+    let mut ignored = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         // Follow the link for the directory check: a symlink / junction ONTO a
@@ -56,11 +64,24 @@ pub fn list_skills(root: &Path) -> Vec<SkillEntry> {
                     "skipping non-spec skill directory `{}`: {e}",
                     path.display()
                 );
+                // The directory name is the user-facing handle (parallel to
+                // SkillEntry::name); fall back to a sentinel for a non-UTF-8
+                // name so the row still renders instead of vanishing twice.
+                let dir = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("<non-utf8-name>")
+                    .to_string();
+                ignored.push(SkippedSkill {
+                    dir,
+                    reason: e.to_string(),
+                });
             }
         }
     }
     skills.sort_by(|a, b| a.name.cmp(&b.name));
-    skills
+    ignored.sort_by(|a, b| a.dir.cmp(&b.dir));
+    SkillListing { skills, ignored }
 }
 
 /// Mint a new `local` skill: `<root>/<name>/SKILL.md` with the given
@@ -438,7 +459,9 @@ mod tests {
     fn list_empty_when_root_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("skills");
-        assert!(list_skills(&missing).is_empty());
+        let listing = list_skills(&missing);
+        assert!(listing.skills.is_empty());
+        assert!(listing.ignored.is_empty());
     }
 
     #[test]
@@ -458,15 +481,65 @@ mod tests {
         )
         .unwrap();
 
-        let names: Vec<_> = list_skills(root).iter().map(|s| s.name.clone()).collect();
+        let listing = list_skills(root);
+        let names: Vec<_> = listing.skills.iter().map(|s| s.name.clone()).collect();
         assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
+        // Plain files never enter the directory scan, so only the two real
+        // directories do -- sorted by name for a stable ignored listing.
+        let ignored: Vec<_> = listing.ignored.iter().map(|s| s.dir.clone()).collect();
+        assert_eq!(
+            ignored,
+            vec!["mismatch".to_string(), "no-skill-md".to_string()]
+        );
+    }
+
+    /// A skipped directory surfaces its English technical reason (issue #373).
+    /// The reason is the SkillError Display string -- the frontend renders it
+    /// verbatim as the diagnostic fold, so the user sees WHY the directory
+    /// disappeared (here: the frontmatter name does not match the directory).
+    #[test]
+    fn list_surfaces_skipped_directories_with_their_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        put_skill(root, "good", "", "Body.\n");
+        // Two distinct failure modes: name mismatch + missing SKILL.md.
+        let mismatch = root.join("mismatch-dir");
+        fs::create_dir(&mismatch).unwrap();
+        fs::write(
+            mismatch.join(SKILL_MD),
+            "---\nname: other\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        fs::create_dir(root.join("no-skill-md")).unwrap();
+
+        let listing = list_skills(root);
+        let by_dir: std::collections::HashMap<&str, &str> = listing
+            .ignored
+            .iter()
+            .map(|s| (s.dir.as_str(), s.reason.as_str()))
+            .collect();
+        assert_eq!(listing.ignored.len(), 2);
+        let mismatch_reason = by_dir["mismatch-dir"];
+        assert!(
+            mismatch_reason.contains("mismatch-dir"),
+            "reason should name the directory, got: {mismatch_reason}"
+        );
+        assert!(
+            mismatch_reason.contains("other"),
+            "reason should name the conflicting frontmatter name, got: {mismatch_reason}"
+        );
+        let noskill_reason = by_dir["no-skill-md"];
+        assert!(
+            noskill_reason.contains("SKILL.md"),
+            "missing-SKILL.md reason should reference the file, got: {noskill_reason}"
+        );
     }
 
     #[test]
     fn list_derives_local_for_real_directories() {
         let tmp = tempfile::tempdir().unwrap();
         put_skill(tmp.path(), "mine", "", "Body.\n");
-        let entry = &list_skills(tmp.path())[0];
+        let entry = &list_skills(tmp.path()).skills[0];
         assert_eq!(entry.acquired, Acquired::Local);
         assert_eq!(entry.link_target, None);
         assert_eq!(entry.description, "Test skill mine.");
@@ -480,7 +553,7 @@ mod tests {
             eprintln!("skipping: platform refused symlink creation");
             return;
         };
-        let skills = list_skills(&registry);
+        let skills = list_skills(&registry).skills;
         let linked = skills.iter().find(|s| s.name == "external-skill").unwrap();
         assert_eq!(linked.acquired, Acquired::Linked);
         assert!(linked.link_target.is_some());
@@ -521,7 +594,7 @@ mod tests {
             return;
         }
 
-        let skills = list_skills(&registry);
+        let skills = list_skills(&registry).skills;
         let linked = skills
             .iter()
             .find(|s| s.name == "external-skill")
@@ -552,7 +625,7 @@ mod tests {
         // The minted file is on disk + spec-valid (list reads it back).
         let raw = fs::read_to_string(root.join("pdf-tools").join(SKILL_MD)).unwrap();
         assert!(raw.starts_with("---\nname: pdf-tools\n"));
-        let listed = list_skills(&root);
+        let listed = list_skills(&root).skills;
         assert_eq!(listed.len(), 1);
         assert!(listed[0].mcp_servers.is_empty());
     }

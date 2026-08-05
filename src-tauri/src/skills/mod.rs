@@ -25,4 +25,6 @@ pub mod frontmatter;
 pub mod model;
 pub mod registry;
 
-pub use model::{Acquired, SkillEntry, SkillError, SkillUpdate, SkillsRoot};
+pub use model::{
+    Acquired, SkillEntry, SkillError, SkillListing, SkillUpdate, SkillsRoot, SkippedSkill,
+};

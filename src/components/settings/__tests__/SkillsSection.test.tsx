@@ -68,11 +68,14 @@ function renderWithProviders(ui: ReactElement) {
 describe("SkillsSection (issue #362)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(listSkills).mockResolvedValue([]);
+    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [] });
   });
 
   it("lists the skills returned by listSkills", async () => {
-    vi.mocked(listSkills).mockResolvedValue([localSkill, linkedSkill]);
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [localSkill, linkedSkill],
+      ignored: [],
+    });
     renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
 
     expect(await screen.findByText("pdf-tools")).toBeInTheDocument();
@@ -83,7 +86,10 @@ describe("SkillsSection (issue #362)", () => {
   });
 
   it("filters by search text across name and description", async () => {
-    vi.mocked(listSkills).mockResolvedValue([localSkill, linkedSkill]);
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [localSkill, linkedSkill],
+      ignored: [],
+    });
     renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
     await screen.findByText("pdf-tools");
 
@@ -96,7 +102,7 @@ describe("SkillsSection (issue #362)", () => {
   });
 
   it("creates a skill via the New drawer", async () => {
-    vi.mocked(listSkills).mockResolvedValue([]);
+    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [] });
     vi.mocked(createSkill).mockResolvedValue(localSkill);
     renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
     await screen.findByText("No skills yet. Click New to author one.");
@@ -115,7 +121,7 @@ describe("SkillsSection (issue #362)", () => {
   });
 
   it("opens a local skill in the edit drawer and saves via updateSkill", async () => {
-    vi.mocked(listSkills).mockResolvedValue([localSkill]);
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [] });
     vi.mocked(updateSkill).mockResolvedValue(localSkill);
     renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
     await screen.findByText("pdf-tools");
@@ -139,7 +145,7 @@ describe("SkillsSection (issue #362)", () => {
   });
 
   it("renders a linked skill read-only with an Open source location button", async () => {
-    vi.mocked(listSkills).mockResolvedValue([linkedSkill]);
+    vi.mocked(listSkills).mockResolvedValue({ skills: [linkedSkill], ignored: [] });
     const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
     renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
     await screen.findByText("external-skill");
@@ -159,7 +165,7 @@ describe("SkillsSection (issue #362)", () => {
   });
 
   it("deletes a skill after confirmation", async () => {
-    vi.mocked(listSkills).mockResolvedValue([localSkill]);
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [] });
     vi.mocked(deleteSkill).mockResolvedValue(undefined);
     renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
     await screen.findByText("pdf-tools");
@@ -176,7 +182,7 @@ describe("SkillsSection (issue #362)", () => {
   });
 
   it("surfaces a create failure as a formatted error", async () => {
-    vi.mocked(listSkills).mockResolvedValue([]);
+    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [] });
     vi.mocked(createSkill).mockRejectedValue({
       kind: "NameTaken",
       data: "pdf-tools",
@@ -196,5 +202,49 @@ describe("SkillsSection (issue #362)", () => {
         screen.getByText("A skill named \"pdf-tools\" already exists"),
       ).toBeInTheDocument();
     });
+  });
+
+  it("does not render the ignored section when the registry is clean", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [] });
+    renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
+    await screen.findByText("pdf-tools");
+
+    expect(screen.queryByTestId("skills-ignored-details")).not.toBeInTheDocument();
+  });
+
+  it("renders the ignored section with each skipped directory and its reason", async () => {
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [localSkill],
+      ignored: [
+        {
+          dir: "mismatch-dir",
+          reason:
+            "frontmatter name `other` does not match its directory name `mismatch-dir`",
+        },
+        {
+          dir: "no-skill-md",
+          reason: "cannot read `no-skill-md/SKILL.md`: No such file or directory",
+        },
+      ],
+    });
+    renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
+    await screen.findByText("pdf-tools");
+
+    // The summary is always visible (the fold is closed by default); the
+    // count badge mirrors the ignored array length.
+    expect(screen.getByText("Ignored directories")).toBeInTheDocument();
+    expect(screen.getByText("2")).toBeInTheDocument();
+
+    // The reason text rides the rows verbatim -- the locale catalog owns the
+    // title / intro only, NOT the per-row reason (ADR-0052 layer 4). Open
+    // the fold so the rows are visible to user-driven queries.
+    fireEvent.click(screen.getByText("Ignored directories"));
+    expect(screen.getByText("mismatch-dir")).toBeInTheDocument();
+    expect(screen.getByText("no-skill-md")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "frontmatter name `other` does not match its directory name `mismatch-dir`",
+      ),
+    ).toBeInTheDocument();
   });
 });

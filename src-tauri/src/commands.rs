@@ -41,7 +41,7 @@ use crate::provider::live_config::LiveProviderConfig;
 use crate::runtime::acp::adapter::{detect_adapter, v1_adapters, AdapterSpec};
 use crate::session::{RenameSessionError, ResumeEvent, ResumeProgress, Session};
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
-use crate::skills::{SkillEntry, SkillError, SkillUpdate, SkillsRoot};
+use crate::skills::{SkillEntry, SkillError, SkillListing, SkillUpdate, SkillsRoot};
 
 /// ADR-0063: the close-and-wait-release variant's wait ceiling. Aligned to
 /// ADR-0021's `REQUEST_TIMEOUT` (120s, the in-flight ask's longest possible
@@ -1619,11 +1619,13 @@ pub fn set_session_runtime(
 // [`SkillError`] (adjacently tagged like every other typed IPC error) so the
 // frontend renders each refusal through the locale catalog (ADR-0052).
 
-/// List every spec-valid skill in the registry (issue #362). Directories that
-/// fail the spec are skipped server-side with a warning; a never-created
+/// List every spec-valid skill in the registry plus the directories the scan
+/// skipped (issue #362 / #373). Skipped directories carry the English technical
+/// reason so the settings UI can surface WHY a directory disappeared; the
+/// spec-valid `skills` list keeps its sorted semantics. A never-created
 /// registry lists empty. Read-only -- cannot refuse.
 #[tauri::command]
-pub fn list_skills(root: State<'_, SkillsRoot>) -> Vec<SkillEntry> {
+pub fn list_skills(root: State<'_, SkillsRoot>) -> SkillListing {
     crate::skills::registry::list_skills(&root.0)
 }
 

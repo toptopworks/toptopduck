@@ -422,6 +422,63 @@ fn skill_entry_serializes_with_snake_case_acquired() {
 }
 
 #[test]
+fn skipped_skill_serializes_as_a_flat_snake_case_object() {
+    // SkippedSkill (issue #373): one row of the list_skills `ignored` fold.
+    // Flat snake_case fields like every other wire struct -- `dir` (the
+    // directory name, parallel to SkillEntry::name) + `reason` (the English
+    // technical detail rendered verbatim). No tagging, no Option, no nesting;
+    // the value strings are opaque to the wire layer.
+    use toptopduck_lib::SkippedSkill;
+    assert_wire(
+        &SkippedSkill {
+            dir: "mismatch-dir".into(),
+            reason: "frontmatter name `other` does not match its directory name `mismatch-dir`"
+                .into(),
+        },
+        r#"{"dir":"mismatch-dir","reason":"frontmatter name `other` does not match its directory name `mismatch-dir`"}"#,
+    );
+}
+
+#[test]
+fn skill_listing_wraps_skills_and_ignored() {
+    // SkillListing (issue #373): the list_skills return is a flat
+    // { skills, ignored } object -- `skills` keeps the SkillEntry shape pinned
+    // above (sorted, the existing semantics), `ignored` carries the spec-
+    // invalid directories. `ignored` is empty for a clean registry (the common
+    // case), so the empty-list literal is the shape the frontend renders as
+    // "no section". Pin both branches so a serde drift fails here before the
+    // hand-mirrored types/skills.ts can drift.
+    use toptopduck_lib::{Acquired, SkillEntry, SkillListing, SkippedSkill};
+    assert_wire(
+        &SkillListing {
+            skills: Vec::new(),
+            ignored: Vec::new(),
+        },
+        r#"{"skills":[],"ignored":[]}"#,
+    );
+    assert_wire(
+        &SkillListing {
+            skills: vec![SkillEntry {
+                name: "pdf-tools".into(),
+                description: "Work with PDF files.".into(),
+                acquired: Acquired::Local,
+                license: None,
+                compatibility: None,
+                mcp_servers: Vec::new(),
+                body: "Body.\n".into(),
+                link_target: None,
+            }],
+            ignored: vec![SkippedSkill {
+                dir: "mismatch-dir".into(),
+                reason: "frontmatter name `other` does not match its directory name `mismatch-dir`"
+                    .into(),
+            }],
+        },
+        r#"{"skills":[{"name":"pdf-tools","description":"Work with PDF files.","acquired":"local","license":null,"compatibility":null,"mcp_servers":[],"body":"Body.\n","link_target":null}],"ignored":[{"dir":"mismatch-dir","reason":"frontmatter name `other` does not match its directory name `mismatch-dir`"}]}"#,
+    );
+}
+
+#[test]
 fn text_kind_serializes_as_a_bare_variant_string() {
     // TextKind is a plain (untagged) enum, so each variant crosses IPC as its
     // bare name string -- the shape src/types.ts mirrors for the textual

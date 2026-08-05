@@ -10,7 +10,7 @@ import type {
   SheetGuidance,
 } from "./types/dataset";
 import type { McpServerConfig, McpServerStatusEntry } from "./types/mcp";
-import type { SkillEntry, SkillUpdate } from "./types/skills";
+import type { SkillEntry, SkillListing, SkillUpdate } from "./types/skills";
 import type {
   ResumeProgress,
   SaveError,
@@ -390,11 +390,14 @@ export async function listMcpServerStatus(sessionId: string): Promise<McpServerS
 // catalog (ADR-0052). The settings SkillsSection that drives these lands in
 // this slice; the composer "+" panel + mount model arrive in later #303 slices.
 
-// List every spec-valid skill in the registry (acquired derived by the loader).
-// Directories that fail the spec are skipped server-side; a never-created
-// registry lists empty. Read-only -- never refuses.
-export async function listSkills(): Promise<SkillEntry[]> {
-  return invoke<SkillEntry[]>("list_skills");
+// List every spec-valid skill in the registry PLUS the directories the scan
+// skipped (acquired derived by the loader). Directories that fail the spec
+// are surfaced in `ignored` with the English technical reason so the settings
+// UI can show WHY a directory disappeared; the spec-valid `skills` list keeps
+// its sorted semantics. A never-created registry lists empty (both fields
+// `[]`). Read-only -- never refuses.
+export async function listSkills(): Promise<SkillListing> {
+  return invoke<SkillListing>("list_skills");
 }
 
 // Mint a new local skill: <root>/<name>/SKILL.md with the given description +
