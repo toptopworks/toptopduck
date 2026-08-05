@@ -18,6 +18,7 @@ use std::path::Path;
 use toptopduck_lib::persistence::recipe::{RecipeEntry, SkillProvenance};
 use toptopduck_lib::provider::tool_calling::ToolTurnReply;
 use toptopduck_lib::skills::{resolve_prompt_fragments, SkillPromptFragment};
+use toptopduck_lib::util::sha256_hex;
 use toptopduck_lib::{
     ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState, FakeProvider,
     KeychainStore, Session, TurnOutcome,
@@ -37,20 +38,6 @@ fn put_skill(root: &Path, name: &str, description: &str, body: &str) {
     fs::create_dir_all(&dir).unwrap();
     let content = format!("---\nname: {name}\ndescription: {description}\n---\n{body}");
     fs::write(dir.join("SKILL.md"), content).unwrap();
-}
-
-/// SHA-256 hex of `bytes` -- mirrors the resolver's helper so the test asserts
-/// the on-disk digest against the recorded provenance without reaching into the
-/// skills module's private helper.
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }
 
 /// AC #1 + AC #3: a mounted skill's body rides the system prompt and its

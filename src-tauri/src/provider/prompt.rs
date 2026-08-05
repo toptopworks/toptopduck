@@ -74,8 +74,9 @@ pub fn response_locale_directive(locale: ResponseLocale) -> &'static str {
 /// site -- the legacy single-SQL path ([`build_system_prompt`]) passes an empty
 /// skill slice (skills are not wired into the retired adapters); the tool-
 /// calling path ([`build_tool_system_prompt`]) passes the session's resolved
-/// fragments. An empty slice adds nothing, so the no-skills path is
-/// byte-identical to the pre-skill assembly.
+/// fragments. An empty slice adds nothing, so the no-skills assembly shape
+/// (base + locale + schema) is preserved modulo the always-on skill-aware
+/// clause added to both base prompts.
 fn assemble(
     base: &str,
     request: &ProviderRequest,

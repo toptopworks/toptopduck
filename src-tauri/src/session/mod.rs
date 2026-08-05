@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 use calamine::Data;
 use duckdb::Connection;
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState};
@@ -374,10 +373,9 @@ fn hash_file(path: &Path) -> Result<Option<String>, std::io::Error> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    let digest = hasher.finalize();
-    Ok(Some(digest.iter().map(|b| format!("{b:02x}")).collect()))
+    // ADR-0086 / issue #364 review I3: the bytes->hex step is shared via
+    // crate::util::sha256_hex (also used by the skills module's content hash).
+    Ok(Some(crate::util::sha256_hex(&bytes)))
 }
 
 pub struct Session {

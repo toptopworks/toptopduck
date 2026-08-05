@@ -12,10 +12,9 @@
 
 use std::path::Path;
 
-use sha2::{Digest, Sha256};
-
 use super::frontmatter::split_frontmatter;
 use super::model::is_valid_skill_name;
+use crate::util::sha256_hex;
 
 /// The one file the registry reads / writes per skill directory (mirrors
 /// [`super::registry::SKILL_MD`]; kept private here to avoid a cross-module
@@ -103,8 +102,7 @@ fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
         }
     };
     // SHA-256 of the WHOLE file bytes (frontmatter + body + trailing newline)
-    // -- ADR-0086 Decision 2. Hex-encode so the digest is a comparable string
-    // (matches the project's existing hash_file helper in session/mod.rs).
+    // -- ADR-0086 Decision 2. Shared via crate::util::sha256_hex (review I3).
     let content_hash = sha256_hex(&bytes);
     // The body is the Markdown after the frontmatter fence. The split is
     // structural (fence lines), not semantic (YAML parse), so a body is still
@@ -127,19 +125,6 @@ fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
         body,
         content_hash,
     }
-}
-
-/// SHA-256 of `bytes` as a lowercase hex string (ADR-0086 content-hash). Mirrors
-/// the `hash_file` helper on Session (kept private there); duplicated here so
-/// the skills module does not reach into `crate::session` for a one-liner.
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }
 
 #[cfg(test)]
