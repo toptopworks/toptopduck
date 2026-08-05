@@ -387,8 +387,9 @@ export async function listMcpServerStatus(sessionId: string): Promise<McpServerS
 // session). The directory scan IS the registry (no sidecar, no app-config
 // entry). Rejects are the typed SkillError (adjacently tagged like every other
 // typed IPC error) so the settings page renders each refusal through the locale
-// catalog (ADR-0052). The settings SkillsSection that drives these lands in
-// this slice; the composer "+" panel + mount model arrive in later #303 slices.
+// catalog (ADR-0052). The composer "+" panel reads the registry through the
+// same IPC (issue #365); the per-session mount model lives in the block below
+// (issue #363).
 
 // List every spec-valid skill in the registry PLUS the directories the scan
 // skipped (acquired derived by the loader). Directories that fail the spec
@@ -419,6 +420,43 @@ export async function updateSkill(name: string, update: SkillUpdate): Promise<Sk
 // a linked skill's LINK is removed without touching the external source.
 export async function deleteSkill(name: string): Promise<void> {
   await invoke<void>("delete_skill", { name });
+}
+
+// --- Skill mount model (issue #363, #365; ADR-0086) -----------------------
+//
+// Per-session mount / unmount over the live timeline. The mount SET is folded
+// from the SkillLifecycleEvent sequence (Mount in / Unmount out); these
+// commands append the event + atomically persist the recipe. Session-scoped
+// (ADR-0056): every command takes sessionId first. The loading gate lives on
+// the backend -- both write commands refuse during resume / an in-flight turn
+// (reject_if_resuming + reject_if_in_flight), so the toggle the frontend
+// renders is also disabled under the same `loading` gate the composer already
+// honors (issue #365 AC #5). Rejects ride SessionError.SkillMount (typed
+// AlreadyMounted / NotMounted).
+
+// The session's currently-mounted skill names, in first-mount insertion order
+// (issue #363). Read-only; the composer "+" panel + the badge both derive the
+// active set from this. Lock-light server-side -- safe to call while a turn is
+// in flight. A reject (e.g. session closed mid-flight) propagates to the
+// caller; the skills section renders the cached / undefined read as an empty
+// set for numeric coherence (badge count + checkbox state) and surfaces the
+// reject through its alert slot.
+export async function listMountedSkills(sessionId: string): Promise<string[]> {
+  return invoke<string[]>("list_mounted_skills", { sessionId });
+}
+
+// Mount a skill into the session's active set (issue #365). Appends a Mount
+// lifecycle event + persists the recipe; refuses a redundant mount
+// (AlreadyMounted) and rejects during resume / an in-flight turn.
+export async function mountSkill(sessionId: string, name: string): Promise<void> {
+  await invoke<void>("mount_skill", { sessionId, name });
+}
+
+// Unmount a skill from the session's active set (issue #365). Appends an
+// Unmount lifecycle event + persists the recipe; refuses a name not in the set
+// (NotMounted) and rejects during resume / an in-flight turn.
+export async function unmountSkill(sessionId: string, name: string): Promise<void> {
+  await invoke<void>("unmount_skill", { sessionId, name });
 }
 
 // --- Tiered tool approval (ADR-0080, issue #294) -------------------------

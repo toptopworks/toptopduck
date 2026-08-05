@@ -3,19 +3,21 @@ import { FormattedMessage, useIntl } from "react-intl";
 import { useQuery } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Plus } from "lucide-react";
-import { listMcpServerStatus } from "../../api";
-import { sessionKeys } from "../../session/queryKeys";
+import { listMountedSkills, listMcpServerStatus, listSkills } from "../../api";
+import { sessionKeys, skillKeys } from "../../session/queryKeys";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
+import { ComposerSkillsSection } from "./ComposerSkillsSection";
 
 // The composer "+" session-context panel (ADR-0083, issue #351). One entry for
 // the three per-turn context additions -- files / skills / MCP tools -- at the
 // turn-launch point. This slice delivers the shell + the live FILE section
-// (multi-select into the existing ingest pipeline); the skills (#303) and MCP
-// (#301) sections render as disabled placeholders until those tickets light
-// them up. With nothing to assemble (no skill system yet, no configured MCP
-// server) the "+" DEGRADES to a pure add-files button: the dialog opens
-// directly, no panel. The trigger's badge carries attached context (mounted
-// skills + session-enabled MCP servers, hidden at zero / degraded).
+// (multi-select into the existing ingest pipeline) + the live SKILLS section
+// (issue #365: per-session mount/unmount checkbox list); the MCP (#301) section
+// renders as a disabled placeholder until that ticket lights it up. With
+// nothing to assemble (registry empty AND no configured MCP server) the "+"
+// DEGRADES to a pure add-files button: the dialog opens directly, no panel.
+// The trigger's badge carries attached context (mounted skills + session-
+// enabled MCP servers, hidden at zero / degraded).
 //
 // The retired standalone source entry (the workspace-hero FileDropzone button)
 // moved here; window-level drag-and-drop stays untouched (App's single
@@ -43,9 +45,13 @@ export type ComposerContextPanelProps = {
    *  (same gate the retired FileDropzone honored). */
   loading: boolean;
   /** The app-config registry has at least one configured MCP server. Drives
-   *  the degraded decision together with the (future) skill count; undefined
+   *  the degraded decision together with the skill-registry read; undefined
    *  app-config reads as "not configured" until it resolves. */
   mcpConfigured: boolean;
+  /** Hop to the settings SkillsSection. The shell owns the navigation; App
+   *  threads openSettings({ section: "skills" }) through SessionPane. The
+   *  skill section's "Manage skills" footer fires this (issue #365 AC #4). */
+  onOpenSettingsSkills: () => void;
 };
 
 export function ComposerContextPanel({
@@ -53,6 +59,7 @@ export function ComposerContextPanel({
   onIngestFiles,
   loading,
   mcpConfigured,
+  onOpenSettingsSkills,
 }: ComposerContextPanelProps) {
   const intl = useIntl();
   const [panelOpen, setPanelOpen] = useState(false);
@@ -68,14 +75,37 @@ export function ComposerContextPanel({
     queryFn: () => listMcpServerStatus(sessionId),
   });
   const enabledMcpCount = (mcpStatus ?? []).filter((s) => s.enabled).length;
-  // No skill system until #303 lands; the badge formula already carries the
-  // slot (ADR-0083: badge = mounted skills + enabled MCP).
-  const mountedSkillCount = 0;
+
+  // Per-session mounted skills (issue #365). The badge count + the section's
+  // checkbox state share this query's cache (ComposerSkillsSection reads the
+  // same key). Lock-light server-side; a reject (session closed mid-flight)
+  // degrades to data-undefined -> count 0, never a user-facing error. Mount /
+  // unmount invalidate the key so the badge re-reads without a remount.
+  const { data: mounted } = useQuery({
+    queryKey: sessionKeys.mountedSkills(sessionId),
+    queryFn: () => listMountedSkills(sessionId),
+  });
+  const mountedSkillCount = (mounted ?? []).length;
+
+  // Process-global skill registry (issue #362). Drives the degraded decision:
+  // the panel serves no purpose when there is nothing to assemble (registry
+  // empty AND no MCP configured). The ComposerSkillsSection inside the popover
+  // reads the same key -- the first consumer pays the IPC, the second rides
+  // the cache.
+  const { data: listing } = useQuery({
+    queryKey: skillKeys.all(),
+    queryFn: listSkills,
+  });
+  const hasSkills = (listing?.skills ?? []).length > 0;
+
   const badgeCount = mountedSkillCount + enabledMcpCount;
 
   // ADR-0083 degraded mode: nothing to assemble -> "+" is a pure add-files
-  // button (dialog directly, no panel shell, no badge).
-  const degraded = !mcpConfigured && mountedSkillCount === 0;
+  // button (dialog directly, no panel shell, no badge). Before the registry
+  // resolves the read is undefined -> hasSkills false -> degrade, matching the
+  // pre-slice behavior; once it resolves the panel opens if there is anything
+  // to attach.
+  const degraded = !mcpConfigured && !hasSkills;
 
   async function pickFiles() {
     const selected = await open({
@@ -173,22 +203,15 @@ export function ComposerContextPanel({
               />
             </button>
           </section>
-          {/* Section 2: skills -- disabled placeholder until #303 lights it up
-              (session-level mount/unmount multi-select). */}
-          <section className="grid gap-1.5 opacity-60" aria-disabled="true">
-            <span className="text-sm font-medium text-muted-foreground">
-              <FormattedMessage
-                id="composer.contextPanel.skillsTitle"
-                defaultMessage="Skills"
-              />
-            </span>
-            <span className="text-xs text-muted-foreground">
-              <FormattedMessage
-                id="composer.contextPanel.placeholderHint"
-                defaultMessage="Not available yet"
-              />
-            </span>
-          </section>
+          {/* Section 2: skills -- live (issue #365). Compact checkbox list of
+              every registry skill; each toggle mounts / unmounts into THIS
+              session's active set, appending a SkillLifecycleEvent + driving
+              the trigger badge via the shared mounted-skills query. */}
+          <ComposerSkillsSection
+            sessionId={sessionId}
+            loading={loading}
+            onOpenSettingsSkills={onOpenSettingsSkills}
+          />
           {/* Section 3: MCP tools -- disabled placeholder until #301 lights it
               up (server-granularity per-session enablement multi-select). */}
           <section className="grid gap-1.5 opacity-60" aria-disabled="true">

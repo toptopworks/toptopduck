@@ -475,6 +475,10 @@ export default function App() {
                           onToggleRail={toggleRailCollapse}
                           sessionName={s.name}
                           approvalEvents={approvalEvents}
+                          // Issue #365 AC #4: the composer "+" panel's skill
+                          // section footer hops to the settings SkillsSection.
+                          // openSettings is shell-owned (ADR-0065 overlay).
+                          onOpenSettingsSkills={() => openSettings({ section: "skills" })}
                           // ADR-0083 (issue #351): the composer "+" degrades to
                           // a pure add-files button when the registry has no
                           // configured MCP server (and no skill system exists
