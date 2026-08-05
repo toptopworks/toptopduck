@@ -81,7 +81,7 @@ pub fn create_skill(root: &Path, name: &str, description: &str) -> Result<SkillE
         Value::String("description".into()),
         Value::String(description.into()),
     );
-    let content = frontmatter::render_skill_md(&fm, SKELETON_BODY);
+    let content = frontmatter::render_skill_md(&fm, SKELETON_BODY)?;
     if let Err(e) = write_skill_md(&dir, &content) {
         // Do not leave an empty directory behind a failed mint (it would
         // surface as NameTaken on the user's retry).
@@ -140,7 +140,8 @@ pub fn update_skill(
             update.compatibility.as_deref(),
         );
         frontmatter::set_mcp_servers(&mut fm, &update.mcp_servers);
-        write_skill_md(&work_dir, &frontmatter::render_skill_md(&fm, &update.body))?;
+        let content = frontmatter::render_skill_md(&fm, &update.body)?;
+        write_skill_md(&work_dir, &content)?;
         load_skill(&work_dir)
     })();
     match result {

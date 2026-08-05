@@ -10,6 +10,8 @@
 
 use serde_yaml::{Mapping, Value};
 
+use super::model::SkillError;
+
 /// A parsed SKILL.md: the whole frontmatter mapping (unknown keys intact) +
 /// the Markdown body after the closing fence.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,9 +152,10 @@ pub fn set_mcp_servers(map: &mut Mapping, ids: &[String]) {
 /// Markdown body. serde_yaml preserves mapping insertion order, so an edit
 /// keeps the field order the file had (existing keys update in place; new keys
 /// append).
-pub fn render_skill_md(frontmatter: &Mapping, body: &str) -> String {
-    let yaml = serde_yaml::to_string(frontmatter).unwrap_or_default();
-    format!("---\n{yaml}---\n{body}")
+pub fn render_skill_md(frontmatter: &Mapping, body: &str) -> Result<String, SkillError> {
+    let yaml = serde_yaml::to_string(frontmatter)
+        .map_err(|e| SkillError::FsFailure(format!("serialize SKILL.md frontmatter: {e}")))?;
+    Ok(format!("---\n{yaml}---\n{body}"))
 }
 
 #[cfg(test)]
@@ -278,7 +281,7 @@ mod tests {
     #[test]
     fn render_produces_a_parseable_skill_md() {
         let parsed = parse_skill_md(sample()).unwrap();
-        let rendered = render_skill_md(&parsed.frontmatter, &parsed.body);
+        let rendered = render_skill_md(&parsed.frontmatter, &parsed.body).unwrap();
         assert!(rendered.starts_with("---\n"));
         // The render parses back to the identical logical content.
         let back = parse_skill_md(&rendered).unwrap();
@@ -293,7 +296,7 @@ mod tests {
         let raw = "---\nname: s\ndescription: d\nallowed-tools:\n  - Bash\n---\nbody\n";
         let mut parsed = parse_skill_md(raw).unwrap();
         set_string_or_remove(&mut parsed.frontmatter, "description", Some("new desc"));
-        let rendered = render_skill_md(&parsed.frontmatter, "new body\n");
+        let rendered = render_skill_md(&parsed.frontmatter, "new body\n").unwrap();
         assert!(
             rendered.contains("allowed-tools"),
             "foreign field must survive: {rendered}"
