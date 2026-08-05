@@ -61,6 +61,14 @@ pub struct SkillEntry {
     pub body: String,
     /// The resolved link target for `linked` skills; `null` for `local`.
     pub link_target: Option<String>,
+    /// SHA-256 hex of the WHOLE `SKILL.md` bytes (frontmatter + body) at the
+    /// registry scan (ADR-0086, issue #381). The drift anchor the frontend
+    /// compares each turn's `SkillProvenance.content_hash` against to surface
+    /// "已修改" when a skill changed after a recorded turn. Computed once at
+    /// load via [`crate::util::sha256_hex`] -- the same helper the assembly
+    /// path uses (issue #364), so an unedited skill yields the identical hash
+    /// both places and the drift signal is exact, not approximate.
+    pub content_hash: String,
 }
 
 /// One spec-invalid skill directory the registry scan skipped, with the
@@ -317,6 +325,7 @@ mod tests {
             mcp_servers: vec!["github-mcp".into()],
             body: "Body text.\n".into(),
             link_target: Some("/home/u/.claude/skills/pdf-tools".into()),
+            content_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: SkillEntry = serde_json::from_str(&json).unwrap();

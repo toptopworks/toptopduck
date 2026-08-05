@@ -59,7 +59,7 @@ describe("Thread", () => {
           assumption,
         },
       },
-      trace: [],
+      trace: [], provenance: { skills: [] },
     };
   }
 
@@ -83,6 +83,7 @@ describe("Thread", () => {
       mcp_servers: mcpServers,
       body: "",
       link_target: null,
+      content_hash: "deadbeef",
     };
   }
 
@@ -104,7 +105,7 @@ describe("Thread", () => {
           assumption: null,
         },
       },
-      trace: [],
+      trace: [], provenance: { skills: [] },
     };
     renderThread(
       <Thread entries={[turnEntry(record)]} selectedResult={null} onSelectResult={() => {}} />,
@@ -129,7 +130,7 @@ describe("Thread", () => {
           kind: "Textual",
           data: { text_kind: "Clarify", body: "按产品名还是客户名？", assumption: null },
         },
-        trace: [],
+        trace: [], provenance: { skills: [] },
       },
       {
         question: "预测销量",
@@ -137,14 +138,14 @@ describe("Thread", () => {
           kind: "Textual",
           data: { text_kind: "Refuse", body: "预测不在 v1 能力范围内", assumption: null },
         },
-        trace: [],
+        trace: [], provenance: { skills: [] },
       },
       {
         question: "坏查询",
         outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } },
-        trace: [],
+        trace: [], provenance: { skills: [] },
       },
-      { question: "中途取消", outcome: { kind: "Cancelled" }, trace: [] },
+      { question: "中途取消", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
     ];
     renderThread(
       <Thread
@@ -189,7 +190,7 @@ describe("Thread", () => {
               kind: "Textual",
               data: { text_kind: "Agent", body: "共 128 位客户。", assumption: null },
             },
-            trace: [],
+            trace: [], provenance: { skills: [] },
           }),
         ]}
         selectedResult={null}
@@ -382,9 +383,9 @@ describe("Thread", () => {
     // on the outcome icon, so the four are distinguishable without color sight.
     const records: TurnRecord[] = [
       materializedRecord("result_1", null),
-      { question: "q", outcome: { kind: "Textual", data: { text_kind: "Clarify", body: "b", assumption: null } }, trace: [] },
-      { question: "q", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "boom" } } }, trace: [] },
-      { question: "q", outcome: { kind: "Cancelled" }, trace: [] },
+      { question: "q", outcome: { kind: "Textual", data: { text_kind: "Clarify", body: "b", assumption: null } }, trace: [], provenance: { skills: [] } },
+      { question: "q", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "boom" } } }, trace: [], provenance: { skills: [] } },
+      { question: "q", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
     ];
     const { container } = renderThread(
       <Thread entries={records.map(turnEntry)} selectedResult={null} onSelectResult={() => {}} />,
@@ -405,8 +406,8 @@ describe("Thread", () => {
     // included a failure" context. v1 only weakens (CSS opacity on the card),
     // so the question + reason/marker stay in the DOM and are queryable.
     const records: TurnRecord[] = [
-      { question: "坏查询", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } }, trace: [] },
-      { question: "中途取消", outcome: { kind: "Cancelled" }, trace: [] },
+      { question: "坏查询", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } }, trace: [], provenance: { skills: [] } },
+      { question: "中途取消", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
     ];
     const { container } = renderThread(
       <Thread entries={records.map(turnEntry)} selectedResult={null} onSelectResult={() => {}} />,
@@ -659,8 +660,8 @@ describe("Thread", () => {
       { reference_name: "orders", display_name: "订单表" },
     ];
     const records: TurnRecord[] = [
-      { question: "在订单表上统计总销售额", outcome: { kind: "Cancelled" }, trace: [] },
-      { question: "总共几行", outcome: { kind: "Cancelled" }, trace: [] },
+      { question: "在订单表上统计总销售额", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
+      { question: "总共几行", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
     ];
     const { container } = renderThread(
       <Thread
@@ -693,7 +694,7 @@ describe("Thread", () => {
     // recognize), never the matched token.
     const labels = [{ reference_name: "people", display_name: "员工表" }];
     const records: TurnRecord[] = [
-      { question: "在 people 上统计总销售额", outcome: { kind: "Cancelled" }, trace: [] },
+      { question: "在 people 上统计总销售额", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
     ];
     renderThread(
       <Thread
@@ -716,7 +717,7 @@ describe("Thread", () => {
       { reference_name: "orders", display_name: "订单表" },
     ];
     const records: TurnRecord[] = [
-      { question: "在订单表上统计", outcome: { kind: "Cancelled" }, trace: [] },
+      { question: "在订单表上统计", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
     ];
     renderThread(
       <Thread
@@ -771,9 +772,9 @@ describe("Thread", () => {
     // the [data-outcome] hue hooks retired from styles.css.
     const records: TurnRecord[] = [
       materializedRecord("result_1", null),
-      { question: "q", outcome: { kind: "Textual", data: { text_kind: "Clarify", body: "b", assumption: null } }, trace: [] },
-      { question: "q", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "boom" } } }, trace: [] },
-      { question: "q", outcome: { kind: "Cancelled" }, trace: [] },
+      { question: "q", outcome: { kind: "Textual", data: { text_kind: "Clarify", body: "b", assumption: null } }, trace: [], provenance: { skills: [] } },
+      { question: "q", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "boom" } } }, trace: [], provenance: { skills: [] } },
+      { question: "q", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
     ];
     const { container } = renderThread(
       <Thread entries={records.map(turnEntry)} selectedResult={null} onSelectResult={() => {}} />,
@@ -823,8 +824,8 @@ describe("Thread", () => {
     // ADR-0028 Why 2: recent intent stays visible even when it produced nothing.
     // The opacity-60 weak state now rides the card as a utility.
     const records: TurnRecord[] = [
-      { question: "坏查询", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } }, trace: [] },
-      { question: "中途取消", outcome: { kind: "Cancelled" }, trace: [] },
+      { question: "坏查询", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } }, trace: [], provenance: { skills: [] } },
+      { question: "中途取消", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
     ];
     const { container } = renderThread(
       <Thread entries={records.map(turnEntry)} selectedResult={null} onSelectResult={() => {}} />,
@@ -967,6 +968,7 @@ describe("Thread", () => {
             result_excerpt: "",
           },
         ],
+        provenance: { skills: [] },
       };
     }
 
@@ -1011,7 +1013,7 @@ describe("Thread", () => {
     it("omits the toggle for a zero-call turn (no trace to expand)", () => {
       renderThread(
         <Thread
-          entries={[turnEntry({ question: "q", outcome: { kind: "Cancelled" }, trace: [] })]}
+          entries={[turnEntry({ question: "q", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } })]}
           selectedResult={null}
           onSelectResult={() => {}}
         />,
@@ -1176,7 +1178,7 @@ describe("Thread", () => {
             assumption: null,
           },
         },
-        trace: [],
+        trace: [], provenance: { skills: [] },
       };
       renderThread(
         <Thread entries={[turnEntry(record)]} selectedResult={null} onSelectResult={() => {}} />,
@@ -1230,7 +1232,7 @@ describe("Thread", () => {
             assumption: null,
           },
         },
-        trace: [],
+        trace: [], provenance: { skills: [] },
       };
       renderThread(
         <Thread entries={[turnEntry(record)]} selectedResult={null} onSelectResult={() => {}} />,
@@ -1251,7 +1253,7 @@ describe("Thread", () => {
                 kind: "Textual",
                 data: { text_kind: "Agent", body: "答案正文", assumption: null },
               },
-              trace: [],
+              trace: [], provenance: { skills: [] },
             }),
           ]}
           selectedResult={null}
@@ -1308,7 +1310,7 @@ describe("Thread", () => {
             assumption: null,
           },
         },
-        trace: [],
+        trace: [], provenance: { skills: [] },
       };
       renderThread(
         <Thread entries={[turnEntry(record)]} selectedResult={null} onSelectResult={() => {}} />,
@@ -1321,6 +1323,102 @@ describe("Thread", () => {
       expect(within(card as HTMLElement).getByText("x")).toBeInTheDocument();
       // The footer still names the window by row count (mockDataset row_count 5).
       expect(within(card as HTMLElement).getByText("首 1 行，共 5 行")).toBeInTheDocument();
+    });
+  });
+
+  // Issue #381: TurnCard surfaces "已修改" for skills whose content_hash drifted
+  // since the turn was recorded. The check compares each turn.provenance.skills
+  // entry against the registry's current SkillEntry.content_hash.
+  describe("TurnCard skill provenance drift (issue #381)", () => {
+    function turnWithSkill(name: string, contentHash: string): TurnRecord {
+      return {
+        question: "q",
+        outcome: { kind: "Cancelled" },
+        trace: [],
+        provenance: { skills: [{ name, content_hash: contentHash }] },
+      };
+    }
+    function registrySkill(name: string, contentHash: string): SkillEntry {
+      return {
+        name,
+        description: `${name} description.`,
+        acquired: "local",
+        license: null,
+        compatibility: null,
+        mcp_servers: [],
+        body: "",
+        link_target: null,
+        content_hash: contentHash,
+      };
+    }
+    function skillIndex(...skills: SkillEntry[]): Map<string, SkillEntry> {
+      return new Map(skills.map((s) => [s.name, s]));
+    }
+
+    it("surfaces 已修改 when the skill's content_hash changed since the turn", () => {
+      const index = skillIndex(registrySkill("sql-coach", "registry-hash"));
+      renderThread(
+        <Thread
+          entries={[{ entry: "Turn", data: turnWithSkill("sql-coach", "turn-hash") }]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+          skillIndex={index}
+        />,
+      );
+      expect(screen.getByText(/sql-coach/)).toBeInTheDocument();
+      expect(screen.getByText(/答案产生后已修改/)).toBeInTheDocument();
+    });
+
+    it("hides the drift badge when content_hash matches the registry", () => {
+      const index = skillIndex(registrySkill("sql-coach", "same-hash"));
+      renderThread(
+        <Thread
+          entries={[{ entry: "Turn", data: turnWithSkill("sql-coach", "same-hash") }]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+          skillIndex={index}
+        />,
+      );
+      expect(screen.queryByText(/答案产生后已修改/)).not.toBeInTheDocument();
+    });
+
+    it("hides the drift badge when content_hash is empty (v3->v4 migration, no baseline)", () => {
+      const index = skillIndex(registrySkill("sql-coach", "registry-hash"));
+      renderThread(
+        <Thread
+          entries={[{ entry: "Turn", data: turnWithSkill("sql-coach", "") }]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+          skillIndex={index}
+        />,
+      );
+      expect(screen.queryByText(/答案产生后已修改/)).not.toBeInTheDocument();
+    });
+
+    it("hides the drift badge when the skill is no longer in the registry", () => {
+      // A name the registry no longer carries is the SkillMarker's "no longer
+      // exists" case (#366), not a content drift -- the TurnCard omits it.
+      const index = skillIndex();
+      renderThread(
+        <Thread
+          entries={[{ entry: "Turn", data: turnWithSkill("ghost", "turn-hash") }]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+          skillIndex={index}
+        />,
+      );
+      expect(screen.queryByText(/答案产生后已修改/)).not.toBeInTheDocument();
+    });
+
+    it("hides the drift badge when skillIndex is not wired (honest degrade)", () => {
+      renderThread(
+        <Thread
+          entries={[{ entry: "Turn", data: turnWithSkill("sql-coach", "turn-hash") }]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+        />,
+      );
+      expect(screen.queryByText(/答案产生后已修改/)).not.toBeInTheDocument();
     });
   });
 });

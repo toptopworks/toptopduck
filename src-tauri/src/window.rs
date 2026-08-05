@@ -398,7 +398,7 @@ mod tests {
     use crate::approval::OperationKind;
     use crate::model::{
         DatasetPrivacy, Promotion, RectifyProvenance, TextKind, TraceEntryView, TurnFailure,
-        TurnOutcome,
+        TurnOutcome, TurnProvenance,
     };
 
     /// Build column schemas from (name, type) pairs.
@@ -459,6 +459,7 @@ mod tests {
             // The window assembler reads question + outcome only (ADR-0078
             // summary-only far window), so test turns carry an empty trace.
             trace: vec![],
+            provenance: TurnProvenance::default(),
         }
     }
 
@@ -588,6 +589,7 @@ mod tests {
                 assumption: None,
             },
             trace: poisoned_trace.clone(),
+            provenance: TurnProvenance::default(),
         }];
         let payload = assemble("probe", &ws, &history);
         let full = format!("{:?}", payload.history);
@@ -667,6 +669,7 @@ mod tests {
                 assumption: None,
             },
             trace: vec![],
+            provenance: TurnProvenance::default(),
         }];
         let payload = assemble("probe", &ws, &history);
         let find = |name: &str| {
@@ -809,6 +812,7 @@ mod tests {
                 assumption: None,
             },
             trace: vec![],
+            provenance: TurnProvenance::default(),
         }
     }
 
@@ -822,6 +826,7 @@ mod tests {
                 detail: "budget exhausted".into(),
             }),
             trace: vec![],
+            provenance: TurnProvenance::default(),
         }
     }
 

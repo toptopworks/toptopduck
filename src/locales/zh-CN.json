@@ -366,6 +366,7 @@
   "thread.resultLink": "结果：{name}",
   "thread.skill.declaresMcp": "声明 MCP：{servers}",
   "thread.skill.missingSuffix": " · 已不存在",
+  "thread.skill.modifiedSuffix": " · 答案产生后已修改",
   "thread.skill.mount": "挂载技能「{name}」",
   "thread.skill.unmount": "卸载技能「{name}」",
   "thread.source.added": "加载了「{name}」",

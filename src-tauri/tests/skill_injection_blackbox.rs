@@ -15,7 +15,8 @@
 use std::fs;
 use std::path::Path;
 
-use toptopduck_lib::persistence::recipe::{RecipeEntry, SkillProvenance};
+use toptopduck_lib::model::SkillProvenance;
+use toptopduck_lib::persistence::recipe::RecipeEntry;
 use toptopduck_lib::provider::tool_calling::ToolTurnReply;
 use toptopduck_lib::skills::{resolve_prompt_fragments, SkillPromptFragment};
 use toptopduck_lib::util::sha256_hex;

@@ -17,6 +17,7 @@ use super::model::{
     validate_body, validate_description, validate_skill_name, Acquired, SkillEntry, SkillError,
     SkillListing, SkillUpdate, SkippedSkill,
 };
+use crate::util::sha256_hex;
 
 /// The markdown body a freshly minted skill starts with. The spec requires a
 /// non-blank body (it is the prompt fragment); the drawer invites the real
@@ -332,6 +333,7 @@ fn load_skill(dir: &Path) -> Result<SkillEntry, SkillError> {
         mcp_servers: frontmatter::mcp_servers(fm),
         body: parsed.body,
         link_target,
+        content_hash: sha256_hex(raw.as_bytes()),
     })
 }
 

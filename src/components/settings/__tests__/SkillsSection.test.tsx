@@ -35,6 +35,7 @@ const localSkill: SkillEntry = {
   mcp_servers: [],
   body: "Use this skill when working with PDFs.\n",
   link_target: null,
+  content_hash: "deadbeef",
 };
 
 const linkedSkill: SkillEntry = {
@@ -46,6 +47,7 @@ const linkedSkill: SkillEntry = {
   mcp_servers: [],
   body: "External body.\n",
   link_target: "/home/u/.claude/skills/external-skill",
+  content_hash: "deadbeef",
 };
 
 // Empty-catalog English IntlProvider: FormattedMessage falls back to

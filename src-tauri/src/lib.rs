@@ -51,10 +51,10 @@ pub use model::{
     ChartKind, ColumnSchema, DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet,
     LoadError, LoadOutcome, ProfileId, ProfileKeyStatus, ProfileTestOutcome, Protocol,
     ProviderConfig, ProviderConfigView, ProviderProfile, RectifyProvenance, RemoveSourceError,
-    RenameError, RowPage, SheetGuidance, SheetRectify, SourceLifecycleEvent, SourceLifecycleKind,
-    StaleAnchor, StaleReason, TextKind, ThreadEntry, TraceEntryView, TurnError, TurnFailure,
-    TurnOutcome, TurnPhase, TurnProgress, TurnRecord, VizSpec, DEFAULT_PROFILE_ID,
-    DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
+    RenameError, RowPage, SheetGuidance, SheetRectify, SkillProvenance, SourceLifecycleEvent,
+    SourceLifecycleKind, StaleAnchor, StaleReason, TextKind, ThreadEntry, TraceEntryView,
+    TurnError, TurnFailure, TurnOutcome, TurnPhase, TurnProgress, TurnProvenance, TurnRecord,
+    VizSpec, DEFAULT_PROFILE_ID, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
 };
 pub use persistence::{
     LoadError as DuckLoadError, MigrationError, RecipeError, SaveError, SessionMetadata,
