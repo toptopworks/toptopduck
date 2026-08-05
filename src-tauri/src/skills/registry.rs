@@ -177,7 +177,7 @@ pub fn delete_skill(root: &Path, name: &str) -> Result<(), SkillError> {
         Ok(m) => m,
         Err(_) => return Err(SkillError::NoSuchSkill(name.to_string())),
     };
-    if meta.file_type().is_symlink() {
+    if is_linked(&meta) {
         // Remove the reparse point / link itself. Windows: RemoveDirectoryW
         // deletes a junction / directory-symlink without following it. Unix:
         // unlink removes the symlink itself (remove_dir_all would follow it
@@ -248,7 +248,7 @@ fn load_skill(dir: &Path) -> Result<SkillEntry, SkillError> {
     // Derive acquired off the directory's own metadata (never following the
     // link), and resolve the target for the "open source location" anchor.
     let is_link = fs::symlink_metadata(dir)
-        .map(|m| m.file_type().is_symlink())
+        .map(|m| is_linked(&m))
         .unwrap_or(false);
     let acquired = if is_link {
         Acquired::Linked
@@ -301,6 +301,27 @@ fn fs_err(op: &str, path: &Path, e: std::io::Error) -> SkillError {
     SkillError::FsFailure(format!("{op} failed for `{}`: {e}", path.display()))
 }
 
+/// Classify a directory's own metadata as a linked posture (symlink or Windows
+/// junction) without following it. `FileType::is_symlink()` does NOT cover
+/// Windows directory junctions (`IO_REPARSE_TAG_MOUNT_POINT` created by
+/// `mklink /J` -- the no-elevation fallback `try_link` uses); junctions still
+/// carry `FILE_ATTRIBUTE_REPARSE_POINT`, so we re-check the attribute flags.
+/// Without this, the loader would misclassify a junction as `Local` and
+/// `delete_skill`'s `remove_dir_all` would follow it into the external source
+/// (ADR-0086 Decision 1 violation).
+fn is_linked(md: &fs::Metadata) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        md.file_type().is_symlink() || (md.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        md.file_type().is_symlink()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,9 +363,10 @@ mod tests {
                 return true;
             }
             // No symlink privilege: fall back to a directory junction
-            // (`mklink /J` needs no elevation). The registry treats both as
-            // `linked` -- symlink_metadata reports the reparse point as a
-            // symlink, and delete removes the junction without following it.
+            // (`mklink /J` needs no elevation). `is_linked` treats both forms
+            // as `linked` via the reparse tag (a junction is NOT reported as a
+            // symlink by `FileType::is_symlink`), and `delete_skill` removes
+            // the junction itself without following it into the source.
             std::process::Command::new("cmd")
                 .args(["/C", "mklink", "/J"])
                 .arg(link)
@@ -420,6 +442,59 @@ mod tests {
         assert_eq!(linked.acquired, Acquired::Linked);
         assert!(linked.link_target.is_some());
         assert_eq!(linked.body, "External body.\n");
+    }
+
+    /// Windows-only regression: a directory junction (`mklink /J`) is the
+    /// no-elevation linked path on Windows. `FileType::is_symlink()` returns
+    /// false for one, so the reparse-tag branch of `is_linked` is what keeps
+    /// the linked-local contract (ADR-0086 Decision 1) and the link-only delete
+    /// honest. Not compiled on non-Windows platforms.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn junction_classified_as_linked_and_delete_preserves_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_dir = tmp.path().join("outside").join("external-skill");
+        let body = "External body.\n";
+        let content = format!(
+            "---\nname: external-skill\ndescription: Test skill external-skill.\n---\n{body}"
+        );
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(source_dir.join(SKILL_MD), content).unwrap();
+        // Sentinel: if delete follows the junction, this disappears and the
+        // assertion fails.
+        fs::write(source_dir.join("marker"), "preserved").unwrap();
+
+        let registry = tmp.path().join("skills");
+        fs::create_dir(&registry).unwrap();
+        let link = registry.join("external-skill");
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&source_dir)
+            .status()
+            .expect("spawn mklink");
+        if !status.success() {
+            eprintln!("skipping: junction creation refused");
+            return;
+        }
+
+        let skills = list_skills(&registry);
+        let linked = skills
+            .iter()
+            .find(|s| s.name == "external-skill")
+            .expect("junction must list as a skill");
+        assert_eq!(
+            linked.acquired,
+            Acquired::Linked,
+            "junction misclassified as Local"
+        );
+
+        delete_skill(&registry, "external-skill").expect("delete linked skill");
+        assert!(
+            source_dir.join("marker").exists(),
+            "junction delete followed into the external source"
+        );
+        assert!(!link.exists(), "junction itself must be removed");
     }
 
     #[test]
