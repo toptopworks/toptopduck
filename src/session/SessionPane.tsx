@@ -1,7 +1,8 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useIntl, FormattedMessage } from "react-intl";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { fmtError, errorDetail, formatTurnFailure, turnFailureDetail } from "../lib/error-presentation";
+import { listSkills } from "../api";
 import { RailToggle } from "../shell/RailToggle";
 import { WorkspaceToggle } from "../shell/WorkspaceToggle";
 import { useSessionState } from "./useSessionState";
@@ -27,9 +28,10 @@ import { Badge } from "../components/ui/badge";
 import { WorkingSetList } from "../components/dataset/WorkingSetList";
 import { cn } from "@/lib/utils";
 import type { DatasetDescriptor, DatasetPrivacy } from "../types/dataset";
+import type { SkillEntry } from "../types/skills";
 import type { ThreadEntry } from "../types/thread";
 import type { NonMaterializedTurn, WorkspaceContent } from "./workspace";
-import { sessionKeys } from "./queryKeys";
+import { sessionKeys, skillKeys } from "./queryKeys";
 
 // The per-session pane (ADR-0051). One `<SessionPane key={sid} sessionId={sid} />`
 // owns ALL of a session's server state (via useSessionState -> TanStack Query)
@@ -141,6 +143,23 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
   // a turn's question lights up a chip only when it explicitly names a dataset.
   // Stale datasets are excluded -- they cannot be the target of a new question.
   const datasetLabels = s.datasets.filter((d) => !d.stale);
+  // Skill registry keyed by spec name (ADR-0086, issue #366): the thread rail's
+  // Skill lifecycle markers look up their name here to surface declared MCP
+  // servers + flag a name the registry no longer carries (resume drift). The
+  // query reuses the ComposerContextPanel cache (skillKeys.all()) -- the
+  // registry is process-global (not per-session), so every pane shares one
+  // IPC round-trip. A failed / loading read leaves data undefined, so
+  // skillIndex stays undefined and the markers render the verb + name from
+  // the event alone (no MCP tooltip, no drift warning) -- the timeline stays
+  // readable while the registry resolves.
+  const skillListing = useQuery({ queryKey: skillKeys.all(), queryFn: listSkills });
+  const skillIndex = useMemo(() => {
+    const skills = skillListing.data?.skills;
+    if (skills === undefined) return undefined;
+    const m = new Map<string, SkillEntry>();
+    for (const skill of skills) m.set(skill.name, skill);
+    return m;
+  }, [skillListing.data?.skills]);
   // Hoisted so the ActiveSourceDeleteDialog filter callback reads it without a
   // non-null assertion: TS narrows a const across the JSX guard + closure, but
   // not a member access like s.pendingActiveDelete.
@@ -201,6 +220,7 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
             onSelectResult={s.handleSelectResult}
             staleByReference={s.staleByReference}
             datasetLabels={datasetLabels}
+            skillIndex={skillIndex}
             // ADR-0078/0083 (issue #297): the in-flight turn's progressive
             // trace card (tool-call rows + approval cards) trails the
             // recorded thread while a turn runs.
