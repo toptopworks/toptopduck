@@ -136,6 +136,13 @@ tauri-plugin-log = "2"
 # never under-invalidates -- "宁可多失效不漏失效", issue #40). default-features
 # off: only the parser is needed, no backend.
 sqlparser = { version = "0.52", default-features = false }
+# YAML frontmatter of Agent Skills `SKILL.md` files (issue #362, ADR-0086):
+# parse into a generic mapping + re-render on update, so spec fields the app
+# does not surface (allowed-tools, any third-party key) survive an edit
+# verbatim. Mapping preserves insertion order, keeping the field order the
+# file had. The crate is archived upstream but remains the de-facto YAML-serde
+# bridge and satisfies the MSRV (1.64 <= 1.77).
+serde_yaml = "0.9"
 # Backend-generated session ids (ADR-0056): create_session mints a UUID v4 so
 # the id <-> resource binding is atomic (no "id issued, resource unbuilt"
 # window). v4 only -- no serde need; the id crosses IPC as a plain string.
@@ -147,6 +154,12 @@ uuid = { version = "1", features = ["v4"] }
 # the IPC error string; serde is derived so the enum is IPC-capable if a future
 # command returns it directly (the frontend still sees a string today).
 thiserror = "2"
+# Reveal a path in the OS file manager (issue #362): the settings Skills
+# section's "open source location" for linked skills reveals the link target.
+# The opener plugin's default permission set includes reveal-item-in-dir (the
+# only surface this app uses); registered on the lib.rs Builder chain like the
+# other unconditional plugins.
+tauri-plugin-opener = "2"
 # OS locale read (ADR-0052, issue #78): when the locale preference is "system",
 # the Rust core resolves the OS locale itself (the frontend never pushes locale
 # over IPC). sys-locale reads the user's preferred UI language on every desktop

@@ -30,6 +30,7 @@ pub mod runtime;
 pub mod sandbox_sql;
 pub mod session;
 pub mod session_store;
+pub mod skills;
 pub mod tools;
 pub mod window;
 pub mod workingset;
@@ -75,6 +76,7 @@ pub use session::{
 pub use session_store::{
     ClosingFlag, SessionError, SessionHandle, SessionId, SessionStore, UNKNOWN_SESSION,
 };
+pub use skills::{Acquired, SkillEntry, SkillError, SkillUpdate, SkillsRoot};
 
 use std::sync::Arc;
 use tauri::Manager;
@@ -168,6 +170,12 @@ pub fn run() {
         // `locale()` / `hostname()` IPC commands are authorized via `os:default`
         // in capabilities/default.json.
         .plugin(tauri_plugin_os::init())
+        // Reveal paths in the OS file manager (issue #362): the settings
+        // Skills section's "open source location" reveals a linked skill's
+        // source directory. Registered unconditionally like dialog / os / log
+        // -- the reveal surface works on every desktop target. The default
+        // capability authorizes reveal-item-in-dir only.
+        .plugin(tauri_plugin_opener::init())
         // Multi-target log sink (issue #98, ADR-0029 invariant 2). Routes the
         // `log` facade to two destinations so the existing log::warn! calls
         // (app-config path fallback, create_dir_all failure, ingest
@@ -242,6 +250,22 @@ pub fn run() {
                 }
             }
 
+            // Skills registry root (issue #362, ADR-0086): the single registry
+            // lives under the OS app-data dir (`<app_data_dir>/skills`), with
+            // the same honest temp-dir fallback the app-config path uses --
+            // the app still boots, the registry just resets to empty each
+            // launch instead of persisting. The directory itself is minted
+            // lazily on first create; a never-created registry lists empty.
+            let skills_root = match app.path().app_data_dir() {
+                Ok(dir) => dir.join("skills"),
+                Err(e) => {
+                    log::warn!(
+                        "failed to resolve app-data dir; skills registry falls back to a temp path: {e}"
+                    );
+                    std::env::temp_dir().join("toptopduck-skills")
+                }
+            };
+
             let keychain = KeychainStore::new();
             let live = LiveProviderConfig::new(keychain, app_config_path);
             // ADR-0056: the multi-session store is the single managed state for
@@ -250,6 +274,7 @@ pub fn run() {
             // provider reads key + endpoint through it.
             app.manage(Arc::new(SessionStore::new()));
             app.manage(live);
+            app.manage(SkillsRoot(skills_root));
 
             // Visibility safety net (issue #268). `visible: false` in
             // tauri.conf.json + the window-state plugin's VISIBLE flag mean
@@ -338,6 +363,10 @@ pub fn run() {
             commands::rescan_adapters,
             commands::get_session_runtime,
             commands::set_session_runtime,
+            commands::list_skills,
+            commands::create_skill,
+            commands::update_skill,
+            commands::delete_skill,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

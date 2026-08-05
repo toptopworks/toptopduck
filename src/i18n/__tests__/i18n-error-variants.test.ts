@@ -103,6 +103,14 @@ const CATALOG_IDS: Readonly<Record<string, Readonly<Record<string, string | null
     KeychainFailure: "error.store.keychainFailure",
     ConfigWriteFailure: "error.store.configWriteFailure",
   },
+  SkillError: {
+    InvalidName: "error.skill.invalidName",
+    InvalidSkill: "error.skill.invalidSkill",
+    NoSuchSkill: "error.skill.notFound",
+    NameTaken: "error.skill.nameTaken",
+    ReadOnly: "error.skill.readOnly",
+    FsFailure: "error.skill.fsFailure",
+  },
   RenameSessionError: {
     EmptyName: "error.session.renameEmpty",
   },
