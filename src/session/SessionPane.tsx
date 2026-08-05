@@ -58,9 +58,13 @@ interface SessionPaneProps {
   /** The app-config MCP registry has at least one configured server (App
    *  derives it; undefined reads as "not configured" until app-config
    *  resolves). Drives the composer "+" panel's degraded decision (ADR-0083,
-   *  issue #351): with no configured MCP and no skill system yet, "+" is a
-   *  pure add-files button instead of the three-section panel. */
+   *  issue #351): with no configured MCP and no skill registry, "+" is a pure
+   *  add-files button instead of the three-section panel. */
   mcpConfigured?: boolean;
+  /** Hop to the settings SkillsSection from the composer "+" panel's skill
+   *  section footer (issue #365 AC #4). Shell-owned navigation; App threads
+   *  openSettings({ section: "skills" }) through. */
+  onOpenSettingsSkills: () => void;
   /** Rail collapse state + toggle (ADR-0054 level 2). Shell-owned pref
    *  rendered per-session: every SessionPane reads the same railCollapsed
    *  (the pref is app-wide), but only the active pane's header is visible
@@ -83,7 +87,7 @@ interface SessionPaneProps {
 // stable prop for useSessionState / useTurnFlow (no every-render fresh []).
 const NO_APPROVALS: ApprovalEntry[] = [];
 
-export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, providerPicker, mcpConfigured = false, railCollapsed, onToggleRail, sessionName, approvalEvents }: SessionPaneProps) {
+export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, providerPicker, mcpConfigured = false, onOpenSettingsSkills, railCollapsed, onToggleRail, sessionName, approvalEvents }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
   // the pane acts on its own session only). The respond / clearSession
@@ -351,6 +355,7 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
             onIngestFiles={s.handleIngestMany}
             loading={s.loading}
             mcpConfigured={mcpConfigured}
+            onOpenSettingsSkills={onOpenSettingsSkills}
           />
         </div>
         {/* Approval-mode chip (ADR-0083, issue #352): the session's

@@ -32,6 +32,12 @@ export const sessionKeys = {
    *  with the rest; a resume lands the reset (built-in) value via the fresh
    *  SessionPane mount, mirroring authMode. */
   runtime: (sessionId: string) => ["session", sessionId, "runtime"] as const,
+  /** Per-session mounted-skill names (issue #365, ADR-0086) -- the composer "+"
+   *  panel's mount-set read + the trigger badge count source. Folded from the
+   *  SkillLifecycleEvent timeline (Mount in / Unmount out); mount / unmount
+   *  invalidate this key so the badge re-reads without a remount. Lives under
+   *  the session prefix so a close's removeQueries drops it with the rest. */
+  mountedSkills: (sessionId: string) => ["session", sessionId, "mountedSkills"] as const,
 } as const;
 
 /** Session-AGNOSTIC adapter table (issue #353) -- the composer runtime picker's

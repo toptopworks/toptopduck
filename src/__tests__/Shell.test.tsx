@@ -116,6 +116,14 @@ vi.mock("../api", async (importOriginal) => {
     rescanAdapters: vi.fn(async () => [] as const),
     getAppConfig: vi.fn(async () => null),
     setAppConfig: vi.fn(async (cfg: AppConfig) => cfg),
+    // The composer "+" panel reads the skill registry + the session's mount set
+    // + drives mount / unmount (issue #365, ADR-0086). Defaults: empty registry
+    // + empty mount set + no-op writes; the panel stays in degraded mode and no
+    // Shell.test scenario drives a toggle, so the defaults keep the panel quiet.
+    listSkills: vi.fn(async () => ({ skills: [], ignored: [] })),
+    listMountedSkills: vi.fn(async () => []),
+    mountSkill: vi.fn(async () => {}),
+    unmountSkill: vi.fn(async () => {}),
   };
 });
 
@@ -2133,13 +2141,15 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
       await screen.findByRole("button", { name: "添加会话上下文" }),
     );
 
-    // File section live; skills + MCP sections disabled placeholders.
+    // File section live; skills section live (issue #365, empty registry ->
+    // empty-state hint); MCP section still a disabled placeholder (#301).
     expect(
       await screen.findByRole("button", { name: "选择数据文件…" }),
     ).toBeInTheDocument();
     expect(screen.getByText("技能")).toBeInTheDocument();
+    expect(screen.getByText("暂无技能。在设置中添加。")).toBeInTheDocument();
     expect(screen.getByText("MCP 工具")).toBeInTheDocument();
-    expect(screen.getAllByText("即将开放")).toHaveLength(2);
+    expect(screen.getAllByText("即将开放")).toHaveLength(1);
   });
 
   it("badges the session-enabled MCP count on the [+] trigger", async () => {
