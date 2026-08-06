@@ -32,6 +32,7 @@ ADR-0076/0078/0079 留下技能机制未决。技能需同时满足：(1) 适配
 - **写穿外部 SKILL.md 存 uuid**：mutate 外部技能、破坏软链只读语义、跨机 uuid 不一致。**否决**。
 - **技能正文嵌进 `.duck`（跨机自包含）**：每个 `.duck` 携多 KB 正文、与注册表重复、且 MCP server id 仍是环境引用（嵌了技能也不完整）。**否决**——违「recipe = 源 + 轮次」边界；诚实降级更干净。
 - **不升 format_version、靠 serde 容错**：旧 app 遇 `RecipeEntry::Skill` serde-fail 而非干净拒绝。**否决**。
+- **全局 mute toggle（`AppConfig.muted_skills`）**：注册表保留技能但从「+」选择器隐藏，需新增配置字段 + 行尾 toggle UI + 选择器过滤逻辑。**否决**——技能管理只需 create/edit/delete，用户不想要的技能要么不导入要么删除。
 
 ## Consequences
 
@@ -40,4 +41,4 @@ ADR-0076/0078/0079 留下技能机制未决。技能需同时满足：(1) 适配
 - **延伸 ADR-0076**：「技能声明的工具」第三类在 v1 校准为**聚合路径类**（skill → mount → MCP enablement → gateway），非可执行面类。
 - **延伸 ADR-0078**：技能生命周期事件与源事件同构（恒可见、非轮次、进当前状态视图）；轮次记技能出处 + content_hash 供审计。
 - **延续 ADR-0082**：recipe format_version v3→v4 单向迁移。
-- **未决（实施期）**：技能根目录位置、导入对话框两段式钻取、设置页 SkillsSection UX、行内校验/冲突标记、`AppConfig.muted_skills` 全局启用 toggle、effective 启用集合成、注入点不对称的实现细节。
+- **未决（实施期）**：技能根目录位置、导入对话框两段式钻取、设置页 SkillsSection UX、行内校验/冲突标记、effective 启用集合成、注入点不对称的实现细节。
