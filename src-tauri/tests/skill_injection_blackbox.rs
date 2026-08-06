@@ -22,7 +22,7 @@ use toptopduck_lib::skills::{resolve_prompt_fragments, SkillPromptFragment};
 use toptopduck_lib::util::sha256_hex;
 use toptopduck_lib::{
     ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState, FakeProvider,
-    KeychainStore, Session, TurnOutcome,
+    KeychainStore, Session, TurnInputs, TurnOutcome,
 };
 
 /// A no-op approval sink (the turn runs ungated). Mirrors the NullSink in
@@ -83,9 +83,11 @@ fn mounted_skill_body_in_prompt_and_provenance() {
         &approval,
         &sink,
         |_| {},
-        &[],
-        &KeychainStore::new(),
-        &fragments,
+        &TurnInputs {
+            mcp_servers: &[],
+            keychain: &KeychainStore::new(),
+            skills: &fragments,
+        },
     );
     // The scripted text reply lands as a textual outcome.
     assert!(
@@ -154,9 +156,7 @@ fn empty_mount_set_omits_skill_section_and_provenance() {
         &approval,
         &sink,
         |_| {},
-        &[],
-        &KeychainStore::new(),
-        &[],
+        &TurnInputs::empty(&KeychainStore::new()),
     );
     assert!(
         matches!(outcome, TurnOutcome::Textual { .. }),

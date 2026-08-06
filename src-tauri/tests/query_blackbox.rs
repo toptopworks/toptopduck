@@ -23,7 +23,7 @@ use toptopduck_lib::{
     ActiveResolution, ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState,
     CancelToken, DatasetPrivacy, FakeProvider, KeychainStore, LoadOutcome, OperationKind,
     ProviderError, ResumeEvent, ResumeProgress, Session, SourceResolution, TextKind, ThreadEntry,
-    TraceEntryView, TurnFailure, TurnOutcome, TurnPhase, TurnProgress, TurnRecord,
+    TraceEntryView, TurnFailure, TurnInputs, TurnOutcome, TurnPhase, TurnProgress, TurnRecord,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -1323,9 +1323,7 @@ fn ask_with_phase_records_the_tool_call_event_stream_on_a_result_turn() {
         &approval,
         &sink,
         |p| phases.push(p),
-        &[],
-        &KeychainStore::new(),
-        &[],
+        &TurnInputs::empty(&KeychainStore::new()),
     );
     assert!(
         matches!(outcome, TurnOutcome::Materialized { .. }),
@@ -1369,9 +1367,7 @@ fn ask_with_phase_records_only_thinking_on_a_textual_turn() {
         &approval,
         &sink,
         |p| phases.push(p),
-        &[],
-        &KeychainStore::new(),
-        &[],
+        &TurnInputs::empty(&KeychainStore::new()),
     );
     assert!(
         matches!(outcome, TurnOutcome::Textual { .. }),
@@ -1418,9 +1414,7 @@ fn turn_progress_events_for_one_turn_share_one_session_id() {
                 phase,
             });
         },
-        &[],
-        &KeychainStore::new(),
-        &[],
+        &TurnInputs::empty(&KeychainStore::new()),
     );
     assert!(
         matches!(outcome, TurnOutcome::Materialized { .. }),
