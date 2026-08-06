@@ -74,7 +74,7 @@ function renderWithProviders(ui: ReactElement) {
 describe("SkillsSection (issue #362)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [] });
+    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
     vi.mocked(listSkillSources).mockResolvedValue([]);
   });
 
@@ -82,6 +82,7 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkills).mockResolvedValue({
       skills: [localSkill, linkedSkill],
       ignored: [],
+      root_error: null,
     });
     renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
 
@@ -96,6 +97,7 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkills).mockResolvedValue({
       skills: [localSkill, linkedSkill],
       ignored: [],
+      root_error: null,
     });
     renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
     await screen.findByText("pdf-tools");
@@ -109,7 +111,7 @@ describe("SkillsSection (issue #362)", () => {
   });
 
   it("creates a skill via the New drawer", async () => {
-    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [] });
+    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
     vi.mocked(createSkill).mockResolvedValue(localSkill);
     renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
     await screen.findByText("No skills yet. Click New to author one.");
@@ -128,7 +130,7 @@ describe("SkillsSection (issue #362)", () => {
   });
 
   it("opens a local skill in the edit drawer and saves via updateSkill", async () => {
-    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [] });
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
     vi.mocked(updateSkill).mockResolvedValue(localSkill);
     renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
     await screen.findByText("pdf-tools");
@@ -152,7 +154,7 @@ describe("SkillsSection (issue #362)", () => {
   });
 
   it("renders a linked skill read-only with an Open source location button", async () => {
-    vi.mocked(listSkills).mockResolvedValue({ skills: [linkedSkill], ignored: [] });
+    vi.mocked(listSkills).mockResolvedValue({ skills: [linkedSkill], ignored: [], root_error: null });
     const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
     renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
     await screen.findByText("external-skill");
@@ -172,7 +174,7 @@ describe("SkillsSection (issue #362)", () => {
   });
 
   it("deletes a skill after confirmation", async () => {
-    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [] });
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
     vi.mocked(deleteSkill).mockResolvedValue(undefined);
     renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
     await screen.findByText("pdf-tools");
@@ -189,7 +191,7 @@ describe("SkillsSection (issue #362)", () => {
   });
 
   it("surfaces a create failure as a formatted error", async () => {
-    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [] });
+    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
     vi.mocked(createSkill).mockRejectedValue({
       kind: "NameTaken",
       data: "pdf-tools",
@@ -212,7 +214,7 @@ describe("SkillsSection (issue #362)", () => {
   });
 
   it("opens the import dialog when the Import button is clicked (issue #367)", async () => {
-    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [] });
+    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
     vi.mocked(listSkillSources).mockResolvedValue([]);
     renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
     await screen.findByText("No skills yet. Click New to author one.");
@@ -227,7 +229,7 @@ describe("SkillsSection (issue #362)", () => {
   });
 
   it("does not render the ignored section when the registry is clean", async () => {
-    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [] });
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
     renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
     await screen.findByText("pdf-tools");
 
@@ -248,6 +250,7 @@ describe("SkillsSection (issue #362)", () => {
           reason: "cannot read `no-skill-md/SKILL.md`: No such file or directory",
         },
       ],
+      root_error: null,
     });
     renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
     await screen.findByText("pdf-tools");
@@ -267,6 +270,33 @@ describe("SkillsSection (issue #362)", () => {
       screen.getByText(
         "frontmatter name `other` does not match its directory name `mismatch-dir`",
       ),
+    ).toBeInTheDocument();
+  });
+
+  it("surfaces a listSkills IPC rejection as a formatted error (issue #375)", async () => {
+    vi.mocked(listSkills).mockRejectedValue("IPC transport error");
+    renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
+
+    // A raw string reject falls through fmtError to the typeof === "string"
+    // branch, rendered verbatim so the user sees the IPC failure rather than
+    // a silent empty registry (listing stays undefined → empty skills list,
+    // but the error face makes the root cause visible).
+    expect(await screen.findByText("IPC transport error")).toBeInTheDocument();
+  });
+
+  it("surfaces a root_error from the scan as a diagnostic (issue #375)", async () => {
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [],
+      ignored: [],
+      root_error: "read skills root `/locked` failed: Permission denied (os error 13)",
+    });
+    renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
+
+    // The locale-catalog prefix renders, and the dynamic root_error detail
+    // rides verbatim so the user sees the OS-level reason.
+    expect(await screen.findByText(/Failed to scan the skills registry/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Permission denied \(os error 13\)/),
     ).toBeInTheDocument();
   });
 });

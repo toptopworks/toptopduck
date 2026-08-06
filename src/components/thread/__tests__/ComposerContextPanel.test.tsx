@@ -72,7 +72,7 @@ function skill(
 }
 
 function listing(skills: SkillEntry[]): SkillListing {
-  return { skills, ignored: [] };
+  return { skills, ignored: [], root_error: null };
 }
 
 function renderPanel(
