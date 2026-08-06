@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import {
   AlertCircle,
@@ -69,8 +69,6 @@ export function McpSection({
 
   const servers = appConfig.mcp_servers.servers;
 
-  const visibleServers = useMemo(() => servers, [servers]);
-
   function toggleRow(id: string) {
     setExpandedRows((prev) => {
       const next = new Set(prev);
@@ -109,19 +107,10 @@ export function McpSection({
     setDeleting(true);
     setError(null);
     try {
-      // Clear each keychain secret first, then remove the config entry
-      // (ADR-0029: clear-then-remove so orphaned keychain entries are cleaned).
-      // The config removal goes through onCommit (the single persistence write
-      // that updates React state + disk), same pattern as profile deletion.
-      for (const envKey of deleteTarget.keychainEnvKeys) {
-        try {
-          await clearMcpServerSecret(deleteTarget.id, envKey);
-        } catch {
-          // Best effort -- a keychain error on one key does not block removal.
-          // The config remove is the primary action; a stale keychain entry is
-          // inert (keyed by the removed server's uuid id).
-        }
-      }
+      // Remove the config entry first (the primary action). If this fails,
+      // the server is still intact — secrets are preserved (reversed from
+      // the original clear-then-remove order to avoid a partial-failure
+      // window where secrets are wiped but the config persists).
       const err = await onCommit((cfg) => ({
         ...cfg,
         mcp_servers: {
@@ -132,18 +121,30 @@ export function McpSection({
       if (err) {
         setError(err);
       } else {
-        // Clean up local state for the removed server.
+        // Config removed — clean up local state for the removed server.
+        const removedId = deleteTarget.id;
+        const removedKeys = deleteTarget.keychainEnvKeys;
         setProbeStates((prev) => {
           const next = { ...prev };
-          delete next[deleteTarget.id];
+          delete next[removedId];
           return next;
         });
         setExpandedRows((prev) => {
           const next = new Set(prev);
-          next.delete(deleteTarget.id);
+          next.delete(removedId);
           return next;
         });
         setDeleteTarget(null);
+        // Clear keychain secrets after successful config removal (best
+        // effort). An orphaned keychain entry is inert — keyed by the
+        // removed server's uuid id, nothing reads it.
+        for (const envKey of removedKeys) {
+          try {
+            await clearMcpServerSecret(removedId, envKey);
+          } catch (e) {
+            console.warn("keychain clear failed for", removedId, envKey, e);
+          }
+        }
       }
     } catch (e) {
       setError(fmtError(e, intl));
@@ -171,7 +172,7 @@ export function McpSection({
       />
 
       <SettingsCard data-testid="mcp-server-list">
-        {visibleServers.length === 0 ? (
+        {servers.length === 0 ? (
           <div className="text-muted-foreground px-4 py-8 text-center text-sm">
             <FormattedMessage
               id="settings.mcp.empty"
@@ -179,7 +180,7 @@ export function McpSection({
             />
           </div>
         ) : (
-          visibleServers.map((server) => (
+          servers.map((server) => (
             <McpServerRow
               key={server.id}
               server={server}
@@ -225,10 +226,7 @@ export function McpSection({
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
-              <AlertDialogCancel
-                onClick={() => setDeleteTarget(null)}
-                disabled={deleting}
-              >
+              <AlertDialogCancel disabled={deleting}>
                 <FormattedMessage
                   id="settings.mcp.confirmDeleteCancel"
                   defaultMessage="Cancel"
@@ -305,21 +303,9 @@ function McpServerRow({
           <span className="text-sm font-medium truncate inline-block">
             {server.display_name}
           </span>
-          {server.transport.type === "stdio" && (
-            <span className="text-muted-foreground ml-2 text-xs">
-              {server.transport.command}
-            </span>
-          )}
-          {server.transport.type === "sse" && (
-            <span className="text-muted-foreground ml-2 text-xs">
-              {server.transport.url}
-            </span>
-          )}
-          {server.transport.type === "http" && (
-            <span className="text-muted-foreground ml-2 text-xs">
-              {server.transport.url}
-            </span>
-          )}
+          <span className="text-muted-foreground ml-2 text-xs">
+            {"url" in server.transport ? server.transport.url : server.transport.command}
+          </span>
         </div>
 
         <Button
@@ -358,19 +344,29 @@ function McpServerRow({
   );
 }
 
-/** The colored status dot reflecting the probe outcome. */
+/** The colored status dot reflecting the probe outcome. Uses `role="img"` +
+ *  `aria-label` so screen readers announce the connection state (idle / testing
+ *  / connected / failed). */
 function StatusDot({ probeState }: { probeState: ProbeState }) {
-  const className = "size-2.5 shrink-0 rounded-full";
+  const dotClass = "size-2.5 shrink-0 rounded-full";
   if (probeState.kind === "idle") {
-    return <span className={cn(className, "bg-muted-foreground/40")} aria-hidden />;
+    return (
+      <span role="img" aria-label="Not tested" className={cn(dotClass, "bg-muted-foreground/40")} />
+    );
   }
   if (probeState.kind === "testing") {
-    return <span className={cn(className, "bg-yellow-500 animate-pulse")} aria-hidden />;
+    return (
+      <span role="img" aria-label="Testing" className={cn(dotClass, "bg-yellow-500 animate-pulse")} />
+    );
   }
   if (probeState.result.connected) {
-    return <CheckCircle2 className={cn("size-4 shrink-0 text-green-500")} aria-hidden />;
+    return (
+      <CheckCircle2 role="img" aria-label="Connected" className={cn("size-4 shrink-0 text-green-500")} />
+    );
   }
-  return <AlertCircle className={cn("size-4 shrink-0 text-destructive")} aria-hidden />;
+  return (
+    <AlertCircle role="img" aria-label="Connection failed" className={cn("size-4 shrink-0 text-destructive")} />
+  );
 }
 
 /** The expandable tool list section. */

@@ -839,31 +839,18 @@ pub fn probe_mcp_server(
     server: McpServerConfig,
 ) -> Result<McpProbeResult, StoreCommandError> {
     // Resolve secret env values from the keychain (ADR-0029 -- the values never
-    // cross IPC). A missing entry contributes nothing; a keychain read error
-    // for one key is logged + skipped so a single OS keychain fault does not
-    // brick the probe (same resilience as the aggregator's collect_secrets).
-    let secrets: Vec<crate::mcp::client::SecretEnv> = server
-        .keychain_env_keys
-        .iter()
-        .filter_map(|env_key| {
-            match crate::mcp::secrets::get_mcp_secret(live.keychain(), &server.id, env_key) {
-                Ok(Some(value)) => Some((env_key.clone(), value)),
-                Ok(None) => None,
-                Err(e) => {
-                    log::warn!(
-                        target: "toptopduck::mcp",
-                        "keychain read for server {} env key {env_key} failed, skipping: {e}",
-                        server.id
-                    );
-                    None
-                }
-            }
-        })
-        .collect();
+    // cross IPC). Shared with the aggregator's connect path so both evolve
+    // together (collect_secrets logs + skips on a per-key keychain fault).
+    let secrets = crate::mcp::aggregator::collect_secrets(live.keychain(), &server);
 
     let mut client = match crate::mcp::client::StdioClient::connect(&server, &secrets) {
         Ok(c) => c,
         Err(e) => {
+            log::warn!(
+                target: "toptopduck::mcp",
+                "probe for server {} connect failed: {e}",
+                server.id
+            );
             return Ok(McpProbeResult {
                 connected: false,
                 tools: Vec::new(),
@@ -874,6 +861,11 @@ pub fn probe_mcp_server(
     let tools = match client.list_tools() {
         Ok(t) => t,
         Err(e) => {
+            log::warn!(
+                target: "toptopduck::mcp",
+                "probe for server {} tools/list failed: {e}",
+                server.id
+            );
             return Ok(McpProbeResult {
                 connected: false,
                 tools: Vec::new(),

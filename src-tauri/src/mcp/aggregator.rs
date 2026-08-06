@@ -278,7 +278,10 @@ impl Default for McpAggregator {
 /// logged + skipped so a single OS keychain fault does not brick the whole
 /// server (the server may still operate without that secret, and bricking it
 /// would let an OS keychain glitch take down the whole tool table).
-fn collect_secrets(keychain: &KeychainStore, server: &McpServerConfig) -> Vec<SecretEnv> {
+pub(crate) fn collect_secrets(
+    keychain: &KeychainStore,
+    server: &McpServerConfig,
+) -> Vec<SecretEnv> {
     server
         .keychain_env_keys
         .iter()

@@ -154,7 +154,7 @@ describe("McpSection (issue #387)", () => {
     ).toBeInTheDocument();
   });
 
-  it("clears keychain secrets then removes server on delete confirm", async () => {
+  it("removes server config then clears keychain secrets on delete confirm", async () => {
     const server = makeServer({
       id: "srv-1",
       display_name: "My Server",
@@ -173,11 +173,6 @@ describe("McpSection (issue #387)", () => {
     // Confirm deletion.
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
 
-    await waitFor(() => {
-      expect(clearMcpServerSecret).toHaveBeenCalledWith("srv-1", "API_KEY");
-      expect(clearMcpServerSecret).toHaveBeenCalledWith("srv-1", "WEBHOOK_SECRET");
-    });
-
     // onCommit should be called with a mutation that removes the server.
     await waitFor(() => {
       expect(onCommit).toHaveBeenCalledTimes(1);
@@ -185,6 +180,65 @@ describe("McpSection (issue #387)", () => {
       const mutated = mutateFn(makeAppConfig([server]));
       expect(mutated.mcp_servers.servers).toHaveLength(0);
     });
+
+    // Keychain secrets are cleared after the config removal succeeds.
+    await waitFor(() => {
+      expect(clearMcpServerSecret).toHaveBeenCalledWith("srv-1", "API_KEY");
+      expect(clearMcpServerSecret).toHaveBeenCalledWith("srv-1", "WEBHOOK_SECRET");
+    });
+  });
+
+  it("keeps dialog open and shows error when onCommit fails", async () => {
+    const server = makeServer({
+      id: "srv-1",
+      display_name: "My Server",
+      keychain_env_keys: ["API_KEY"],
+    });
+
+    const onCommit = vi.fn().mockResolvedValue("disk write failed");
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([server])} onCommit={onCommit} />,
+    );
+
+    // Open + confirm delete.
+    fireEvent.click(screen.getByRole("button", { name: "Delete server My Server" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("disk write failed")).toBeInTheDocument();
+    });
+
+    // Dialog should still be visible (deleteTarget not cleared).
+    expect(screen.getByText("Delete MCP server?")).toBeInTheDocument();
+    // Keychain secret should NOT have been cleared (config removal failed).
+    expect(clearMcpServerSecret).not.toHaveBeenCalled();
+  });
+
+  it("proceeds with config removal when keychain clear fails (best effort)", async () => {
+    const server = makeServer({
+      id: "srv-1",
+      display_name: "My Server",
+      keychain_env_keys: ["API_KEY"],
+    });
+    vi.mocked(clearMcpServerSecret).mockRejectedValue(new Error("keychain locked"));
+
+    const onCommit = vi.fn().mockResolvedValue(null);
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([server])} onCommit={onCommit} />,
+    );
+
+    // Open + confirm delete.
+    fireEvent.click(screen.getByRole("button", { name: "Delete server My Server" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    // Config removal should succeed and clear should have been attempted.
+    await waitFor(() => {
+      expect(onCommit).toHaveBeenCalledTimes(1);
+      expect(clearMcpServerSecret).toHaveBeenCalledWith("srv-1", "API_KEY");
+    });
+
+    // No error surfaced — the keychain failure is swallowed (best effort).
+    expect(screen.queryByText("keychain locked")).not.toBeInTheDocument();
   });
 
   it("shows Add button as disabled (placeholder for follow-up ticket)", () => {
