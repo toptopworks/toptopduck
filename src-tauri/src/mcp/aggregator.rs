@@ -48,7 +48,7 @@ struct AggregatedServer {
 /// `SessionHandle` so `list_mcp_server_status` reads the last turn's outcome
 /// without taking the session lock (which an in-flight turn holds) -- the
 /// status IPC is lock-light on the handle. `connected: false` covers every
-/// skip path (unsupported transport, spawn fault, tools/list fault) with the
+/// skip path (transport connect fault, spawn fault, tools/list fault) with the
 /// reason in `error`; `connected: true` carries the live tool count the
 /// gateway advertised that turn.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -104,7 +104,8 @@ pub fn extract_tool_info(tools: &[Value]) -> Vec<McpToolInfo> {
 }
 
 /// The merged view over every connected external MCP server (ADR-0076). Owns
-/// the spawned children; `Drop` kills them via [`StdioClient`]'s `Drop`.
+/// the transport clients; `Drop` tears down each one (kills the child for
+/// stdio, stops the reader thread for SSE, no-op for HTTP).
 pub struct McpAggregator {
     servers: Vec<AggregatedServer>,
 }

@@ -227,9 +227,11 @@ fn read_sse_event<R: BufRead>(reader: &mut R) -> std::io::Result<Option<SseEvent
 /// stdin/stdout. Owns the child; `Drop` kills it (per-turn lifecycle, issue
 /// #301 Q2).
 ///
-/// Only the stdio transport is wired in slice C1 (issue #301 Q4); `sse` /
-/// `http` configs surface [`ClientError::UnsupportedTransport`] so the gateway
-/// can log + skip the server rather than silently dropping it.
+/// Only the stdio transport is constructed here; SSE / HTTP transports have
+/// their own client types ([`SseClient`], [`HttpClient`]). The dispatcher
+/// [`connect_transport`] routes by transport variant. `StdioClient::connect`
+/// retains its `UnsupportedTransport` guard so a direct call with a non-stdio
+/// config fails loudly rather than silently spawning a bogus child.
 pub struct StdioClient {
     inner: McpClient<BufReader<ChildStdout>, ChildStdin>,
     child: Child,
@@ -375,8 +377,7 @@ impl HttpClient {
         // POST the initialized notification (no response expected; the
         // server typically returns 202 Accepted).
         let notif = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
-        let _ = self
-            .agent
+        self.agent
             .post(&self.url)
             .send_json(notif)
             .map_err(|e| ClientError::Http(e.to_string()))?;
@@ -468,14 +469,30 @@ impl SseClient {
 
         let mut reader = BufReader::new(response.into_reader());
 
-        // The first event must carry the POST endpoint URL.
+        // The first event MUST be `event: endpoint` carrying the POST URL
+        // (the MCP legacy SSE transport contract). Rejecting anything else
+        // prevents a misbehaving server's message payload from being used as
+        // the POST target (H1: review feedback).
         let first_event = read_sse_event(&mut reader)
             .map_err(ClientError::Framing)?
             .ok_or(ClientError::ServerClosed)?;
-        let post_url = first_event.data;
+        if first_event.event.as_deref() != Some("endpoint") {
+            return Err(ClientError::Framing(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "expected `event: endpoint` first, got {:?}",
+                    first_event.event
+                ),
+            )));
+        }
+        // Resolve the POST URL relative to the SSE URL (the server may send
+        // a relative path like `/message`). Reject non-http(s) schemes to
+        // prevent SSRF via a compromised server's endpoint event (H2).
+        let post_url = resolve_post_url(url, &first_event.data)?;
 
-        // Spawn the background reader for subsequent events.
-        let (tx, rx) = mpsc::channel();
+        // Spawn the background reader for subsequent events. A bounded
+        // sync_channel backpressures a flooding server (H4: review feedback).
+        let (tx, rx) = mpsc::sync_channel(64);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
         let handle = thread::spawn(move || {
@@ -535,8 +552,7 @@ impl SseClient {
         });
         let result = self.request(req)?;
         let notif = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
-        let _ = self
-            .agent
+        self.agent
             .post(&self.post_url)
             .send_json(notif)
             .map_err(|e| ClientError::Http(e.to_string()))?;
@@ -590,7 +606,7 @@ impl Drop for SseClient {
 /// re-check the stop flag — the TCP connection stays open between timeouts.
 fn sse_reader_loop<R: BufRead + Send>(
     mut reader: R,
-    tx: mpsc::Sender<Value>,
+    tx: mpsc::SyncSender<Value>,
     stop: Arc<AtomicBool>,
 ) {
     while !stop.load(Ordering::SeqCst) {
@@ -639,6 +655,23 @@ fn check_rpc_response(msg: &Value) -> Result<Value, ClientError> {
         return Err(ClientError::ServerError(err.clone()));
     }
     Ok(msg.get("result").cloned().unwrap_or(Value::Null))
+}
+
+/// Resolve the SSE endpoint event's POST URL relative to the SSE stream URL,
+/// rejecting non-http(s) schemes (SSRF guard, H2: review feedback). The
+/// server may send an absolute URL or a relative path like `/message`.
+fn resolve_post_url(sse_url: &str, raw: &str) -> Result<String, ClientError> {
+    let base =
+        url::Url::parse(sse_url).map_err(|e| ClientError::Http(format!("invalid SSE url: {e}")))?;
+    let resolved = base
+        .join(raw)
+        .map_err(|e| ClientError::Http(format!("invalid endpoint url: {e}")))?;
+    match resolved.scheme() {
+        "http" | "https" => Ok(resolved.to_string()),
+        other => Err(ClientError::Http(format!(
+            "endpoint url must be http or https, got: {other}"
+        ))),
+    }
 }
 
 /// The connected MCP client for one server, specialized by transport. The
