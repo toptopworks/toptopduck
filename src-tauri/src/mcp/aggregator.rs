@@ -6,18 +6,19 @@
 //! namespaced as `mcp__<server_slug>__<tool>` (ADR-0076) so same-name tools
 //! across servers stay distinct and the trace filter (`mcp__` prefix) stays
 //! reliable. A `tools/call` carrying a namespaced name is parsed here and
-//! routed to the matching [`StdioClient`] (the `mcp__<slug>__` prefix is
+//! routed to the matching [`TransportClient`] (the `mcp__<slug>__` prefix is
 //! stripped -- the server only ever sees its own native tool name).
 //!
 //! Turn-local (issue #301 Q2): the gateway constructs one `McpAggregator` per
-//! turn via [`McpAggregator::connect_all`] and drops it at turn end, killing
-//! every spawned child. A failed connect (unsupported transport in slice C1,
-//! spawn fault, tools/list error) logs + skips that server rather than failing
-//! the turn -- a misconfigured server must not brick the gateway.
+//! turn via [`McpAggregator::connect_all`] and drops it at turn end, tearing
+//! down every transport (killing stdio children, stopping SSE reader threads).
+//! A failed connect (transport fault, spawn fault, tools/list error) logs +
+//! skips that server rather than failing the turn -- a misconfigured server
+//! must not brick the gateway.
 
 use serde_json::Value;
 
-use crate::mcp::client::{ClientError, SecretEnv, StdioClient};
+use crate::mcp::client::{connect_transport, ClientError, SecretEnv, TransportClient};
 use crate::mcp::config::{McpServerConfig, McpServerId};
 use crate::mcp::secrets::get_mcp_secret;
 use crate::provider::keychain::KeychainStore;
@@ -38,7 +39,7 @@ const NAMESPACED_SEP: &str = "__";
 /// shape and routing strips the prefix rather than re-deriving it).
 struct AggregatedServer {
     slug: String,
-    client: StdioClient,
+    client: TransportClient,
     tools: Vec<Value>,
 }
 
@@ -116,34 +117,20 @@ impl McpAggregator {
         Self { servers: vec![] }
     }
 
-    /// Spawn + initialize one server, list its tools, and add it under a
-    /// unique slug derived from its display name (issue #301 slice D: returns
-    /// a [`ConnectResult`] so the caller can snapshot the per-turn outcome).
-    /// A failure (unsupported transport in slice C1, spawn fault, tools/list
-    /// fault) logs + skips the server -- the turn is not failed by a
-    /// misconfigured server -- and the `ConnectResult` carries `connected:
+    /// Connect + initialize one server (any transport), list its tools, and
+    /// add it under a unique slug derived from its display name (issue #301
+    /// slice D + issue #389 SSE/HTTP). Returns a [`ConnectResult`] so the
+    /// caller can snapshot the per-turn outcome. A failure (connect fault,
+    /// tools/list fault) logs + skips the server -- the turn is not failed by
+    /// a misconfigured server -- and the `ConnectResult` carries `connected:
     /// false` + the reason so the status IPC surfaces it without re-spawning.
     pub fn connect_one(
         &mut self,
         config: &McpServerConfig,
         secrets: &[SecretEnv],
     ) -> ConnectResult {
-        let mut client = match StdioClient::connect(config, secrets) {
+        let mut client = match connect_transport(config, secrets) {
             Ok(c) => c,
-            Err(ClientError::UnsupportedTransport(t)) => {
-                log::warn!(
-                    target: "toptopduck::mcp",
-                    "skipping MCP server {}: stdio is the only supported transport (got {t})",
-                    config.id
-                );
-                return ConnectResult {
-                    id: config.id.clone(),
-                    connected: false,
-                    tool_count: 0,
-                    tools: Vec::new(),
-                    error: Some(format!("unsupported transport: {t}")),
-                };
-            }
             Err(e) => {
                 log::warn!(
                     target: "toptopduck::mcp",
@@ -167,7 +154,8 @@ impl McpAggregator {
                     "MCP server {} tools/list failed, skipping server: {e}",
                     config.id
                 );
-                // Dropping `client` kills the spawned child (StdioClient::drop);
+                // Dropping `client` tears down the transport (kills the child
+                // for stdio, stops the reader thread for SSE, etc.);
                 // a server whose tools/list is broken contributes nothing to the
                 // merged table, so it is not kept around for the turn (matching
                 // the connect-failure skip above).

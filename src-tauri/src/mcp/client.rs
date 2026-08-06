@@ -1,22 +1,41 @@
-//! MCP stdio client -- the gateway's per-turn JSON-RPC client for ONE
-//! user-configured external MCP server (ADR-0076, issue #301 slice C1).
+//! MCP transport clients -- the gateway's per-turn JSON-RPC clients for ONE
+//! user-configured external MCP server (ADR-0076, issue #301 slice C1 +
+//! issue #389 SSE/HTTP transports).
 //!
 //! The gateway aggregates an enabled server's tools into its advertised table
 //! (slice C-gw) and routes `tools/call` to the matching server. This module
-//! owns the connection: spawn the stdio transport, perform the MCP initialize
-//! handshake, and drive `tools/list` + `tools/call` over newline-delimited
-//! JSON-RPC (reusing [`crate::runtime::gateway::framing`] -- same wire shape).
+//! owns the connection: establish the transport (stdio / SSE / HTTP), perform
+//! the MCP initialize handshake, and drive `tools/list` + `tools/call`.
 //!
-//! Turn-local (issue #301 Q2): the gateway spawns one [`StdioClient`] per
-//! configured server at turn start and drops it (killing the child) at turn
-//! end -- no cross-turn state, no session-level handle. Per-call timeout is
-//! NOT enforced per-read here: stdio reads block with no native deadline, so
-//! the turn-level watchdog (ADR-0021) bounds a hung server. `timeout_ms` stays
-//! on [`crate::mcp::config::McpServerConfig`] as a forward-compat contract; a
-//! per-read deadline would need a read thread + timeout (deferred).
+//! Three transport clients share the same MCP JSON-RPC conversation shape but
+//! differ in how request/response bytes are carried:
+//! - [`StdioClient`]: newline-delimited JSON-RPC over a spawned child's
+//!   stdin/stdout (the MCP stdio transport).
+//! - [`HttpClient`]: each JSON-RPC request is POSTed to a URL; the response
+//!   body is either a single JSON value or an SSE stream (MCP streamable HTTP
+//!   transport, issue #389).
+//! - [`SseClient`]: a long-lived GET opens an SSE stream (responses arrive
+//!   here); JSON-RPC requests are POSTed to a server-advertised endpoint URL
+//!   (legacy MCP SSE transport, issue #389). A background reader thread
+//!   forwards SSE events via an mpsc channel.
+//!
+//! [`connect_transport`] dispatches by transport type; the gateway /
+//! aggregator holds a [`TransportClient`] enum per connected server.
+//!
+//! Turn-local (issue #301 Q2): the gateway constructs one client per
+//! configured server at turn start and drops it at turn end -- no
+//! cross-turn state, no session-level handle. Per-call timeout is NOT
+//! enforced per-read here: blocking reads have no native deadline, so the
+//! turn-level watchdog (ADR-0021) bounds a hung server. `timeout_ms` stays
+//! on [`crate::mcp::config::McpServerConfig`] as a forward-compat contract.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -138,6 +157,72 @@ impl<R: BufRead, W: Write> McpClient<R, W> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SSE event parsing (shared by HttpClient + SseClient, issue #389)
+// ---------------------------------------------------------------------------
+
+/// One parsed SSE event from a `text/event-stream` response (issue #389).
+/// `event` is the `event:` field value (e.g., `"endpoint"`, `"message"` or
+/// `None` when omitted — the SSE default is `"message"`). `data` is the
+/// concatenation of all `data:` lines (joined with `\n` per the SSE spec).
+struct SseEvent {
+    event: Option<String>,
+    data: String,
+}
+
+/// Read one SSE event from a buffered reader. An event is terminated by a
+/// blank line; lines starting with `:` are comments (skipped). `event:` and
+/// `data:` fields are accumulated; other fields (`id:`, `retry:`) are ignored.
+/// Returns `Ok(None)` at clean EOF (stream closed). Multiple `data:` lines
+/// within one event are joined with `\n` per the SSE spec.
+fn read_sse_event<R: BufRead>(reader: &mut R) -> std::io::Result<Option<SseEvent>> {
+    let mut event_type: Option<String> = None;
+    let mut data_parts: Vec<String> = Vec::new();
+
+    loop {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            // EOF: return any buffered event, else None (clean close).
+            if data_parts.is_empty() && event_type.is_none() {
+                return Ok(None);
+            }
+            return Ok(Some(SseEvent {
+                event: event_type,
+                data: data_parts.join("\n"),
+            }));
+        }
+
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+
+        if trimmed.is_empty() {
+            // Blank line = event boundary. Leading blank lines (before any
+            // field) are skipped so a keepalive gap does not produce an empty
+            // event.
+            if data_parts.is_empty() && event_type.is_none() {
+                continue;
+            }
+            return Ok(Some(SseEvent {
+                event: event_type,
+                data: data_parts.join("\n"),
+            }));
+        }
+
+        if trimmed.starts_with(':') {
+            continue; // SSE comment (keepalive)
+        } else if let Some(rest) = trimmed.strip_prefix("event:") {
+            event_type = Some(rest.trim().to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("data:") {
+            // Per the SSE spec, a single leading space after the colon is
+            // stripped; everything else (including additional spaces) is
+            // retained as data.
+            let data = rest.strip_prefix(' ').unwrap_or(rest);
+            data_parts.push(data.to_string());
+        }
+        // id:, retry:, and unknown fields are silently ignored.
+    }
+}
+
 /// Production wrapper: a [`McpClient`] backed by a spawned stdio MCP server's
 /// stdin/stdout. Owns the child; `Drop` kills it (per-turn lifecycle, issue
 /// #301 Q2).
@@ -203,6 +288,402 @@ impl Drop for StdioClient {
     }
 }
 
+// ---------------------------------------------------------------------------
+// HTTP transport client (streamable HTTP, issue #389)
+// ---------------------------------------------------------------------------
+
+/// A streamable-HTTP MCP client: each JSON-RPC request is POSTed to `url`,
+/// and the response body is either a single JSON value (`application/json`)
+/// or an SSE stream (`text/event-stream`) carrying the response (issue #389).
+///
+/// Stateless per call — the server may respond with JSON or SSE; the client
+/// handles both transparently. No persistent connection between calls (unlike
+/// [`SseClient`]); `Drop` has no side effects.
+pub struct HttpClient {
+    url: String,
+    agent: ureq::Agent,
+    next_id: i64,
+}
+
+impl HttpClient {
+    /// Connect to the HTTP endpoint and perform the MCP initialize handshake.
+    pub fn connect(url: &str) -> Result<Self, ClientError> {
+        let agent = ureq::AgentBuilder::new().build();
+        let mut client = Self {
+            url: url.to_string(),
+            agent,
+            next_id: 1,
+        };
+        client.initialize()?;
+        Ok(client)
+    }
+
+    /// POST one JSON-RPC request and await its response. The server may
+    /// respond with `application/json` (single JSON-RPC envelope) or
+    /// `text/event-stream` (SSE carrying the envelope). Both are handled;
+    /// the response is matched by JSON-RPC `id`.
+    fn request(&mut self, req: Value) -> Result<Value, ClientError> {
+        let id = req.get("id").cloned();
+        let response = self
+            .agent
+            .post(&self.url)
+            .send_json(req)
+            .map_err(|e| ClientError::Http(e.to_string()))?;
+
+        let content_type = response.header("Content-Type").unwrap_or("");
+        if content_type.contains("text/event-stream") {
+            // Streamable-HTTP SSE response: read events and find the matching
+            // JSON-RPC response by id (notifications without id are skipped).
+            let mut reader = BufReader::new(response.into_reader());
+            loop {
+                match read_sse_event(&mut reader).map_err(ClientError::Framing)? {
+                    Some(event) => {
+                        if let Ok(msg) = serde_json::from_str::<Value>(&event.data) {
+                            if msg.get("id") == id.as_ref() && id.is_some() {
+                                return check_rpc_response(&msg);
+                            }
+                        }
+                    }
+                    None => return Err(ClientError::ServerClosed),
+                }
+            }
+        } else {
+            // Plain JSON response.
+            let body: Value = response
+                .into_json()
+                .map_err(|e| ClientError::Http(e.to_string()))?;
+            check_rpc_response(&body)
+        }
+    }
+
+    fn initialize(&mut self) -> Result<Value, ClientError> {
+        let id = self.next_id();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "toptopduck-gateway",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+            }
+        });
+        let result = self.request(req)?;
+        // POST the initialized notification (no response expected; the
+        // server typically returns 202 Accepted).
+        let notif = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+        let _ = self
+            .agent
+            .post(&self.url)
+            .send_json(notif)
+            .map_err(|e| ClientError::Http(e.to_string()))?;
+        Ok(result)
+    }
+
+    pub fn list_tools(&mut self) -> Result<Vec<Value>, ClientError> {
+        let id = self.next_id();
+        let req = json!({"jsonrpc": "2.0", "id": id, "method": "tools/list"});
+        let result = self.request(req)?;
+        Ok(result
+            .get("tools")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    pub fn call(&mut self, name: &str, arguments: &Value) -> Result<Value, ClientError> {
+        let id = self.next_id();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments}
+        });
+        self.request(req)
+    }
+
+    fn next_id(&mut self) -> i64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSE transport client (legacy SSE, issue #389)
+// ---------------------------------------------------------------------------
+
+/// A legacy-SSE MCP client (issue #389). The client opens a GET to the SSE
+/// URL; the server responds with `text/event-stream` and sends an `endpoint`
+/// event carrying the POST URL for JSON-RPC requests. Subsequent requests are
+/// POSTed to that endpoint; responses arrive as `message` events on the SSE
+/// stream.
+///
+/// A background thread ([`sse_reader_loop`]) continuously reads SSE events
+/// and forwards JSON-RPC messages via an [`mpsc`] channel. The main thread
+/// POSTs requests and receives responses from the channel, matching by id.
+/// The agent's `timeout_read` (2 s) lets the reader periodically check the
+/// stop flag so [`Drop`] can join the thread cleanly.
+pub struct SseClient {
+    /// Receives JSON-RPC messages forwarded by the reader thread.
+    response_rx: mpsc::Receiver<Value>,
+    /// The POST endpoint URL (from the server's initial `endpoint` event).
+    post_url: String,
+    /// HTTP agent for POST requests (the GET agent's stream is owned by the
+    /// reader thread).
+    agent: ureq::Agent,
+    /// Stop flag shared with the reader thread.
+    stop: Arc<AtomicBool>,
+    /// The reader thread handle (joined on Drop).
+    reader_thread: Option<thread::JoinHandle<()>>,
+    next_id: i64,
+}
+
+impl SseClient {
+    /// Open the SSE stream, read the endpoint event, spawn the reader thread,
+    /// and perform the MCP initialize handshake.
+    pub fn connect(url: &str) -> Result<Self, ClientError> {
+        // The GET agent carries a read timeout so the reader thread can
+        // periodically check the stop flag (the stream is otherwise blocking
+        // forever between events).
+        let agent = ureq::AgentBuilder::new()
+            .timeout_read(Duration::from_secs(2))
+            .build();
+
+        let response = agent
+            .get(url)
+            .set("Accept", "text/event-stream")
+            .call()
+            .map_err(|e| ClientError::Http(e.to_string()))?;
+
+        let content_type = response.header("Content-Type").unwrap_or("");
+        if !content_type.contains("text/event-stream") {
+            return Err(ClientError::Http(format!(
+                "SSE endpoint returned non-event-stream content-type: {content_type}"
+            )));
+        }
+
+        let mut reader = BufReader::new(response.into_reader());
+
+        // The first event must carry the POST endpoint URL.
+        let first_event = read_sse_event(&mut reader)
+            .map_err(ClientError::Framing)?
+            .ok_or(ClientError::ServerClosed)?;
+        let post_url = first_event.data;
+
+        // Spawn the background reader for subsequent events.
+        let (tx, rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop.clone();
+        let handle = thread::spawn(move || {
+            sse_reader_loop(reader, tx, stop_clone);
+        });
+
+        let mut client = Self {
+            response_rx: rx,
+            post_url,
+            agent,
+            stop,
+            reader_thread: Some(handle),
+            next_id: 1,
+        };
+
+        client.initialize()?;
+        Ok(client)
+    }
+
+    /// POST one JSON-RPC request and await the matching response from the SSE
+    /// stream (forwarded by the reader thread via the channel). Notifications
+    /// (no `id`) and responses for other ids are skipped.
+    fn request(&mut self, req: Value) -> Result<Value, ClientError> {
+        let id = req.get("id").cloned();
+        self.agent
+            .post(&self.post_url)
+            .send_json(req)
+            .map_err(|e| ClientError::Http(e.to_string()))?;
+        // The POST response is typically 202 Accepted; the actual JSON-RPC
+        // response arrives on the SSE stream.
+        loop {
+            let msg = self
+                .response_rx
+                .recv()
+                .map_err(|_| ClientError::ServerClosed)?;
+            if msg.get("id") != id.as_ref() {
+                continue;
+            }
+            return check_rpc_response(&msg);
+        }
+    }
+
+    fn initialize(&mut self) -> Result<Value, ClientError> {
+        let id = self.next_id();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "toptopduck-gateway",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+            }
+        });
+        let result = self.request(req)?;
+        let notif = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+        let _ = self
+            .agent
+            .post(&self.post_url)
+            .send_json(notif)
+            .map_err(|e| ClientError::Http(e.to_string()))?;
+        Ok(result)
+    }
+
+    pub fn list_tools(&mut self) -> Result<Vec<Value>, ClientError> {
+        let id = self.next_id();
+        let req = json!({"jsonrpc": "2.0", "id": id, "method": "tools/list"});
+        let result = self.request(req)?;
+        Ok(result
+            .get("tools")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    pub fn call(&mut self, name: &str, arguments: &Value) -> Result<Value, ClientError> {
+        let id = self.next_id();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments}
+        });
+        self.request(req)
+    }
+
+    fn next_id(&mut self) -> i64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+}
+
+impl Drop for SseClient {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.reader_thread.take() {
+            // The reader thread checks the stop flag on each read-timeout
+            // (at most 2 s), so join returns promptly.
+            let _ = handle.join();
+        }
+    }
+}
+
+/// The SSE reader thread loop: continuously reads SSE events and forwards
+/// JSON-RPC messages ([`SseEvent`] with `event: message` or default) through
+/// the channel. Exits when `stop` is set or the stream closes / errors. Read
+/// timeouts (from the agent's `timeout_read`) are treated as a wakeup to
+/// re-check the stop flag — the TCP connection stays open between timeouts.
+fn sse_reader_loop<R: BufRead + Send>(
+    mut reader: R,
+    tx: mpsc::Sender<Value>,
+    stop: Arc<AtomicBool>,
+) {
+    while !stop.load(Ordering::SeqCst) {
+        match read_sse_event(&mut reader) {
+            Ok(Some(event)) => {
+                // Only forward `message` events (the default event type when
+                // `event:` is omitted). The initial `endpoint` event was
+                // consumed in `connect` before the thread started.
+                let is_message = event
+                    .event
+                    .as_deref()
+                    .map(|e| e == "message")
+                    .unwrap_or(true);
+                if is_message {
+                    if let Ok(msg) = serde_json::from_str::<Value>(&event.data) {
+                        if msg.is_object() && tx.send(msg).is_err() {
+                            break; // Channel closed (client dropped).
+                        }
+                    }
+                }
+            }
+            Ok(None) => break, // EOF (stream closed).
+            Err(ref e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                continue; // Read timeout → re-check stop flag.
+            }
+            Err(_) => break, // Unrecoverable stream error.
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Transport dispatch (issue #389)
+// ---------------------------------------------------------------------------
+
+/// Check a JSON-RPC response envelope: return the `result` field on success,
+/// or [`ClientError::ServerError`] when the server returned an `error` field.
+/// Shared by [`HttpClient`] and [`SseClient`] (the stream-based [`McpClient`]
+/// has its own inline version).
+fn check_rpc_response(msg: &Value) -> Result<Value, ClientError> {
+    if let Some(err) = msg.get("error") {
+        return Err(ClientError::ServerError(err.clone()));
+    }
+    Ok(msg.get("result").cloned().unwrap_or(Value::Null))
+}
+
+/// The connected MCP client for one server, specialized by transport. The
+/// aggregator holds one [`TransportClient`] per connected server;
+/// `list_tools` and `call` dispatch to the concrete transport client.
+pub enum TransportClient {
+    Stdio(StdioClient),
+    Sse(SseClient),
+    Http(HttpClient),
+}
+
+impl TransportClient {
+    pub fn list_tools(&mut self) -> Result<Vec<Value>, ClientError> {
+        match self {
+            Self::Stdio(c) => c.list_tools(),
+            Self::Sse(c) => c.list_tools(),
+            Self::Http(c) => c.list_tools(),
+        }
+    }
+
+    pub fn call(&mut self, name: &str, arguments: &Value) -> Result<Value, ClientError> {
+        match self {
+            Self::Stdio(c) => c.call(name, arguments),
+            Self::Sse(c) => c.call(name, arguments),
+            Self::Http(c) => c.call(name, arguments),
+        }
+    }
+}
+
+/// Connect to a configured MCP server, dispatching to the transport-specific
+/// client (issue #389). Each transport's `connect` performs the MCP initialize
+/// handshake and returns a ready-to-use [`TransportClient`].
+pub fn connect_transport(
+    config: &McpServerConfig,
+    secrets: &[SecretEnv],
+) -> Result<TransportClient, ClientError> {
+    match &config.transport {
+        McpTransport::Stdio { .. } => {
+            StdioClient::connect(config, secrets).map(TransportClient::Stdio)
+        }
+        McpTransport::Sse { url } => SseClient::connect(url).map(TransportClient::Sse),
+        McpTransport::Http { url } => HttpClient::connect(url).map(TransportClient::Http),
+    }
+}
+
 /// The short label for an unsupported transport in an error message
 /// (`"stdio"` / `"sse"` / `"http"`).
 fn transport_label(t: &McpTransport) -> String {
@@ -233,6 +714,8 @@ pub enum ClientError {
     ServerClosed,
     #[error("server returned a JSON-RPC error: {0}")]
     ServerError(Value),
+    #[error("HTTP transport error: {0}")]
+    Http(String),
 }
 
 #[cfg(test)]
@@ -389,5 +872,107 @@ mod tests {
         let mut client = McpClient::new(Cursor::new(server), Cursor::new(Vec::new()));
         client.list_tools().expect("first call (id=1)");
         client.call("x", &json!({})).expect("second call (id=2)");
+    }
+
+    // --- SSE event parsing (issue #389) --------------------------------------
+
+    /// `read_sse_event` parses one event terminated by a blank line. The
+    /// `event:` and `data:` fields are captured; comments and unknown fields
+    /// are skipped.
+    #[test]
+    fn read_sse_event_parses_event_and_data_fields() {
+        let wire = b"event: endpoint\ndata: http://localhost:3001/message\n\n";
+        let mut reader = Cursor::new(wire.to_vec());
+        let event = read_sse_event(&mut reader)
+            .expect("read")
+            .expect("an event");
+        assert_eq!(event.event.as_deref(), Some("endpoint"));
+        assert_eq!(event.data, "http://localhost:3001/message");
+    }
+
+    /// Multiple `data:` lines within one event are joined with `\n` (the SSE
+    /// spec contract). A single leading space after `data:` is stripped.
+    #[test]
+    fn read_sse_event_joins_multi_line_data() {
+        let wire = b"data: line1\ndata: line2\ndata:  extra space\n\n";
+        let mut reader = Cursor::new(wire.to_vec());
+        let event = read_sse_event(&mut reader)
+            .expect("read")
+            .expect("an event");
+        assert_eq!(event.data, "line1\nline2\n extra space");
+    }
+
+    /// An event with no `event:` field defaults to `None` (the SSE default
+    /// event type is `"message"`, which the reader loop treats as a message).
+    #[test]
+    fn read_sse_event_defaults_event_to_none_when_absent() {
+        let wire = b"data: {\"jsonrpc\":\"2.0\",\"id\":1}\n\n";
+        let mut reader = Cursor::new(wire.to_vec());
+        let event = read_sse_event(&mut reader)
+            .expect("read")
+            .expect("an event");
+        assert!(event.event.is_none());
+        assert_eq!(event.data, "{\"jsonrpc\":\"2.0\",\"id\":1}");
+    }
+
+    /// Comments (lines starting with `:`) and blank lines between events are
+    /// skipped so keepalive gaps do not produce spurious empty events.
+    #[test]
+    fn read_sse_event_skips_comments_and_keepalive_blanks() {
+        let wire = b": keepalive\n\nevent: message\ndata: hello\n\n";
+        let mut reader = Cursor::new(wire.to_vec());
+        let event = read_sse_event(&mut reader)
+            .expect("read")
+            .expect("an event");
+        assert_eq!(event.event.as_deref(), Some("message"));
+        assert_eq!(event.data, "hello");
+    }
+
+    /// A clean EOF (stream closed) at the start returns `Ok(None)` so the
+    /// caller can distinguish "stream ended" from "partial event".
+    #[test]
+    fn read_sse_event_returns_none_at_clean_eof() {
+        let mut reader = Cursor::new(Vec::new());
+        let event = read_sse_event(&mut reader).expect("read on empty");
+        assert!(event.is_none(), "EOF -> None, not error");
+    }
+
+    /// Two consecutive events: the first read returns event 1, the second
+    /// returns event 2, and the third returns `None` (EOF).
+    #[test]
+    fn read_sse_event_reads_two_consecutive_events_then_eof() {
+        let wire = b"event: endpoint\ndata: url1\n\nevent: message\ndata: msg1\n\n";
+        let mut reader = Cursor::new(wire.to_vec());
+        let e1 = read_sse_event(&mut reader)
+            .expect("read 1")
+            .expect("event 1");
+        assert_eq!(e1.event.as_deref(), Some("endpoint"));
+        assert_eq!(e1.data, "url1");
+        let e2 = read_sse_event(&mut reader)
+            .expect("read 2")
+            .expect("event 2");
+        assert_eq!(e2.event.as_deref(), Some("message"));
+        assert_eq!(e2.data, "msg1");
+        let e3 = read_sse_event(&mut reader).expect("read 3");
+        assert!(e3.is_none(), "third read -> EOF");
+    }
+
+    /// `check_rpc_response` returns the `result` field on success and maps an
+    /// `error` field to `ClientError::ServerError`.
+    #[test]
+    fn check_rpc_response_returns_result_on_success() {
+        let msg = json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}});
+        let result = check_rpc_response(&msg).expect("ok");
+        assert_eq!(result, json!({"tools": []}));
+    }
+
+    #[test]
+    fn check_rpc_response_maps_error_field_to_server_error() {
+        let msg = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -1, "message": "bad"}});
+        let err = check_rpc_response(&msg).expect_err("error field");
+        assert!(
+            matches!(err, ClientError::ServerError(_)),
+            "error -> ServerError, got {err:?}"
+        );
     }
 }
