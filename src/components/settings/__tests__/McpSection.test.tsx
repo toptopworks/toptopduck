@@ -4,7 +4,7 @@ import { IntlProvider } from "react-intl";
 import type { ReactElement } from "react";
 
 import { McpSection } from "../McpSection";
-import { clearMcpServerSecret, probeMcpServer } from "../../../api";
+import { clearMcpServerSecret, probeMcpServer, upsertMcpServer } from "../../../api";
 import type { AppConfig } from "../../../types/app-config";
 import type { McpServerConfig, McpProbeResult } from "../../../types/mcp";
 
@@ -27,6 +27,10 @@ function makeServer(overrides: Partial<McpServerConfig> = {}): McpServerConfig {
     timeout_ms: null,
     ...overrides,
   };
+}
+
+function makeProbeResult(overrides: Partial<McpProbeResult> = {}): McpProbeResult {
+  return { connected: true, tools: [], error: null, ...overrides };
 }
 
 function makeAppConfig(servers: McpServerConfig[]): AppConfig {
@@ -292,5 +296,61 @@ describe("McpSection (issue #387)", () => {
 
     const addButton = screen.getByRole("button", { name: /Add/ });
     expect(addButton).not.toBeDisabled();
+  });
+
+  // --- Review fix tests (PR #393 review) ------------------------------------
+
+  it("syncs saved server into list and seeds probe state on save (H4)", async () => {
+    const finalized = makeServer({ id: "srv-new", display_name: "Brand New" });
+    const probeResult = makeProbeResult({
+      connected: true,
+      tools: [{ name: "search", description: "Search" }],
+    });
+    vi.mocked(upsertMcpServer).mockResolvedValue(finalized);
+    vi.mocked(probeMcpServer).mockResolvedValue(probeResult);
+
+    const onCommit = vi.fn().mockResolvedValue(null);
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([])} onCommit={onCommit} />,
+    );
+
+    // Enter the form and save.
+    fireEvent.click(screen.getByRole("button", { name: /Add/ }));
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => {
+      // Form closed — back to the list view.
+      expect(screen.getByTestId("mcp-server-list")).toBeInTheDocument();
+    });
+
+    // onCommit was called with a mutation that adds the finalized server.
+    expect(onCommit).toHaveBeenCalledTimes(1);
+    const mutateFn = onCommit.mock.calls[0][0];
+    const mutated = mutateFn(makeAppConfig([]));
+    expect(mutated.mcp_servers.servers).toHaveLength(1);
+    expect(mutated.mcp_servers.servers[0].id).toBe("srv-new");
+  });
+
+  it("shows error on the list when onCommit fails after form save (H4)", async () => {
+    const finalized = makeServer({ id: "srv-new", display_name: "Brand New" });
+    vi.mocked(upsertMcpServer).mockResolvedValue(finalized);
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+
+    const onCommit = vi.fn().mockResolvedValue("disk write error");
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([])} onCommit={onCommit} />,
+    );
+
+    // Enter the form and save.
+    fireEvent.click(screen.getByRole("button", { name: /Add/ }));
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => {
+      expect(screen.getByText("disk write error")).toBeInTheDocument();
+    });
+
+    // Form is closed — error shows on the list view (C3: setFormTarget(null)
+    // runs at the end regardless of onCommit outcome).
+    expect(screen.getByTestId("mcp-server-list")).toBeInTheDocument();
   });
 });

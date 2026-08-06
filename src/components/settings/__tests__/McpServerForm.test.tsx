@@ -358,4 +358,128 @@ describe("McpServerForm (issue #388)", () => {
     });
     expect(screen.getByText("Cancel")).toBeDisabled();
   });
+
+  // --- Review fix tests (PR #393 review) ------------------------------------
+
+  it("persists minted id after upsert so retry is idempotent (C1)", async () => {
+    const finalized = makeServer({ id: "minted-id", keychain_env_keys: ["API_KEY"] });
+    vi.mocked(upsertMcpServer).mockResolvedValue(finalized);
+    // Secret write fails to simulate partial failure.
+    vi.mocked(setMcpServerSecret).mockRejectedValueOnce(new Error("keychain locked"));
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({ id: "", keychain_env_keys: ["API_KEY"] })}
+        isEdit={false}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    // Type a secret value so setMcpServerSecret is called.
+    const secretInput = screen.getByDisplayValue("API_KEY")
+      .closest("div")
+      ?.querySelector("input[type=\"password\"]") as HTMLInputElement;
+    fireEvent.change(secretInput, { target: { value: "sk-secret" } });
+
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => {
+      expect(screen.getByText("keychain locked")).toBeInTheDocument();
+    });
+
+    // First upsert sent id="" (new server).
+    expect(vi.mocked(upsertMcpServer).mock.calls[0][0].id).toBe("");
+
+    // Fix the secret mock and retry.
+    vi.mocked(setMcpServerSecret).mockResolvedValue(undefined);
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => {
+      expect(upsertMcpServer).toHaveBeenCalledTimes(2);
+    });
+
+    // Retry sent the minted id, not "" — no duplicate server.
+    expect(vi.mocked(upsertMcpServer).mock.calls[1][0].id).toBe("minted-id");
+  });
+
+  it("commits config even when probe fails after successful upsert (C2)", async () => {
+    const finalized = makeServer({ id: "minted-id" });
+    vi.mocked(upsertMcpServer).mockResolvedValue(finalized);
+    vi.mocked(setMcpServerSecret).mockResolvedValue(undefined);
+    vi.mocked(probeMcpServer).mockRejectedValue(new Error("probe timeout"));
+
+    const onSaved = vi.fn();
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer()}
+        isEdit={true}
+        onSaved={onSaved}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => {
+      expect(onSaved).toHaveBeenCalledOnce();
+    });
+
+    // onSaved receives a disconnected probe result with the error.
+    const [, probeResult] = onSaved.mock.calls[0];
+    expect(probeResult.connected).toBe(false);
+    expect(probeResult.error).toContain("probe timeout");
+  });
+
+  it("preserves secret values across Form→JSON→Form round-trip (H2)", () => {
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer()}
+        isEdit={true}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    // Type a secret value into the API_KEY row.
+    const secretInput = screen.getByDisplayValue("API_KEY")
+      .closest("div")
+      ?.querySelector("input[type=\"password\"]") as HTMLInputElement;
+    fireEvent.change(secretInput, { target: { value: "sk-preserve-me" } });
+
+    // Switch to JSON then back to Form.
+    fireEvent.click(screen.getByText("JSON"));
+    fireEvent.click(screen.getByText("Form"));
+
+    // The secret value should be preserved.
+    const restoredInput = screen.getByDisplayValue("API_KEY")
+      .closest("div")
+      ?.querySelector("input[type=\"password\"]") as HTMLInputElement;
+    expect(restoredInput.value).toBe("sk-preserve-me");
+  });
+
+  it("removes the correct env entry when trash button is clicked (H1)", () => {
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({
+          env: { FIRST: "1", SECOND: "2" },
+          keychain_env_keys: [],
+        })}
+        isEdit={true}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByDisplayValue("FIRST")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("SECOND")).toBeInTheDocument();
+
+    // Remove the first row (row 1).
+    fireEvent.click(screen.getByRole("button", { name: /Remove variable.*row 1/ }));
+
+    // FIRST is gone, SECOND remains — stable keys ensured correct removal.
+    expect(screen.queryByDisplayValue("FIRST")).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue("SECOND")).toBeInTheDocument();
+  });
 });

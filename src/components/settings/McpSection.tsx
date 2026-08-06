@@ -101,12 +101,12 @@ export function McpSection({
 
   /** Called by the form after upsert + secrets + probe complete. Syncs the
    *  finalized config into React state, stores the probe result, and returns
-   *  to the list. */
+   *  to the list. Handles both onCommit rejection and resolve-to-error so
+   *  no failure path is silently swallowed (C3). */
   async function handleFormSaved(
     finalized: McpServerConfig,
     probeResult: McpProbeResult,
   ) {
-    setFormTarget(null);
     setProbeStates((prev) => ({
       ...prev,
       [finalized.id]: { kind: "done", result: probeResult },
@@ -115,18 +115,24 @@ export function McpSection({
       setExpandedRows((prev) => new Set(prev).add(finalized.id));
     }
     // Sync the finalized config into React state so the list shows the
-    // new/updated entry immediately.
-    const err = await onCommit((cfg) => {
-      const others = cfg.mcp_servers.servers.filter((s) => s.id !== finalized.id);
-      return {
-        ...cfg,
-        mcp_servers: {
-          ...cfg.mcp_servers,
-          servers: [...others, finalized],
-        },
-      };
-    });
-    if (err) setError(err);
+    // new/updated entry immediately. Both rejection and resolve-to-error
+    // are surfaced so the user knows the commit failed (C3).
+    try {
+      const err = await onCommit((cfg) => {
+        const others = cfg.mcp_servers.servers.filter((s) => s.id !== finalized.id);
+        return {
+          ...cfg,
+          mcp_servers: {
+            ...cfg.mcp_servers,
+            servers: [...others, finalized],
+          },
+        };
+      });
+      if (err) setError(err);
+    } catch (e) {
+      setError(fmtError(e, intl));
+    }
+    setFormTarget(null);
   }
 
   function toggleRow(id: string) {

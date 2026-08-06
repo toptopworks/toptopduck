@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ArrowLeft, Loader2, Plus, Trash2 } from "lucide-react";
 import { FormattedMessage, useIntl } from "react-intl";
 
@@ -31,10 +31,15 @@ import { PaneHeader, SettingsCard, SettingsRow } from "./settings-chrome";
 /** One row of the env-var editor. `isSecret` routes the value to the OS
  *  keychain (via setMcpServerSecret on save) instead of the `env` map. */
 type EnvEntry = {
+  id: number;
   key: string;
   value: string;
   isSecret: boolean;
 };
+
+// Monotonic counter for stable EnvEntry keys (H1: index-based keys break
+// focus/cursor when rows are inserted or deleted mid-list).
+let envEntrySeq = 0;
 
 export type McpServerFormProps = {
   /** Blank server (empty id) for add; existing server for edit. */
@@ -56,20 +61,15 @@ type FormMode = "form" | "json";
  *  `keychain_env_keys`. */
 function initEnvEntries(server: McpServerConfig): EnvEntry[] {
   const entries: EnvEntry[] = Object.entries(server.env).map(([key, value]) => ({
+    id: envEntrySeq++,
     key,
     value,
     isSecret: false,
   }));
   for (const key of server.keychain_env_keys) {
-    entries.push({ key, value: "", isSecret: true });
+    entries.push({ id: envEntrySeq++, key, value: "", isSecret: true });
   }
   return entries;
-}
-
-/** Serialize a McpServerConfig to pretty-printed JSON (secret values excluded
- *  — only keychain_env_keys key names appear). */
-function configToJson(server: McpServerConfig): string {
-  return JSON.stringify(server, null, 2);
 }
 
 export function McpServerForm({
@@ -79,6 +79,16 @@ export function McpServerForm({
   onCancel,
 }: McpServerFormProps) {
   const intl = useIntl();
+
+  // Server id state — updated after upsert so a retry (after a secret/probe
+  // failure) sends the minted id instead of "", preventing Rust from creating
+  // a duplicate server (C1).
+  const [serverId, setServerId] = useState(initialServer.id);
+
+  // Pending secret values captured before a Form→JSON switch so they survive
+  // the round-trip (H2: buildConfigFromForm serializes only key names, and
+  // initEnvEntries reconstructs with empty values).
+  const pendingSecrets = useRef<Record<string, string>>({});
 
   // --- Flat form state (single source of truth for Form mode) ---------------
   const [displayName, setDisplayName] = useState(initialServer.display_name);
@@ -135,7 +145,7 @@ export function McpServerForm({
     }
 
     return {
-      id: initialServer.id,
+      id: serverId,
       display_name: displayName,
       transport,
       env,
@@ -148,6 +158,19 @@ export function McpServerForm({
           ? Number(timeoutMs)
           : null,
     };
+  }
+
+  /** Parse JSON text into a McpServerConfig, returning an error string on
+   *  failure. Shared by mode-switch and save to avoid duplicating the
+   *  try/catch (M7). */
+  function tryParseConfig(
+    text: string,
+  ): { ok: true; config: McpServerConfig } | { ok: false; error: string } {
+    try {
+      return { ok: true, config: JSON.parse(text) as McpServerConfig };
+    } catch (e) {
+      return { ok: false, error: fmtError(e, intl) };
+    }
   }
 
   /** Sync FROM JSON text → flat form state (called when switching JSON → Form). */
@@ -163,33 +186,51 @@ export function McpServerForm({
       setCommand("");
       setArgsText("");
     }
-    setEnvEntries(initEnvEntries(parsed));
+    setEnvEntries(
+      // Restore secret values captured before the Form→JSON switch so they
+      // survive the round-trip (H2).
+      initEnvEntries(parsed).map((entry) =>
+        entry.isSecret && pendingSecrets.current[entry.key]
+          ? { ...entry, value: pendingSecrets.current[entry.key] }
+          : entry,
+      ),
+    );
     setTimeoutMs(parsed.timeout_ms !== null ? String(parsed.timeout_ms) : "");
   }
 
   function handleSwitchMode(next: FormMode) {
     if (next === mode) return;
     if (next === "json") {
-      // Serialize current form state → JSON text.
-      setJsonText(configToJson(buildConfigFromForm()));
+      // Capture non-empty secret values before serializing so they can be
+      // restored on the return trip (H2).
+      for (const entry of envEntries) {
+        if (entry.isSecret && entry.value) {
+          pendingSecrets.current[entry.key] = entry.value;
+        }
+      }
+      // Serialize current form state → JSON text (secret values excluded
+      // — only keychain_env_keys key names appear).
+      setJsonText(JSON.stringify(buildConfigFromForm(), null, 2));
       setJsonError(null);
     } else {
       // Parse JSON text → form state. If invalid, abort the switch and show
       // an error so the user can fix the JSON before returning to Form mode.
-      try {
-        const parsed = JSON.parse(jsonText) as McpServerConfig;
-        syncFromJson(parsed);
-        setJsonError(null);
-      } catch (e) {
-        setJsonError(fmtError(e, intl));
+      const result = tryParseConfig(jsonText);
+      if (!result.ok) {
+        setJsonError(result.error);
         return;
       }
+      syncFromJson(result.config);
+      setJsonError(null);
     }
     setMode(next);
   }
 
   function addEnvEntry() {
-    setEnvEntries((prev) => [...prev, { key: "", value: "", isSecret: false }]);
+    setEnvEntries((prev) => [
+      ...prev,
+      { id: envEntrySeq++, key: "", value: "", isSecret: false },
+    ]);
   }
 
   function removeEnvEntry(index: number) {
@@ -206,12 +247,12 @@ export function McpServerForm({
     // Build the config from the active mode.
     let config: McpServerConfig;
     if (mode === "json") {
-      try {
-        config = JSON.parse(jsonText) as McpServerConfig;
-      } catch (e) {
-        setJsonError(fmtError(e, intl));
+      const result = tryParseConfig(jsonText);
+      if (!result.ok) {
+        setJsonError(result.error);
         return;
       }
+      config = result.config;
     } else {
       config = buildConfigFromForm();
     }
@@ -233,6 +274,11 @@ export function McpServerForm({
       // 1. Upsert (writes to disk; returns finalized config with minted id).
       const finalized = await upsertMcpServer(config);
 
+      // Persist the minted id so a retry (after a secret/probe failure) is
+      // idempotent — without this, a retry sends id="" again and Rust mints
+      // a second server (C1).
+      setServerId(finalized.id);
+
       // 2. Write each secret to the OS keychain (ADR-0029 one-shot transfer).
       for (const key of finalized.keychain_env_keys) {
         const value = secretsToSet[key];
@@ -241,8 +287,20 @@ export function McpServerForm({
         }
       }
 
-      // 3. Auto-probe so the list shows an immediate status.
-      const probeResult = await probeMcpServer(finalized);
+      // 3. Auto-probe so the list shows an immediate status. A probe failure
+      // is non-fatal — the server is already saved; surface it as a
+      // disconnected probe result so the parent still commits the config
+      // and switches to the list view (C2).
+      let probeResult: McpProbeResult;
+      try {
+        probeResult = await probeMcpServer(finalized);
+      } catch (probeErr) {
+        probeResult = {
+          connected: false,
+          tools: [],
+          error: fmtError(probeErr, intl),
+        };
+      }
 
       // 4. Hand the finalized config + probe result back to the list.
       onSaved(finalized, probeResult);
@@ -606,6 +664,7 @@ function EnvEditor({
   onRemove: (index: number) => void;
   onUpdate: (index: number, patch: Partial<EnvEntry>) => void;
 }) {
+  const intl = useIntl();
   return (
     <div data-testid="mcp-env-editor" className="px-4 py-4">
       <div className="mb-2 flex items-center justify-between">
@@ -634,23 +693,27 @@ function EnvEditor({
       ) : (
         <div className="space-y-2">
           {entries.map((entry, i) => (
-            <div key={i} className="flex items-center gap-2">
+            <div key={entry.id} className="flex items-center gap-2">
               <Input
                 className="w-40 font-mono text-xs"
                 value={entry.key}
                 onChange={(e) => onUpdate(i, { key: e.target.value })}
                 placeholder="KEY"
+                aria-label={intl.formatMessage(
+                  { id: "settings.mcp.form.envKeyLabel", defaultMessage: "Variable name (row {row})" },
+                  { row: i + 1 },
+                )}
               />
               <Input
                 className="flex-1 font-mono text-xs"
                 value={entry.value}
                 onChange={(e) => onUpdate(i, { value: e.target.value })}
-                placeholder={
-                  entry.isSecret
-                    ? "Stored in keychain"
-                    : "value"
-                }
+                placeholder={entry.isSecret ? "Stored in keychain" : "value"}
                 type={entry.isSecret ? "password" : "text"}
+                aria-label={intl.formatMessage(
+                  { id: "settings.mcp.form.envValueLabel", defaultMessage: "Variable value (row {row})" },
+                  { row: i + 1 },
+                )}
               />
               <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs">
                 <input
@@ -658,6 +721,10 @@ function EnvEditor({
                   checked={entry.isSecret}
                   onChange={(e) => onUpdate(i, { isSecret: e.target.checked })}
                   className="size-3.5 cursor-pointer accent-primary"
+                  aria-label={intl.formatMessage(
+                    { id: "settings.mcp.form.envSecretLabel", defaultMessage: "Secret (row {row})" },
+                    { row: i + 1 },
+                  )}
                 />
                 <FormattedMessage
                   id="settings.mcp.form.envSecret"
@@ -670,7 +737,10 @@ function EnvEditor({
                 size="icon"
                 className="text-muted-foreground hover:text-destructive size-7 shrink-0"
                 onClick={() => onRemove(i)}
-                aria-label="Remove variable"
+                aria-label={intl.formatMessage(
+                  { id: "settings.mcp.form.envRemoveLabel", defaultMessage: "Remove variable (row {row})" },
+                  { row: i + 1 },
+                )}
               >
                 <Trash2 className="size-3.5" aria-hidden />
               </Button>
