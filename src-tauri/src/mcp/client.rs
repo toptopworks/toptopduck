@@ -47,6 +47,12 @@ use crate::runtime::gateway::framing;
 /// (the reader wakes at most every this interval to re-check the stop flag).
 const SSE_READ_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// HTTP per-read timeout (issue #392). Ensures a hung HTTP server's
+/// `spawn_blocking` task eventually terminates after the probe deadline
+/// fires — `spawn_blocking` tasks are not cancelled, so without this the
+/// thread + TCP connection would linger indefinitely.
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Bounded channel capacity for SSE reader → consumer message forwarding.
 /// Backpressures a flooding server so the reader blocks on send rather than
 /// accumulating unbounded messages in memory (H4: review feedback).
@@ -328,9 +334,7 @@ pub fn spawn_stdio_child(
     config: &McpServerConfig,
     secrets: &[SecretEnv],
 ) -> Result<std::process::Child, ClientError> {
-    stdio_command(config, secrets)?
-        .spawn()
-        .map_err(ClientError::Spawn)
+    Ok(stdio_command(config, secrets)?.spawn()?)
 }
 
 /// Drive the MCP initialize + tools/list handshake on already-spawned stdio
@@ -366,7 +370,9 @@ pub struct HttpClient {
 impl HttpClient {
     /// Connect to the HTTP endpoint and perform the MCP initialize handshake.
     pub fn connect(url: &str) -> Result<Self, ClientError> {
-        let agent = ureq::AgentBuilder::new().build();
+        let agent = ureq::AgentBuilder::new()
+            .timeout_read(HTTP_READ_TIMEOUT)
+            .build();
         let mut client = Self {
             url: url.to_string(),
             agent,
@@ -831,7 +837,7 @@ fn transport_label(t: &McpTransport) -> String {
 /// error the agent self-corrects from (ADR-0077) plus a trace entry.
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
-    #[error("unsupported transport (slice C1 supports stdio only): {0}")]
+    #[error("unsupported transport: {0}")]
     UnsupportedTransport(String),
     #[error("failed to spawn MCP server: {0}")]
     Spawn(#[from] std::io::Error),

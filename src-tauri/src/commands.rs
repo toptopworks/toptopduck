@@ -832,7 +832,9 @@ const PROBE_DEFAULT_TIMEOUT_MS: u32 = 30_000;
 /// is best-effort; a failed wait would leak a zombie). Used by the stdio
 /// probe path where the Child handle is retained outside `spawn_blocking`.
 fn kill_and_reap_child(child: &mut std::process::Child) {
-    let _ = child.kill();
+    if let Err(e) = child.kill() {
+        log::warn!(target: "toptopduck::mcp", "probe child kill failed: {e}");
+    }
     if let Err(e) = child.wait() {
         log::warn!(target: "toptopduck::mcp", "probe child reap failed: {e}");
     }
@@ -866,7 +868,7 @@ fn probe_result_from_outcome(
         Err(_) => {
             log::warn!(
                 target: "toptopduck::mcp",
-                "probe for server {server_id} timed out after {deadline_ms}ms"
+                "probe for server {server_id} timed out after {deadline_ms} ms"
             );
             McpProbeResult {
                 connected: false,
@@ -902,7 +904,7 @@ pub async fn probe_mcp_server(
     let secrets = crate::mcp::aggregator::collect_secrets(live.keychain(), &server);
     let deadline_ms = server.timeout_ms.unwrap_or(PROBE_DEFAULT_TIMEOUT_MS);
     let deadline = Duration::from_millis(deadline_ms as u64);
-    let server_id = server.id.as_str().to_string();
+    let server_id = server.id.as_str();
 
     // Stdio: spawn the child in the async scope so we own the Child handle
     // for kill-on-timeout. The blocking handshake runs in spawn_blocking with
@@ -934,12 +936,14 @@ pub async fn probe_mcp_server(
         .await;
 
         kill_and_reap_child(&mut child);
-        return Ok(probe_result_from_outcome(outcome, &server_id, deadline_ms));
+        return Ok(probe_result_from_outcome(outcome, server_id, deadline_ms));
     }
 
-    // SSE/HTTP: the blocking ureq I/O runs inside spawn_blocking wrapped in
-    // a deadline. ureq's own socket-level timeouts backstop a network hang;
-    // the outer deadline catches any missed case.
+    // SSE/HTTP: the blocking I/O runs inside spawn_blocking wrapped in a
+    // deadline. The outer deadline is the primary bound — spawn_blocking
+    // tasks are not cancelled, so the thread lingers until the I/O returns.
+    // HTTP agents carry HTTP_READ_TIMEOUT so the task eventually resolves;
+    // SSE has a per-read timeout on its reader thread (SSE_READ_TIMEOUT).
     let server_for_blocking = server.clone();
     let result = tokio::time::timeout(deadline, async {
         tauri::async_runtime::spawn_blocking(move || {
@@ -952,7 +956,7 @@ pub async fn probe_mcp_server(
     })
     .await;
 
-    Ok(probe_result_from_outcome(result, &server_id, deadline_ms))
+    Ok(probe_result_from_outcome(result, server_id, deadline_ms))
 }
 
 /// Discover MCP servers from an external tool's config (issue #390). Reads the
@@ -2445,6 +2449,58 @@ mod tests {
         assert!(
             matches!(err, SessionError::Engine(_)),
             "unknown adapter id surfaces as Engine, got {err:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // probe_result_from_outcome (issue #392)
+    // -----------------------------------------------------------------------
+
+    /// Produce a `tokio::time::error::Elapsed` for testing (no public
+    /// constructor — obtained from a zero-duration timeout on a pending
+    /// future via a throwaway current-thread runtime).
+    fn make_elapsed() -> tokio::time::error::Elapsed {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("build test runtime");
+        rt.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_nanos(0),
+                std::future::pending::<()>(),
+            )
+            .await
+            .unwrap_err()
+        })
+    }
+
+    #[test]
+    fn probe_outcome_success_maps_to_connected_with_tools() {
+        let tools = vec![serde_json::json!({"name": "echo", "description": "d"})];
+        let result = probe_result_from_outcome(Ok(Ok(tools)), "srv", 30_000);
+        assert!(result.connected);
+        assert!(result.error.is_none());
+        assert_eq!(result.tools.len(), 1);
+    }
+
+    #[test]
+    fn probe_outcome_error_maps_to_disconnected_with_message() {
+        let result =
+            probe_result_from_outcome(Ok(Err("handshake failed".to_string())), "srv", 30_000);
+        assert!(!result.connected);
+        assert!(result.tools.is_empty());
+        assert_eq!(result.error.as_deref(), Some("handshake failed"));
+    }
+
+    #[test]
+    fn probe_outcome_timeout_maps_to_disconnected_with_deadline() {
+        let result = probe_result_from_outcome(Err(make_elapsed()), "srv", 5000);
+        assert!(!result.connected);
+        assert!(result.tools.is_empty());
+        let error = result.error.expect("timeout produces an error");
+        assert!(
+            error.contains("5000 ms"),
+            "error should include the deadline, got: {error}"
         );
     }
 }

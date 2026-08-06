@@ -73,15 +73,14 @@ fn probe_succeeds_on_responsive_server() {
 
     // Always kill + reap the child (probe is one-shot).
     let _ = child.kill();
-    let exit = child.wait().expect("child reaped");
+    // wait() succeeding confirms the child was reaped (no zombie/leak).
+    child.wait().expect("child reaped");
 
     let tools = result.expect("handshake should succeed");
     assert!(
         !tools.is_empty(),
         "fake server should advertise tools, got {tools:?}"
     );
-    // wait() succeeding confirms the child was reaped (no zombie/leak).
-    let _ = exit;
 }
 
 #[test]
