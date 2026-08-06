@@ -169,6 +169,9 @@ tauri-plugin-opener = "2"
 # identically in steady state. The narrow drift window (a live OS-language
 # switch lagging the webview's cached copy) is recorded in ADR-0052 Decision 7.
 sys-locale = "0.3"
+# Codex CLI config parsing for the MCP import wizard (issue #390): reads the
+# `[mcp_servers.*]` tables from `~/.codex/config.toml`. MSRV 1.76 (<= 1.77).
+toml = "0.9"
 
 # Desktop-only Tauri plugins (issue #100, ADR-0008 cross-platform). Gated to
 # non-mobile targets to mirror lib.rs `#[cfg(desktop)]` -- these plugins have

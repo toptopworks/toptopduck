@@ -118,3 +118,18 @@ export interface McpProbeResult {
   // The error message when connected is false (null on success).
   error: string | null;
 }
+
+// The external source to import MCP servers from (issue #390). Mirrors the
+// Rust ImportSource enum (serde rename = snake_case string over IPC).
+export type ImportSource = "claude_desktop" | "codex";
+
+// One server discovered in an external config (issue #390). Mirrors the Rust
+// DiscoveredServer. A subset of McpServerConfig without `id` (empty -- Rust
+// mints a uuid on upsert) or `timeout_ms` (defaults to null). The import
+// checklist renders these; the user selects entries to batch-upsert.
+export interface DiscoveredServer {
+  display_name: string;
+  transport: McpTransport;
+  env: Record<string, string>;
+  keychain_env_keys: string[];
+}

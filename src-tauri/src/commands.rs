@@ -882,6 +882,19 @@ pub fn probe_mcp_server(
     })
 }
 
+/// Discover MCP servers from an external tool's config (issue #390). Reads the
+/// source's local config file (Claude Desktop / Codex), parses server
+/// definitions, and returns them as [`DiscoveredServer`] entries for the
+/// frontend to show in an import checklist. Returns an empty vec when the
+/// config file is not found (the frontend shows a "not found" message -- this
+/// is NOT an error). A parse error (malformed file) returns an error string.
+#[tauri::command]
+pub fn discover_mcp_servers(
+    source: crate::mcp::import::ImportSource,
+) -> Result<Vec<crate::mcp::import::DiscoveredServer>, String> {
+    crate::mcp::import::discover(source)
+}
+
 /// Why a server is enabled in this session (issue #369). Distinguishes
 /// user-toggled from skill-declared so the "+" panel renders three states:
 /// off (`None`) / on-user (`User`, toggle off allowed) / on-skill (`Skill`,

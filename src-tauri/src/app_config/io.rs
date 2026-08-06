@@ -257,7 +257,7 @@ fn find_secret_field(value: &Value) -> Option<String> {
 /// that contain NO secret name, so substring matching stays false-positive-free
 /// across the real schema. The primary secrets-never defense is the model having
 /// no key field; this scan is the read-time backstop for hand-edited files.
-fn is_secret_name(name: &str) -> bool {
+pub(crate) fn is_secret_name(name: &str) -> bool {
     let collapsed: String = name
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())

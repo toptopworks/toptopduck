@@ -349,6 +349,7 @@ pub fn run() {
             commands::set_mcp_server_secret,
             commands::clear_mcp_server_secret,
             commands::probe_mcp_server,
+            commands::discover_mcp_servers,
             commands::toggle_mcp_server,
             commands::list_mcp_server_status,
             commands::record_recent_file,

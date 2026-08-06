@@ -30,4 +30,5 @@ pub(crate) const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub mod aggregator;
 pub mod client;
 pub mod config;
+pub mod import;
 pub mod secrets;
