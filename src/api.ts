@@ -9,7 +9,13 @@ import type {
   RowPage,
   SheetGuidance,
 } from "./types/dataset";
-import type { McpProbeResult, McpServerConfig, McpServerStatusEntry } from "./types/mcp";
+import type {
+  DiscoveredServer,
+  ImportSource,
+  McpProbeResult,
+  McpServerConfig,
+  McpServerStatusEntry,
+} from "./types/mcp";
 import type {
   ImportItem,
   ImportMode,
@@ -408,6 +414,16 @@ export async function toggleMcpServer(
 // with an unsupported-transport error.
 export async function probeMcpServer(server: McpServerConfig): Promise<McpProbeResult> {
   return invoke<McpProbeResult>("probe_mcp_server", { server });
+}
+
+// Discover MCP servers from an external tool's config (issue #390). The backend
+// reads the source's local config file (Claude Desktop / Codex), parses server
+// definitions, and returns DiscoveredServer entries for the import checklist.
+// Returns an empty array when the config file is not found (NOT an error).
+export async function discoverMcpServers(
+  source: ImportSource,
+): Promise<DiscoveredServer[]> {
+  return invoke<DiscoveredServer[]>("discover_mcp_servers", { source });
 }
 
 // --- Skills registry (issue #362, ADR-0086) --------------------------------

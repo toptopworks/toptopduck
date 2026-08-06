@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Download,
   Loader2,
   MinusCircle,
   Pencil,
@@ -30,6 +31,7 @@ import {
 } from "../ui/alert-dialog";
 import { Button } from "../ui/button";
 import { PaneHeader, SettingsCard } from "./settings-chrome";
+import { McpImportDialog } from "./McpImportDialog";
 import { McpServerForm } from "./McpServerForm";
 
 // MCP servers settings pane (issue #387 + #388). Two sub-views managed by local
@@ -77,6 +79,11 @@ export function McpSection({
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  // Monotonic counter that increments each time the import dialog opens, used
+  // as the dialog's `key` so React creates a fresh instance (resetting all
+  // internal step/state) without a setState-in-effect (react-hooks lint).
+  const [importEpoch, setImportEpoch] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   const servers = appConfig.mcp_servers.servers;
@@ -133,6 +140,47 @@ export function McpSection({
       setError(fmtError(e, intl));
     }
     setFormTarget(null);
+  }
+
+  /** Called by the import dialog after batch upsert + probe complete. Syncs
+   *  each finalized config into React state and stores probe results so the
+   *  list shows the new entries + status dots immediately (issue #390). */
+  async function handleImported(
+    results: { config: McpServerConfig; probeResult: McpProbeResult }[],
+  ) {
+    // Seed probe states for all imported servers.
+    setProbeStates((prev) => {
+      const next = { ...prev };
+      for (const { config, probeResult } of results) {
+        next[config.id] = { kind: "done", result: probeResult };
+      }
+      return next;
+    });
+    // Auto-expand connected servers so the user sees the tools.
+    setExpandedRows((prev) => {
+      const next = new Set(prev);
+      for (const { config, probeResult } of results) {
+        if (probeResult.connected) next.add(config.id);
+      }
+      return next;
+    });
+    // Sync all imported configs into React state (one commit for the batch).
+    try {
+      const err = await onCommit((cfg) => {
+        const existingIds = new Set(results.map((r) => r.config.id));
+        const others = cfg.mcp_servers.servers.filter((s) => !existingIds.has(s.id));
+        return {
+          ...cfg,
+          mcp_servers: {
+            ...cfg.mcp_servers,
+            servers: [...others, ...results.map((r) => r.config)],
+          },
+        };
+      });
+      if (err) setError(err);
+    } catch (e) {
+      setError(fmtError(e, intl));
+    }
   }
 
   function toggleRow(id: string) {
@@ -245,10 +293,24 @@ export function McpSection({
           />
         )}
         action={(
-          <Button type="button" size="sm" onClick={handleAdd}>
-            <Plus className="size-4" aria-hidden />
-            <FormattedMessage id="settings.mcp.add" defaultMessage="Add" />
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setImportEpoch((n) => n + 1);
+                setImportOpen(true);
+              }}
+            >
+              <Download className="size-4" aria-hidden />
+              <FormattedMessage id="settings.mcp.import.button" defaultMessage="Import" />
+            </Button>
+            <Button type="button" size="sm" onClick={handleAdd}>
+              <Plus className="size-4" aria-hidden />
+              <FormattedMessage id="settings.mcp.add" defaultMessage="Add" />
+            </Button>
+          </div>
         )}
       />
 
@@ -340,6 +402,13 @@ export function McpSection({
           </AlertDialogContent>
         </AlertDialog>
       )}
+
+      <McpImportDialog
+        key={importEpoch}
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImported={(results) => void handleImported(results)}
+      />
     </div>
   );
 }

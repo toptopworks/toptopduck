@@ -353,4 +353,26 @@ describe("McpSection (issue #387)", () => {
     // runs at the end regardless of onCommit outcome).
     expect(screen.getByTestId("mcp-server-list")).toBeInTheDocument();
   });
+
+  // --- Import button (issue #390) -----------------------------------------
+
+  it("shows an Import button in the header", () => {
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([])} onCommit={vi.fn()} />,
+    );
+
+    expect(screen.getByRole("button", { name: /Import/ })).toBeInTheDocument();
+  });
+
+  it("opens the import dialog on Import button click", () => {
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([])} onCommit={vi.fn()} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Import/ }));
+
+    // The import dialog shows source selection.
+    expect(screen.getByText("Claude Desktop")).toBeInTheDocument();
+    expect(screen.getByText("Codex")).toBeInTheDocument();
+  });
 });
