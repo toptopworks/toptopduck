@@ -4,7 +4,7 @@ import { IntlProvider } from "react-intl";
 import type { ReactElement } from "react";
 
 import { McpSection } from "../McpSection";
-import { clearMcpServerSecret, probeMcpServer } from "../../../api";
+import { clearMcpServerSecret, probeMcpServer, upsertMcpServer } from "../../../api";
 import type { AppConfig } from "../../../types/app-config";
 import type { McpServerConfig, McpProbeResult } from "../../../types/mcp";
 
@@ -13,6 +13,8 @@ import type { McpServerConfig, McpProbeResult } from "../../../types/mcp";
 vi.mock("../../../api", () => ({
   clearMcpServerSecret: vi.fn(),
   probeMcpServer: vi.fn(),
+  upsertMcpServer: vi.fn(),
+  setMcpServerSecret: vi.fn(),
 }));
 
 function makeServer(overrides: Partial<McpServerConfig> = {}): McpServerConfig {
@@ -25,6 +27,10 @@ function makeServer(overrides: Partial<McpServerConfig> = {}): McpServerConfig {
     timeout_ms: null,
     ...overrides,
   };
+}
+
+function makeProbeResult(overrides: Partial<McpProbeResult> = {}): McpProbeResult {
+  return { connected: true, tools: [], error: null, ...overrides };
 }
 
 function makeAppConfig(servers: McpServerConfig[]): AppConfig {
@@ -241,12 +247,110 @@ describe("McpSection (issue #387)", () => {
     expect(screen.queryByText("keychain locked")).not.toBeInTheDocument();
   });
 
-  it("shows Add button as disabled (placeholder for follow-up ticket)", () => {
+  it("clicking Add switches to the form view (issue #388)", () => {
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([])} onCommit={vi.fn()} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Add/ }));
+
+    expect(screen.getByTestId("mcp-server-form")).toBeInTheDocument();
+    expect(screen.getByText("Add MCP server")).toBeInTheDocument();
+  });
+
+  it("clicking Edit on a server row switches to a pre-filled form (issue #388)", () => {
+    const server = makeServer({ id: "srv-1", display_name: "My Server" });
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([server])} onCommit={vi.fn()} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit server My Server" }));
+
+    expect(screen.getByTestId("mcp-server-form")).toBeInTheDocument();
+    expect(screen.getByText("Edit MCP server")).toBeInTheDocument();
+    expect((screen.getByLabelText("Display name") as HTMLInputElement).value).toBe(
+      "My Server",
+    );
+  });
+
+  it("back link in the form returns to the list view (issue #388)", () => {
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([])} onCommit={vi.fn()} />,
+    );
+
+    // Enter the form.
+    fireEvent.click(screen.getByRole("button", { name: /Add/ }));
+    expect(screen.getByTestId("mcp-server-form")).toBeInTheDocument();
+
+    // Go back.
+    fireEvent.click(screen.getByText("Back to MCP list"));
+
+    expect(screen.queryByTestId("mcp-server-form")).not.toBeInTheDocument();
+    expect(screen.getByTestId("mcp-server-list")).toBeInTheDocument();
+  });
+
+  it("Add button is now enabled (no longer a placeholder)", () => {
     renderWithProviders(
       <McpSection appConfig={makeAppConfig([])} onCommit={vi.fn()} />,
     );
 
     const addButton = screen.getByRole("button", { name: /Add/ });
-    expect(addButton).toBeDisabled();
+    expect(addButton).not.toBeDisabled();
+  });
+
+  // --- Review fix tests (PR #393 review) ------------------------------------
+
+  it("syncs saved server into list and seeds probe state on save (H4)", async () => {
+    const finalized = makeServer({ id: "srv-new", display_name: "Brand New" });
+    const probeResult = makeProbeResult({
+      connected: true,
+      tools: [{ name: "search", description: "Search" }],
+    });
+    vi.mocked(upsertMcpServer).mockResolvedValue(finalized);
+    vi.mocked(probeMcpServer).mockResolvedValue(probeResult);
+
+    const onCommit = vi.fn().mockResolvedValue(null);
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([])} onCommit={onCommit} />,
+    );
+
+    // Enter the form and save.
+    fireEvent.click(screen.getByRole("button", { name: /Add/ }));
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => {
+      // Form closed — back to the list view.
+      expect(screen.getByTestId("mcp-server-list")).toBeInTheDocument();
+    });
+
+    // onCommit was called with a mutation that adds the finalized server.
+    expect(onCommit).toHaveBeenCalledTimes(1);
+    const mutateFn = onCommit.mock.calls[0][0];
+    const mutated = mutateFn(makeAppConfig([]));
+    expect(mutated.mcp_servers.servers).toHaveLength(1);
+    expect(mutated.mcp_servers.servers[0].id).toBe("srv-new");
+  });
+
+  it("shows error on the list when onCommit fails after form save (H4)", async () => {
+    const finalized = makeServer({ id: "srv-new", display_name: "Brand New" });
+    vi.mocked(upsertMcpServer).mockResolvedValue(finalized);
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+
+    const onCommit = vi.fn().mockResolvedValue("disk write error");
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([])} onCommit={onCommit} />,
+    );
+
+    // Enter the form and save.
+    fireEvent.click(screen.getByRole("button", { name: /Add/ }));
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => {
+      expect(screen.getByText("disk write error")).toBeInTheDocument();
+    });
+
+    // Form is closed — error shows on the list view (C3: setFormTarget(null)
+    // runs at the end regardless of onCommit outcome).
+    expect(screen.getByTestId("mcp-server-list")).toBeInTheDocument();
   });
 });
