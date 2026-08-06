@@ -57,6 +57,12 @@ fn bridge_handshakes_then_pumps_server_to_stdout() {
     let frame = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n";
     stream.write_all(frame).expect("write frame");
     stream.flush().expect("flush");
+    // Give the bridge time to read the frame from its TCP receive buffer and
+    // pump it to stdout before the stream is closed. Without this delay the
+    // bridge's BufReader (carried from the handshake) may see the connection
+    // close before it has drained the frame from its internal buffer or the
+    // kernel receive queue.
+    std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Drain stdout + stderr on background threads. Reading either pipe on the
     // main thread is a classic deadlock risk: the main thread blocks on
