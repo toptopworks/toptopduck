@@ -71,14 +71,17 @@ static EGRESS_AGENT_BUILDS: std::sync::atomic::AtomicU32 = std::sync::atomic::At
 /// (ureq keeps 3xx as `Ok`; only `>= 400` becomes `Error::Status`); adapters
 /// map any non-2xx to their usual transient error.
 ///
-/// `std::sync::OnceLock` is the std equivalent of `once_cell::sync::Lazy`
-/// (stable since 1.70, within the crate MSRV of 1.77) and avoids adding a
-/// dependency; the agent is constructed lazily on first use via `get_or_init`.
-/// `ureq::Agent: Send + Sync` (its fields are `Arc` over thread-safe state, so
-/// the auto traits hold), which makes the static `Sync` and safely reachable
-/// from the `spawn_blocking` threads that drive `Provider::generate` and the
-/// preflight probe.
-static EGRESS_AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+/// `std::sync::LazyLock` is the std equivalent of `once_cell::sync::Lazy`
+/// and avoids adding a dependency; the agent is constructed lazily on first
+/// use. `ureq::Agent: Send + Sync` (its fields are `Arc` over thread-safe
+/// state, so the auto traits hold), which makes the static `Sync` and safely
+/// reachable from the `spawn_blocking` threads that drive `Provider::generate`
+/// and the preflight probe.
+static EGRESS_AGENT: std::sync::LazyLock<ureq::Agent> = std::sync::LazyLock::new(|| {
+    #[cfg(test)]
+    EGRESS_AGENT_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    ureq::AgentBuilder::new().redirects(0).build()
+});
 
 /// Return a clone of the shared egress agent (issue #278).
 ///
@@ -88,13 +91,7 @@ static EGRESS_AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new
 /// so call sites chain `.post(..).set(..).send_json(..)` unchanged -- cloning is
 /// the ureq-blessed way to hand out a pool-sharing handle.
 pub(crate) fn egress_agent() -> ureq::Agent {
-    EGRESS_AGENT
-        .get_or_init(|| {
-            #[cfg(test)]
-            EGRESS_AGENT_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            ureq::AgentBuilder::new().redirects(0).build()
-        })
-        .clone()
+    EGRESS_AGENT.clone()
 }
 
 /// Classify a ureq send result into either a 2xx [`ureq::Response`] or a

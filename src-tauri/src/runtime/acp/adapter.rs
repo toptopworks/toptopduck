@@ -188,8 +188,8 @@ pub const fn opencode() -> AdapterSpec {
 /// All v1 adapters, in the composer picker's display order (ADR-0083). Adding
 /// a CLI = adding one entry here + one constructor above.
 pub fn v1_adapters() -> &'static [AdapterSpec] {
-    // A pure-data static backing slice. MSRV 1.77 disallows LazyLock (ADR-0076
-    // note); a plain `static` of const-constructible data is the right shape.
+    // A pure-data static backing slice: const-constructible data in a plain
+    // `static` is simpler than LazyLock and avoids the indirection.
     &V1_ADAPTERS
 }
 
