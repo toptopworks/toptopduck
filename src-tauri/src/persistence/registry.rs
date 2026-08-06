@@ -20,15 +20,15 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex};
 
 /// The process-global set of canonical `.duck` paths currently held open by a
 /// [`crate::session::Session`]. Acquired on bind / open, released on the
 /// Session's Drop. A second acquire of an already-held canonical path is the
 /// single-writer violation.
 fn open_ducks() -> &'static Mutex<HashSet<PathBuf>> {
-    static OPEN: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-    OPEN.get_or_init(|| Mutex::new(HashSet::new()))
+    static OPEN: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+    &OPEN
 }
 
 /// Canonicalize a `.duck` path for registry keying. The file may not exist yet

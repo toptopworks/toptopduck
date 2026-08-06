@@ -190,9 +190,9 @@ fn extract_json_object(text: &str) -> Option<&str> {
 /// boundary: a naive `&s[..LIMIT]` panics when the cut lands mid-character, and
 /// model replies / gateway error bodies (and the errors built from them) are
 /// routinely CJK -- so this path, of all paths, must not panic on multi-byte
-/// text. (`rust-version = 1.77` predates the stable `floor_char_boundary`, so
-/// the floor is manual.) Shared across the adapters so both the reply-text path
-/// and the HTTP-error-body path stay panic-free from one source.
+/// text. (`floor_char_boundary` needs 1.91, so the floor is manual.) Shared
+/// across the adapters so both the reply-text path and the HTTP-error-body path
+/// stay panic-free from one source.
 pub(crate) fn truncate(s: &str) -> String {
     const LIMIT: usize = 200;
     if s.len() <= LIMIT {

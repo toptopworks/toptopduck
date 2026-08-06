@@ -13,7 +13,7 @@
 //! [`crate::session::materializer::Materializer`] and so inherits ADR-0022/0024/
 //! 0030 numbering + caps for free.
 
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 use crate::approval::OperationKind;
 use crate::model::ColumnSchema;
@@ -218,16 +218,15 @@ pub(crate) struct BuiltinToolSpec {
 
 /// The single-point built-in tool table (issue #336): the built-in DuckDB tools
 /// the gateway advertises, each with its schema + classification in one entry.
-/// Held in a process-level [`OnceLock`] (MSRV 1.77 -- `LazyLock` needs 1.80) so
-/// the table is built once and read by both [`builtin_definitions`] (schema view)
-/// and [`builtin_metadata`] (classification view) without re-spelling them.
+/// Held in a process-level [`LazyLock`] so the table is built once and read by
+/// both [`builtin_definitions`] (schema view) and [`builtin_metadata`]
+/// (classification view) without re-spelling them.
 ///
 /// User-configured MCP servers (#301) and skill-declared tools join the
 /// advertised surface at the gateway aggregation layer in a later slice; this
 /// table is the built-in-only foundation.
 pub(crate) fn builtin_tools() -> &'static [BuiltinToolSpec] {
-    static TOOLS: OnceLock<Vec<BuiltinToolSpec>> = OnceLock::new();
-    TOOLS.get_or_init(|| {
+    static TOOLS: LazyLock<Vec<BuiltinToolSpec>> = LazyLock::new(|| {
         vec![
             BuiltinToolSpec {
                 definition: explore_definition(),
@@ -254,13 +253,14 @@ pub(crate) fn builtin_tools() -> &'static [BuiltinToolSpec] {
                 summary_fallback: "<no reference_name>",
             },
         ]
-    })
+    });
+    &TOOLS
 }
 
 /// Look up a built-in tool's metadata by name (issue #336). Returns `None` for
 /// an unknown name so the caller (the agent-loop `classify_call`) can fall
 /// through to its external-tool arm. The borrow is `&'static` because
-/// [`builtin_tools`] lives in a process-level `OnceLock`.
+/// [`builtin_tools`] lives in a process-level `LazyLock`.
 pub(crate) fn builtin_metadata(name: &str) -> Option<&'static BuiltinToolSpec> {
     builtin_tools()
         .iter()
