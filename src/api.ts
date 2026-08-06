@@ -9,7 +9,7 @@ import type {
   RowPage,
   SheetGuidance,
 } from "./types/dataset";
-import type { McpServerConfig, McpServerStatusEntry } from "./types/mcp";
+import type { McpProbeResult, McpServerConfig, McpServerStatusEntry } from "./types/mcp";
 import type {
   ImportItem,
   ImportMode,
@@ -399,6 +399,15 @@ export async function toggleMcpServer(
   enabled: boolean,
 ): Promise<void> {
   await invoke<void>("toggle_mcp_server", { sessionId, serverId, enabled });
+}
+
+// Probe one MCP server's connectivity (issue #387). Global (not session-
+// scoped): the settings page calls this to test a server independently of any
+// agent turn. The backend spawns the server, initializes, lists tools, then
+// tears down. v1 supports stdio only; other transports return connected:false
+// with an unsupported-transport error.
+export async function probeMcpServer(server: McpServerConfig): Promise<McpProbeResult> {
+  return invoke<McpProbeResult>("probe_mcp_server", { server });
 }
 
 // --- Skills registry (issue #362, ADR-0086) --------------------------------

@@ -1234,7 +1234,7 @@ function mcpServer(id: string): McpServerConfig {
 
 // A per-session MCP status row (issue #301 slice D shape).
 function mcpStatus(id: string, enabled: boolean): McpServerStatusEntry {
-  return { id, display_name: id, enabled, source: enabled ? { kind: "user" } : null, connected: false, tool_count: 0, error: null };
+  return { id, display_name: id, enabled, source: enabled ? { kind: "user" } : null, connected: false, tool_count: 0, tools: [], error: null };
 }
 
 describe("App shell window collapse + drag-drop bisection (issue #84)", () => {

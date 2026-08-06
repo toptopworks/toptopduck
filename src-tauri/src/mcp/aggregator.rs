@@ -62,8 +62,44 @@ pub struct ConnectResult {
     pub connected: bool,
     /// The number of tools the server advertised (0 when not connected).
     pub tool_count: usize,
+    /// The tool list the server advertised at connect (empty when not
+    /// connected). The settings page renders this in the expandable per-row
+    /// detail (issue #387).
+    pub tools: Vec<McpToolInfo>,
     /// The skip reason when `connected: false` (`None` on success).
     pub error: Option<String>,
+}
+
+/// One tool entry a connected server advertised, projected to just the fields
+/// the UI needs (issue #387). The full `{name, description, inputSchema}` entry
+/// stays in [`AggregatedServer::tools`] for gateway routing; this is the lean
+/// view for `list_mcp_server_status` + `probe_mcp_server`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct McpToolInfo {
+    /// The server-native tool name (no `mcp__<slug>__` prefix -- the raw name
+    /// the server reported at `tools/list`).
+    pub name: String,
+    /// The human-readable description the server reported (`""` when the server
+    /// omitted it).
+    pub description: String,
+}
+
+/// Project a raw `tools/list` entry's `{name, description}` into
+/// [`McpToolInfo`]. Missing `name` skips the entry (malformed); missing
+/// `description` degrades to empty string (the server may legitimately omit it).
+pub fn extract_tool_info(tools: &[Value]) -> Vec<McpToolInfo> {
+    tools
+        .iter()
+        .filter_map(|t| {
+            let name = t.get("name")?.as_str()?.to_string();
+            let description = t
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            Some(McpToolInfo { name, description })
+        })
+        .collect()
 }
 
 /// The merged view over every connected external MCP server (ADR-0076). Owns
@@ -104,6 +140,7 @@ impl McpAggregator {
                     id: config.id.clone(),
                     connected: false,
                     tool_count: 0,
+                    tools: Vec::new(),
                     error: Some(format!("unsupported transport: {t}")),
                 };
             }
@@ -117,6 +154,7 @@ impl McpAggregator {
                     id: config.id.clone(),
                     connected: false,
                     tool_count: 0,
+                    tools: Vec::new(),
                     error: Some(e.to_string()),
                 };
             }
@@ -137,11 +175,13 @@ impl McpAggregator {
                     id: config.id.clone(),
                     connected: false,
                     tool_count: 0,
+                    tools: Vec::new(),
                     error: Some(format!("tools/list failed: {e}")),
                 };
             }
         };
         let tool_count = tools.len();
+        let tool_infos = extract_tool_info(&tools);
         let base = slugify(&config.display_name, &config.id);
         let slug = self.unique_slug(&base);
         self.servers.push(AggregatedServer {
@@ -153,6 +193,7 @@ impl McpAggregator {
             id: config.id.clone(),
             connected: true,
             tool_count,
+            tools: tool_infos,
             error: None,
         }
     }
@@ -237,7 +278,10 @@ impl Default for McpAggregator {
 /// logged + skipped so a single OS keychain fault does not brick the whole
 /// server (the server may still operate without that secret, and bricking it
 /// would let an OS keychain glitch take down the whole tool table).
-fn collect_secrets(keychain: &KeychainStore, server: &McpServerConfig) -> Vec<SecretEnv> {
+pub(crate) fn collect_secrets(
+    keychain: &KeychainStore,
+    server: &McpServerConfig,
+) -> Vec<SecretEnv> {
     server
         .keychain_env_keys
         .iter()
@@ -559,5 +603,50 @@ mod tests {
             matches!(err, RouteError::UnknownServer(ref s) if s == "ghost"),
             "unknown slug -> UnknownServer(\"ghost\"), got {err:?}"
         );
+    }
+
+    // --- extract_tool_info (issue #387) -------------------------------------
+
+    #[test]
+    fn extract_tool_info_projects_name_and_description() {
+        let tools = vec![
+            json!({"name": "search", "description": "Search the web"}),
+            json!({"name": "fetch", "description": "Fetch a URL"}),
+        ];
+        let infos = extract_tool_info(&tools);
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0].name, "search");
+        assert_eq!(infos[0].description, "Search the web");
+        assert_eq!(infos[1].name, "fetch");
+        assert_eq!(infos[1].description, "Fetch a URL");
+    }
+
+    #[test]
+    fn extract_tool_info_degrades_missing_description_to_empty() {
+        // A server may legitimately omit description; it degrades to "".
+        let tools = vec![json!({"name": "ping"})];
+        let infos = extract_tool_info(&tools);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "ping");
+        assert_eq!(infos[0].description, "");
+    }
+
+    #[test]
+    fn extract_tool_info_skips_entries_missing_name() {
+        // A malformed entry without a string name is skipped, not paniced.
+        let tools = vec![
+            json!({"description": "no name here"}),
+            json!({"name": 42, "description": "non-string name"}),
+            json!({"name": "valid", "description": "ok"}),
+        ];
+        let infos = extract_tool_info(&tools);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "valid");
+    }
+
+    #[test]
+    fn extract_tool_info_empty_input_returns_empty() {
+        let infos: Vec<McpToolInfo> = extract_tool_info(&[]);
+        assert!(infos.is_empty());
     }
 }

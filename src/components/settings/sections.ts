@@ -6,9 +6,15 @@
 // pane now self-persists through the parent's commit helper, so this module only
 // carries the section id set + order.
 
-/** The settings panes (ADR-0065 + #362 skills): General / Skills / Profiles /
- *  Engine / Privacy. */
-export type SettingsSection = "general" | "skills" | "profiles" | "engine" | "privacy";
+/** The settings panes (ADR-0065 + #362 skills + #387 MCP): General / Skills /
+ *  Profiles / Engine / Privacy / MCP. */
+export type SettingsSection =
+  | "general"
+  | "skills"
+  | "profiles"
+  | "engine"
+  | "privacy"
+  | "mcp";
 
 /** The ordered set of settings sections rendered into the left rail. Drives
  *  ORDER + state only; the visible label for each id is rendered by SectionLabel
@@ -21,4 +27,5 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSection> = [
   "profiles",
   "engine",
   "privacy",
+  "mcp",
 ];

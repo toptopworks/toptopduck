@@ -893,6 +893,7 @@ mod tests {
             id: srv_b.clone(),
             connected: true,
             tool_count: 3,
+            tools: Vec::new(),
             error: None,
         }]);
         handle.reset_mcp_enablement();

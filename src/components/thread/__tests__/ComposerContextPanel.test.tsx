@@ -46,6 +46,7 @@ function status(id: string, enabled: boolean): McpServerStatusEntry {
     source: enabled ? { kind: "user" } : null,
     connected: false,
     tool_count: 0,
+    tools: [],
     error: null,
   };
 }

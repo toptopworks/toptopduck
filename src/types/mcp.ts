@@ -65,6 +65,16 @@ export type McpEnabledSource =
   | { kind: "user" }
   | { kind: "skill"; name: string };
 
+// One tool entry a connected server advertised, projected to just the fields
+// the UI needs (issue #387). Mirrors the Rust McpToolInfo -- the server-native
+// name (no namespace prefix) + human-readable description.
+export interface McpToolInfo {
+  // The server-native tool name (no `mcp__<slug>__` prefix).
+  name: string;
+  // The human-readable description the server reported ("" when omitted).
+  description: string;
+}
+
 // One row of the per-session MCP server status (issue #301 slice D, AC#3 +
 // #369 skill sources). Mirrors the Rust McpServerStatusEntry joined at the
 // command boundary from the app-config registry + the session's effective
@@ -89,6 +99,22 @@ export interface McpServerStatusEntry {
   // The tool count the server advertised at the last connect (0 when not
   // connected).
   tool_count: number;
+  // The tool list the server advertised at the last connect (empty when not
+  // connected). The settings page renders this in the expandable per-row
+  // detail (issue #387).
+  tools: McpToolInfo[];
   // The last connect's error message (null on success or when not attempted).
+  error: string | null;
+}
+
+// The result of a manual connection probe (issue #387). Mirrors the Rust
+// McpProbeResult. The settings page's per-row Test button triggers
+// probe_mcp_server and receives this.
+export interface McpProbeResult {
+  // Whether the spawn + initialize + tools/list cycle succeeded.
+  connected: boolean;
+  // The tools the server advertised (empty when not connected).
+  tools: McpToolInfo[];
+  // The error message when connected is false (null on success).
   error: string | null;
 }

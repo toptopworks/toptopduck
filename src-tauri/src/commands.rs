@@ -807,6 +807,80 @@ pub fn clear_mcp_server_secret(
         .map_err(StoreCommandError::KeychainFailure)
 }
 
+/// The result of a manual connection probe (issue #387). The settings page's
+/// per-row Test button triggers this: spawn the server, initialize, list tools,
+/// teardown, and return the outcome so the status dot + expandable tool list
+/// update without a full turn. Mirrors the shape the per-turn aggregator
+/// produces but is a standalone global IPC (not session-scoped).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct McpProbeResult {
+    /// Whether the spawn + initialize + tools/list cycle succeeded.
+    pub connected: bool,
+    /// The tools the server advertised (name + description only; empty when not
+    /// connected).
+    pub tools: Vec<crate::mcp::aggregator::McpToolInfo>,
+    /// The error message when `connected: false` (`None` on success).
+    pub error: Option<String>,
+}
+
+/// Probe one MCP server's connectivity (issue #387). Global (not
+/// session-scoped): the settings page calls this to test a configured server
+/// independently of any agent turn. Receives the full [`McpServerConfig`],
+/// resolves the server's secret env values from the keychain
+/// ([`McpServerConfig::keychain_env_keys`], ADR-0029 -- values never cross IPC),
+/// spawns the server via [`StdioClient`], performs the MCP initialize handshake,
+/// lists tools, then tears down (the `StdioClient`'s `Drop` kills the child).
+/// Returns the outcome so the UI can render a status dot + expandable tool
+/// list. v1 supports stdio only; other transports return `connected: false`
+/// with an `unsupported transport` error.
+#[tauri::command]
+pub fn probe_mcp_server(
+    live: State<'_, LiveProviderConfig>,
+    server: McpServerConfig,
+) -> Result<McpProbeResult, StoreCommandError> {
+    // Resolve secret env values from the keychain (ADR-0029 -- the values never
+    // cross IPC). Shared with the aggregator's connect path so both evolve
+    // together (collect_secrets logs + skips on a per-key keychain fault).
+    let secrets = crate::mcp::aggregator::collect_secrets(live.keychain(), &server);
+
+    let mut client = match crate::mcp::client::StdioClient::connect(&server, &secrets) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!(
+                target: "toptopduck::mcp",
+                "probe for server {} connect failed: {e}",
+                server.id
+            );
+            return Ok(McpProbeResult {
+                connected: false,
+                tools: Vec::new(),
+                error: Some(e.to_string()),
+            });
+        }
+    };
+    let tools = match client.list_tools() {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!(
+                target: "toptopduck::mcp",
+                "probe for server {} tools/list failed: {e}",
+                server.id
+            );
+            return Ok(McpProbeResult {
+                connected: false,
+                tools: Vec::new(),
+                error: Some(format!("tools/list failed: {e}")),
+            });
+        }
+    };
+    // client drops here -> StdioClient::Drop kills the child (teardown).
+    Ok(McpProbeResult {
+        connected: true,
+        tools: crate::mcp::aggregator::extract_tool_info(&tools),
+        error: None,
+    })
+}
+
 /// Why a server is enabled in this session (issue #369). Distinguishes
 /// user-toggled from skill-declared so the "+" panel renders three states:
 /// off (`None`) / on-user (`User`, toggle off allowed) / on-skill (`Skill`,
@@ -849,6 +923,10 @@ pub struct McpServerStatusEntry {
     /// The tool count the server advertised at the last connect (0 when not
     /// connected).
     pub tool_count: usize,
+    /// The tool list the server advertised at the last connect (empty when not
+    /// connected). The settings page renders this in the expandable per-row
+    /// detail (issue #387).
+    pub tools: Vec<crate::mcp::aggregator::McpToolInfo>,
     /// The last connect's error message (`None` on success or when not
     /// attempted).
     pub error: Option<String>,
@@ -924,6 +1002,7 @@ pub fn list_mcp_server_status(
                 source,
                 connected: result.map(|r| r.connected).unwrap_or(false),
                 tool_count: result.map(|r| r.tool_count).unwrap_or(0),
+                tools: result.map(|r| r.tools.clone()).unwrap_or_default(),
                 error: result.and_then(|r| r.error.clone()),
             }
         })
