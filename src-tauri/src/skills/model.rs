@@ -324,9 +324,9 @@ pub enum DiscoveredSkillStatus {
 }
 
 /// Import mode for a batch (issue #367). The dialog's bottom dropdown selects
-/// one mode for every selected skill. `link` is the default (the AC: "导入后
-/// 技能以 acquired: linked 进注册表"); `copy` is the fallback when the platform
-/// / target refuses a link.
+/// one mode for every selected skill. `link` is the default (the AC: linked
+/// skills enter the registry as `acquired: linked`); `copy` is the fallback
+/// when the platform / target refuses a link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImportMode {
@@ -355,7 +355,7 @@ pub struct ImportItem {
 /// while the successes invalidate the skills query. `Failed` nests the typed
 /// [`SkillError`] (already adjacently tagged) as its `data` -- the frontend
 /// reaches the reject detail through `outcome.data`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum ImportOutcome {
     /// The skill was linked / copied into the registry; carries the entry read

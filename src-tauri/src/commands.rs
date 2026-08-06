@@ -1689,8 +1689,8 @@ pub fn delete_skill(root: State<'_, SkillsRoot>, name: String) -> Result<(), Ski
 /// home-dir path, appends the user-supplied `custom_paths` (each an absolute
 /// OS path the frontend collected via the directory picker), and projects the
 /// union through [`discover_skill_sources`]. A source that does not exist is
-/// dropped silently (the "show only if it exists" rule); each surviving
-/// source's resident skills are classified `importable` / `already_exists` /
+/// dropped silently (the "show only if it exists" rule, issue #367); each
+/// surviving source's resident skills are classified `importable` / `already_exists` /
 /// `invalid` against the CURRENT registry name set (a snapshot taken fresh per
 /// call so a create / delete between calls is reflected). Read-only -- never
 /// refuses.
@@ -1734,7 +1734,7 @@ pub fn import_skills(
 /// entry is appended as its own candidate (id = path string for stable
 /// expand/collapse state across re-discoveries, label = the directory's file
 /// name so the row reads naturally). Duplicates are harmless -- discovery
-/// deduplicates by existence + the frontend keys off the id.
+/// filters by existence + the frontend keys off the id.
 fn build_skill_source_candidates(
     app: &tauri::AppHandle,
     custom_paths: &[String],

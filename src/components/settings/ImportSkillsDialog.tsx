@@ -6,6 +6,7 @@ import { ChevronRight, Plus, RefreshCw } from "lucide-react";
 
 import type {
   DiscoveredSkill,
+  ImportItem,
   ImportMode,
   SkillSource,
 } from "../../types/skills";
@@ -60,12 +61,22 @@ export function ImportSkillsDialog({ onClose }: Props) {
   }
 
   const importMutation = useMutation({
-    mutationFn: () => {
-      const items = [...selected].map((source_dir) => ({ source_dir }));
-      return importSkills(items, mode);
-    },
-    onSuccess: (outcomes) => {
+    mutationFn: (items: ImportItem[]) => importSkills(items, mode),
+    onSuccess: (outcomes, items) => {
       invalidateAfterImport();
+      // Prune successfully imported items from `selected` so a retry does not
+      // re-send them (the backend would reject with NameTaken). The outcomes
+      // parallel the input items in order.
+      const importedDirs = items
+        .filter((_, i) => outcomes[i]?.kind === "imported")
+        .map((item) => item.source_dir);
+      if (importedDirs.length > 0) {
+        setSelected((prev) => {
+          const next = new Set(prev);
+          importedDirs.forEach((d) => next.delete(d));
+          return next;
+        });
+      }
       const failed = outcomes.filter((o) => o.kind === "failed");
       if (failed.length === 0) {
         onClose();
@@ -149,7 +160,8 @@ export function ImportSkillsDialog({ onClose }: Props) {
 
   function handleImport() {
     setError(null);
-    importMutation.mutate();
+    const items = [...selected].map((source_dir) => ({ source_dir }));
+    importMutation.mutate(items);
   }
 
   const sourceList = sources ?? [];
@@ -161,7 +173,16 @@ export function ImportSkillsDialog({ onClose }: Props) {
         if (!open) onClose();
       }}
     >
-      <DialogContent className="sm:max-w-2xl" showCloseButton>
+      <DialogContent
+        className="sm:max-w-2xl"
+        showCloseButton
+        onEscapeKeyDown={(e) => {
+          if (importMutation.isPending) e.preventDefault();
+        }}
+        onPointerDownOutside={(e) => {
+          if (importMutation.isPending) e.preventDefault();
+        }}
+      >
         <DialogHeader>
           <div className="flex items-center justify-between gap-2">
             <DialogTitle>
@@ -208,6 +229,7 @@ export function ImportSkillsDialog({ onClose }: Props) {
               <SourceRow
                 key={source.id}
                 source={source}
+                importableDirs={importableDirsBySource.get(source.id) ?? []}
                 expanded={expanded.has(source.id)}
                 selected={selected}
                 onToggleExpand={() => toggleExpand(source.id)}
@@ -300,6 +322,7 @@ export function ImportSkillsDialog({ onClose }: Props) {
 
 type SourceRowProps = {
   source: SkillSource;
+  importableDirs: string[];
   expanded: boolean;
   selected: Set<string>;
   onToggleExpand: () => void;
@@ -309,6 +332,7 @@ type SourceRowProps = {
 
 function SourceRow({
   source,
+  importableDirs,
   expanded,
   selected,
   onToggleExpand,
@@ -316,9 +340,6 @@ function SourceRow({
   onToggleSkill,
 }: SourceRowProps) {
   const intl = useIntl();
-  const importableDirs = source.skills
-    .filter((s) => s.status === "importable")
-    .map((s) => s.source_dir);
   const selectedInSource = importableDirs.filter((d) => selected.has(d)).length;
   const allSelected =
     importableDirs.length > 0 && selectedInSource === importableDirs.length;
@@ -327,8 +348,8 @@ function SourceRow({
     <div className="border-border rounded-lg border">
       {/* Collapsed header: select-all checkbox + single expand toggle carrying
           label + path + count badge + chevron (one aria-expanded element, not
-          two — P2 fix). The aria-label carries the expand/collapse action so
-          the path / badge text never leaks into the accessible name. */}
+          two). The aria-label carries the expand/collapse action so the path /
+          badge text never leaks into the accessible name. */}
       <div className="hover:bg-accent/50 flex items-center gap-2 px-3 py-2.5">
         <input
           type="checkbox"

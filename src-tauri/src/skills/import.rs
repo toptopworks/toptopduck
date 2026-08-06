@@ -7,10 +7,10 @@
 //!   `app.path().home_dir()`) into a wire list, classifying each resident
 //!   skill directory as importable / already-exists / invalid. Pure of Tauri
 //!   state, so the whole surface tests against a tempdir.
-//! - [`import_skill_linked`] / [`import_skill_copied`] commit one skill into
-//!   the registry, re-validating the source + re-checking the registry at
-//!   commit time so a source that changed between discovery and commit never
-//!   overwrites a name that landed in the interim.
+//! - [`import_skill`] commits one skill into the registry (link or copy),
+//!   re-validating the source + re-checking the registry at commit time so a
+//!   source that changed between discovery and commit never overwrites a name
+//!   that landed in the interim.
 //!
 //! Link = symlink (Unix) / directory junction (Windows) -> `acquired: linked`
 //! (read-only); copy = recursive directory copy -> `acquired: local`
@@ -30,12 +30,13 @@ use super::registry::{fs_err, load_skill};
 
 /// Project the candidate sources into the wire list (issue #367). A candidate
 /// whose `path` does not exist (or is not a directory) is DROPPED -- the
-/// "show only if it exists" rule (ADR-0086 D10). Each surviving source lists
+/// "show only if it exists" rule (issue #367). Each surviving source lists
 /// its resident skill directories with an import-readiness classification;
 /// `already_exists` mirrors membership in `existing_names` (the registry's
 /// current name set, supplied by the command layer so this function stays
-/// Tauri-state-free). Sources and their skills are sorted by name / id for a
-/// deterministic listing (parallel to [`super::registry::list_skills`]).
+/// Tauri-state-free). Sources are sorted by id; skills within each source are
+/// sorted by name, for a deterministic listing (parallel to
+/// [`super::registry::list_skills`]).
 pub fn discover_skill_sources(
     candidates: &[SkillSourceCandidate],
     existing_names: &HashSet<String>,
@@ -68,15 +69,45 @@ pub fn discover_skill_sources(
 /// discovery and commit surfaces a typed reject rather than overwriting. The
 /// registry root is minted lazily on first import (parallel to
 /// [`super::registry::create_skill`]).
+///
+/// Link mode creates a symlink (Unix) / directory junction (Windows) onto the
+/// external source -> `acquired: linked` (read-only). A link failure folds a
+/// copy-mode hint into the error detail. Copy mode recursively copies the
+/// source directory -> `acquired: local` (editable); a mid-copy failure
+/// removes the partial copy so a retry does not strand a name (parallel to
+/// `create_skill`'s rollback).
 pub fn import_skill(
     root: &Path,
     source_dir: &Path,
     mode: ImportMode,
 ) -> Result<SkillEntry, SkillError> {
-    match mode {
-        ImportMode::Link => import_skill_linked(root, source_dir),
-        ImportMode::Copy => import_skill_copied(root, source_dir),
+    let entry = load_skill(source_dir)?;
+    let target = root.join(&entry.name);
+    if target.exists() {
+        return Err(SkillError::NameTaken(entry.name.clone()));
     }
+    fs::create_dir_all(root).map_err(|e| fs_err("create skills root", root, e))?;
+    match mode {
+        ImportMode::Link => {
+            link_dir(source_dir, &target).map_err(|e| {
+                SkillError::FsFailure(format!(
+                    "link skill `{}` from `{}` failed: {e}; try Copy mode instead",
+                    entry.name,
+                    source_dir.display()
+                ))
+            })?;
+        }
+        ImportMode::Copy => {
+            if let Err(e) = copy_dir_recursive(source_dir, &target, 0) {
+                let _ = fs::remove_dir_all(&target);
+                return Err(fs_err("copy skill directory", &target, e));
+            }
+        }
+    }
+    // Read back through the link / copy so the entry carries the correct
+    // `acquired` variant + the link target the drawer's "open source location"
+    // reveals.
+    load_skill(&target)
 }
 
 /// Run a batch of imports, collecting each outcome so a per-item failure never
@@ -97,48 +128,6 @@ pub fn import_skills(
             },
         )
         .collect()
-}
-
-/// Link one external skill directory into the registry as `acquired: linked`
-/// (issue #367). Re-validates the source + refuses a taken name BEFORE creating
-/// the link. A link failure (rare on Unix; on Windows only when BOTH the
-/// symlink privilege AND the junction fallback refuse) folds a copy-mode hint
-/// into the error detail so the dialog can steer the user.
-pub fn import_skill_linked(root: &Path, source_dir: &Path) -> Result<SkillEntry, SkillError> {
-    let entry = load_skill(source_dir)?;
-    let target = root.join(&entry.name);
-    if target.exists() {
-        return Err(SkillError::NameTaken(entry.name.clone()));
-    }
-    fs::create_dir_all(root).map_err(|e| fs_err("create skills root", root, e))?;
-    link_dir(source_dir, &target).map_err(|e| {
-        SkillError::FsFailure(format!(
-            "link skill `{}` from `{}` failed: {e}; try Copy mode instead",
-            entry.name,
-            source_dir.display()
-        ))
-    })?;
-    // Read back through the link so the entry carries `acquired: linked` +
-    // the link target the drawer's "open source location" reveals.
-    load_skill(&target)
-}
-
-/// Copy one external skill directory into the registry as `acquired: local`
-/// (issue #367). Re-validates the source + refuses a taken name BEFORE the
-/// copy. A mid-copy failure removes the partial copy so a retry does not hit
-/// `NameTaken` (parallel to `create_skill`'s empty-directory rollback).
-pub fn import_skill_copied(root: &Path, source_dir: &Path) -> Result<SkillEntry, SkillError> {
-    let entry = load_skill(source_dir)?;
-    let target = root.join(&entry.name);
-    if target.exists() {
-        return Err(SkillError::NameTaken(entry.name.clone()));
-    }
-    fs::create_dir_all(root).map_err(|e| fs_err("create skills root", root, e))?;
-    if let Err(e) = copy_dir_recursive(source_dir, &target) {
-        let _ = fs::remove_dir_all(&target);
-        return Err(fs_err("copy skill directory", &target, e));
-    }
-    load_skill(&target)
 }
 
 // --- internals ---------------------------------------------------------------
@@ -196,37 +185,38 @@ fn scan_source_children(source: &Path, existing_names: &HashSet<String>) -> Vec<
     skills
 }
 
-/// Create a directory link `link -> target` (issue #367). Unix uses a symlink;
-/// Windows tries a directory symlink first (Developer Mode / admin), then falls
-/// back to a directory junction (`mklink /J`) which needs no elevation -- the
-/// no-elevation linked posture, parallel to the test helper in `registry::tests`.
-/// Both forms are classified as `linked` by [`super::registry::is_linked`] and
-/// removed link-only by [`super::registry::delete_skill`].
-fn link_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+/// Create a directory link at `link_path` pointing to `source` (issue #367).
+/// Unix uses a symlink; Windows tries a directory symlink first (Developer Mode
+/// / admin), then falls back to a directory junction (`mklink /J`) which needs
+/// no elevation -- the no-elevation linked posture, parallel to the test helper
+/// in `registry::tests`. Both forms are classified as `linked` by
+/// [`super::registry::is_linked`] and removed link-only by
+/// [`super::registry::delete_skill`].
+fn link_dir(source: &Path, link_path: &Path) -> std::io::Result<()> {
     #[cfg(not(target_os = "windows"))]
     {
-        std::os::unix::fs::symlink(target, link)
+        std::os::unix::fs::symlink(source, link_path)
     }
     #[cfg(target_os = "windows")]
     {
-        if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+        if std::os::windows::fs::symlink_dir(source, link_path).is_ok() {
             return Ok(());
         }
-        junction_via_mklink(target, link)
+        junction_via_mklink(source, link_path)
     }
 }
 
-/// Windows-only junction fallback: `cmd /C mklink /J link target`. `mklink /J`
-/// creates a directory junction without the symlink privilege, so it is the
-/// reliable linked posture on a stock Windows account. The reparse tag (NOT
-/// the symlink flag) is what `is_linked` keys on, so the junction reads back
-/// as `acquired: linked`.
+/// Windows-only junction fallback: `cmd /C mklink /J link_path source`.
+/// `mklink /J` creates a directory junction without the symlink privilege, so
+/// it is the reliable linked posture on a stock Windows account. Junctions lack
+/// the symlink flag, but [`super::registry::is_linked`] also checks the
+/// reparse-point attribute, so the junction reads back as `acquired: linked`.
 #[cfg(target_os = "windows")]
-fn junction_via_mklink(target: &Path, link: &Path) -> std::io::Result<()> {
+fn junction_via_mklink(source: &Path, link_path: &Path) -> std::io::Result<()> {
     let output = std::process::Command::new("cmd")
         .args(["/C", "mklink", "/J"])
-        .arg(link)
-        .arg(target)
+        .arg(link_path)
+        .arg(source)
         .output()?;
     if output.status.success() {
         Ok(())
@@ -237,11 +227,23 @@ fn junction_via_mklink(target: &Path, link: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Recursion depth cap for [`copy_dir_recursive`]. A symlink loop in an
+/// untrusted external skill directory would otherwise recurse until stack
+/// overflow; 32 levels is well beyond any real skill directory depth.
+const COPY_DEPTH_CAP: usize = 32;
+
 /// Recursively copy `src` onto `dst` (issue #367 copy mode). Follows symlinks
 /// (`cp -rL` semantics): a symlink inside the skill dir resolves to its
 /// target's content, so a copy never strands a broken link pointing outside
-/// the tree. `dst` is created if missing.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+/// the tree. `dst` is created if missing. The `depth` parameter caps recursion
+/// to guard against symlink loops in untrusted source directories.
+fn copy_dir_recursive(src: &Path, dst: &Path, depth: usize) -> std::io::Result<()> {
+    if depth >= COPY_DEPTH_CAP {
+        return Err(std::io::Error::other(format!(
+            "copy recursion depth cap ({COPY_DEPTH_CAP}) exceeded at `{}`; possible symlink loop",
+            src.display()
+        )));
+    }
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
@@ -250,7 +252,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         // Follow the link for classification: symlink-to-dir recurses,
         // symlink-to-file copies by content (fs::copy follows the link).
         if fs::metadata(&src_path)?.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
+            copy_dir_recursive(&src_path, &dst_path, depth + 1)?;
         } else {
             fs::copy(&src_path, &dst_path)?;
         }
@@ -394,7 +396,11 @@ mod tests {
         assert_eq!(entry.name, "external");
         assert_eq!(entry.acquired, Acquired::Linked);
         assert_eq!(entry.body, "External body.\n");
-        // The registry entry IS a link (not a real dir) onto the source.
+        // entry.acquired == Linked already verifies the link was created
+        // (load_skill detects it via is_linked). The raw metadata check is
+        // Unix-only because Windows junctions are NOT reported as symlinks by
+        // FileType::is_symlink().
+        #[cfg(not(target_os = "windows"))]
         assert!(fs::symlink_metadata(root.join("external"))
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false));
@@ -448,11 +454,8 @@ mod tests {
         ));
     }
 
-    /// A mid-copy failure removes the partial copy so a retry does not strand a
-    /// name (parallel to create_skill's rollback). We simulate by importing a
-    /// source whose name is too long AFTER the registry already has it -- but
-    /// the cleaner probe is: import once succeeds, import the same name again
-    /// refuses NameTaken and leaves no partial behind.
+    /// A second import of the same name refuses NameTaken without stranding a
+    /// partial copy (the NameTaken check fires before `copy_dir_recursive`).
     #[test]
     fn import_copied_leaves_no_partial_on_retry_after_name_taken() {
         let tmp = tempfile::tempdir().unwrap();
@@ -489,6 +492,62 @@ mod tests {
         assert_eq!(outcomes.len(), 2);
         assert!(matches!(outcomes[0], ImportOutcome::Imported(_)));
         assert!(matches!(outcomes[1], ImportOutcome::Failed(_)));
+    }
+
+    /// A mid-copy failure rolls back the partial copy so the name is free for
+    /// a retry. We simulate by placing an unreadable file inside the source
+    /// skill directory (Unix-only -- `fs::copy` fails with EACCES on a
+    /// 000-permission file when not running as root).
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn import_copied_rolls_back_partial_on_mid_copy_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("skills");
+        let lib = tmp.path().join("lib");
+        let source = put_skill(&lib, "has-bad-file", "Body.\n");
+        // A subdirectory with an unreadable file -- fs::copy fails with EACCES.
+        let subdir = source.join("assets");
+        fs::create_dir_all(&subdir).unwrap();
+        let bad_file = subdir.join("unreadable.txt");
+        fs::write(&bad_file, "content").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&bad_file, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let err = import_skill(&root, &source, ImportMode::Copy).unwrap_err();
+        assert!(matches!(err, SkillError::FsFailure(_)));
+        // Rollback: the partial copy was removed so the name is free.
+        assert!(
+            !root.join("has-bad-file").exists(),
+            "partial copy rolled back"
+        );
+        // Restore permissions so the tempdir cleanup can remove the file.
+        let _ = fs::set_permissions(&bad_file, fs::Permissions::from_mode(0o644));
+    }
+
+    /// A symlink loop inside a copy-mode source hits the depth cap instead of
+    /// recursing until stack overflow (Unix-only -- symlinks are the vector).
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn import_copied_rejects_symlink_loop_via_depth_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("skills");
+        let lib = tmp.path().join("lib");
+        let source = put_skill(&lib, "looped", "Body.\n");
+        // Create a symlink loop: source/loop -> source (self-reference).
+        std::os::unix::fs::symlink(&source, source.join("loop")).unwrap();
+
+        let err = import_skill(&root, &source, ImportMode::Copy).unwrap_err();
+        assert!(matches!(err, SkillError::FsFailure(_)));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("depth cap") || msg.contains("symlink loop"),
+            "error should mention depth cap or symlink loop: {msg}"
+        );
+        // Rollback: partial copy removed.
+        assert!(
+            !root.join("looped").exists(),
+            "partial copy rolled back after depth cap"
+        );
     }
 
     /// A name at the spec ceiling imports through both modes (the name rule
