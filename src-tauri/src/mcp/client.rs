@@ -47,6 +47,12 @@ use crate::runtime::gateway::framing;
 /// (the reader wakes at most every this interval to re-check the stop flag).
 const SSE_READ_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// HTTP per-read timeout (issue #392). Ensures a hung HTTP server's
+/// `spawn_blocking` task eventually terminates after the probe deadline
+/// fires — `spawn_blocking` tasks are not cancelled, so without this the
+/// thread + TCP connection would linger indefinitely.
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Bounded channel capacity for SSE reader → consumer message forwarding.
 /// Backpressures a flooding server so the reader blocks on send rather than
 /// accumulating unbounded messages in memory (H4: review feedback).
@@ -253,22 +259,7 @@ impl StdioClient {
     /// [`McpServerConfig::keychain_env_keys`]); they are injected into the
     /// child env alongside [`McpServerConfig::env`] (the non-secret values).
     pub fn connect(config: &McpServerConfig, secrets: &[SecretEnv]) -> Result<Self, ClientError> {
-        let (command, args) = match &config.transport {
-            McpTransport::Stdio { command, args } => (command.clone(), args.clone()),
-            McpTransport::Sse { .. } | McpTransport::Http { .. } => {
-                return Err(ClientError::UnsupportedTransport(transport_label(
-                    &config.transport,
-                )));
-            }
-        };
-        let mut child = Command::new(&command)
-            .args(&args)
-            .envs(config.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-            .envs(secrets.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
+        let mut child = stdio_command(config, secrets)?.spawn()?;
         let stdin = child.stdin.take().ok_or(ClientError::NoChildStdin)?;
         let stdout = child.stdout.take().ok_or(ClientError::NoChildStdout)?;
         let mut client = StdioClient {
@@ -300,6 +291,66 @@ impl Drop for StdioClient {
 }
 
 // ---------------------------------------------------------------------------
+// Probe helpers (issue #392)
+// ---------------------------------------------------------------------------
+
+/// Build the [`Command`] for a stdio MCP server from the config (shared by
+/// [`StdioClient::connect`] and [`spawn_stdio_child`]). Extracts the command +
+/// args from the transport, injects env + keychain secrets, and configures
+/// piped stdin/stdout. Keeping this in one place prevents the two spawn paths
+/// (aggregator's per-turn connect vs the probe's timeout-bounded connect)
+/// from diverging on env/secret handling.
+fn stdio_command(config: &McpServerConfig, secrets: &[SecretEnv]) -> Result<Command, ClientError> {
+    let (command, args) = match &config.transport {
+        McpTransport::Stdio { command, args } => (command.clone(), args.clone()),
+        McpTransport::Sse { .. } | McpTransport::Http { .. } => {
+            return Err(ClientError::UnsupportedTransport(transport_label(
+                &config.transport,
+            )));
+        }
+    };
+    let mut cmd = Command::new(&command);
+    cmd.args(&args)
+        .envs(config.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .envs(secrets.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    Ok(cmd)
+}
+
+/// Spawn the configured stdio server child process WITHOUT driving the MCP
+/// handshake (issue #392). Returns the raw [`Child`] so the caller owns the
+/// lifecycle — specifically, the async `probe_mcp_server` command retains the
+/// Child handle outside its `spawn_blocking` closure so a timeout can kill
+/// the process. The caller passes the child's stdin/stdout to
+/// [`stdio_handshake`] inside a blocking task.
+///
+/// This is split from [`StdioClient::connect`] (which couples spawn +
+/// initialize in one call) because `spawn_blocking` tasks are NOT
+/// cancellable — if the handshake hangs inside the task, the only way to
+/// guarantee the child is killed is to keep the Child handle outside.
+pub fn spawn_stdio_child(
+    config: &McpServerConfig,
+    secrets: &[SecretEnv],
+) -> Result<std::process::Child, ClientError> {
+    Ok(stdio_command(config, secrets)?.spawn()?)
+}
+
+/// Drive the MCP initialize + tools/list handshake on already-spawned stdio
+/// handles (issue #392). Returns the raw tool list on success. Used by the
+/// probe command which owns the Child externally (for timeout kill); this
+/// function performs only the blocking I/O, not process management.
+pub fn stdio_handshake(
+    stdin: std::process::ChildStdin,
+    stdout: std::process::ChildStdout,
+) -> Result<Vec<Value>, ClientError> {
+    let mut client = McpClient::new(BufReader::new(stdout), stdin);
+    client.initialize()?;
+    client.list_tools()
+}
+
+// ---------------------------------------------------------------------------
 // HTTP transport client (streamable HTTP, issue #389)
 // ---------------------------------------------------------------------------
 
@@ -319,7 +370,9 @@ pub struct HttpClient {
 impl HttpClient {
     /// Connect to the HTTP endpoint and perform the MCP initialize handshake.
     pub fn connect(url: &str) -> Result<Self, ClientError> {
-        let agent = ureq::AgentBuilder::new().build();
+        let agent = ureq::AgentBuilder::new()
+            .timeout_read(HTTP_READ_TIMEOUT)
+            .build();
         let mut client = Self {
             url: url.to_string(),
             agent,
@@ -784,7 +837,7 @@ fn transport_label(t: &McpTransport) -> String {
 /// error the agent self-corrects from (ADR-0077) plus a trace entry.
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
-    #[error("unsupported transport (slice C1 supports stdio only): {0}")]
+    #[error("unsupported transport: {0}")]
     UnsupportedTransport(String),
     #[error("failed to spawn MCP server: {0}")]
     Spawn(#[from] std::io::Error),

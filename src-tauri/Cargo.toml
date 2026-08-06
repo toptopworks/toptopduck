@@ -41,6 +41,16 @@ path = "tests/fixtures/acp_fake_cli.rs"
 name = "mcp-fake-server"
 path = "tests/fixtures/mcp_fake_server.rs"
 
+# MCP hang server fixture (issue #392): a stdio process that spawns
+# successfully but never responds to JSON-RPC requests. The probe timeout
+# integration test spawns it, verifies the deadline fires, and confirms the
+# child is killed. Pure std — reads stdin to keep the pipe open, writes
+# nothing. The Tauri bundler ships only `main.rs`, so this never reaches end
+# users.
+[[bin]]
+name = "mcp-hang-server"
+path = "tests/fixtures/mcp_hang_server.rs"
+
 # ACP bridge process (ADR-0085, issue #299 slice 9b): a thin stdio<->TCP proxy
 # the external CLI launches as its MCP server (per the McpServer::stdio_bridge
 # descriptor). Pure std -- no lib import, no serde, no JSON parsing: it forwards
@@ -128,6 +138,12 @@ log = "0.4"
 # facade, so existing log::warn! call sites need zero changes -- the sink is
 # transparent.
 tauri-plugin-log = "2"
+# tokio is already a transitive dep through Tauri; declared explicitly so the
+# probe command can use `tokio::time::timeout` to bound the MCP probe cycle
+# (issue #392). Only the `time` feature is needed — the runtime itself is
+# managed by Tauri's async_runtime. Zero additional code is shipped: the
+# tokio shared object is already linked.
+tokio = { version = "1", features = ["time"] }
 # `sqlparser` parses provider SQL to extract the FROM/JOIN reference-name set
 # for the stale-cascade provenance graph (issue #40, ADR-0013/0025/0040): each
 # materialized result_N records which working-set members its SQL named, so a
