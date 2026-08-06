@@ -106,6 +106,11 @@ pub fn mcp_servers(map: &Mapping) -> Vec<String> {
 /// posture of [`mcp_servers`].
 pub fn mcp_servers_from_yaml(yaml: &str) -> Vec<String> {
     let Ok(Value::Mapping(mapping)) = serde_yaml::from_str(yaml) else {
+        log::warn!(
+            target: "skills",
+            "unparseable frontmatter YAML -- MCP server declarations contribute \
+             nothing (the skill body is still injected if the fence is valid)",
+        );
         return Vec::new();
     };
     mcp_servers(&mapping)

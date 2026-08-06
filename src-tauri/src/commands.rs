@@ -526,19 +526,20 @@ pub async fn ask(
         // and the turn.
         let mounted = s.mounted_skills();
         let skill_fragments = resolve_prompt_fragments(&skills_root, &mounted);
+        // Issue #369: mirror the mounted-skills snapshot onto the handle so
+        // `list_mcp_server_status` stays lock-light (it reads the snapshot
+        // instead of taking this lock, which an in-flight turn holds).
+        handle.set_mounted_skills_snapshot(mounted.clone());
         // Issue #369: compute the effective MCP set = enabled_mcp (user intent)
-        // ∪ (skill-declared ids ∩ globally configured). The skill fragments
-        // carry each mounted skill's mcp_servers (parsed from frontmatter); we
-        // collect them into a set for the membership test. Mount/unmount does
-        // not change enabled_mcp -- the skill contribution is a computed layer
+        // ∪ (skill-declared ids ∩ globally configured). Reuse
+        // [`resolve_skill_mcp_map`] so the skill→id mapping has one source of
+        // truth (shared with `list_mcp_server_status`). Mount/unmount does not
+        // change enabled_mcp -- the skill contribution is a computed layer
         // recalculated each turn.
-        let skill_mcp_ids: HashSet<String> = skill_fragments
-            .iter()
-            .flat_map(|f| f.mcp_servers.iter().cloned())
-            .collect();
+        let skill_mcp = resolve_skill_mcp_map(&skills_root, &mounted);
         let active: Vec<McpServerConfig> = mcp_servers
             .iter()
-            .filter(|srv| enabled.contains(&srv.id) || skill_mcp_ids.contains(&srv.id.0))
+            .filter(|srv| enabled.contains(&srv.id) || skill_mcp.contains_key(&srv.id.0))
             .cloned()
             .collect();
         let outcome = s.ask_with_phase(
@@ -806,9 +807,6 @@ pub fn clear_mcp_server_secret(
         .map_err(StoreCommandError::KeychainFailure)
 }
 
-/// One row of the per-session MCP server status (issue #301 slice D, AC#3).
-/// The UI renders every configured server with its on/off toggle state + its
-/// last connect outcome + tool count. Joined at the command boundary from
 /// Why a server is enabled in this session (issue #369). Distinguishes
 /// user-toggled from skill-declared so the "+" panel renders three states:
 /// off (`None`) / on-user (`User`, toggle off allowed) / on-skill (`Skill`,
@@ -826,6 +824,9 @@ pub enum McpEnabledSource {
     Skill { name: String },
 }
 
+/// One row of the per-session MCP server status (issue #301 slice D, AC#3).
+/// The UI renders every configured server with its on/off toggle state + its
+/// last connect outcome + tool count. Joined at the command boundary from
 /// app-config (the full registry) + the handle's enablement set + the last
 /// turn's connect cache.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -874,16 +875,17 @@ pub fn toggle_mcp_server(
 
 /// List every configured MCP server with this session's effective enablement +
 /// last connect outcome (issue #301 slice D AC#3, extended #369 for skill
-/// sources). Takes the session lock briefly to read the mounted-skill set, then
-/// resolves each mounted skill's `metadata.toptopduck_mcp_servers` to build a
-/// server-id → skill-name map. A server enabled by either the user toggle set
-/// OR a mounted skill is `enabled: true`; the `source` field distinguishes
-/// user-toggled (`User`) from skill-declared (`Skill { name }`). When both
-/// sources enable the same server, skill takes priority (v1 read-only, issue
-/// #369 spec). A configured-but-not-enabled server appears with `enabled:
-/// false` + `source: None`; an enabled server that has not connected yet this
-/// session (or whose last connect failed) surfaces `connected: false` via the
-/// cache miss.
+/// sources). Lock-light: reads the handle's mirrored mounted-skills snapshot +
+/// enablement set + connect cache, never the session lock (an in-flight turn
+/// holds it). Resolves each mounted skill's `metadata.toptopduck_mcp_servers`
+/// via the snapshot to build a server-id → skill-name map. A server enabled by
+/// either the user toggle set OR a mounted skill is `enabled: true`; the
+/// `source` field distinguishes user-toggled (`User`) from skill-declared
+/// (`Skill { name }`). When both sources enable the same server, skill takes
+/// priority (v1 read-only, issue #369 spec). A configured-but-not-enabled
+/// server appears with `enabled: false` + `source: None`; an enabled server
+/// that has not connected yet this session (or whose last connect failed)
+/// surfaces `connected: false` via the cache miss.
 #[tauri::command]
 pub fn list_mcp_server_status(
     store: State<'_, Arc<SessionStore>>,
@@ -895,13 +897,10 @@ pub fn list_mcp_server_status(
     let handle = store.get(&id)?;
     let enabled = handle.enabled_mcp_servers();
     let last_connect = handle.last_mcp_connect();
-    // Issue #369: resolve mounted skills' declared MCP server ids to build a
-    // server-id → skill-name map. The session lock is held only for the brief
-    // mounted_skills() clone; the skill file reads happen outside the lock.
-    let mounted = {
-        let s = handle.session_lock()?;
-        s.mounted_skills()
-    };
+    // Issue #369: read the mirrored mounted-skills snapshot (lock-light --
+    // never takes the session lock). The snapshot is updated on mount/unmount
+    // and inside `ask`, so it is current outside an in-flight turn.
+    let mounted = handle.mounted_skills_snapshot();
     let skill_mcp = resolve_skill_mcp_map(&skills_root.0, &mounted);
     let entries = live
         .mcp_servers()
@@ -1863,6 +1862,9 @@ pub fn mount_skill(
     reject_if_in_flight(&handle)?;
     let mut s = handle.session_lock()?;
     s.mount_skill(&name).map_err(SessionError::SkillMount)?;
+    // Issue #369: mirror the updated mounted-skills set onto the handle so
+    // `list_mcp_server_status` stays lock-light.
+    handle.set_mounted_skills_snapshot(s.mounted_skills());
     // Issue #369 AC#5: warn for declared MCP server ids not in the global
     // registry. The mount already succeeded (the skill is live for prompt
     // injection); the unknown ids are simply skipped in the effective set.
@@ -1886,7 +1888,11 @@ pub fn unmount_skill(
     reject_if_resuming(&handle)?;
     reject_if_in_flight(&handle)?;
     let mut s = handle.session_lock()?;
-    s.unmount_skill(&name).map_err(SessionError::SkillMount)
+    s.unmount_skill(&name).map_err(SessionError::SkillMount)?;
+    // Issue #369: mirror the updated mounted-skills set onto the handle so
+    // `list_mcp_server_status` stays lock-light.
+    handle.set_mounted_skills_snapshot(s.mounted_skills());
+    Ok(())
 }
 
 /// The session's currently-mounted skill names, in first-mount insertion order

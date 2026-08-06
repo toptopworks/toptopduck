@@ -93,12 +93,19 @@ export function ComposerSkillsSection({
   // Resync the cache + clear the mutation error after a mount / unmount settle.
   // Central here so both mutations share the identical post-write behavior
   // (seed the cache for an instant flip, then invalidate so the backend truth
-  // lands). Issue #369: also invalidate mcpStatus so the MCP section re-reads
-  // the skill-declared server contributions + the trigger badge recomputes.
+  // lands).
   function applyMountDelta(delta: (prev: string[] | undefined) => string[]) {
     setError(null);
     queryClient.setQueryData<string[]>(sessionKeys.mountedSkills(sessionId), delta);
     void queryClient.invalidateQueries({ queryKey: sessionKeys.mountedSkills(sessionId) });
+  }
+
+  // Issue #369: invalidate mcpStatus once per mutation in onSettled (fires on
+  // both success + error) so the MCP section re-reads the skill-declared server
+  // contributions + the trigger badge recomputes. Centralizing here avoids
+  // repeating the call in onSuccess + onError for each mutation.
+  function invalidateAfterSkillMutation(name: string) {
+    clearPending(name);
     void queryClient.invalidateQueries({ queryKey: sessionKeys.mcpStatus(sessionId) });
   }
 
@@ -110,9 +117,8 @@ export function ComposerSkillsSection({
     onError: (e) => {
       setError(fmtError(e, intl));
       void queryClient.invalidateQueries({ queryKey: sessionKeys.mountedSkills(sessionId) });
-      void queryClient.invalidateQueries({ queryKey: sessionKeys.mcpStatus(sessionId) });
     },
-    onSettled: (_d, _e, name) => clearPending(name),
+    onSettled: (_d, _e, name) => invalidateAfterSkillMutation(name),
   });
 
   const unmountMutation = useMutation({
@@ -123,9 +129,8 @@ export function ComposerSkillsSection({
     onError: (e) => {
       setError(fmtError(e, intl));
       void queryClient.invalidateQueries({ queryKey: sessionKeys.mountedSkills(sessionId) });
-      void queryClient.invalidateQueries({ queryKey: sessionKeys.mcpStatus(sessionId) });
     },
-    onSettled: (_d, _e, name) => clearPending(name),
+    onSettled: (_d, _e, name) => invalidateAfterSkillMutation(name),
   });
 
   function toggle(skill: SkillEntry) {

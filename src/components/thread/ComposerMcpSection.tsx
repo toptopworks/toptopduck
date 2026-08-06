@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 
 import { listMcpServerStatus, toggleMcpServer } from "../../api";
@@ -36,6 +37,8 @@ export type ComposerMcpSectionProps = {
 export function ComposerMcpSection({ sessionId, loading }: ComposerMcpSectionProps) {
   const intl = useIntl();
   const queryClient = useQueryClient();
+  const [error, setError] = useState<string | null>(null);
+  const [pendingId, setPendingId] = useState<string | null>(null);
 
   const { data: mcpStatus, error: queryError } = useQuery({
     queryKey: sessionKeys.mcpStatus(sessionId),
@@ -49,19 +52,28 @@ export function ComposerMcpSection({ sessionId, loading }: ComposerMcpSectionPro
   const toggleMutation = useMutation({
     mutationFn: (args: { id: string; enabled: boolean }) =>
       toggleMcpServer(sessionId, args.id, args.enabled),
-    onSuccess: invalidate,
-    onError: invalidate,
+    onSuccess: () => {
+      setError(null);
+      setPendingId(null);
+      invalidate();
+    },
+    onError: (e) => {
+      setError(fmtError(e, intl));
+      setPendingId(null);
+      invalidate();
+    },
   });
 
   function handleToggle(id: string, source: McpEnabledSource | null) {
     // Skill-enabled servers are read-only (v1, issue #369 spec).
     if (source?.kind === "skill") return;
     const currentlyEnabled = source !== null;
+    setPendingId(id);
     toggleMutation.mutate({ id, enabled: !currentlyEnabled });
   }
 
   const servers = mcpStatus ?? [];
-  const displayError = queryError ? fmtError(queryError, intl) : null;
+  const displayError = error ?? (queryError ? fmtError(queryError, intl) : null);
 
   if (servers.length === 0) {
     return null;
@@ -81,7 +93,11 @@ export function ComposerMcpSection({ sessionId, loading }: ComposerMcpSectionPro
           const isSkillSourced = src?.kind === "skill";
           const isUserSourced = src?.kind === "user";
           const skillName = src?.kind === "skill" ? src.name : null;
-          const disabled = loading || isSkillSourced || toggleMutation.isPending;
+          // Disable only the in-flight row (per-row pending, mirroring
+          // ComposerSkillsSection's pendingNames pattern) -- cross-row
+          // toggles proceed in parallel since the backend serializes through
+          // the session lock per-call.
+          const disabled = loading || isSkillSourced || pendingId === srv.id;
           return (
             <li key={srv.id}>
               <label className={ROW_CLASS}>
@@ -109,6 +125,9 @@ export function ComposerMcpSection({ sessionId, loading }: ComposerMcpSectionPro
                     />
                   </span>
                 )}
+                {/* Tool-count chip: shown only for user-sourced rows. Skill-sourced
+                    rows use the `ml-auto` right slot for the "via skill" label, so
+                    the two never collide (single right-slot, source-dependent). */}
                 {isUserSourced && srv.connected && srv.tool_count > 0 && (
                   <span className="text-muted-foreground ml-auto shrink-0 text-[10px]">
                     {srv.tool_count}
