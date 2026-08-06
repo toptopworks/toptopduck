@@ -253,22 +253,7 @@ impl StdioClient {
     /// [`McpServerConfig::keychain_env_keys`]); they are injected into the
     /// child env alongside [`McpServerConfig::env`] (the non-secret values).
     pub fn connect(config: &McpServerConfig, secrets: &[SecretEnv]) -> Result<Self, ClientError> {
-        let (command, args) = match &config.transport {
-            McpTransport::Stdio { command, args } => (command.clone(), args.clone()),
-            McpTransport::Sse { .. } | McpTransport::Http { .. } => {
-                return Err(ClientError::UnsupportedTransport(transport_label(
-                    &config.transport,
-                )));
-            }
-        };
-        let mut child = Command::new(&command)
-            .args(&args)
-            .envs(config.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-            .envs(secrets.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
+        let mut child = stdio_command(config, secrets)?.spawn()?;
         let stdin = child.stdin.take().ok_or(ClientError::NoChildStdin)?;
         let stdout = child.stdout.take().ok_or(ClientError::NoChildStdout)?;
         let mut client = StdioClient {
@@ -297,6 +282,68 @@ impl Drop for StdioClient {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Probe helpers (issue #392)
+// ---------------------------------------------------------------------------
+
+/// Build the [`Command`] for a stdio MCP server from the config (shared by
+/// [`StdioClient::connect`] and [`spawn_stdio_child`]). Extracts the command +
+/// args from the transport, injects env + keychain secrets, and configures
+/// piped stdin/stdout. Keeping this in one place prevents the two spawn paths
+/// (aggregator's per-turn connect vs the probe's timeout-bounded connect)
+/// from diverging on env/secret handling.
+fn stdio_command(config: &McpServerConfig, secrets: &[SecretEnv]) -> Result<Command, ClientError> {
+    let (command, args) = match &config.transport {
+        McpTransport::Stdio { command, args } => (command.clone(), args.clone()),
+        McpTransport::Sse { .. } | McpTransport::Http { .. } => {
+            return Err(ClientError::UnsupportedTransport(transport_label(
+                &config.transport,
+            )));
+        }
+    };
+    let mut cmd = Command::new(&command);
+    cmd.args(&args)
+        .envs(config.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .envs(secrets.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    Ok(cmd)
+}
+
+/// Spawn the configured stdio server child process WITHOUT driving the MCP
+/// handshake (issue #392). Returns the raw [`Child`] so the caller owns the
+/// lifecycle — specifically, the async `probe_mcp_server` command retains the
+/// Child handle outside its `spawn_blocking` closure so a timeout can kill
+/// the process. The caller passes the child's stdin/stdout to
+/// [`stdio_handshake`] inside a blocking task.
+///
+/// This is split from [`StdioClient::connect`] (which couples spawn +
+/// initialize in one call) because `spawn_blocking` tasks are NOT
+/// cancellable — if the handshake hangs inside the task, the only way to
+/// guarantee the child is killed is to keep the Child handle outside.
+pub fn spawn_stdio_child(
+    config: &McpServerConfig,
+    secrets: &[SecretEnv],
+) -> Result<std::process::Child, ClientError> {
+    stdio_command(config, secrets)?
+        .spawn()
+        .map_err(ClientError::Spawn)
+}
+
+/// Drive the MCP initialize + tools/list handshake on already-spawned stdio
+/// handles (issue #392). Returns the raw tool list on success. Used by the
+/// probe command which owns the Child externally (for timeout kill); this
+/// function performs only the blocking I/O, not process management.
+pub fn stdio_handshake(
+    stdin: std::process::ChildStdin,
+    stdout: std::process::ChildStdout,
+) -> Result<Vec<Value>, ClientError> {
+    let mut client = McpClient::new(BufReader::new(stdout), stdin);
+    client.initialize()?;
+    client.list_tools()
 }
 
 // ---------------------------------------------------------------------------

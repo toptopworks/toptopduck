@@ -31,7 +31,7 @@ use tauri::{Emitter, Manager, State};
 use crate::app_config::AppConfig;
 use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink, AuthMode, ToolKey};
 use crate::cancel::CancelToken;
-use crate::mcp::config::{McpServerConfig, McpServerId};
+use crate::mcp::config::{McpServerConfig, McpServerId, McpTransport};
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, LoadOutcome, ProfileId, ProfileKeyStatus,
     ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView, RemoveSourceError, RowPage,
@@ -823,6 +823,60 @@ pub struct McpProbeResult {
     pub error: Option<String>,
 }
 
+/// Default probe deadline when [`McpServerConfig::timeout_ms`] is `None`
+/// (issue #392). Generous enough for a well-behaved stdio server's spawn +
+/// initialize + tools/list cycle on a cold start.
+const PROBE_DEFAULT_TIMEOUT_MS: u32 = 30_000;
+
+/// Kill + reap a child process, logging a warning if reaping fails (the kill
+/// is best-effort; a failed wait would leak a zombie). Used by the stdio
+/// probe path where the Child handle is retained outside `spawn_blocking`.
+fn kill_and_reap_child(child: &mut std::process::Child) {
+    let _ = child.kill();
+    if let Err(e) = child.wait() {
+        log::warn!(target: "toptopduck::mcp", "probe child reap failed: {e}");
+    }
+}
+
+/// Map a timeout-bounded probe outcome to an [`McpProbeResult`]. Both the
+/// stdio and SSE/HTTP branches produce the same shape after flattening:
+/// `Result<Vec<Value>, String>` (tools on success, error string on failure)
+/// wrapped in `tokio::time::timeout`. This helper consolidates the three-arm
+/// match (success / error / timeout) so the two transport branches share one
+/// mapping.
+fn probe_result_from_outcome(
+    outcome: Result<Result<Vec<serde_json::Value>, String>, tokio::time::error::Elapsed>,
+    server_id: &str,
+    deadline_ms: u32,
+) -> McpProbeResult {
+    match outcome {
+        Ok(Ok(tools)) => McpProbeResult {
+            connected: true,
+            tools: crate::mcp::aggregator::extract_tool_info(&tools),
+            error: None,
+        },
+        Ok(Err(e)) => {
+            log::warn!(target: "toptopduck::mcp", "probe for server {server_id} failed: {e}");
+            McpProbeResult {
+                connected: false,
+                tools: Vec::new(),
+                error: Some(e),
+            }
+        }
+        Err(_) => {
+            log::warn!(
+                target: "toptopduck::mcp",
+                "probe for server {server_id} timed out after {deadline_ms}ms"
+            );
+            McpProbeResult {
+                connected: false,
+                tools: Vec::new(),
+                error: Some(format!("probe timed out after {deadline_ms} ms")),
+            }
+        }
+    }
+}
+
 /// Probe one MCP server's connectivity (issue #387). Global (not
 /// session-scoped): the settings page calls this to test a configured server
 /// without starting a turn. Connects via the transport dispatcher
@@ -830,56 +884,75 @@ pub struct McpProbeResult {
 /// tears down. Receives the full [`McpServerConfig`], resolves the server's
 /// secret env values from the keychain
 /// ([`McpServerConfig::keychain_env_keys`], ADR-0029 -- values never cross
-/// IPC), connects via [`connect_transport`](crate::mcp::client::connect_transport)
-/// (which dispatches to the transport-specific client), lists tools, then
-/// drops the client (tearing down the transport). Returns the outcome so the
+/// IPC), connects, lists tools, then tears down. Returns the outcome so the
 /// UI can render a status dot + expandable tool list.
+///
+/// Async + deadline-bounded (issue #392): the entire spawn + initialize +
+/// tools/list cycle is wrapped in `tokio::time::timeout` with a deadline
+/// from `server.timeout_ms` (or the 30 s default). For stdio the child is
+/// spawned in the async scope (not inside `spawn_blocking`) so the Child
+/// handle is retained for kill-on-timeout — `spawn_blocking` tasks are NOT
+/// cancellable, and the only way to guarantee a hung child is reaped is to
+/// keep the process handle outside the blocking closure.
 #[tauri::command]
-pub fn probe_mcp_server(
+pub async fn probe_mcp_server(
     live: State<'_, LiveProviderConfig>,
     server: McpServerConfig,
 ) -> Result<McpProbeResult, StoreCommandError> {
-    // Resolve secret env values from the keychain (ADR-0029 -- the values never
-    // cross IPC). Shared with the aggregator's connect path so both evolve
-    // together (collect_secrets logs + skips on a per-key keychain fault).
     let secrets = crate::mcp::aggregator::collect_secrets(live.keychain(), &server);
+    let deadline_ms = server.timeout_ms.unwrap_or(PROBE_DEFAULT_TIMEOUT_MS);
+    let deadline = Duration::from_millis(deadline_ms as u64);
+    let server_id = server.id.as_str().to_string();
 
-    let mut client = match crate::mcp::client::connect_transport(&server, &secrets) {
-        Ok(c) => c,
-        Err(e) => {
-            log::warn!(
-                target: "toptopduck::mcp",
-                "probe for server {} connect failed: {e}",
-                server.id
-            );
-            return Ok(McpProbeResult {
-                connected: false,
-                tools: Vec::new(),
-                error: Some(e.to_string()),
-            });
-        }
-    };
-    let tools = match client.list_tools() {
-        Ok(t) => t,
-        Err(e) => {
-            log::warn!(
-                target: "toptopduck::mcp",
-                "probe for server {} tools/list failed: {e}",
-                server.id
-            );
-            return Ok(McpProbeResult {
-                connected: false,
-                tools: Vec::new(),
-                error: Some(format!("tools/list failed: {e}")),
-            });
-        }
-    };
-    // client drops here -> transport teardown (kills child / stops SSE thread).
-    Ok(McpProbeResult {
-        connected: true,
-        tools: crate::mcp::aggregator::extract_tool_info(&tools),
-        error: None,
+    // Stdio: spawn the child in the async scope so we own the Child handle
+    // for kill-on-timeout. The blocking handshake runs in spawn_blocking with
+    // the child's stdin/stdout (issue #392).
+    if let McpTransport::Stdio { .. } = &server.transport {
+        let mut child = match crate::mcp::client::spawn_stdio_child(&server, &secrets) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!(target: "toptopduck::mcp", "probe for server {server_id} spawn failed: {e}");
+                return Ok(McpProbeResult {
+                    connected: false,
+                    tools: Vec::new(),
+                    error: Some(e.to_string()),
+                });
+            }
+        };
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take();
+
+        let join = tauri::async_runtime::spawn_blocking(move || {
+            let stdin = stdin.ok_or_else(|| "child stdin not available".to_string())?;
+            let stdout = stdout.ok_or_else(|| "child stdout not available".to_string())?;
+            crate::mcp::client::stdio_handshake(stdin, stdout).map_err(|e| e.to_string())
+        });
+
+        let outcome = tokio::time::timeout(deadline, async {
+            join.await.map_err(|e| e.to_string()).and_then(|r| r)
+        })
+        .await;
+
+        kill_and_reap_child(&mut child);
+        return Ok(probe_result_from_outcome(outcome, &server_id, deadline_ms));
+    }
+
+    // SSE/HTTP: the blocking ureq I/O runs inside spawn_blocking wrapped in
+    // a deadline. ureq's own socket-level timeouts backstop a network hang;
+    // the outer deadline catches any missed case.
+    let server_for_blocking = server.clone();
+    let result = tokio::time::timeout(deadline, async {
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut client = crate::mcp::client::connect_transport(&server_for_blocking, &secrets)?;
+            client.list_tools()
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r.map_err(|e| e.to_string()))
     })
+    .await;
+
+    Ok(probe_result_from_outcome(result, &server_id, deadline_ms))
 }
 
 /// Discover MCP servers from an external tool's config (issue #390). Reads the
