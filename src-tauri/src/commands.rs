@@ -40,7 +40,7 @@ use crate::model::{
 use crate::persistence::{list_session_metadata, SaveError, SessionMetadata};
 use crate::provider::live_config::LiveProviderConfig;
 use crate::runtime::acp::adapter::{detect_adapter, v1_adapters, AdapterSpec};
-use crate::session::{RenameSessionError, ResumeEvent, ResumeProgress, Session};
+use crate::session::{RenameSessionError, ResumeEvent, ResumeProgress, Session, TurnInputs};
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
 use crate::skills::{
     discover_skill_sources, import_skills as import_skills_impl, resolve_prompt_fragments,
@@ -542,6 +542,11 @@ pub async fn ask(
             .filter(|srv| enabled.contains(&srv.id) || skill_mcp.contains_key(&srv.id.0))
             .cloned()
             .collect();
+        let inputs = TurnInputs {
+            mcp_servers: &active,
+            keychain: live.keychain(),
+            skills: &skill_fragments,
+        };
         let outcome = s.ask_with_phase(
             &question,
             &approval,
@@ -565,9 +570,7 @@ pub async fn ask(
                     );
                 }
             },
-            &active,
-            live.keychain(),
-            &skill_fragments,
+            &inputs,
         );
         // Issue #301 slice D: mirror the Session's last-turn connect cache into
         // the handle so list_mcp_server_status is lock-light (it never takes

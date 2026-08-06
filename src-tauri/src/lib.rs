@@ -72,7 +72,7 @@ pub use provider::{
 };
 pub use session::{
     is_resuming, ActiveAbandoned, ActiveResolution, PendingConflict, RenameSessionError,
-    ResumeError, ResumeEvent, ResumeProgress, Session, SourceIssue, SourceResolution,
+    ResumeError, ResumeEvent, ResumeProgress, Session, SourceIssue, SourceResolution, TurnInputs,
 };
 pub use session_store::{
     ClosingFlag, SessionError, SessionHandle, SessionId, SessionStore, UNKNOWN_SESSION,

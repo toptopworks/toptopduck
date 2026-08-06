@@ -593,6 +593,42 @@ impl TurnAudit {
     }
 }
 
+/// The per-turn borrowed data inputs for [`Session::ask_with_phase`] (issue
+/// #378): the effective MCP servers, the keychain for secret env resolution,
+/// and the mounted skill prompt fragments. These three are "data passed in"
+/// rather than orchestration concerns -- the approval state / sink / phase
+/// callback are wiring, not data -- so they collapse into one struct. This
+/// keeps `run_external_turn` (currently 8 params, `#[allow]` retained) from
+/// growing further, and prevents `ask_with_phase` from exceeding the
+/// threshold as more data inputs are added.
+pub struct TurnInputs<'a> {
+    /// The effective MCP server configs for this turn (enabled ∪
+    /// skill-declared, computed at the command boundary). The gateway
+    /// connects each one per turn (ADR-0076).
+    pub mcp_servers: &'a [McpServerConfig],
+    /// Borrow of the OS keychain (ADR-0029). The gateway reads each server's
+    /// secret env values at spawn; the values never cross IPC back out.
+    pub keychain: &'a KeychainStore,
+    /// The mounted-skill prompt fragments (ADR-0086, issue #364). Each
+    /// fragment's body rides the system prompt; its `content_hash` snapshots
+    /// into the turn's provenance for resume-time drift detection.
+    pub skills: &'a [SkillPromptFragment],
+}
+
+impl<'a> TurnInputs<'a> {
+    /// Build a no-MCP / no-skill input set -- the common case in tests and the
+    /// non-command path ([`Session::ask`]). Borrows the caller-owned keychain;
+    /// `Default` is impossible because the keychain field is a borrowed (not
+    /// owned) type.
+    pub fn empty(keychain: &'a KeychainStore) -> Self {
+        Self {
+            mcp_servers: &[],
+            keychain,
+            skills: &[],
+        }
+    }
+}
+
 impl Session {
     pub fn new() -> anyhow::Result<Self> {
         Self::with_provider_and_cancel(Box::new(UnwiredProvider), Arc::new(CancelToken::new()))
@@ -1783,7 +1819,8 @@ impl Session {
         let keychain = KeychainStore::new();
         // No mounted skills either: tests that need skill injection call
         // ask_with_phase directly with resolved fragments (issue #364).
-        self.ask_with_phase(question, &approval, &sink, |_| {}, &[], &keychain, &[])
+        let inputs = TurnInputs::empty(&keychain);
+        self.ask_with_phase(question, &approval, &sink, |_| {}, &inputs)
     }
 
     /// Run one turn AND surface its discrete progress events (ADR-0059,
@@ -1803,16 +1840,13 @@ impl Session {
     /// the approval-card events. Both live at the command boundary (the only
     /// layer holding an AppHandle, ADR-0029) and are borrowed per turn, so the
     /// Session stays unparameterized across `commands.rs`.
-    #[allow(clippy::too_many_arguments)]
     pub fn ask_with_phase(
         &mut self,
         question: &str,
         approval: &ApprovalState,
         sink: &dyn ApprovalSink,
         on_phase: impl FnMut(TurnPhase) + Send,
-        mcp_servers: &[McpServerConfig],
-        keychain: &KeychainStore,
-        skills: &[SkillPromptFragment],
+        inputs: &TurnInputs<'_>,
     ) -> TurnOutcome {
         // Facade over the agent loop (ADR-0081, issue #318): assemble the
         // windowed tool-calling request (system prompt + tool table + windowed
@@ -1830,7 +1864,8 @@ impl Session {
         // Computed once here so both branches see the same assembly-time
         // snapshot; an empty slice stays empty end-to-end (no skill section in
         // the prompt, no skills in the provenance -- the pre-skill path).
-        let skill_provenance: Vec<SkillProvenance> = skills
+        let skill_provenance: Vec<SkillProvenance> = inputs
+            .skills
             .iter()
             .map(|f| SkillProvenance {
                 name: f.name.clone(),
@@ -1846,23 +1881,19 @@ impl Session {
         // both hold it.
         let (outcome, trace) = match self.external_runtime.clone() {
             Some(adapter) => self.run_external_turn(
-                question,
-                &turns,
-                locale,
-                adapter,
-                approval,
-                sink,
-                on_phase,
-                mcp_servers,
-                keychain,
-                skills,
+                question, &turns, locale, adapter, approval, sink, on_phase, inputs,
             ),
             None => {
                 // Built-in agent loop (ADR-0081, issue #318): assemble the
                 // windowed tool-calling request, drive the loop with the shared
                 // session state, map the structured LoopOutcome onto TurnOutcome.
-                let mut request =
-                    window::assemble_tool_turn(question, &self.working_set, &turns, locale, skills);
+                let mut request = window::assemble_tool_turn(
+                    question,
+                    &self.working_set,
+                    &turns,
+                    locale,
+                    inputs.skills,
+                );
                 // Disjoint field borrows: the loop borrows `&*self.provider`
                 // while TurnDeps borrows `&self.conn` / `&self.source_files` /
                 // `&mut self.working_set` / `&self.temp_path` and the loop takes
@@ -1885,7 +1916,7 @@ impl Session {
                     // preceding the borrow keeps borrowck structural so the
                     // command layer can mirror it into the SessionHandle).
                     let mut mcp = crate::mcp::aggregator::McpAggregator::empty();
-                    self.last_mcp_connect = mcp.connect_all(mcp_servers, keychain);
+                    self.last_mcp_connect = mcp.connect_all(inputs.mcp_servers, inputs.keychain);
                     request
                         .tools
                         .extend(crate::tools::external_tool_definitions(
@@ -1961,6 +1992,10 @@ impl Session {
     /// for gateway-routed tools, ACP pump for the CLI's own built-in tools),
     /// and returns the same `(TurnOutcome, trace)` shape the built-in branch
     /// does so [`Self::ask_with_phase`]'s post-turn path is shared.
+    // Cannot collapse further: question / history / locale / adapter are
+    // external-runtime orchestration params with no natural grouping (unlike
+    // the three data inputs now in TurnInputs); approval / sink / on_phase
+    // are per-turn wiring callbacks (see TurnInputs doc), not data.
     #[allow(clippy::too_many_arguments)]
     fn run_external_turn<O: FnMut(TurnPhase) + Send>(
         &mut self,
@@ -1971,9 +2006,7 @@ impl Session {
         approval: &ApprovalState,
         sink: &dyn ApprovalSink,
         on_phase: O,
-        mcp_servers: &[McpServerConfig],
-        keychain: &KeychainStore,
-        skills: &[SkillPromptFragment],
+        inputs: &TurnInputs<'_>,
     ) -> (TurnOutcome, Vec<TraceEntry>) {
         // 1. Resolve the CLI binary. Not-on-PATH -> a transient turn failure
         //    (the engine never spawns; nothing to clean up).
@@ -2024,7 +2057,7 @@ impl Session {
         // 4. Assemble the prompt blocks (leading context: locale + schema;
         //    skill block before question; M-contract via gateway tool table).
         let prompt_blocks =
-            window::assemble_acp_turn(question, &self.working_set, history, locale, skills);
+            window::assemble_acp_turn(question, &self.working_set, history, locale, inputs.skills);
         let input = AcpTurnInput {
             cwd: self.temp_path.to_string_lossy().to_string(),
             mcp_servers: vec![mcp_server],
@@ -2085,7 +2118,7 @@ impl Session {
             // self.working_set (disjoint field, assignment-first keeps borrowck
             // structural for the command-layer mirror).
             let mut mcp = crate::mcp::aggregator::McpAggregator::empty();
-            self.last_mcp_connect = mcp.connect_all(mcp_servers, keychain);
+            self.last_mcp_connect = mcp.connect_all(inputs.mcp_servers, inputs.keychain);
             let deps = TurnDeps {
                 conn: &self.conn,
                 source_files: &self.source_files,

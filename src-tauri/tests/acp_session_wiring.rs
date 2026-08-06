@@ -22,7 +22,7 @@ use toptopduck_lib::skills::{resolve_prompt_fragments, SkillPromptFragment};
 use toptopduck_lib::util::sha256_hex;
 use toptopduck_lib::{
     ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState, KeychainStore, Session,
-    TurnOutcome,
+    TurnInputs, TurnOutcome,
 };
 
 /// The fake-CLI adapter: the fixture binary (named `acp-fake-cli`) driven with
@@ -170,9 +170,11 @@ fn external_turn_with_skill_records_provenance() {
         &approval,
         &sink,
         |_| {},
-        &[],
-        &keychain,
-        &fragments,
+        &TurnInputs {
+            mcp_servers: &[],
+            keychain: &keychain,
+            skills: &fragments,
+        },
     );
     std::env::set_var("PATH", old_path);
     assert!(
