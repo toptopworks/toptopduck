@@ -7,13 +7,14 @@ import { listMountedSkills, listMcpServerStatus, listSkills } from "../../api";
 import { sessionKeys, skillKeys } from "../../session/queryKeys";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { ComposerSkillsSection } from "./ComposerSkillsSection";
+import { ComposerMcpSection } from "./ComposerMcpSection";
 
 // The composer "+" session-context panel (ADR-0083, issue #351). One entry for
 // the three per-turn context additions -- files / skills / MCP tools -- at the
 // turn-launch point. This slice delivers the shell + the live FILE section
 // (multi-select into the existing ingest pipeline) + the live SKILLS section
-// (issue #365: per-session mount/unmount checkbox list); the MCP (#301) section
-// renders as a disabled placeholder until that ticket lights it up. With
+// (issue #365: per-session mount/unmount checkbox list) + the live MCP section
+// (issue #369: three-state server enablement). With
 // nothing to assemble (registry empty AND no configured MCP server) the "+"
 // DEGRADES to a pure add-files button: the dialog opens directly, no panel.
 // The trigger's badge carries attached context (mounted skills + session-
@@ -64,12 +65,13 @@ export function ComposerContextPanel({
   const intl = useIntl();
   const [panelOpen, setPanelOpen] = useState(false);
 
-  // Per-session MCP status (issue #301 slice D): the badge counts the servers
-  // THIS session enabled. The query is lock-light server-side, so one read per
-  // mounted pane is cheap; a reject (session closed mid-flight) degrades to
-  // data-undefined -> count 0, never a user-facing error.
-  // TODO(#301 follow-up): invalidate mcpStatus after the MCP section's toggle
-  // flips a server, so the badge re-reads without a remount.
+  // Per-session MCP status (issue #301 slice D, #369): the badge counts the
+  // servers in THIS session's effective enabled set (user ∪ skill). The query
+  // is lock-light server-side, so one read per mounted pane is cheap; a reject
+  // (session closed mid-flight) degrades to data-undefined -> count 0, never a
+  // user-facing error. ComposerMcpSection's toggle mutation + the skills
+  // section's mount/unmount mutations both invalidate this key so the badge
+  // re-reads without a remount.
   const { data: mcpStatus } = useQuery({
     queryKey: sessionKeys.mcpStatus(sessionId),
     queryFn: () => listMcpServerStatus(sessionId),
@@ -212,22 +214,12 @@ export function ComposerContextPanel({
             loading={loading}
             onOpenSettingsSkills={onOpenSettingsSkills}
           />
-          {/* Section 3: MCP tools -- disabled placeholder until #301 lights it
-              up (server-granularity per-session enablement multi-select). */}
-          <section className="grid gap-1.5 opacity-60" aria-disabled="true">
-            <span className="text-sm font-medium text-muted-foreground">
-              <FormattedMessage
-                id="composer.contextPanel.mcpTitle"
-                defaultMessage="MCP tools"
-              />
-            </span>
-            <span className="text-xs text-muted-foreground">
-              <FormattedMessage
-                id="composer.contextPanel.placeholderHint"
-                defaultMessage="Not available yet"
-              />
-            </span>
-          </section>
+          {/* Section 3: MCP tools -- live (issue #369). Three-state server
+              list: off / on-user (toggle off) / on-skill (read-only). The
+              section renders only when at least one MCP server is configured;
+              an empty registry yields null (the section is hidden, not an empty
+              shell). The parent's badge reads the same mcpStatus query. */}
+          <ComposerMcpSection sessionId={sessionId} loading={loading} />
         </div>
       </PopoverContent>
     </Popover>

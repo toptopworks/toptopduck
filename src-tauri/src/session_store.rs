@@ -287,6 +287,14 @@ pub struct SessionHandle {
     /// (the ADR-0080 reset lineage: a session-level assembly posture, not in
     /// the recipe / app-config).
     runtime: Mutex<Option<AdapterSpec>>,
+    /// Issue #369: a snapshot of the session's mounted-skill names, mirrored
+    /// from `Session::mounted_skills()` on mount/unmount (and inside `ask`).
+    /// Lets `list_mcp_server_status` resolve skill-declared MCP servers without
+    /// taking the session lock an in-flight turn holds -- the same lock-light
+    /// pattern as `enabled_mcp` + `last_mcp_connect`. Reset to empty on resume
+    /// alongside the MCP enablement set; the first post-resume `ask` repopulates
+    /// it from the replayed recipe.
+    mounted_skills_snapshot: Mutex<Vec<String>>,
 }
 
 impl SessionHandle {
@@ -444,7 +452,10 @@ impl SessionHandle {
     /// D, AC#3). Called by `open_duck` after a successful resume alongside
     /// [`Self::reset_approval`] -- the enablement is session-level and must
     /// not survive a resume (it is not in the recipe / app-config, same
-    /// reasoning as the approval posture).
+    /// reasoning as the approval posture). Issue #369: also clears the
+    /// mounted-skills snapshot so `list_mcp_server_status` does not surface
+    /// stale skill-declared servers before the first post-resume turn
+    /// repopulates it.
     pub fn reset_mcp_enablement(&self) {
         self.enabled_mcp
             .lock()
@@ -453,6 +464,10 @@ impl SessionHandle {
         self.last_mcp_connect
             .lock()
             .expect("last_mcp_connect lock poisoned")
+            .clear();
+        self.mounted_skills_snapshot
+            .lock()
+            .expect("mounted_skills_snapshot lock poisoned")
             .clear();
     }
 
@@ -477,6 +492,29 @@ impl SessionHandle {
             .last_mcp_connect
             .lock()
             .expect("last_mcp_connect lock poisoned") = results;
+    }
+
+    /// A snapshot of the session's mounted-skill names (issue #369). Mirrored
+    /// from `Session::mounted_skills()` on mount/unmount and inside `ask`, so
+    /// `list_mcp_server_status` can resolve skill-declared MCP servers without
+    /// taking the session lock an in-flight turn holds. Empty until the first
+    /// mount and after a resume (the first post-resume `ask` repopulates).
+    pub fn mounted_skills_snapshot(&self) -> Vec<String> {
+        self.mounted_skills_snapshot
+            .lock()
+            .expect("mounted_skills_snapshot lock poisoned")
+            .clone()
+    }
+
+    /// Mirror the session's mounted-skill set into the handle (issue #369).
+    /// Called by `mount_skill`/`unmount_skill` (session lock held) and `ask`
+    /// (session lock held) so the snapshot stays current. Lock-light: touches
+    /// only the handle's own Mutex, no session-lock re-entry.
+    pub fn set_mounted_skills_snapshot(&self, names: Vec<String>) {
+        *self
+            .mounted_skills_snapshot
+            .lock()
+            .expect("mounted_skills_snapshot lock poisoned") = names;
     }
 
     // --- Runtime selector (issue #353, ADR-0076/0081/0083) ------------------
@@ -572,6 +610,7 @@ impl SessionStore {
             // Issue #353: the built-in runtime is the honest default (ADR-0081);
             // an external CLI is an explicit per-session pick, reset on resume.
             runtime: Mutex::new(None),
+            mounted_skills_snapshot: Mutex::new(Vec::new()),
         });
         // Generate the id only after the resource exists; insert under the
         // write lock; return the id only after the insert lands.

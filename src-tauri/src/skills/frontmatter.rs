@@ -100,6 +100,22 @@ pub fn mcp_servers(map: &Mapping) -> Vec<String> {
         .collect()
 }
 
+/// Parse a raw YAML frontmatter string and extract the MCP server ids (issue
+/// #369). Degrades to an empty list on any parse failure -- a malformed
+/// frontmatter contributes no MCP servers, mirroring the degrade-everywhere
+/// posture of [`mcp_servers`].
+pub fn mcp_servers_from_yaml(yaml: &str) -> Vec<String> {
+    let Ok(Value::Mapping(mapping)) = serde_yaml::from_str(yaml) else {
+        log::warn!(
+            target: "skills",
+            "unparseable frontmatter YAML -- MCP server declarations contribute \
+             nothing (the skill body is still injected if the fence is valid)",
+        );
+        return Vec::new();
+    };
+    mcp_servers(&mapping)
+}
+
 /// Set a top-level string field, or REMOVE the key when the value is None /
 /// blank -- a cleared optional field disappears from the frontmatter instead of
 /// persisting as an empty string.

@@ -388,6 +388,19 @@ export async function listMcpServerStatus(sessionId: string): Promise<McpServerS
   return invoke<McpServerStatusEntry[]>("list_mcp_server_status", { sessionId });
 }
 
+// Toggle one MCP server's enabled state for this session (issue #301 slice D
+// AC#3, used by the composer "+" panel MCP section, issue #369). Session-
+// scoped: enabling includes all the server's tools in the next turn's
+// connect_all; disabling removes them. The change lands next turn (per-turn
+// spawn, ADR-0076 Q2).
+export async function toggleMcpServer(
+  sessionId: string,
+  serverId: string,
+  enabled: boolean,
+): Promise<void> {
+  await invoke<void>("toggle_mcp_server", { sessionId, serverId, enabled });
+}
+
 // --- Skills registry (issue #362, ADR-0086) --------------------------------
 //
 // CRUD over the Agent Skills registry under <app_data_dir>/skills.

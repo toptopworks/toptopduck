@@ -1234,7 +1234,7 @@ function mcpServer(id: string): McpServerConfig {
 
 // A per-session MCP status row (issue #301 slice D shape).
 function mcpStatus(id: string, enabled: boolean): McpServerStatusEntry {
-  return { id, display_name: id, enabled, connected: false, tool_count: 0, error: null };
+  return { id, display_name: id, enabled, source: enabled ? { kind: "user" } : null, connected: false, tool_count: 0, error: null };
 }
 
 describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
@@ -2134,6 +2134,10 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
       ...baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
       mcp_servers: { servers: [mcpServer("srv")] },
     });
+    // Issue #369: the MCP section renders only when the status list is
+    // non-empty; mock one server so the section appears alongside files +
+    // skills.
+    vi.mocked(listMcpServerStatus).mockResolvedValue([mcpStatus("srv", false)]);
     render(<App />);
     await openSession();
 
@@ -2142,14 +2146,14 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     );
 
     // File section live; skills section live (issue #365, empty registry ->
-    // empty-state hint); MCP section still a disabled placeholder (#301).
+    // empty-state hint); MCP section live (issue #369).
     expect(
       await screen.findByRole("button", { name: "选择数据文件…" }),
     ).toBeInTheDocument();
     expect(screen.getByText("技能")).toBeInTheDocument();
     expect(screen.getByText("暂无技能。在设置中添加。")).toBeInTheDocument();
-    expect(screen.getByText("MCP 工具")).toBeInTheDocument();
-    expect(screen.getAllByText("即将开放")).toHaveLength(1);
+    expect(await screen.findByText("MCP 工具")).toBeInTheDocument();
+    expect(screen.getByText("srv")).toBeInTheDocument();
   });
 
   it("badges the session-enabled MCP count on the [+] trigger", async () => {

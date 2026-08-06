@@ -100,6 +100,15 @@ export function ComposerSkillsSection({
     void queryClient.invalidateQueries({ queryKey: sessionKeys.mountedSkills(sessionId) });
   }
 
+  // Issue #369: invalidate mcpStatus once per mutation in onSettled (fires on
+  // both success + error) so the MCP section re-reads the skill-declared server
+  // contributions + the trigger badge recomputes. Centralizing here avoids
+  // repeating the call in onSuccess + onError for each mutation.
+  function invalidateAfterSkillMutation(name: string) {
+    clearPending(name);
+    void queryClient.invalidateQueries({ queryKey: sessionKeys.mcpStatus(sessionId) });
+  }
+
   const mountMutation = useMutation({
     mutationFn: (name: string) => mountSkill(sessionId, name),
     onMutate: (name) => markPending(name),
@@ -109,7 +118,7 @@ export function ComposerSkillsSection({
       setError(fmtError(e, intl));
       void queryClient.invalidateQueries({ queryKey: sessionKeys.mountedSkills(sessionId) });
     },
-    onSettled: (_d, _e, name) => clearPending(name),
+    onSettled: (_d, _e, name) => invalidateAfterSkillMutation(name),
   });
 
   const unmountMutation = useMutation({
@@ -121,7 +130,7 @@ export function ComposerSkillsSection({
       setError(fmtError(e, intl));
       void queryClient.invalidateQueries({ queryKey: sessionKeys.mountedSkills(sessionId) });
     },
-    onSettled: (_d, _e, name) => clearPending(name),
+    onSettled: (_d, _e, name) => invalidateAfterSkillMutation(name),
   });
 
   function toggle(skill: SkillEntry) {

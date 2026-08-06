@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use super::frontmatter::split_frontmatter;
+use super::frontmatter::{mcp_servers_from_yaml, split_frontmatter};
 use super::model::is_valid_skill_name;
 use crate::util::sha256_hex;
 
@@ -42,6 +42,11 @@ pub struct SkillPromptFragment {
     /// turn's assembly time. Empty string when no baseline exists (unreadable
     /// at turn time); a live v4 turn otherwise records the real digest.
     pub content_hash: String,
+    /// The MCP server ids declared under `metadata.toptopduck_mcp_servers`
+    /// (issue #369). Empty when absent or when the frontmatter YAML is
+    /// unparseable. The command layer intersects these with the globally
+    /// configured servers to derive the effective MCP enablement set.
+    pub mcp_servers: Vec<String>,
 }
 
 /// Resolve the mounted-skill names into prompt fragments for both the system
@@ -82,6 +87,7 @@ fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
             name: name.to_string(),
             body: String::new(),
             content_hash: String::new(),
+            mcp_servers: Vec::new(),
         };
     }
     let path = root.join(name).join(SKILL_MD);
@@ -98,6 +104,7 @@ fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
                 name: name.to_string(),
                 body: String::new(),
                 content_hash: String::new(),
+                mcp_servers: Vec::new(),
             };
         }
     };
@@ -108,22 +115,26 @@ fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
     // structural (fence lines), not semantic (YAML parse), so a body is still
     // recoverable when an externally edited frontmatter is malformed YAML --
     // the user's prompt fragment stays live until they repair or unmount.
+    // The frontmatter YAML string is also captured so the MCP server ids can
+    // be extracted (issue #369) -- a malformed YAML degrades to empty, so a
+    // broken frontmatter injects the body but contributes no MCP servers.
     let raw = String::from_utf8_lossy(&bytes);
-    let body = match split_frontmatter(&raw) {
-        Ok((_, body)) => body,
+    let (body, mcp_servers) = match split_frontmatter(&raw) {
+        Ok((yaml, body)) => (body, mcp_servers_from_yaml(&yaml)),
         Err(reason) => {
             log::warn!(
                 target: "skills",
                 "mounted skill `{name}` has a malformed SKILL.md fence ({reason}) \
                  -- injecting no body, recording hash only",
             );
-            String::new()
+            (String::new(), Vec::new())
         }
     };
     SkillPromptFragment {
         name: name.to_string(),
         body,
         content_hash,
+        mcp_servers,
     }
 }
 
@@ -132,10 +143,18 @@ mod tests {
     use super::*;
 
     /// Write one skill directory with a `---`-fenced SKILL.md (frontmatter +
-    /// body). `body` is inserted verbatim between the closing fence and EOF.
+    /// body). `extra_fm` is inserted verbatim into the frontmatter block (for
+    /// metadata extensions like `toptopduck_mcp_servers`); `body` is inserted
+    /// verbatim between the closing fence and EOF.
     fn put_skill(root: &Path, name: &str, body: &str) {
+        put_skill_fm(root, name, "", body);
+    }
+
+    /// Write one skill directory with extra frontmatter lines.
+    fn put_skill_fm(root: &Path, name: &str, extra_fm: &str, body: &str) {
         std::fs::create_dir_all(root.join(name)).unwrap();
-        let content = format!("---\nname: {name}\ndescription: Test skill {name}.\n---\n{body}");
+        let content =
+            format!("---\nname: {name}\ndescription: Test skill {name}.{extra_fm}\n---\n{body}");
         std::fs::write(root.join(name).join(SKILL_MD), content).unwrap();
     }
 
@@ -260,5 +279,54 @@ mod tests {
             "frontmatter difference must flip the whole-file hash",
         );
         assert_eq!(fragments[0].body, fragments[1].body);
+    }
+
+    #[test]
+    fn fragment_extracts_mcp_servers_from_frontmatter() {
+        // A skill declaring MCP servers via the metadata extension key yields
+        // the parsed ids on the fragment (issue #369).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        put_skill_fm(
+            root,
+            "github-helper",
+            "\nmetadata:\n  toptopduck_mcp_servers: github-mcp, context7",
+            "Use GitHub tools.\n",
+        );
+        let fragments = resolve_prompt_fragments(root, &["github-helper".to_string()]);
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(
+            fragments[0].mcp_servers,
+            vec!["github-mcp".to_string(), "context7".to_string()],
+        );
+    }
+
+    #[test]
+    fn fragment_mcp_servers_empty_when_metadata_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        put_skill(root, "plain-skill", "Body.\n");
+        let fragments = resolve_prompt_fragments(root, &["plain-skill".to_string()]);
+        assert_eq!(fragments.len(), 1);
+        assert!(fragments[0].mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn fragment_mcp_servers_empty_when_frontmatter_unparseable() {
+        // A structurally valid fence but malformed YAML still yields the body
+        // (the split is structural), but mcp_servers degrades to empty because
+        // the YAML parse fails.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("bad-yaml")).unwrap();
+        std::fs::write(
+            root.join("bad-yaml").join(SKILL_MD),
+            "---\nname: bad-yaml\ndescription: d\nmetadata: [invalid yaml\n---\nBody.\n",
+        )
+        .unwrap();
+        let fragments = resolve_prompt_fragments(root, &["bad-yaml".to_string()]);
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0].body, "Body.\n");
+        assert!(fragments[0].mcp_servers.is_empty());
     }
 }

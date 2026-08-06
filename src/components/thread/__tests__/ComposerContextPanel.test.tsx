@@ -17,8 +17,8 @@ import type { McpServerStatusEntry } from "../../../types/mcp";
 
 // ComposerContextPanel is the composer "+" shell (ADR-0083, issue #351):
 // three-section context panel (files / skills / MCP). The skills section went
-// live in issue #365 (per-session mount/unmount checkbox list); MCP stays a
-// disabled placeholder until #301. Routes its chrome through react-intl
+// live in issue #365; the MCP section went live in issue #369 (three-state
+// server enablement). Routes its chrome through react-intl
 // (ADR-0052); rendered inside an empty-catalog English IntlProvider so
 // assertions anchor on the canonical defaultMessage strings. The skill + mount
 // APIs + the dialog plugin are mocked so the view never hits Tauri (ADR-0029).
@@ -43,6 +43,7 @@ function status(id: string, enabled: boolean): McpServerStatusEntry {
     id,
     display_name: id,
     enabled,
+    source: enabled ? { kind: "user" } : null,
     connected: false,
     tool_count: 0,
     error: null,
@@ -183,20 +184,20 @@ describe("ComposerContextPanel (ADR-0083, issue #351)", () => {
       expect(
         await screen.findByText("No skills yet. Add one in Settings."),
       ).toBeInTheDocument();
-      // Section 3: MCP tools -- still a disabled placeholder until #301.
-      expect(screen.getByText("MCP tools")).toBeInTheDocument();
-      expect(screen.getByText("Not available yet")).toBeInTheDocument();
+      // Section 3: MCP tools -- live (issue #369). The section renders only
+      // when at least one server is configured; the default mock returns [],
+      // so no MCP header appears in this test.
+      expect(screen.queryByText("MCP tools")).not.toBeInTheDocument();
     });
 
-    it("marks only the MCP placeholder section aria-disabled", async () => {
-      // The skills section went live (#365): only the MCP placeholder keeps
-      // its aria-disabled marker now.
+    it("renders the MCP section when servers are configured", async () => {
+      vi.mocked(listMcpServerStatus).mockResolvedValue([status("srv-a", false)]);
       renderPanel({ mcpConfigured: true });
       fireEvent.click(screen.getByRole("button", { name: "Add session context" }));
       await screen.findByRole("button", { name: "Select data files…" });
 
-      const disabledSections = document.querySelectorAll("[aria-disabled='true']");
-      expect(disabledSections.length).toBe(1);
+      expect(await screen.findByText("MCP tools")).toBeInTheDocument();
+      expect(screen.getByText("srv-a")).toBeInTheDocument();
     });
 
     it("ingests the picked files and closes the panel", async () => {
