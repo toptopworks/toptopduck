@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import {
   ArrowLeft,
+  Cable,
   Cpu,
   KeyRound,
   Puzzle,
@@ -28,6 +29,7 @@ import {
 import { Button } from "../ui/button";
 import { EngineSection } from "./EngineSection";
 import { GeneralSection } from "./GeneralSection";
+import { McpSection } from "./McpSection";
 import { ProfilesSection, type ProfilesControls } from "./ProfilesSection";
 import { PrivacySection } from "./PrivacySection";
 import { SkillsSection } from "./SkillsSection";
@@ -74,6 +76,8 @@ function SectionIcon({ section }: { section: SettingsSection }) {
       return <Cpu className="size-4 shrink-0" aria-hidden />;
     case "privacy":
       return <ShieldCheck className="size-4 shrink-0" aria-hidden />;
+    case "mcp":
+      return <Cable className="size-4 shrink-0" aria-hidden />;
     default: {
       const _exhaustive: never = section;
       throw new Error(`Unknown settings section: ${String(_exhaustive)}`);
@@ -96,6 +100,8 @@ function SectionLabel({ section }: { section: SettingsSection }) {
       return <FormattedMessage id="settings.nav.engine" defaultMessage="Engine" />;
     case "privacy":
       return <FormattedMessage id="settings.nav.privacy" defaultMessage="Privacy" />;
+    case "mcp":
+      return <FormattedMessage id="settings.nav.mcp" defaultMessage="MCP Servers" />;
     default: {
       const _exhaustive: never = section;
       throw new Error(`Unknown settings section: ${String(_exhaustive)}`);
@@ -145,6 +151,8 @@ function SectionContent({
       return <EngineSection appConfig={appConfig} onCommit={onCommit} />;
     case "privacy":
       return <PrivacySection />;
+    case "mcp":
+      return <McpSection appConfig={appConfig} onCommit={onCommit} />;
     default: {
       const _exhaustive: never = section;
       throw new Error(`Unknown settings section: ${String(_exhaustive)}`);
