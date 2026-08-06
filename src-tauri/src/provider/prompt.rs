@@ -107,7 +107,8 @@ fn render_skill_section(skills: &[SkillPromptFragment]) -> String {
         out.push_str(&skill.name);
         out.push_str("`：\n");
         // Trim trailing whitespace for clean section separation; the body is
-        // otherwise byte-verbatim (ADR-0086 "逐字不模板化").
+        // otherwise byte-verbatim (ADR-0086: skill body injected as-is, never
+        // summarized or templated).
         out.push_str(skill.body.trim_end());
         out.push('\n');
     }
@@ -131,14 +132,14 @@ pub fn render_skill_block(skills: &[SkillPromptFragment]) -> String {
 /// persona; our capability boundary is enforced at the tool / gateway surface
 /// (ADR-0086 Consequence: external downgrades to tool-surface boundary). The
 /// M-contract (`result_N` naming) rides the gateway tool descriptions
-/// ([`crate::tools::definitions`]), not this block. Skill fragments are
+/// ([`crate::tools::builtin_table`]), not this block. Skill fragments are
 /// injected as a separate text block by the caller
 /// ([`crate::window::assemble_acp_turn`]).
 pub fn build_acp_context_block(request: &ProviderRequest, locale: ResponseLocale) -> String {
     let mut out = String::new();
     out.push_str(response_locale_directive(locale));
     out.push_str(&render_schema_context(request));
-    out.trim_start().to_string()
+    out.trim_start().to_owned()
 }
 
 /// The full system prompt for the legacy single-SQL path (ADR-0052): the
@@ -900,7 +901,7 @@ mod tests {
         assert!(prompt.contains("挂载技能"));
     }
 
-    // --- external-runtime ACP context block + skill block (ADR-0086, #368) ---
+    // --- external-runtime ACP context block + skill block (ADR-0086, issue #368) ---
 
     #[test]
     fn build_acp_context_block_omits_capability_boundary() {

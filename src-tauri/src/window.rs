@@ -108,10 +108,7 @@ pub fn assemble_acp_turn(
 ) -> Vec<ContentBlock> {
     let request = assemble(question, working_set, history);
     let mut blocks = Vec::with_capacity(request.history.len() * 2 + 3);
-    // Leading context block: locale directive + schema context ONLY (no
-    // capability boundary prompt, ADR-0086). The external CLI needs the schema
-    // so the first SQL has a data anchor; the result_N naming discipline rides
-    // the gateway tool descriptions.
+    // Leading context block (locale + schema only, ADR-0086).
     blocks.push(ContentBlock::text(build_acp_context_block(
         &request, locale,
     )));
@@ -133,14 +130,10 @@ pub fn assemble_acp_turn(
             }
         }
     }
-    // Mounted-skill fragments as a separate text block before the question
-    // (ADR-0086, issue #368): reuses the internal renderer so the framing +
-    // verbatim body are identical across runtimes. Omitted when no skills are
-    // mounted (the block count stays at the pre-skill shape).
+    // Mounted-skill fragments as a separate block before the question (#368).
     if !skills.is_empty() {
         blocks.push(ContentBlock::text(render_skill_block(skills)));
     }
-    // The asking question as the final block.
     blocks.push(ContentBlock::text(request.question));
     blocks
 }
@@ -970,11 +963,8 @@ mod tests {
     // the user's question, not embedded in a system prompt. These tests pin
     // both invariants + the block ordering.
 
-    use crate::provider::prompt::ResponseLocale as AcpLocale;
-    use crate::skills::SkillPromptFragment as AcpFragment;
-
-    fn acp_fragment(name: &str, body: &str) -> AcpFragment {
-        AcpFragment {
+    fn acp_fragment(name: &str, body: &str) -> SkillPromptFragment {
+        SkillPromptFragment {
             name: name.into(),
             body: body.into(),
             content_hash: "deadbeef".into(),
@@ -987,7 +977,7 @@ mod tests {
         // The capability boundary landmarks (IN-SCOPE / OUT-SCOPE / refuse)
         // must be absent so they do not compete with the CLI's own persona.
         let (ws, history) = source_plus_turns(1);
-        let blocks = assemble_acp_turn("查询", &ws, &history, AcpLocale::ZhCN, &[]);
+        let blocks = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &[]);
         let leading = blocks.first().expect("at least one block");
         let text = leading.as_text().expect("leading block is text");
         assert!(text.contains("【数据上下文】"), "schema context present");
@@ -1003,7 +993,7 @@ mod tests {
         // block right before the user's question (after the history blocks).
         let (ws, history) = source_plus_turns(1);
         let skills = vec![acp_fragment("sql-coach", "Name the method.\n")];
-        let blocks = assemble_acp_turn("查询", &ws, &history, AcpLocale::ZhCN, &skills);
+        let blocks = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &skills);
         // Last block = the user's question.
         let last = blocks.last().expect("at least one block");
         assert_eq!(last.as_text().unwrap(), "查询");
@@ -1031,14 +1021,14 @@ mod tests {
         // An empty mount set adds no skill block -- the question is the last
         // block and the block count matches the pre-skill shape.
         let (ws, history) = source_plus_turns(1);
-        let blocks_empty = assemble_acp_turn("查询", &ws, &history, AcpLocale::ZhCN, &[]);
+        let blocks_empty = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &[]);
         // Last block is the question, second-to-last is a history block (not a
         // skill block).
         assert_eq!(blocks_empty.last().unwrap().as_text().unwrap(), "查询");
         // With skills added, the block count grows by exactly 1 (the skill
         // block); the question stays last.
         let skills = vec![acp_fragment("a", "Body A.\n")];
-        let blocks_with = assemble_acp_turn("查询", &ws, &history, AcpLocale::ZhCN, &skills);
+        let blocks_with = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &skills);
         assert_eq!(
             blocks_with.len(),
             blocks_empty.len() + 1,
@@ -1055,7 +1045,7 @@ mod tests {
             acp_fragment("beta", "Body B.\n"),
             acp_fragment("alpha", "Body A.\n"),
         ];
-        let blocks = assemble_acp_turn("查询", &ws, &history, AcpLocale::ZhCN, &skills);
+        let blocks = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &skills);
         let skill_block = &blocks[blocks.len() - 2];
         let text = skill_block.as_text().unwrap();
         let b = text.find("beta").unwrap();
