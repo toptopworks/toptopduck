@@ -822,6 +822,7 @@ mod tests {
             // The hash rides the fragment but is NOT part of the rendered
             // prompt; the renderer ignores it, so a placeholder is fine here.
             content_hash: "deadbeef".into(),
+            mcp_servers: Vec::new(),
         }
     }
 

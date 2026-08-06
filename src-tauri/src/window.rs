@@ -968,6 +968,7 @@ mod tests {
             name: name.into(),
             body: body.into(),
             content_hash: "deadbeef".into(),
+            mcp_servers: Vec::new(),
         }
     }
 

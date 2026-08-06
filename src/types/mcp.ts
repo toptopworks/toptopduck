@@ -56,9 +56,19 @@ export interface McpServerRegistry {
   servers: McpServerConfig[];
 }
 
-// One row of the per-session MCP server status (issue #301 slice D, AC#3).
-// Mirrors the Rust McpServerStatusEntry joined at the command boundary from
-// the app-config registry + the session's enablement set + the last turn's
+// The enablement source for a server in this session (issue #369). Mirrors
+// the Rust McpEnabledSource adjacently-tagged enum (snake_case variants).
+// Distinguishes user-toggled from skill-declared so the "+" panel renders
+// three states: off (null) / on-user (can toggle off) / on-skill (read-only,
+// labeled "via skill <name>").
+export type McpEnabledSource =
+  | { kind: "user" }
+  | { kind: "skill"; name: string };
+
+// One row of the per-session MCP server status (issue #301 slice D, AC#3 +
+// #369 skill sources). Mirrors the Rust McpServerStatusEntry joined at the
+// command boundary from the app-config registry + the session's effective
+// enablement set (user ∪ skill-declared ∩ configured) + the last turn's
 // connect cache. list_mcp_server_status returns one entry per CONFIGURED
 // server, enabled or not.
 export interface McpServerStatusEntry {
@@ -66,8 +76,13 @@ export interface McpServerStatusEntry {
   id: string;
   // The renamable display label.
   display_name: string;
-  // Whether THIS session has the server enabled (the toggle state).
+  // Whether THIS session has the server in the EFFECTIVE enabled set -- user
+  // OR skill (issue #369). false when neither source enabled it.
   enabled: boolean;
+  // The enablement source (issue #369): null when disabled, { kind: "user" }
+  // when user-toggled, { kind: "skill", name } when skill-declared. When both
+  // sources enable the same server, skill takes priority (v1 read-only).
+  source: McpEnabledSource | null;
   // Whether the last turn's connect succeeded for this server (false when
   // enabled-but-failed or not connected yet this session).
   connected: boolean;
