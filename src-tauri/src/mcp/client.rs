@@ -43,6 +43,15 @@ use crate::mcp::config::{McpServerConfig, McpTransport};
 use crate::mcp::MCP_PROTOCOL_VERSION;
 use crate::runtime::gateway::framing;
 
+/// SSE reader-thread read timeout. Bounds the join latency in `SseClient::drop`
+/// (the reader wakes at most every this interval to re-check the stop flag).
+const SSE_READ_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Bounded channel capacity for SSE reader → consumer message forwarding.
+/// Backpressures a flooding server so the reader blocks on send rather than
+/// accumulating unbounded messages in memory (H4: review feedback).
+const SSE_CHANNEL_BOUND: usize = 64;
+
 /// One keychain-backed env value the gateway injects at spawn. The gateway
 /// resolves these from the OS keychain via
 /// [`crate::mcp::secrets::get_mcp_secret`] (ADR-0029) BEFORE constructing the
@@ -340,9 +349,24 @@ impl HttpClient {
             loop {
                 match read_sse_event(&mut reader).map_err(ClientError::Framing)? {
                     Some(event) => {
-                        if let Ok(msg) = serde_json::from_str::<Value>(&event.data) {
-                            if msg.get("id") == id.as_ref() && id.is_some() {
-                                return check_rpc_response(&msg);
+                        match serde_json::from_str::<Value>(&event.data) {
+                            Ok(msg) => {
+                                if msg.get("id") == id.as_ref() && id.is_some() {
+                                    return check_rpc_response(&msg);
+                                }
+                            }
+                            Err(e) => {
+                                // Malformed JSON in an SSE event: return a
+                                // framing error to match the stdio path's
+                                // contract (framing::read_message →
+                                // InvalidData).
+                                return Err(ClientError::Framing(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    format!(
+                                        "malformed JSON in SSE event ({} bytes): {e}",
+                                        event.data.len()
+                                    ),
+                                )));
                             }
                         }
                     }
@@ -451,7 +475,7 @@ impl SseClient {
         // periodically check the stop flag (the stream is otherwise blocking
         // forever between events).
         let agent = ureq::AgentBuilder::new()
-            .timeout_read(Duration::from_secs(2))
+            .timeout_read(SSE_READ_TIMEOUT)
             .build();
 
         let response = agent
@@ -492,7 +516,7 @@ impl SseClient {
 
         // Spawn the background reader for subsequent events. A bounded
         // sync_channel backpressures a flooding server (H4: review feedback).
-        let (tx, rx) = mpsc::sync_channel(64);
+        let (tx, rx) = mpsc::sync_channel(SSE_CHANNEL_BOUND);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
         let handle = thread::spawn(move || {
@@ -593,8 +617,15 @@ impl Drop for SseClient {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.reader_thread.take() {
             // The reader thread checks the stop flag on each read-timeout
-            // (at most 2 s), so join returns promptly.
-            let _ = handle.join();
+            // (at most SSE_READ_TIMEOUT), so join returns promptly. If the
+            // thread panicked, log the payload — panics cannot propagate from
+            // Drop, but the diagnostic should not be silently lost.
+            if let Err(payload) = handle.join() {
+                log::error!(
+                    target: "toptopduck::mcp",
+                    "SSE reader thread panicked during drop: {payload:?}"
+                );
+            }
         }
     }
 }
@@ -621,9 +652,21 @@ fn sse_reader_loop<R: BufRead + Send>(
                     .map(|e| e == "message")
                     .unwrap_or(true);
                 if is_message {
-                    if let Ok(msg) = serde_json::from_str::<Value>(&event.data) {
-                        if msg.is_object() && tx.send(msg).is_err() {
-                            break; // Channel closed (client dropped).
+                    match serde_json::from_str::<Value>(&event.data) {
+                        Ok(msg) => {
+                            if msg.is_object() && tx.send(msg).is_err() {
+                                break; // Channel closed (client dropped).
+                            }
+                        }
+                        Err(e) => {
+                            // Malformed JSON in a message event: the matching
+                            // JSON-RPC response is lost, so log for
+                            // observability rather than silently dropping it.
+                            log::warn!(
+                                target: "toptopduck::mcp",
+                                "SSE reader: dropping malformed message event ({} bytes): {e}",
+                                event.data.len()
+                            );
                         }
                     }
                 }
@@ -637,7 +680,15 @@ fn sse_reader_loop<R: BufRead + Send>(
             {
                 continue; // Read timeout → re-check stop flag.
             }
-            Err(_) => break, // Unrecoverable stream error.
+            Err(e) => {
+                // Unrecoverable stream error (TCP RST, broken pipe, etc.):
+                // log so the operator can distinguish this from a clean close.
+                log::warn!(
+                    target: "toptopduck::mcp",
+                    "SSE reader: stream error, shutting down reader thread: {e}"
+                );
+                break;
+            }
         }
     }
 }
@@ -1006,6 +1057,58 @@ mod tests {
         assert!(
             matches!(err, ClientError::ServerError(_)),
             "error -> ServerError, got {err:?}"
+        );
+    }
+
+    // --- resolve_post_url SSRF guard (issue #389, H2) -------------------------
+
+    /// A relative path like `/message` resolves against the SSE base URL.
+    #[test]
+    fn resolve_post_url_resolves_relative_path() {
+        let url = resolve_post_url("http://localhost:3001/sse", "/message").expect("relative");
+        assert_eq!(url, "http://localhost:3001/message");
+    }
+
+    /// An absolute http URL to a different host is accepted (the MCP SSE
+    /// transport contract allows the server to advertise any http(s) endpoint).
+    #[test]
+    fn resolve_post_url_accepts_absolute_http_url() {
+        let url = resolve_post_url("http://localhost:3001/sse", "http://other.host:8080/mcp")
+            .expect("absolute");
+        assert_eq!(url, "http://other.host:8080/mcp");
+    }
+
+    /// A `file://` scheme in the endpoint event is rejected (SSRF guard).
+    #[test]
+    fn resolve_post_url_rejects_file_scheme() {
+        let err = resolve_post_url("http://localhost:3001/sse", "file:///etc/passwd")
+            .expect_err("file:// rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must be http or https"),
+            "file:// rejected with scheme error, got: {msg}"
+        );
+    }
+
+    /// A `gopher://` scheme is rejected (SSRF guard — protocol smuggling).
+    #[test]
+    fn resolve_post_url_rejects_gopher_scheme() {
+        let err = resolve_post_url("http://localhost:3001/sse", "gopher://attacker/x")
+            .expect_err("gopher:// rejected");
+        assert!(
+            err.to_string().contains("must be http or https"),
+            "gopher:// rejected with scheme error"
+        );
+    }
+
+    /// A `data:` scheme is rejected (SSRF guard).
+    #[test]
+    fn resolve_post_url_rejects_data_scheme() {
+        let err = resolve_post_url("http://localhost:3001/sse", "data:text/plain,evil")
+            .expect_err("data: rejected");
+        assert!(
+            err.to_string().contains("must be http or https"),
+            "data: rejected with scheme error"
         );
     }
 }

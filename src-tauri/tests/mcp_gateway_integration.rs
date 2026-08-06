@@ -283,10 +283,10 @@ fn connect_all_returns_per_server_connect_results_with_failure_reasons() {
     assert_eq!(fail.id, McpServerId("http-fail".into()));
     assert!(!fail.connected);
     assert_eq!(fail.tool_count, 0);
+    let fail_reason = fail.error.as_deref().unwrap_or("");
     assert!(
-        fail.error.is_some(),
-        "HTTP connect failure carries a reason, got {:?}",
-        fail.error
+        fail_reason.contains("HTTP transport error") || fail_reason.contains("Connection refused"),
+        "HTTP connect failure carries a transport-level reason, got: {fail_reason}"
     );
 
     // Success -> connected:true with the live tool count + no error.
@@ -325,8 +325,16 @@ struct ServerState {
 enum ServerMode {
     /// Streamable HTTP: each POST gets a JSON response.
     Http,
+    /// Streamable HTTP with SSE response: each POST gets a
+    /// `text/event-stream` response carrying the JSON-RPC envelope (exercises
+    /// `HttpClient`'s SSE branch, issue #389).
+    HttpSse,
     /// Legacy SSE: GET opens SSE stream; POST sends messages.
     Sse,
+    /// Legacy SSE that sends `event: message` (not `event: endpoint`) as the
+    /// first event — exercises `SseClient`'s first-event rejection guard (H1,
+    /// issue #389).
+    SseBadFirstEvent,
 }
 
 /// A minimal in-process HTTP MCP server for integration testing (issue #389).
@@ -436,8 +444,14 @@ fn handle_connection(
 
     match (mode, method) {
         (ServerMode::Http, "POST") => handle_jsonrpc_post(&mut stream, &body, "http-fake"),
+        (ServerMode::HttpSse, "POST") => {
+            handle_jsonrpc_sse_post(&mut stream, &body, "http-sse-fake")
+        }
         (ServerMode::Sse, "GET") => handle_sse_stream(&mut stream, &state, base_url),
         (ServerMode::Sse, "POST") => handle_sse_post(&mut stream, &body, &state),
+        (ServerMode::SseBadFirstEvent, "GET") => {
+            handle_sse_stream_bad_first_event(&mut stream, base_url);
+        }
         _ => {
             write_response(&mut stream, 404, "text/plain", "not found");
         }
@@ -464,7 +478,52 @@ fn handle_jsonrpc_post(stream: &mut TcpStream, body: &[u8], server_name: &str) {
     }
 }
 
+/// POST handler for streamable HTTP with SSE response: parse JSON-RPC, wrap the
+/// response in a single SSE `message` event (exercises `HttpClient`'s
+/// `text/event-stream` branch, issue #389 I3).
+fn handle_jsonrpc_sse_post(stream: &mut TcpStream, body: &[u8], server_name: &str) {
+    let req: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            write_response(stream, 400, "text/plain", "bad json");
+            return;
+        }
+    };
+    let resp = build_rpc_response(&req, server_name);
+    if let Value::Null = resp {
+        // Notification (no id) → 202 with empty body.
+        write_response(stream, 202, "application/json", "");
+    } else {
+        // Wrap the JSON-RPC response in a single SSE event.
+        let sse_body = format!("event: message\r\ndata: {}\r\n\r\n", resp);
+        write_response(stream, 200, "text/event-stream", &sse_body);
+    }
+}
+
 // --- Legacy SSE handlers ---------------------------------------------------
+
+/// GET handler for SSE transport that sends `event: message` as the first
+/// event instead of `event: endpoint` — exercises `SseClient`'s first-event
+/// rejection guard (H1, issue #389 I4).
+fn handle_sse_stream_bad_first_event(stream: &mut TcpStream, base_url: &str) {
+    let header = "HTTP/1.1 200 OK\r\n\
+                  Content-Type: text/event-stream\r\n\
+                  Cache-Control: no-cache\r\n\
+                  Connection: keep-alive\r\n\
+                  \r\n";
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.flush();
+
+    // Send a `message` event first (wrong — should be `endpoint`).
+    let payload = json!({"jsonrpc": "2.0", "id": 1, "result": {}}).to_string();
+    let bad = format!("event: message\r\ndata: {}\r\n\r\n", payload);
+    let _ = stream.write_all(bad.as_bytes());
+    let _ = stream.flush();
+
+    // Keep the connection open briefly so the client reads the first event.
+    let _ = base_url;
+    thread::sleep(Duration::from_secs(5));
+}
 
 /// GET handler for SSE transport: write SSE headers + endpoint event, then
 /// poll the shared queue for responses to relay as SSE events.
@@ -671,6 +730,50 @@ fn http_transport_aggregator_connect_and_route() {
         .route("mcp__httpmcp__add", &json!({"a": 10, "b": 20}))
         .expect("route ok");
     assert_eq!(first_text(&result), "30");
+}
+
+// --- Streamable HTTP SSE response tests (issue #389 I3) ---------------------
+
+/// `HttpClient` handles `text/event-stream` responses (streamable HTTP), not
+/// just plain JSON. The fixture wraps each JSON-RPC response in a single SSE
+/// `message` event (issue #389 I3).
+#[test]
+fn http_transport_handles_sse_response_branch() {
+    let server = HttpMcpServer::spawn(ServerMode::HttpSse);
+    let url = format!("{}/mcp", server.url());
+
+    let mut client =
+        toptopduck_lib::mcp::client::HttpClient::connect(&url).expect("http-sse connect");
+
+    let tools = client.list_tools().expect("tools/list via SSE response");
+    assert_eq!(tools.len(), 2, "http-sse server advertises echo + add");
+
+    let result = client
+        .call("add", &json!({"a": 20, "b": 22}))
+        .expect("tools/call via SSE response");
+    assert_eq!(first_text(&result), "42");
+}
+
+// --- SSE first-event rejection tests (issue #389 I4) ------------------------
+
+/// `SseClient::connect` rejects a server whose first SSE event is not
+/// `event: endpoint` (H1 security guard). The fixture sends
+/// `event: message` first (issue #389 I4).
+#[test]
+fn sse_transport_rejects_non_endpoint_first_event() {
+    let server = HttpMcpServer::spawn(ServerMode::SseBadFirstEvent);
+    let url = format!("{}/sse", server.url());
+
+    let result = toptopduck_lib::mcp::client::SseClient::connect(&url);
+    let err = match result {
+        Ok(_) => panic!("non-endpoint first event should be rejected"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("expected") && msg.contains("endpoint"),
+        "rejection reason mentions endpoint expectation, got: {msg}"
+    );
 }
 
 // --- SSE transport integration tests ---------------------------------------
