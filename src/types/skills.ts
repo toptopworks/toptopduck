@@ -58,17 +58,26 @@ export interface SkippedSkill {
   reason: string;
 }
 
-// The result of a registry scan (issue #373): the spec-valid skills plus the
-// directories the scan skipped. Mirrors the Rust SkillListing. `skills` keeps
-// the sorted / deduplicated semantics; `ignored` is sorted by directory name
-// for a stable listing. The frontend renders the ignored section ONLY when
-// `ignored` is non-empty (a clean registry never shows the section).
+// The result of a registry scan (issue #373 / #375): the spec-valid skills
+// plus the directories the scan skipped, plus a root-level error when the
+// skills root itself could not be read. Mirrors the Rust SkillListing.
+// `skills` keeps the sorted / deduplicated semantics; `ignored` is sorted by
+// directory name for a stable listing. The frontend renders the ignored
+// section ONLY when `ignored` is non-empty (a clean registry never shows the
+// section). `root_error` is null for the common case (root readable or never
+// created); when non-null the settings UI renders it so the user can
+// distinguish a locked-out root from a clean registry.
 export interface SkillListing {
   // Spec-valid skills, sorted by name.
   skills: SkillEntry[];
   // Directories the scan skipped, each with the English technical reason.
   // Sorted by directory name. Empty for a clean registry.
   ignored: SkippedSkill[];
+  // The English technical reason the skills root itself could not be read
+  // (issue #375): a permission denial, lock contention, or other IO failure
+  // distinct from a never-created registry (null). When non-null, `skills`
+  // and `ignored` are both empty.
+  root_error: string | null;
 }
 
 // The editable payload of update_skill. Addressed by the command's separate

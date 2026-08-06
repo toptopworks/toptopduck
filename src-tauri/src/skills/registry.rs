@@ -32,59 +32,108 @@ const TMP_SUFFIX: &str = ".tmp";
 
 /// Every spec-valid skill under `root`, sorted by name for a stable listing,
 /// plus the directories the scan SKIPPED with their English technical reason
-/// (issue #373). A missing root lists empty (a never-created registry is a
-/// valid state). Directories that fail the spec (no `SKILL.md`, malformed
-/// frontmatter, name / directory mismatch, blank body) are skipped -- the
-/// listing never fabricates an entry and one broken skill never hides the
-/// rest. Each skip is logged server-side AND surfaced in `ignored` so the
+/// (issue #373), plus a root-level error when the skills root itself could not
+/// be read (issue #375). A missing root (`NotFound`) lists empty with no error
+/// (a never-created registry is a valid state); any other `read_dir` failure
+/// (permission denied, lock contention, etc.) surfaces the English technical
+/// reason in `root_error` so the settings UI can distinguish a locked-out root
+/// from a clean registry. Directories that fail the spec (no `SKILL.md`,
+/// malformed frontmatter, name / directory mismatch, blank body) are skipped
+/// -- the listing never fabricates an entry and one broken skill never hides
+/// the rest. Each skip is logged server-side AND surfaced in `ignored` so the
 /// settings UI can show WHY a directory disappeared instead of debugging from
 /// silence; `ignored` is sorted by directory name for a deterministic listing.
+/// A directory entry the OS itself could not read (concurrent modification,
+/// entry-level permission) is also pushed to `ignored` rather than silently
+/// dropped by `flatten()`.
 pub fn list_skills(root: &Path) -> SkillListing {
-    let Ok(entries) = fs::read_dir(root) else {
-        return SkillListing {
-            skills: Vec::new(),
-            ignored: Vec::new(),
-        };
-    };
     let mut skills = Vec::new();
     let mut ignored = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        // Follow the link for the directory check: a symlink / junction ONTO a
-        // directory is a skill directory (the linked posture); a dangling link
-        // or a link to a file is not.
-        let is_dir = fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
-        if !is_dir {
-            continue;
-        }
-        match load_skill(&path) {
-            Ok(skill) => skills.push(skill),
-            Err(e) => {
-                log::warn!(
-                    target: "skills",
-                    "skipping non-spec skill directory `{}`: {e}",
-                    path.display()
-                );
-                // The directory name is the user-facing handle (parallel to
-                // SkillEntry::name). `to_string_lossy` keeps each non-UTF-8
-                // name distinct (different byte sequences map to different
-                // lossy strings) so two non-UTF-8 directories never collapse
-                // into one row + React key; a path with no file_name
-                // component falls back to a positional sentinel.
-                let dir = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| format!("<unnamed-entry-{}>", ignored.len()));
-                ignored.push(SkippedSkill {
-                    dir,
-                    reason: e.to_string(),
-                });
+    let mut root_error = None;
+
+    match fs::read_dir(root) {
+        Ok(entries) => {
+            for entry in entries {
+                match entry {
+                    Ok(entry) => {
+                        let path = entry.path();
+                        // Follow the link for the directory check: a symlink /
+                        // junction ONTO a directory is a skill directory (the
+                        // linked posture); a dangling link or a link to a file
+                        // is not.
+                        let is_dir = fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
+                        if !is_dir {
+                            continue;
+                        }
+                        match load_skill(&path) {
+                            Ok(skill) => skills.push(skill),
+                            Err(e) => {
+                                log::warn!(
+                                    target: "skills",
+                                    "skipping non-spec skill directory `{}`: {e}",
+                                    path.display()
+                                );
+                                // The directory name is the user-facing handle
+                                // (parallel to SkillEntry::name).
+                                // `to_string_lossy` keeps each non-UTF-8 name
+                                // distinct (different byte sequences map to
+                                // different lossy strings) so two non-UTF-8
+                                // directories never collapse into one row +
+                                // React key; a path with no file_name component
+                                // falls back to a positional sentinel.
+                                let dir = path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| {
+                                        format!("<unnamed-entry-{}>", ignored.len())
+                                    });
+                                ignored.push(SkippedSkill {
+                                    dir,
+                                    reason: e.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // The OS could not read one directory entry (concurrent
+                        // modification, entry-level permission, transient IO).
+                        // Surface it in `ignored` so the entry does not
+                        // disappear silently -- parallel to the spec-invalid
+                        // skip above. `file_name` is unavailable on an Err, so
+                        // use a positional sentinel (issue #375).
+                        log::warn!(
+                            target: "skills",
+                            "error reading a skills directory entry: {e}"
+                        );
+                        let dir = format!("<unreadable-entry-{}>", ignored.len());
+                        ignored.push(SkippedSkill {
+                            dir,
+                            reason: e.to_string(),
+                        });
+                    }
+                }
             }
         }
+        // NotFound is the legitimate "never-created registry" state -- not an
+        // error (issue #375).
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            log::warn!(
+                target: "skills",
+                "failed to read skills root `{}`: {e}",
+                root.display()
+            );
+            root_error = Some(format!("read skills root `{}` failed: {e}", root.display()));
+        }
     }
+
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     ignored.sort_by(|a, b| a.dir.cmp(&b.dir));
-    SkillListing { skills, ignored }
+    SkillListing {
+        skills,
+        ignored,
+        root_error,
+    }
 }
 
 /// Mint a new `local` skill: `<root>/<name>/SKILL.md` with the given
@@ -472,6 +521,34 @@ mod tests {
         let listing = list_skills(&missing);
         assert!(listing.skills.is_empty());
         assert!(listing.ignored.is_empty());
+        // NotFound is the legitimate "never-created registry" state -- no
+        // root_error (issue #375).
+        assert!(listing.root_error.is_none());
+    }
+
+    /// A non-`NotFound` `read_dir` failure surfaces the English technical
+    /// reason in `root_error` so the settings UI can distinguish a locked-out
+    /// root from a clean registry (issue #375). Passing a FILE path triggers
+    /// `NotADirectory` (not `NotFound`) on every platform -- a reliable,
+    /// cross-platform way to exercise the non-`NotFound` error arm without
+    /// platform-specific permission gymnastics.
+    #[test]
+    fn list_surfaces_root_error_when_read_dir_fails_non_notfound() {
+        let tmp = tempfile::tempdir().unwrap();
+        let not_a_dir = tmp.path().join("not-a-dir.txt");
+        fs::write(&not_a_dir, "x").unwrap();
+
+        let listing = list_skills(&not_a_dir);
+        assert!(listing.skills.is_empty());
+        assert!(listing.ignored.is_empty());
+        let root_error = listing
+            .root_error
+            .as_ref()
+            .expect("root_error should be Some for a non-NotFound read_dir failure");
+        assert!(
+            root_error.contains("not-a-dir.txt"),
+            "root_error should name the path, got: {root_error}"
+        );
     }
 
     #[test]

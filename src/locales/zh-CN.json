@@ -376,6 +376,7 @@
   "settings.skills.rescan": "重新扫描",
   "settings.skills.save": "保存",
   "settings.skills.saving": "保存中…",
+  "settings.skills.scanFailed": "扫描技能注册表失败：{detail}",
   "settings.skills.searchPlaceholder": "搜索技能…",
   "settings.theme.dark": "深色",
   "settings.theme.legend": "主题",

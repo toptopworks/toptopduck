@@ -466,20 +466,22 @@ fn skipped_skill_serializes_as_a_flat_snake_case_object() {
 
 #[test]
 fn skill_listing_wraps_skills_and_ignored() {
-    // SkillListing (issue #373): the list_skills return is a flat
-    // { skills, ignored } object -- `skills` keeps the SkillEntry shape pinned
-    // above (sorted, the existing semantics), `ignored` carries the spec-
-    // invalid directories. `ignored` is empty for a clean registry (the common
-    // case), so the empty-list literal is the shape the frontend renders as
-    // "no section". Pin both branches so a serde drift fails here before the
-    // hand-mirrored types/skills.ts can drift.
+    // SkillListing (issue #373 / #375): the list_skills return is a flat
+    // { skills, ignored, root_error } object -- `skills` keeps the SkillEntry
+    // shape pinned above (sorted, the existing semantics), `ignored` carries
+    // the spec-invalid directories, `root_error` carries the English technical
+    // reason when the skills root itself could not be read (permission denied,
+    // lock contention, etc.) -- `null` for the common case (root readable or
+    // never created). Pin all three branches so a serde drift fails here before
+    // the hand-mirrored types/skills.ts can drift.
     use toptopduck_lib::{Acquired, SkillEntry, SkillListing, SkippedSkill};
     assert_wire(
         &SkillListing {
             skills: Vec::new(),
             ignored: Vec::new(),
+            root_error: None,
         },
-        r#"{"skills":[],"ignored":[]}"#,
+        r#"{"skills":[],"ignored":[],"root_error":null}"#,
     );
     assert_wire(
         &SkillListing {
@@ -500,8 +502,19 @@ fn skill_listing_wraps_skills_and_ignored() {
                 reason: "frontmatter name `other` does not match its directory name `mismatch-dir`"
                     .into(),
             }],
+            root_error: None,
         },
-        r#"{"skills":[{"name":"pdf-tools","description":"Work with PDF files.","acquired":"local","license":null,"compatibility":null,"mcp_servers":[],"body":"Body.\n","link_target":null,"content_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}],"ignored":[{"dir":"mismatch-dir","reason":"frontmatter name `other` does not match its directory name `mismatch-dir`"}]}"#,
+        r#"{"skills":[{"name":"pdf-tools","description":"Work with PDF files.","acquired":"local","license":null,"compatibility":null,"mcp_servers":[],"body":"Body.\n","link_target":null,"content_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}],"ignored":[{"dir":"mismatch-dir","reason":"frontmatter name `other` does not match its directory name `mismatch-dir`"}],"root_error":null}"#,
+    );
+    assert_wire(
+        &SkillListing {
+            skills: Vec::new(),
+            ignored: Vec::new(),
+            root_error: Some(
+                "read skills root `/locked` failed: Permission denied (os error 13)".into(),
+            ),
+        },
+        r#"{"skills":[],"ignored":[],"root_error":"read skills root `/locked` failed: Permission denied (os error 13)"}"#,
     );
 }
 

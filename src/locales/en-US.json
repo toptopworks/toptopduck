@@ -376,6 +376,7 @@
   "settings.skills.rescan": "Rescan",
   "settings.skills.save": "Save",
   "settings.skills.saving": "Saving…",
+  "settings.skills.scanFailed": "Failed to scan the skills registry: {detail}",
   "settings.skills.searchPlaceholder": "Search skills…",
   "settings.theme.dark": "Dark",
   "settings.theme.legend": "Theme",

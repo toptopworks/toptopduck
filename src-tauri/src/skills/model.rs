@@ -96,11 +96,15 @@ pub struct SkippedSkill {
     pub reason: String,
 }
 
-/// The result of a registry scan (issue #373): the spec-valid skills plus the
-/// directories skipped for spec violations. The `skills` list keeps its
-/// sorted semantics (by name); `ignored` is sorted by directory name for a
-/// stable listing. `ignored` may be empty; it never contains a directory that
-/// also appears in `skills` (a directory either loads or it does not).
+/// The result of a registry scan (issue #373 / #375): the spec-valid skills
+/// plus the directories skipped for spec violations, and -- when the root
+/// itself could not be read -- the English technical reason. The `skills` list
+/// keeps its sorted semantics (by name); `ignored` is sorted by directory name
+/// for a stable listing. `ignored` may be empty; it never contains a directory
+/// that also appears in `skills` (a directory either loads or it does not).
+/// `root_error` is `None` for the common case (root readable or never created);
+/// when `Some`, both `skills` and `ignored` are empty (the scan could not
+/// iterate the root).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SkillListing {
     /// Spec-valid skills, sorted by name -- the existing list semantics.
@@ -108,6 +112,13 @@ pub struct SkillListing {
     /// Directories the scan skipped, each with the English technical reason.
     /// Sorted by directory name for a deterministic listing.
     pub ignored: Vec<SkippedSkill>,
+    /// The English technical reason the skills root itself could not be read
+    /// (issue #375): a permission denial, lock contention, or other IO failure
+    /// distinct from `NotFound` (a never-created registry is a valid empty
+    /// state, surfaced as `None`). When present the settings UI renders this
+    /// verbatim so the user can distinguish a locked-out root from a clean
+    /// registry.
+    pub root_error: Option<String>,
 }
 
 /// The editable payload of `update_skill` (issue #362). Addressed by the command's

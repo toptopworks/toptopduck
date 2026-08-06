@@ -89,7 +89,7 @@ export function SkillsSection({ configuredMcpIds }: { configuredMcpIds: string[]
   const intl = useIntl();
   const queryClient = useQueryClient();
 
-  const { data: listing, refetch, isFetching } = useQuery({
+  const { data: listing, error: queryError, refetch, isFetching } = useQuery({
     queryKey: skillKeys.all(),
     queryFn: listSkills,
   });
@@ -145,6 +145,27 @@ export function SkillsSection({ configuredMcpIds }: { configuredMcpIds: string[]
     () => listing?.ignored ?? [],
     [listing],
   );
+  const rootError = listing?.root_error ?? null;
+
+  // Derived display error (issue #375): mutation error (explicit state, the
+  // user's most recent action) takes priority, then the IPC transport error
+  // (list_skills itself failed), then the root scan error (read_dir failed
+  // for a reason other than NotFound). All three share the same error face so
+  // the user never sees a silent empty registry when something went wrong.
+  const displayError = useMemo(() => {
+    if (error) return error;
+    if (queryError) return fmtError(queryError, intl);
+    if (rootError) {
+      return intl.formatMessage(
+        {
+          id: "settings.skills.scanFailed",
+          defaultMessage: "Failed to scan the skills registry: {detail}",
+        },
+        { detail: rootError },
+      );
+    }
+    return null;
+  }, [error, queryError, rootError, intl]);
   const visible = useMemo(
     () =>
       allSkills.filter(
@@ -322,7 +343,9 @@ export function SkillsSection({ configuredMcpIds }: { configuredMcpIds: string[]
         )}
       </SettingsCard>
 
-      {error && <p className="settings-error mt-3 text-destructive text-sm">{error}</p>}
+      {displayError && (
+        <p className="settings-error mt-3 text-destructive text-sm">{displayError}</p>
+      )}
 
       {ignoredDirs.length > 0 && <IgnoredDirectoriesSection skipped={ignoredDirs} />}
 
