@@ -11,11 +11,19 @@
 //! these tests pin the WIRING -- the scoped-thread serve, the bridge
 //! spawn/connect, and the parallel engine drive rejoin without deadlock.
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
+use toptopduck_lib::model::SkillProvenance;
+use toptopduck_lib::persistence::recipe::RecipeEntry;
 use toptopduck_lib::runtime::acp::adapter::{AdapterId, AdapterSpec};
-use toptopduck_lib::{Session, TurnOutcome};
+use toptopduck_lib::skills::{resolve_prompt_fragments, SkillPromptFragment};
+use toptopduck_lib::util::sha256_hex;
+use toptopduck_lib::{
+    ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState, KeychainStore, Session,
+    TurnOutcome,
+};
 
 /// The fake-CLI adapter: the fixture binary (named `acp-fake-cli`) driven with
 /// no argv prefix -- it reads its scenario from `ACP_FAKE_SCENARIO`. A bespoke
@@ -108,4 +116,86 @@ fn external_gateway_tool_call_drives_dispatch() {
         }
         other => panic!("gateway_tool_call must complete Textual, got {other:?}"),
     }
+}
+
+// --- helpers for skill-injection tests (issue #368) -------------------------
+
+/// A no-op approval sink (the turn runs ungated). Mirrors the NullSink in
+/// skill_injection_blackbox.rs -- the real one is private to the session module.
+struct NullSink;
+impl ApprovalSink for NullSink {
+    fn emit_request(&self, _body: &ApprovalRequestBody) {}
+    fn emit_resolved(&self, _body: &ApprovalRequestBody, _response: ApprovalResponse) {}
+}
+
+/// Write one skill directory with a spec-valid SKILL.md (frontmatter + body).
+fn put_skill(root: &Path, name: &str, description: &str, body: &str) {
+    let dir = root.join(name);
+    fs::create_dir_all(&dir).unwrap();
+    let content = format!("---\nname: {name}\ndescription: {description}\n---\n{body}");
+    fs::write(dir.join("SKILL.md"), content).unwrap();
+}
+
+/// Issue #368 AC #2: an external-runtime turn with a mounted skill records
+/// `{name, content_hash}` in TurnProvenance.skills. The ask_with_phase facade
+/// computes provenance once before the built-in / external branch and passes it
+/// to record_turn after; this test pins the external branch so a future change
+/// cannot silently drop the skill provenance on the ACP path.
+#[test]
+fn external_turn_with_skill_records_provenance() {
+    let skills_root = tempfile::tempdir().unwrap();
+    let skills_root = skills_root.path().to_path_buf();
+    let body = "Name the statistical method you use.\n";
+    put_skill(
+        &skills_root,
+        "sql-coach",
+        "Coach honest SQL reporting.",
+        body,
+    );
+    let skill_md_bytes = fs::read(skills_root.join("sql-coach").join("SKILL.md")).unwrap();
+    let expected_hash = sha256_hex(&skill_md_bytes);
+
+    let (mut session, old_path, _guard) = external_session("text_reply");
+    session.mount_skill("sql-coach").expect("mount");
+    let mounted = session.mounted_skills();
+    let fragments: Vec<SkillPromptFragment> = resolve_prompt_fragments(&skills_root, &mounted);
+    assert_eq!(fragments.len(), 1);
+    assert_eq!(fragments[0].content_hash, expected_hash);
+
+    let approval = ApprovalState::new();
+    let sink = NullSink;
+    let keychain = KeychainStore::new();
+    let outcome = session.ask_with_phase(
+        "what is the answer?",
+        &approval,
+        &sink,
+        |_| {},
+        &[],
+        &keychain,
+        &fragments,
+    );
+    std::env::set_var("PATH", old_path);
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "got {outcome:?}"
+    );
+
+    let recipe = session.build_recipe();
+    let last_turn = recipe
+        .history
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            RecipeEntry::Turn(t) => Some(t),
+            _ => None,
+        })
+        .expect("at least one turn in the recipe");
+    assert_eq!(
+        last_turn.provenance.skills,
+        vec![SkillProvenance {
+            name: "sql-coach".into(),
+            content_hash: expected_hash,
+        }],
+        "external path provenance must snapshot skill name + hash"
+    );
 }

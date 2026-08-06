@@ -15,7 +15,8 @@ use std::collections::HashSet;
 
 use crate::model::{ColumnSchema, DatasetDescriptor, TurnOutcome, TurnRecord};
 use crate::provider::prompt::{
-    build_tool_system_prompt, render_response, render_summary_turn_note, ResponseLocale,
+    build_acp_context_block, build_tool_system_prompt, render_response, render_skill_block,
+    render_summary_turn_note, ResponseLocale,
 };
 use crate::provider::tool_calling::{ToolTurnMessage, ToolTurnRequest};
 use crate::provider::{
@@ -83,20 +84,21 @@ pub fn assemble_tool_turn(
     }
 }
 
-/// Assemble the ACP turn's prompt blocks (ADR-0081, issue #299 slice 9c): the
-/// windowed context as text [`ContentBlock`]s for an external CLI runtime.
+/// Assemble the ACP turn's prompt blocks (ADR-0081/0086, issues #299 and #368):
+/// the windowed context as text [`ContentBlock`]s for an external CLI runtime.
 ///
-/// Mirrors [`assemble_tool_turn`]'s windowing -- the SAME system prompt spine
-/// (capability boundary + mounted-skill fragments + locale directive + schema
-/// context, via [`build_tool_system_prompt`]) and the SAME history rendering --
-/// but emits ACP content blocks instead of a [`ToolTurnRequest`]. The external
-/// CLI brings its own tool table (its built-ins + the gateway MCP tools
-/// advertised through the bridge descriptor at `session/new`), so this assembly
-/// carries ONLY the task context, never a tool table: the schema + M-contract
-/// (the result_N naming discipline) ride the leading system-prompt block so the
-/// CLI writes correct SQL on the first tool call instead of guessing and
-/// wasting a round-trip (ADR-0081 "M-contract discipline lives in the system
-/// prompt").
+/// Mirrors [`assemble_tool_turn`]'s windowing -- the SAME history rendering --
+/// but emits ACP content blocks instead of a [`ToolTurnRequest`], and the
+/// leading block carries ONLY locale directive + schema context (no capability
+/// boundary prompt: ADR-0086 Consequence -- the external CLI brings its own
+/// persona and our boundary is enforced at the tool / gateway surface). The
+/// M-contract (`result_N` naming) rides the gateway tool descriptions, not
+/// this assembly.
+///
+/// Mounted-skill fragments (issue #368) land as a SEPARATE text block right
+/// before the user's question, reusing the internal path's framing +
+/// verbatim-body renderer ([`render_skill_block`]). An empty mount set adds no
+/// block, so the pre-skill block order is preserved.
 pub fn assemble_acp_turn(
     question: &str,
     working_set: &WorkingSet,
@@ -105,13 +107,10 @@ pub fn assemble_acp_turn(
     skills: &[SkillPromptFragment],
 ) -> Vec<ContentBlock> {
     let request = assemble(question, working_set, history);
-    let mut blocks = Vec::with_capacity(request.history.len() * 2 + 2);
-    // Leading system-prompt block: TOOL_CALLING_PROMPT + skill fragments +
-    // locale directive + schema context. The external CLI needs the schema +
-    // result_N naming up front (ADR-0081 M-contract); without it the first SQL
-    // has no anchor.
-    blocks.push(ContentBlock::text(build_tool_system_prompt(
-        &request, locale, skills,
+    let mut blocks = Vec::with_capacity(request.history.len() * 2 + 3);
+    // Leading context block (locale + schema only, ADR-0086).
+    blocks.push(ContentBlock::text(build_acp_context_block(
+        &request, locale,
     )));
     // Windowed history as alternating user/assistant text blocks. Mirrors
     // `tool_turn_messages` turn-for-turn but as flat text -- the external CLI
@@ -131,7 +130,10 @@ pub fn assemble_acp_turn(
             }
         }
     }
-    // The asking question as the final block.
+    // Mounted-skill fragments as a separate block before the question (#368).
+    if !skills.is_empty() {
+        blocks.push(ContentBlock::text(render_skill_block(skills)));
+    }
     blocks.push(ContentBlock::text(request.question));
     blocks
 }
@@ -950,5 +952,104 @@ mod tests {
         );
         // The contract under test: active still names the out-of-window result.
         assert_eq!(payload.active.as_deref(), Some("result_1"));
+    }
+
+    // --- assemble_acp_turn (ADR-0086, issue #368) ---------------------------
+    //
+    // The external-runtime ACP assembly differs from the built-in path in two
+    // ways per ADR-0086: (1) NO capability boundary prompt -- the external CLI
+    // brings its own persona and our boundary is enforced at the tool / gateway
+    // surface; (2) mounted-skill fragments land as a SEPARATE text block before
+    // the user's question, not embedded in a system prompt. These tests pin
+    // both invariants + the block ordering.
+
+    fn acp_fragment(name: &str, body: &str) -> SkillPromptFragment {
+        SkillPromptFragment {
+            name: name.into(),
+            body: body.into(),
+            content_hash: "deadbeef".into(),
+        }
+    }
+
+    #[test]
+    fn assemble_acp_turn_leading_block_has_no_capability_boundary() {
+        // ADR-0086: the leading context block carries locale + schema ONLY.
+        // The capability boundary landmarks (IN-SCOPE / OUT-SCOPE / refuse)
+        // must be absent so they do not compete with the CLI's own persona.
+        let (ws, history) = source_plus_turns(1);
+        let blocks = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &[]);
+        let leading = blocks.first().expect("at least one block");
+        let text = leading.as_text().expect("leading block is text");
+        assert!(text.contains("【数据上下文】"), "schema context present");
+        assert!(text.contains("【回复语言】"), "locale directive present");
+        assert!(!text.contains("IN-SCOPE"), "no capability boundary");
+        assert!(!text.contains("OUT-OF-SCOPE"), "no capability boundary");
+        assert!(!text.contains("绝不冒充"), "no capability boundary");
+    }
+
+    #[test]
+    fn assemble_acp_turn_with_skills_places_skill_block_before_question() {
+        // Issue #368 AC#1: mounted-skill fragments land as a separate text
+        // block right before the user's question (after the history blocks).
+        let (ws, history) = source_plus_turns(1);
+        let skills = vec![acp_fragment("sql-coach", "Name the method.\n")];
+        let blocks = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &skills);
+        // Last block = the user's question.
+        let last = blocks.last().expect("at least one block");
+        assert_eq!(last.as_text().unwrap(), "查询");
+        // Second-to-last = the skill block (skills are non-empty).
+        let skill_block = &blocks[blocks.len() - 2];
+        let skill_text = skill_block.as_text().unwrap();
+        assert!(
+            skill_text.contains("【挂载技能】技能 `sql-coach`："),
+            "skill frame in separate block"
+        );
+        assert!(
+            skill_text.contains("Name the method."),
+            "skill body verbatim in separate block"
+        );
+        // The skill block is NOT the leading block (which holds schema + locale).
+        let leading = blocks.first().unwrap().as_text().unwrap();
+        assert!(
+            !leading.contains("【挂载技能】"),
+            "skill fragments must not be in the leading block"
+        );
+    }
+
+    #[test]
+    fn assemble_acp_turn_empty_skills_omits_skill_block() {
+        // An empty mount set adds no skill block -- the question is the last
+        // block and the block count matches the pre-skill shape.
+        let (ws, history) = source_plus_turns(1);
+        let blocks_empty = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &[]);
+        // Last block is the question, second-to-last is a history block (not a
+        // skill block).
+        assert_eq!(blocks_empty.last().unwrap().as_text().unwrap(), "查询");
+        // With skills added, the block count grows by exactly 1 (the skill
+        // block); the question stays last.
+        let skills = vec![acp_fragment("a", "Body A.\n")];
+        let blocks_with = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &skills);
+        assert_eq!(
+            blocks_with.len(),
+            blocks_empty.len() + 1,
+            "exactly one skill block added"
+        );
+        assert_eq!(blocks_with.last().unwrap().as_text().unwrap(), "查询");
+    }
+
+    #[test]
+    fn assemble_acp_turn_skill_block_preserves_mount_order() {
+        // Mount order is preserved in the skill block (not sorted).
+        let (ws, history) = source_plus_turns(0);
+        let skills = vec![
+            acp_fragment("beta", "Body B.\n"),
+            acp_fragment("alpha", "Body A.\n"),
+        ];
+        let blocks = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &skills);
+        let skill_block = &blocks[blocks.len() - 2];
+        let text = skill_block.as_text().unwrap();
+        let b = text.find("beta").unwrap();
+        let a = text.find("alpha").unwrap();
+        assert!(b < a, "mount order preserved, not sorted");
     }
 }

@@ -107,11 +107,39 @@ fn render_skill_section(skills: &[SkillPromptFragment]) -> String {
         out.push_str(&skill.name);
         out.push_str("`：\n");
         // Trim trailing whitespace for clean section separation; the body is
-        // otherwise byte-verbatim (ADR-0086 "逐字不模板化").
+        // otherwise byte-verbatim (ADR-0086: skill body injected as-is, never
+        // summarized or templated).
         out.push_str(skill.body.trim_end());
         out.push('\n');
     }
     out
+}
+
+/// Render the mounted-skills section as a standalone text block for the
+/// external-runtime ACP path (ADR-0086, issue #368). Same framing + verbatim
+/// body + mount order as the internal path's [`render_skill_section`], but
+/// trimmed of the leading newlines that the system-prompt embedding adds for
+/// separation. The block lands as a separate [`ContentBlock`] before the
+/// user's question, NOT inside a system prompt -- the external CLI brings its
+/// own persona and does not receive our capability boundary prompt.
+pub fn render_skill_block(skills: &[SkillPromptFragment]) -> String {
+    render_skill_section(skills).trim_start().to_string()
+}
+
+/// The leading context block for an external-runtime ACP turn (ADR-0086,
+/// issue #368): locale directive + schema context ONLY -- no capability
+/// boundary prompt and no skill fragments. The external CLI brings its own
+/// persona; our capability boundary is enforced at the tool / gateway surface
+/// (ADR-0086 Consequence: external downgrades to tool-surface boundary). The
+/// M-contract (`result_N` naming) rides the gateway tool descriptions
+/// ([`crate::tools::builtin_table`]), not this block. Skill fragments are
+/// injected as a separate text block by the caller
+/// ([`crate::window::assemble_acp_turn`]).
+pub fn build_acp_context_block(request: &ProviderRequest, locale: ResponseLocale) -> String {
+    let mut out = String::new();
+    out.push_str(response_locale_directive(locale));
+    out.push_str(&render_schema_context(request));
+    out.trim_start().to_owned()
 }
 
 /// The full system prompt for the legacy single-SQL path (ADR-0052): the
@@ -871,5 +899,76 @@ mod tests {
         // is the always-on clause, not a mounted-skill body. Pin it still
         // appears (AC #2) while the body section does not.
         assert!(prompt.contains("挂载技能"));
+    }
+
+    // --- external-runtime ACP context block + skill block (ADR-0086, issue #368) ---
+
+    #[test]
+    fn build_acp_context_block_omits_capability_boundary() {
+        // ADR-0086 Consequence: the external runtime does NOT receive our
+        // capability boundary prompt. The leading block carries locale +
+        // schema only -- the IN-SCOPE / OUT-SCOPE / refuse landmarks must be
+        // absent so they cannot compete with the CLI's own persona.
+        let req = request(vec![ds("people", r#""people".data"#)], Some("people"));
+        let block = build_acp_context_block(&req, ResponseLocale::ZhCN);
+        // Schema context IS present (the CLI needs the data anchor).
+        assert!(block.contains("【数据上下文】"));
+        assert!(block.contains("引用名 = people"));
+        // Locale directive IS present.
+        assert!(block.contains("【回复语言】"));
+        // Capability boundary landmarks are ABSENT.
+        assert!(!block.contains("IN-SCOPE"), "no capability boundary");
+        assert!(!block.contains("OUT-OF-SCOPE"), "no capability boundary");
+        assert!(!block.contains("绝不冒充"), "no capability boundary");
+        assert!(
+            !block.contains("【挂载技能】"),
+            "no skill section in the context block"
+        );
+    }
+
+    #[test]
+    fn build_acp_context_block_has_no_leading_whitespace() {
+        // The block is a standalone text content block, not appended after a
+        // base prompt -- leading whitespace from the locale directive's \n\n
+        // must be trimmed so the block starts cleanly.
+        let req = request(vec![], None);
+        let block = build_acp_context_block(&req, ResponseLocale::EnUS);
+        assert!(
+            !block.starts_with('\n'),
+            "no leading newlines in standalone context block"
+        );
+    }
+
+    #[test]
+    fn render_skill_block_trims_leading_whitespace() {
+        // The standalone skill block must not start with the \n\n that the
+        // system-prompt embedding adds for separation.
+        let skills = [fragment("sql-coach", "Name the method.\n")];
+        let block = render_skill_block(&skills);
+        assert!(
+            block.starts_with("【挂载技能】"),
+            "block starts with the frame, not whitespace"
+        );
+    }
+
+    #[test]
+    fn render_skill_block_preserves_framing_and_verbatim_body() {
+        // Same framing + verbatim body + mount order as the internal path --
+        // the external block is the same rendering, just standalone.
+        let skills = [
+            fragment("sql-coach", "Always name the method.\n"),
+            fragment("pdf-tools", "Extract tables first.\n"),
+        ];
+        let block = render_skill_block(&skills);
+        // Mount order preserved.
+        let a = block.find("sql-coach").unwrap();
+        let b = block.find("pdf-tools").unwrap();
+        assert!(a < b, "mount order preserved");
+        // Framing.
+        assert!(block.contains("【挂载技能】技能 `sql-coach`：\n"));
+        assert!(block.contains("【挂载技能】技能 `pdf-tools`：\n"));
+        // Verbatim bodies.
+        assert!(block.contains("Always name the method."));
+        assert!(block.contains("Extract tables first."));
     }
 }

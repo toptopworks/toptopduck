@@ -2021,8 +2021,8 @@ impl Session {
             (ENV_TOKEN.to_string(), handle.token.clone()),
         ]);
         let mcp_server = McpServer::stdio_bridge(GATEWAY_SERVER_NAME, bin_path, Vec::new(), env);
-        // 4. Assemble the prompt blocks (windowed context + schema; the
-        //    leading system-prompt block carries the M-contract, ADR-0081).
+        // 4. Assemble the prompt blocks (leading context: locale + schema;
+        //    skill block before question; M-contract via gateway tool table).
         let prompt_blocks =
             window::assemble_acp_turn(question, &self.working_set, history, locale, skills);
         let input = AcpTurnInput {
