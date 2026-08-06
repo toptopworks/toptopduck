@@ -12,7 +12,7 @@
 
 use std::collections::BTreeMap;
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use toptopduck_lib::mcp::aggregator::{McpAggregator, RouteError};
 use toptopduck_lib::mcp::client::SecretEnv;
@@ -238,7 +238,9 @@ fn connect_all_returns_per_server_connect_results_with_failure_reasons() {
     // The per-server ConnectResult (issue #301 slice D) is the source of truth
     // for list_mcp_server_status: a return-shape regression would silently
     // break the status IPC. This pins the shape for the three reachable return
-    // paths in connect_one -- success, spawn failure, unsupported transport.
+    // paths in connect_one -- success, stdio spawn failure, and HTTP transport
+    // failure (issue #389: SSE/HTTP now attempt to connect instead of being
+    // rejected upfront as "unsupported transport").
     // (The fourth path, tools/list failure, needs a fixture that corrupts
     // tools/list; its construction site is byte-identical to the other two
     // skip paths and is shape-covered by them.)
@@ -252,11 +254,11 @@ fn connect_all_returns_per_server_connect_results_with_failure_reasons() {
         keychain_env_keys: Vec::new(),
         timeout_ms: None,
     };
-    let unsupported = McpServerConfig {
-        id: McpServerId("unsupported".into()),
-        display_name: "Unsupported".into(),
-        transport: McpTransport::Sse {
-            url: "http://localhost:1".into(),
+    let http_fail = McpServerConfig {
+        id: McpServerId("http-fail".into()),
+        display_name: "HttpFail".into(),
+        transport: McpTransport::Http {
+            url: "http://127.0.0.1:1".into(),
         },
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
@@ -265,7 +267,7 @@ fn connect_all_returns_per_server_connect_results_with_failure_reasons() {
     let good = fake_config("good", "Good");
 
     // connect_all preserves the configured order in its returned Vec.
-    let results = agg.connect_all(&[bad_spawn, unsupported, good], &keychain);
+    let results = agg.connect_all(&[bad_spawn, http_fail, good], &keychain);
     assert_eq!(results.len(), 3, "one ConnectResult per configured server");
 
     // Spawn failure -> connected:false, no tools, a carried reason.
@@ -275,19 +277,16 @@ fn connect_all_returns_per_server_connect_results_with_failure_reasons() {
     assert_eq!(bad.tool_count, 0);
     assert!(bad.error.is_some(), "spawn failure carries a reason");
 
-    // Unsupported transport -> connected:false with the transport reason.
-    let unsup = &results[1];
-    assert_eq!(unsup.id, McpServerId("unsupported".into()));
-    assert!(!unsup.connected);
-    assert_eq!(unsup.tool_count, 0);
+    // HTTP connect failure (port 1 unreachable) -> connected:false with an
+    // HTTP transport error (no longer "unsupported transport", issue #389).
+    let fail = &results[1];
+    assert_eq!(fail.id, McpServerId("http-fail".into()));
+    assert!(!fail.connected);
+    assert_eq!(fail.tool_count, 0);
+    let fail_reason = fail.error.as_deref().unwrap_or("");
     assert!(
-        unsup
-            .error
-            .as_deref()
-            .unwrap_or("")
-            .contains("unsupported transport"),
-        "unsupported-transport reason, got {:?}",
-        unsup.error
+        fail_reason.contains("HTTP transport error") || fail_reason.contains("Connection refused"),
+        "HTTP connect failure carries a transport-level reason, got: {fail_reason}"
     );
 
     // Success -> connected:true with the live tool count + no error.
@@ -299,4 +298,557 @@ fn connect_all_returns_per_server_connect_results_with_failure_reasons() {
         "fake server advertises add + echo + echo_env"
     );
     assert!(ok.error.is_none(), "good server has no error");
+}
+
+// ---------------------------------------------------------------------------
+// SSE + HTTP transport integration tests (issue #389)
+// ---------------------------------------------------------------------------
+
+use std::collections::VecDeque;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+/// Per-server shared state: carries the SSE response queue (for legacy SSE
+/// mode) and the shutdown flag. Each connection handler gets a clone of the
+/// `Arc` so the GET stream thread and POST handler thread can coordinate.
+struct ServerState {
+    sse_queue: Mutex<VecDeque<String>>,
+    shutdown: AtomicBool,
+}
+
+/// Which transport protocol the test server speaks.
+#[derive(Clone, Copy)]
+enum ServerMode {
+    /// Streamable HTTP: each POST gets a JSON response.
+    Http,
+    /// Streamable HTTP with SSE response: each POST gets a
+    /// `text/event-stream` response carrying the JSON-RPC envelope (exercises
+    /// `HttpClient`'s SSE branch, issue #389).
+    HttpSse,
+    /// Legacy SSE: GET opens SSE stream; POST sends messages.
+    Sse,
+    /// Legacy SSE that sends `event: message` (not `event: endpoint`) as the
+    /// first event — exercises `SseClient`'s first-event rejection guard (H1,
+    /// issue #389).
+    SseBadFirstEvent,
+}
+
+/// A minimal in-process HTTP MCP server for integration testing (issue #389).
+/// Runs on a background thread; the port is chosen by the OS (bind 0). The
+/// tool table mirrors the stdio fake server (`echo`, `add`) so assertions are
+/// cross-comparable.
+struct HttpMcpServer {
+    port: u16,
+    state: Arc<ServerState>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl HttpMcpServer {
+    fn spawn(mode: ServerMode) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let state = Arc::new(ServerState {
+            sse_queue: Mutex::new(VecDeque::new()),
+            shutdown: AtomicBool::new(false),
+        });
+        let state_clone = state.clone();
+        listener.set_nonblocking(true).expect("set_nonblocking");
+        let handle = thread::spawn(move || {
+            run_server(listener, mode, state_clone);
+        });
+        Self {
+            port,
+            state,
+            handle: Some(handle),
+        }
+    }
+
+    fn url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+}
+
+impl Drop for HttpMcpServer {
+    fn drop(&mut self) {
+        self.state.shutdown.store(true, Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// Accept loop with non-blocking IO so the shutdown flag is checked between
+/// connections. Each accepted connection runs on its own thread with a clone
+/// of the shared state.
+fn run_server(listener: TcpListener, mode: ServerMode, state: Arc<ServerState>) {
+    let base_url = format!("http://{}", listener.local_addr().expect("local_addr"));
+    while !state.shutdown.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let st = state.clone();
+                let url = base_url.clone();
+                thread::spawn(move || handle_connection(stream, mode, st, &url));
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+/// Handle one HTTP connection. Parses the request line + headers, reads the
+/// body, and dispatches by method + transport mode.
+fn handle_connection(
+    mut stream: TcpStream,
+    mode: ServerMode,
+    state: Arc<ServerState>,
+    base_url: &str,
+) {
+    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+    let request_line = match read_line(&mut reader) {
+        Some(l) => l,
+        None => return,
+    };
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
+    if parts.len() < 2 {
+        return;
+    }
+    let method = parts[0];
+    let _path = parts[1];
+
+    // Read headers to get content-length.
+    let mut content_length = 0usize;
+    loop {
+        let line = match read_line(&mut reader) {
+            Some(l) => l,
+            None => return,
+        };
+        if line.is_empty() {
+            break;
+        }
+        if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            content_length = rest.trim().parse().unwrap_or(0);
+        }
+    }
+
+    // Read body.
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 && reader.read_exact(&mut body).is_err() {
+        return;
+    }
+
+    match (mode, method) {
+        (ServerMode::Http, "POST") => handle_jsonrpc_post(&mut stream, &body, "http-fake"),
+        (ServerMode::HttpSse, "POST") => {
+            handle_jsonrpc_sse_post(&mut stream, &body, "http-sse-fake")
+        }
+        (ServerMode::Sse, "GET") => handle_sse_stream(&mut stream, &state, base_url),
+        (ServerMode::Sse, "POST") => handle_sse_post(&mut stream, &body, &state),
+        (ServerMode::SseBadFirstEvent, "GET") => {
+            handle_sse_stream_bad_first_event(&mut stream, base_url);
+        }
+        _ => {
+            write_response(&mut stream, 404, "text/plain", "not found");
+        }
+    }
+}
+
+// --- Streamable HTTP handler ----------------------------------------------
+
+/// POST handler for HTTP transport: parse JSON-RPC, return a JSON response.
+fn handle_jsonrpc_post(stream: &mut TcpStream, body: &[u8], server_name: &str) {
+    let req: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            write_response(stream, 400, "text/plain", "bad json");
+            return;
+        }
+    };
+    let resp = build_rpc_response(&req, server_name);
+    if let Value::Null = resp {
+        // Notification (no id) → 202 with empty body.
+        write_response(stream, 202, "application/json", "");
+    } else {
+        write_response(stream, 200, "application/json", &resp.to_string());
+    }
+}
+
+/// POST handler for streamable HTTP with SSE response: parse JSON-RPC, wrap the
+/// response in a single SSE `message` event (exercises `HttpClient`'s
+/// `text/event-stream` branch, issue #389 I3).
+fn handle_jsonrpc_sse_post(stream: &mut TcpStream, body: &[u8], server_name: &str) {
+    let req: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            write_response(stream, 400, "text/plain", "bad json");
+            return;
+        }
+    };
+    let resp = build_rpc_response(&req, server_name);
+    if let Value::Null = resp {
+        // Notification (no id) → 202 with empty body.
+        write_response(stream, 202, "application/json", "");
+    } else {
+        // Wrap the JSON-RPC response in a single SSE event.
+        let sse_body = format!("event: message\r\ndata: {}\r\n\r\n", resp);
+        write_response(stream, 200, "text/event-stream", &sse_body);
+    }
+}
+
+// --- Legacy SSE handlers ---------------------------------------------------
+
+/// GET handler for SSE transport that sends `event: message` as the first
+/// event instead of `event: endpoint` — exercises `SseClient`'s first-event
+/// rejection guard (H1, issue #389 I4).
+fn handle_sse_stream_bad_first_event(stream: &mut TcpStream, base_url: &str) {
+    let header = "HTTP/1.1 200 OK\r\n\
+                  Content-Type: text/event-stream\r\n\
+                  Cache-Control: no-cache\r\n\
+                  Connection: keep-alive\r\n\
+                  \r\n";
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.flush();
+
+    // Send a `message` event first (wrong — should be `endpoint`).
+    let payload = json!({"jsonrpc": "2.0", "id": 1, "result": {}}).to_string();
+    let bad = format!("event: message\r\ndata: {}\r\n\r\n", payload);
+    let _ = stream.write_all(bad.as_bytes());
+    let _ = stream.flush();
+
+    // Keep the connection open briefly so the client reads the first event.
+    let _ = base_url;
+    thread::sleep(Duration::from_secs(5));
+}
+
+/// GET handler for SSE transport: write SSE headers + endpoint event, then
+/// poll the shared queue for responses to relay as SSE events.
+fn handle_sse_stream(stream: &mut TcpStream, state: &ServerState, base_url: &str) {
+    let header = "HTTP/1.1 200 OK\r\n\
+                  Content-Type: text/event-stream\r\n\
+                  Cache-Control: no-cache\r\n\
+                  Connection: keep-alive\r\n\
+                  \r\n";
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.flush();
+
+    // Send the endpoint event with the full POST URL.
+    let post_url = format!("{}/message", base_url);
+    let endpoint = format!("event: endpoint\r\ndata: {}\r\n\r\n", post_url);
+    let _ = stream.write_all(endpoint.as_bytes());
+    let _ = stream.flush();
+
+    // Poll the queue for responses until shutdown or the client disconnects.
+    while !state.shutdown.load(Ordering::SeqCst) {
+        while let Some(resp) = state.sse_queue.lock().unwrap().pop_front() {
+            let sse = format!("event: message\r\ndata: {}\r\n\r\n", resp);
+            if stream.write_all(sse.as_bytes()).is_err() {
+                return;
+            }
+            let _ = stream.flush();
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// POST handler for SSE transport: process JSON-RPC, push response to the
+/// shared queue (the GET thread writes it as an SSE event), return 202.
+fn handle_sse_post(stream: &mut TcpStream, body: &[u8], state: &ServerState) {
+    let req: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            write_response(stream, 400, "text/plain", "bad json");
+            return;
+        }
+    };
+    let resp = build_rpc_response(&req, "sse-fake");
+    if resp != Value::Null {
+        state.sse_queue.lock().unwrap().push_back(resp.to_string());
+    }
+    write_response(stream, 202, "application/json", "");
+}
+
+// --- Shared JSON-RPC response builder --------------------------------------
+
+/// Build a JSON-RPC response for a request. Returns `Value::Null` for
+/// notifications (no id). Mirrors the stdio fake server's tool table.
+fn build_rpc_response(req: &Value, server_name: &str) -> Value {
+    let id = req.get("id").cloned();
+    let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+
+    if id.is_none() {
+        return Value::Null; // Notification — no response body.
+    }
+
+    match method {
+        "initialize" => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": server_name, "version": "0.0.0"}
+            }
+        }),
+        "tools/list" => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "tools": [
+                    {"name": "echo", "description": "echo the message field",
+                     "inputSchema": {"type": "object"}},
+                    {"name": "add", "description": "sum a and b",
+                     "inputSchema": {"type": "object"}},
+                ]
+            }
+        }),
+        "tools/call" => {
+            let params = req.get("params").cloned().unwrap_or(Value::Null);
+            let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+            let args = params.get("arguments").cloned().unwrap_or(Value::Null);
+            let text = match name {
+                "add" => {
+                    let a = args.get("a").and_then(Value::as_i64).unwrap_or(0);
+                    let b = args.get("b").and_then(Value::as_i64).unwrap_or(0);
+                    format!("{}", a + b)
+                }
+                _ => {
+                    let msg = args.get("message").and_then(Value::as_str).unwrap_or("");
+                    format!("Echo: {msg}")
+                }
+            };
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "content": [{"type": "text", "text": text}],
+                    "isError": false
+                }
+            })
+        }
+        _ => json!({
+            "jsonrpc": "2.0", "id": id,
+            "error": {"code": -32601, "message": "method not found"}
+        }),
+    }
+}
+
+// --- HTTP helpers ----------------------------------------------------------
+
+/// Read one CRLF-terminated line, returning the trimmed string. None at EOF.
+fn read_line(reader: &mut impl BufRead) -> Option<String> {
+    let mut line = String::new();
+    let n = reader.read_line(&mut line).ok()?;
+    if n == 0 {
+        return None;
+    }
+    Some(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+/// Write a minimal HTTP response with a body.
+fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, body: &str) {
+    let status_text = match status {
+        200 => "OK",
+        202 => "Accepted",
+        400 => "Bad Request",
+        404 => "Not Found",
+        _ => "OK",
+    };
+    let header = format!(
+        "HTTP/1.1 {status} {status_text}\r\n\
+         Content-Type: {content_type}\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n",
+        body.len()
+    );
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(body.as_bytes());
+    let _ = stream.flush();
+}
+
+// --- HTTP transport integration tests --------------------------------------
+
+#[test]
+fn http_transport_connect_tools_list_and_call() {
+    let server = HttpMcpServer::spawn(ServerMode::Http);
+    let url = format!("{}/mcp", server.url());
+
+    let mut client = toptopduck_lib::mcp::client::HttpClient::connect(&url).expect("http connect");
+
+    let tools = client.list_tools().expect("tools/list");
+    assert_eq!(tools.len(), 2, "http server advertises echo + add");
+    assert_eq!(tools[0]["name"], "echo");
+    assert_eq!(tools[1]["name"], "add");
+
+    let result = client
+        .call("add", &json!({"a": 7, "b": 8}))
+        .expect("tools/call");
+    let text = first_text(&result);
+    assert_eq!(text, "15");
+
+    let echo = client
+        .call("echo", &json!({"message": "hello-http"}))
+        .expect("echo call");
+    assert_eq!(first_text(&echo), "Echo: hello-http");
+}
+
+#[test]
+fn http_transport_aggregator_connect_and_route() {
+    let server = HttpMcpServer::spawn(ServerMode::Http);
+    let url = format!("{}/mcp", server.url());
+
+    let config = McpServerConfig {
+        id: McpServerId("http-srv".into()),
+        display_name: "HttpMCP".into(),
+        transport: McpTransport::Http { url },
+        env: BTreeMap::new(),
+        keychain_env_keys: Vec::new(),
+        timeout_ms: None,
+    };
+    let keychain = KeychainStore::new();
+    let mut agg = McpAggregator::empty();
+    let results = agg.connect_all(&[config], &keychain);
+    assert_eq!(results.len(), 1);
+    assert!(results[0].connected, "http server connected via aggregator");
+
+    let names: Vec<String> = agg
+        .aggregated_tools()
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+        .collect();
+    assert!(
+        names.contains(&"mcp__httpmcp__add".into()),
+        "namespaced tool table, got {names:?}"
+    );
+
+    let result = agg
+        .route("mcp__httpmcp__add", &json!({"a": 10, "b": 20}))
+        .expect("route ok");
+    assert_eq!(first_text(&result), "30");
+}
+
+// --- Streamable HTTP SSE response tests (issue #389 I3) ---------------------
+
+/// `HttpClient` handles `text/event-stream` responses (streamable HTTP), not
+/// just plain JSON. The fixture wraps each JSON-RPC response in a single SSE
+/// `message` event (issue #389 I3).
+#[test]
+fn http_transport_handles_sse_response_branch() {
+    let server = HttpMcpServer::spawn(ServerMode::HttpSse);
+    let url = format!("{}/mcp", server.url());
+
+    let mut client =
+        toptopduck_lib::mcp::client::HttpClient::connect(&url).expect("http-sse connect");
+
+    let tools = client.list_tools().expect("tools/list via SSE response");
+    assert_eq!(tools.len(), 2, "http-sse server advertises echo + add");
+
+    let result = client
+        .call("add", &json!({"a": 20, "b": 22}))
+        .expect("tools/call via SSE response");
+    assert_eq!(first_text(&result), "42");
+}
+
+// --- SSE first-event rejection tests (issue #389 I4) ------------------------
+
+/// `SseClient::connect` rejects a server whose first SSE event is not
+/// `event: endpoint` (H1 security guard). The fixture sends
+/// `event: message` first (issue #389 I4).
+#[test]
+fn sse_transport_rejects_non_endpoint_first_event() {
+    let server = HttpMcpServer::spawn(ServerMode::SseBadFirstEvent);
+    let url = format!("{}/sse", server.url());
+
+    let result = toptopduck_lib::mcp::client::SseClient::connect(&url);
+    let err = match result {
+        Ok(_) => panic!("non-endpoint first event should be rejected"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("expected") && msg.contains("endpoint"),
+        "rejection reason mentions endpoint expectation, got: {msg}"
+    );
+}
+
+// --- SSE transport integration tests ---------------------------------------
+
+#[test]
+fn sse_transport_connect_tools_list_and_call() {
+    let server = HttpMcpServer::spawn(ServerMode::Sse);
+    let url = format!("{}/sse", server.url());
+
+    let mut client = toptopduck_lib::mcp::client::SseClient::connect(&url).expect("sse connect");
+
+    let tools = client.list_tools().expect("tools/list");
+    assert_eq!(tools.len(), 2, "sse server advertises echo + add");
+    assert_eq!(tools[0]["name"], "echo");
+    assert_eq!(tools[1]["name"], "add");
+
+    let result = client
+        .call("add", &json!({"a": 3, "b": 4}))
+        .expect("tools/call");
+    assert_eq!(first_text(&result), "7");
+
+    let echo = client
+        .call("echo", &json!({"message": "hello-sse"}))
+        .expect("echo call");
+    assert_eq!(first_text(&echo), "Echo: hello-sse");
+
+    // Dropping the client stops the reader thread (stop flag + join).
+    drop(client);
+}
+
+#[test]
+fn sse_transport_aggregator_connect_and_route() {
+    let server = HttpMcpServer::spawn(ServerMode::Sse);
+    let url = format!("{}/sse", server.url());
+
+    let config = McpServerConfig {
+        id: McpServerId("sse-srv".into()),
+        display_name: "SseMCP".into(),
+        transport: McpTransport::Sse { url },
+        env: BTreeMap::new(),
+        keychain_env_keys: Vec::new(),
+        timeout_ms: None,
+    };
+    let keychain = KeychainStore::new();
+    let mut agg = McpAggregator::empty();
+    let results = agg.connect_all(&[config], &keychain);
+    assert_eq!(results.len(), 1);
+    assert!(results[0].connected, "sse server connected via aggregator");
+
+    let names: Vec<String> = agg
+        .aggregated_tools()
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+        .collect();
+    assert!(
+        names.contains(&"mcp__ssemcp__add".into()),
+        "namespaced tool table, got {names:?}"
+    );
+
+    let result = agg
+        .route("mcp__ssemcp__add", &json!({"a": 5, "b": 6}))
+        .expect("route ok");
+    assert_eq!(first_text(&result), "11");
+
+    // Dropping the aggregator drops the SseClient (stop flag + thread join).
+    drop(agg);
+}
+
+/// Extract the first text block from an MCP tools/call envelope (test helper).
+fn first_text(envelope: &Value) -> String {
+    envelope
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|b| b.get("text"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string()
 }

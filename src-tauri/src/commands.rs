@@ -825,14 +825,15 @@ pub struct McpProbeResult {
 
 /// Probe one MCP server's connectivity (issue #387). Global (not
 /// session-scoped): the settings page calls this to test a configured server
-/// independently of any agent turn. Receives the full [`McpServerConfig`],
-/// resolves the server's secret env values from the keychain
-/// ([`McpServerConfig::keychain_env_keys`], ADR-0029 -- values never cross IPC),
-/// spawns the server via [`StdioClient`], performs the MCP initialize handshake,
-/// lists tools, then tears down (the `StdioClient`'s `Drop` kills the child).
-/// Returns the outcome so the UI can render a status dot + expandable tool
-/// list. v1 supports stdio only; other transports return `connected: false`
-/// with an `unsupported transport` error.
+/// without starting a turn. Connects via the transport dispatcher
+/// (issue #389: stdio / SSE / HTTP), performs initialize + tools/list, then
+/// tears down. Receives the full [`McpServerConfig`], resolves the server's
+/// secret env values from the keychain
+/// ([`McpServerConfig::keychain_env_keys`], ADR-0029 -- values never cross
+/// IPC), connects via [`connect_transport`](crate::mcp::client::connect_transport)
+/// (which dispatches to the transport-specific client), lists tools, then
+/// drops the client (tearing down the transport). Returns the outcome so the
+/// UI can render a status dot + expandable tool list.
 #[tauri::command]
 pub fn probe_mcp_server(
     live: State<'_, LiveProviderConfig>,
@@ -843,7 +844,7 @@ pub fn probe_mcp_server(
     // together (collect_secrets logs + skips on a per-key keychain fault).
     let secrets = crate::mcp::aggregator::collect_secrets(live.keychain(), &server);
 
-    let mut client = match crate::mcp::client::StdioClient::connect(&server, &secrets) {
+    let mut client = match crate::mcp::client::connect_transport(&server, &secrets) {
         Ok(c) => c,
         Err(e) => {
             log::warn!(
@@ -873,7 +874,7 @@ pub fn probe_mcp_server(
             });
         }
     };
-    // client drops here -> StdioClient::Drop kills the child (teardown).
+    // client drops here -> transport teardown (kills child / stops SSE thread).
     Ok(McpProbeResult {
         connected: true,
         tools: crate::mcp::aggregator::extract_tool_info(&tools),
