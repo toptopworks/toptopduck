@@ -54,4 +54,14 @@ export const adapterKeys = {
  *  shared by every session). A close's removeQueries does not touch it. */
 export const skillKeys = {
   all: () => ["skills"] as const,
+  /** Import-dialog source discovery (issue #367) -- the two-stage drill-down's
+   *  source-list read. Keyed by the custom-paths tuple so adding a custom path
+   *  re-fetches; the standard sources (Claude Code / Codex CLI) are resolved
+   *  server-side off the home dir, so the key only needs the user-controlled
+   *  tail. Lives under the "skills" prefix so a successful import (which
+   *  invalidates `skillKeys.all()`) also evicts the stale discovery read -- a
+   *  previously `already_exists` skill becomes importable-shaped once its name
+   *  leaves the registry, and the dialog re-reads on next open. */
+  sources: (customPaths: readonly string[]) =>
+    ["skills", "sources", customPaths] as const,
 } as const;

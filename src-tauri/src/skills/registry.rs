@@ -280,7 +280,7 @@ fn existing_skill_dir(root: &Path, name: &str) -> Result<PathBuf, SkillError> {
 }
 
 /// Load + validate one skill directory into its wire entry.
-fn load_skill(dir: &Path) -> Result<SkillEntry, SkillError> {
+pub(crate) fn load_skill(dir: &Path) -> Result<SkillEntry, SkillError> {
     let dir_name = dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -371,7 +371,7 @@ fn write_skill_md(dir: &Path, content: &str) -> Result<(), SkillError> {
 
 /// The FsFailure constructor: the operation + path + OS detail, English (the
 /// technical-detail fold; user-facing wording lives in the locale catalog).
-fn fs_err(op: &str, path: &Path, e: std::io::Error) -> SkillError {
+pub(crate) fn fs_err(op: &str, path: &Path, e: std::io::Error) -> SkillError {
     SkillError::FsFailure(format!("{op} failed for `{}`: {e}", path.display()))
 }
 

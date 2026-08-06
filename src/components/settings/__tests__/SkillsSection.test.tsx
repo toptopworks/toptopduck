@@ -9,18 +9,22 @@ import {
   createSkill,
   deleteSkill,
   listSkills,
+  listSkillSources,
   updateSkill,
 } from "../../../api";
 import type { SkillEntry } from "../../../types/skills";
 
 // The pane drives everything through IPC + the opener plugin; mock both so the
 // test never touches Tauri. revealItemInDir is the "open source location" call
-// for linked skills.
+// for linked skills. listSkillSources feeds the import dialog's discovery read
+// (issue #367).
 vi.mock("../../../api", () => ({
   listSkills: vi.fn(),
   createSkill: vi.fn(),
   updateSkill: vi.fn(),
   deleteSkill: vi.fn(),
+  listSkillSources: vi.fn(),
+  importSkills: vi.fn(),
 }));
 vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: vi.fn(),
@@ -71,6 +75,7 @@ describe("SkillsSection (issue #362)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [] });
+    vi.mocked(listSkillSources).mockResolvedValue([]);
   });
 
   it("lists the skills returned by listSkills", async () => {
@@ -204,6 +209,21 @@ describe("SkillsSection (issue #362)", () => {
         screen.getByText("A skill named \"pdf-tools\" already exists"),
       ).toBeInTheDocument();
     });
+  });
+
+  it("opens the import dialog when the Import button is clicked (issue #367)", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [] });
+    vi.mocked(listSkillSources).mockResolvedValue([]);
+    renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
+    await screen.findByText("No skills yet. Click New to author one.");
+
+    // The Import button is now enabled (was disabled before #367); clicking it
+    // opens the two-stage drill-down dialog, surfaced by its title.
+    const importBtn = screen.getByRole("button", { name: /Import/i });
+    expect(importBtn).not.toBeDisabled();
+    fireEvent.click(importBtn);
+
+    expect(await screen.findByText("Import skills")).toBeInTheDocument();
   });
 
   it("does not render the ignored section when the registry is clean", async () => {
