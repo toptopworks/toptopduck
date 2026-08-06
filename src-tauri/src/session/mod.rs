@@ -597,9 +597,10 @@ impl TurnAudit {
 /// #378): the effective MCP servers, the keychain for secret env resolution,
 /// and the mounted skill prompt fragments. These three are "data passed in"
 /// rather than orchestration concerns -- the approval state / sink / phase
-/// callback are wiring, not data -- so they collapse into one struct to keep
-/// `ask_with_phase` under clippy's argument threshold as MCP / skill slices
-/// add more inputs.
+/// callback are wiring, not data -- so they collapse into one struct. This
+/// keeps `run_external_turn` (currently 8 params, `#[allow]` retained) from
+/// growing further, and prevents `ask_with_phase` from exceeding the
+/// threshold as more data inputs are added.
 pub struct TurnInputs<'a> {
     /// The effective MCP server configs for this turn (enabled ∪
     /// skill-declared, computed at the command boundary). The gateway
@@ -1993,7 +1994,8 @@ impl Session {
     /// does so [`Self::ask_with_phase`]'s post-turn path is shared.
     // Cannot collapse further: question / history / locale / adapter are
     // external-runtime orchestration params with no natural grouping (unlike
-    // the three data inputs now in TurnInputs).
+    // the three data inputs now in TurnInputs); approval / sink / on_phase
+    // are per-turn wiring callbacks (see TurnInputs doc), not data.
     #[allow(clippy::too_many_arguments)]
     fn run_external_turn<O: FnMut(TurnPhase) + Send>(
         &mut self,
