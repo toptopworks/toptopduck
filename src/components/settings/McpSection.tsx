@@ -7,6 +7,7 @@ import {
   ChevronRight,
   Loader2,
   MinusCircle,
+  Pencil,
   Plus,
   Trash2,
   Zap,
@@ -29,12 +30,15 @@ import {
 } from "../ui/alert-dialog";
 import { Button } from "../ui/button";
 import { PaneHeader, SettingsCard } from "./settings-chrome";
+import { McpServerForm } from "./McpServerForm";
 
-// MCP servers settings pane (issue #387). Lists every configured MCP server
-// from app-config with a connection status dot, expandable tool list, per-row
-// Test button (manual probe_mcp_server), and delete (AlertDialog confirm →
-// clear secrets + remove config). v1: the Add button is a placeholder (the
-// form page lands in a follow-up ticket).
+// MCP servers settings pane (issue #387 + #388). Two sub-views managed by local
+// state: "list" shows every configured server with a connection status dot,
+// expandable tool list, per-row Test/Edit/Delete buttons; "form" shows the
+// add/edit form (Form/JSON dual-mode) for one server. The Add button and each
+// row's Edit button switch to the form; the form's back link returns to the
+// list. After save, the form hands the finalized config + probe result back so
+// the list shows the new entry + its status dot immediately.
 
 /** Per-server probe status held in local state (issue #387). The initial state
  *  is "untested" (gray); the Test button transitions through "testing" →
@@ -50,6 +54,11 @@ type DeleteTarget = {
   keychainEnvKeys: string[];
 };
 
+type FormTarget = {
+  server: McpServerConfig;
+  isEdit: boolean;
+};
+
 export function McpSection({
   appConfig,
   onCommit,
@@ -59,8 +68,11 @@ export function McpSection({
 }) {
   const intl = useIntl();
 
-  // Probe state keyed by server id. Survives across re-renders; a new server
-  // added later starts at "idle" (the add flow lands in a follow-up).
+  // Sub-view: "list" (server list) or "form" (add/edit one server).
+  const [formTarget, setFormTarget] = useState<FormTarget | null>(null);
+
+  // Probe state keyed by server id. Survives across re-renders; the form's
+  // onSaved callback seeds the entry for a newly added/edited server.
   const [probeStates, setProbeStates] = useState<Record<string, ProbeState>>({});
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
@@ -68,6 +80,54 @@ export function McpSection({
   const [error, setError] = useState<string | null>(null);
 
   const servers = appConfig.mcp_servers.servers;
+
+  function handleAdd() {
+    setFormTarget({
+      server: {
+        id: "",
+        display_name: "",
+        transport: { type: "stdio", command: "", args: [] },
+        env: {},
+        keychain_env_keys: [],
+        timeout_ms: null,
+      },
+      isEdit: false,
+    });
+  }
+
+  function handleEdit(server: McpServerConfig) {
+    setFormTarget({ server, isEdit: true });
+  }
+
+  /** Called by the form after upsert + secrets + probe complete. Syncs the
+   *  finalized config into React state, stores the probe result, and returns
+   *  to the list. */
+  async function handleFormSaved(
+    finalized: McpServerConfig,
+    probeResult: McpProbeResult,
+  ) {
+    setFormTarget(null);
+    setProbeStates((prev) => ({
+      ...prev,
+      [finalized.id]: { kind: "done", result: probeResult },
+    }));
+    if (probeResult.connected) {
+      setExpandedRows((prev) => new Set(prev).add(finalized.id));
+    }
+    // Sync the finalized config into React state so the list shows the
+    // new/updated entry immediately.
+    const err = await onCommit((cfg) => {
+      const others = cfg.mcp_servers.servers.filter((s) => s.id !== finalized.id);
+      return {
+        ...cfg,
+        mcp_servers: {
+          ...cfg.mcp_servers,
+          servers: [...others, finalized],
+        },
+      };
+    });
+    if (err) setError(err);
+  }
 
   function toggleRow(id: string) {
     setExpandedRows((prev) => {
@@ -153,6 +213,21 @@ export function McpSection({
     }
   }
 
+  // --- Form view ----------------------------------------------------------
+  if (formTarget) {
+    return (
+      <McpServerForm
+        key={formTarget.server.id || "new"}
+        initialServer={formTarget.server}
+        isEdit={formTarget.isEdit}
+        onSaved={(finalized, probeResult) =>
+          void handleFormSaved(finalized, probeResult)}
+        onCancel={() => setFormTarget(null)}
+      />
+    );
+  }
+
+  // --- List view ----------------------------------------------------------
   return (
     <div>
       <PaneHeader
@@ -164,7 +239,7 @@ export function McpSection({
           />
         )}
         action={(
-          <Button type="button" size="sm" disabled>
+          <Button type="button" size="sm" onClick={handleAdd}>
             <Plus className="size-4" aria-hidden />
             <FormattedMessage id="settings.mcp.add" defaultMessage="Add" />
           </Button>
@@ -188,6 +263,7 @@ export function McpSection({
               expanded={expandedRows.has(server.id)}
               onToggleRow={() => toggleRow(server.id)}
               onProbe={() => void handleProbe(server)}
+              onEdit={() => handleEdit(server)}
               onDelete={() =>
                 setDeleteTarget({
                   id: server.id,
@@ -268,6 +344,7 @@ type McpServerRowProps = {
   expanded: boolean;
   onToggleRow: () => void;
   onProbe: () => void;
+  onEdit: () => void;
   onDelete: () => void;
 };
 
@@ -277,6 +354,7 @@ function McpServerRow({
   expanded,
   onToggleRow,
   onProbe,
+  onEdit,
   onDelete,
 }: McpServerRowProps) {
   const intl = useIntl();
@@ -307,6 +385,20 @@ function McpServerRow({
             {"url" in server.transport ? server.transport.url : server.transport.command}
           </span>
         </div>
+
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="shrink-0"
+          aria-label={intl.formatMessage(
+            { id: "settings.mcp.editLabel", defaultMessage: "Edit server {name}" },
+            { name: server.display_name },
+          )}
+          onClick={onEdit}
+        >
+          <Pencil className="size-4" aria-hidden />
+        </Button>
 
         <Button
           type="button"

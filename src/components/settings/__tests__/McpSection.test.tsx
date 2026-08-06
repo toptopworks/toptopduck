@@ -13,6 +13,8 @@ import type { McpServerConfig, McpProbeResult } from "../../../types/mcp";
 vi.mock("../../../api", () => ({
   clearMcpServerSecret: vi.fn(),
   probeMcpServer: vi.fn(),
+  upsertMcpServer: vi.fn(),
+  setMcpServerSecret: vi.fn(),
 }));
 
 function makeServer(overrides: Partial<McpServerConfig> = {}): McpServerConfig {
@@ -241,12 +243,54 @@ describe("McpSection (issue #387)", () => {
     expect(screen.queryByText("keychain locked")).not.toBeInTheDocument();
   });
 
-  it("shows Add button as disabled (placeholder for follow-up ticket)", () => {
+  it("clicking Add switches to the form view (issue #388)", () => {
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([])} onCommit={vi.fn()} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Add/ }));
+
+    expect(screen.getByTestId("mcp-server-form")).toBeInTheDocument();
+    expect(screen.getByText("Add MCP server")).toBeInTheDocument();
+  });
+
+  it("clicking Edit on a server row switches to a pre-filled form (issue #388)", () => {
+    const server = makeServer({ id: "srv-1", display_name: "My Server" });
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([server])} onCommit={vi.fn()} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit server My Server" }));
+
+    expect(screen.getByTestId("mcp-server-form")).toBeInTheDocument();
+    expect(screen.getByText("Edit MCP server")).toBeInTheDocument();
+    expect((screen.getByLabelText("Display name") as HTMLInputElement).value).toBe(
+      "My Server",
+    );
+  });
+
+  it("back link in the form returns to the list view (issue #388)", () => {
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([])} onCommit={vi.fn()} />,
+    );
+
+    // Enter the form.
+    fireEvent.click(screen.getByRole("button", { name: /Add/ }));
+    expect(screen.getByTestId("mcp-server-form")).toBeInTheDocument();
+
+    // Go back.
+    fireEvent.click(screen.getByText("Back to MCP list"));
+
+    expect(screen.queryByTestId("mcp-server-form")).not.toBeInTheDocument();
+    expect(screen.getByTestId("mcp-server-list")).toBeInTheDocument();
+  });
+
+  it("Add button is now enabled (no longer a placeholder)", () => {
     renderWithProviders(
       <McpSection appConfig={makeAppConfig([])} onCommit={vi.fn()} />,
     );
 
     const addButton = screen.getByRole("button", { name: /Add/ });
-    expect(addButton).toBeDisabled();
+    expect(addButton).not.toBeDisabled();
   });
 });
