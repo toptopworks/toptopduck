@@ -347,4 +347,67 @@ describe("McpImportDialog (issue #390)", () => {
     expect(results[0].probeResult.connected).toBe(false);
     expect(results[0].probeResult.error).toBe("spawn timeout");
   });
+
+  it("does not re-import succeeded servers on retry after partial failure (H1)", async () => {
+    const servers = [
+      makeDiscovered({ display_name: "srv-a" }),
+      makeDiscovered({ display_name: "srv-b" }),
+    ];
+    vi.mocked(discoverMcpServers).mockResolvedValue(servers);
+
+    const finalizedA: McpServerConfig = {
+      id: "id-a",
+      display_name: "srv-a",
+      transport: { type: "stdio", command: "npx", args: ["-y", "server"] },
+      env: {},
+      keychain_env_keys: [],
+      timeout_ms: null,
+    };
+    const finalizedB: McpServerConfig = {
+      ...finalizedA,
+      id: "id-b",
+      display_name: "srv-b",
+    };
+    // First attempt: srv-a succeeds, srv-b fails.
+    // Retry: srv-b succeeds (should NOT re-import srv-a).
+    vi.mocked(upsertMcpServer)
+      .mockResolvedValueOnce(finalizedA)
+      .mockRejectedValueOnce(new Error("disk full"))
+      .mockResolvedValueOnce(finalizedB);
+    vi.mocked(probeMcpServer).mockResolvedValue({ connected: true, tools: [], error: null });
+
+    const onImported = vi.fn();
+    renderWithProviders(
+      <McpImportDialog {...defaultProps} onImported={onImported} />,
+    );
+
+    fireEvent.click(screen.getByTestId("mcp-import-source-claude_desktop"));
+    await screen.findByText("srv-a");
+    fireEvent.click(screen.getByRole("button", { name: /Import 2/ }));
+
+    // First attempt: srv-a imported, srv-b failed.
+    await waitFor(() => {
+      expect(onImported).toHaveBeenCalledTimes(1);
+    });
+    expect(onImported.mock.calls[0][0]).toHaveLength(1);
+
+    // srv-a removed from checklist; only srv-b remains for retry.
+    await waitFor(() => {
+      expect(screen.queryByText("srv-a")).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: /Import 1/ })).toBeInTheDocument();
+    expect(screen.getByText(/disk full/)).toBeInTheDocument();
+
+    // Retry: click Import again — only srv-b should be imported.
+    fireEvent.click(screen.getByRole("button", { name: /Import 1/ }));
+
+    await waitFor(() => {
+      expect(onImported).toHaveBeenCalledTimes(2);
+    });
+    expect(onImported.mock.calls[1][0]).toHaveLength(1);
+    expect(onImported.mock.calls[1][0][0].config.id).toBe("id-b");
+
+    // Total upsert calls: 2 (first attempt) + 1 (retry) = 3, NOT 4.
+    expect(upsertMcpServer).toHaveBeenCalledTimes(3);
+  });
 });

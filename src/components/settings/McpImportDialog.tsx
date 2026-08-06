@@ -46,10 +46,7 @@ export type McpImportDialogProps = {
   onImported: (results: { config: McpServerConfig; probeResult: McpProbeResult }[]) => void;
 };
 
-const SOURCES: { value: ImportSource; icon: typeof Monitor }[] = [
-  { value: "claude_desktop", icon: Monitor },
-  { value: "codex", icon: Terminal },
-];
+const SOURCES: ImportSource[] = ["claude_desktop", "codex"];
 
 /** The source-selection buttons. Each FormattedMessage uses a static id literal
  *  so @formatjs/cli extract resolves every key (ADR-0052). */
@@ -125,6 +122,8 @@ export function McpImportDialog({ open, onClose, onImported }: McpImportDialogPr
   }, []);
 
   async function handleImport() {
+    // Guard against double-click / stale closure re-entry (M2).
+    if (step !== "checklist") return;
     if (!discoverResult || discoverResult.kind !== "servers") return;
     const servers = discoverResult.servers.filter((s) => selected.has(s.display_name));
     if (servers.length === 0) return;
@@ -173,9 +172,24 @@ export function McpImportDialog({ open, onClose, onImported }: McpImportDialogPr
     }
 
     // Sync all successfully imported servers to the parent so the list shows
-    // them immediately, even if some servers in the batch failed.
+    // them immediately, even if some servers in the batch failed. Also remove
+    // succeeded servers from the checklist so a retry only covers the failed
+    // ones — prevents re-importing with fresh uuids (H1: duplicate prevention).
     if (results.length > 0) {
       onImported(results);
+      const succeededNames = new Set(results.map((r) => r.config.display_name));
+      setDiscoverResult((prev) => {
+        if (prev?.kind !== "servers") return prev;
+        return {
+          ...prev,
+          servers: prev.servers.filter((s) => !succeededNames.has(s.display_name)),
+        };
+      });
+      setSelected((prev) => {
+        const next = new Set(prev);
+        for (const name of succeededNames) next.delete(name);
+        return next;
+      });
     }
 
     if (failures.length > 0) {
@@ -231,8 +245,8 @@ export function McpImportDialog({ open, onClose, onImported }: McpImportDialogPr
           <div className="grid gap-2" data-testid="mcp-import-sources">
             {SOURCES.map((src) => (
               <SourceButton
-                key={src.value}
-                source={src.value}
+                key={src}
+                source={src}
                 onSelect={(s) => void handleSelectSource(s)}
               />
             ))}
@@ -347,7 +361,7 @@ export function McpImportDialog({ open, onClose, onImported }: McpImportDialogPr
         )}
 
         {error && (
-          <p className="text-destructive text-sm">{error}</p>
+          <p className="text-destructive whitespace-pre-line text-sm">{error}</p>
         )}
 
         <DialogFooter>

@@ -9,15 +9,18 @@
 //! ## Secrets handling
 //!
 //! External configs (especially Claude Desktop) often carry secret env values
-//! inline (e.g. `API_KEY`). The app-config read-time scan refuses any key
-//! matching a secret name (see [`crate::app_config::io::is_secret_name`]).
-//! During import, env keys that match the scan are routed to
+//! inline (e.g. `API_KEY`, `AUTH_TOKEN`). The import path uses a more aggressive
+//! scan ([`is_secret_env_key`]) than the app-config read-time backstop
+//! ([`is_secret_name`]) because on the import path env values are about to be
+//! persisted to `app-config.json` -- the scan IS the primary defense, so
+//! false-positive cost (user re-enters a value) is preferred over false-negative
+//! cost (plaintext leak). Keys caught by the scan are routed to
 //! [`DiscoveredServer::keychain_env_keys`] (name only -- the value is dropped;
 //! the user re-enters it after import). Non-secret env values stay in the env
 //! map and ride the normal config write.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -60,10 +63,46 @@ pub struct DiscoveredServer {
 ///
 /// Parse errors (malformed JSON / TOML) return an error string so the frontend
 /// can tell the user the file exists but could not be read.
+///
+/// # Errors
+///
+/// Returns `Err` when the config file exists but cannot be read (permissions,
+/// size limit exceeded) or when parsing fails (malformed JSON / TOML). The
+/// frontend shows the error string to the user.
 pub fn discover(source: ImportSource) -> Result<Vec<DiscoveredServer>, String> {
     match source {
         ImportSource::ClaudeDesktop => discover_claude_desktop(),
         ImportSource::Codex => discover_codex(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Config file I/O (shared)
+// ---------------------------------------------------------------------------
+
+/// Maximum external config file size read by the import wizard (8 MiB -- far
+/// beyond any real MCP config). Prevents OOM when a malformed or hostile file
+/// is encountered (review M4).
+const MAX_CONFIG_SIZE: u64 = 8 * 1024 * 1024;
+
+/// Read a config file, returning `None` when not found (intentionally not an
+/// error -- the frontend shows a "not found" message). Files exceeding
+/// [`MAX_CONFIG_SIZE`] are rejected before reading to avoid OOM.
+fn read_config(path: &Path) -> Result<Option<String>, String> {
+    if let Ok(metadata) = std::fs::metadata(path) {
+        if metadata.len() > MAX_CONFIG_SIZE {
+            return Err(format!(
+                "config file too large ({} bytes; limit {}): {}",
+                metadata.len(),
+                MAX_CONFIG_SIZE,
+                path.display()
+            ));
+        }
+    }
+    match std::fs::read_to_string(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("failed to read {}: {e}", path.display())),
     }
 }
 
@@ -141,23 +180,26 @@ fn discover_claude_desktop() -> Result<Vec<DiscoveredServer>, String> {
         Some(p) => p,
         None => return Ok(Vec::new()), // Unsupported platform = "not found"
     };
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("failed to read {}: {e}", path.display())),
-    };
-    parse_claude_desktop_config(&content)
-        .map_err(|e| format!("failed to parse {}: {e}", path.display()))
+    match read_config(&path)? {
+        None => Ok(Vec::new()),
+        Some(content) => parse_claude_desktop_config(&content)
+            .map_err(|e| format!("failed to parse {}: {e}", path.display())),
+    }
 }
 
 /// Pure parse of a Claude Desktop config JSON string (testable without touching
 /// the filesystem). Extracted from [`discover_claude_desktop`] so unit tests can
 /// exercise the parse + mapping logic + malformed-input rejection.
+///
+/// Non-stdio entries (SSE/HTTP with `url` instead of `command`) have an empty
+/// `command` after serde default-fills and are skipped -- the import wizard
+/// only supports stdio servers in v1 (review M1).
 fn parse_claude_desktop_config(content: &str) -> Result<Vec<DiscoveredServer>, String> {
     let config: ClaudeDesktopConfig = serde_json::from_str(content).map_err(|e| e.to_string())?;
     Ok(config
         .mcp_servers
         .into_iter()
+        .filter(|(_, server)| !server.command.is_empty())
         .map(|(name, server)| parse_external_server(&name, server.command, server.args, server.env))
         .collect())
 }
@@ -209,22 +251,26 @@ fn discover_codex() -> Result<Vec<DiscoveredServer>, String> {
         Some(p) => p,
         None => return Ok(Vec::new()),
     };
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("failed to read {}: {e}", path.display())),
-    };
-    parse_codex_config(&content).map_err(|e| format!("failed to parse {}: {e}", path.display()))
+    match read_config(&path)? {
+        None => Ok(Vec::new()),
+        Some(content) => parse_codex_config(&content)
+            .map_err(|e| format!("failed to parse {}: {e}", path.display())),
+    }
 }
 
 /// Pure parse of a Codex config TOML string (testable without touching the
 /// filesystem). Extracted from [`discover_codex`] so unit tests can exercise
 /// the parse + mapping logic + malformed-input rejection.
+///
+/// Non-stdio entries (SSE/HTTP with `url` instead of `command`) have an empty
+/// `command` after serde default-fills and are skipped -- the import wizard
+/// only supports stdio servers in v1 (review M1).
 fn parse_codex_config(content: &str) -> Result<Vec<DiscoveredServer>, String> {
     let config: CodexConfig = toml::from_str(content).map_err(|e| e.to_string())?;
     Ok(config
         .mcp_servers
         .into_iter()
+        .filter(|(_, server)| !server.command.is_empty())
         .map(|(name, server)| parse_external_server(&name, server.command, server.args, server.env))
         .collect())
 }
@@ -233,12 +279,39 @@ fn parse_codex_config(content: &str) -> Result<Vec<DiscoveredServer>, String> {
 // Shared mapping
 // ---------------------------------------------------------------------------
 
+/// Additional secret-name substrings checked only on the import path (see
+/// [`is_secret_env_key`]). Kept narrow to avoid false positives on legitimate
+/// env keys like `LOG_LEVEL` or `NODE_PATH`.
+const IMPORT_SECRET_SUBSTRINGS: &[&str] = &["token", "bearer", "jwt", "privatekey"];
+
+/// Check whether an env key from an external config likely holds a secret.
+///
+/// More aggressive than [`is_secret_name`] (the app-config read-time scan)
+/// because on the import path the scan is the primary defense -- env values
+/// are about to be persisted to `app-config.json`, with no structural backstop.
+/// False-positive cost (user re-enters a value) is far lower than false-negative
+/// cost (plaintext leak). In addition to the [`is_secret_name`] patterns, this
+/// catches `token` / `bearer` / `jwt` / `private_key` substrings (review H2).
+fn is_secret_env_key(name: &str) -> bool {
+    if is_secret_name(name) {
+        return true;
+    }
+    let collapsed: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    IMPORT_SECRET_SUBSTRINGS
+        .iter()
+        .any(|s| collapsed.contains(s))
+}
+
 /// Map one external server entry (common stdio shape across both sources) into
 /// a [`DiscoveredServer`], splitting env values into non-secret vs keychain.
 ///
-/// Env keys matching the secret scan ([`is_secret_name`]) are routed to
-/// `keychain_env_keys` (name only -- the value is dropped; the user re-enters
-/// it after import). Non-secret values stay in the env map.
+/// Env keys matching the import-specific secret scan ([`is_secret_env_key`])
+/// are routed to `keychain_env_keys` (name only -- the value is dropped; the
+/// user re-enters it after import). Non-secret values stay in the env map.
 fn parse_external_server(
     name: &str,
     command: String,
@@ -248,7 +321,7 @@ fn parse_external_server(
     let mut safe_env = BTreeMap::new();
     let mut keychain_env_keys = Vec::new();
     for (key, value) in env {
-        if is_secret_name(&key) {
+        if is_secret_env_key(&key) {
             keychain_env_keys.push(key);
         } else {
             safe_env.insert(key, value);
@@ -370,6 +443,39 @@ LOG_LEVEL = "debug"
     }
 
     #[test]
+    fn import_specific_secret_patterns_routed_to_keychain() {
+        // Patterns caught by the import-specific scan but NOT by the base
+        // is_secret_name scan (review H2): token / bearer / jwt / private_key.
+        let mut env = BTreeMap::new();
+        env.insert("LOG_LEVEL".to_string(), "debug".to_string());
+        env.insert("AUTH_TOKEN".to_string(), "ghp_xxx".to_string());
+        env.insert("GH_TOKEN".to_string(), "ghp_yyy".to_string());
+        env.insert("PRIVATE_KEY".to_string(), "-----BEGIN".to_string());
+        env.insert("BEARER".to_string(), "Bearer zzz".to_string());
+        env.insert("JWT_SECRET".to_string(), "jwt_www".to_string());
+
+        let server = parse_external_server("test", "cmd".into(), Vec::new(), env);
+
+        // LOG_LEVEL is the only non-secret.
+        assert_eq!(server.env.len(), 1);
+        assert_eq!(server.env.get("LOG_LEVEL").unwrap(), "debug");
+        // All token/bearer/jwt/private_key patterns caught.
+        assert_eq!(server.keychain_env_keys.len(), 5);
+        for key in &[
+            "AUTH_TOKEN",
+            "GH_TOKEN",
+            "PRIVATE_KEY",
+            "BEARER",
+            "JWT_SECRET",
+        ] {
+            assert!(
+                server.keychain_env_keys.contains(&key.to_string()),
+                "{key} should be routed to keychain"
+            );
+        }
+    }
+
+    #[test]
     fn parse_claude_desktop_malformed_json_returns_err() {
         let result = parse_claude_desktop_config("{ not valid json");
         assert!(result.is_err(), "malformed JSON must return Err");
@@ -443,5 +549,42 @@ args = ["mcp-server-fetch"]
         assert_eq!(json["display_name"], "test");
         assert_eq!(json["transport"]["type"], "stdio");
         assert_eq!(json["transport"]["command"], "npx");
+    }
+
+    #[test]
+    fn empty_command_entries_skipped_in_claude_desktop() {
+        // Non-stdio entries (SSE/HTTP with `url` instead of `command`) have an
+        // empty `command` after serde default-fills -- they are skipped because
+        // the import wizard only supports stdio (review M1).
+        let json = r#"{
+            "mcpServers": {
+                "stdio-server": {
+                    "command": "npx",
+                    "args": ["-y", "server"]
+                },
+                "sse-server": {
+                    "url": "https://example.com/sse",
+                    "type": "sse"
+                }
+            }
+        }"#;
+        let servers = parse_claude_desktop_config(json).unwrap();
+        assert_eq!(servers.len(), 1, "non-stdio entries should be skipped");
+        assert_eq!(servers[0].display_name, "stdio-server");
+    }
+
+    #[test]
+    fn empty_command_entries_skipped_in_codex() {
+        let toml = r#"
+[mcp_servers.stdio-server]
+command = "npx"
+args = ["-y", "server"]
+
+[mcp_servers.sse-server]
+url = "https://example.com/sse"
+"#;
+        let servers = parse_codex_config(toml).unwrap();
+        assert_eq!(servers.len(), 1, "non-stdio entries should be skipped");
+        assert_eq!(servers[0].display_name, "stdio-server");
     }
 }
