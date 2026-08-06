@@ -240,7 +240,7 @@ mod tests {
     fn egress_agent_builds_only_once_across_calls() {
         // AC #278: there is exactly one `ureq::Agent` for the whole process, so
         // every call site (anthropic / openai / preflight) draws from a single
-        // shared connection pool. A `OnceLock` singleton is built on first use
+        // shared connection pool. A `LazyLock` singleton is built on first use
         // and cloned thereafter -- the construction counter must not advance on
         // the 2nd+ call, regardless of whether another test already initialized
         // it (tests run in parallel, so `before` may already be non-zero). The

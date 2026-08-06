@@ -157,7 +157,7 @@ sqlparser = { version = "0.52", default-features = false }
 # does not surface (allowed-tools, any third-party key) survive an edit
 # verbatim. Mapping preserves insertion order, keeping the field order the
 # file had. The crate is archived upstream but remains the de-facto YAML-serde
-# bridge and satisfies the MSRV (1.64 <= 1.77).
+# bridge and satisfies the MSRV (1.64 <= 1.80).
 serde_yaml = "0.9"
 # Backend-generated session ids (ADR-0056): create_session mints a UUID v4 so
 # the id <-> resource binding is atomic (no "id issued, resource unbuilt"
@@ -186,7 +186,7 @@ tauri-plugin-opener = "2"
 # switch lagging the webview's cached copy) is recorded in ADR-0052 Decision 7.
 sys-locale = "0.3"
 # Codex CLI config parsing for the MCP import wizard (issue #390): reads the
-# `[mcp_servers.*]` tables from `~/.codex/config.toml`. MSRV 1.76 (<= 1.77).
+# `[mcp_servers.*]` tables from `~/.codex/config.toml`. MSRV 1.76 (<= 1.80).
 toml = "0.9"
 
 # Desktop-only Tauri plugins (issue #100, ADR-0008 cross-platform). Gated to
