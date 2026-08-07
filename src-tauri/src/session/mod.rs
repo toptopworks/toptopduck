@@ -3554,7 +3554,7 @@ mod tests {
         // ADR-0078 (issue #328): on resume, TurnAudit::from_recipe_turn
         // harvests a turn's trace + provenance from the persisted recipe.
         // build_recipe must route those values back through
-        // RecipeTurn::with_audit verbatim -- a regression to RecipeTurn::new
+        // RecipeTurn::with_audit verbatim -- a regression to RecipeTurn::without_audit
         // (empty trace + default provenance) would silently drop the harvested
         // audit data. This test pins the resume path by injecting a timeline
         // entry whose audit was harvested from a recipe turn carrying a

@@ -249,7 +249,7 @@ mod tests {
                 rectify: RectifyProvenance::NotApplicable,
                 fingerprint: "fp".into(),
             }],
-            vec![RecipeEntry::Turn(RecipeTurn::new(
+            vec![RecipeEntry::Turn(RecipeTurn::without_audit(
                 "q",
                 RecipeOutcome::Materialized {
                     promotions: vec![RecipePromotion {

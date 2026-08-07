@@ -36,7 +36,7 @@ fn write_recipe(dir: &std::path::Path, file: &str, session_name: &str, src: &str
     let recipe = Recipe::build(
         session_name.into(),
         vec![source],
-        vec![RecipeEntry::Turn(RecipeTurn::new(
+        vec![RecipeEntry::Turn(RecipeTurn::without_audit(
             "q",
             RecipeOutcome::Materialized {
                 promotions: vec![RecipePromotion {

@@ -322,7 +322,7 @@ impl RecipeTurn {
     /// (`Session::build_recipe`) routes through [`Self::with_audit`] instead,
     /// pairing each turn with its recorded audit (the loop's real trace +
     /// runtime provenance, ADR-0078).
-    pub fn new(question: impl Into<String>, outcome: RecipeOutcome) -> Self {
+    pub fn without_audit(question: impl Into<String>, outcome: RecipeOutcome) -> Self {
         Self {
             question: question.into(),
             outcome,
@@ -336,7 +336,7 @@ impl RecipeTurn {
     /// every persisted turn through here, pairing each turn with the trace
     /// and runtime/skill provenance recorded as it ran (the loop's real
     /// multi-call trajectory for a live turn; the recipe's values harvested
-    /// on resume). [`Self::new`] stays the empty-trace / default-provenance
+    /// on resume). [`Self::without_audit`] stays the empty-trace / default-provenance
     /// shape (a no-tool turn, or a v1-era migrated turn).
     pub fn with_audit(
         question: impl Into<String>,
@@ -740,7 +740,7 @@ mod tests {
                     reference_name: "people".into(),
                     display_name: "people".into(),
                 }),
-                RecipeEntry::Turn(RecipeTurn::new(
+                RecipeEntry::Turn(RecipeTurn::without_audit(
                     "多少人",
                     RecipeOutcome::Materialized {
                         promotions: vec![RecipePromotion {
@@ -752,7 +752,7 @@ mod tests {
                         assumption: None,
                     },
                 )),
-                RecipeEntry::Turn(RecipeTurn::new(
+                RecipeEntry::Turn(RecipeTurn::without_audit(
                     "哪种名字",
                     RecipeOutcome::Textual {
                         text_kind: TextKind::Clarify,
@@ -808,7 +808,7 @@ mod tests {
             session_name: "s".into(),
             sources: vec![csv_source("people", "fp")],
             history: vec![
-                RecipeEntry::Turn(RecipeTurn::new(
+                RecipeEntry::Turn(RecipeTurn::without_audit(
                     "q1",
                     RecipeOutcome::Materialized {
                         promotions: vec![RecipePromotion {
@@ -820,7 +820,7 @@ mod tests {
                         assumption: None,
                     },
                 )),
-                RecipeEntry::Turn(RecipeTurn::new(
+                RecipeEntry::Turn(RecipeTurn::without_audit(
                     "q2",
                     RecipeOutcome::Materialized {
                         promotions: vec![RecipePromotion {
@@ -917,7 +917,7 @@ mod tests {
             session_name: "stale-chain".into(),
             sources: vec![csv_source("people", "fp")],
             history: vec![
-                RecipeEntry::Turn(RecipeTurn::new(
+                RecipeEntry::Turn(RecipeTurn::without_audit(
                     "live",
                     RecipeOutcome::Materialized {
                         promotions: vec![RecipePromotion {
@@ -929,7 +929,7 @@ mod tests {
                         assumption: None,
                     },
                 )),
-                RecipeEntry::Turn(RecipeTurn::new(
+                RecipeEntry::Turn(RecipeTurn::without_audit(
                     "stale",
                     stale_materialized(
                         "result_2",
@@ -958,7 +958,7 @@ mod tests {
         // survive serialize -> deserialize so resume can rebuild the timeline
         // AND mark the result_N stale in the working set. A dropped or
         // truncated anchor would silently lose the stale badge after reopen.
-        let turn = RecipeTurn::new(
+        let turn = RecipeTurn::without_audit(
             "stale",
             stale_materialized(
                 "result_2",
@@ -1016,7 +1016,7 @@ mod tests {
             session_name: "interleaved".into(),
             sources: vec![csv_source("people", "fp")],
             history: vec![
-                RecipeEntry::Turn(RecipeTurn::new(
+                RecipeEntry::Turn(RecipeTurn::without_audit(
                     "first live",
                     RecipeOutcome::Materialized {
                         promotions: vec![RecipePromotion {
@@ -1028,7 +1028,7 @@ mod tests {
                         assumption: None,
                     },
                 )),
-                RecipeEntry::Turn(RecipeTurn::new(
+                RecipeEntry::Turn(RecipeTurn::without_audit(
                     "stale middle",
                     stale_materialized(
                         "result_2",
@@ -1037,7 +1037,7 @@ mod tests {
                         StaleReason::Replaced,
                     ),
                 )),
-                RecipeEntry::Turn(RecipeTurn::new(
+                RecipeEntry::Turn(RecipeTurn::without_audit(
                     "live after gap",
                     RecipeOutcome::Materialized {
                         promotions: vec![RecipePromotion {
@@ -1080,7 +1080,7 @@ mod tests {
         let recipe = Recipe::build(
             "valid".into(),
             vec![csv_source("people", "fp")],
-            vec![RecipeEntry::Turn(RecipeTurn::new(
+            vec![RecipeEntry::Turn(RecipeTurn::without_audit(
                 "多少人",
                 RecipeOutcome::Materialized {
                     promotions: vec![RecipePromotion {
@@ -1134,7 +1134,7 @@ mod tests {
     fn build_rejects_a_duplicate_materialized_reference_name() {
         // ADR-0022 result_N is never reused. Two Materialized turns sharing a
         // name would shadow one another on the replay chain; build refuses.
-        let dup_turn = RecipeTurn::new(
+        let dup_turn = RecipeTurn::without_audit(
             "q",
             RecipeOutcome::Materialized {
                 promotions: vec![RecipePromotion {
@@ -1245,7 +1245,7 @@ mod tests {
         // fields (skip_serializing_if), keeping the .duck lean. A v1-era
         // Textual turn serializes to the same shape v1 carried (no trace /
         // provenance keys) -- the round trip is byte-stable.
-        let turn = RecipeTurn::new(
+        let turn = RecipeTurn::without_audit(
             "哪种名字",
             RecipeOutcome::Textual {
                 text_kind: TextKind::Clarify,
@@ -1522,7 +1522,7 @@ mod tests {
                     kind: SkillLifecycleKind::Mount,
                     name: "sql-coach".into(),
                 }),
-                RecipeEntry::Turn(RecipeTurn::new(
+                RecipeEntry::Turn(RecipeTurn::without_audit(
                     "q",
                     RecipeOutcome::Materialized {
                         promotions: vec![RecipePromotion {
