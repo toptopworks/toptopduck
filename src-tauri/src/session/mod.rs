@@ -2327,12 +2327,10 @@ impl Session {
                                 .collect();
                             // If no promotion survived (every result_N GC'd),
                             // the turn cannot replay or render -- drop it.
-                            // ADR-0041 Consequences (GC exception, issue #326):
-                            // stale turns (table still present) stay visible
-                            // with their anchor (Decision 2); a GC'd turn's
-                            // backing is physically gone, so there is nothing
-                            // to show or replay. `return None` exits the
-                            // filter_map closure, NOT build_recipe.
+                            // ADR-0041 GC exception (issue #326): stale turns
+                            // stay visible (table still present); a GC'd turn's
+                            // backing is physically gone. `return None` exits
+                            // the outer timeline-entry filter_map closure.
                             if recipe_promotions.is_empty() {
                                 return None;
                             }
@@ -3324,20 +3322,13 @@ mod tests {
 
     #[test]
     fn build_recipe_drops_a_turn_whose_every_promotion_was_gc_d() {
-        // ADR-0041 Consequences (GC exception, issue #326): when every
-        // promotion of a Materialized turn has been physically reclaimed by
-        // gc_stale_candidates (table DROP'd + descriptor removed), the turn
-        // can neither replay nor render -- build_recipe drops it from the
-        // recipe's history entirely. This is distinct from a stale turn
-        // (cascade-invalidated but table still present): stale turns stay
-        // visible with their stale anchor (ADR-0041 Decision 2); GC'd turns
-        // are gone. The recipe is a current-state snapshot, not a historical
-        // ledger (ADR-0034).
+        // ADR-0041 GC exception (issue #326): when every promotion of a
+        // Materialized turn is reclaimed by gc_stale_results (DROP TABLE +
+        // descriptor removed), build_recipe drops the turn -- unlike a stale
+        // turn (table still present, kept visible).
         //
-        // Setup: two asks against `people`, cap=1. The replace between them
-        // cascades result_1 stale; q2's materialize trips the cap and GC
-        // reclaims result_1 (the oldest stale). q1's sole promotion is gone
-        // -> build_recipe omits q1, keeps q2.
+        // Setup: two asks, cap=1. replace cascades result_1 stale; q2's
+        // materialize trips the cap -> GC reclaims result_1 -> q1 dropped.
         use crate::persistence::recipe::{RecipeEntry, RecipeOutcome};
 
         let provider = FakeProvider::new()
@@ -3362,8 +3353,21 @@ mod tests {
         let (mut session, dir) = session_with_people(provider);
         session.set_result_count_cap(1);
 
-        session.ask("q1"); // result_1, active; count 1 = cap -> no GC
-                           // Replace people (non-active) -> result_1 cascade-stale.
+        // q1 materializes result_1; count 1 = cap -> no GC yet.
+        match session.ask("q1") {
+            TurnOutcome::Materialized { promotions, .. } => {
+                assert_eq!(
+                    promotions
+                        .last()
+                        .expect("q1 promotes")
+                        .dataset
+                        .reference_name,
+                    "result_1"
+                );
+            }
+            other => panic!("expected q1 to materialize result_1, got {other:?}"),
+        }
+        // Replace people -> result_1 cascade-stale.
         let replacement = dir.path().join("people_v2.csv");
         std::fs::write(&replacement, "name,score\nBob,7\n").expect("write replacement csv");
         match session.replace_source("people", &replacement) {
@@ -3405,6 +3409,105 @@ mod tests {
             matches!(q2.outcome, RecipeOutcome::Materialized { .. }),
             "q2 is a Materialized turn"
         );
+    }
+
+    #[test]
+    fn build_recipe_keeps_a_turn_when_only_some_of_its_promotions_were_gc_d() {
+        // ADR-0084 full-chain invariant: a Materialized turn persists EVERY
+        // promotion. When only some are GC'd, the surviving promotions keep
+        // the turn in the recipe (distinct from the all-GC'd drop above).
+        //
+        // Setup: q1 has two promotions (result_1, result_2), cap=2. replace
+        // cascades both stale. q2 materializes result_3 -> count 3 > cap 2
+        // -> GC reclaims only the oldest stale (result_1). q1 stays with
+        // result_2 (stale) surviving.
+        use crate::persistence::recipe::{RecipeEntry, RecipeOutcome};
+
+        let provider = FakeProvider::new()
+            .scripted_tool_turn_seq(
+                "q1",
+                vec![
+                    Ok(materialize_call(
+                        "SELECT COUNT(*) AS n FROM \"people\".data",
+                    )),
+                    Ok(materialize_call(
+                        "SELECT COUNT(*) AS n FROM \"people\".data",
+                    )),
+                    Ok(ToolTurnReply::Text("done".into())),
+                ],
+            )
+            .scripted_tool_turn_seq(
+                "q2",
+                vec![
+                    Ok(materialize_call(
+                        "SELECT COUNT(*) AS n FROM \"people\".data",
+                    )),
+                    Ok(ToolTurnReply::Text("done".into())),
+                ],
+            );
+        let (mut session, dir) = session_with_people(provider);
+        session.set_result_count_cap(2);
+
+        // q1: two materializes -> result_1, result_2; count 2 = cap -> no GC.
+        match session.ask("q1") {
+            TurnOutcome::Materialized { promotions, .. } => {
+                assert_eq!(promotions.len(), 2, "q1 promotes two results");
+            }
+            other => panic!("expected q1 Materialized, got {other:?}"),
+        }
+        // Replace people -> result_1, result_2 cascade-stale.
+        let replacement = dir.path().join("people_v2.csv");
+        std::fs::write(&replacement, "name,score\nBob,7\n").expect("write replacement csv");
+        match session.replace_source("people", &replacement) {
+            crate::model::LoadOutcome::Loaded(_) => {}
+            other => panic!("expected replace to succeed, got {other:?}"),
+        }
+        // q2 materializes result_3 -> count 3 > cap 2 -> GC reclaims oldest
+        // stale (result_1 only -- over = 1).
+        match session.ask("q2") {
+            TurnOutcome::Materialized { promotions, .. } => {
+                let primary = promotions.last().expect("q2 carries promotions");
+                assert_eq!(primary.dataset.reference_name, "result_3");
+            }
+            other => panic!("expected Materialized result_3, got {other:?}"),
+        }
+        assert!(
+            session.get("result_1").is_none(),
+            "result_1 GC'd from the working set"
+        );
+        assert!(
+            session.get("result_2").is_some(),
+            "result_2 survived -- only the oldest stale was reclaimed"
+        );
+
+        let recipe = session.build_recipe();
+        // q1 survives: result_2 (stale) is still registered, so the turn has
+        // one surviving promotion and is retained.
+        let q1 = recipe
+            .history
+            .iter()
+            .find_map(|e| match e {
+                RecipeEntry::Turn(t) if t.question == "q1" => Some(t),
+                _ => None,
+            })
+            .expect("q1 retained -- result_2 survived GC");
+        let surviving: Vec<&String> = match &q1.outcome {
+            RecipeOutcome::Materialized { promotions, .. } => {
+                promotions.iter().map(|p| &p.reference_name).collect()
+            }
+            other => panic!("expected q1 Materialized, got {other:?}"),
+        };
+        assert_eq!(
+            surviving,
+            vec![&"result_2".to_string()],
+            "q1 keeps only result_2 (result_1 was GC'd)"
+        );
+        // q2 survives: result_3 is active.
+        let q2_present = recipe
+            .history
+            .iter()
+            .any(|e| matches!(e, RecipeEntry::Turn(t) if t.question == "q2"));
+        assert!(q2_present, "q2 retained -- result_3 is active");
     }
 
     // M1 regression: a turn whose shape derivation fails must roll back the
