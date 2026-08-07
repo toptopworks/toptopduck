@@ -31,14 +31,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::provider::keychain::ProviderConfigSource;
-use crate::provider::prompt::{
-    build_system_prompt, render_response, render_summary_turn_note, Message,
-};
+use crate::provider::prompt::{build_system_prompt, render_history_messages, Message};
 use crate::provider::reply::parse_reply;
 use crate::provider::tool_calling::{ToolTurnMessage, ToolTurnReply, ToolTurnRequest, ToolUse};
-use crate::provider::{
-    ProviderError, ProviderReply, ProviderRequest, TurnPayload, MAX_REPLY_TOKENS,
-};
+use crate::provider::{ProviderError, ProviderReply, ProviderRequest, MAX_REPLY_TOKENS};
 
 /// Wall-clock ceiling on one LLM HTTP call (mirrors the anthropic adapter).
 /// Bounds a hung call so the cancel path eventually lands: a cancel during the
@@ -496,47 +492,20 @@ fn parse_tool_turn_response(raw: RawToolTurnResponse) -> Result<ToolTurnReply, P
 /// turn. Unlike the anthropic adapter -- which carries the system prompt in
 /// the request body's `system` field and starts `messages` with a user turn
 /// -- OpenAI Chat Completions has no separate system field, so the system
-/// prompt rides a leading role="system" message.
+/// prompt rides a leading role="system" message. The role/content sequence
+/// is delegated to [`render_history_messages`]; this function only prepends
+/// the system message and maps the neutral pairs into OpenAI's wire shape.
 fn build_messages(request: &ProviderRequest, system: String) -> Vec<Message> {
     let mut msgs = Vec::with_capacity(request.history.len() * 2 + 2);
     msgs.push(Message {
         role: "system",
         content: system,
     });
-    for turn in &request.history {
-        match turn {
-            TurnPayload::Full { question, response } => {
-                msgs.push(Message {
-                    role: "user",
-                    content: question.clone(),
-                });
-                msgs.push(Message {
-                    role: "assistant",
-                    content: render_response(response),
-                });
-            }
-            TurnPayload::Summary {
-                question_excerpt,
-                result,
-            } => {
-                // A far-window turn (ADR-0039): only the verbatim question
-                // excerpt + whether it produced a result ride; no SQL/schema.
-                msgs.push(Message {
-                    role: "user",
-                    content: question_excerpt.clone(),
-                });
-                let note = render_summary_turn_note(result);
-                msgs.push(Message {
-                    role: "assistant",
-                    content: note,
-                });
-            }
-        }
-    }
-    msgs.push(Message {
-        role: "user",
-        content: request.question.clone(),
-    });
+    msgs.extend(
+        render_history_messages(request)
+            .into_iter()
+            .map(|(role, content)| Message { role, content }),
+    );
     msgs
 }
 
@@ -547,7 +516,7 @@ mod tests {
     use crate::provider::keychain::StaticConfig;
     use crate::provider::prompt::ResponseLocale;
     use crate::provider::tool_calling::{ToolDefinition, ToolResult};
-    use crate::provider::{ColumnRef, DatasetRef, ResponsePayload};
+    use crate::provider::{ColumnRef, DatasetRef, ResponsePayload, TurnPayload};
 
     /// Build a fixed config pointing at a mockito server URL (no OS keychain,
     /// no real network), speaking the OpenAI protocol. Locale defaults to EnUS.

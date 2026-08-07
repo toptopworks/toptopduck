@@ -22,7 +22,7 @@
 
 use serde::Serialize;
 
-use super::{ColumnRef, DatasetRef, ProviderRequest, ResponsePayload};
+use super::{ColumnRef, DatasetRef, ProviderRequest, ResponsePayload, TurnPayload};
 use crate::model::TextKind;
 use crate::skills::SkillPromptFragment;
 
@@ -438,6 +438,42 @@ pub fn render_response(r: &ResponsePayload) -> String {
         }
         ResponsePayload::Cancelled => "（上一步已取消）".to_string(),
     }
+}
+
+/// Render the windowed conversation history as protocol-neutral `(role, content)`
+/// pairs (ADR-0023/0039), closed by the asking question. A full prior turn is a
+/// `user` (its question) + `assistant` ([`render_response`]) pair; a far-window
+/// summary turn is a `user` (verbatim excerpt) + `assistant`
+/// ([`render_summary_turn_note`]) pair. The asking question is the final `user`
+/// entry.
+///
+/// Shared by the three typed-message consumers — the tool-calling loop's
+/// [`crate::window::tool_turn_messages`] and the two adapters' `build_messages`
+/// (anthropic, openai) — so the per-turn rendering sequence stays in one place.
+/// Each consumer maps the neutral pairs into its own wire shape; none
+/// re-derives the role sequence or the per-turn rendering. The ACP flat-text
+/// path ([`crate::window::assemble_acp_turn`]) re-derives the same sequence
+/// because it interleaves a skill block between the history and the asking
+/// question — a structural difference that prevents direct delegation.
+pub(crate) fn render_history_messages(request: &ProviderRequest) -> Vec<(&'static str, String)> {
+    let mut msgs = Vec::with_capacity(request.history.len() * 2 + 1);
+    for turn in &request.history {
+        match turn {
+            TurnPayload::Full { question, response } => {
+                msgs.push(("user", question.clone()));
+                msgs.push(("assistant", render_response(response)));
+            }
+            TurnPayload::Summary {
+                question_excerpt,
+                result,
+            } => {
+                msgs.push(("user", question_excerpt.clone()));
+                msgs.push(("assistant", render_summary_turn_note(result)));
+            }
+        }
+    }
+    msgs.push(("user", request.question.clone()));
+    msgs
 }
 
 #[cfg(test)]
@@ -971,5 +1007,127 @@ mod tests {
         // Verbatim bodies.
         assert!(block.contains("Always name the method."));
         assert!(block.contains("Extract tables first."));
+    }
+
+    // --- shared history-to-messages renderer (ADR-0023/0039, issue #322) -----
+    //
+    // render_history_messages is the single source of truth for the windowed
+    // conversation → (role, content) sequence. The three consumers (tool-calling
+    // tool_turn_messages + the two adapters' build_messages) delegate to it, so
+    // these tests pin the two rendering shapes (Full vs. Summary) + the asking-
+    // question closer + turn ordering + the empty-history edge case. The
+    // adapter wire-shape assertions stay in their own test modules.
+
+    /// Build a ProviderRequest with the given history + asking question.
+    fn history_request(question: &str, history: Vec<TurnPayload>) -> ProviderRequest {
+        ProviderRequest {
+            question: question.into(),
+            history,
+            datasets: Vec::new(),
+            active: None,
+        }
+    }
+
+    #[test]
+    fn render_history_messages_full_turn_is_question_plus_rendered_response() {
+        // ADR-0023: a recent (in-window) turn ships as user(verbatim question)
+        // + assistant(render_response). The assistant text is whatever
+        // render_response produces — not re-derived here.
+        let req = history_request(
+            "现在呢",
+            vec![TurnPayload::Full {
+                question: "上一问".into(),
+                response: ResponsePayload::Materialized {
+                    result: "result_1".into(),
+                    sql: Some("SELECT 1".into()),
+                    assumption: None,
+                },
+            }],
+        );
+        let pairs = render_history_messages(&req);
+        // Two history entries + one asking-question entry.
+        assert_eq!(pairs.len(), 3);
+        assert_eq!(pairs[0].0, "user");
+        assert_eq!(pairs[0].1, "上一问");
+        assert_eq!(pairs[1].0, "assistant");
+        // The assistant content is render_response's output (names result + SQL).
+        assert!(pairs[1].1.contains("result_1"));
+        assert!(pairs[1].1.contains("SELECT 1"));
+        // Asking question closes as the final user entry.
+        assert_eq!(pairs[2].0, "user");
+        assert_eq!(pairs[2].1, "现在呢");
+    }
+
+    #[test]
+    fn render_history_messages_summary_turn_is_excerpt_plus_result_note() {
+        // ADR-0039: a far-window turn ships only the verbatim question excerpt
+        // + the result note (produced a result / did not). No SQL, no schema.
+        let req = history_request(
+            "继续",
+            vec![TurnPayload::Summary {
+                question_excerpt: "很久以前的问题".into(),
+                result: Some("result_7".into()),
+            }],
+        );
+        let pairs = render_history_messages(&req);
+        assert_eq!(pairs.len(), 3);
+        assert_eq!(pairs[0].0, "user");
+        assert_eq!(pairs[0].1, "很久以前的问题");
+        assert_eq!(pairs[1].0, "assistant");
+        assert!(pairs[1].1.contains("result_7"), "names the produced result");
+        // A no-result summary turn renders the "did not produce" note.
+        let req_no_result = history_request(
+            "继续",
+            vec![TurnPayload::Summary {
+                question_excerpt: "另一个旧问题".into(),
+                result: None,
+            }],
+        );
+        let pairs = render_history_messages(&req_no_result);
+        assert_eq!(pairs[1].0, "assistant");
+        assert!(pairs[1].1.contains("未生成结果"), "no-result note");
+    }
+
+    #[test]
+    fn render_history_messages_preserves_oldest_first_order() {
+        // Mixed Full + Summary turns render oldest-first, each producing its
+        // user/assistant pair, closed by the asking question.
+        let req = history_request(
+            "最新问题",
+            vec![
+                TurnPayload::Summary {
+                    question_excerpt: "最旧摘要".into(),
+                    result: None,
+                },
+                TurnPayload::Full {
+                    question: "中间完整回合".into(),
+                    response: ResponsePayload::Textual {
+                        kind: TextKind::Agent,
+                        body: "回答内容".into(),
+                        assumption: None,
+                    },
+                },
+            ],
+        );
+        let pairs = render_history_messages(&req);
+        // 2 turns × 2 entries + 1 asking question = 5.
+        assert_eq!(pairs.len(), 5);
+        // Oldest summary first.
+        assert_eq!(pairs[0].1, "最旧摘要");
+        // Then the full turn's question + rendered response.
+        assert_eq!(pairs[2].1, "中间完整回合");
+        assert!(pairs[3].1.contains("回答内容"));
+        // Asking question last.
+        assert_eq!(pairs[4].1, "最新问题");
+    }
+
+    #[test]
+    fn render_history_messages_empty_history_is_just_the_asking_question() {
+        // No prior turns: the sequence is a single user entry — the question.
+        let req = history_request("第一个问题", Vec::new());
+        let pairs = render_history_messages(&req);
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, "user");
+        assert_eq!(pairs[0].1, "第一个问题");
     }
 }

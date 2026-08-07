@@ -15,8 +15,8 @@ use std::collections::HashSet;
 
 use crate::model::{ColumnSchema, DatasetDescriptor, TurnOutcome, TurnRecord};
 use crate::provider::prompt::{
-    build_acp_context_block, build_tool_system_prompt, render_response, render_skill_block,
-    render_summary_turn_note, ResponseLocale,
+    build_acp_context_block, build_tool_system_prompt, render_history_messages, render_response,
+    render_skill_block, render_summary_turn_note, ResponseLocale,
 };
 use crate::provider::tool_calling::{ToolTurnMessage, ToolTurnRequest};
 use crate::provider::{
@@ -139,39 +139,26 @@ pub fn assemble_acp_turn(
 }
 
 /// Render the windowed history as tool-calling messages (ADR-0023/0039),
-/// closed by the asking question. Mirrors the single-shot adapters'
-/// `build_messages` turn-for-turn: a full turn is a user question + an
-/// assistant turn carrying the rendered prior response; a far-window summary
-/// is the verbatim question excerpt + the result note. The prior assistant
+/// closed by the asking question. Delegates the role/content sequence to
+/// [`render_history_messages`] so the per-turn rendering stays in one place;
+/// each pair is mapped to the tool-calling wire shape. The prior assistant
 /// turns carry empty tool-call lists -- the history predates the tool
 /// contract (or is rendered text either way), so no `tool_use` pairing rides
 /// it; the model reads its own prior turns as prose, exactly as on the
 /// single-shot path.
 fn tool_turn_messages(request: &ProviderRequest) -> Vec<ToolTurnMessage> {
-    let mut messages = Vec::with_capacity(request.history.len() * 2 + 1);
-    for turn in &request.history {
-        match turn {
-            TurnPayload::Full { question, response } => {
-                messages.push(ToolTurnMessage::user(question.clone()));
-                messages.push(ToolTurnMessage::Assistant {
-                    text: Some(render_response(response)),
-                    tool_calls: Vec::new(),
-                });
-            }
-            TurnPayload::Summary {
-                question_excerpt,
-                result,
-            } => {
-                messages.push(ToolTurnMessage::user(question_excerpt.clone()));
-                messages.push(ToolTurnMessage::Assistant {
-                    text: Some(render_summary_turn_note(result)),
-                    tool_calls: Vec::new(),
-                });
-            }
-        }
-    }
-    messages.push(ToolTurnMessage::user(request.question.clone()));
-    messages
+    render_history_messages(request)
+        .into_iter()
+        .map(|(role, content)| match role {
+            "user" => ToolTurnMessage::user(content),
+            "assistant" => ToolTurnMessage::Assistant {
+                text: Some(content),
+                tool_calls: Vec::new(),
+            },
+            // render_history_messages only emits user/assistant.
+            _ => unreachable!("unknown role from render_history_messages: {role}"),
+        })
+        .collect()
 }
 
 /// Resolve the dataset a question targets by default when the user names none
