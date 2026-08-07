@@ -21,6 +21,7 @@ use serde_json::Value;
 use crate::mcp::client::{connect_transport, ClientError, SecretEnv, TransportClient};
 use crate::mcp::config::{McpServerConfig, McpServerId};
 use crate::mcp::secrets::get_mcp_secret;
+use crate::mcp::McpClient;
 use crate::provider::keychain::KeychainStore;
 
 /// The prefix marking a gateway-aggregated external tool name. The bridge /

@@ -6,7 +6,7 @@
 //!
 //! The process reads stdin (to keep the pipe open so the parent sees a
 //! live process, not a crash) but writes nothing to stdout. The gateway's
-//! [`McpClient`](toptopduck_lib::mcp::client::McpClient) blocks forever on
+//! [`FramedClient`](toptopduck_lib::mcp::client::FramedClient) blocks forever on
 //! `read_line` waiting for the `initialize` response, simulating a broken
 //! MCP server that accepts the connection but never sends a reply.
 //!
