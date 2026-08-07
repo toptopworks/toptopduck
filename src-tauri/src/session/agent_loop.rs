@@ -214,15 +214,11 @@ impl<'p> AgentLoop<'p> {
                 self.provider.generate_tool_turn(&turn_req)
             })) {
                 Err(payload) => {
-                    let detail = format!(
-                        "agent loop panicked in generate_tool_turn: {}",
-                        panic_message(&*payload)
+                    return outcome(
+                        panic_to_transient("generate_tool_turn", &*payload),
+                        outputs,
+                        round_trips,
                     );
-                    log::error!(
-                        target: "toptopduck::agent_loop",
-                        "{detail}"
-                    );
-                    return outcome(Termination::Transient(detail), outputs, round_trips);
                 }
                 Ok(reply) => reply,
             };
@@ -265,14 +261,14 @@ impl<'p> AgentLoop<'p> {
                         // the completion for a gate-denied call).
                         //
                         // Issue #321: guard the tool dispatch against a panic.
-                        // The materialize path registers result_N as its LAST
-                        // step, but the register-to-return window
-                        // (apply_display_label, descriptor_json, ToolOutcome
-                        // construction) can leave a ghost result_N if the panic
-                        // strikes there. The snapshot + diff in
-                        // rollback_ghost_result detects + reverts any orphan so
-                        // the working_set <-> history 1:1 invariant (ADR-0084)
-                        // holds.
+                        // The materialize path registers result_N partway
+                        // through try_materialize; a panic in any subsequent
+                        // step (record_provenance, gc_stale_results,
+                        // apply_display_label, descriptor_json, ToolOutcome
+                        // construction) can leave a ghost result_N. The
+                        // snapshot + diff in rollback_ghost_result detects +
+                        // reverts any orphan so the working_set <-> history
+                        // invariant holds (ADR-0084).
                         let prev_next = deps.working_set.next_result_number();
                         match catch_unwind(AssertUnwindSafe(|| {
                             execute_call(
@@ -287,17 +283,9 @@ impl<'p> AgentLoop<'p> {
                         })) {
                             Err(payload) => {
                                 rollback_ghost_result(deps, prev_next);
-                                let detail = format!(
-                                    "agent loop panicked in tool dispatch `{}`: {}",
-                                    call.name,
-                                    panic_message(&*payload)
-                                );
-                                log::error!(
-                                    target: "toptopduck::agent_loop",
-                                    "{detail}"
-                                );
+                                let site = format!("tool dispatch `{}`", call.name);
                                 return outcome(
-                                    Termination::Transient(detail),
+                                    panic_to_transient(&site, &*payload),
                                     outputs,
                                     round_trips,
                                 );
@@ -370,15 +358,29 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-/// Roll back a ghost `result_N` left by a panic mid-dispatch (issue #321). The
-/// materialize path registers `result_N` as its last step before returning, but
-/// the window between registration and the dispatch return means a panic can
-/// leave a registered-but-unhistoried result. Detection: compare
+/// Build the `Transient` termination for a caught panic (issue #321):
+/// single-sources the detail format + the log target so the two guard
+/// sites stay consistent.
+fn panic_to_transient(site: &str, payload: &(dyn std::any::Any + Send)) -> Termination {
+    let detail = format!("agent loop panicked in {site}: {}", panic_message(payload));
+    log::error!(target: "toptopduck::agent_loop", "{detail}");
+    Termination::Transient(detail)
+}
+
+/// Roll back a ghost `result_N` left by a panic mid-dispatch (issue #321).
+/// `try_materialize` registers `result_N` partway through its body; a panic in
+/// any subsequent step (record_provenance, gc_stale_results, apply_display_label,
+/// ...) leaves a registered-but-unhistoried result. Detection: compare
 /// `next_result_number()` before and after the `catch_unwind`; if it grew, the
-/// orphan is `result_{prev_next}` — drop its admin table (best-effort) +
-/// unregister it from the working set so the working_set <-> history 1:1
-/// invariant (ADR-0084) holds and `next_result_number` does not skip
-/// (ADR-0022).
+/// orphan is `result_{prev_next}` — drop its admin table + unregister it from
+/// the working set so the working_set <-> history invariant holds (ADR-0084: no
+/// orphan working-set result without a matching promotion in history).
+///
+/// If the DROP fails the orphan is left registered so `next_result_number`
+/// skips it — the visible orphan is manually deletable from the UI, which is
+/// safer than rewinding the number and clashing on reuse. The ghost was never
+/// user-visible, so ADR-0022's no-reuse constraint does not apply to the
+/// rollback itself.
 fn rollback_ghost_result(deps: &mut TurnDeps, prev_next: u64) {
     let curr_next = deps.working_set.next_result_number();
     if curr_next <= prev_next {
@@ -393,9 +395,10 @@ fn rollback_ghost_result(deps: &mut TurnDeps, prev_next: u64) {
     if let Err(e) = deps.conn.execute_batch(&drop_sql) {
         log::error!(
             target: "toptopduck::agent_loop",
-            "ghost rollback DROP of {ghost} failed: {e}; session may wedge on next \
-             result_{prev_next} reuse (ADR-0022)"
+            "ghost rollback DROP of {ghost} failed: {e}; leaving result_{prev_next} \
+             registered so next_result_number skips it -- delete manually"
         );
+        return;
     }
     deps.working_set.remove(&ghost);
 }
@@ -1907,10 +1910,11 @@ mod tests {
         }
     }
 
-    /// A materializer that registers `result_N` in the working set then panics,
-    /// simulating a panic in the register-to-return window. The ghost-result
-    /// rollback in `AgentLoop::run` must detect + revert the orphan so the
-    /// working_set <-> history 1:1 invariant holds.
+    /// A materializer that creates the physical `result_N` table, registers it
+    /// in the working set, then panics — simulating a panic in the
+    /// register-to-return window. The ghost-result rollback in `AgentLoop::run`
+    /// must detect + revert the orphan (DROP the physical table + unregister)
+    /// so the working_set <-> history invariant holds.
     struct GhostThenPanicMaterializer;
     impl Materializer for GhostThenPanicMaterializer {
         fn try_materialize(
@@ -1920,6 +1924,16 @@ mod tests {
             result_name: String,
             deps: &mut TurnDeps,
         ) -> Result<DatasetDescriptor, ExecError> {
+            // Create the physical table first (mirrors RealMaterializer's
+            // install_result step) so the ghost rollback exercises the DROP
+            // TABLE success path.
+            let create_sql = format!(
+                "CREATE TABLE {} AS SELECT 1 AS x",
+                quote_ident(&result_name)
+            );
+            deps.conn
+                .execute_batch(&create_sql)
+                .expect("fixture CREATE TABLE");
             let descriptor = DatasetDescriptor {
                 reference_name: result_name.clone(),
                 display_name: result_name,
@@ -1965,6 +1979,10 @@ mod tests {
                     detail.contains("generate_tool_turn"),
                     "detail names the panic step: {detail}"
                 );
+                assert!(
+                    detail.contains("simulated provider panic"),
+                    "detail carries the panic message: {detail}"
+                );
             }
             other => panic!("expected Transient, got {other:?}"),
         }
@@ -2009,17 +2027,54 @@ mod tests {
                     detail.contains("tool dispatch"),
                     "detail names the panic step: {detail}"
                 );
+                assert!(
+                    detail.contains("simulated post-register panic"),
+                    "detail carries the panic message: {detail}"
+                );
             }
             other => panic!("expected Transient, got {other:?}"),
         }
         assert_eq!(
-            ws.next_result_number(),
+            d.working_set.next_result_number(),
             1,
             "ghost result_1 rolled back; next_result_number is back to 1"
         );
         assert!(
-            !ws.is_result("result_1"),
+            !d.working_set.is_result("result_1"),
             "result_1 unregistered from the working set"
         );
+        // Verify the physical table was dropped by the rollback (not just
+        // unregistered from the working set).
+        let table_count: i64 = d
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM information_schema.tables \
+                 WHERE table_name = 'result_1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query information_schema");
+        assert_eq!(
+            table_count, 0,
+            "physical result_1 table dropped by ghost rollback"
+        );
+    }
+
+    // --- panic_message unit tests ------------------------------------------
+
+    #[test]
+    fn panic_message_extracts_str_payload() {
+        assert_eq!(panic_message(&"boom"), "boom");
+    }
+
+    #[test]
+    fn panic_message_extracts_string_payload() {
+        assert_eq!(panic_message(&String::from("owned boom")), "owned boom");
+    }
+
+    #[test]
+    fn panic_message_fallback_for_non_string_payload() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new(42i32);
+        assert_eq!(panic_message(&*payload), "<non-string panic payload>");
     }
 }
