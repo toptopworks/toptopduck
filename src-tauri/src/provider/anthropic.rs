@@ -22,14 +22,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::provider::keychain::ProviderConfigSource;
-use crate::provider::prompt::{
-    build_system_prompt, render_response, render_summary_turn_note, Message,
-};
+use crate::provider::prompt::{build_system_prompt, render_history_messages, Message};
 use crate::provider::reply::parse_reply;
 use crate::provider::tool_calling::{ToolTurnMessage, ToolTurnReply, ToolTurnRequest, ToolUse};
-use crate::provider::{
-    ProviderError, ProviderReply, ProviderRequest, TurnPayload, MAX_REPLY_TOKENS,
-};
+use crate::provider::{ProviderError, ProviderReply, ProviderRequest, MAX_REPLY_TOKENS};
 
 /// Anthropic Messages API protocol version header value (ADR-0019: native
 /// Anthropic protocol). Pinned; bumped only when Anthropic ships a breaking
@@ -403,43 +399,13 @@ fn parse_tool_turn_response(raw: RawToolTurnResponse) -> Result<ToolTurnReply, P
 /// turn becomes a user (its question) + assistant (its rendered response) pair,
 /// oldest first; the asking question is the final user turn. Roles strictly
 /// alternate (Anthropic requires it), and the first message is always `user`.
+/// The role/content sequence is delegated to [`render_history_messages`];
+/// this function only maps the neutral pairs into Anthropic's wire shape.
 fn build_messages(request: &ProviderRequest) -> Vec<Message> {
-    let mut msgs = Vec::with_capacity(request.history.len() * 2 + 1);
-    for turn in &request.history {
-        match turn {
-            TurnPayload::Full { question, response } => {
-                msgs.push(Message {
-                    role: "user",
-                    content: question.clone(),
-                });
-                msgs.push(Message {
-                    role: "assistant",
-                    content: render_response(response),
-                });
-            }
-            TurnPayload::Summary {
-                question_excerpt,
-                result,
-            } => {
-                // A far-window turn (ADR-0039): only the verbatim question
-                // excerpt + whether it produced a result ride; no SQL/schema.
-                msgs.push(Message {
-                    role: "user",
-                    content: question_excerpt.clone(),
-                });
-                let note = render_summary_turn_note(result);
-                msgs.push(Message {
-                    role: "assistant",
-                    content: note,
-                });
-            }
-        }
-    }
-    msgs.push(Message {
-        role: "user",
-        content: request.question.clone(),
-    });
-    msgs
+    render_history_messages(request)
+        .into_iter()
+        .map(|(role, content)| Message { role, content })
+        .collect()
 }
 
 #[cfg(test)]
@@ -449,7 +415,7 @@ mod tests {
     use crate::provider::keychain::StaticConfig;
     use crate::provider::prompt::ResponseLocale;
     use crate::provider::tool_calling::{ToolDefinition, ToolResult};
-    use crate::provider::{ColumnRef, DatasetRef, ResponsePayload};
+    use crate::provider::{ColumnRef, DatasetRef, ResponsePayload, TurnPayload};
 
     /// Build a fixed config pointing at a mockito server URL (no OS keychain,
     /// no real network). Locale defaults to EnUS (the least-surprise fallback);
