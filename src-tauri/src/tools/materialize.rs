@@ -66,24 +66,26 @@ pub(crate) fn dispatch(
     // invariants hold. The materializer set display_name = reference_name; a
     // caller-supplied label that trims + does not collide is swapped in on BOTH
     // the working-set slot and the returned descriptor. When the label CANNOT be
-    // applied (collision, blank, or concurrent removal) the promotion already
-    // succeeded so it is NOT rolled back -- instead the rejection is surfaced as
-    // a `label_warning` field on the success payload (issue #308) so the agent
-    // can distinguish "label rejected" from "no label supplied" and self-correct
-    // (re-call with a unique label). Done here rather than inside the
-    // materializer so the materializer stays display-name-agnostic (its contract
-    // is to install under result_name; the label is a tool-layer concern).
-    let mut label_warning: Option<String> = None;
-    if let Some(label) = &display_name {
+    // applied (collision or blank -- `NotFound` is handled defensively but is
+    // practically unreachable here since the materializer just registered the
+    // descriptor) the promotion already succeeded so it is NOT rolled back --
+    // instead the rejection is surfaced as a `label_warning` field on the success
+    // payload (issue #308) so the agent can distinguish "label rejected" from "no
+    // label supplied" and self-correct (use a unique label on the next call).
+    // Done here rather than inside the materializer so the materializer stays
+    // display-name-agnostic (its contract is to install under result_name; the
+    // label is a tool-layer concern).
+    let label_warning = if let Some(label) = display_name.as_deref() {
         match apply_display_label(deps, &result_name, label) {
             Ok(applied) => {
                 descriptor.display_name = applied;
+                None
             }
-            Err(e) => {
-                label_warning = Some(label_warning_message(&e));
-            }
+            Err(e) => Some(label_warning_message(&e)),
         }
-    }
+    } else {
+        None
+    };
 
     // Side-effect channel (issue #336): the promotion is built from the typed
     // `sql` (parsed above) + the typed `descriptor` (the materializer returned
@@ -107,7 +109,7 @@ pub(crate) fn dispatch(
 /// Returns the trimmed label on success (the caller mirrors it onto the returned
 /// descriptor). On failure the typed `RenameError` is propagated so the caller
 /// can surface it to the agent -- the promotion already succeeded, so the error
-/// is NOT fatal; the caller turns it into a `label_warning` field (issue #308).
+/// is NOT fatal; the caller turns it into a `label_warning` field.
 fn apply_display_label(
     deps: &mut TurnDeps,
     reference_name: &str,
@@ -119,19 +121,23 @@ fn apply_display_label(
 }
 
 /// Turn a [`RenameError`] from `apply_display_label` into an agent-facing warning
-/// string (issue #308). The promotion already succeeded -- the warning tells the
-/// agent WHY its label was rejected so it can self-correct (re-call materialize
-/// with a unique label). The three variants share a consistent structure: the
-/// rejection reason + a note that the reference name was used instead.
+/// string. The promotion already succeeded -- the warning tells the agent WHY
+/// its label was rejected so it can self-correct. The three variants share a
+/// consistent structure: the rejection reason + a note that the reference name
+/// was used instead.
+///
+/// `NotFound` is practically unreachable in the current single-threaded dispatch
+/// (the materializer just registered the descriptor), but is handled defensively
+/// in case of future restructuring.
 fn label_warning_message(e: &RenameError) -> String {
     match e {
         RenameError::DisplayTaken(label) => format!(
             "display name `{label}` is already in use by another dataset; \
-             the reference name was used instead — supply a unique display_name to rename it"
+             the reference name was used instead — use a unique display_name on the next materialize call"
         ),
         RenameError::InvalidLabel => {
             "display name is blank (whitespace-only); the reference name was \
-             used instead — supply a non-blank display_name to rename it"
+             used instead — use a non-blank display_name on the next materialize call"
                 .to_string()
         }
         RenameError::NotFound(name) => format!(
@@ -146,7 +152,7 @@ fn label_warning_message(e: &RenameError) -> String {
 /// display label, the column schema, and the row count -- enough for the agent
 /// to reference + reason about the new result without a follow-up `describe`.
 /// When `label_warning` is present, a `label_warning` field is included so the
-/// agent can distinguish "label rejected" from "no label supplied" (issue #308).
+/// agent can distinguish "label rejected" from "no label supplied".
 fn descriptor_json(d: &DatasetDescriptor, label_warning: Option<&str>) -> Value {
     let mut payload = json!({
         "reference_name": d.reference_name,
@@ -480,46 +486,49 @@ mod tests {
     /// trim invariant (`rename_display` refuses an empty label). The promotion
     /// still lands (result_N registered, display_name falls back to the
     /// reference name), and a `label_warning` field tells the agent the label
-    /// was blank so it can self-correct (issue #308).
+    /// was blank so it can self-correct (issue #308). Covers both whitespace-only
+    /// and empty-string inputs to guard against a trim regression.
     #[test]
     fn display_name_blank_signals_rejection_to_agent() {
         use crate::session::materializer::RealMaterializer;
         use tempfile::TempDir;
 
-        let conn = Connection::open_in_memory().unwrap();
-        let mut ws = crate::workingset::WorkingSet::default();
-        let sources = std::collections::HashMap::new();
-        let temp = TempDir::new().unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
-        let cancel = CancelToken::new();
-        let mut materializer = RealMaterializer;
-        let payload = dispatch(
-            &json!({"sql": "SELECT 1 AS x", "display_name": "   "}),
-            &mut deps,
-            &cancel,
-            &mut materializer,
-        )
-        .unwrap();
-        let promotion = payload.promotion.as_ref().expect("materialize promotes");
-        assert_eq!(promotion.dataset.reference_name, "result_1");
-        assert_eq!(promotion.dataset.display_name, "result_1");
-        let v = &payload.content;
-        assert_eq!(v["reference_name"], "result_1");
-        assert_eq!(
-            v["display_name"], "result_1",
-            "blank label falls back to the reference name"
-        );
-        let warning = v["label_warning"]
-            .as_str()
-            .expect("label_warning is present on blank rejection");
-        assert!(
-            warning.contains("blank"),
-            "warning identifies a blank label: {warning}"
-        );
-        assert_eq!(
-            deps.working_set.get("result_1").unwrap().display_name,
-            "result_1"
-        );
+        for blank in ["   ", ""] {
+            let conn = Connection::open_in_memory().unwrap();
+            let mut ws = crate::workingset::WorkingSet::default();
+            let sources = std::collections::HashMap::new();
+            let temp = TempDir::new().unwrap();
+            let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+            let cancel = CancelToken::new();
+            let mut materializer = RealMaterializer;
+            let payload = dispatch(
+                &json!({"sql": "SELECT 1 AS x", "display_name": blank}),
+                &mut deps,
+                &cancel,
+                &mut materializer,
+            )
+            .unwrap();
+            let promotion = payload.promotion.as_ref().expect("materialize promotes");
+            assert_eq!(promotion.dataset.reference_name, "result_1");
+            assert_eq!(promotion.dataset.display_name, "result_1");
+            let v = &payload.content;
+            assert_eq!(v["reference_name"], "result_1");
+            assert_eq!(
+                v["display_name"], "result_1",
+                "blank label falls back to the reference name"
+            );
+            let warning = v["label_warning"]
+                .as_str()
+                .expect("label_warning is present on blank rejection");
+            assert!(
+                warning.contains("blank"),
+                "warning identifies a blank label: {warning}"
+            );
+            assert_eq!(
+                deps.working_set.get("result_1").unwrap().display_name,
+                "result_1"
+            );
+        }
     }
 
     /// `label_warning_message` produces a distinct, actionable message for each
@@ -534,6 +543,10 @@ mod tests {
             taken.contains("already in use"),
             "DisplayTaken identifies a collision: {taken}"
         );
+        assert!(
+            taken.contains("my label"),
+            "DisplayTaken echoes the rejected label: {taken}"
+        );
 
         let blank = label_warning_message(&RenameError::InvalidLabel);
         assert!(
@@ -545,6 +558,10 @@ mod tests {
         assert!(
             gone.contains("removed"),
             "NotFound identifies concurrent removal: {gone}"
+        );
+        assert!(
+            gone.contains("result_3"),
+            "NotFound echoes the dataset name: {gone}"
         );
     }
 
