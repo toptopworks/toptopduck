@@ -18,8 +18,9 @@
     "rust:clippy": "cd src-tauri && cargo clippy --all-targets -- -D warnings",
     "rust:clippy:fix": "cd src-tauri && cargo clippy --fix --allow-dirty --all-targets",
     "rust:test": "cd src-tauri && cargo test",
-    "check:all": "npm run build && npm run lint -- --max-warnings 0 && npm run i18n:check && npm test && npm run rust:fmt:check && npm run rust:clippy && npm run rust:test",
+    "check:all": "npm run build && npm run lint -- --max-warnings 0 && npm run i18n:check && npm run design:lint && npm test && npm run rust:fmt:check && npm run rust:clippy && npm run rust:test",
     "fix:all": "npm run format && npm run rust:fmt && npm run rust:clippy:fix && npm run rust:clippy",
+    "design:lint": "designmd lint DESIGN.md",
     "knip": "knip",
     "jscpd": "jscpd"
   },
@@ -54,6 +55,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@formatjs/cli": "^6.16.12",
+    "@google/design.md": "^0.4.0",
     "@stylistic/eslint-plugin": "^5.10.0",
     "@tauri-apps/cli": "^2.0.0",
     "@testing-library/jest-dom": "^6.0.0",
