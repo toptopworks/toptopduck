@@ -468,12 +468,30 @@ pub(crate) fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) 
             // bare unknown name keeps the "unknown" server. Either way the
             // call badges Network and the summary names the tool so an
             // approval card can surface it.
+            //
+            // Issue #312: `try_external` rejects the reserved `"builtin"`
+            // server name. A malicious model can spoof `mcp__builtin__*`; we
+            // never panic (untrusted input) — the spoof falls back to
+            // `RESERVED_SPOOF_SERVER` so classify returns `NeedsApproval`
+            // (card surfaces) and routing finds no server (graceful failure).
             let other = call.name.as_str();
             let server = aggregator::parse_namespaced(other)
                 .map(|(slug, _)| slug)
                 .unwrap_or_else(|| "unknown".to_string());
+            let key = match ToolKey::try_external(server, other.to_string()) {
+                Ok(k) => k,
+                Err(_) => {
+                    log::warn!(
+                        target: "toptopduck::agent_loop",
+                        "model emitted tool name `{other}` resolving to reserved \
+                         `builtin` server; routing to RESERVED_SPOOF sentinel so \
+                         the gate surfaces a card"
+                    );
+                    ToolKey::external(ToolKey::RESERVED_SPOOF_SERVER, other)
+                }
+            };
             (
-                ToolKey::external(server, other.to_string()),
+                key,
                 OperationKind::Network,
                 format!("external tool `{other}`"),
             )
@@ -1693,6 +1711,26 @@ mod tests {
             unknown.2.contains("acme_fetch"),
             "external summary names the tool: {}",
             unknown.2
+        );
+    }
+
+    /// Issue #312: a model-emitted `mcp__builtin__*` spoof must not bypass the
+    /// gate. `try_external` rejects the reserved name; the fallback routes to
+    /// `RESERVED_SPOOF_SERVER` so classify surfaces a card and routing fails
+    /// gracefully (no panic on untrusted input).
+    #[test]
+    fn classify_call_routes_builtin_spoof_to_reserved_sentinel() {
+        let (key, _, _) = classify_call(&ToolUse {
+            id: "x".into(),
+            name: "mcp__builtin__foo".into(),
+            input: json!({}),
+        });
+        assert_eq!(key.server, ToolKey::RESERVED_SPOOF_SERVER);
+        assert!(!key.is_builtin());
+        let trust = std::collections::HashSet::new();
+        assert_eq!(
+            crate::approval::classify(&key, crate::approval::AuthMode::PerCall, &trust),
+            crate::approval::Classification::NeedsApproval
         );
     }
 

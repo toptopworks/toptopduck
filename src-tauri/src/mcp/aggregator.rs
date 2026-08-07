@@ -319,6 +319,14 @@ pub fn slugify(display_name: &str, id: &McpServerId) -> String {
     if slug.is_empty() {
         let id8: String = id.as_str().chars().take(8).collect();
         format!("server-{id8}")
+    } else if slug == crate::approval::ToolKey::BUILTIN_SERVER {
+        // Reserved-name guard (issue #312): a display name that normalizes to
+        // "builtin" would flow into `ToolKey::external("builtin", ...)` →
+        // `is_builtin()` → `classify` returns `Allow`, bypassing the approval
+        // gate. Append `_reserved` so the slug never collides with the
+        // built-in server namespace. This is distinct from `unique_slug`'s
+        // `_2` suffix, whose semantics is collision de-duplication.
+        format!("{slug}_reserved")
     } else {
         slug
     }
@@ -440,6 +448,36 @@ mod tests {
     fn slugify_keeps_ascii_in_a_mixed_name() {
         let id = McpServerId("id".into());
         assert_eq!(slugify("GitHub 数据源", &id), "github");
+    }
+
+    #[test]
+    fn slugify_appends_reserved_suffix_for_builtin_collision() {
+        // Issue #312: a display name that normalizes to "builtin" must not
+        // produce the reserved slug — it would bypass the approval gate via
+        // `ToolKey::external("builtin", ...)`. Append `_reserved`. The guard
+        // catches any input whose alphanumeric chars form "builtin"
+        // (case-insensitive) — e.g. "Built.in", "Built,in" also drop to
+        // "builtin" because non-alphanumeric-separator chars are discarded.
+        // A separator-bearing variant like "built-in" becomes "built_in".
+        let id = McpServerId("a1b2c3d4".into());
+        assert_eq!(slugify("Builtin", &id), "builtin_reserved");
+        assert_eq!(slugify("builtin", &id), "builtin_reserved");
+        assert_eq!(slugify("BUILTIN", &id), "builtin_reserved");
+        assert_eq!(slugify("builtIn", &id), "builtin_reserved");
+        assert_eq!(slugify("Built.in", &id), "builtin_reserved");
+    }
+
+    #[test]
+    fn slugify_strips_underscores_from_reserved_spoof_sentinel() {
+        // Issue #312: RESERVED_SPOOF_SERVER ("_builtin_spoof_") has leading /
+        // trailing underscores that slugify's split('_') + filter(!empty)
+        // strips. No real display name can produce a slug that collides with
+        // the sentinel, so routing always fails gracefully on a spoofed call.
+        let id = McpServerId("a1b2c3d4".into());
+        assert_eq!(
+            slugify(crate::approval::ToolKey::RESERVED_SPOOF_SERVER, &id),
+            "builtin_spoof"
+        );
     }
 
     // --- namespaced name round-trip -----------------------------------------
