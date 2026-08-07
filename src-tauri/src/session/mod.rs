@@ -3510,6 +3510,124 @@ mod tests {
         assert!(q2_present, "q2 retained -- result_3 is active");
     }
 
+    #[test]
+    fn build_recipe_persists_an_empty_trace_for_a_no_tool_turn() {
+        // ADR-0078 (issue #328): a turn whose agent loop made NO tool calls
+        // (a pure textual answer) carries an empty trace in the recipe. The
+        // existing textual-turn trace test follows an explore call (trace.len()
+        // == 1); this test pins the zero-call case -- the empty-trace half of
+        // the audit-routing contract. The built-in loop still ran (it
+        // answered), so provenance records BuiltIn.
+        use crate::persistence::recipe::{RecipeEntry, RuntimeKind};
+
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "你好",
+            vec![Ok(ToolTurnReply::Text("你好！有什么可以帮你的？".into()))],
+        );
+        let (mut session, _dir) = session_with_people(provider);
+        let _ = session.ask("你好");
+
+        let recipe = session.build_recipe();
+        let turn = recipe
+            .history
+            .iter()
+            .find_map(|e| match e {
+                RecipeEntry::Turn(t) => Some(t),
+                _ => None,
+            })
+            .expect("a turn in history");
+        assert!(
+            turn.trace.is_empty(),
+            "a no-tool turn carries an empty trace"
+        );
+        assert_eq!(
+            turn.provenance.runtime,
+            Some(RuntimeKind::BuiltIn),
+            "the built-in loop ran even without tool calls"
+        );
+    }
+
+    #[test]
+    fn build_recipe_round_trips_a_resumed_turns_harvested_trace_and_provenance() {
+        // ADR-0078 (issue #328): on resume, TurnAudit::from_recipe_turn
+        // harvests a turn's trace + provenance from the persisted recipe.
+        // build_recipe must route those values back through
+        // RecipeTurn::with_audit verbatim -- a regression to RecipeTurn::new
+        // (empty trace + default provenance) would silently drop the harvested
+        // audit data. This test pins the resume path by injecting a timeline
+        // entry whose audit was harvested from a recipe turn carrying a
+        // non-empty trace + non-default (External) provenance.
+        use super::{TimelineEntry, TurnAudit};
+        use crate::approval::OperationKind;
+        use crate::model::{TextKind, TurnOutcome, TurnRecord};
+        use crate::persistence::recipe::{
+            RecipeEntry, RecipeOutcome, RecipeTraceEntry, RecipeTurn, RuntimeKind,
+            TurnProvenance as PersistedTurnProvenance,
+        };
+
+        // A recipe turn carrying data that must survive the round-trip.
+        let harvested_trace = vec![RecipeTraceEntry {
+            name: "explore".into(),
+            operation_kind: OperationKind::Read,
+            summary: "SELECT 1 AS n".into(),
+            success: true,
+            result_excerpt: String::new(),
+        }];
+        let harvested_provenance = PersistedTurnProvenance {
+            runtime: Some(RuntimeKind::External),
+            skills: vec![],
+        };
+
+        // Harvest the audit from the recipe turn (the resume path).
+        let source_turn = RecipeTurn::with_audit(
+            "resumed question",
+            RecipeOutcome::Textual {
+                text_kind: TextKind::Agent,
+                body: "resumed body".into(),
+                assumption: None,
+            },
+            harvested_trace.clone(),
+            harvested_provenance.clone(),
+        );
+        let audit = TurnAudit::from_recipe_turn(&source_turn);
+
+        // The IPC-visible record (build_recipe reads question + outcome from
+        // record, trace + provenance from audit).
+        let record = TurnRecord {
+            question: "resumed question".into(),
+            outcome: TurnOutcome::Textual {
+                text_kind: TextKind::Agent,
+                body: "resumed body".into(),
+                assumption: None,
+            },
+            trace: vec![],
+            provenance: Default::default(),
+        };
+
+        // Inject the timeline entry -- simulates a resumed session whose
+        // timeline was seeded from the recipe.
+        let mut session = Session::new().expect("session");
+        session.timeline.push(TimelineEntry::Turn { record, audit });
+
+        let recipe = session.build_recipe();
+        let turn = recipe
+            .history
+            .iter()
+            .find_map(|e| match e {
+                RecipeEntry::Turn(t) => Some(t),
+                _ => None,
+            })
+            .expect("a turn in history");
+        assert_eq!(
+            turn.trace, harvested_trace,
+            "the harvested trace round-trips verbatim through build_recipe"
+        );
+        assert_eq!(
+            turn.provenance, harvested_provenance,
+            "the harvested provenance round-trips verbatim (External runtime preserved)"
+        );
+    }
+
     // M1 regression: a turn whose shape derivation fails must roll back the
     // already-created result_N. Here the derivation's fingerprint dump cannot be
     // written -- temp_path points at a file, so its "child" dump path has a file
