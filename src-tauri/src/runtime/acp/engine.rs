@@ -826,7 +826,11 @@ fn decide_permission(
         .clone()
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| params.tool_call.tool_call_id.clone());
-    let key = ToolKey::external(adapter.id.as_str(), tool_name);
+    // Issue #312: adapter ids are controlled literals (codex / gemini), never
+    // the reserved builtin name — `expect` is safe and keeps the type-level
+    // invariant visible.
+    let key = ToolKey::try_external(adapter.id.as_str(), tool_name)
+        .expect("ACP adapter id is not the reserved builtin name");
     let mode = approval.auth_mode();
     let trust: HashSet<ToolKey> = approval.trust_list().into_iter().collect();
     let allowed = classify(&key, mode, &trust) == Classification::Allow;
@@ -841,11 +845,14 @@ fn decide_permission(
         server: key.server.clone(),
         tool: key.tool.clone(),
         operation_kind,
-        summary: params
-            .tool_call
-            .title
-            .clone()
-            .unwrap_or_else(|| params.tool_call.tool_call_id.clone()),
+        summary: crate::approval::truncate_summary(
+            &params
+                .tool_call
+                .title
+                .clone()
+                .unwrap_or_else(|| params.tool_call.tool_call_id.clone()),
+            crate::approval::SUMMARY_MAX_CHARS,
+        ),
     };
     if allowed {
         // The policy auto-allows; pick the first allow_* option.

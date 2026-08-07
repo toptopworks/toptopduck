@@ -64,6 +64,14 @@ impl ToolKey {
     /// (ADR-0076/0080). Tools under this server always pass the gate.
     pub const BUILTIN_SERVER: &'static str = "builtin";
 
+    /// Fallback server name for a model-spoofed `mcp__builtin__*` tool name
+    /// (issue #312). A malicious model can emit a reserved server name to try
+    /// to bypass approval; the agent loop routes such a name here so
+    /// [`classify`] returns [`Classification::NeedsApproval`] (the card
+    /// surfaces) and subsequent routing fails gracefully (no real server
+    /// matches this sentinel). This must never equal [`Self::BUILTIN_SERVER`].
+    pub const RESERVED_SPOOF_SERVER: &'static str = "_builtin_spoof_";
+
     /// A built-in tool key (explore / materialize / describe / sample).
     pub fn builtin(tool: impl Into<String>) -> Self {
         Self {
@@ -72,11 +80,49 @@ impl ToolKey {
         }
     }
 
-    /// An external MCP tool key. `server` is the user-configured MCP server
-    /// name (ADR-0076); `tool` is the tool name that server advertises.
+    /// Fallible external-tool constructor for production call sites (issue
+    /// #312). Returns [`Err(ReservedServerName)`] when `server` is exactly
+    /// [`Self::BUILTIN_SERVER`] — the reserved name that would make
+    /// [`Self::is_builtin`] return `true` and short-circuit [`classify`] to
+    /// [`Classification::Allow`], silently bypassing the approval gate. The
+    /// check is a precise `==` match; no trim / lowercase normalization
+    /// (the constructor guards a reserved name, not input hygiene).
+    ///
+    /// Production callers should branch on the `Err`: the agent loop falls
+    /// back to [`Self::RESERVED_SPOOF_SERVER`] (untrusted model input — never
+    /// panic); the ACP engine uses `expect` (adapter ids are controlled
+    /// literals).
+    pub fn try_external(
+        server: impl Into<String>,
+        tool: impl Into<String>,
+    ) -> Result<Self, ReservedServerName> {
+        let server = server.into();
+        if server == Self::BUILTIN_SERVER {
+            return Err(ReservedServerName(server));
+        }
+        Ok(Self {
+            server,
+            tool: tool.into(),
+        })
+    }
+
+    /// An external MCP tool key — unchecked convenience constructor (issue
+    /// #312). Panics in debug if `server` is the reserved
+    /// [`Self::BUILTIN_SERVER`]. For untrusted / dynamic server names,
+    /// production code must use [`Self::try_external`] instead. The only
+    /// non-test production use is with a compile-time constant guaranteed to
+    /// differ from `BUILTIN_SERVER` (e.g. [`Self::RESERVED_SPOOF_SERVER`] in
+    /// the agent-loop spoof fallback). `server` is the user-configured MCP
+    /// server name (ADR-0076); `tool` is the tool name that server advertises.
     pub fn external(server: impl Into<String>, tool: impl Into<String>) -> Self {
+        let server = server.into();
+        debug_assert!(
+            server != Self::BUILTIN_SERVER,
+            "ToolKey::external called with reserved builtin server name; \
+             use try_external in production code"
+        );
         Self {
-            server: server.into(),
+            server,
             tool: tool.into(),
         }
     }
@@ -87,6 +133,13 @@ impl ToolKey {
         self.server == Self::BUILTIN_SERVER
     }
 }
+
+/// Error returned by [`ToolKey::try_external`] when the server name is the
+/// reserved [`ToolKey::BUILTIN_SERVER`] (issue #312). Carries the offending
+/// name so `Display` / logs are readable.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("server name `{0}` is reserved for built-in tools")]
+pub struct ReservedServerName(pub String);
 
 /// Session-level authorization posture (ADR-0080 Decision 4). The default is
 /// [`AuthMode::PerCall`]; [`AuthMode::NoConfirmation`] is an explicit,
@@ -224,7 +277,38 @@ pub struct ApprovalRequestBody {
     /// Short agent-readable parameter summary for the card body (ADR-0083).
     /// NOT the full call arguments -- those may be large or sensitive; the
     /// bridge summarizes (e.g. "GET https://example.com/x" / "write ~/file").
+    ///
+    /// **Sanitization contract (issue #312):** the bridge is the PRIMARY
+    /// cleansing layer. This field MUST NOT carry raw credentials, API keys,
+    /// bearer tokens, `file:///` PII, or query-string credentials. The
+    /// gateway applies a length cap ([`truncate_summary`] /
+    /// [`SUMMARY_MAX_CHARS`]) as a SECONDARY defense -- it bounds the
+    /// broadcast surface, it does not sanitize content.
     pub summary: String,
+}
+
+/// Hard cap on [`ApprovalRequestBody::summary`] length in `char`s (issue
+/// #312). The summary is globally broadcast via `app.emit` (ADR-0056 multi-
+/// pane), so a cap bounds the cross-pane leak surface. 512 chars is ample for
+/// a human-readable card body while preventing an unbounded bridge payload
+/// from flooding every pane.
+pub const SUMMARY_MAX_CHARS: usize = 512;
+
+/// Truncate `summary` to at most `max_chars` `char`s, appending `"..."` when
+/// the input was cut (issue #312). The result length is always `<= max_chars`:
+/// a cut string occupies `max_chars - 3` chars of headroom plus the 3-char
+/// ellipsis. When `max_chars < 3` the function degrades to a plain truncate
+/// (no ellipsis). Truncation is at `char` boundaries (UTF-8 safe), not
+/// grapheme-cluster boundaries (good enough for a card-body preview).
+pub fn truncate_summary(summary: &str, max_chars: usize) -> String {
+    if summary.chars().count() <= max_chars {
+        return summary.to_string();
+    }
+    if max_chars < 3 {
+        return summary.chars().take(max_chars).collect();
+    }
+    let head: String = summary.chars().take(max_chars - 3).collect();
+    format!("{head}...")
 }
 
 /// Full `approval-request` event payload (ADR-0083, addressed by session id).
@@ -429,7 +513,7 @@ impl ApprovalState {
             server: request.key.server.clone(),
             tool: request.key.tool.clone(),
             operation_kind: request.operation_kind,
-            summary: request.summary,
+            summary: truncate_summary(&request.summary, SUMMARY_MAX_CHARS),
         };
 
         // Clear any stale interrupt latch from a prior cancel BEFORE installing
@@ -1187,5 +1271,142 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         None
+    }
+
+    // --- try_external / reserved server name (issue #312) -------------------
+
+    #[test]
+    fn try_external_rejects_builtin_server_name() {
+        let err = ToolKey::try_external("builtin", "any").unwrap_err();
+        assert_eq!(err, ReservedServerName("builtin".into()));
+        assert_eq!(
+            err.to_string(),
+            "server name `builtin` is reserved for built-in tools"
+        );
+    }
+
+    #[test]
+    fn try_external_accepts_non_reserved_server_name() {
+        let key = ToolKey::try_external("acme", "fetch").unwrap();
+        assert_eq!(key.server, "acme");
+        assert_eq!(key.tool, "fetch");
+        assert!(!key.is_builtin());
+    }
+
+    #[test]
+    fn try_external_precise_match_no_normalization() {
+        // Trim / case variants are NOT normalized — only the exact reserved
+        // name is rejected.
+        assert!(ToolKey::try_external("Builtin", "x").is_ok());
+        assert!(ToolKey::try_external(" builtin ", "x").is_ok());
+        assert!(ToolKey::try_external("BUILTIN", "x").is_ok());
+        assert!(ToolKey::try_external("builtin", "x").is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "reserved builtin server name")]
+    fn external_panics_in_debug_for_reserved_name() {
+        let _ = ToolKey::external("builtin", "any");
+    }
+
+    #[test]
+    fn external_accepts_non_reserved_in_debug() {
+        let key = ToolKey::external("acme", "fetch");
+        assert_eq!(key.server, "acme");
+    }
+
+    #[test]
+    fn reserved_spoof_server_differs_from_builtin() {
+        // The fallback sentinel must never equal the reserved name, else the
+        // spoof would bypass approval instead of surfacing a card.
+        assert_ne!(ToolKey::RESERVED_SPOOF_SERVER, ToolKey::BUILTIN_SERVER);
+    }
+
+    // --- truncate_summary (issue #312) --------------------------------------
+
+    #[test]
+    fn truncate_summary_returns_input_unchanged_when_within_limit() {
+        assert_eq!(truncate_summary("short", 512), "short");
+        assert_eq!(truncate_summary("exactly 10", 10), "exactly 10");
+        assert_eq!(truncate_summary("", 512), "");
+    }
+
+    #[test]
+    fn truncate_summary_appends_ellipsis_when_cut() {
+        let input = "a".repeat(600);
+        let result = truncate_summary(&input, 512);
+        assert!(result.chars().count() <= 512);
+        assert!(result.ends_with("..."));
+        // Head is `max_chars - 3` 'a's, then "...".
+        let head: String = result.chars().take(509).collect();
+        assert_eq!(head, "a".repeat(509));
+    }
+
+    #[test]
+    fn truncate_summary_total_length_never_exceeds_max() {
+        for &max in &[3usize, 5, 10, 50, 512] {
+            let input = "x".repeat(1000);
+            let result = truncate_summary(&input, max);
+            assert!(
+                result.chars().count() <= max,
+                "result {} chars > max {}",
+                result.chars().count(),
+                max
+            );
+        }
+    }
+
+    #[test]
+    fn truncate_summary_degrades_to_plain_cut_when_max_below_3() {
+        assert_eq!(truncate_summary("abcdef", 2), "ab");
+        assert_eq!(truncate_summary("abcdef", 0), "");
+        assert_eq!(truncate_summary("abcdef", 1), "a");
+    }
+
+    #[test]
+    fn truncate_summary_is_char_boundary_safe() {
+        // Multi-byte UTF-8: 'é' is 2 bytes, '中' is 3 bytes. Truncation at
+        // char boundaries must never split a code point.
+        let input = "中".repeat(100);
+        let result = truncate_summary(&input, 10);
+        assert!(result.chars().count() <= 10);
+        assert!(result.ends_with("..."));
+        // No panic / no replacement chars.
+        assert!(result.chars().all(|c| c == '中' || c == '.'));
+    }
+
+    #[test]
+    fn gate_truncates_summary_before_broadcast() {
+        // The gate must cap summary to SUMMARY_MAX_CHARS before emitting, so
+        // the broadcast never carries an unbounded bridge payload (issue #312).
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "S".repeat(1000),
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        let _ = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        cancel.request();
+        state.interrupt_pending();
+        let _ = handle.join();
+
+        let body = sink.last_request().expect("request recorded");
+        assert!(
+            body.summary.chars().count() <= SUMMARY_MAX_CHARS,
+            "broadcast summary {} > {}",
+            body.summary.chars().count(),
+            SUMMARY_MAX_CHARS
+        );
+        assert!(body.summary.ends_with("..."));
     }
 }
