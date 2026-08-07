@@ -528,9 +528,6 @@ pub struct Session {
     mounted_skills: Vec<String>,
 }
 
-/// The persisted-form audit substructures for ONE timeline entry (ADR-0078,
-/// issue #319): a turn's execution trace (the agent loop's recorded calls,
-/// mapped to the recipe form) + its runtime/skill provenance. Lives on the
 /// One entry in the session's unified timeline (issue #325). Replaces the
 /// former pair of index-aligned `Vec<ThreadEntry>` + `Vec<TurnAudit>` so
 /// alignment is structural (compile-time): a turn entry CANNOT exist without
@@ -999,9 +996,6 @@ impl Session {
                 };
                 resumer.replay(&mut deps, &mut on_progress)?
             };
-            // Phase 4: rebuild the conversation timeline, truncated at the
-            // replay breakpoint (if any). Post-break entries are dropped
-            // ("对话停在断点").
             // Phase 4: rebuild the conversation timeline, truncated at the
             // replay breakpoint (if any). Post-break entries are dropped
             // ("对话停在断点"). rebuild_timeline returns the unified timeline
