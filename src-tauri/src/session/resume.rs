@@ -680,7 +680,7 @@ mod tests {
 
     /// A live (non-stale) Materialized recipe entry producing `reference_name`.
     fn materialized_turn(reference_name: &str, sql: &str) -> RecipeEntry {
-        RecipeEntry::Turn(RecipeTurn::new(
+        RecipeEntry::Turn(RecipeTurn::without_audit(
             format!("q_{reference_name}"),
             RecipeOutcome::Materialized {
                 promotions: vec![RecipePromotion {
@@ -699,7 +699,7 @@ mod tests {
     /// for (absent from the productive chain, so phase 3 never re-materialized
     /// its table).
     fn stale_materialized_turn(reference_name: &str, sql: &str, anchor: &str) -> RecipeEntry {
-        RecipeEntry::Turn(RecipeTurn::new(
+        RecipeEntry::Turn(RecipeTurn::without_audit(
             format!("q_{reference_name}"),
             RecipeOutcome::Materialized {
                 promotions: vec![RecipePromotion {

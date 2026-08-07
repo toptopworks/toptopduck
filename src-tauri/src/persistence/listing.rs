@@ -209,7 +209,7 @@ mod tests {
                         reference_name: "orders".into(),
                         display_name: "orders".into(),
                     }),
-                    RecipeEntry::Turn(RecipeTurn::new(
+                    RecipeEntry::Turn(RecipeTurn::without_audit(
                         "多少单",
                         RecipeOutcome::Materialized {
                             promotions: vec![RecipePromotion {
@@ -221,7 +221,7 @@ mod tests {
                             assumption: None,
                         },
                     )),
-                    RecipeEntry::Turn(RecipeTurn::new(
+                    RecipeEntry::Turn(RecipeTurn::without_audit(
                         "再问",
                         RecipeOutcome::Materialized {
                             promotions: vec![RecipePromotion {
@@ -370,7 +370,7 @@ mod tests {
                         reference_name: "b".into(),
                         display_name: "b".into(),
                     }),
-                    RecipeEntry::Turn(RecipeTurn::new(
+                    RecipeEntry::Turn(RecipeTurn::without_audit(
                         "q",
                         RecipeOutcome::Materialized {
                             promotions: vec![RecipePromotion {

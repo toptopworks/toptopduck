@@ -2764,7 +2764,7 @@ fn resume_renders_a_broken_sql_turn_as_failed_and_preserves_prior_results() {
             fingerprint,
         }],
         vec![
-            RecipeEntry::Turn(RecipeTurn::new(
+            RecipeEntry::Turn(RecipeTurn::without_audit(
                 "good",
                 RecipeOutcome::Materialized {
                     promotions: vec![RecipePromotion {
@@ -2776,7 +2776,7 @@ fn resume_renders_a_broken_sql_turn_as_failed_and_preserves_prior_results() {
                     assumption: None,
                 },
             )),
-            RecipeEntry::Turn(RecipeTurn::new(
+            RecipeEntry::Turn(RecipeTurn::without_audit(
                 "broken",
                 RecipeOutcome::Materialized {
                     promotions: vec![RecipePromotion {
@@ -2792,7 +2792,7 @@ fn resume_renders_a_broken_sql_turn_as_failed_and_preserves_prior_results() {
             // turns after the break (K+1..) are dropped, not silently skipped
             // then recovered. If the truncation invariant broke, result_3
             // would materialize and this test would fail.
-            RecipeEntry::Turn(RecipeTurn::new(
+            RecipeEntry::Turn(RecipeTurn::without_audit(
                 "after-break",
                 RecipeOutcome::Materialized {
                     promotions: vec![RecipePromotion {
