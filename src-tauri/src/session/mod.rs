@@ -3513,12 +3513,12 @@ mod tests {
     #[test]
     fn build_recipe_persists_an_empty_trace_for_a_no_tool_turn() {
         // ADR-0078 (issue #328): a turn whose agent loop made NO tool calls
-        // (a pure textual answer) carries an empty trace in the recipe. The
-        // existing textual-turn trace test follows an explore call (trace.len()
-        // == 1); this test pins the zero-call case -- the empty-trace half of
-        // the audit-routing contract. The built-in loop still ran (it
-        // answered), so provenance records BuiltIn.
-        use crate::persistence::recipe::{RecipeEntry, RuntimeKind};
+        // (a pure textual answer) carries an empty trace in the recipe.
+        // build_recipe_persists_a_textual_turns_recorded_trace follows an
+        // explore call (trace.len() == 1); this test pins the zero-call case
+        // -- the empty-trace half of the audit-routing contract. The built-in
+        // loop still ran (it answered), so provenance records BuiltIn.
+        use crate::persistence::recipe::{RecipeEntry, RecipeOutcome, RuntimeKind};
 
         let provider = FakeProvider::new().scripted_tool_turn_seq(
             "你好",
@@ -3532,10 +3532,12 @@ mod tests {
             .history
             .iter()
             .find_map(|e| match e {
-                RecipeEntry::Turn(t) => Some(t),
+                RecipeEntry::Turn(t) if matches!(t.outcome, RecipeOutcome::Textual { .. }) => {
+                    Some(t)
+                }
                 _ => None,
             })
-            .expect("a turn in history");
+            .expect("a Textual turn in history");
         assert!(
             turn.trace.is_empty(),
             "a no-tool turn carries an empty trace"
@@ -3591,8 +3593,14 @@ mod tests {
         );
         let audit = TurnAudit::from_recipe_turn(&source_turn);
 
-        // The IPC-visible record (build_recipe reads question + outcome from
-        // record, trace + provenance from audit).
+        // The IPC-visible record. Its trace + provenance are deliberately
+        // empty/default -- build_recipe reads those from the audit, not the
+        // record. The real resume path (resume.rs) populates record.trace from
+        // the recipe, but here the emptiness sharpens the assertion: a
+        // regression that reads record.trace instead of audit.trace would
+        // produce an empty trace and fail the assert_eq below. External (not
+        // BuiltIn) is chosen so a live-path overwrite (which stamps BuiltIn)
+        // is also caught.
         let record = TurnRecord {
             question: "resumed question".into(),
             outcome: TurnOutcome::Textual {
