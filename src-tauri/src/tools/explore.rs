@@ -473,7 +473,7 @@ mod tests {
     fn explore_refuses_relative_dotdot_read_escape_at_gateway() {
         use crate::tools::test_support::inert_deps_with_temp;
         use std::fs;
-        use tempfile::TempDir;
+        use tempfile::{NamedTempFile, TempDir};
 
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
@@ -481,14 +481,20 @@ mod tests {
         let temp = TempDir::new().unwrap();
         // A sibling file in the CWD's parent -- the literal `../<name>` in the
         // SQL resolves against the process CWD to this file, which is outside
-        // temp_root, so the gateway refuses it.
-        let target_name = "explore_dotdot_escape_293.csv";
+        // temp_root, so the gateway refuses it. NamedTempFile gives panic-safe
+        // RAII cleanup (the fixture lives outside any TempDir, so a manual
+        // remove_file at scope end would leak on panic between create and
+        // remove). Hard-panics if CWD parent is not writable -- a silent skip
+        // would make this test a vacuous pass on CI with no signal.
         let cwd = std::env::current_dir().unwrap();
-        let escape_target = cwd.parent().unwrap().join(target_name);
-        if fs::write(&escape_target, "x").is_err() {
-            eprintln!("skipped: CWD parent not writable");
-            return;
-        }
+        let escape_file = NamedTempFile::new_in(cwd.parent().unwrap())
+            .expect("escape-target fixture: CWD parent must be writable");
+        fs::write(escape_file.path(), "x").unwrap();
+        let target_name = escape_file
+            .path()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("escape-target filename is valid UTF-8");
         let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
         let cancel = CancelToken::new();
         let err = dispatch(
@@ -505,7 +511,7 @@ mod tests {
             err.contains(&format!("../{target_name}")),
             "error names the literal relative path: {err}"
         );
-        let _ = fs::remove_file(&escape_target);
+        // escape_file cleans up via Drop on scope exit (incl. panic).
     }
 
     /// Design-B lockdown backstop (issue #293): a `read_*` call whose path the
@@ -546,6 +552,12 @@ mod tests {
         assert!(
             lower.contains("sql failed"),
             "refusal reads as a SQL failure: {err}"
+        );
+        // The gateway let the in-bounds path through (it is inside temp_root);
+        // the refusal is from the engine lockdown, not the FsAcl door.
+        assert!(
+            !lower.contains("outside the allowed"),
+            "gateway must have let the in-bounds path through: {err}"
         );
     }
 

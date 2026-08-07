@@ -633,6 +633,194 @@ mod tests {
         assert_eq!(deps.working_set.next_result_number(), 1);
     }
 
+    /// AC#2 / AC#3 (issue #310): a relative `../` escape in a `read_*` path is
+    /// refused by the gateway door BEFORE the sandbox runs -- symmetric with
+    /// explore's `explore_refuses_relative_dotdot_read_escape_at_gateway`. The
+    /// literal `../` in the SQL resolves against the process CWD; the resolved
+    /// file lives outside the session temp dir, so FsAcl classifies it as
+    /// `OutsideAllowedArea` and the structured message names both the path and
+    /// the allowed area (ADR-0077 / ADR-0080). No promotion lands.
+    #[test]
+    fn materialize_refuses_relative_dotdot_read_escape_at_gateway() {
+        use crate::session::materializer::RealMaterializer;
+        use std::fs;
+        use tempfile::{NamedTempFile, TempDir};
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = crate::workingset::WorkingSet::default();
+        let sources = std::collections::HashMap::new();
+        let temp = TempDir::new().unwrap();
+        // A sibling file in the CWD's parent -- the literal `../<name>` in the
+        // SQL resolves against the process CWD to this file, which is outside
+        // temp_root, so the gateway refuses it. NamedTempFile gives panic-safe
+        // RAII cleanup (the fixture lives outside any TempDir, so a manual
+        // remove_file at scope end would leak on panic between create and
+        // remove). Hard-panics if CWD parent is not writable -- a silent skip
+        // would make this test a vacuous pass on CI with no signal.
+        let cwd = std::env::current_dir().unwrap();
+        let escape_file = NamedTempFile::new_in(cwd.parent().unwrap())
+            .expect("escape-target fixture: CWD parent must be writable");
+        fs::write(escape_file.path(), "x").unwrap();
+        let target_name = escape_file
+            .path()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("escape-target filename is valid UTF-8");
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+        let cancel = CancelToken::new();
+        let mut materializer = RealMaterializer;
+        let err = dispatch(
+            &json!({"sql": format!("SELECT * FROM read_csv_auto('../{target_name}')")}),
+            &mut deps,
+            &cancel,
+            &mut materializer,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("outside the allowed"),
+            "relative `../` escape refused: {err}"
+        );
+        assert!(
+            err.contains(&format!("../{target_name}")),
+            "error names the literal relative path: {err}"
+        );
+        // No promotion landed.
+        assert_eq!(deps.working_set.len(), 0);
+        assert_eq!(deps.working_set.next_result_number(), 1);
+        // escape_file cleans up via Drop on scope exit (incl. panic).
+    }
+
+    /// AC#4 (issue #310): explore and materialize return the same structured
+    /// FsAcl message for the same out-of-bounds `read_*` path. Both surfaces
+    /// share `preflight_read_sql`, so the path-naming "outside the allowed
+    /// area" message the agent self-corrects from appears in BOTH tool errors.
+    /// The materialize path wraps it in a Runtime-error prefix
+    /// (`"SQL failed (target result_1): ..."`), so the two strings are NOT
+    /// identical -- but the structured content the agent reads (path name +
+    /// allowed-area hint) is the same FsAcl substring in both. This test pins
+    /// that substring symmetry: if either surface drops or rewrites the FsAcl
+    /// wording, one of the `contains` assertions fails.
+    #[test]
+    fn explore_and_materialize_return_symmetric_fs_acl_error() {
+        use crate::session::materializer::RealMaterializer;
+        use crate::tools::explore;
+        use std::fs;
+        use tempfile::TempDir;
+
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("secret.csv");
+        fs::write(&outside_file, "x").unwrap();
+        let sql = format!(
+            "SELECT * FROM read_csv_auto('{}')",
+            outside_file.to_string_lossy()
+        );
+
+        // Explore surface.
+        let conn_e = Connection::open_in_memory().unwrap();
+        let mut ws_e = crate::workingset::WorkingSet::default();
+        let sources_e = std::collections::HashMap::new();
+        let temp_e = TempDir::new().unwrap();
+        let mut deps_e = inert_deps_with_temp(&conn_e, &mut ws_e, &sources_e, temp_e.path());
+        let cancel_e = CancelToken::new();
+        let explore_err =
+            explore::dispatch(&json!({"sql": sql.clone()}), &mut deps_e, &cancel_e).unwrap_err();
+
+        // Materialize surface.
+        let conn_m = Connection::open_in_memory().unwrap();
+        let mut ws_m = crate::workingset::WorkingSet::default();
+        let sources_m = std::collections::HashMap::new();
+        let temp_m = TempDir::new().unwrap();
+        let mut deps_m = inert_deps_with_temp(&conn_m, &mut ws_m, &sources_m, temp_m.path());
+        let cancel_m = CancelToken::new();
+        let mut materializer = RealMaterializer;
+        let materialize_err = dispatch(
+            &json!({"sql": sql.clone()}),
+            &mut deps_m,
+            &cancel_m,
+            &mut materializer,
+        )
+        .unwrap_err();
+
+        // Both errors carry the core FsAcl structured message: path name +
+        // "outside the allowed area". This is the symmetry AC#4 requires.
+        assert!(
+            explore_err.contains("outside the allowed"),
+            "explore error carries the FsAcl refusal: {explore_err}"
+        );
+        assert!(
+            materialize_err.contains("outside the allowed"),
+            "materialize error carries the FsAcl refusal: {materialize_err}"
+        );
+        assert!(
+            explore_err.contains("secret.csv"),
+            "explore error names the offending path: {explore_err}"
+        );
+        assert!(
+            materialize_err.contains("secret.csv"),
+            "materialize error names the offending path: {materialize_err}"
+        );
+        // Neither surface let the call proceed -- no working-set mutation.
+        assert_eq!(deps_e.working_set.len(), 0);
+        assert_eq!(deps_m.working_set.len(), 0);
+    }
+
+    /// AC#1 (issue #310): a `read_*` call whose path the gateway whitelist
+    /// ALLOWS (a file inside the session temp dir) still does not execute --
+    /// the engine-level `disabled_filesystems` lockdown remains the file-
+    /// reachability GUARANTEE, so the agent cannot read arbitrary files through
+    /// materialize; it reaches sources via the `"<ref>".data` catalog. The
+    /// gateway adds structured out-of-bounds guidance (ADR-0080); the lockdown
+    /// guarantees the rest (ADR-0005). Symmetric with explore's
+    /// `explore_lockdown_still_refuses_in_bounds_read_path`.
+    #[test]
+    fn materialize_lockdown_still_refuses_in_bounds_read_path() {
+        use crate::session::materializer::RealMaterializer;
+        use std::fs;
+        use tempfile::TempDir;
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = crate::workingset::WorkingSet::default();
+        let sources = std::collections::HashMap::new();
+        let temp = TempDir::new().unwrap();
+        // A file INSIDE the temp dir: the gateway whitelist allows it (in-
+        // bounds), so the call proceeds to the sandbox, where the engine
+        // lockdown refuses read_* with its "... disabled" message.
+        let inside = temp.path().join("scratch.csv");
+        fs::write(&inside, "x").unwrap();
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+        let cancel = CancelToken::new();
+        let mut materializer = RealMaterializer;
+        let err = dispatch(
+            &json!({"sql": format!("SELECT * FROM read_csv_auto('{}')", inside.to_string_lossy())}),
+            &mut deps,
+            &cancel,
+            &mut materializer,
+        )
+        .unwrap_err();
+        let lower = err.to_ascii_lowercase();
+        assert!(
+            lower.contains("disabled"),
+            "lockdown backstop refuses an in-bounds read_*: {err}"
+        );
+        // The lockdown error ("disabled by configuration") classifies as
+        // Resource via classify_duckdb_error, so materialize wraps it as a
+        // resource-cap error (explore wraps it as "SQL failed" -- the two
+        // surfaces classify differently, but both refuse the read_*).
+        assert!(
+            err.contains("result exceeds a resource cap"),
+            "lockdown refusal reads as a resource-cap error: {err}"
+        );
+        // The gateway let the in-bounds path through (it is inside temp_root);
+        // the refusal is from the engine lockdown, not the FsAcl door.
+        assert!(
+            !err.contains("outside the allowed"),
+            "gateway must have let the in-bounds path through: {err}"
+        );
+        // No promotion landed.
+        assert_eq!(deps.working_set.len(), 0);
+        assert_eq!(deps.working_set.next_result_number(), 1);
+    }
+
     /// A cancel requested before the call surfaces as "materialize cancelled"
     /// without driving a real promotion. Symmetric with explore's
     /// `explore_returns_cancelled_when_cancel_already_requested`; the shared

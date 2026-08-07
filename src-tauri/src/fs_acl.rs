@@ -212,7 +212,7 @@ mod tests {
     use crate::model::{ColumnSchema, DatasetDescriptor, DatasetPrivacy, RectifyProvenance};
     use crate::workingset::WorkingSet;
     use std::fs;
-    use tempfile::TempDir;
+    use tempfile::{NamedTempFile, TempDir};
 
     /// A working set with one source whose original file lives at `path`, so
     /// the ACL carries it as a read-only source root.
@@ -265,15 +265,21 @@ mod tests {
     #[test]
     fn relative_dotdot_escape_is_refused() {
         let temp = TempDir::new().unwrap();
-        let target_name = "relative_dotdot_escape_293.txt";
+        // A sibling file in the CWD's parent: the literal `../<name>` resolves
+        // against the process CWD to this file, which is outside temp_root, so
+        // the ACL refuses it. NamedTempFile gives panic-safe RAII cleanup (the
+        // fixture lives outside any TempDir, so a manual remove_file at scope
+        // end would leak on panic). Hard-panics if CWD parent is not writable
+        // -- a silent skip would make this test a vacuous pass on CI.
         let cwd = std::env::current_dir().unwrap();
-        let sibling = cwd.parent().unwrap().join(target_name);
-        // Skip on environments where the CWD parent is not writable -- the
-        // test needs the sibling to exist for the canonicalizer to resolve.
-        if fs::write(&sibling, "x").is_err() {
-            eprintln!("skipped: CWD parent not writable");
-            return;
-        }
+        let escape_file = NamedTempFile::new_in(cwd.parent().unwrap())
+            .expect("escape-target fixture: CWD parent must be writable");
+        fs::write(escape_file.path(), "x").unwrap();
+        let target_name = escape_file
+            .path()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("escape-target filename is valid UTF-8");
         let acl = FsAcl::new(&WorkingSet::default(), temp.path());
         // The literal relative path: resolve() joins it against the CWD and
         // canonicalizes to cwd.parent/target_name, which is outside temp_root.
@@ -286,7 +292,7 @@ mod tests {
             "error names the literal relative path: {}",
             err.message()
         );
-        let _ = fs::remove_file(&sibling);
+        // escape_file cleans up via Drop on scope exit (incl. panic).
     }
 
     /// AC #2 / AC #4: an in-bounds symlink that points outside is resolved to
