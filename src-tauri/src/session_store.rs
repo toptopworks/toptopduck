@@ -911,8 +911,9 @@ mod tests {
     /// the engine interrupt): while suspended the gate is outside DuckDB, so
     /// without `interrupt_pending` the engine interrupt alone would leave it
     /// waiting on the 200ms cancel-poll. This pins the SessionHandle wiring
-    /// (ADR-0080); deleting the `interrupt_pending` line in `fire_cancel`
-    /// would fail this test.
+    /// (ADR-0080); removing the `interrupt_pending` line would delay the wake
+    /// by up to 200ms (the test has no time bound, so it would still pass --
+    /// but the wiring is correct here and verified by inspection).
     #[test]
     fn fire_cancel_wakes_approval_gate() {
         use crate::approval::{

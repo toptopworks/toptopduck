@@ -353,9 +353,9 @@ pub enum GateOutcome {
     /// The call proceeds -- the agent loop runs [`crate::tools::dispatch`] (or
     /// the external bridge forwards the call).
     Allow,
-    /// The user (or policy) refused the call. The agent loop surfaces a
-    /// tool-level denial the model can self-correct from (ADR-0077) -- it is
-    /// NOT a transport error and does NOT fail the turn.
+    /// The user refused the call (via the approval card's deny button). The
+    /// agent loop surfaces a tool-level denial the model can self-correct from
+    /// (ADR-0077) -- it is NOT a transport error and does NOT fail the turn.
     Denied,
 }
 
@@ -474,8 +474,7 @@ impl ApprovalState {
     /// pending approval so its gate returns [`GateCancelled`] and clears its
     /// own slot (the slot is owned by the gate, not this fn). Called on a
     /// successful resume by `open_duck` -- trust state is session-level and
-    /// must not survive a
-    /// resume (it is not in the recipe, ADR-0080).
+    /// must not survive a resume (it is not in the recipe, ADR-0080).
     ///
     /// Both fields are written under a single `policy` lock so a concurrent
     /// reader never observes a half-reset state (new mode + stale trust).
@@ -685,6 +684,17 @@ impl ApprovalState {
             .trust
             .contains(key)
     }
+
+    /// Seed a tool key into the trust set directly (test-only shortcut so
+    /// tests do not reach into the private `policy` mutex).
+    #[cfg(test)]
+    pub fn seed_trust(&self, key: &ToolKey) {
+        self.policy
+            .lock()
+            .expect("policy lock poisoned")
+            .trust
+            .insert(key.clone());
+    }
 }
 
 /// Why a `respond_tool_approval` call did not land (issue #294).
@@ -881,7 +891,7 @@ mod tests {
         let state = ApprovalState::new();
         let key = ToolKey::external("acme", "fetch");
         // Seed trust directly to test the gate short-circuit.
-        state.policy.lock().unwrap().trust.insert(key.clone());
+        state.seed_trust(&key);
         let cancel = CancelToken::new();
         let sink = RecordingSink::default();
         let req = ApprovalRequest {
@@ -1131,7 +1141,7 @@ mod tests {
     fn reset_clears_trust_and_mode() {
         let state = ApprovalState::new();
         let key = ToolKey::external("acme", "fetch");
-        state.policy.lock().unwrap().trust.insert(key.clone());
+        state.seed_trust(&key);
         state.set_auth_mode(AuthMode::NoConfirmation);
         assert_eq!(state.auth_mode(), AuthMode::NoConfirmation);
 
@@ -1274,6 +1284,15 @@ mod tests {
         assert!(
             !cancel.is_requested(),
             "reset wakes via interrupt_pending, not the cancel token"
+        );
+        // The cancel-path branch emits a synthetic Deny resolved event so the
+        // frontend flips stale pending cards (ADR-0083 "no stale pending").
+        let resolved = sink.resolved.lock().unwrap();
+        assert_eq!(resolved.len(), 1, "cancel path emits a synthetic Deny");
+        assert_eq!(
+            resolved[0].1,
+            ApprovalResponse::Deny,
+            "the synthetic resolved event is a Deny"
         );
     }
 
@@ -1436,5 +1455,56 @@ mod tests {
             SUMMARY_MAX_CHARS
         );
         assert!(body.summary.ends_with("..."));
+    }
+
+    // --- Policy atomicity (review H1) -------------------------------------
+
+    /// Hammer test: a concurrent `reset()` must never let a reader observe a
+    /// half-reset policy snapshot (`PerCall` mode + stale trust). The merged
+    /// `Mutex<Policy>` guarantees this structurally; this test catches a
+    /// regression if someone splits the mutex back into two. Race tests are
+    /// inherently non-deterministic, but hundreds of iterations across
+    /// multiple threads give high regression hit-rate.
+    #[test]
+    fn reset_is_atomic_relative_to_concurrent_reads() {
+        let state = Arc::new(ApprovalState::new());
+
+        // Reader thread: repeatedly take a policy snapshot via the same lock
+        // path `gate()` uses. The only invalid state is `PerCall` (the
+        // post-reset default) with `trust` still containing `key` -- that
+        // would mean `reset` cleared the mode but not the trust (half-reset).
+        // `NoConfirmation` + empty trust is valid (writer between set_mode
+        // and seed_trust); `NoConfirmation` + trust is the pre-reset steady
+        // state.
+        let state_r = Arc::clone(&state);
+        let reader = std::thread::spawn(move || {
+            let key = ToolKey::external("acme", "fetch");
+            for _ in 0..500 {
+                let (mode, has_trust) = {
+                    let g = state_r.policy.lock().expect("policy lock poisoned");
+                    (g.auth_mode, g.trust.contains(&key))
+                };
+                if mode == AuthMode::PerCall {
+                    assert!(
+                        !has_trust,
+                        "half-reset: PerCall mode but trust not yet cleared"
+                    );
+                }
+            }
+        });
+
+        // Writer thread: cycle set -> reset repeatedly.
+        let state_w = Arc::clone(&state);
+        let writer = std::thread::spawn(move || {
+            let key = ToolKey::external("acme", "fetch");
+            for _ in 0..500 {
+                state_w.set_auth_mode(AuthMode::NoConfirmation);
+                state_w.seed_trust(&key);
+                state_w.reset();
+            }
+        });
+
+        writer.join().expect("writer");
+        reader.join().expect("reader");
     }
 }
