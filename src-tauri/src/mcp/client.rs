@@ -62,7 +62,7 @@ const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Bounded channel capacity for SSE reader → consumer message forwarding.
 /// Backpressures a flooding server so the reader blocks on send rather than
-/// accumulating unbounded messages in memory (H4: review feedback).
+/// accumulating unbounded messages in memory.
 const SSE_CHANNEL_BOUND: usize = 64;
 
 /// One keychain-backed env value the gateway injects at spawn. The gateway
@@ -197,11 +197,11 @@ impl<R: BufRead, W: Write> McpClient for FramedClient<R, W> {
             let msg = framing::read_message(&mut self.reader)
                 .map_err(ClientError::Framing)?
                 .ok_or(ClientError::ServerClosed)?;
-            if msg.get("id") != id.as_ref() {
+            // Match only id-bearing responses; a notification (no id) or a
+            // response for another id is skipped (issue #413).
+            if msg.get("id") != id.as_ref() || id.is_none() {
                 continue;
             }
-            // Shared envelope check (issue #413): the inline version was a
-            // historical residual predating `check_rpc_response`.
             return check_rpc_response(&msg);
         }
     }
@@ -489,13 +489,7 @@ impl McpClient for HttpClient {
     }
 
     fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
-        // POST the notification (no response expected; the server typically
-        // returns 202 Accepted). The response body is intentionally ignored.
-        self.agent
-            .post(&self.url)
-            .send_json(notif)
-            .map(drop)
-            .map_err(|e| ClientError::Http(e.to_string()))
+        post_notification(&self.agent, &self.url, notif)
     }
 
     fn next_id(&mut self) -> i64 {
@@ -564,7 +558,7 @@ impl SseClient {
         // The first event MUST be `event: endpoint` carrying the POST URL
         // (the MCP legacy SSE transport contract). Rejecting anything else
         // prevents a misbehaving server's message payload from being used as
-        // the POST target (H1: review feedback).
+        // the POST target.
         let first_event = read_sse_event(&mut reader)
             .map_err(ClientError::Framing)?
             .ok_or(ClientError::ServerClosed)?;
@@ -579,11 +573,11 @@ impl SseClient {
         }
         // Resolve the POST URL relative to the SSE URL (the server may send
         // a relative path like `/message`). Reject non-http(s) schemes to
-        // prevent SSRF via a compromised server's endpoint event (H2).
+        // prevent SSRF via a compromised server's endpoint event.
         let post_url = resolve_post_url(url, &first_event.data)?;
 
         // Spawn the background reader for subsequent events. A bounded
-        // sync_channel backpressures a flooding server (H4: review feedback).
+        // sync_channel backpressures a flooding server.
         let (tx, rx) = mpsc::sync_channel(SSE_CHANNEL_BOUND);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
@@ -622,7 +616,7 @@ impl McpClient for SseClient {
                 .response_rx
                 .recv()
                 .map_err(|_| ClientError::ServerClosed)?;
-            if msg.get("id") != id.as_ref() {
+            if msg.get("id") != id.as_ref() || id.is_none() {
                 continue;
             }
             return check_rpc_response(&msg);
@@ -630,11 +624,7 @@ impl McpClient for SseClient {
     }
 
     fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
-        self.agent
-            .post(&self.post_url)
-            .send_json(notif)
-            .map(drop)
-            .map_err(|e| ClientError::Http(e.to_string()))
+        post_notification(&self.agent, &self.post_url, notif)
     }
 
     fn next_id(&mut self) -> i64 {
@@ -730,19 +720,37 @@ fn sse_reader_loop<R: BufRead + Send>(
 // ---------------------------------------------------------------------------
 
 /// Check a JSON-RPC response envelope: return the `result` field on success,
-/// or [`ClientError::ServerError`] when the server returned an `error` field.
-/// Shared by all [`McpClient`] implementations (issue #413) — the stream-based
-/// clients call it directly; the framed client calls it from its `request`
-/// impl.
+/// [`ClientError::ServerError`] when the server returned an `error` field, or
+/// [`ClientError::Framing`] when the envelope has neither (a protocol
+/// violation). Shared by all [`McpClient`] implementations (issue #413).
 fn check_rpc_response(msg: &Value) -> Result<Value, ClientError> {
     if let Some(err) = msg.get("error") {
         return Err(ClientError::ServerError(err.clone()));
     }
-    Ok(msg.get("result").cloned().unwrap_or(Value::Null))
+    match msg.get("result") {
+        Some(v) => Ok(v.clone()),
+        None => Err(ClientError::Framing(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "JSON-RPC response has neither `result` nor `error`",
+        ))),
+    }
+}
+
+/// POST a JSON-RPC notification (no `id`, no response awaited) over an HTTP
+/// transport. The response body is intentionally discarded — MCP
+/// notifications are fire-and-forget; the server typically returns 202.
+/// Non-2xx status codes surface as `ClientError::Http` via `ureq`'s error
+/// channel.
+fn post_notification(agent: &ureq::Agent, url: &str, notif: Value) -> Result<(), ClientError> {
+    agent
+        .post(url)
+        .send_json(notif)
+        .map(drop)
+        .map_err(|e| ClientError::Http(e.to_string()))
 }
 
 /// Resolve the SSE endpoint event's POST URL relative to the SSE stream URL,
-/// rejecting non-http(s) schemes (SSRF guard, H2: review feedback). The
+/// rejecting non-http(s) schemes (SSRF guard). The
 /// server may send an absolute URL or a relative path like `/message`.
 fn resolve_post_url(sse_url: &str, raw: &str) -> Result<String, ClientError> {
     let base =
@@ -830,6 +838,7 @@ pub enum ClientError {
     UnsupportedTransport(String),
     #[error("failed to spawn MCP server: {0}")]
     Spawn(#[from] std::io::Error),
+    // No `#[from]`: would conflict with `Spawn`'s `#[from] std::io::Error`.
     #[error("framing error on the server transport: {0}")]
     Framing(std::io::Error),
     #[error("spawned child has no stdin (piped was requested)")]
@@ -1102,7 +1111,19 @@ mod tests {
         );
     }
 
-    // --- resolve_post_url SSRF guard (issue #389, H2) -------------------------
+    /// A response with neither `result` nor `error` (JSON-RPC protocol
+    /// violation) is rejected as a framing error, not silently mapped to Null.
+    #[test]
+    fn check_rpc_response_rejects_envelope_without_result_or_error() {
+        let msg = json!({"jsonrpc": "2.0", "id": 1});
+        let err = check_rpc_response(&msg).expect_err("malformed response");
+        assert!(
+            matches!(err, ClientError::Framing(_)),
+            "neither result nor error -> Framing, got {err:?}"
+        );
+    }
+
+    // --- resolve_post_url SSRF guard (issue #389) -----------------------------
 
     /// A relative path like `/message` resolves against the SSE base URL.
     #[test]
