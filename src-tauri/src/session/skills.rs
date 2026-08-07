@@ -20,7 +20,7 @@
 //!
 //! [`Recipe::mounted_skills`]: crate::persistence::recipe::Recipe::mounted_skills
 
-use crate::model::{SkillLifecycleEvent, SkillLifecycleKind, ThreadEntry};
+use crate::model::{SkillLifecycleEvent, SkillLifecycleKind};
 
 /// Why a skill mount / unmount was refused (issue #363). Mirrors the typed-
 /// reject pattern of [`crate::model::RemoveSourceError`]: each variant names
@@ -104,13 +104,11 @@ impl super::Session {
     /// Mirrors [`super::Session::append_source_event`]: first-class timeline
     /// slot (always visible), never a turn, never enters the LLM window.
     fn append_skill_event(&mut self, kind: SkillLifecycleKind, name: &str) {
-        self.history.push(ThreadEntry::Skill(SkillLifecycleEvent {
-            kind,
-            name: name.to_string(),
-        }));
-        // Keep turn_audit index-aligned with history (ADR-0078, issue #319):
-        // a skill event is not a turn, so its audit slot is a default.
-        self.turn_audit.push(super::TurnAudit::default());
+        self.timeline
+            .push(super::TimelineEntry::Skill(SkillLifecycleEvent {
+                kind,
+                name: name.to_string(),
+            }));
         // ADR-0086: a skill lifecycle operation also lands its terminal state
         // to the recipe atomically (the timeline IS the source of truth for
         // the active set, so changing it is a recipe mutation).
@@ -121,6 +119,7 @@ impl super::Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ThreadEntry;
     use crate::session::Session;
 
     /// A fresh session mounts nothing: the live cache is empty and the fold
@@ -139,7 +138,8 @@ mod tests {
         session.mount_skill("sql-coach").expect("mount");
         assert_eq!(session.mounted_skills(), vec!["sql-coach".to_string()]);
         // The timeline's tail is the Mount event.
-        let last = session.history.last().expect("history non-empty");
+        let conv = session.conversation();
+        let last = conv.last().expect("history non-empty");
         match last {
             ThreadEntry::Skill(ev) => {
                 assert_eq!(ev.kind, SkillLifecycleKind::Mount);
@@ -161,7 +161,7 @@ mod tests {
         );
         // The cache + timeline are unchanged (no second event appended).
         assert_eq!(session.mounted_skills(), vec!["sql-coach".to_string()]);
-        assert_eq!(session.history.len(), 1);
+        assert_eq!(session.conversation().len(), 1);
     }
 
     /// unmount_skill removes the name from the live cache AND lands an Unmount
@@ -173,8 +173,8 @@ mod tests {
         session.unmount_skill("sql-coach").expect("unmount");
         assert!(session.mounted_skills().is_empty());
         // Two events: Mount then Unmount.
-        assert_eq!(session.history.len(), 2);
-        match &session.history[1] {
+        assert_eq!(session.conversation().len(), 2);
+        match &session.conversation()[1] {
             ThreadEntry::Skill(ev) => {
                 assert_eq!(ev.kind, SkillLifecycleKind::Unmount);
                 assert_eq!(ev.name, "sql-coach");
@@ -192,7 +192,10 @@ mod tests {
             matches!(err, SkillMountError::NotMounted { ref name } if name == "sql-coach"),
             "expected NotMounted, got {err:?}",
         );
-        assert!(session.history.is_empty(), "no event appended on refusal");
+        assert!(
+            session.conversation().is_empty(),
+            "no event appended on refusal"
+        );
     }
 
     /// The mount -> unmount -> remount sequence (AC #3): the live cache ends

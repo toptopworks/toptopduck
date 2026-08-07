@@ -1207,7 +1207,8 @@ fn resume_replay_failure_marks_turn_failed_and_preserves_prior_results() {
     // after it (truncated at the breakpoint).
     let mut found_failed = false;
     let mut idx = 0;
-    for (i, entry) in resumed.conversation().iter().enumerate() {
+    let conv = resumed.conversation();
+    for (i, entry) in conv.iter().enumerate() {
         if let ThreadEntry::Turn(t) = entry {
             if t.question == "多少单" {
                 found_failed = matches!(&t.outcome, TurnOutcome::Failed(_));
@@ -1222,7 +1223,7 @@ fn resume_replay_failure_marks_turn_failed_and_preserves_prior_results() {
     );
     // No turn entries after the break turn (source events after it are also
     // dropped -- the conversation stops at the breakpoint).
-    let after = &resumed.conversation()[idx + 1..];
+    let after = &conv[idx + 1..];
     assert!(
         after.is_empty(),
         "no entries after the breakpoint, got {after:?}"

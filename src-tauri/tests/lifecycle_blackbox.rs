@@ -128,7 +128,7 @@ fn ingest_appends_an_added_event_per_source() {
     // A second ingest appends a second Added event -- one per source.
     load_source(&mut session, &fixture("orders.csv"));
     assert_eq!(
-        count_events(session.conversation(), SourceLifecycleKind::Added),
+        count_events(&session.conversation(), SourceLifecycleKind::Added),
         2
     );
 }
@@ -166,8 +166,8 @@ fn guided_multi_sheet_ingest_appends_an_added_event_per_sheet() {
     }
 
     // Two sheets -> two Added events, one per sheet, in ingest order.
-    let added: Vec<_> = session
-        .conversation()
+    let conv = session.conversation();
+    let added: Vec<_> = conv
         .iter()
         .filter_map(|e| match e {
             ThreadEntry::Source(ev) if ev.kind == SourceLifecycleKind::Added => Some(ev),
@@ -225,8 +225,8 @@ fn remove_source_drops_a_non_active_no_result_source() {
 
     // AC2: exactly one Deleted event, carrying the removed source's identity +
     // the display label captured before removal (so the thread still names it).
-    let deleted: Vec<_> = session
-        .conversation()
+    let conv = session.conversation();
+    let deleted: Vec<_> = conv
         .iter()
         .filter_map(|e| match e {
             ThreadEntry::Source(ev) if ev.kind == SourceLifecycleKind::Deleted => Some(ev),
@@ -263,7 +263,7 @@ fn remove_source_empties_when_last_active_source_removed() {
     );
     // The Deleted event still lands -- the timeline records what was removed.
     assert_eq!(
-        count_events(session.conversation(), SourceLifecycleKind::Deleted),
+        count_events(&session.conversation(), SourceLifecycleKind::Deleted),
         1
     );
 }
@@ -301,7 +301,7 @@ fn remove_source_refuses_active_when_other_sources_remain() {
         "focus unchanged"
     );
     assert_eq!(
-        count_events(session.conversation(), SourceLifecycleKind::Deleted),
+        count_events(&session.conversation(), SourceLifecycleKind::Deleted),
         0
     );
 }
@@ -376,8 +376,8 @@ fn remove_active_source_switches_focus_and_deletes() {
         "focus moved to the chosen continuation"
     );
     // AC2: one Deleted event carrying the removed source's identity + display.
-    let deleted: Vec<_> = session
-        .conversation()
+    let conv = session.conversation();
+    let deleted: Vec<_> = conv
         .iter()
         .filter_map(|e| match e {
             ThreadEntry::Source(ev) if ev.kind == SourceLifecycleKind::Deleted => Some(ev),
@@ -420,7 +420,7 @@ fn remove_active_source_refuses_non_active() {
         "focus unchanged"
     );
     assert_eq!(
-        count_events(session.conversation(), SourceLifecycleKind::Deleted),
+        count_events(&session.conversation(), SourceLifecycleKind::Deleted),
         0
     );
 }
@@ -456,7 +456,7 @@ fn remove_active_source_refuses_invalid_continue() {
     assert!(session.get("people").is_some());
     assert_eq!(session.active().unwrap().reference_name, "orders");
     assert_eq!(
-        count_events(session.conversation(), SourceLifecycleKind::Deleted),
+        count_events(&session.conversation(), SourceLifecycleKind::Deleted),
         0
     );
 }
@@ -604,11 +604,11 @@ fn source_events_neither_advance_result_n_nor_are_turns() {
     session.remove_source("people").expect("remove non-active");
     // Three source events now sit in the timeline; the next result is result_1.
     assert_eq!(
-        count_events(session.conversation(), SourceLifecycleKind::Added),
+        count_events(&session.conversation(), SourceLifecycleKind::Added),
         2
     );
     assert_eq!(
-        count_events(session.conversation(), SourceLifecycleKind::Deleted),
+        count_events(&session.conversation(), SourceLifecycleKind::Deleted),
         1
     );
     let outcome = session.ask("count");
@@ -1016,8 +1016,8 @@ fn replace_source_appends_a_replaced_event() {
         other => panic!("expected replace to succeed, got {other:?}"),
     }
 
-    let replaced: Vec<_> = session
-        .conversation()
+    let conv = session.conversation();
+    let replaced: Vec<_> = conv
         .iter()
         .filter_map(|e| match e {
             ThreadEntry::Source(ev) if ev.kind == SourceLifecycleKind::Replaced => Some(ev),
@@ -1032,12 +1032,12 @@ fn replace_source_appends_a_replaced_event() {
     );
     // A replace is NOT also an Added or Deleted -- only Replaced lands.
     assert_eq!(
-        count_events(session.conversation(), SourceLifecycleKind::Added),
+        count_events(&session.conversation(), SourceLifecycleKind::Added),
         2,
         "two Added events (people + orders) from the initial loads"
     );
     assert_eq!(
-        count_events(session.conversation(), SourceLifecycleKind::Deleted),
+        count_events(&session.conversation(), SourceLifecycleKind::Deleted),
         0,
         "a replace never emits a Deleted event"
     );

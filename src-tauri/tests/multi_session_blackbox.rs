@@ -253,8 +253,8 @@ fn close_with_inflight_ask_discards_turn_not_in_thread_or_recipe() {
     // conversation is still readable.
     {
         let s = handle.session_lock().unwrap();
-        let thread_questions: Vec<&str> = s
-            .conversation()
+        let conv = s.conversation();
+        let thread_questions: Vec<&str> = conv
             .iter()
             .filter_map(|e| match e {
                 toptopduck_lib::ThreadEntry::Turn(r) => Some(r.question.as_str()),
@@ -800,8 +800,8 @@ fn close_after_resume_discards_inflight_turn_via_shared_closing_flag() {
     // The cancelled turn did NOT enter the thread (ADR-0055 discard).
     {
         let s = handle.session_lock().unwrap();
-        let thread_questions: Vec<&str> = s
-            .conversation()
+        let conv = s.conversation();
+        let thread_questions: Vec<&str> = conv
             .iter()
             .filter_map(|e| match e {
                 toptopduck_lib::ThreadEntry::Turn(r) => Some(r.question.as_str()),

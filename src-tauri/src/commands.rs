@@ -615,7 +615,7 @@ pub fn conversation(
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     let s = handle.session_lock()?;
-    Ok(s.conversation().to_vec())
+    Ok(s.conversation())
 }
 
 /// Read one page of a dataset's rows from the named session (ADR-0024 windowed

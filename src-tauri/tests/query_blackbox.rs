@@ -583,7 +583,7 @@ fn every_turn_is_recorded_in_the_conversation_thread_in_order() {
     session.ask("哪个名字");
     session.ask("坏查询");
 
-    let thread = turns(session.conversation());
+    let thread = turns(&session.conversation());
     assert_eq!(thread.len(), 3, "every turn occupies a thread slot");
     // Each entry is labeled by its verbatim question (ADR-0039).
     assert_eq!(thread[0].question, "查行数");
@@ -1180,7 +1180,7 @@ fn a_cancelled_turn_is_recorded_in_the_thread_but_advances_no_result_number() {
     // counted here -- the assertion stays about the turn slot.)
     let thread = {
         let s = session.lock().unwrap();
-        turns(s.conversation())
+        turns(&s.conversation())
     };
     assert_eq!(thread.len(), 1);
     assert_eq!(thread[0].question, "慢查询");

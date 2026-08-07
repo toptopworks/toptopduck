@@ -29,9 +29,9 @@ use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::mcp::config::McpServerConfig;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
-    RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, SkillProvenance,
-    SourceLifecycleKind, TextKind, ThreadEntry, TraceEntryView, TurnError, TurnFailure,
-    TurnOutcome, TurnPhase, TurnProvenance, TurnRecord,
+    RectifyProvenance, RenameError, RowPage, SheetGuidance, SheetRectify, SkillLifecycleEvent,
+    SkillProvenance, SourceLifecycleEvent, SourceLifecycleKind, TextKind, ThreadEntry,
+    TraceEntryView, TurnError, TurnFailure, TurnOutcome, TurnPhase, TurnProvenance, TurnRecord,
 };
 use crate::persistence::recipe::{
     Recipe, RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTraceEntry, RecipeTurn, RuntimeKind,
@@ -400,23 +400,14 @@ pub struct Session {
     /// resume borrow and the live-turn borrow share one object.
     materializer: Box<dyn Materializer>,
     /// The conversation thread (ADR-0028/0039/0040): a unified timeline of turns
-    /// AND source lifecycle events, in order. The source of truth the frontend
-    /// renders; the window assembler reads only the turns (via [`Self::turns`]),
-    /// so source events occupy a timeline slot and stay always-visible yet never
-    /// enter the LLM turn window or advance result_N (ADR-0040).
-    history: Vec<ThreadEntry>,
-    /// Per-timeline-entry persisted audit substructures (ADR-0078, issue #319),
-    /// INDEX-ALIGNED with [`Self::history`] (invariant: equal lengths; every
-    /// history push pairs with exactly one audit push). A turn entry carries
-    /// its real execution trace + runtime/skill provenance, snapshotted at
-    /// record time (or harvested from the recipe on resume); a source event
-    /// entry carries a default. The trace's PERSISTED form rides HERE (the
-    /// recipe is its .duck layer, read per turn by [`Self::build_recipe`]);
-    /// `TurnRecord` additionally carries the DISPLAY view (the same bounded
-    /// shape, issue #297) so the rail can expand a completed turn's calls --
-    /// the full in-memory payloads ride neither, and the far window reads
-    /// only question + outcome (ADR-0078 summary-only invariant intact).
-    turn_audit: Vec<TurnAudit>,
+    /// AND source/skill lifecycle events, in order. The source of truth the
+    /// frontend renders (via [`Self::conversation`]); the window assembler reads
+    /// only the turns (via [`Self::turns`]), so non-turn events occupy a
+    /// timeline slot and stay always-visible yet never enter the LLM turn window
+    /// or advance result_N (ADR-0040). Each turn entry carries its persisted
+    /// audit (trace + provenance, ADR-0078) inline, so alignment is structural
+    /// rather than maintained by paired pushes (issue #325).
+    timeline: Vec<TimelineEntry>,
     /// Ceiling on a materialized result's row count (ADR-0005 L3). A query whose
     /// result would exceed it is aborted with a resource error rather than
     /// allowed to balloon memory. Defaults to [`DEFAULT_MAX_RESULT_ROWS`];
@@ -540,20 +531,51 @@ pub struct Session {
 /// The persisted-form audit substructures for ONE timeline entry (ADR-0078,
 /// issue #319): a turn's execution trace (the agent loop's recorded calls,
 /// mapped to the recipe form) + its runtime/skill provenance. Lives on the
-/// Session in [`Session::turn_audit`], index-aligned with
-/// [`Session::history`]. This is the trace's PERSISTENCE form; the
-/// [`TurnRecord`] additionally carries the display view ([`crate::model::
-/// TraceEntryView`], issue #297) for the rail's expanded trace -- same
-/// bounded shape, so the full in-memory payloads cross neither, and the far
-/// window still reads only the trace's summary (ADR-0078).
-/// [`Session::build_recipe`]'s whole-file rebuild reads one audit per
-/// timeline entry on every persist; resume seeds the vector from the recipe
-/// so persisted values round-trip verbatim. Source lifecycle entries carry
-/// a default (sources are not turns).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct TurnAudit {
-    /// The turn's persisted execution trace (ADR-0078); empty for no-tool
-    /// turns and source lifecycle entries.
+/// One entry in the session's unified timeline (issue #325). Replaces the
+/// former pair of index-aligned `Vec<ThreadEntry>` + `Vec<TurnAudit>` so
+/// alignment is structural (compile-time): a turn entry CANNOT exist without
+/// its audit, and a non-turn entry (Source/Skill lifecycle) CANNOT carry
+/// audit data. The `TurnAudit::default()` sentinel is eliminated.
+#[derive(Debug)]
+pub(super) enum TimelineEntry {
+    /// A conversation turn: the IPC-visible [`TurnRecord`] paired with the
+    /// turn's persisted audit (trace + provenance, ADR-0078).
+    Turn {
+        record: TurnRecord,
+        audit: TurnAudit,
+    },
+    /// A source lifecycle event (ADR-0040): first-class timeline slot, not a turn.
+    Source(SourceLifecycleEvent),
+    /// A skill lifecycle event (ADR-0086): first-class timeline slot, not a turn.
+    Skill(SkillLifecycleEvent),
+}
+
+impl TimelineEntry {
+    /// Project to the IPC-visible [`ThreadEntry`] form (drops the persisted
+    /// audit). The unified timeline is the session's internal representation;
+    /// this projection feeds the `conversation()` IPC boundary so the wire
+    /// shape stays unchanged (ADR-0078).
+    fn to_thread_entry(&self) -> ThreadEntry {
+        match self {
+            TimelineEntry::Turn { record, .. } => ThreadEntry::Turn(record.clone()),
+            TimelineEntry::Source(ev) => ThreadEntry::Source(ev.clone()),
+            TimelineEntry::Skill(ev) => ThreadEntry::Skill(ev.clone()),
+        }
+    }
+}
+
+/// The persisted audit for one turn (ADR-0078, issue #319): the trace's
+/// PERSISTENCE form, carried alongside the [`TurnRecord`] in
+/// [`TimelineEntry::Turn`]. The [`TurnRecord`] additionally carries the
+/// display view ([`crate::model::TraceEntryView`], issue #297) for the
+/// rail's expanded trace -- same bounded shape, so the full in-memory
+/// payloads cross neither, and the far window still reads only the trace's
+/// summary (ADR-0078). [`Session::build_recipe`]'s whole-file rebuild reads
+/// the audit inline from each timeline turn entry; resume seeds it from the
+/// recipe so persisted values round-trip verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TurnAudit {
+    /// The turn's persisted execution trace (ADR-0078); empty for no-tool turns.
     trace: Vec<RecipeTraceEntry>,
     /// The turn's runtime + skill provenance (ADR-0078/0081). The PERSISTED
     /// shape (recipe::TurnProvenance, aliased here) -- wider than the IPC
@@ -571,7 +593,10 @@ impl TurnAudit {
     /// (the field is default-omitted from the .duck while empty).
     fn builtin(trace: Vec<TraceEntry>, skills: Vec<SkillProvenance>) -> Self {
         Self {
-            trace: trace.iter().map(RecipeTraceEntry::from).collect(),
+            trace: trace
+                .iter()
+                .map(RecipeTraceEntry::from_live_trace)
+                .collect(),
             provenance: PersistedTurnProvenance {
                 runtime: Some(RuntimeKind::BuiltIn),
                 skills,
@@ -579,16 +604,14 @@ impl TurnAudit {
         }
     }
 
-    /// The audit harvested from one persisted recipe entry (resume, ADR-0078):
-    /// a turn's trace + provenance round-trip verbatim from the .duck; a
-    /// source or skill entry carries no audit (lifecycle events are not turns).
-    fn from_recipe_entry(entry: &RecipeEntry) -> Self {
-        match entry {
-            RecipeEntry::Turn(t) => Self {
-                trace: t.trace.clone(),
-                provenance: t.provenance.clone(),
-            },
-            RecipeEntry::Source(_) | RecipeEntry::Skill(_) => Self::default(),
+    /// The audit harvested from one persisted recipe turn (resume, ADR-0078):
+    /// a turn's trace + provenance round-trip verbatim from the .duck. Called
+    /// only for `RecipeEntry::Turn` -- source and skill lifecycle entries are
+    /// not turns and never produce a [`TurnAudit`].
+    fn from_recipe_turn(turn: &RecipeTurn) -> Self {
+        Self {
+            trace: turn.trace.clone(),
+            provenance: turn.provenance.clone(),
         }
     }
 }
@@ -701,8 +724,7 @@ impl Session {
             temp_path,
             provider,
             materializer: Box::new(RealMaterializer),
-            history: Vec::new(),
-            turn_audit: Vec::new(),
+            timeline: Vec::new(),
             result_row_cap: DEFAULT_MAX_RESULT_ROWS,
             result_count_cap: DEFAULT_RESULT_COUNT_CAP,
             source_files: HashMap::new(),
@@ -980,20 +1002,13 @@ impl Session {
             // Phase 4: rebuild the conversation timeline, truncated at the
             // replay breakpoint (if any). Post-break entries are dropped
             // ("对话停在断点").
-            let timeline =
+            // Phase 4: rebuild the conversation timeline, truncated at the
+            // replay breakpoint (if any). Post-break entries are dropped
+            // ("对话停在断点"). rebuild_timeline returns the unified timeline
+            // (ThreadEntry + audit paired per turn, issue #325) so alignment is
+            // structural and no separate audit harvest is needed.
+            session.timeline =
                 resumer.rebuild_timeline(&mut session.working_set, replay_break.as_ref())?;
-            // ADR-0078 (issue #319): seed the per-turn audit (trace +
-            // provenance) from the SAME recipe slice the timeline was rebuilt
-            // from -- rebuild_timeline maps history[..end] 1:1 (never
-            // filtered), so the harvested audit is index-aligned with the
-            // assigned history, and phase 5's post-resume persist re-writes
-            // the persisted values verbatim (no re-synthesis).
-            let audit = recipe.history[..timeline.len()]
-                .iter()
-                .map(TurnAudit::from_recipe_entry)
-                .collect();
-            session.history = timeline;
-            session.turn_audit = audit;
             // ADR-0086 (issue #363): seed the live mounted-skills cache from
             // the recipe's Mount/Unmount fold. The recipe never stores a
             // snapshot -- the timeline IS the source of truth -- so the cache
@@ -2164,11 +2179,13 @@ impl Session {
     /// Append a turn to the conversation thread and return its outcome. Every
     /// outcome kind is recorded (ADR-0028 always-visible); the caller has
     /// already decided the outcome, so this just persists + returns it. The turn
-    /// is wrapped in a [`ThreadEntry::Turn`] -- source lifecycle events share
-    /// the same timeline (ADR-0040) but never enter the LLM window. `trace` is
-    /// the agent loop's recorded call trajectory for this turn; it snapshots
-    /// into the turn's persisted audit (ADR-0078) paired with the history
-    /// push, so [`Self::build_recipe`]'s whole-file rebuild reads it per turn.
+    /// is wrapped in a [`TimelineEntry::Turn`] carrying both the IPC-visible
+    /// [`TurnRecord`] and the persisted [`TurnAudit`] (ADR-0078) so alignment
+    /// is structural (issue #325). Source/skill lifecycle events share the same
+    /// timeline (ADR-0040) but never enter the LLM window. `trace` is the agent
+    /// loop's recorded call trajectory for this turn; it snapshots into the
+    /// turn's persisted audit so [`Self::build_recipe`]'s whole-file rebuild
+    /// reads it per turn.
     fn record_turn(
         &mut self,
         question: &str,
@@ -2182,26 +2199,28 @@ impl Session {
         // payloads never cross IPC). Mapped before the audit consumes the
         // in-memory entries below.
         let trace_view: Vec<TraceEntryView> = trace.iter().map(TraceEntryView::from).collect();
-        self.history.push(ThreadEntry::Turn(TurnRecord {
-            question: question.to_string(),
-            outcome: outcome.clone(),
-            trace: trace_view,
-            // Issue #381: the IPC provenance narrows to skills only (the
-            // runtime kind stays in the persisted TurnAudit below -- backend
-            // audit, never crosses to the webview). `skills` is already the
-            // model::SkillProvenance shape record_turn receives.
-            provenance: TurnProvenance {
-                skills: skills.clone(),
+        self.timeline.push(TimelineEntry::Turn {
+            record: TurnRecord {
+                question: question.to_string(),
+                outcome: outcome.clone(),
+                trace: trace_view,
+                // Issue #381: the IPC provenance narrows to skills only (the
+                // runtime kind stays in the persisted TurnAudit below -- backend
+                // audit, never crosses to the webview). `skills` is already the
+                // model::SkillProvenance shape record_turn receives.
+                provenance: TurnProvenance {
+                    skills: skills.clone(),
+                },
             },
-        }));
-        // ADR-0078 (issue #319): index-aligned with the history push above --
-        // the loop's real multi-call trace (mapped to the recipe form) + the
-        // BuiltIn runtime provenance + the mounted-skills provenance
-        // (ADR-0086, issue #364: each skill's name + content_hash snapshotted
-        // at assembly time). The PERSISTED form rides the Session (the recipe
-        // is the trace's .duck layer, read by build_recipe); the TurnRecord's
-        // display view above is the same bounded shape.
-        self.turn_audit.push(TurnAudit::builtin(trace, skills));
+            // ADR-0078 (issue #319): the loop's real multi-call trace (mapped
+            // to the recipe form) + the BuiltIn runtime provenance + the
+            // mounted-skills provenance (ADR-0086, issue #364: each skill's
+            // name + content_hash snapshotted at assembly time). The PERSISTED
+            // form rides the Session (the recipe is its .duck layer, read by
+            // build_recipe); the TurnRecord's display view above is the same
+            // bounded shape.
+            audit: TurnAudit::builtin(trace, skills),
+        });
         // ADR-0034 per-terminal-turn atomic write: the recipe is rewritten
         // whole-file at the bound path (temp + rename). No-op when no .duck
         // is bound; a failure is logged (the prior file is intact and the
@@ -2258,30 +2277,15 @@ impl Session {
             })
             .collect();
 
-        // A HARD assert, not debug_assert: the zip below silently truncates to
-        // the shorter iterator, so a misalignment escaping to a release build
-        // would drop trailing turns from the persisted recipe -- silent data
-        // loss on the persistence path. The invariant holds by pairing: every
-        // history push (record_turn / source lifecycle / resume seed) pushes
-        // exactly one audit alongside. If a future push site forgets the pair,
-        // this fires inside `session_lock` (held by the `ask` command): the
-        // panic poisons the session mutex (the session becomes a zombie until
-        // reopened) and bypasses `persist_if_bound`'s non-blocking `SaveError`
-        // banner -- a deliberate fail-fast over silent corruption. The
-        // structural fix is to pair the two in a single Vec (or a per-entry
-        // timeline enum) so misalignment is unrepresentable; until then this
-        // assert is the backstop.
-        assert_eq!(
-            self.history.len(),
-            self.turn_audit.len(),
-            "turn_audit is index-aligned with history: every push pairs"
-        );
+        // The unified timeline carries each turn's audit inline (issue #325),
+        // so no separate alignment guard or zip is needed here. A Materialized
+        // turn whose every result_N is gone is filtered out -- without a
+        // descriptor the turn cannot replay or render.
         let history: Vec<RecipeEntry> = self
-            .history
+            .timeline
             .iter()
-            .zip(self.turn_audit.iter())
-            .filter_map(|(entry, audit)| match entry {
-                ThreadEntry::Turn(record) => {
+            .filter_map(|entry| match entry {
+                TimelineEntry::Turn { record, audit } => {
                     // Build the trimmed outcome; the persisted trace +
                     // provenance come from the turn's recorded audit
                     // (ADR-0078, issue #319) -- the loop's real multi-call
@@ -2299,11 +2303,12 @@ impl Session {
                             // ADR-0084: persist EVERY promotion as its own
                             // RecipePromotion. display_name + stale come from
                             // the working set's CURRENT state, not the ask-time
-                            // snapshot in history -- a user rename (ADR-0037) /
-                            // cascade (ADR-0041) updates the working set, not
-                            // the history entry. A promotion whose result_N is
-                            // gone (GC'd / removed, no descriptor) is dropped
-                            // -- it can neither replay nor render.
+                            // snapshot in the timeline -- a user rename
+                            // (ADR-0037) / cascade (ADR-0041) updates the
+                            // working set, not the timeline entry. A promotion
+                            // whose result_N is gone (GC'd / removed, no
+                            // descriptor) is dropped -- it can neither replay
+                            // nor render.
                             let recipe_promotions: Vec<RecipePromotion> = promotions
                                 .iter()
                                 .filter_map(|p| {
@@ -2316,8 +2321,8 @@ impl Session {
                                         // ADR-0041: a live result -> stale None
                                         // (replayed); a cascade-invalidated
                                         // result -> the anchor from its
-                                        // descriptor (dead result, kept in
-                                        // history, never replayed). The anchor
+                                        // descriptor (dead result, kept in the
+                                        // timeline, never replayed). The anchor
                                         // is what the UI's stale badge reads,
                                         // so a reopen renders the same
                                         // "invalidated by" provenance as the
@@ -2330,8 +2335,6 @@ impl Session {
                             // the turn cannot replay or render -- drop it
                             // (`return None` exits the filter_map closure, NOT
                             // build_recipe), mirroring the single-result drop.
-                            // The zipped audit drops with the entry, so the
-                            // alignment with `turn_audit` is preserved.
                             if recipe_promotions.is_empty() {
                                 return None;
                             }
@@ -2366,8 +2369,8 @@ impl Session {
                         audit.provenance.clone(),
                     )))
                 }
-                ThreadEntry::Source(ev) => Some(RecipeEntry::Source(ev.clone())),
-                ThreadEntry::Skill(ev) => Some(RecipeEntry::Skill(ev.clone())),
+                TimelineEntry::Source(ev) => Some(RecipeEntry::Source(ev.clone())),
+                TimelineEntry::Skill(ev) => Some(RecipeEntry::Skill(ev.clone())),
             })
             .collect();
 
@@ -2622,23 +2625,28 @@ impl Session {
     /// and its tests stay event-agnostic. The clone is negligible (a small
     /// thread, once per turn / active read) next to the LLM call it feeds.
     fn turns(&self) -> Vec<TurnRecord> {
-        self.history
+        self.timeline
             .iter()
             .filter_map(|entry| match entry {
-                ThreadEntry::Turn(record) => Some(record.clone()),
-                ThreadEntry::Source(_) | ThreadEntry::Skill(_) => None,
+                TimelineEntry::Turn { record, .. } => Some(record.clone()),
+                TimelineEntry::Source(_) | TimelineEntry::Skill(_) => None,
             })
             .collect()
     }
 
     /// The conversation thread (ADR-0028/0039/0040): the unified timeline of
-    /// turns AND source lifecycle events, in order. The thread is the source of
-    /// truth the frontend renders; the window assembler reads only the turns
-    /// (via [`Self::turns`]) to build the provider payload (ADR-0023 window +
-    /// ADR-0039 summary). Source events are first-class here but never reach
-    /// the window.
-    pub fn conversation(&self) -> &[ThreadEntry] {
-        &self.history
+    /// turns AND source/skill lifecycle events, projected to the IPC-visible
+    /// [`ThreadEntry`] form. The thread is the source of truth the frontend
+    /// renders; the window assembler reads only the turns (via [`Self::turns`])
+    /// to build the provider payload (ADR-0023 window + ADR-0039 summary).
+    /// Source/skill events are first-class here but never reach the window.
+    /// The projection drops the persisted audit (ADR-0078) so the wire shape
+    /// stays unchanged (issue #325).
+    pub fn conversation(&self) -> Vec<ThreadEntry> {
+        self.timeline
+            .iter()
+            .map(TimelineEntry::to_thread_entry)
+            .collect()
     }
 
     /// Read one page of a dataset's rows (ADR-0024 windowed display). Cells are
