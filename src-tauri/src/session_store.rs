@@ -1018,4 +1018,48 @@ mod tests {
             "reset returns the choice to the built-in default"
         );
     }
+
+    /// `open_duck` calls `reset_approval` after the resume swap (ADR-0080:
+    /// resume 归零). This test verifies the handle-level mechanism: set a
+    /// non-default approval posture, call `reset_approval` (the exact call
+    /// `open_duck` makes after the resumed Session is live), and confirm the
+    /// defaults are restored. If the reset call were removed from `open_duck`
+    /// or `reset_approval` stopped working, a resumed session would inherit the
+    /// prior session's NoConfirmation mode (violating ADR-0080).
+    #[test]
+    fn reset_approval_restores_default_posture_after_resume() {
+        use crate::approval::AuthMode;
+
+        let store = SessionStore::new();
+        let id = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+            )
+            .expect("create session");
+        let handle = store.get(&id).expect("get handle");
+
+        // Simulate a session that ran under NoConfirmation before resume.
+        let approval = handle.approval_state();
+        approval.set_auth_mode(AuthMode::NoConfirmation);
+        assert_eq!(
+            approval.auth_mode(),
+            AuthMode::NoConfirmation,
+            "pre-condition: non-default mode"
+        );
+
+        // open_duck's resume swap calls reset_approval after the new Session
+        // is live (ADR-0080: resume 归零).
+        handle.reset_approval();
+
+        assert_eq!(
+            approval.auth_mode(),
+            AuthMode::PerCall,
+            "resume resets auth mode to PerCall (ADR-0080)"
+        );
+        assert!(
+            approval.trust_list().is_empty(),
+            "resume clears the session trust set (ADR-0080)"
+        );
+    }
 }
