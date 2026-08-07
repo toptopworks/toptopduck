@@ -454,13 +454,17 @@ mod tests {
     fn slugify_appends_reserved_suffix_for_builtin_collision() {
         // Issue #312: a display name that normalizes to "builtin" must not
         // produce the reserved slug — it would bypass the approval gate via
-        // `ToolKey::external("builtin", ...)`. Append `_reserved`. Only exact
-        // case variants of "builtin" (no separators) normalize here; a hyphen
-        // like "built-in" becomes "built_in" and is unaffected.
+        // `ToolKey::external("builtin", ...)`. Append `_reserved`. The guard
+        // catches any input whose alphanumeric chars form "builtin"
+        // (case-insensitive) — e.g. "Built.in", "Built,in" also drop to
+        // "builtin" because non-alphanumeric-separator chars are discarded.
+        // A separator-bearing variant like "built-in" becomes "built_in".
         let id = McpServerId("a1b2c3d4".into());
         assert_eq!(slugify("Builtin", &id), "builtin_reserved");
         assert_eq!(slugify("builtin", &id), "builtin_reserved");
         assert_eq!(slugify("BUILTIN", &id), "builtin_reserved");
+        assert_eq!(slugify("builtIn", &id), "builtin_reserved");
+        assert_eq!(slugify("Built.in", &id), "builtin_reserved");
     }
 
     #[test]

@@ -845,14 +845,10 @@ fn decide_permission(
         server: key.server.clone(),
         tool: key.tool.clone(),
         operation_kind,
-        summary: crate::approval::truncate_summary(
-            &params
-                .tool_call
-                .title
-                .clone()
-                .unwrap_or_else(|| params.tool_call.tool_call_id.clone()),
-            crate::approval::SUMMARY_MAX_CHARS,
-        ),
+        // Reuse `key.tool` (= tool_name with empty-title filter applied) so
+        // the summary and tool field stay consistent and we avoid recomputing
+        // the title-fallback expression (review M3).
+        summary: crate::approval::truncate_summary(&key.tool, crate::approval::SUMMARY_MAX_CHARS),
     };
     if allowed {
         // The policy auto-allows; pick the first allow_* option.
@@ -901,6 +897,34 @@ pub(crate) struct NullAcpSink;
 #[cfg(test)]
 impl ApprovalSink for NullAcpSink {
     fn emit_request(&self, _body: &crate::approval::ApprovalRequestBody) {}
+    fn emit_resolved(
+        &self,
+        _body: &crate::approval::ApprovalRequestBody,
+        _response: ApprovalResponse,
+    ) {
+    }
+}
+
+/// Test sink that records the last emitted request body (review M1).
+#[cfg(test)]
+struct RecordingAcpSink {
+    last_request: std::sync::Mutex<Option<crate::approval::ApprovalRequestBody>>,
+}
+
+#[cfg(test)]
+impl RecordingAcpSink {
+    fn new() -> Self {
+        Self {
+            last_request: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+#[cfg(test)]
+impl ApprovalSink for RecordingAcpSink {
+    fn emit_request(&self, body: &crate::approval::ApprovalRequestBody) {
+        *self.last_request.lock().unwrap() = Some(body.clone());
+    }
     fn emit_resolved(
         &self,
         _body: &crate::approval::ApprovalRequestBody,
@@ -1041,5 +1065,41 @@ mod tests {
         };
         let outcome = decide_permission(&adapter, &params, &approval, &NullAcpSink, &cancel);
         assert_eq!(outcome, RequestPermissionOutcome::Cancelled);
+    }
+
+    /// decide_permission truncates the summary before broadcasting so an
+    /// unbounded ACP title cannot flood every pane (review M1 — the gate-side
+    /// equivalent is `gate_truncates_summary_before_broadcast` in approval.rs).
+    #[test]
+    fn decide_permission_truncates_summary_before_broadcast() {
+        use crate::approval::ApprovalState;
+        let adapter = crate::runtime::acp::adapter::claude_code();
+        let approval = ApprovalState::new();
+        approval.set_auth_mode(crate::approval::AuthMode::NoConfirmation);
+        let params = RequestPermissionParams {
+            session_id: "s".into(),
+            tool_call: wire::PermissionToolCall {
+                tool_call_id: "tc_1".into(),
+                title: Some("x".repeat(1000)),
+                kind: Some(wire::ToolKind::Execute),
+            },
+            options: vec![wire::PermissionOption {
+                id: "allow_once".into(),
+                label: "Allow".into(),
+                kind: Some(PermissionOptionKind::AllowOnce),
+            }],
+        };
+        let sink = RecordingAcpSink::new();
+        let outcome = decide_permission(&adapter, &params, &approval, &sink, &CancelToken::new());
+        assert!(matches!(outcome, RequestPermissionOutcome::Selected { .. }));
+        let body = sink.last_request.lock().unwrap();
+        let body = body.as_ref().expect("request was emitted");
+        assert!(
+            body.summary.chars().count() <= crate::approval::SUMMARY_MAX_CHARS,
+            "broadcast summary {} > {}",
+            body.summary.chars().count(),
+            crate::approval::SUMMARY_MAX_CHARS
+        );
+        assert!(body.summary.ends_with("..."));
     }
 }

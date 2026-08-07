@@ -478,8 +478,18 @@ pub(crate) fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) 
             let server = aggregator::parse_namespaced(other)
                 .map(|(slug, _)| slug)
                 .unwrap_or_else(|| "unknown".to_string());
-            let key = ToolKey::try_external(server, other.to_string())
-                .unwrap_or_else(|_| ToolKey::external(ToolKey::RESERVED_SPOOF_SERVER, other));
+            let key = match ToolKey::try_external(server, other.to_string()) {
+                Ok(k) => k,
+                Err(_) => {
+                    log::warn!(
+                        target: "toptopduck::agent_loop",
+                        "model emitted tool name `{other}` resolving to reserved \
+                         `builtin` server; routing to RESERVED_SPOOF sentinel so \
+                         the gate surfaces a card"
+                    );
+                    ToolKey::external(ToolKey::RESERVED_SPOOF_SERVER, other)
+                }
+            };
             (
                 key,
                 OperationKind::Network,

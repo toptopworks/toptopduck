@@ -301,14 +301,18 @@ pub const SUMMARY_MAX_CHARS: usize = 512;
 /// (no ellipsis). Truncation is at `char` boundaries (UTF-8 safe), not
 /// grapheme-cluster boundaries (good enough for a card-body preview).
 pub fn truncate_summary(summary: &str, max_chars: usize) -> String {
-    if summary.chars().count() <= max_chars {
+    // Early-exit overflow check: scan at most `max_chars + 1` chars rather
+    // than the full input — the summary may be an unbounded bridge payload
+    // (issue #312).
+    if summary.chars().take(max_chars.saturating_add(1)).count() <= max_chars {
         return summary.to_string();
     }
     if max_chars < 3 {
         return summary.chars().take(max_chars).collect();
     }
-    let head: String = summary.chars().take(max_chars - 3).collect();
-    format!("{head}...")
+    let mut result: String = summary.chars().take(max_chars - 3).collect();
+    result.push_str("...");
+    result
 }
 
 /// Full `approval-request` event payload (ADR-0083, addressed by session id).
@@ -1304,6 +1308,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "reserved builtin server name")]
     fn external_panics_in_debug_for_reserved_name() {
         let _ = ToolKey::external("builtin", "any");
