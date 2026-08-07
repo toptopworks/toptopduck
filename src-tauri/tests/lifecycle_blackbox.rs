@@ -734,6 +734,75 @@ fn new_question_referencing_stale_result_is_rejected() {
 }
 
 #[test]
+fn stale_reference_self_corrects_by_redirecting_to_active_source() {
+    // ADR-0077 positive recovery (issue #323): the self-correction routing
+    // handles the stale-reference flavor. A model that first references a
+    // stale result_N (provenance pre-check rejects, tool error routes back)
+    // and then redirects to the active source recovers, landing a Materialized
+    // turn. This is the positive diagonal to
+    // `new_question_referencing_stale_result_is_rejected` -- that test pins the
+    // negative exit (a non-correcting model clamps to the stale call and
+    // exhausts the step cap); this one pins the recovery: the model sees the
+    // stale tool error, switches to the live source, and the turn succeeds.
+    let provider = FakeProvider::new()
+        .scripted_tool_turn_seq(
+            "count",
+            vec![
+                Ok(materialize(r#"SELECT COUNT(*) AS n FROM "orders".data"#)),
+                Ok(answer("done")),
+            ],
+        )
+        .scripted_tool_turn_seq(
+            "recheck",
+            vec![
+                // First call: reference stale result_1 -- provenance pre-check
+                // refuses, the tool error routes back to the model.
+                Ok(materialize(r#"SELECT * FROM "result_1""#)),
+                // Second call: redirect to the still-active source -- succeeds.
+                Ok(materialize(r#"SELECT COUNT(*) AS n FROM "people".data"#)),
+                Ok(answer("redirected")),
+            ],
+        );
+    let captured = provider.captured_tool_turns();
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv")); // active = orders
+    session.ask("count"); // result_1 FROM orders
+                          // Delete orders -> result_1 cascade-stale (anchored to the deleted source).
+    session
+        .remove_active_source("orders", "people")
+        .expect("cascade");
+    assert!(session.get("result_1").unwrap().stale.is_some());
+
+    // Snapshot the capture count to isolate this turn's round-trips.
+    let before = captured.lock().expect("capture lock").len();
+    let outcome = session.ask("recheck");
+    let round_trips = captured.lock().expect("capture lock").len() - before;
+
+    // AC1: the turn landed Materialized, not step-cap-exhausted Failed.
+    let primary = outcome
+        .primary_promotion()
+        .expect("Materialized with a promotion");
+    assert_eq!(
+        primary.dataset.reference_name, "result_2",
+        "redirect produced a fresh active result"
+    );
+
+    // AC2: the new result is anchored to the active source, not stale.
+    assert!(
+        session.get("result_2").unwrap().stale.is_none(),
+        "result_2 anchored to the active source"
+    );
+
+    // AC3: self-correction converged in 3 round-trips (stale ref -> redirect
+    // -> answer), not the 24-step-cap exhaustion a non-correcting loop hits.
+    assert_eq!(
+        round_trips, 3,
+        "self-correction converged in 3 round-trips, not step-cap exhaustion"
+    );
+}
+
+#[test]
 fn stale_result_excluded_from_llm_window() {
     // AC5 (issue #40, ADR-0013 invariant 3): a stale result_N does not enter
     // the LLM-visible working set. Proved by inspecting the tool-turn request
