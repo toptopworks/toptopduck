@@ -19,6 +19,13 @@
 //!   (legacy MCP SSE transport, issue #389). A background reader thread
 //!   forwards SSE events via an mpsc channel.
 //!
+//! The shared MCP protocol logic (`initialize` / `list_tools` / `call`) lives
+//! in the [`McpClient`] trait as default methods; each transport implements
+//! only the 3 transport-specific wire methods (`request` /
+//! `send_notification` / `next_id`). [`FramedClient`] is the newline-framed
+//! implementation used by the stdio transport + the `Cursor`-mocked unit
+//! tests (issue #413).
+//!
 //! [`connect_transport`] dispatches by transport type; the gateway /
 //! aggregator holds a [`TransportClient`] enum per connected server.
 //!
@@ -55,7 +62,7 @@ const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Bounded channel capacity for SSE reader → consumer message forwarding.
 /// Backpressures a flooding server so the reader blocks on send rather than
-/// accumulating unbounded messages in memory (H4: review feedback).
+/// accumulating unbounded messages in memory.
 const SSE_CHANNEL_BOUND: usize = 64;
 
 /// One keychain-backed env value the gateway injects at spawn. The gateway
@@ -65,34 +72,44 @@ const SSE_CHANNEL_BOUND: usize = 64;
 /// never touches the keychain -- it is pure transport, testable without one.
 pub type SecretEnv = (String, String);
 
-/// A JSON-RPC client over newline-delimited framing (ADR-0076, issue #301 C1).
-///
-/// Generic over the read/write halves so the core handshake + request/response
-/// pairing is testable with `Cursor` mocks (no subprocess); the production
-/// [`StdioClient`] wraps a spawned child's stdin/stdout.
-pub struct McpClient<R, W> {
-    reader: R,
-    writer: W,
-    next_id: i64,
-}
+// ---------------------------------------------------------------------------
+// McpClient trait (issue #413)
+// ---------------------------------------------------------------------------
 
-impl<R: BufRead, W: Write> McpClient<R, W> {
-    /// Wrap an already-connected read/write pair. The caller performs the
-    /// transport-specific bring-up (spawn, TCP connect, ...); this type drives
-    /// the MCP JSON-RPC conversation.
-    pub fn new(reader: R, writer: W) -> Self {
-        Self {
-            reader,
-            writer,
-            next_id: 1,
-        }
-    }
+/// The MCP JSON-RPC conversation contract shared by all three transports
+/// (issue #413). The 3 required methods carry the transport-specific wire
+/// logic; the 3 default methods implement the shared MCP protocol
+/// (`initialize` / `list_tools` / `call`) purely in terms of the required
+/// methods, so adding a new transport needs no protocol-level duplication.
+///
+/// Required methods:
+/// - [`request`](McpClient::request): send one JSON-RPC request and await its
+///   matched response (by `id`).
+/// - [`send_notification`](McpClient::send_notification): send a JSON-RPC
+///   notification (no `id`, no response expected). Each transport carries the
+///   bytes differently (stdio frame / HTTP POST / SSE POST).
+/// - [`next_id`](McpClient::next_id): allocate a monotonic JSON-RPC request
+///   id. Transport-local so each client owns its counter.
+pub trait McpClient {
+    /// Send one JSON-RPC request and await its response (matched by `id`).
+    /// Server-emitted notifications (no `id`) and responses for other ids are
+    /// skipped -- an MCP server may emit progress / log notifications between
+    /// requests, and they are not paired with any client request.
+    fn request(&mut self, req: Value) -> Result<Value, ClientError>;
+
+    /// Send a JSON-RPC notification (no `id`, no response awaited). The
+    /// `initialize` handshake uses this for the `notifications/initialized`
+    /// ack; each transport sends it over its own wire.
+    fn send_notification(&mut self, notif: Value) -> Result<(), ClientError>;
+
+    /// Allocate the next monotonic JSON-RPC request id.
+    fn next_id(&mut self) -> i64;
 
     /// Perform the MCP initialize handshake: send `initialize`, await its
     /// response, then send the `notifications/initialized` ack. Returns the
     /// server's `InitializeResult` so the caller can log the negotiated
     /// `protocolVersion` / `serverInfo`.
-    pub fn initialize(&mut self) -> Result<Value, ClientError> {
+    fn initialize(&mut self) -> Result<Value, ClientError> {
         let id = self.next_id();
         let req = json!({
             "jsonrpc": "2.0",
@@ -111,14 +128,14 @@ impl<R: BufRead, W: Write> McpClient<R, W> {
         // The initialized notification completes the handshake; MCP
         // notifications are unacknowledged, so no response is awaited.
         let notif = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
-        framing::write_message(&mut self.writer, &notif).map_err(ClientError::Framing)?;
+        self.send_notification(notif)?;
         Ok(result)
     }
 
     /// List the server's tools. Returns the raw `tools` array entries (each is
     /// the server's own `{name, description, inputSchema}` shape); the gateway
     /// namespaces them (`mcp__<server_slug>__<tool>`) at aggregation time.
-    pub fn list_tools(&mut self) -> Result<Vec<Value>, ClientError> {
+    fn list_tools(&mut self) -> Result<Vec<Value>, ClientError> {
         let id = self.next_id();
         let req = json!({"jsonrpc": "2.0", "id": id, "method": "tools/list"});
         let result = self.request(req)?;
@@ -133,7 +150,7 @@ impl<R: BufRead, W: Write> McpClient<R, W> {
     /// stripped the `mcp__<server_slug>__` prefix before routing here).
     /// Returns the `tools/call` result for the gateway to relay to the bridge
     /// verbatim (content + isError).
-    pub fn call(&mut self, name: &str, arguments: &Value) -> Result<Value, ClientError> {
+    fn call(&mut self, name: &str, arguments: &Value) -> Result<Value, ClientError> {
         let id = self.next_id();
         let req = json!({
             "jsonrpc": "2.0",
@@ -143,11 +160,36 @@ impl<R: BufRead, W: Write> McpClient<R, W> {
         });
         self.request(req)
     }
+}
 
-    /// Send a request and read frames until its response (matched by id)
-    /// arrives. Server-emitted notifications (no id) and responses for other
-    /// ids are skipped -- an MCP server may emit progress / log notifications
-    /// between requests, and they are not paired with any client request.
+/// A newline-framed JSON-RPC client over generic read/write halves
+/// (ADR-0076, issue #301 C1). Generic over R/W so the core handshake +
+/// request/response pairing is testable with `Cursor` mocks (no subprocess);
+/// the production [`StdioClient`] wraps a spawned child's stdin/stdout.
+///
+/// Implements [`McpClient`] — the 3 required methods drive the newline
+/// framing, and the shared protocol methods (`initialize` / `list_tools` /
+/// `call`) are inherited from the trait (issue #413).
+pub struct FramedClient<R, W> {
+    reader: R,
+    writer: W,
+    next_id: i64,
+}
+
+impl<R, W> FramedClient<R, W> {
+    /// Wrap an already-connected read/write pair. The caller performs the
+    /// transport-specific bring-up (spawn, TCP connect, ...); this type drives
+    /// the MCP JSON-RPC conversation.
+    pub fn new(reader: R, writer: W) -> Self {
+        Self {
+            reader,
+            writer,
+            next_id: 1,
+        }
+    }
+}
+
+impl<R: BufRead, W: Write> McpClient for FramedClient<R, W> {
     fn request(&mut self, req: Value) -> Result<Value, ClientError> {
         let id = req.get("id").cloned();
         framing::write_message(&mut self.writer, &req).map_err(ClientError::Framing)?;
@@ -155,14 +197,17 @@ impl<R: BufRead, W: Write> McpClient<R, W> {
             let msg = framing::read_message(&mut self.reader)
                 .map_err(ClientError::Framing)?
                 .ok_or(ClientError::ServerClosed)?;
-            if msg.get("id") != id.as_ref() {
+            // Match only id-bearing responses; a notification (no id) or a
+            // response for another id is skipped (issue #413).
+            if msg.get("id") != id.as_ref() || id.is_none() {
                 continue;
             }
-            if let Some(err) = msg.get("error") {
-                return Err(ClientError::ServerError(err.clone()));
-            }
-            return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
+            return check_rpc_response(&msg);
         }
+    }
+
+    fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
+        framing::write_message(&mut self.writer, &notif).map_err(ClientError::Framing)
     }
 
     fn next_id(&mut self) -> i64 {
@@ -238,9 +283,9 @@ fn read_sse_event<R: BufRead>(reader: &mut R) -> std::io::Result<Option<SseEvent
     }
 }
 
-/// Production wrapper: a [`McpClient`] backed by a spawned stdio MCP server's
-/// stdin/stdout. Owns the child; `Drop` kills it (per-turn lifecycle, issue
-/// #301 Q2).
+/// Production wrapper: a [`FramedClient`] backed by a spawned stdio MCP
+/// server's stdin/stdout. Owns the child; `Drop` kills it (per-turn lifecycle,
+/// issue #301 Q2).
 ///
 /// Only the stdio transport is constructed here; SSE / HTTP transports have
 /// their own client types ([`SseClient`], [`HttpClient`]). The dispatcher
@@ -248,7 +293,7 @@ fn read_sse_event<R: BufRead>(reader: &mut R) -> std::io::Result<Option<SseEvent
 /// retains its `UnsupportedTransport` guard so a direct call with a non-stdio
 /// config fails loudly rather than silently spawning a bogus child.
 pub struct StdioClient {
-    inner: McpClient<BufReader<ChildStdout>, ChildStdin>,
+    inner: FramedClient<BufReader<ChildStdout>, ChildStdin>,
     child: Child,
 }
 
@@ -263,19 +308,25 @@ impl StdioClient {
         let stdin = child.stdin.take().ok_or(ClientError::NoChildStdin)?;
         let stdout = child.stdout.take().ok_or(ClientError::NoChildStdout)?;
         let mut client = StdioClient {
-            inner: McpClient::new(BufReader::new(stdout), stdin),
+            inner: FramedClient::new(BufReader::new(stdout), stdin),
             child,
         };
-        client.inner.initialize()?;
+        client.initialize()?;
         Ok(client)
     }
+}
 
-    pub fn list_tools(&mut self) -> Result<Vec<Value>, ClientError> {
-        self.inner.list_tools()
+impl McpClient for StdioClient {
+    fn request(&mut self, req: Value) -> Result<Value, ClientError> {
+        self.inner.request(req)
     }
 
-    pub fn call(&mut self, name: &str, arguments: &Value) -> Result<Value, ClientError> {
-        self.inner.call(name, arguments)
+    fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
+        self.inner.send_notification(notif)
+    }
+
+    fn next_id(&mut self) -> i64 {
+        self.inner.next_id()
     }
 }
 
@@ -345,7 +396,7 @@ pub fn stdio_handshake(
     stdin: std::process::ChildStdin,
     stdout: std::process::ChildStdout,
 ) -> Result<Vec<Value>, ClientError> {
-    let mut client = McpClient::new(BufReader::new(stdout), stdin);
+    let mut client = FramedClient::new(BufReader::new(stdout), stdin);
     client.initialize()?;
     client.list_tools()
 }
@@ -381,7 +432,9 @@ impl HttpClient {
         client.initialize()?;
         Ok(client)
     }
+}
 
+impl McpClient for HttpClient {
     /// POST one JSON-RPC request and await its response. The server may
     /// respond with `application/json` (single JSON-RPC envelope) or
     /// `text/event-stream` (SSE carrying the envelope). Both are handled;
@@ -435,52 +488,8 @@ impl HttpClient {
         }
     }
 
-    fn initialize(&mut self) -> Result<Value, ClientError> {
-        let id = self.next_id();
-        let req = json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {
-                    "name": "toptopduck-gateway",
-                    "version": env!("CARGO_PKG_VERSION"),
-                },
-            }
-        });
-        let result = self.request(req)?;
-        // POST the initialized notification (no response expected; the
-        // server typically returns 202 Accepted).
-        let notif = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
-        self.agent
-            .post(&self.url)
-            .send_json(notif)
-            .map_err(|e| ClientError::Http(e.to_string()))?;
-        Ok(result)
-    }
-
-    pub fn list_tools(&mut self) -> Result<Vec<Value>, ClientError> {
-        let id = self.next_id();
-        let req = json!({"jsonrpc": "2.0", "id": id, "method": "tools/list"});
-        let result = self.request(req)?;
-        Ok(result
-            .get("tools")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default())
-    }
-
-    pub fn call(&mut self, name: &str, arguments: &Value) -> Result<Value, ClientError> {
-        let id = self.next_id();
-        let req = json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "tools/call",
-            "params": {"name": name, "arguments": arguments}
-        });
-        self.request(req)
+    fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
+        post_notification(&self.agent, &self.url, notif)
     }
 
     fn next_id(&mut self) -> i64 {
@@ -549,7 +558,7 @@ impl SseClient {
         // The first event MUST be `event: endpoint` carrying the POST URL
         // (the MCP legacy SSE transport contract). Rejecting anything else
         // prevents a misbehaving server's message payload from being used as
-        // the POST target (H1: review feedback).
+        // the POST target.
         let first_event = read_sse_event(&mut reader)
             .map_err(ClientError::Framing)?
             .ok_or(ClientError::ServerClosed)?;
@@ -564,11 +573,11 @@ impl SseClient {
         }
         // Resolve the POST URL relative to the SSE URL (the server may send
         // a relative path like `/message`). Reject non-http(s) schemes to
-        // prevent SSRF via a compromised server's endpoint event (H2).
+        // prevent SSRF via a compromised server's endpoint event.
         let post_url = resolve_post_url(url, &first_event.data)?;
 
         // Spawn the background reader for subsequent events. A bounded
-        // sync_channel backpressures a flooding server (H4: review feedback).
+        // sync_channel backpressures a flooding server.
         let (tx, rx) = mpsc::sync_channel(SSE_CHANNEL_BOUND);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
@@ -588,7 +597,9 @@ impl SseClient {
         client.initialize()?;
         Ok(client)
     }
+}
 
+impl McpClient for SseClient {
     /// POST one JSON-RPC request and await the matching response from the SSE
     /// stream (forwarded by the reader thread via the channel). Notifications
     /// (no `id`) and responses for other ids are skipped.
@@ -605,57 +616,15 @@ impl SseClient {
                 .response_rx
                 .recv()
                 .map_err(|_| ClientError::ServerClosed)?;
-            if msg.get("id") != id.as_ref() {
+            if msg.get("id") != id.as_ref() || id.is_none() {
                 continue;
             }
             return check_rpc_response(&msg);
         }
     }
 
-    fn initialize(&mut self) -> Result<Value, ClientError> {
-        let id = self.next_id();
-        let req = json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {
-                    "name": "toptopduck-gateway",
-                    "version": env!("CARGO_PKG_VERSION"),
-                },
-            }
-        });
-        let result = self.request(req)?;
-        let notif = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
-        self.agent
-            .post(&self.post_url)
-            .send_json(notif)
-            .map_err(|e| ClientError::Http(e.to_string()))?;
-        Ok(result)
-    }
-
-    pub fn list_tools(&mut self) -> Result<Vec<Value>, ClientError> {
-        let id = self.next_id();
-        let req = json!({"jsonrpc": "2.0", "id": id, "method": "tools/list"});
-        let result = self.request(req)?;
-        Ok(result
-            .get("tools")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default())
-    }
-
-    pub fn call(&mut self, name: &str, arguments: &Value) -> Result<Value, ClientError> {
-        let id = self.next_id();
-        let req = json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "tools/call",
-            "params": {"name": name, "arguments": arguments}
-        });
-        self.request(req)
+    fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
+        post_notification(&self.agent, &self.post_url, notif)
     }
 
     fn next_id(&mut self) -> i64 {
@@ -751,18 +720,37 @@ fn sse_reader_loop<R: BufRead + Send>(
 // ---------------------------------------------------------------------------
 
 /// Check a JSON-RPC response envelope: return the `result` field on success,
-/// or [`ClientError::ServerError`] when the server returned an `error` field.
-/// Shared by [`HttpClient`] and [`SseClient`] (the stream-based [`McpClient`]
-/// has its own inline version).
+/// [`ClientError::ServerError`] when the server returned an `error` field, or
+/// [`ClientError::Framing`] when the envelope has neither (a protocol
+/// violation). Shared by all [`McpClient`] implementations (issue #413).
 fn check_rpc_response(msg: &Value) -> Result<Value, ClientError> {
     if let Some(err) = msg.get("error") {
         return Err(ClientError::ServerError(err.clone()));
     }
-    Ok(msg.get("result").cloned().unwrap_or(Value::Null))
+    match msg.get("result") {
+        Some(v) => Ok(v.clone()),
+        None => Err(ClientError::Framing(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "JSON-RPC response has neither `result` nor `error`",
+        ))),
+    }
+}
+
+/// POST a JSON-RPC notification (no `id`, no response awaited) over an HTTP
+/// transport. The response body is intentionally discarded — MCP
+/// notifications are fire-and-forget; the server typically returns 202.
+/// Non-2xx status codes surface as `ClientError::Http` via `ureq`'s error
+/// channel.
+fn post_notification(agent: &ureq::Agent, url: &str, notif: Value) -> Result<(), ClientError> {
+    agent
+        .post(url)
+        .send_json(notif)
+        .map(drop)
+        .map_err(|e| ClientError::Http(e.to_string()))
 }
 
 /// Resolve the SSE endpoint event's POST URL relative to the SSE stream URL,
-/// rejecting non-http(s) schemes (SSRF guard, H2: review feedback). The
+/// rejecting non-http(s) schemes (SSRF guard). The
 /// server may send an absolute URL or a relative path like `/message`.
 fn resolve_post_url(sse_url: &str, raw: &str) -> Result<String, ClientError> {
     let base =
@@ -779,28 +767,37 @@ fn resolve_post_url(sse_url: &str, raw: &str) -> Result<String, ClientError> {
 }
 
 /// The connected MCP client for one server, specialized by transport. The
-/// aggregator holds one [`TransportClient`] per connected server;
-/// `list_tools` and `call` dispatch to the concrete transport client.
+/// aggregator holds one [`TransportClient`] per connected server; the
+/// [`McpClient`] trait methods (`list_tools` / `call` / ...) dispatch to the
+/// concrete transport client.
 pub enum TransportClient {
     Stdio(StdioClient),
     Sse(SseClient),
     Http(HttpClient),
 }
 
-impl TransportClient {
-    pub fn list_tools(&mut self) -> Result<Vec<Value>, ClientError> {
+impl McpClient for TransportClient {
+    fn request(&mut self, req: Value) -> Result<Value, ClientError> {
         match self {
-            Self::Stdio(c) => c.list_tools(),
-            Self::Sse(c) => c.list_tools(),
-            Self::Http(c) => c.list_tools(),
+            Self::Stdio(c) => c.request(req),
+            Self::Sse(c) => c.request(req),
+            Self::Http(c) => c.request(req),
         }
     }
 
-    pub fn call(&mut self, name: &str, arguments: &Value) -> Result<Value, ClientError> {
+    fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
         match self {
-            Self::Stdio(c) => c.call(name, arguments),
-            Self::Sse(c) => c.call(name, arguments),
-            Self::Http(c) => c.call(name, arguments),
+            Self::Stdio(c) => c.send_notification(notif),
+            Self::Sse(c) => c.send_notification(notif),
+            Self::Http(c) => c.send_notification(notif),
+        }
+    }
+
+    fn next_id(&mut self) -> i64 {
+        match self {
+            Self::Stdio(c) => c.next_id(),
+            Self::Sse(c) => c.next_id(),
+            Self::Http(c) => c.next_id(),
         }
     }
 }
@@ -841,6 +838,7 @@ pub enum ClientError {
     UnsupportedTransport(String),
     #[error("failed to spawn MCP server: {0}")]
     Spawn(#[from] std::io::Error),
+    // No `#[from]`: would conflict with `Spawn`'s `#[from] std::io::Error`.
     #[error("framing error on the server transport: {0}")]
     Framing(std::io::Error),
     #[error("spawned child has no stdin (piped was requested)")]
@@ -882,7 +880,7 @@ mod tests {
             "serverInfo": {"name": "fake-mcp", "version": "0.1"}
         });
         let server = wire(&[json!({"jsonrpc": "2.0", "id": 1, "result": init_result.clone()})]);
-        let mut client = McpClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
         let result = client.initialize().expect("handshake ok");
         assert_eq!(result, init_result);
         // The writer collected the initialize request + the initialized
@@ -904,7 +902,7 @@ mod tests {
             {"name": "fetch", "description": "fetch a url"}
         ]);
         let server = wire(&[json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}})]);
-        let mut client = McpClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
         let listed = client.list_tools().expect("list ok");
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0]["name"], "search");
@@ -914,7 +912,7 @@ mod tests {
     #[test]
     fn list_tools_empty_when_result_has_no_tools_key() {
         let server = wire(&[json!({"jsonrpc": "2.0", "id": 1, "result": {}})]);
-        let mut client = McpClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
         let listed = client.list_tools().expect("list ok");
         assert!(listed.is_empty(), "missing tools key -> empty, not error");
     }
@@ -927,7 +925,7 @@ mod tests {
             "isError": false
         });
         let server = wire(&[json!({"jsonrpc": "2.0", "id": 1, "result": result.clone()})]);
-        let mut client = McpClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
         let back = client
             .call("search", &json!({"query": "duckdb"}))
             .expect("call ok");
@@ -948,7 +946,7 @@ mod tests {
             "jsonrpc": "2.0", "id": 1,
             "error": {"code": -32602, "message": "unknown tool"}
         })]);
-        let mut client = McpClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
         let err = client
             .call("bogus", &json!({}))
             .expect_err("error response");
@@ -963,7 +961,7 @@ mod tests {
     #[test]
     fn eof_before_response_surfaces_as_server_closed() {
         let server = wire(&[]); // no frames at all
-        let mut client = McpClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
         let err = client.list_tools().expect_err("eof");
         assert!(
             matches!(err, ClientError::ServerClosed),
@@ -979,7 +977,7 @@ mod tests {
             json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progress": 50}}),
             json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}),
         ]);
-        let mut client = McpClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
         let listed = client.list_tools().expect("list ok past notification");
         assert!(listed.is_empty());
     }
@@ -992,7 +990,7 @@ mod tests {
             json!({"jsonrpc": "2.0", "id": 999, "result": {"tools": [{"name": "wrong"}]}}),
             json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [{"name": "right"}]}}),
         ]);
-        let mut client = McpClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
         let listed = client.list_tools().expect("list ok");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0]["name"], "right");
@@ -1006,7 +1004,7 @@ mod tests {
             json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}),
             json!({"jsonrpc": "2.0", "id": 2, "result": {"content": [], "isError": false}}),
         ]);
-        let mut client = McpClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
         client.list_tools().expect("first call (id=1)");
         client.call("x", &json!({})).expect("second call (id=2)");
     }
@@ -1113,7 +1111,19 @@ mod tests {
         );
     }
 
-    // --- resolve_post_url SSRF guard (issue #389, H2) -------------------------
+    /// A response with neither `result` nor `error` (JSON-RPC protocol
+    /// violation) is rejected as a framing error, not silently mapped to Null.
+    #[test]
+    fn check_rpc_response_rejects_envelope_without_result_or_error() {
+        let msg = json!({"jsonrpc": "2.0", "id": 1});
+        let err = check_rpc_response(&msg).expect_err("malformed response");
+        assert!(
+            matches!(err, ClientError::Framing(_)),
+            "neither result nor error -> Framing, got {err:?}"
+        );
+    }
+
+    // --- resolve_post_url SSRF guard (issue #389) -----------------------------
 
     /// A relative path like `/message` resolves against the SSE base URL.
     #[test]

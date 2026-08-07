@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use toptopduck_lib::mcp::aggregator::{McpAggregator, RouteError};
 use toptopduck_lib::mcp::client::SecretEnv;
 use toptopduck_lib::mcp::config::{McpServerConfig, McpServerId, McpTransport};
+use toptopduck_lib::mcp::McpClient;
 use toptopduck_lib::provider::keychain::KeychainStore;
 
 /// Path to the compiled fake MCP server fixture (Cargo sets this at build time;
