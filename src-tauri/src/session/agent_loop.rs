@@ -44,6 +44,7 @@ use crate::approval::{
     ToolKey,
 };
 use crate::cancel::CancelToken;
+use crate::ingest::schema::quote_ident;
 use crate::mcp::aggregator::{self, McpAggregator, RouteError};
 use crate::model::{Promotion, TraceEntryView, TurnPhase};
 use crate::persistence::recipe::RecipeTraceEntry;
@@ -203,7 +204,29 @@ impl<'p> AgentLoop<'p> {
                 tools: request.tools.clone(),
                 max_tokens: request.max_tokens,
             };
-            match self.provider.generate_tool_turn(&turn_req) {
+            // Issue #321: guard the provider call against a panic. The adapter
+            // (anthropic/openai HTTP + JSON parsing) is a trust boundary whose
+            // panic must be an honest failed turn, not a silent unwind. A
+            // generate_tool_turn panic cannot leave a ghost result_N (no tool
+            // dispatched yet), so no rollback is needed -- the working set is
+            // untouched.
+            let reply = match catch_unwind(AssertUnwindSafe(|| {
+                self.provider.generate_tool_turn(&turn_req)
+            })) {
+                Err(payload) => {
+                    let detail = format!(
+                        "agent loop panicked in generate_tool_turn: {}",
+                        panic_message(&*payload)
+                    );
+                    log::error!(
+                        target: "toptopduck::agent_loop",
+                        "{detail}"
+                    );
+                    return outcome(Termination::Transient(detail), outputs, round_trips);
+                }
+                Ok(reply) => reply,
+            };
+            match reply {
                 // Terminal text: the model answered. A cancel that arrived
                 // during the (possibly slow) provider call wins over a textual
                 // reply (ADR-0021) -- the user asked to stop.
@@ -240,23 +263,53 @@ impl<'p> AgentLoop<'p> {
                         // retired `Querying` marker; execute_call emits the
                         // started/completed pair around the dispatch (or only
                         // the completion for a gate-denied call).
-                        match execute_call(
-                            call,
-                            deps,
-                            materializer,
-                            mcp,
-                            &gate,
-                            &mut outputs,
-                            &mut on_phase,
-                        ) {
+                        //
+                        // Issue #321: guard the tool dispatch against a panic.
+                        // The materialize path registers result_N as its LAST
+                        // step, but the register-to-return window
+                        // (apply_display_label, descriptor_json, ToolOutcome
+                        // construction) can leave a ghost result_N if the panic
+                        // strikes there. The snapshot + diff in
+                        // rollback_ghost_result detects + reverts any orphan so
+                        // the working_set <-> history 1:1 invariant (ADR-0084)
+                        // holds.
+                        let prev_next = deps.working_set.next_result_number();
+                        match catch_unwind(AssertUnwindSafe(|| {
+                            execute_call(
+                                call,
+                                deps,
+                                materializer,
+                                mcp,
+                                &gate,
+                                &mut outputs,
+                                &mut on_phase,
+                            )
+                        })) {
+                            Err(payload) => {
+                                rollback_ghost_result(deps, prev_next);
+                                let detail = format!(
+                                    "agent loop panicked in tool dispatch `{}`: {}",
+                                    call.name,
+                                    panic_message(&*payload)
+                                );
+                                log::error!(
+                                    target: "toptopduck::agent_loop",
+                                    "{detail}"
+                                );
+                                return outcome(
+                                    Termination::Transient(detail),
+                                    outputs,
+                                    round_trips,
+                                );
+                            }
                             // The gate was cancelled (close / resume / cancel
                             // interrupted an in-flight approval). The whole
                             // turn aborts.
-                            Err(GateCancelled) => {
+                            Ok(Err(GateCancelled)) => {
                                 aborted = true;
                                 break;
                             }
-                            Ok(result) => messages.push(ToolTurnMessage::tool_result(result)),
+                            Ok(Ok(result)) => messages.push(ToolTurnMessage::tool_result(result)),
                         }
                     }
                     if aborted || cancel.is_requested() {
@@ -301,6 +354,50 @@ fn outcome(termination: Termination, outputs: CallOutputs, round_trips: u32) -> 
         trace: outputs.trace,
         round_trips,
     }
+}
+
+/// Extract a human-readable message from a panic payload (the `Err` variant of
+/// `catch_unwind`, issue #321). Covers `&str` and `String` — the two common
+/// payload types; anything else degrades to a placeholder so the detail string
+/// is never empty. MSRV 1.80 precludes `std::panic::panic_message` (1.81+).
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
+}
+
+/// Roll back a ghost `result_N` left by a panic mid-dispatch (issue #321). The
+/// materialize path registers `result_N` as its last step before returning, but
+/// the window between registration and the dispatch return means a panic can
+/// leave a registered-but-unhistoried result. Detection: compare
+/// `next_result_number()` before and after the `catch_unwind`; if it grew, the
+/// orphan is `result_{prev_next}` — drop its admin table (best-effort) +
+/// unregister it from the working set so the working_set <-> history 1:1
+/// invariant (ADR-0084) holds and `next_result_number` does not skip
+/// (ADR-0022).
+fn rollback_ghost_result(deps: &mut TurnDeps, prev_next: u64) {
+    let curr_next = deps.working_set.next_result_number();
+    if curr_next <= prev_next {
+        return;
+    }
+    let ghost = format!("result_{prev_next}");
+    log::warn!(
+        target: "toptopduck::agent_loop",
+        "rolling back ghost {ghost} left by a panicked dispatch"
+    );
+    let drop_sql = format!("DROP TABLE {}", quote_ident(&ghost));
+    if let Err(e) = deps.conn.execute_batch(&drop_sql) {
+        log::error!(
+            target: "toptopduck::agent_loop",
+            "ghost rollback DROP of {ghost} failed: {e}; session may wedge on next \
+             result_{prev_next} reuse (ADR-0022)"
+        );
+    }
+    deps.working_set.remove(&ghost);
 }
 
 /// The mutable per-turn outputs [`execute_call`] accumulates: the trace
@@ -723,8 +820,12 @@ mod tests {
 
     use super::*;
     use crate::approval::ApprovalResponse;
+    use crate::guardrail::ExecError;
+    use crate::model::{DatasetDescriptor, DatasetPrivacy, RectifyProvenance};
     use crate::provider::fake::FakeProvider;
+    use crate::provider::prompt::ResponseLocale;
     use crate::provider::tool_calling::ToolTurnMessage;
+    use crate::provider::{ProviderReply, ProviderRequest};
     use crate::session::materializer::RealMaterializer;
     use crate::tools::builtin_table;
     use crate::workingset::WorkingSet;
@@ -1787,5 +1888,138 @@ mod tests {
         let cut = truncate(&long, 10);
         assert_eq!(cut.chars().count(), 10);
         assert!(cut.ends_with('…'), "ends with ellipsis: {cut}");
+    }
+
+    // --- panic guards (issue #321) -----------------------------------------
+
+    /// A provider that panics inside `generate_tool_turn`. The tool-calling loop
+    /// never invokes `generate`; it is an unreachable stub.
+    struct PanickingProvider;
+    impl Provider for PanickingProvider {
+        fn generate(&self, _: &ProviderRequest) -> Result<ProviderReply, ProviderError> {
+            unreachable!("the tool-calling loop never invokes generate")
+        }
+        fn generate_tool_turn(&self, _: &ToolTurnRequest) -> Result<ToolTurnReply, ProviderError> {
+            panic!("simulated provider panic in generate_tool_turn")
+        }
+        fn response_locale(&self) -> ResponseLocale {
+            ResponseLocale::EnUS
+        }
+    }
+
+    /// A materializer that registers `result_N` in the working set then panics,
+    /// simulating a panic in the register-to-return window. The ghost-result
+    /// rollback in `AgentLoop::run` must detect + revert the orphan so the
+    /// working_set <-> history 1:1 invariant holds.
+    struct GhostThenPanicMaterializer;
+    impl Materializer for GhostThenPanicMaterializer {
+        fn try_materialize(
+            &self,
+            _sql: &str,
+            _cancel: &CancelToken,
+            result_name: String,
+            deps: &mut TurnDeps,
+        ) -> Result<DatasetDescriptor, ExecError> {
+            let descriptor = DatasetDescriptor {
+                reference_name: result_name.clone(),
+                display_name: result_name,
+                source_path: String::new(),
+                columns: Vec::new(),
+                row_count: 0,
+                sample: Vec::new(),
+                fingerprint: String::new(),
+                rectify: RectifyProvenance::NotApplicable,
+                privacy: DatasetPrivacy::default(),
+                stale: None,
+            };
+            deps.working_set.register_result(descriptor);
+            panic!("simulated post-register panic in tool dispatch")
+        }
+    }
+
+    /// Issue #321: a provider panic in `generate_tool_turn` lands as a failed
+    /// turn (Transient) with a detail naming the step. No tool dispatched, so
+    /// the working set is untouched — no ghost result_N.
+    #[test]
+    fn provider_panic_in_generate_tool_turn_lands_failed_turn() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        let provider = PanickingProvider;
+        let sources = HashMap::new();
+        let mut d = deps(&engine.conn, &mut ws, &sources, engine.temp.path());
+        let approval = ApprovalState::new();
+        let sink = RecordingSink::default();
+        let outcome = AgentLoop::new(&provider, cancel).with_caps(24, None).run(
+            &request("panic-test"),
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &approval,
+            &sink,
+            |_| {},
+        );
+        match &outcome.termination {
+            Termination::Transient(detail) => {
+                assert!(
+                    detail.contains("generate_tool_turn"),
+                    "detail names the panic step: {detail}"
+                );
+            }
+            other => panic!("expected Transient, got {other:?}"),
+        }
+        assert_eq!(
+            ws.next_result_number(),
+            1,
+            "no ghost result: working set untouched"
+        );
+    }
+
+    /// Issue #321: a panic in `tools::dispatch` (mid-materialize, after
+    /// `result_N` is registered) lands as a failed turn AND rolls back the
+    /// ghost `result_N` so the working_set <-> history 1:1 invariant holds.
+    #[test]
+    fn dispatch_panic_lands_failed_turn_and_rolls_back_ghost_result() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        // The provider emits a materialize call; GhostThenPanicMaterializer
+        // registers result_1 then panics in the return window.
+        let provider = FakeProvider::new().scripted_tool_turn(
+            "panic-dispatch",
+            call("materialize", json!({"sql": "SELECT 1 AS x"})),
+        );
+        let sources = HashMap::new();
+        let mut d = deps(&engine.conn, &mut ws, &sources, engine.temp.path());
+        let approval = ApprovalState::new();
+        let sink = RecordingSink::default();
+        let mut materializer = GhostThenPanicMaterializer;
+        let outcome = AgentLoop::new(&provider, cancel).with_caps(24, None).run(
+            &request("panic-dispatch"),
+            &mut d,
+            &mut materializer,
+            &mut McpAggregator::empty(),
+            &approval,
+            &sink,
+            |_| {},
+        );
+        match &outcome.termination {
+            Termination::Transient(detail) => {
+                assert!(
+                    detail.contains("tool dispatch"),
+                    "detail names the panic step: {detail}"
+                );
+            }
+            other => panic!("expected Transient, got {other:?}"),
+        }
+        assert_eq!(
+            ws.next_result_number(),
+            1,
+            "ghost result_1 rolled back; next_result_number is back to 1"
+        );
+        assert!(
+            !ws.is_result("result_1"),
+            "result_1 unregistered from the working set"
+        );
     }
 }
