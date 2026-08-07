@@ -762,8 +762,9 @@ mod tests {
     }
 
     /// Poll the sink for the first emitted request id (the gate-deny test's
-    /// responder waits on this before answering Deny). Mirrors approval.rs's
-    /// `poll_for_request`.
+    /// responder waits on this before answering Deny). Uses wall-clock sleep
+    /// polling (approval.rs's equivalent switched to condvar, but this local
+    /// sink predates that and the cost of porting is not justified here).
     fn poll_request_id(sink: &RecordingSink, timeout: std::time::Duration) -> Option<uuid::Uuid> {
         let start = std::time::Instant::now();
         loop {

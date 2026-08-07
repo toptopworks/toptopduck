@@ -186,19 +186,13 @@ pub enum OperationKind {
 // ---------------------------------------------------------------------------
 
 /// The gateway's classification of a tool call (ADR-0080). The
-/// [`ApprovalState`] gate maps this to a concrete action (pass / suspend /
-/// refuse).
+/// [`ApprovalState`] gate maps this to a concrete action (pass / suspend).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Classification {
     /// Pass through: built-in (Decision 1), OR trusted via "always allow"
     /// (Decision 3), OR the session is in [`AuthMode::NoConfirmation`]
     /// (Decision 4).
     Allow,
-    /// Hard refusal. The gateway does not classify anything as `Deny` today
-    /// -- external tools default to [`Classification::NeedsApproval`] -- but
-    /// the variant is kept so a future deny-list can refuse without
-    /// suspending.
-    Deny,
     /// External tool under [`AuthMode::PerCall`] that is not in the trust
     /// set: suspend this turn's call and surface the in-flow approval card
     /// (ADR-0083).
@@ -359,9 +353,9 @@ pub enum GateOutcome {
     /// The call proceeds -- the agent loop runs [`crate::tools::dispatch`] (or
     /// the external bridge forwards the call).
     Allow,
-    /// The user (or policy) refused the call. The agent loop surfaces a
-    /// tool-level denial the model can self-correct from (ADR-0077) -- it is
-    /// NOT a transport error and does NOT fail the turn.
+    /// The user refused the call (via the approval card's deny button). The
+    /// agent loop surfaces a tool-level denial the model can self-correct from
+    /// (ADR-0077) -- it is NOT a transport error and does NOT fail the turn.
     Denied,
 }
 
@@ -391,13 +385,25 @@ struct Pending {
     response: Option<ApprovalResponse>,
 }
 
+/// Authorization policy fields guarded by a single mutex so [`ApprovalState::reset`]
+/// is atomic relative to concurrent readers (ADR-0080). `auth_mode` + `trust` are
+/// always read/written together — splitting them across two mutexes let a reader
+/// observe a half-reset state (new mode + stale trust).
+struct Policy {
+    auth_mode: AuthMode,
+    trust: HashSet<ToolKey>,
+}
+
 /// Per-session approval state (ADR-0080). Lives on the [`SessionHandle`] as an
 /// `Arc<ApprovalState>` so the turn (holding the `Session` mutex) and the
 /// `respond_tool_approval` command (which must NOT take that mutex) share it
 /// directly.
 pub struct ApprovalState {
-    auth_mode: Mutex<AuthMode>,
-    trust: Mutex<HashSet<ToolKey>>,
+    /// Authorization policy (mode + trust) behind one lock so `reset` is
+    /// atomic (ADR-0080). `pending` + `cv` stay on separate locks — the gate
+    /// holds `pending` across a condvar wait and must not deadlock against
+    /// policy reads/writes.
+    policy: Mutex<Policy>,
     pending: Mutex<Option<Pending>>,
     /// Paired with [`Self::pending`]: the gate waits on it; `respond` +
     /// [`Self::interrupt_pending`] notify it.
@@ -422,8 +428,10 @@ const GATE_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(200);
 impl ApprovalState {
     pub fn new() -> Self {
         Self {
-            auth_mode: Mutex::new(AuthMode::default()),
-            trust: Mutex::new(HashSet::new()),
+            policy: Mutex::new(Policy {
+                auth_mode: AuthMode::default(),
+                trust: HashSet::new(),
+            }),
             pending: Mutex::new(None),
             cv: Condvar::new(),
             interrupted: AtomicBool::new(false),
@@ -432,20 +440,21 @@ impl ApprovalState {
 
     /// Read the current authorization mode (ADR-0080 Decision 4).
     pub fn auth_mode(&self) -> AuthMode {
-        *self.auth_mode.lock().expect("auth_mode lock poisoned")
+        self.policy.lock().expect("policy lock poisoned").auth_mode
     }
 
     /// Set the authorization mode (ADR-0080 Decision 4). Session-level,
     /// resume-reset (see [`Self::reset`]).
     pub fn set_auth_mode(&self, mode: AuthMode) {
-        *self.auth_mode.lock().expect("auth_mode lock poisoned") = mode;
+        self.policy.lock().expect("policy lock poisoned").auth_mode = mode;
     }
 
     /// A snapshot of the session trust set ("always allow", ADR-0080 Decision 3).
     pub fn trust_list(&self) -> Vec<ToolKey> {
-        self.trust
+        self.policy
             .lock()
-            .expect("trust lock poisoned")
+            .expect("policy lock poisoned")
+            .trust
             .iter()
             .cloned()
             .collect()
@@ -453,7 +462,11 @@ impl ApprovalState {
 
     /// Revoke a single tool's session-level trust (ADR-0080 Decision 3).
     pub fn revoke(&self, key: &ToolKey) {
-        self.trust.lock().expect("trust lock poisoned").remove(key);
+        self.policy
+            .lock()
+            .expect("policy lock poisoned")
+            .trust
+            .remove(key);
     }
 
     /// Reset to the default posture (ADR-0080: resume 归零). Clears the trust
@@ -461,11 +474,15 @@ impl ApprovalState {
     /// pending approval so its gate returns [`GateCancelled`] and clears its
     /// own slot (the slot is owned by the gate, not this fn). Called on a
     /// successful resume by `open_duck` -- trust state is session-level and
-    /// must not survive a
-    /// resume (it is not in the recipe, ADR-0080).
+    /// must not survive a resume (it is not in the recipe, ADR-0080).
+    ///
+    /// Both fields are written under a single `policy` lock so a concurrent
+    /// reader never observes a half-reset state (new mode + stale trust).
     pub fn reset(&self) {
-        *self.auth_mode.lock().expect("auth_mode lock poisoned") = AuthMode::default();
-        self.trust.lock().expect("trust lock poisoned").clear();
+        let mut g = self.policy.lock().expect("policy lock poisoned");
+        g.auth_mode = AuthMode::default();
+        g.trust.clear();
+        drop(g);
         // Drop any pending approval: the waiting turn (if any -- resume runs
         // with no turn in flight in practice) wakes to a cancelled state.
         self.interrupt_pending();
@@ -502,12 +519,14 @@ impl ApprovalState {
         // Pure classify first -- the common case (built-in pass-through,
         // trusted, or no-confirmation) takes no lock on `pending` and never
         // reaches the sink. ADR-0080 AC: built-in read-only + materialize
-        // pass with zero approval.
-        let mode = self.auth_mode();
-        let trust = self.trust.lock().expect("trust lock poisoned").clone();
+        // pass with zero approval. Both policy fields are read under one lock
+        // so a concurrent `reset` cannot split the snapshot.
+        let (mode, trust) = {
+            let g = self.policy.lock().expect("policy lock poisoned");
+            (g.auth_mode, g.trust.clone())
+        };
         match classify(&request.key, mode, &trust) {
             Classification::Allow => return Ok(GateOutcome::Allow),
-            Classification::Deny => return Ok(GateOutcome::Denied),
             Classification::NeedsApproval => {}
         }
 
@@ -617,9 +636,10 @@ impl ApprovalState {
                 // Escalate to session-level trust (ADR-0080 Decision 3). Same
                 // tool, different params share trust; param-pattern
                 // granularity is out of scope (v1).
-                self.trust
+                self.policy
                     .lock()
-                    .expect("trust lock poisoned")
+                    .expect("policy lock poisoned")
+                    .trust
                     .insert(key.clone());
                 Ok(GateOutcome::Allow)
             }
@@ -658,10 +678,22 @@ impl ApprovalState {
     /// for the "always allow" AC).
     #[cfg(test)]
     pub fn is_trusted(&self, key: &ToolKey) -> bool {
-        self.trust
+        self.policy
             .lock()
-            .expect("trust lock poisoned")
+            .expect("policy lock poisoned")
+            .trust
             .contains(key)
+    }
+
+    /// Seed a tool key into the trust set directly (test-only shortcut so
+    /// tests do not reach into the private `policy` mutex).
+    #[cfg(test)]
+    pub fn seed_trust(&self, key: &ToolKey) {
+        self.policy
+            .lock()
+            .expect("policy lock poisoned")
+            .trust
+            .insert(key.clone());
     }
 }
 
@@ -676,17 +708,6 @@ pub enum RespondError {
     AlreadyAnswered,
 }
 
-impl RespondError {
-    /// Stable wire discriminant for the frontend (mirrors the Rust variant).
-    pub fn as_kind(&self) -> &'static str {
-        match self {
-            Self::NoPending => "no_pending",
-            Self::UnknownRequest => "unknown_request",
-            Self::AlreadyAnswered => "already_answered",
-        }
-    }
-}
-
 /// Convenience alias for callers that hold the state behind an `Arc` (the
 /// `SessionHandle` shape). The gate runs against `&ApprovalState` either way.
 pub type SharedApprovalState = Arc<ApprovalState>;
@@ -696,16 +717,21 @@ mod tests {
     use super::*;
 
     /// Recording sink for tests: thread-safe (the gate may run on a spawned
-    /// thread while the test thread reads the recordings).
+    /// thread while the test thread reads the recordings). `cv` wakes
+    /// `poll_for_request` on push so the test does not rely on wall-clock
+    /// sleep polling.
     #[derive(Default)]
     struct RecordingSink {
         requests: Mutex<Vec<ApprovalRequestBody>>,
         resolved: Mutex<Vec<(ApprovalRequestBody, ApprovalResponse)>>,
+        cv: Condvar,
     }
 
     impl ApprovalSink for RecordingSink {
         fn emit_request(&self, body: &ApprovalRequestBody) {
-            self.requests.lock().unwrap().push(body.clone());
+            let mut g = self.requests.lock().unwrap();
+            g.push(body.clone());
+            self.cv.notify_all();
         }
         fn emit_resolved(&self, body: &ApprovalRequestBody, response: ApprovalResponse) {
             self.resolved.lock().unwrap().push((body.clone(), response));
@@ -865,7 +891,7 @@ mod tests {
         let state = ApprovalState::new();
         let key = ToolKey::external("acme", "fetch");
         // Seed trust directly to test the gate short-circuit.
-        state.trust.lock().unwrap().insert(key.clone());
+        state.seed_trust(&key);
         let cancel = CancelToken::new();
         let sink = RecordingSink::default();
         let req = ApprovalRequest {
@@ -1115,7 +1141,7 @@ mod tests {
     fn reset_clears_trust_and_mode() {
         let state = ApprovalState::new();
         let key = ToolKey::external("acme", "fetch");
-        state.trust.lock().unwrap().insert(key.clone());
+        state.seed_trust(&key);
         state.set_auth_mode(AuthMode::NoConfirmation);
         assert_eq!(state.auth_mode(), AuthMode::NoConfirmation);
 
@@ -1259,22 +1285,38 @@ mod tests {
             !cancel.is_requested(),
             "reset wakes via interrupt_pending, not the cancel token"
         );
+        // The cancel-path branch emits a synthetic Deny resolved event so the
+        // frontend flips stale pending cards (ADR-0083 "no stale pending").
+        let resolved = sink.resolved.lock().unwrap();
+        assert_eq!(resolved.len(), 1, "cancel path emits a synthetic Deny");
+        assert_eq!(
+            resolved[0].1,
+            ApprovalResponse::Deny,
+            "the synthetic resolved event is a Deny"
+        );
     }
 
     // --- helper ------------------------------------------------------------
 
-    /// Poll the recording sink until a request body is observable, returning
-    /// its parsed request id. Bounded by `timeout` so a logic bug fails the
-    /// test instead of hanging CI.
+    /// Wait on the recording sink's condvar until a request body is
+    /// observable, returning its parsed request id. Bounded by `timeout` so
+    /// a logic bug fails the test instead of hanging CI. Uses `wait_timeout`
+    /// instead of wall-clock sleep polling so the test wakes immediately on
+    /// push and never flakes under CI load.
     fn poll_for_request(sink: &Arc<RecordingSink>, timeout: Duration) -> Option<uuid::Uuid> {
         let deadline = std::time::Instant::now() + timeout;
-        while std::time::Instant::now() < deadline {
-            if let Some(body) = sink.last_request() {
+        let mut g = sink.requests.lock().unwrap();
+        loop {
+            if let Some(body) = g.last() {
                 return uuid::Uuid::parse_str(&body.request_id).ok();
             }
-            std::thread::sleep(Duration::from_millis(5));
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            let (g2, _) = sink.cv.wait_timeout(g, deadline - now).unwrap();
+            g = g2;
         }
-        None
     }
 
     // --- try_external / reserved server name (issue #312) -------------------
@@ -1413,5 +1455,56 @@ mod tests {
             SUMMARY_MAX_CHARS
         );
         assert!(body.summary.ends_with("..."));
+    }
+
+    // --- Policy atomicity (review H1) -------------------------------------
+
+    /// Hammer test: a concurrent `reset()` must never let a reader observe a
+    /// half-reset policy snapshot (`PerCall` mode + stale trust). The merged
+    /// `Mutex<Policy>` guarantees this structurally; this test catches a
+    /// regression if someone splits the mutex back into two. Race tests are
+    /// inherently non-deterministic, but hundreds of iterations across
+    /// multiple threads give high regression hit-rate.
+    #[test]
+    fn reset_is_atomic_relative_to_concurrent_reads() {
+        let state = Arc::new(ApprovalState::new());
+
+        // Reader thread: repeatedly take a policy snapshot via the same lock
+        // path `gate()` uses. The only invalid state is `PerCall` (the
+        // post-reset default) with `trust` still containing `key` -- that
+        // would mean `reset` cleared the mode but not the trust (half-reset).
+        // `NoConfirmation` + empty trust is valid (writer between set_mode
+        // and seed_trust); `NoConfirmation` + trust is the pre-reset steady
+        // state.
+        let state_r = Arc::clone(&state);
+        let reader = std::thread::spawn(move || {
+            let key = ToolKey::external("acme", "fetch");
+            for _ in 0..500 {
+                let (mode, has_trust) = {
+                    let g = state_r.policy.lock().expect("policy lock poisoned");
+                    (g.auth_mode, g.trust.contains(&key))
+                };
+                if mode == AuthMode::PerCall {
+                    assert!(
+                        !has_trust,
+                        "half-reset: PerCall mode but trust not yet cleared"
+                    );
+                }
+            }
+        });
+
+        // Writer thread: cycle set -> reset repeatedly.
+        let state_w = Arc::clone(&state);
+        let writer = std::thread::spawn(move || {
+            let key = ToolKey::external("acme", "fetch");
+            for _ in 0..500 {
+                state_w.set_auth_mode(AuthMode::NoConfirmation);
+                state_w.seed_trust(&key);
+                state_w.reset();
+            }
+        });
+
+        writer.join().expect("writer");
+        reader.join().expect("reader");
     }
 }

@@ -1631,9 +1631,10 @@ impl ApprovalSink for TauriApprovalSink {
 /// the frontend received; the response is `allow_once` / `always_allow` /
 /// `deny`. `always_allow` escalates the `server::tool` to session-level trust
 /// (resume resets it). A respond that lands after the turn was cancelled, or a
-/// duplicate answer, rejects with a typed [`SessionError::Engine`] carrying
-/// the stable kind discriminator -- the frontend reconciles via the
-/// `approval-resolved` event rather than branching on this error.
+/// duplicate answer, rejects with a [`SessionError::Engine`] carrying the
+/// `Debug` representation of the underlying `RespondError` (the frontend
+/// reconciles via the `approval-resolved` event rather than branching on this
+/// string).
 #[tauri::command]
 pub fn respond_tool_approval(
     store: State<'_, Arc<SessionStore>>,
@@ -1643,12 +1644,13 @@ pub fn respond_tool_approval(
 ) -> Result<(), SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
+    reject_if_resuming(&handle)?;
     let request_uuid = uuid::Uuid::parse_str(&request_id)
         .map_err(|_| SessionError::Engine("approval request id malformed".into()))?;
     let approval = handle.approval_state();
     approval
         .respond(request_uuid, response)
-        .map_err(|e| SessionError::Engine(e.as_kind().to_string()))?;
+        .map_err(|e| SessionError::Engine(format!("{e:?}")))?;
     Ok(())
 }
 
