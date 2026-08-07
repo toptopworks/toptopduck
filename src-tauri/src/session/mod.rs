@@ -304,10 +304,6 @@ pub enum ActiveResolution {
     Abort,
 }
 
-/// A pre-write external-change conflict surfaced by the hash check (ADR-0035
-/// Decision 3, issue #50). When the `.duck` file's current on-disk hash differs from
-/// the baseline the session recorded after its last successful write, the
-/// auto-write is SUSPENDED and this notice is stashed in
 /// Re-export from [`recipe_persister`] (issue #415): the type moved to the
 /// persister module but `commands.rs` / `lib.rs` reach it through `session::`.
 pub use self::recipe_persister::PendingConflict;
@@ -927,9 +923,7 @@ impl Session {
         // runs the external-change hash check against the resume_baseline --
         // if the file changed under us during resume, the write is suspended
         // and pending_conflict is set (never a silent clobber).
-        session
-            .persister
-            .save_if_bound(&session.working_set, &session.timeline);
+        session.persist_if_bound();
 
         // Success -- the resumed Session owns the registry key now. Disarm the
         // guard so its Drop does NOT release the key; the Session's own Drop
@@ -2131,18 +2125,8 @@ impl Session {
         outcome
     }
 
-    /// Append a source lifecycle event (ADR-0040) to the timeline. The event is
-    /// first-class (always visible, occupies a slot) but NOT a turn, so it never
-    /// enters the LLM window or advances result_N. The display label is carried
-    /// verbatim so the thread can still name a dataset after it's removed.
-    /// Build the recipe (ADR-0034) describing the current working set. The
-    /// recipe is organized by current state, not as a historical ledger:
-    /// only LIVE productive turns ride the replayable chain, while a stale
-    /// (cascade-invalidated) result_N's turn stays in `history` marked stale
-    /// (ADR-0041 point 2: kept for display + the LLM window, never replayed)
-    /// rather than being silently dropped. A Materialized turn whose
-    /// `result_N` is gone entirely (removed/GC'd, no descriptor) is dropped
-    /// -- without a descriptor the turn cannot replay or render.
+    /// Build the recipe (ADR-0034). Facade delegate to
+    /// [`RecipePersister::build_recipe`](recipe_persister::RecipePersister::build_recipe).
     pub fn build_recipe(&self) -> Recipe {
         self.persister
             .build_recipe(&self.working_set, &self.timeline)

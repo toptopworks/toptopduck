@@ -4,7 +4,7 @@
 //! write loop ([`Self::save_if_bound`]), conflict resolution, and the
 //! single-writer gate ([`Self::bind`] / [`Self::adopt_resumed`] /
 //! [`Self::release_key`]). Session delegates to this struct via thin facade
-//! methods -- the 12 existing `build_recipe_*` integration tests stay on
+//! methods -- the 10 existing `build_recipe_*` integration tests stay on
 //! Session (end-to-end coverage via the facade) while this module adds pure
 //! unit tests that need no DuckDB / provider / tempdir.
 
@@ -262,6 +262,14 @@ impl RecipePersister {
         save_atomic(path, &recipe)
     }
 
+    /// Compute the post-write baseline hash for a path (ADR-0035 Decision 3).
+    /// Returns `None` on a read failure -- the caller should keep the prior
+    /// baseline in that case (at worst a false conflict on the next write,
+    /// resolved by the user -- never a silent clobber).
+    fn compute_baseline(path: &Path) -> Option<String> {
+        hash_file(path).ok().flatten()
+    }
+
     /// Fire [`Self::persist`] after a terminal event, capturing a failure
     /// instead of propagating (ADR-0035 honest signal). Runs the external-
     /// change hash check before writing; suspends the auto-write and stashes
@@ -292,6 +300,14 @@ impl RecipePersister {
                 }
                 Ok(_) => {} // Match (or file missing) -> proceed.
                 Err(e) => {
+                    // Fail-safe (ADR-0035 Decision 3): a hash read failure
+                    // might hide an external edit we cannot see (Windows
+                    // share lock, AV scan, permission flip). Suspend the
+                    // write and surface a conflict so the user decides
+                    // (reload / keep mine / save as new) -- never silently
+                    // clobber bytes the check could not read. The
+                    // found_hash carries the read error so the UI can tell
+                    // "could not read" apart from a real hash divergence.
                     self.pending_conflict = Some(PendingConflict {
                         path: path.to_path_buf(),
                         expected_hash: baseline,
@@ -312,7 +328,7 @@ impl RecipePersister {
             return;
         }
         // Successful write -- refresh the baseline.
-        if let Some(h) = hash_file(path).ok().flatten() {
+        if let Some(h) = Self::compute_baseline(path) {
             self.last_written_hash = Some(h);
         }
     }
@@ -323,6 +339,16 @@ impl RecipePersister {
     /// path, acquires the single-writer registry key (releasing the old one if
     /// re-binding to a different path), sets the path + name, and performs the
     /// first write + baseline seed.
+    ///
+    /// On persist failure: the binding still takes effect (in-memory state is
+    /// correct; the next turn's `save_if_bound` retries the write).
+    /// `last_written_hash` is LEFT AS NONE on purpose -- the disk content is
+    /// unknown after a failed write, so seeding a baseline here would either
+    /// freeze the wrong bytes (a false conflict later) or match a later read
+    /// and silence the check. With baseline = None the next `save_if_bound`
+    /// skips the hash check and writes directly -- acceptable because bind is
+    /// an explicit user action, not an auto-save that ADR-0035 Decision 3
+    /// protects from clobbering.
     pub(super) fn bind(
         &mut self,
         path: PathBuf,
@@ -346,10 +372,8 @@ impl RecipePersister {
         self.session_name = Some(session_name);
         let result = self.persist(working_set, timeline);
         if result.is_ok() {
-            if let Some(path) = self.duck_path.as_deref() {
-                if let Some(h) = hash_file(path).ok().flatten() {
-                    self.last_written_hash = Some(h);
-                }
+            if let Some(h) = self.duck_path.as_deref().and_then(Self::compute_baseline) {
+                self.last_written_hash = Some(h);
             }
             self.pending_conflict = None;
         }
@@ -399,7 +423,7 @@ impl RecipePersister {
             .ok_or_else(|| SaveError::Io("no .duck path bound; cannot resolve conflict".into()))?;
         let recipe = self.build_recipe(working_set, timeline);
         save_atomic(&path, &recipe)?;
-        if let Some(h) = hash_file(&path).ok().flatten() {
+        if let Some(h) = Self::compute_baseline(&path) {
             self.last_written_hash = Some(h);
         }
         self.pending_conflict = None;
@@ -424,16 +448,17 @@ impl RecipePersister {
         }
         let recipe = self.build_recipe(working_set, timeline);
         if let Err(e) = save_atomic(&new_path, &recipe) {
+            // Release the just-acquired key so a retry / another session can
+            // target the same path; the conflict stays pending.
             release(&canonical);
             return Err(e);
         }
-        let new_hash = hash_file(&new_path).ok().flatten();
         if let Some(old) = self.duck_canonical.take() {
             release(&old);
         }
         self.duck_canonical = Some(canonical);
+        self.last_written_hash = Self::compute_baseline(&new_path);
         self.duck_path = Some(new_path);
-        self.last_written_hash = new_hash;
         self.pending_conflict = None;
         Ok(())
     }
