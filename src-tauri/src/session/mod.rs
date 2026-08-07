@@ -4,6 +4,7 @@
 
 pub mod agent_loop;
 pub mod materializer;
+pub mod recipe_persister;
 pub mod resume;
 pub mod sandbox;
 pub mod skills;
@@ -34,11 +35,11 @@ use crate::model::{
     TraceEntryView, TurnError, TurnFailure, TurnOutcome, TurnPhase, TurnProvenance, TurnRecord,
 };
 use crate::persistence::recipe::{
-    Recipe, RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTraceEntry, RecipeTurn, RuntimeKind,
-    SourceRef, TurnProvenance as PersistedTurnProvenance,
+    Recipe, RecipeTraceEntry, RecipeTurn, RuntimeKind, SourceRef,
+    TurnProvenance as PersistedTurnProvenance,
 };
-use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
-use crate::persistence::{read_duck, save_atomic, SaveError};
+use crate::persistence::registry::canonicalize_duck;
+use crate::persistence::{read_duck, SaveError};
 use crate::provider::keychain::KeychainStore;
 use crate::provider::prompt::ResponseLocale;
 use crate::provider::{Provider, UnwiredProvider};
@@ -307,24 +308,9 @@ pub enum ActiveResolution {
 /// Decision 3, issue #50). When the `.duck` file's current on-disk hash differs from
 /// the baseline the session recorded after its last successful write, the
 /// auto-write is SUSPENDED and this notice is stashed in
-/// [`Session::pending_conflict`] for the caller to read via
-/// [`Session::take_pending_conflict`]. The engine NEVER silently clobbers the
-/// externally-edited file; the caller resolves the conflict with one of three
-/// options (reload / keep mine / save as new) via
-/// [`Session::conflict_keep_mine`] / [`Session::conflict_save_as_new`] (and
-/// drop + reopen for reload).
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct PendingConflict {
-    /// The bound `.duck` path whose on-disk content diverged.
-    pub path: PathBuf,
-    /// The hash the session recorded after its last successful write -- what
-    /// the session believes the disk file SHOULD look like.
-    pub expected_hash: String,
-    /// The hash the session just computed from the file on disk -- evidence
-    /// that an external edit (another window, a text editor, a sync tool)
-    /// changed the file under us.
-    pub found_hash: String,
-}
+/// Re-export from [`recipe_persister`] (issue #415): the type moved to the
+/// persister module but `commands.rs` / `lib.rs` reach it through `session::`.
+pub use self::recipe_persister::PendingConflict;
 
 /// One progress event during resume (ADR-0034 visible progress). Fired per
 /// source verification and per replayed turn so the UI can render a
@@ -358,24 +344,6 @@ pub enum ResumeEvent {
 pub struct ResumeProgress {
     pub session_id: String,
     pub event: ResumeEvent,
-}
-
-/// SHA-256 of a `.duck` file's bytes (ADR-0035 Decision 3, issue #50). Used as the
-/// pre-write external-change baseline: the session records this after every
-/// successful write and compares the file's current hash before the next write.
-/// The recipe is small text, so a whole-file read is the KISS choice (no
-/// streaming needed at v1). Returns `Ok(None)` when the file does not exist --
-/// a missing file is not a conflict (the next write recreates it; there is
-/// nothing on disk to clobber), so the caller proceeds without a baseline.
-fn hash_file(path: &Path) -> Result<Option<String>, std::io::Error> {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    // ADR-0086 / issue #364 review I3: the bytes->hex step is shared via
-    // crate::util::sha256_hex (also used by the skills module's content hash).
-    Ok(Some(crate::util::sha256_hex(&bytes)))
 }
 
 pub struct Session {
@@ -448,46 +416,11 @@ pub struct Session {
     /// (review H2, issue #73) -- the prior `Arc<AtomicBool>` let any holder
     /// `store(false)` and revoke a close.
     closing: ClosingFlag,
-    /// The bound `.duck` path (ADR-0034). When `Some`, every terminal turn
-    /// and source lifecycle event atomically rewrites the recipe at this path
-    /// (temp + rename, whole-file). `None` until the user saves / opens a
-    /// `.duck` -- an in-memory-only session (the pre-persistence behavior).
-    duck_path: Option<PathBuf>,
-    /// The user-facing session name (ADR-0034). Carried in the recipe header
-    /// and shown on resume; `None` for an in-memory-only session (the recipe
-    /// falls back to an empty name).
-    session_name: Option<String>,
-    /// The most recent per-turn atomic-write failure (ADR-0034). Set by
-    /// [`Self::persist_if_bound`] when a save fails (the typed [`SaveError`],
-    /// captured verbatim -- issue #120); cleared by
-    /// [`Self::take_persist_error`]. The in-memory turn always advances
-    /// regardless (the user's work stays live); this field lets the UI
-    /// surface the disk-vs-memory drift instead of silently relying on the
-    /// next successful write to self-heal (ADR-0035 honest signal -- a
-    /// dropped save is a correctness gap, not just a log line).
-    persist_error: Option<SaveError>,
-    /// The canonical form of [`Self::duck_path`] (ADR-0035 Decision 3, issue #50):
-    /// the registry key under which this session holds the file. Every
-    /// spelling of the same on-disk file collapses to one canonical path, so
-    /// the single-writer contract cannot be evaded by a path synonym.
-    /// `None` while unbound; set on bind / open and released on Drop.
-    duck_canonical: Option<PathBuf>,
-    /// SHA-256 of the `.duck` file's bytes as of the session's last
-    /// successful write (ADR-0035 Decision 3, issue #50). The pre-write hash check
-    /// compares the file's current hash against this baseline: a mismatch
-    /// means an external edit landed between writes and the auto-write is
-    /// suspended (never a silent clobber). `None` until the first successful
-    /// write to a bound path; on `open_duck` it is seeded from the file as
-    /// read (the resume baseline) so an external edit DURING resume is also
-    /// caught.
-    last_written_hash: Option<String>,
-    /// A pre-write external-change conflict surfaced by the hash check
-    /// (ADR-0035 Decision 3, issue #50). Set when the on-disk hash diverged from
-    /// [`Self::last_written_hash`]; cleared by
-    /// [`Self::take_pending_conflict`] or a successful conflict resolution.
-    /// The auto-write is suspended while this is `Some` -- the engine never
-    /// silently overwrites the externally-edited file.
-    pending_conflict: Option<PendingConflict>,
+    /// The persistence concern (issue #415): `.duck` binding, projection,
+    /// write loop, conflict detection, and the single-writer registry key.
+    /// Extracted from the former inline fields so the projection + write
+    /// state machine are testable without a DuckDB connection.
+    persister: recipe_persister::RecipePersister,
     /// ADR-0063: the sender half of the close-and-wait-release drop signal. The
     /// matching receiver lives on the [`SessionHandle`](crate::session_store::SessionHandle);
     /// the delete path awaits it after detaching the handle from the store map so
@@ -611,6 +544,27 @@ impl TurnAudit {
             provenance: turn.provenance.clone(),
         }
     }
+
+    /// Read-only access to the persisted trace (for RecipePersister's
+    /// projection, issue #415).
+    pub(super) fn trace(&self) -> &[RecipeTraceEntry] {
+        &self.trace
+    }
+
+    /// Read-only access to the persisted provenance (for RecipePersister's
+    /// projection, issue #415).
+    pub(super) fn provenance(&self) -> &PersistedTurnProvenance {
+        &self.provenance
+    }
+
+    /// Test-only constructor with explicit trace + provenance (issue #415).
+    #[cfg(test)]
+    pub(super) fn test_new(
+        trace: Vec<RecipeTraceEntry>,
+        provenance: PersistedTurnProvenance,
+    ) -> Self {
+        Self { trace, provenance }
+    }
 }
 
 /// The per-turn borrowed data inputs for [`Session::ask_with_phase`] (issue
@@ -727,12 +681,7 @@ impl Session {
             source_files: HashMap::new(),
             cancel,
             closing: ClosingFlag::new(),
-            duck_path: None,
-            session_name: None,
-            persist_error: None,
-            duck_canonical: None,
-            last_written_hash: None,
-            pending_conflict: None,
+            persister: recipe_persister::RecipePersister::new(),
             drop_signal: None,
             external_runtime: None,
             last_mcp_connect: Vec::new(),
@@ -818,65 +767,19 @@ impl Session {
     /// one `.duck` to another releases the old canonical key so a different
     /// session can open it.
     pub fn bind_duck(&mut self, path: PathBuf, session_name: String) -> Result<(), SaveError> {
-        let canonical = canonicalize_duck(&path).map_err(|e| SaveError::Io(e.to_string()))?;
-        // Single-writer gate. Re-binding the SAME canonical path on this
-        // session is an update (Save over the open file) and skips the
-        // acquire; any other path -- including one another session holds --
-        // goes through try_acquire, which refuses a duplicate.
-        if self.duck_canonical.as_deref() != Some(canonical.as_path()) {
-            if !try_acquire(&canonical) {
-                return Err(SaveError::AlreadyOpen(canonical));
-            }
-            // Acquired the new key; release the old one (if any) so a
-            // different session can open the previous .duck.
-            if let Some(old) = self.duck_canonical.take() {
-                release(&old);
-            }
-        }
-        self.duck_canonical = Some(canonical);
-        self.duck_path = Some(path);
-        self.session_name = Some(session_name);
-        // The first write to a newly bound path has no baseline to compare
-        // against, so persist directly (persist_if_bound would also work --
-        // last_written_hash is None -> skip the check); subsequent writes go
-        // through persist_if_bound's hash check.
-        let result = self.persist();
-        if result.is_ok() {
-            // Write succeeded -- seed the baseline so the next persist_if_bound
-            // can detect an external edit. Best-effort (no `?`): a hash read
-            // failure leaves last_written_hash = None, which makes the next
-            // write skip the check. Returning an Err AFTER a successful write
-            // would mislead the caller into retrying an already-applied bind.
-            // Consistent with persist_if_bound / conflict_keep_mine.
-            if let Some(path) = self.duck_path.as_deref() {
-                if let Some(h) = hash_file(path).ok().flatten() {
-                    self.last_written_hash = Some(h);
-                }
-            }
-            // A freshly bound path has no pending conflict -- the baseline is now.
-            self.pending_conflict = None;
-        }
-        // On Err: the binding still takes effect (in-memory state is correct;
-        // the next turn's persist_if_bound retries the write). last_written_hash
-        // is LEFT AS NONE on purpose -- the disk content is unknown after a
-        // failed write, so seeding a baseline here would either freeze the
-        // wrong bytes (a false conflict later) or match a later read and
-        // silence the check. With baseline = None the next persist_if_bound
-        // skips the check and writes -- acceptable because bind_duck is an
-        // explicit user action, not an auto-save that ADR-0035 Decision 3
-        // protects from clobbering.
-        result
+        self.persister
+            .bind(path, session_name, &self.working_set, &self.timeline)
     }
 
     /// The bound `.duck` path, if any (ADR-0034). `None` for an in-memory-only
     /// session (the pre-persistence behavior).
     pub fn duck_path(&self) -> Option<&Path> {
-        self.duck_path.as_deref()
+        self.persister.duck_path()
     }
 
     /// The user-facing session name, if bound to a `.duck` (ADR-0034).
     pub fn session_name(&self) -> Option<&str> {
-        self.session_name.as_deref()
+        self.persister.session_name()
     }
 
     /// Open a `.duck` and resume the session across the restart boundary
@@ -954,13 +857,16 @@ impl Session {
         // issue #50): any external edit during the resume phases (re-ingest /
         // replay can take seconds) surfaces at the post-resume persist via the
         // hash check, never as a silent clobber of the edited file.
-        let resume_baseline = hash_file(path)
+        let resume_baseline = recipe_persister::hash_file(path)
             .map_err(|e| ResumeError::Load(crate::persistence::io::LoadError::Io(e.to_string())))?;
         let mut session = Session::with_provider_and_cancel(provider, cancel)
             .map_err(|e| ResumeError::Load(crate::persistence::io::LoadError::Io(e.to_string())))?;
-        session.session_name = Some(recipe.session_name.clone());
-        session.last_written_hash = resume_baseline;
-        session.duck_canonical = Some(canonical.clone());
+        session.persister.adopt_resumed(
+            path.to_path_buf(),
+            canonical.clone(),
+            recipe.session_name.clone(),
+            resume_baseline,
+        );
 
         // Phase 1: re-read + verify each source (interactive re-link / rebuild).
         // Returns the set of rebuilt (dropped) sources; recipe.sources[i] is
@@ -1012,17 +918,18 @@ impl Session {
             session.mounted_skills = recipe.mounted_skills();
         }
 
-        // Phase 5: re-bind the .duck path + persist the post-resume state.
-        // build_recipe reads the live working set, so relinked paths, dropped
-        // (rebuilt) sources, and the truncated timeline (failed turn at K)
-        // land in the persisted recipe. A failure is non-blocking -- the
-        // session is live; the banner surfaces the disk-vs-memory drift.
-        // The post-resume persist runs the external-change hash check against
-        // the resume_baseline seeded above -- if the file changed under us
-        // during resume, the write is suspended and pending_conflict is set
-        // (the caller surfaces the conflict UI; never a silent clobber).
-        session.duck_path = Some(path.to_path_buf());
-        session.persist_if_bound();
+        // Phase 5: persist the post-resume state. adopt_resumed already set
+        // duck_path + the baseline, so only the write remains. build_recipe
+        // reads the live working set, so relinked paths, dropped (rebuilt)
+        // sources, and the truncated timeline (failed turn at K) land in the
+        // persisted recipe. A failure is non-blocking -- the session is live;
+        // the banner surfaces the disk-vs-memory drift. The post-resume write
+        // runs the external-change hash check against the resume_baseline --
+        // if the file changed under us during resume, the write is suspended
+        // and pending_conflict is set (never a silent clobber).
+        session
+            .persister
+            .save_if_bound(&session.working_set, &session.timeline);
 
         // Success -- the resumed Session owns the registry key now. Disarm the
         // guard so its Drop does NOT release the key; the Session's own Drop
@@ -1781,8 +1688,9 @@ impl Session {
             return Err(RenameSessionError::EmptyName);
         }
         let name = trimmed.to_string();
-        self.session_name = Some(name.clone());
-        self.persist_if_bound();
+        self.persister.set_session_name(name.clone());
+        self.persister
+            .save_if_bound(&self.working_set, &self.timeline);
         Ok(name)
     }
 
@@ -2236,382 +2144,39 @@ impl Session {
     /// `result_N` is gone entirely (removed/GC'd, no descriptor) is dropped
     /// -- without a descriptor the turn cannot replay or render.
     pub fn build_recipe(&self) -> Recipe {
-        // ADR-0036 Decision 4 hybrid paths: `source_path` is always absolute (fallback
-        // resolver); `relative_path` is set when the source lives inside the
-        // .duck file's directory subtree (primary resolver, survives "move the
-        // folder"). strip_prefix succeeds exactly when the source is in the
-        // subtree (cross-volume / outside-subtree -> None). Components are
-        // rejoined with '/' so the stored path is cross-platform portable
-        // (Path::join accepts '/' on Windows; POSIX-only readers can resolve it
-        // too). Computed only when a .duck is bound -- an unbound session has
-        // no .duck directory to be relative to, so relative_path stays None.
-        let duck_dir = self.duck_path.as_deref().and_then(Path::parent);
-        let sources: Vec<SourceRef> = self
-            .working_set
-            .list()
-            .iter()
-            .filter(|d| !self.working_set.is_result(&d.reference_name))
-            .map(|d| {
-                let relative_path = duck_dir
-                    .and_then(|dir| Path::new(&d.source_path).strip_prefix(dir).ok())
-                    .map(|rel| {
-                        rel.components()
-                            .filter_map(|c| c.as_os_str().to_str())
-                            .collect::<Vec<_>>()
-                            .join("/")
-                    });
-                SourceRef {
-                    reference_name: d.reference_name.clone(),
-                    display_name: d.display_name.clone(),
-                    source_path: d.source_path.clone(),
-                    relative_path,
-                    rectify: d.rectify.clone(),
-                    fingerprint: d.fingerprint.clone(),
-                }
-            })
-            .collect();
-
-        // The unified timeline carries each turn's audit inline (issue #325),
-        // so no separate alignment guard or zip is needed here. A Materialized
-        // turn whose every result_N is gone is filtered out -- without a
-        // descriptor the turn cannot replay or render.
-        let history: Vec<RecipeEntry> = self
-            .timeline
-            .iter()
-            .filter_map(|entry| match entry {
-                TimelineEntry::Turn { record, audit } => {
-                    // Build the trimmed outcome; the persisted trace +
-                    // provenance come from the turn's recorded audit
-                    // (ADR-0078, issue #319) -- the loop's real multi-call
-                    // trajectory for a live turn, the recipe's values
-                    // harvested on resume. A Materialized turn persists its
-                    // FULL promotion chain (ADR-0084) -- every result_N the
-                    // turn produced, each its own RecipePromotion -- so
-                    // resume replays the whole chain.
-                    let outcome = match &record.outcome {
-                        TurnOutcome::Materialized {
-                            promotions,
-                            viz: _,
-                            assumption,
-                        } => {
-                            // ADR-0084: persist EVERY promotion as its own
-                            // RecipePromotion. display_name + stale come from
-                            // the working set's CURRENT state, not the ask-time
-                            // snapshot in the timeline -- a user rename
-                            // (ADR-0037) / cascade (ADR-0041) updates the
-                            // working set, not the timeline entry. A promotion
-                            // whose result_N is gone (GC'd / removed, no
-                            // descriptor) is dropped -- it can neither replay
-                            // nor render.
-                            let recipe_promotions: Vec<RecipePromotion> = promotions
-                                .iter()
-                                .filter_map(|p| {
-                                    let descriptor =
-                                        self.working_set.get(&p.dataset.reference_name)?;
-                                    Some(RecipePromotion {
-                                        reference_name: p.dataset.reference_name.clone(),
-                                        display_name: descriptor.display_name.clone(),
-                                        sql: p.sql.clone(),
-                                        // ADR-0041: a live result -> stale None
-                                        // (replayed); a cascade-invalidated
-                                        // result -> the anchor from its
-                                        // descriptor (dead result, kept in the
-                                        // timeline, never replayed). The anchor
-                                        // is what the UI's stale badge reads,
-                                        // so a reopen renders the same
-                                        // "invalidated by" provenance as the
-                                        // live session did.
-                                        stale: descriptor.stale.clone(),
-                                    })
-                                })
-                                .collect();
-                            // If no promotion survived (every result_N GC'd),
-                            // the turn cannot replay or render -- drop it.
-                            // ADR-0041 GC exception (issue #326): stale turns
-                            // stay visible (table still present); a GC'd turn's
-                            // backing is physically gone. `return None` exits
-                            // the outer timeline-entry filter_map closure.
-                            if recipe_promotions.is_empty() {
-                                return None;
-                            }
-                            RecipeOutcome::Materialized {
-                                promotions: recipe_promotions,
-                                assumption: assumption.clone(),
-                            }
-                        }
-                        TurnOutcome::Textual {
-                            text_kind,
-                            body,
-                            assumption,
-                        } => RecipeOutcome::Textual {
-                            text_kind: *text_kind,
-                            body: body.clone(),
-                            assumption: assumption.clone(),
-                        },
-                        TurnOutcome::Failed(failure) => RecipeOutcome::Failed(failure.clone()),
-                        TurnOutcome::Cancelled => RecipeOutcome::Cancelled,
-                    };
-                    // The turn's recorded audit (ADR-0078, issue #319): the
-                    // loop's real multi-call trace + runtime/skill provenance
-                    // for a live turn; the recipe's values (harvested at
-                    // resume) for a resumed one. A no-tool turn's audit trace
-                    // is empty. Construction routes through the audit-bearing
-                    // constructor (issue #316) so production `RecipeTurn`
-                    // construction stays on constructor paths.
-                    Some(RecipeEntry::Turn(RecipeTurn::with_audit(
-                        record.question.clone(),
-                        outcome,
-                        audit.trace.clone(),
-                        audit.provenance.clone(),
-                    )))
-                }
-                TimelineEntry::Source(ev) => Some(RecipeEntry::Source(ev.clone())),
-                TimelineEntry::Skill(ev) => Some(RecipeEntry::Skill(ev.clone())),
-            })
-            .collect();
-
-        let active = self.working_set.active().map(|d| d.reference_name.clone());
-
-        // Route construction through the invariant-validating constructor.
-        // The working set's own invariants guarantee build() succeeds here
-        // -- `active` always tracks a registered source
-        // (or None), `result_N` numbering is never reused (ADR-0022), and
-        // source events always carry non-empty names -- so a failure is a
-        // logic bug, surfaced fail-fast rather than persisted as a corrupt
-        // recipe read_duck would later reject.
-        Recipe::build(
-            self.session_name.clone().unwrap_or_default(),
-            sources,
-            history,
-            active,
-        )
-        .expect("Session::build_recipe produces a recipe satisfying Recipe::build invariants")
+        self.persister
+            .build_recipe(&self.working_set, &self.timeline)
     }
 
-    /// Rewrite the recipe at the bound path (ADR-0034 atomic write). No-op
-    /// when no `.duck` is bound (in-memory-only session). A save failure does
-    /// NOT roll back the in-memory turn -- the user's work stays live; the
-    /// next turn retries the write and the prior recipe on disk is intact
-    /// (temp + rename never leaves a half-written target).
-    fn persist(&self) -> Result<(), SaveError> {
-        let Some(path) = &self.duck_path else {
-            return Ok(());
-        };
-        let recipe = self.build_recipe();
-        save_atomic(path, &recipe)
-    }
-
-    /// Fire [`Self::persist`] after a terminal event, capturing a failure
-    /// instead of propagating: a per-turn save error must not abort the turn
-    /// (the in-memory state is already advanced; the disk copy self-heals on
-    /// the next successful write, and the prior file is intact). The failure
-    /// is captured in [`Self::persist_error`] so the UI can surface it as a
-    /// non-blocking "未保存到磁盘" banner (ADR-0035 honest signal) -- silently
-    /// relying on the next write to self-heal would mask a disk-vs-memory
-    /// drift that closes the app losing the unsaved turns.
-    ///
-    /// ADR-0035 Decision 3 / issue #50 external-change check: before writing, hash the
-    /// file on disk and compare against [`Self::last_written_hash`]. A mismatch
-    /// means the file was edited externally (another window, a text editor, a
-    /// sync tool) since the session's last successful write -- the auto-write
-    /// is SUSPENDED and a [`PendingConflict`] is stashed for the caller
-    /// ([`Self::take_pending_conflict`]). The engine NEVER silently clobbers
-    /// the externally-edited file; the user picks reload / keep mine / save as
-    /// new. A missing file is not a conflict (nothing to clobber) -- the write
-    /// proceeds and recreates the file. A hash READ failure is treated
-    /// conservatively as a possible undetectable edit (Windows share lock, AV
-    /// scan, permission flip) and ALSO suspends the write: `save_atomic` does
-    /// a rename, not a read, so proceeding would clobber bytes the check could
-    /// not see. The check is skipped while a conflict is already pending (the
-    /// caller has not yet resolved the prior one) so the surfaced notice stays
-    /// stable.
+    /// Rewrite the recipe at the bound path (ADR-0034 atomic write). Facade
+    /// delegate to [`RecipePersister::save_if_bound`](recipe_persister::RecipePersister::save_if_bound).
     fn persist_if_bound(&mut self) {
-        let Some(path) = self.duck_path.as_deref() else {
-            return; // unbound -- in-memory-only session, nothing to persist.
-        };
-        // While a conflict is pending, the auto-write is SUSPENDED (ADR-0035
-        // Decision 3): the caller has not resolved the prior divergence, so
-        // writing would clobber the externally-edited file the user is mid-
-        // decision on, and re-detecting would overwrite the stashed notice.
-        // Skip BOTH detection AND the write; the caller's resolution drives
-        // the next step. (Without this early return the outer persist() below
-        // would run on every subsequent turn and silently clobber.)
-        if self.pending_conflict.is_some() {
-            return;
-        }
-        // External-change check (ADR-0035 Decision 3, issue #50). A baseline
-        // exists after the first successful write to a bound path (and is
-        // seeded from the file as read on `open_duck`, so an edit during resume
-        // is also caught).
-        if let Some(baseline) = self.last_written_hash.clone() {
-            match hash_file(path) {
-                Ok(Some(current)) if current != baseline => {
-                    self.pending_conflict = Some(PendingConflict {
-                        path: path.to_path_buf(),
-                        expected_hash: baseline,
-                        found_hash: current,
-                    });
-                    log::warn!(
-                        target: "toptopduck::session",
-                        "检测到 .duck 外部变更，挂起自动写盘：{}",
-                        path.display()
-                    );
-                    return; // Suspend the write -- do NOT clobber.
-                }
-                Ok(_) => {} // Match (or file missing) -> proceed.
-                Err(e) => {
-                    // Fail-safe (ADR-0035 Decision 3): a hash read failure
-                    // might hide an external edit we cannot see. Suspend
-                    // the write and surface a conflict so the user decides
-                    // (reload / keep mine / save as new) -- never silently
-                    // clobber bytes the check could not read. The
-                    // found_hash carries the read error so the UI can tell
-                    // "could not read" apart from a real hash divergence.
-                    self.pending_conflict = Some(PendingConflict {
-                        path: path.to_path_buf(),
-                        expected_hash: baseline,
-                        found_hash: format!("<read failed: {e}>"),
-                    });
-                    log::warn!(
-                        target: "toptopduck::session",
-                        "外部变更检测读 .duck 失败，保守挂起自动写盘：{}",
-                        path.display()
-                    );
-                    return;
-                }
-            }
-        }
-        if let Err(e) = self.persist() {
-            log::error!(target: "toptopduck::session", "自动保存 .duck 失败：{e}");
-            // Stash the latest failure (overwrites a prior unread one -- the
-            // most recent is the most actionable). Cleared by take_persist_error.
-            // Captured as the typed SaveError (issue #120) so the frontend
-            // narrows on `kind` and renders a locale message; the underlying
-            // io/serde/rename detail or the AlreadyOpen path rides the fold.
-            self.persist_error = Some(e);
-            return;
-        }
-        // Successful write -- refresh the baseline so the NEXT write's check
-        // compares against what we just wrote (not a stale prior baseline).
-        // hash_file best-effort: a failure leaves the old baseline, which at
-        // worst causes a false conflict on the next write (the user resolves
-        // it -- never a silent clobber).
-        if let Some(h) = hash_file(path).ok().flatten() {
-            self.last_written_hash = Some(h);
-        }
+        self.persister
+            .save_if_bound(&self.working_set, &self.timeline);
     }
 
     /// Take (read + clear) the most recent per-turn persistence failure, if
-    /// any. The command layer exposes this so the frontend can show a
-    /// non-blocking banner after each turn / source event / resume. The
-    /// failure is cleared on read so a turn that subsequently saves
-    /// successfully does not re-surface the stale error. Returns the typed
-    /// [`SaveError`] (issue #120) so the frontend narrows on `kind` and
-    /// renders a locale message instead of matching a backend Display string.
+    /// any (issue #120 typed error for IPC).
     pub fn take_persist_error(&mut self) -> Option<SaveError> {
-        self.persist_error.take()
+        self.persister.take_persist_error()
     }
 
     /// Take (read + clear) the pending external-change conflict, if any
-    /// (ADR-0035 Decision 3, issue #50). The command layer polls this after each
-    /// turn / source event / resume; a non-`None` value means the auto-write
-    /// was suspended because the `.duck` file's on-disk hash diverged from the
-    /// session's baseline, and the caller must surface the three-option
-    /// conflict UI. Cleared on read so a turn that subsequently resolves the
-    /// conflict does not re-surface the stale notice. While a conflict is
-    /// pending, [`Self::persist_if_bound`] skips further writes (and further
-    /// detection) -- the caller's resolution drives the next step.
+    /// (ADR-0035 Decision 3, issue #50).
     pub fn take_pending_conflict(&mut self) -> Option<PendingConflict> {
-        self.pending_conflict.take()
+        self.persister.take_pending_conflict()
     }
 
-    /// Resolve a pending conflict with "Keep Mine" (ADR-0035 Decision 3, issue #50):
-    /// force-write the in-memory recipe to the bound `.duck` path,
-    /// overwriting the externally-edited on-disk file. The user explicitly
-    /// chose to discard the external edit, so this is the ONE path that
-    /// overwrites -- and only ever on explicit user resolution, never silently
-    /// from the auto-write path. Refreshes the baseline hash so subsequent
-    /// auto-writes compare against the freshly written file. Clears the
-    /// pending conflict.
-    ///
-    /// Returns [`SaveError::Io`] if no path is bound (the conflict machinery
-    /// only fires on a bound session, so this is a logic bug, not a user
-    /// path). A real write failure is returned for the caller to retry or
-    /// surface; the pending conflict stays uncleared so the user can retry.
+    /// Resolve a pending conflict with "Keep Mine" (ADR-0035 Decision 3).
     pub fn conflict_keep_mine(&mut self) -> Result<(), SaveError> {
-        let path = self
-            .duck_path
-            .clone()
-            .ok_or_else(|| SaveError::Io("no .duck path bound; cannot resolve conflict".into()))?;
-        let recipe = self.build_recipe();
-        save_atomic(&path, &recipe)?;
-        // save succeeded -- the conflict IS resolved (disk now holds in-memory
-        // state, the external edit overwritten by explicit user choice).
-        // Refresh the baseline best-effort: a hash failure leaves the stale
-        // baseline, and the next persist_if_bound re-detects + self-heals
-        // (never a silent clobber). Propagating the hash error after a
-        // successful save would mislead the caller into retrying an
-        // already-applied resolution AND leave pending_conflict set, so the
-        // session contradicts itself (disk resolved, memory says not).
-        if let Some(h) = hash_file(&path).ok().flatten() {
-            self.last_written_hash = Some(h);
-        }
-        self.pending_conflict = None;
-        Ok(())
+        self.persister
+            .conflict_keep_mine(&self.working_set, &self.timeline)
     }
 
-    /// Resolve a pending conflict with "Save As New" (ADR-0035 Decision 3, issue #50):
-    /// write the in-memory recipe to a NEW path, leaving the original
-    /// (externally-edited) `.duck` file untouched. The session re-binds to the
-    /// new path (releases the old canonical key, acquires the new one), so
-    /// subsequent auto-writes target the new file. Refreshes the baseline hash
-    /// against the new file. Clears the pending conflict.
-    ///
-    /// Single-writer (ADR-0035 Decision 3): the new path must NOT be already held by
-    /// another Session in this process -- returns [`SaveError::AlreadyOpen`]
-    /// without writing, leaving the conflict pending for the user to pick a
-    /// different path. Acquiring the new key before releasing the old one is
-    /// safe: the two canonical paths differ (the new path is a different
-    /// file), so the brief overlap cannot deadlock.
+    /// Resolve a pending conflict with "Save As New" (ADR-0035 Decision 3).
     pub fn conflict_save_as_new(&mut self, new_path: PathBuf) -> Result<(), SaveError> {
-        let canonical = canonicalize_duck(&new_path).map_err(|e| SaveError::Io(e.to_string()))?;
-        // Same canonical path as the current binding: the caller meant "keep
-        // mine", not "save as new" (save-as-new would overwrite the externally
-        // edited file the user is trying to preserve). Surface as AlreadyOpen
-        // so the caller routes to keep_mine.
-        if self.duck_canonical.as_deref() == Some(canonical.as_path()) {
-            return Err(SaveError::AlreadyOpen(canonical));
-        }
-        if !try_acquire(&canonical) {
-            return Err(SaveError::AlreadyOpen(canonical));
-        }
-        let recipe = self.build_recipe();
-        if let Err(e) = save_atomic(&new_path, &recipe) {
-            // Release the just-acquired key so a different session / a retry
-            // can target the same path; the conflict stays pending.
-            release(&canonical);
-            return Err(e);
-        }
-        // save_atomic succeeded -- the conflict IS resolved. Hash best-effort
-        // (consistent with conflict_keep_mine): a hash read failure does NOT
-        // roll back the rebind. Rolling back here would leave three
-        // contradictory truths: the new file exists on disk, the session
-        // reports "still bound to the old path", and the caller gets an Err
-        // for a save that actually succeeded. last_written_hash = None makes
-        // the next persist_if_bound skip the check, which is safe (the file
-        // was just written by us). Release the old canonical AFTER recording
-        // the new one on the session so a panic between acquire and rebind
-        // cannot leak the new key (Session::drop releases whatever
-        // duck_canonical holds).
-        let new_hash = hash_file(&new_path).ok().flatten();
-        if let Some(old) = self.duck_canonical.take() {
-            release(&old);
-        }
-        self.duck_canonical = Some(canonical);
-        self.duck_path = Some(new_path);
-        self.last_written_hash = new_hash;
-        self.pending_conflict = None;
-        Ok(())
+        self.persister
+            .conflict_save_as_new(new_path, &self.working_set, &self.timeline)
     }
 
     /// The turn-only view of the timeline, cloned out for the window assembler
@@ -2873,22 +2438,17 @@ impl ApprovalSink for NullApprovalSink {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // ADR-0035 Decision 3 / issue #50: release the single-writer registry key the
-        // session holds for its bound `.duck`. registry::release logs + swallows
-        // a poisoned lock (Drop must not panic); see release's doc for the
-        // degraded mode a poison leaves behind.
-        if let Some(canonical) = self.duck_canonical.take() {
-            release(&canonical);
-        }
+        // ADR-0035 Decision 3 / issue #50: release the single-writer registry key
+        // the persister holds for its bound `.duck`. Delegated to the persister
+        // (issue #415) so the key release is owned by the persistence concern.
+        // Fired BEFORE the drop signal so the delete-path awaiter resolves
+        // precisely when the single-writer gate will succeed.
+        self.persister.release_key();
         // ADR-0063: signal the close-and-wait-release awaiter (delete path) that
-        // the canonical key has been released -- fired AFTER the release above so
-        // the awaiter resolves precisely when the single-writer gate will succeed.
-        // Single-waiter (oneshot via std mpsc); a closed receiver (waiter gone or
-        // timed out) makes send return Err, which is swallowed here. `take()`
-        // moves the sender out so the field is `None` and the later struct
-        // field-drop is pure deallocation -- dropping an `mpsc::Sender` never
-        // calls `send` (send is a `&self` method), so there is no double-fire
-        // risk to guard against; `take` is ownership transfer, not a guard.
+        // the canonical key has been released. Single-waiter (oneshot via std
+        // mpsc); a closed receiver (waiter gone or timed out) makes send return
+        // Err, which is swallowed here. `take()` moves the sender out so the
+        // field is `None` and the later struct field-drop is pure deallocation.
         if let Some(tx) = self.drop_signal.take() {
             let _ = tx.send(());
         }
