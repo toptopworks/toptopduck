@@ -28,7 +28,7 @@ use crate::ingest;
 use crate::ingest::schema::quote_ident;
 use crate::model::{
     DatasetDescriptor, LoadError, LoadOutcome, RectifyProvenance, RemoveSourceError,
-    SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, StaleReason, ThreadEntry,
+    SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, StaleReason,
 };
 
 impl super::Session {
@@ -506,14 +506,12 @@ impl super::Session {
         reference_name: &str,
         display_name: &str,
     ) {
-        self.history.push(ThreadEntry::Source(SourceLifecycleEvent {
-            kind,
-            reference_name: reference_name.to_string(),
-            display_name: display_name.to_string(),
-        }));
-        // Keep turn_audit index-aligned with history (ADR-0078, issue #319):
-        // a source event is not a turn, so its audit slot is a default.
-        self.turn_audit.push(super::TurnAudit::default());
+        self.timeline
+            .push(super::TimelineEntry::Source(SourceLifecycleEvent {
+                kind,
+                reference_name: reference_name.to_string(),
+                display_name: display_name.to_string(),
+            }));
         // ADR-0034 / ADR-0040: a source lifecycle operation also lands its
         // terminal state to the recipe atomically (changing the current
         // source set is a recipe mutation, not just a thread entry).

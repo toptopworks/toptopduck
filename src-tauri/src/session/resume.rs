@@ -25,11 +25,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use super::materializer::{Materializer, TurnDeps};
-use super::{ActiveAbandoned, ActiveResolution, ResumeError, ResumeEvent};
+use super::{
+    ActiveAbandoned, ActiveResolution, ResumeError, ResumeEvent, TimelineEntry, TurnAudit,
+};
 use crate::cancel::CancelToken;
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, RectifyProvenance, ThreadEntry, TraceEntryView, TurnFailure,
-    TurnOutcome, TurnProvenance, TurnRecord,
+    DatasetDescriptor, DatasetPrivacy, RectifyProvenance, TraceEntryView, TurnFailure, TurnOutcome,
+    TurnProvenance, TurnRecord,
 };
 use crate::persistence::recipe::{Recipe, RecipeEntry, RecipeOutcome, RecipeTraceEntry};
 use crate::persistence::registry::{release, try_acquire};
@@ -371,17 +373,18 @@ impl<'a> Resumer<'a> {
     /// conversation stops at the breakpoint). viz is `None` (ADR-0036 not
     /// persisted), so a reopened chart renders as a table (ADR-0033).
     ///
-    /// Returns the rebuilt timeline; `open_duck` assigns it to `session.history`.
+    /// Returns the rebuilt timeline; `open_duck` assigns it to `session.timeline`.
     /// The rebuild is a 1:1 map over `recipe.history[..end]` (never filtered),
-    /// so the returned length IS `end` -- `open_duck` relies on this to index-
-    /// align the per-turn audit substructures against the same slice (ADR-0078,
-    /// issue #319). Registers stale placeholders into `working_set` as a
-    /// pre-pass (ADR-0041 dead turns stay visible but carry no backing data).
-    pub(crate) fn rebuild_timeline(
+    /// so the returned length IS `end`. Each turn entry carries its persisted
+    /// audit (trace + provenance) harvested verbatim from the recipe, so
+    /// alignment is structural (issue #325). Registers stale placeholders into
+    /// `working_set` as a pre-pass (ADR-0041 dead turns stay visible but carry
+    /// no backing data).
+    pub(super) fn rebuild_timeline(
         &self,
         working_set: &mut WorkingSet,
         break_at: Option<&ReplayBreak>,
-    ) -> Result<Vec<ThreadEntry>, ResumeError> {
+    ) -> Result<Vec<TimelineEntry>, ResumeError> {
         // Locate the break turn's history index (if any) to truncate there.
         // The productive_chain is the Materialized turns in timeline order, so
         // turn K in that order maps to one history entry by reference name.
@@ -496,29 +499,36 @@ impl<'a> Resumer<'a> {
                         RecipeOutcome::Failed(failure) => TurnOutcome::Failed(failure.clone()),
                         RecipeOutcome::Cancelled => TurnOutcome::Cancelled,
                     };
-                    Ok(ThreadEntry::Turn(TurnRecord {
-                        question: turn.question.clone(),
-                        outcome,
-                        // ADR-0078 (issue #297): the display trace round-trips
-                        // from the recipe's persisted entries -- the same
-                        // bounded shape the live turn emitted, so a resumed
-                        // session expands identical trace rows. Empty for
-                        // v1-era migrated turns (their RecipeTurn carries no
-                        // trace; the v2+ synthetic single-call trace does).
-                        trace: turn.trace.iter().map(TraceEntryView::from).collect(),
-                        // Issue #381: the IPC provenance narrows to skills
-                        // (recipe::TurnProvenance also carries runtime, which
-                        // stays backend-side). RecipeTurn.skills is already the
-                        // model::SkillProvenance shape, so a verbatim clone
-                        // preserves each skill's assembly-time content_hash
-                        // for the frontend drift check.
-                        provenance: TurnProvenance {
-                            skills: turn.provenance.skills.clone(),
+                    Ok(TimelineEntry::Turn {
+                        record: TurnRecord {
+                            question: turn.question.clone(),
+                            outcome,
+                            // ADR-0078 (issue #297): the display trace round-trips
+                            // from the recipe's persisted entries -- the same
+                            // bounded shape the live turn emitted, so a resumed
+                            // session expands identical trace rows. Empty for
+                            // v1-era migrated turns (their RecipeTurn carries no
+                            // trace; the v2+ synthetic single-call trace does).
+                            trace: turn.trace.iter().map(TraceEntryView::from).collect(),
+                            // Issue #381: the IPC provenance narrows to skills
+                            // (recipe::TurnProvenance also carries runtime, which
+                            // stays backend-side). RecipeTurn.skills is already the
+                            // model::SkillProvenance shape, so a verbatim clone
+                            // preserves each skill's assembly-time content_hash
+                            // for the frontend drift check.
+                            provenance: TurnProvenance {
+                                skills: turn.provenance.skills.clone(),
+                            },
                         },
-                    }))
+                        // ADR-0078 (issue #319): the persisted audit round-trips
+                        // verbatim from the recipe turn -- trace + provenance
+                        // are read back as-is so the next persist re-writes the
+                        // same values (no re-synthesis).
+                        audit: TurnAudit::from_recipe_turn(turn),
+                    })
                 }
-                RecipeEntry::Source(ev) => Ok(ThreadEntry::Source(ev.clone())),
-                RecipeEntry::Skill(ev) => Ok(ThreadEntry::Skill(ev.clone())),
+                RecipeEntry::Source(ev) => Ok(TimelineEntry::Source(ev.clone())),
+                RecipeEntry::Skill(ev) => Ok(TimelineEntry::Skill(ev.clone())),
             })
             .collect::<Result<Vec<_>, ResumeError>>()?;
         Ok(timeline)
@@ -1002,7 +1012,7 @@ mod tests {
         let timeline = resumer.rebuild_timeline(&mut ws, None).unwrap();
         assert_eq!(timeline.len(), 2);
         for entry in &timeline {
-            let ThreadEntry::Turn(t) = entry else {
+            let TimelineEntry::Turn { record: t, .. } = entry else {
                 panic!("expected Turn, got {entry:?}")
             };
             assert!(
@@ -1043,7 +1053,7 @@ mod tests {
         let timeline = resumer.rebuild_timeline(&mut ws, Some(&brk)).unwrap();
         // Truncated at result_2: [result_1, result_2] (result_3 dropped).
         assert_eq!(timeline.len(), 2);
-        let ThreadEntry::Turn(t1) = &timeline[0] else {
+        let TimelineEntry::Turn { record: t1, .. } = &timeline[0] else {
             panic!("expected Turn, got {:?}", timeline[0])
         };
         assert!(
@@ -1051,7 +1061,7 @@ mod tests {
             "result_1 should still be Materialized: {:?}",
             t1.outcome
         );
-        let ThreadEntry::Turn(t2) = &timeline[1] else {
+        let TimelineEntry::Turn { record: t2, .. } = &timeline[1] else {
             panic!("expected Turn, got {:?}", timeline[1])
         };
         match &t2.outcome {

@@ -762,13 +762,15 @@ fn reduced_trace(entry: &TraceEntry) -> TraceEntryView {
     }
 }
 
-impl From<&TraceEntry> for RecipeTraceEntry {
-    /// The persisted trace form (ADR-0078, issue #319): the reduced projection
-    /// (drop the in-memory `tool_use_id`, empty a success call's excerpt, keep
-    /// a failure's message) is the persisted shape verbatim -- the surviving
-    /// strings stay bounded at capture time (`summarize_field` /
-    /// `TRACE_EXCERPT_MAX`), so no re-truncation.
-    fn from(entry: &TraceEntry) -> Self {
+impl RecipeTraceEntry {
+    /// Map a live in-memory [`TraceEntry`] to its persisted recipe form
+    /// (ADR-0078, issue #319): the reduced projection (drop the in-memory
+    /// `tool_use_id`, empty a success call's excerpt, keep a failure's message)
+    /// is the persisted shape verbatim -- the surviving strings stay bounded at
+    /// capture time (`summarize_field` / `TRACE_EXCERPT_MAX`), so no
+    /// re-truncation. Named (not `From`) to make the lossy + conditional
+    /// projection explicit at the call site (issue #325).
+    pub(crate) fn from_live_trace(entry: &TraceEntry) -> Self {
         let v = reduced_trace(entry);
         Self {
             name: v.name,
@@ -1022,10 +1024,10 @@ mod tests {
             success,
             result_excerpt: excerpt.into(),
         };
-        let ok = RecipeTraceEntry::from(&base(true, "42 rows"));
+        let ok = RecipeTraceEntry::from_live_trace(&base(true, "42 rows"));
         assert!(ok.success);
         assert!(ok.result_excerpt.is_empty(), "success payload dropped");
-        let failed = RecipeTraceEntry::from(&base(false, "no such table"));
+        let failed = RecipeTraceEntry::from_live_trace(&base(false, "no such table"));
         assert!(!failed.success);
         assert_eq!(
             failed.result_excerpt, "no such table",
@@ -1229,7 +1231,7 @@ mod tests {
             success: false,
             result_excerpt: String::new(),
         };
-        let _ = RecipeTraceEntry::from(&entry);
+        let _ = RecipeTraceEntry::from_live_trace(&entry);
     }
 
     /// Throwaway TurnDeps over a real in-memory connection. Mirrors the

@@ -258,7 +258,7 @@ pub(crate) fn synthetic_materialize_trace(sql: &str) -> Vec<RecipeTraceEntry> {
         result_excerpt: String::new(),
     };
     // Failure-message guard (issue #316): shared with the live trace mapping
-    // (`From<&TraceEntry> for RecipeTraceEntry`) -- a failed entry must carry
+    // (`RecipeTraceEntry::from_live_trace`) -- a failed entry must carry
     // its result message (ADR-0078 failure anchor). Trivially satisfied here
     // (the synthesized entry is always a success); kept so both construction
     // sites pin the same invariant.
