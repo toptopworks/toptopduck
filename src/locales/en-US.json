@@ -396,6 +396,7 @@
   "settings.theme.description": "Follow the system appearance, or force a light or dark palette.",
   "settings.theme.legend": "Theme",
   "settings.theme.light": "Light",
+  "settings.lazyLoading": "Loading settings…",
   "settings.title": "App Settings",
   "sidebar.ariaLabel": "Sessions",
   "sidebar.brand": "TOPTOPDuck",

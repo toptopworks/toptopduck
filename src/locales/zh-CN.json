@@ -396,6 +396,7 @@
   "settings.theme.description": "跟随系统外观，或强制使用浅色 / 深色。",
   "settings.theme.legend": "主题",
   "settings.theme.light": "浅色",
+  "settings.lazyLoading": "正在加载设置…",
   "settings.title": "应用设置",
   "sidebar.ariaLabel": "会话",
   "sidebar.brand": "TOPTOPDuck",

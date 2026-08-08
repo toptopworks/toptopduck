@@ -1556,6 +1556,9 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // collapse to recall).
     fireEvent.keyDown(window, { key: "Escape" });
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    // Reopen re-suspends in vitest (dynamic import re-evaluates per mount
+    // cycle); await the lazy module before asserting nav state.
+    await screen.findByRole("button", { name: "折叠设置导航" });
     expect(
       document.querySelector(".shell")?.classList.contains("settings-nav-collapsed"),
     ).toBe(false);

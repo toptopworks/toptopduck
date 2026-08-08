@@ -523,43 +523,52 @@ export default function App() {
                 )}
 
                 {settingsView.open && appConfig && (
-                  // Suspense (issue #423): React.lazy defers the settings
-                  // subtree's ~110 modules. The lazy promise suspends the
-                  // nearest boundary during first open; the shell ErrorBoundary
-                  // above only catches true errors, not suspense. Fallback is a
-                  // lightweight full-viewport overlay so the settings nav rail
-                  // loads without a visual flash of empty content.
-                  <Suspense
-                    fallback={
-                      <div className="settings-lazy-overlay" role="status" aria-busy="true" />
-                    }
-                  >
-                    <SettingsView
-                      collapsed={settingsNavCollapsed}
-                      appConfig={appConfig}
-                      section={liveSettingsSection}
-                      onSectionChange={setLiveSettingsSection}
-                      initialEditProfileId={settingsView.editProfileId}
-                      // Returns the IPC promise (unwrapped) so per-control commits
-                      // inside SettingsView can await + catch failures and revert
-                      // (ADR-0075). commitAppConfig itself stays optimistic /
-                      // no-rollback (ADR-0068); the revert is the view's compensating
-                      // write on a caught reject.
-                      onCommitAppConfig={(cfg) => commitAppConfig(cfg)}
-                      onRefreshKeyStatus={() => void refreshKeyStatus()}
-                      keyStatus={keyStatus}
-                      onClose={() => {
-                        setSettingsView({ open: false });
-                        setLiveSettingsSection("general");
-                        void refreshKeyStatus();
-                        // A Settings Save may have changed a keychain slot; bump
-                        // the epoch so each keep-alive picker + the ColdStartHero
-                        // refetch their overlays (ADR-0019 honest gate, issue #238;
-                        // issue #239 extends the epoch to the hero).
-                        setProfileKeyEpoch((n) => n + 1);
-                      }}
-                    />
-                  </Suspense>
+                  // Region-level boundary (ADR-0058): a chunk-load failure (hash
+                  // mismatch, network error) throws during render. Without this
+                  // boundary the shell ErrorBoundary above would catch it,
+                  // degrading the entire workspace + clearing the full Query
+                  // cache on reset. Settings is not query-driven, so onReset is
+                  // empty — retry just remounts the lazy component.
+                  <ErrorBoundary name="settings">
+                    <Suspense
+                      fallback={(
+                        <div className="settings-lazy-overlay" role="status" aria-busy="true">
+                          <span className="sr-only">
+                            <FormattedMessage
+                              id="settings.lazyLoading"
+                              defaultMessage="Loading settings…"
+                            />
+                          </span>
+                        </div>
+                      )}
+                    >
+                      <SettingsView
+                        collapsed={settingsNavCollapsed}
+                        appConfig={appConfig}
+                        section={liveSettingsSection}
+                        onSectionChange={setLiveSettingsSection}
+                        initialEditProfileId={settingsView.editProfileId}
+                        // Returns the IPC promise (unwrapped) so per-control commits
+                        // inside SettingsView can await + catch failures and revert
+                        // (ADR-0075). commitAppConfig itself stays optimistic /
+                        // no-rollback (ADR-0068); the revert is the view's compensating
+                        // write on a caught reject.
+                        onCommitAppConfig={(cfg) => commitAppConfig(cfg)}
+                        onRefreshKeyStatus={() => void refreshKeyStatus()}
+                        keyStatus={keyStatus}
+                        onClose={() => {
+                          setSettingsView({ open: false });
+                          setLiveSettingsSection("general");
+                          void refreshKeyStatus();
+                          // A Settings Save may have changed a keychain slot; bump
+                          // the epoch so each keep-alive picker + the ColdStartHero
+                          // refetch their overlays (ADR-0019 honest gate, issue #238;
+                          // issue #239 extends the epoch to the hero).
+                          setProfileKeyEpoch((n) => n + 1);
+                        }}
+                      />
+                    </Suspense>
+                  </ErrorBoundary>
                 )}
 
                 {/* Ctrl/⌘+K session-search modal (ADR-0072, issue
