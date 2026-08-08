@@ -31,7 +31,7 @@ export type DatasetLabel = Pick<DatasetDescriptor, "reference_name" | "display_n
 export function primaryReferenceName(outcome: TurnOutcome): string | undefined {
   if (outcome.kind !== "Materialized") return undefined;
   const { promotions } = outcome.data;
-  return promotions.at(-1)?.dataset.reference_name;
+  return promotions[promotions.length - 1]?.dataset.reference_name;
 }
 
 // OutcomeTone is the closed union of the three text-* utilities outcomeVisual
