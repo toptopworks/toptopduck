@@ -1,6 +1,6 @@
 # toptopduck
 
-本地优先的 AI 数据分析桌面工具：用户上传多格式数据集（Excel/CSV/JSON/Parquet），用自然语言做查询、清洗、聚合与描述性统计（含相关性、简单回归）。分析执行由**运行时**完成——内置 BYOK agent 循环，或用户选配的第三方 CLI agent；DuckDB 工作集经 MCP 工具面接入。**默认**能力以 SQL/DuckDB 原生为界——预测、机器学习、语义文本分类等默认不做，越界请求诚实拒绝并给出 in-scope 替代（见 ADR-0017）；用户可经自定义**技能**与 MCP 工具自行扩展能力，边界随之降为每技能语义。app 主动联网仅限 LLM 调用路径与用户启用的 MCP 工具；外部运行时进程自身的网络行为归其第三方。
+本地优先的 AI **数据分析 agent** 桌面工具：用户上传多格式数据集（Excel/CSV/JSON/Parquet），用自然语言做查询、清洗、聚合与描述性统计（含相关性、简单回归）。agent 的工具箱包含内置 DuckDB SQL 工具（默认）和用户配置的外部 MCP 工具——agent 根据提问自主选用合适工具，一个会话可能全程不使用 DuckDB（见 ADR-0087）。分析执行由**运行时**完成——内置 BYOK agent 循环，或用户选配的第三方 CLI agent。**默认**能力以 SQL/DuckDB 原生为界——预测、机器学习、语义文本分类等默认不做；当工具箱中存在匹配的外部工具时，agent 优先使用而非拒绝；无任何匹配工具时诚实拒绝并给出 in-scope 替代（见 ADR-0017/0079）。用户可经自定义**技能**与 MCP 工具自行扩展能力，边界随之降为每技能语义。外部工具产出的数据可经文件中介导入 DuckDB 工作集，持久化为**派生源**。app 主动联网仅限 LLM 调用路径与用户启用的 MCP 工具；外部运行时进程自身的网络行为归其第三方。
 
 ## Language
 
@@ -28,6 +28,10 @@ _Avoid_: 操作(operation)、动作(action)、事件(event)——太泛
 **中间结果 (Intermediate Result)**:
 由轮次执行轨迹内的**显式物化**工具调用产生、晋升进工作集的 Dataset（探索查询的 scratch 表不是中间结果，轮末即弃）。其**引用名**（`result_1`、`result_2`…按晋升顺序单调递增、永不复用，ADR-0022）是 SQL、recipe 链、active 指针引用它的**稳定身份**；用户可改的是**显示名**（纯展示别名，仅显示层查重），改名不波及任何已存 SQL、不断 resume 重放链（ADR-0037）。它本身也是一种 Dataset。
 _Avoid_: 临时表(temp table)、缓存(cache)、视图(view)——实现概念
+
+**派生源 (Derived Source)**:
+由外部 MCP 工具产出、经文件中介导入并持久化进会话数据目录的文件——在 Working Set 中作为源 Dataset 存在，与上传源文件同级（路径 + 内容指纹）。其来源是 agent 轮内外部工具调用（非用户上传），但一旦持久化，resume 加载、stale 检测、换源级联行为与上传源完全一致（ADR-0087）。agent 经 `read_csv_auto` / `read_json` 等 DuckDB 原生文件读取在 explore/materialize 中引用它。
+_Avoid_: 临时文件(temp file)、缓存(cache)、中间结果(intermediate result)——派生源是源数据非派生数据
 
 **会话 (Session)**:
 一个**持久化、可命名、可 resume** 的分析单元，拥有一条 recipe（见下）存在本地磁盘；重启后按 recipe 重建其工作集。打开时其工作集在内存中物化，多个打开的 Session 在内存中相互隔离（见 ADR-0027）。会话是持久化单位；临时的只是工作集，不再是“关闭即重置”。
