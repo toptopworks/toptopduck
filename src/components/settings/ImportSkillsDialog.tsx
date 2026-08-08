@@ -58,7 +58,7 @@ export function ImportSkillsDialog({ onClose }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   const sourcesKey = skillKeys.sources(customPaths);
-  const { data: sources, refetch, isFetching } = useQuery({
+  const { data: sources, error: sourcesError, refetch, isFetching } = useQuery({
     queryKey: sourcesKey,
     queryFn: () => listSkillSources(customPaths),
   });
@@ -90,10 +90,21 @@ export function ImportSkillsDialog({ onClose }: Props) {
         onClose();
         return;
       }
-      // Partial failure: fold the FIRST failure's typed reject + stay open so
-      // the user sees which import did not land (the rest imported fine). A
-      // full success closes the dialog; a full failure surfaces the same way.
-      setError(fmtError(failed[0].data, intl));
+      // Partial failure: surface the first typed reject + the total failure
+      // count so the user knows how many imports did not land. The rest
+      // imported fine; a full success closes the dialog.
+      const firstError = fmtError(failed[0].data, intl);
+      setError(
+        failed.length > 1
+          ? intl.formatMessage(
+              {
+                id: "settings.skills.importPartialFailure",
+                defaultMessage: "{error} (+{count} more)",
+              },
+              { error: firstError, count: failed.length - 1 },
+            )
+          : firstError,
+      );
     },
     onError: (e) => setError(fmtError(e, intl)),
   });
@@ -113,8 +124,8 @@ export function ImportSkillsDialog({ onClose }: Props) {
   }, [sources]);
 
   const selectedCount = selected.size;
-  const totalDiscovered = (sources ?? []).reduce(
-    (sum, source) => sum + source.skills.length,
+  const totalDiscovered = [...importableDirsBySource.values()].reduce(
+    (sum, dirs) => sum + dirs.length,
     0,
   );
 
@@ -230,6 +241,7 @@ export function ImportSkillsDialog({ onClose }: Props) {
                   defaultMessage: "Close",
                 })}
                 onClick={onClose}
+                disabled={importMutation.isPending}
               >
                 <X className="size-4" aria-hidden />
               </Button>
@@ -242,6 +254,12 @@ export function ImportSkillsDialog({ onClose }: Props) {
             />
           </DialogDescription>
         </DialogHeader>
+
+        {sourcesError && (
+          <p className="settings-error text-destructive text-sm">
+            {fmtError(sourcesError, intl)}
+          </p>
+        )}
 
         <div className="flex min-h-[40vh] max-h-[60vh] flex-col gap-1 overflow-y-auto">
           {sourceList.length === 0 ? (
@@ -330,7 +348,7 @@ export function ImportSkillsDialog({ onClose }: Props) {
             <TooltipContent side="top" align="start" sideOffset={3} className="max-w-[15rem] bg-popover text-popover-foreground border shadow-md rounded-lg px-2.5 py-2">
               <div className="space-y-1">
                 <p className="text-sm font-medium">
-                  <FormattedMessage id="settings.skills.importModeHintAria" defaultMessage="Import mode" />
+                  <FormattedMessage id="settings.skills.importModeHintTitle" defaultMessage="Import mode" />
                 </p>
                 <p className="text-muted-foreground text-sm">
                   {mode === "link" ? (
@@ -350,7 +368,7 @@ export function ImportSkillsDialog({ onClose }: Props) {
             disabled={importMutation.isPending}
           >
             <FormattedMessage
-              id="settings.skills.cancel"
+              id="common.cancel"
               defaultMessage="Cancel"
             />
           </Button>

@@ -727,7 +727,7 @@ function SkillDrawer({
             </Button>
           )}
           <Button type="button" variant="ghost" onClick={onCancel}>
-            <FormattedMessage id="settings.skills.cancel" defaultMessage="Cancel" />
+            <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
           </Button>
           {!isLinked && (
             <Button type="button" onClick={handleSave} disabled={saving}>
