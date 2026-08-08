@@ -1,0 +1,225 @@
+// Turn-domain pure functions extracted from Thread.tsx (issue #427).
+// These are stateless transforms that do not depend on React — they map
+// TurnRecord / TurnOutcome / stale anchors / skill provenance into the
+// primitive values the rail components render.
+
+import type { IntlShape } from "react-intl";
+import {
+  Ban,
+  CircleOff,
+  MessageCircleQuestion,
+  Table2,
+  TriangleAlert,
+  type LucideIcon,
+} from "lucide-react";
+import type { DatasetDescriptor, StaleAnchor, StaleReason } from "../../types/dataset";
+import type { SkillEntry } from "../../types/skills";
+import type { ThreadEntry, TurnOutcome, TurnRecord } from "../../types/thread";
+
+// A compact label slice for the active-chip match (ADR-0047): the thread only
+// needs the names to detect when a question explicitly points at a dataset, so
+// the descriptor is narrowed at the call site. Pick keeps the structural tie to
+// the single source of truth (DatasetDescriptor) rather than hand-mirroring
+// field names that would silently drift on a rename.
+export type DatasetLabel = Pick<DatasetDescriptor, "reference_name" | "display_name">;
+
+// The reference name of a Materialized turn's primary result (ADR-0084): the
+// promotion chain's tail -- the result the turn's answer references. The stale
+// ghost and the result link both key on the primary; antecedent promotions
+// (earlier in the chain) are intermediate results. undefined for a
+// non-Materialized outcome (or an illegal empty chain).
+export function primaryReferenceName(outcome: TurnOutcome): string | undefined {
+  if (outcome.kind !== "Materialized") return undefined;
+  const { promotions } = outcome.data;
+  return promotions[promotions.length - 1]?.dataset.reference_name;
+}
+
+// OutcomeTone is the closed union of the three text-* utilities outcomeVisual
+// emits. Typing the return field as OutcomeTone (not string) lets the compiler
+// enforce the ADR-0047 hue mapping: a typo like "text-primay", or a stray warm
+// class on the Textual/Cancelled branch (which ADR-0017 forbids), is a type
+// error rather than a silent broken render.
+export type OutcomeTone = "text-primary" | "text-muted-foreground" | "text-destructive";
+
+// A turn's outcome mapped to its Lucide glyph + accessible label + color tone
+// (ADR-0047/0050 four-outcome visual language, ADR-0052 i18n). A stale
+// Materialized turn swaps Table2 for CircleOff (ghost). The label rides the
+// icon's aria-label so the outcome kind is conveyed to assistive tech and is
+// queryable in tests without relying on color alone. The tone rides the
+// outcome-icon span as a Tailwind text-* utility over the ADR-0050 token, so
+// the four-way color encoding (A=primary / B=muted / C=destructive / D=muted,
+// per ADR-0047) is owned by the component and flips with .dark alongside the
+// token -- no [data-outcome] hue hook in styles.css (retired by ADR-0067).
+export function outcomeVisual(
+  intl: IntlShape,
+  outcome: TurnOutcome,
+  stale: boolean,
+): { Icon: LucideIcon; label: string; tone: OutcomeTone } {
+  if (stale && outcome.kind === "Materialized") {
+    return {
+      Icon: CircleOff,
+      label: intl.formatMessage({ id: "thread.outcome.stale", defaultMessage: "Result stale" }),
+      // The ghost already dims the whole card via opacity-50 (TurnCard); the
+      // CircleOff glyph reads as muted-foreground so the icon and the dimmed
+      // card agree on "dead" -- distinct from a fresh Materialized's primary.
+      tone: "text-muted-foreground",
+    };
+  }
+  switch (outcome.kind) {
+    case "Materialized":
+      return {
+        Icon: Table2,
+        label: intl.formatMessage({
+          id: "thread.outcome.materialized",
+          defaultMessage: "Result ready",
+        }),
+        // A materialized round = teal --primary (ADR-0047 A hue).
+        tone: "text-primary",
+      };
+    case "Textual":
+      return {
+        // ADR-0050 specifies `MessageSquareQuestion` for outcome B, but that
+        // glyph is not exported by the currently pinned lucide-react; using
+        // `MessageCircleQuestion` is a deliberate DEVIATION from ADR-0050
+        // (question-mark semantics preserved). Follow-up: restore
+        // MessageSquareQuestion once lucide ships it, OR amend ADR-0050 to make
+        // MessageCircleQuestion the canonical glyph. The label still names
+        // the sub-kind (Agent vs Clarify vs Refuse) so the split is legible
+        // without it.
+        Icon: MessageCircleQuestion,
+        // B is intentionally neutral (ADR-0047 B!=C; an honest answer /
+        // refuse / clarify must NOT read as failure, so no warm tint).
+        tone: "text-muted-foreground",
+        label:
+          outcome.data.text_kind === "Agent"
+            ? intl.formatMessage({
+                id: "thread.outcome.agent",
+                defaultMessage: "Answered",
+              })
+            : outcome.data.text_kind === "Clarify"
+              ? intl.formatMessage({
+                  id: "thread.outcome.clarify",
+                  defaultMessage: "Needs clarification",
+                })
+              : intl.formatMessage({
+                  id: "thread.outcome.refused",
+                  defaultMessage: "Cannot fulfill",
+                }),
+      };
+    case "Failed":
+      return {
+        Icon: TriangleAlert,
+        // C failure round = --destructive (ADR-0047 C hue).
+        tone: "text-destructive",
+        label: intl.formatMessage({ id: "thread.outcome.failed", defaultMessage: "Failed" }),
+      };
+    case "Cancelled":
+      return {
+        Icon: Ban,
+        // D cancelled round = weakened grey (ADR-0047 D hue); the card also
+        // dims via opacity-60 (TurnCard) per ADR-0028 Why 2.
+        tone: "text-muted-foreground",
+        label: intl.formatMessage({
+          id: "thread.outcome.cancelled",
+          defaultMessage: "Cancelled",
+        }),
+      };
+    default: {
+      const unhandled: never = outcome;
+      throw new Error(`unhandled turn outcome: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+// Detect whether a turn's question explicitly names a working-set dataset
+// (ADR-0047 conditional active chip). Most turns act implicitly on the prior
+// step, so the chip is absent by default; it lights up only when the user typed
+// a dataset name, making the chip a signal rather than noise.
+// Matches on the display label (what the user sees/types) first, then the
+// reference name (for users who know the technical id); the first hit wins.
+export function findMentionedDataset(
+  question: string,
+  labels: ReadonlyArray<DatasetLabel>,
+): DatasetLabel | null {
+  for (const label of labels) {
+    if (question.includes(label.display_name)) return label;
+  }
+  for (const label of labels) {
+    if (question.includes(label.reference_name)) return label;
+  }
+  return null;
+}
+
+// Locate the nearest SourceLifecycleEvent after a turn whose reference_name +
+// kind match a stale anchor (ADR-0047 chip-trace). Causality guarantees the
+// invalidating event follows the turn; "nearest one" resolves same-source
+// repeated lifecycles. No event_id is stored (ADR-0047 YAGNI) -- the match is
+// derived from the existing thread. StaleReason is now the invalidating subset
+// of SourceLifecycleKind (types/lifecycle.ts), so anchor.reason compares to entry.data.kind
+// directly with no conversion function. Returns null when no event follows
+// (resume / stale-map inconsistency); the caller renders the chip disabled then.
+export function findStaleSourceIdx(
+  entries: ThreadEntry[],
+  turnIdx: number,
+  anchor: StaleAnchor,
+): number | null {
+  for (let i = turnIdx + 1; i < entries.length; i++) {
+    const e = entries[i];
+    if (
+      e.entry === "Source" &&
+      e.data.reference_name === anchor.reference_name &&
+      e.data.kind === anchor.reason
+    ) {
+      return i;
+    }
+  }
+  return null;
+}
+
+// Concise verb for the stale causal chip (ADR-0041 honest split, ADR-0052 i18n):
+// a Replaced source -> "Source updated" (the SQL still physically runs on the
+// new backing; v1 just does not recompute); a Deleted source -> "Upstream
+// deleted" (the reference name is gone, truly unavailable). The wording split
+// signals whether the user could re-ask to recover the result. Distinct from
+// the working-set list's workingSet.staleRow ICU message (a full sentence) --
+// the chip is a compact, clickable label.
+export function staleChipVerb(intl: IntlShape, reason: StaleReason): string {
+  switch (reason) {
+    case "Replaced":
+      return intl.formatMessage({
+        id: "thread.staleChip.replaced",
+        defaultMessage: "Source updated",
+      });
+    case "Deleted":
+      return intl.formatMessage({
+        id: "thread.staleChip.deleted",
+        defaultMessage: "Upstream deleted",
+      });
+    default: {
+      const unhandled: never = reason;
+      throw new Error(`unhandled stale reason: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+// Issue #381: the turn's mounted skills whose content changed after this turn
+// was recorded. Each provenance skill carries its SKILL.md SHA-256 at assembly
+// time; the registry's current SkillEntry.content_hash is the same hash
+// recomputed at load. A mismatch means the skill was edited after this answer
+// -- the TurnCard surfaces a drift badge so a reader can tell the answer may be
+// stale. An empty content_hash (v3->v4 migration, no baseline) never trips the
+// check; a name the registry no longer carries is the SkillMarker's "no longer
+// exists" case (issue #366), not a content drift -- omitted here.
+export function selectDriftedSkills(
+  record: TurnRecord,
+  skillIndex: ReadonlyMap<string, SkillEntry> | undefined,
+): string[] {
+  return record.provenance.skills
+    .filter((s) => {
+      if (s.content_hash === "") return false;
+      const current = skillIndex?.get(s.name);
+      if (!current) return false;
+      return current.content_hash !== s.content_hash;
+    })
+    .map((s) => s.name);
+}
