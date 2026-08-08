@@ -748,6 +748,7 @@ mod tests {
     /// #401's NamedTempFile + .expect pattern).
     #[test]
     #[cfg(windows)]
+    #[ignore = "requires Windows Developer Mode / admin for symlink_dir (issue #402)"]
     fn materialize_refuses_symlink_escape_at_gateway_windows() {
         use crate::session::materializer::RealMaterializer;
         use std::os::windows::fs::symlink_dir;
@@ -898,10 +899,11 @@ mod tests {
             lower.contains("disabled"),
             "lockdown backstop refuses an in-bounds read_*: {err}"
         );
-        // The lockdown error ("disabled by configuration") classifies as
-        // Resource via classify_duckdb_error, so materialize wraps it as a
-        // resource-cap error (explore wraps it as "SQL failed" -- the two
-        // surfaces classify differently, but both refuse the read_*).
+        // The lockdown error ("disabled by configuration") is classified as
+        // Resource at the sandbox-primitive boundary and carried through the
+        // runner, so the kind propagates through materialize's promotion
+        // (explore wraps the detail as "SQL failed" -- the two surfaces
+        // present the error differently, but both refuse the read_*).
         assert!(
             err.contains("result exceeds a resource cap"),
             "lockdown refusal reads as a resource-cap error: {err}"

@@ -24,7 +24,7 @@ use std::path::Path;
 use duckdb::Connection;
 
 use crate::cancel::CancelToken;
-use crate::guardrail::{classify_duckdb_error, ExecError, ExecErrorKind};
+use crate::guardrail::{ExecError, ExecErrorKind};
 use crate::ingest::schema::quote_ident;
 use crate::model::{DatasetDescriptor, DatasetPrivacy, RectifyProvenance};
 use crate::sandbox_sql::{
@@ -137,7 +137,7 @@ impl Materializer for RealMaterializer {
                 ExecErrorKind::Resource,
                 format!("结果行数（{rows}）超过上限 {cap}"),
             ),
-            SandboxExecError::Runtime(s) => ExecError::new(classify_duckdb_error(&s), s),
+            SandboxExecError::Runtime { kind, detail } => ExecError::new(kind, detail),
         })?;
 
         // Install the new result onto admin (Value mirror). A failure can leave

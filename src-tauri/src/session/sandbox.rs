@@ -204,7 +204,8 @@ fn describe_columns(conn: &Connection, table: &str) -> Result<Vec<(String, Strin
 /// (attach/mirror/install) are tool-controlled, so a failure is operational --
 /// classification only picks retry-vs-abort, and most land Runtime.
 fn duck_err(e: duckdb::Error) -> ExecError {
-    ExecError::new(classify_duckdb_error(&e.to_string()), e.to_string())
+    let detail = e.to_string();
+    ExecError::new(classify_duckdb_error(&detail), detail)
 }
 
 #[cfg(test)]

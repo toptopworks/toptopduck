@@ -126,7 +126,7 @@ fn run_explore(
         SandboxExecError::Resource { rows, cap } => format!(
             "result row count ({rows}) exceeds the cap {cap}; add a LIMIT or narrow the query"
         ),
-        SandboxExecError::Runtime(s) => format!("SQL failed: {s}"),
+        SandboxExecError::Runtime { detail, .. } => format!("SQL failed: {detail}"),
     })?;
 
     // Tail: derive the shape FROM THE SANDBOX (explore never persists). No
@@ -570,6 +570,7 @@ mod tests {
     /// #401's NamedTempFile + .expect pattern).
     #[test]
     #[cfg(windows)]
+    #[ignore = "requires Windows Developer Mode / admin for symlink_dir (issue #402)"]
     fn explore_refuses_symlink_escape_at_gateway_windows() {
         use crate::tools::test_support::inert_deps_with_temp;
         use std::os::windows::fs::symlink_dir;
