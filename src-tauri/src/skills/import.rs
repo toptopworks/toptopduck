@@ -148,6 +148,19 @@ fn scan_source_children(source: &Path, existing_names: &HashSet<String>) -> Vec<
         if !fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) {
             continue;
         }
+        // Skip hidden directories (dot-prefixed). Codex nests its system
+        // skills under `.system/`; the dot prefix marks it as an internal
+        // layout directory, not a spec-shaped skill directory (the Agent
+        // Skills spec has no hidden directories). Without this filter,
+        // `.system` surfaces as invalid noise in the user-skills source
+        // (issue #418).
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with('.'))
+        {
+            continue;
+        }
         match load_skill(&path) {
             Ok(loaded) => {
                 let status = if existing_names.contains(&loaded.name) {
@@ -350,6 +363,42 @@ mod tests {
             .collect();
         assert_eq!(by_name["free"], DiscoveredSkillStatus::Importable);
         assert_eq!(by_name["taken"], DiscoveredSkillStatus::AlreadyExists);
+    }
+
+    /// Hidden directories (dot-prefixed) are skipped so Codex's `.system/`
+    /// layout directory never surfaces as invalid noise in the user-skills
+    /// source, while a separate candidate targeting `.system/` discovers the
+    /// built-in system skills (issue #418).
+    #[test]
+    fn discover_skips_hidden_dirs_and_finds_codex_system_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        let codex_skills = tmp.path().join(".codex").join("skills");
+        fs::create_dir_all(&codex_skills).unwrap();
+        // User-installed skill at the top level.
+        put_skill(&codex_skills, "hatch-pet", "User skill.\n");
+        // Hidden `.system` dir with two system skills inside.
+        let system = codex_skills.join(".system");
+        fs::create_dir_all(&system).unwrap();
+        put_skill(&system, "skill-creator", "System skill.\n");
+        put_skill(&system, "imagegen", "System skill.\n");
+
+        let candidates = vec![
+            candidate_at("codex-cli", "Codex CLI", &codex_skills),
+            candidate_at("codex-cli-system", "Codex CLI (system)", &system),
+        ];
+
+        let sources = discover_skill_sources(&candidates, &existing(&[]));
+        assert_eq!(sources.len(), 2);
+
+        // User source: only hatch-pet; .system is hidden and never listed.
+        let user_src = sources.iter().find(|s| s.id == "codex-cli").unwrap();
+        assert_eq!(user_src.skills.len(), 1);
+        assert_eq!(user_src.skills[0].name, "hatch-pet");
+
+        // System source: both system skills, no hidden dirs leaked.
+        let sys_src = sources.iter().find(|s| s.id == "codex-cli-system").unwrap();
+        let sys_names: Vec<&str> = sys_src.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(sys_names, vec!["imagegen", "skill-creator"]);
     }
 
     /// A symlinked source library (the whole `~/.claude/skills` is a link)
