@@ -1,7 +1,7 @@
 ---
 version: alpha
 name: toptopduck
-description: A local-first AI data analysis workbench for desktop (Tauri + React). Teal (#0d9488) is the sole brand accent on a dual-mode canvas — clean white in light mode, a dark surface (#0f1410) in dark mode with a subtle green undertone. Compact 6px base radius and 4px spacing signal developer-tool ergonomics. The system font stack carries all UI text; the system monospace stack renders SQL, data, and code. The structural signature is a three-column shell (session sidebar + conversation rail + workspace) with independently collapsible panels. No decorative gradients or drop shadows — depth comes from surface brightness steps and hairline borders.
+description: A local-first AI data analysis workbench for desktop (Tauri + React). Teal (#0d9488) is the sole brand accent on a dual-mode canvas — clean white in light mode, a dark surface (#0f1410) in dark mode with a subtle green undertone. Compact 6px base radius and 4px spacing signal developer-tool ergonomics. The system font stack carries all UI text; the system monospace stack renders SQL, data, and code. The structural signature is a three-column shell (session sidebar + conversation rail + workspace) with independently collapsible panels. No decorative gradients — depth comes from surface brightness steps, hairline borders, and a 3-tier functional shadow scale (shadow-sm for in-content cards, shadow-md for popovers, shadow-lg for dialogs).
 
 colors:
   # --- Brand (mode-invariant) ---
@@ -100,6 +100,12 @@ typography:
     fontWeight: 500
     lineHeight: 1.0
     letterSpacing: 0
+  badge:
+    fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+    fontSize: 12px
+    fontWeight: 500
+    lineHeight: 1.0
+    letterSpacing: 0
   nav-link:
     fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
     fontSize: 14px
@@ -171,8 +177,8 @@ components:
     backgroundColor: "{colors.card}"
     textColor: "{colors.ink}"
     typography: "{typography.body-md}"
-    rounded: "{rounded.lg}"
-    padding: 16px
+    rounded: "{rounded.xl}"
+    padding: 24px
   card-dark:
     backgroundColor: "{colors.card-dark}"
     textColor: "{colors.ink-dark}"
@@ -183,7 +189,7 @@ components:
     textColor: "{colors.ink}"
     typography: "{typography.body-md}"
     rounded: "{rounded.lg}"
-    padding: 16px
+    padding: 24px
   popover-dark:
     backgroundColor: "{colors.popover-dark}"
     textColor: "{colors.ink-dark}"
@@ -233,14 +239,14 @@ components:
   badge-primary:
     backgroundColor: "{colors.primary}"
     textColor: "{colors.primary-foreground}"
-    typography: "{typography.label-caps}"
-    rounded: "{rounded.sm}"
+    typography: "{typography.badge}"
+    rounded: "{rounded.md}"
     padding: 2px 8px
   badge-secondary:
     backgroundColor: "{colors.muted}"
     textColor: "{colors.muted-foreground}"
-    typography: "{typography.label-caps}"
-    rounded: "{rounded.sm}"
+    typography: "{typography.badge}"
+    rounded: "{rounded.md}"
     padding: 2px 8px
   badge-secondary-dark:
     backgroundColor: "{colors.muted-dark}"
@@ -248,8 +254,8 @@ components:
   badge-accent:
     backgroundColor: "{colors.accent}"
     textColor: "{colors.accent-foreground}"
-    typography: "{typography.label-caps}"
-    rounded: "{rounded.sm}"
+    typography: "{typography.badge}"
+    rounded: "{rounded.md}"
     padding: 2px 8px
   badge-accent-dark:
     backgroundColor: "{colors.accent-dark}"
@@ -312,7 +318,7 @@ The structural signature is a **three-column shell**: session sidebar (220px) + 
 - Dark canvas (`{colors.canvas-dark}` — #0f1410) carries a green undertone visually harmonious with teal.
 - Compact workbench density: 6px base radius, 36px button height, 40px topbar, 14px body text.
 - Three-column collapsible shell as the structural signature.
-- Brightness-step elevation: depth from surface luminance differences, never drop shadows.
+- Brightness-step elevation: depth from surface luminance differences + a 3-tier functional shadow scale.
 - Hairline-only borders (1px) for all visual separation.
 - System font stack across every text role; system monospace on every code/SQL/data surface.
 - Data-first surfaces: result tables, SQL traces, and charts are primary content — not cards or hero sections.
@@ -384,6 +390,7 @@ The **system monospace stack** (`ui-monospace, SFMono-Regular, Menlo, Monaco, Co
 | `{typography.label-caps}` | 12px | 600 | 0.05em | `text-xs` uppercase | Badges, section labels — render uppercase via CSS `text-transform: uppercase` |
 | `{typography.code}` | 13px | 400 | 0 | `font-mono` | SQL, data values, file paths — system monospace |
 | `{typography.button}` | 14px | 500 | 0 | `text-sm font-medium` | Button labels |
+| `{typography.badge}` | 12px | 500 | 0 | `text-xs font-medium` | Badge labels — medium weight, no uppercase |
 | `{typography.nav-link}` | 14px | 500 | 0 | `text-sm` | Sidebar entries, session list items |
 
 ### Principles
@@ -391,7 +398,7 @@ The **system monospace stack** (`ui-monospace, SFMono-Regular, Menlo, Monaco, Co
 - **Weight discipline.** Display/headlines at 600, body at 400, buttons/nav at 500. Never use weight 700.
 - **Negative tracking on display only.** `{typography.display}` and `{typography.headline-lg}` carry negative letter-spacing for tighter reading. Body and below have zero tracking.
 - **Monospace on every code surface.** SQL, data values, trace output, file paths, and result identifiers always render in the system monospace stack — never in the sans stack.
-- **Uppercase labels.** `{typography.label-caps}` defines the typographic properties (weight, tracking, size); apply CSS `text-transform: uppercase` at the element level.
+- **Uppercase labels.** `{typography.label-caps}` defines the typographic properties (weight, tracking, size); apply CSS `text-transform: uppercase` at the element level. (Note: badge variants use `{typography.badge}` — medium weight, no uppercase — for a softer workbench feel; `{typography.label-caps}` is reserved for explicit section labels.)
 - **Tailwind mapping.** The Tailwind column shows the nearest utility class. Ad-hoc values like `text-[0.82rem]` and `text-[0.85rem]` are visual-polish variants within the `{typography.body-sm}` range.
 
 ## Layout
@@ -421,7 +428,19 @@ Desktop workbench density — tighter than a web app, looser than an IDE. The ca
 
 ## Elevation & Depth
 
-The system uses **brightness-step elevation** — surfaces step up in luminance to create depth. No drop shadows at any level.
+The system uses **brightness-step elevation** — surfaces step up in luminance to create depth — supplemented by a **3-tier functional shadow scale** for floating layers and in-content card lift (issue #222, ADR-0067 (2)). Decorative shadows are forbidden; every shadow usage maps to one of three functional tiers.
+
+### Shadow Tiers
+
+| Tier | Utility | Use |
+|---|---|---|
+| In-content | `shadow-sm` | Cards, textual-card outcomes, working-set panels — lifts content above the canvas |
+| Floating popover | `shadow-md` | Menus, dropdowns, select content, session-entry menu |
+| Floating dialog | `shadow-lg` | Modals, alert dialogs, switch thumb |
+
+These ride the Tailwind shadow scale directly (no custom `--shadow-*` token per ADR-0067 "no new elevation tokens"). The shadow serves the same depth purpose as brightness steps — it is functional, not decorative.
+
+### Surface Levels
 
 | Level | Light Treatment | Dark Treatment | Use |
 |---|---|---|---|
@@ -431,8 +450,9 @@ The system uses **brightness-step elevation** — surfaces step up in luminance 
 | Hairline | 1px `{colors.border}` (#e3e3e8) | 1px `{colors.border-dark}` (#2a2f2a) | All visual separation |
 
 ### Depth Principles
-- **Hairlines carry all separation.** Every card, divider, and input border is a 1px hairline. There are no 2px borders, no shadow tiers, no elevation levels.
-- **Light mode relies on hairline contrast.** Cards share the same white as the canvas — the 1px `{colors.border}` is the only visual edge.
+- **Hairlines carry primary separation.** Every card, divider, and input border is a 1px hairline. There are no 2px borders.
+- **Shadows lift floating layers and in-content cards.** The 3-tier scale (`shadow-sm` / `shadow-md` / `shadow-lg`) provides functional depth — in-content cards lift above the canvas, popovers float above content, dialogs float above all. No decorative shadow usage.
+- **Light mode relies on hairline contrast + shadow-sm.** Cards share the same white as the canvas — the 1px `{colors.border}` plus `shadow-sm` defines the visual edge.
 - **Dark mode uses brightness steps.** Canvas (#0f1410) → Card (#181b18) is a subtle but perceptible luminance step. The green undertone in both values is visually consistent with the teal brand.
 - **Focus rings use teal.** `{colors.primary}` at 2px outline-offset. Not a shadow — a color ring.
 
@@ -444,10 +464,10 @@ The system uses **brightness-step elevation** — surfaces step up in luminance 
 |---|---|---|
 | `{rounded.none}` | 0px | Reserved |
 | `{rounded.xs}` | 4px | Inline code chips, small tags |
-| `{rounded.sm}` | 4px | Badges, compact rows |
-| `{rounded.md}` | 6px | Buttons, form inputs, text fields — the canonical CTA radius |
-| `{rounded.lg}` | 8px | Cards, conversation rail, popovers, dialogs |
-| `{rounded.xl}` | 10px | Large feature containers (rare) |
+| `{rounded.sm}` | 4px | Inline code chips, small tags |
+| `{rounded.md}` | 6px | Badges, buttons, form inputs, text fields — the canonical radius |
+| `{rounded.lg}` | 8px | Conversation rail, popovers, dialogs |
+| `{rounded.xl}` | 10px | Cards (shadcn default) |
 | `{rounded.pill}` | 9999px | Status indicators, warning dots |
 
 Compact developer-ergonomic radii. The 6px base (vs shadcn's 10px default) signals "workbench tool" rather than "consumer app." Cards at 8px sit one step above buttons — enough to read as a container without softening the precise aesthetic.
@@ -471,9 +491,9 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 
 ### Cards & Containers
 
-**`card` / `card-dark`** — Generic content card. Background `{colors.card}`, text `{colors.ink}`, rounded `{rounded.lg}` (8px), padding 16px, 1px `{colors.border}` hairline. Used for turn cards, result containers, settings sections.
+**`card` / `card-dark`** — Generic content card. Background `{colors.card}`, text `{colors.ink}`, rounded `{rounded.xl}` (10px, shadcn default), padding 24px (`py-6 px-6`), 1px `{colors.border}` hairline, `shadow-sm` lift. Used for turn cards, result containers, settings sections.
 
-**`popover` / `popover-dark`** — Dialog, dropdown, and popover surface. Background `{colors.popover}`, rounded `{rounded.lg}`, padding 16px. Same surface as card.
+**`popover` / `popover-dark`** — Dialog, dropdown, and popover surface. Background `{colors.popover}`, rounded `{rounded.lg}`, padding 24px (`p-6`). Same surface as card.
 
 ### Buttons
 
@@ -485,11 +505,11 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 
 ### Inputs
 
-**`text-input` / `text-input-dark`** — Transparent background, 1px `{colors.border}` hairline, text `{colors.ink}` / `{colors.ink-dark}`, type `{typography.body-md}`, rounded `{rounded.md}` (6px), padding 8px × 12px, height 36px. Focus state replaces the border with a 2px `{colors.primary}` ring.
+**`text-input` / `text-input-dark`** — Transparent background, 1px `{colors.border}` hairline, text `{colors.ink}` / `{colors.ink-dark}`, type `{typography.body-md}`, rounded `{rounded.md}` (6px), padding 8px × 12px, height 36px. Focus state replaces the border with a 2px `{colors.primary}` ring. The shadcn Input/Textarea copy-in carries a mobile-first `text-base md:text-sm` responsive override (16px below the `md` breakpoint, then 14px) — a vestigial Safari auto-zoom prevention idiom from the shadcn default; Tauri desktop ignores the mobile breakpoint.
 
 ### Badges
 
-**`badge-primary`** — Teal pill. Background `{colors.primary}`, text white, type `{typography.label-caps}` (uppercase), rounded `{rounded.sm}`, padding 2px × 8px. Used for the active-dataset chip.
+**`badge-primary`** — Teal pill. Background `{colors.primary}`, text white, type `{typography.badge}` (12px / 500, no uppercase), rounded `{rounded.md}` (6px), padding 2px × 8px. Used for the active-dataset chip.
 
 **`badge-secondary` / `badge-secondary-dark`** — Muted pill. Background `{colors.muted}`, text `{colors.muted-foreground}`. Used for session count, metadata tags.
 
@@ -517,7 +537,7 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 
 ### Do
 - Reserve `{colors.primary}` (teal) for primary CTAs, active states, and focus rings. One accent, used scarcely.
-- Use brightness-step surfaces for depth. Cards sit one luminance step above canvas — no shadows needed.
+- Use brightness-step surfaces + functional shadow tiers for depth. In-content cards carry `shadow-sm`; floating popovers carry `shadow-md`; dialogs carry `shadow-lg`.
 - Render every SQL snippet, data value, and file path in the system monospace stack via `{typography.code}`.
 - Keep button height at 36px and topbar at 40px — compact workbench density.
 - Use 1px hairlines (`{colors.border}` / `{colors.border-dark}`) for all visual separation.
@@ -527,7 +547,7 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 
 ### Don't
 - Don't introduce a secondary brand color. Teal is the only chromatic accent.
-- Don't use drop shadows. Hairlines and brightness steps carry all depth.
+- Don't use decorative drop shadows. The 3-tier functional shadow scale (`shadow-sm` / `shadow-md` / `shadow-lg`) is the only shadow usage — no ad-hoc shadow values, no custom shadow tokens.
 - Don't use font weight 700. Display caps at 600; body stays at 400.
 - Don't animate layout-bound properties (width, height, top, left). Animate `grid-template-columns` and `opacity` for panel transitions.
 - Don't use `{colors.warning}` as a solid fill for alert backgrounds. Use tinted backgrounds (`bg-warning/10`) with warning indicator dots.
