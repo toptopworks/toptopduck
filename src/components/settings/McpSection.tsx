@@ -492,7 +492,7 @@ function McpServerRow({
 }: McpServerRowProps) {
   const intl = useIntl();
   return (
-    <div data-testid={`mcp-server-row-${server.id}`} className="px-4 py-3">
+    <div data-testid={`mcp-server-row-${server.id}`} className="hover:bg-accent/50 px-4 py-3">
       <div className="flex items-center gap-3">
         <button
           type="button"
