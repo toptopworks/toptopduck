@@ -562,49 +562,49 @@ mod tests {
         assert_eq!(deps.working_set.len(), 0);
     }
 
-    // TODO: re-enable after enabling Windows Developer Mode or CI with admin
-    // /// Windows variant of `explore_refuses_symlink_escape_at_gateway`. Uses
-    // /// `symlink_dir` (mirrors `fs_acl::symlink_escape_is_refused_windows`).
-    // /// Hard-panics if symlink creation fails (no Developer Mode) -- a silent
-    // /// skip would make this test a vacuous pass on local Windows environments
-    // /// without Developer Mode, with no signal (issue #402, consistent with
-    // /// #401's NamedTempFile + .expect pattern).
-    // #[test]
-    // #[cfg(windows)]
-    // fn explore_refuses_symlink_escape_at_gateway_windows() {
-    //     use crate::tools::test_support::inert_deps_with_temp;
-    //     use std::os::windows::fs::symlink_dir;
-    //     use tempfile::TempDir;
-    //
-    //     let conn = Connection::open_in_memory().unwrap();
-    //     let mut ws = crate::workingset::WorkingSet::default();
-    //     let sources = std::collections::HashMap::new();
-    //     let temp = TempDir::new().unwrap();
-    //     let outside = TempDir::new().unwrap();
-    //     // A directory symlink INSIDE temp pointing at the outside dir.
-    //     let link = temp.path().join("alias");
-    //     symlink_dir(outside.path(), &link)
-    //         .expect("Windows symlink creation needs Developer Mode / admin");
-    //     let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
-    //     let cancel = CancelToken::new();
-    //     let err = dispatch(
-    //         &json!({"sql": format!(
-    //             "SELECT * FROM read_csv_auto('{}')", link.to_string_lossy()
-    //         )}),
-    //         &mut deps,
-    //         &cancel,
-    //     )
-    //     .unwrap_err();
-    //     assert!(
-    //         err.contains("outside the allowed"),
-    //         "symlink escape refused: {err}"
-    //     );
-    //     assert!(
-    //         err.contains("\\alias") || err.contains("/alias"),
-    //         "error names the symlink path: {err}"
-    //     );
-    //     assert_eq!(deps.working_set.len(), 0);
-    // }
+    /// Windows variant of `explore_refuses_symlink_escape_at_gateway`. Uses
+    /// `symlink_dir` (mirrors `fs_acl::symlink_escape_is_refused_windows`).
+    /// Hard-panics if symlink creation fails (no Developer Mode) -- a silent
+    /// skip would make this test a vacuous pass on local Windows environments
+    /// without Developer Mode, with no signal (issue #402, consistent with
+    /// #401's NamedTempFile + .expect pattern).
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "requires Windows Developer Mode / admin for symlink_dir (issue #402)"]
+    fn explore_refuses_symlink_escape_at_gateway_windows() {
+        use crate::tools::test_support::inert_deps_with_temp;
+        use std::os::windows::fs::symlink_dir;
+        use tempfile::TempDir;
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = crate::workingset::WorkingSet::default();
+        let sources = std::collections::HashMap::new();
+        let temp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        // A directory symlink INSIDE temp pointing at the outside dir.
+        let link = temp.path().join("alias");
+        symlink_dir(outside.path(), &link)
+            .expect("Windows symlink creation needs Developer Mode / admin");
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+        let cancel = CancelToken::new();
+        let err = dispatch(
+            &json!({"sql": format!(
+                "SELECT * FROM read_csv_auto('{}')", link.to_string_lossy()
+            )}),
+            &mut deps,
+            &cancel,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("outside the allowed"),
+            "symlink escape refused: {err}"
+        );
+        assert!(
+            err.contains("\\alias") || err.contains("/alias"),
+            "error names the symlink path: {err}"
+        );
+        assert_eq!(deps.working_set.len(), 0);
+    }
 
     /// Design-B lockdown backstop (issue #293): a `read_*` call whose path the
     /// gateway whitelist ALLOWS (a file inside the session temp dir) still does

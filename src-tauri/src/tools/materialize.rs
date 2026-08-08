@@ -740,52 +740,52 @@ mod tests {
         assert_eq!(deps.working_set.next_result_number(), 1);
     }
 
-    // TODO: re-enable after enabling Windows Developer Mode or CI with admin
-    // /// Windows variant of `materialize_refuses_symlink_escape_at_gateway`. Uses
-    // /// `symlink_dir` (mirrors `fs_acl::symlink_escape_is_refused_windows`).
-    // /// Hard-panics if symlink creation fails (no Developer Mode) -- a silent
-    // /// skip would make this test a vacuous pass on local Windows environments
-    // /// without Developer Mode, with no signal (issue #402, consistent with
-    // /// #401's NamedTempFile + .expect pattern).
-    // #[test]
-    // #[cfg(windows)]
-    // fn materialize_refuses_symlink_escape_at_gateway_windows() {
-    //     use crate::session::materializer::RealMaterializer;
-    //     use std::os::windows::fs::symlink_dir;
-    //     use tempfile::TempDir;
-    //
-    //     let conn = Connection::open_in_memory().unwrap();
-    //     let mut ws = crate::workingset::WorkingSet::default();
-    //     let sources = std::collections::HashMap::new();
-    //     let temp = TempDir::new().unwrap();
-    //     let outside = TempDir::new().unwrap();
-    //     // A directory symlink INSIDE temp pointing at the outside dir.
-    //     let link = temp.path().join("alias");
-    //     symlink_dir(outside.path(), &link)
-    //         .expect("Windows symlink creation needs Developer Mode / admin");
-    //     let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
-    //     let cancel = CancelToken::new();
-    //     let mut materializer = RealMaterializer;
-    //     let err = dispatch(
-    //         &json!({"sql": format!(
-    //             "SELECT * FROM read_csv_auto('{}')", link.to_string_lossy()
-    //         )}),
-    //         &mut deps,
-    //         &cancel,
-    //         &mut materializer,
-    //     )
-    //     .unwrap_err();
-    //     assert!(
-    //         err.contains("outside the allowed"),
-    //         "symlink escape refused: {err}"
-    //     );
-    //     assert!(
-    //         err.contains("\\alias") || err.contains("/alias"),
-    //         "error names the symlink path: {err}"
-    //     );
-    //     assert_eq!(deps.working_set.len(), 0);
-    //     assert_eq!(deps.working_set.next_result_number(), 1);
-    // }
+    /// Windows variant of `materialize_refuses_symlink_escape_at_gateway`. Uses
+    /// `symlink_dir` (mirrors `fs_acl::symlink_escape_is_refused_windows`).
+    /// Hard-panics if symlink creation fails (no Developer Mode) -- a silent
+    /// skip would make this test a vacuous pass on local Windows environments
+    /// without Developer Mode, with no signal (issue #402, consistent with
+    /// #401's NamedTempFile + .expect pattern).
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "requires Windows Developer Mode / admin for symlink_dir (issue #402)"]
+    fn materialize_refuses_symlink_escape_at_gateway_windows() {
+        use crate::session::materializer::RealMaterializer;
+        use std::os::windows::fs::symlink_dir;
+        use tempfile::TempDir;
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = crate::workingset::WorkingSet::default();
+        let sources = std::collections::HashMap::new();
+        let temp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        // A directory symlink INSIDE temp pointing at the outside dir.
+        let link = temp.path().join("alias");
+        symlink_dir(outside.path(), &link)
+            .expect("Windows symlink creation needs Developer Mode / admin");
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+        let cancel = CancelToken::new();
+        let mut materializer = RealMaterializer;
+        let err = dispatch(
+            &json!({"sql": format!(
+                "SELECT * FROM read_csv_auto('{}')", link.to_string_lossy()
+            )}),
+            &mut deps,
+            &cancel,
+            &mut materializer,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("outside the allowed"),
+            "symlink escape refused: {err}"
+        );
+        assert!(
+            err.contains("\\alias") || err.contains("/alias"),
+            "error names the symlink path: {err}"
+        );
+        assert_eq!(deps.working_set.len(), 0);
+        assert_eq!(deps.working_set.next_result_number(), 1);
+    }
 
     /// AC#4 (issue #310): explore and materialize return the same structured
     /// FsAcl message for the same out-of-bounds `read_*` path. Both surfaces
@@ -900,10 +900,10 @@ mod tests {
             "lockdown backstop refuses an in-bounds read_*: {err}"
         );
         // The lockdown error ("disabled by configuration") is classified as
-        // Resource by the sandbox runner at construction time, so the carried
-        // kind propagates through materialize's promotion (explore wraps the
-        // detail as "SQL failed" -- the two surfaces classify differently, but
-        // both refuse the read_*).
+        // Resource at the sandbox-primitive boundary and carried through the
+        // runner, so the kind propagates through materialize's promotion
+        // (explore wraps the detail as "SQL failed" -- the two surfaces
+        // present the error differently, but both refuse the read_*).
         assert!(
             err.contains("result exceeds a resource cap"),
             "lockdown refusal reads as a resource-cap error: {err}"

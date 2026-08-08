@@ -185,10 +185,12 @@ pub(crate) fn run_sandboxed_read(
     // Sandbox lifecycle: fresh instance -> attach sources READ_ONLY -> mirror
     // prior results -> lockdown (refuse read_*). Dropped at end of scope
     // (lockdown is irreversible, so the connection is single-use).
-    let sandbox_conn = sandbox::open().map_err(runtime)?;
-    sandbox::attach_sources(&sandbox_conn, deps.working_set, deps.source_files).map_err(runtime)?;
-    sandbox::mirror_results(&sandbox_conn, deps.admin_conn, deps.working_set).map_err(runtime)?;
-    sandbox::lockdown(&sandbox_conn).map_err(runtime)?;
+    let sandbox_conn = sandbox::open().map_err(lift_exec_error)?;
+    sandbox::attach_sources(&sandbox_conn, deps.working_set, deps.source_files)
+        .map_err(lift_exec_error)?;
+    sandbox::mirror_results(&sandbox_conn, deps.admin_conn, deps.working_set)
+        .map_err(lift_exec_error)?;
+    sandbox::lockdown(&sandbox_conn).map_err(lift_exec_error)?;
 
     // Mid-check: cancel arrived during setup -> honest Cancelled, not the
     // later CREATE's generic failure.
@@ -217,11 +219,7 @@ pub(crate) fn run_sandboxed_read(
         return Err(SandboxExecError::Cancelled);
     }
     if let Some(e) = create_err {
-        let detail = e.to_string();
-        return Err(SandboxExecError::Runtime {
-            kind: classify_duckdb_error(&detail),
-            detail,
-        });
+        return Err(runtime_from_duckdb(e));
     }
 
     // Row-count governor: count == cap+1 -> the true result exceeded the cap
@@ -232,13 +230,7 @@ pub(crate) fn run_sandboxed_read(
         |r| r.get(0),
     ) {
         Ok(rows) => rows,
-        Err(e) => {
-            let detail = e.to_string();
-            return Err(SandboxExecError::Runtime {
-                kind: classify_duckdb_error(&detail),
-                detail,
-            });
-        }
+        Err(e) => return Err(runtime_from_duckdb(e)),
     };
     if rows as u64 > deps.result_row_cap {
         return Err(SandboxExecError::Resource {
@@ -261,13 +253,23 @@ pub(crate) fn run_sandboxed_read(
     })
 }
 
+/// Classify a raw DuckDB error and wrap it as a [`SandboxExecError::Runtime`].
+/// The kind is derived from the detail via `classify_duckdb_error`, guaranteeing
+/// `kind == classify_duckdb_error(&detail)` at every direct construction site.
+fn runtime_from_duckdb(e: duckdb::Error) -> SandboxExecError {
+    let detail = e.to_string();
+    SandboxExecError::Runtime {
+        kind: classify_duckdb_error(&detail),
+        detail,
+    }
+}
+
 /// Lift a sandbox-primitive [`ExecError`] (open / attach / mirror / lockdown)
-/// into the runner's narrow [`SandboxExecError::Runtime`]. Both the retry-
-/// routing kind and the honest detail are preserved -- the kind was already
-/// classified by `duck_err` / `classify_duckdb_error` at the sandbox-primitive
-/// boundary, so callers (explore formats the detail; materialize uses the kind
-/// directly) consume it without re-inferring from the detail string.
-fn runtime(e: ExecError) -> SandboxExecError {
+/// into the runner's narrow [`SandboxExecError::Runtime`], preserving both the
+/// retry-routing kind and the honest detail. The kind was already classified at
+/// the sandbox-primitive boundary (`duck_err` / `classify_duckdb_error`), so it
+/// is carried verbatim without re-inferring.
+fn lift_exec_error(e: ExecError) -> SandboxExecError {
     SandboxExecError::Runtime {
         kind: e.kind,
         detail: e.detail,
