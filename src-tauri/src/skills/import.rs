@@ -399,6 +399,10 @@ mod tests {
         let sys_src = sources.iter().find(|s| s.id == "codex-cli-system").unwrap();
         let sys_names: Vec<&str> = sys_src.skills.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(sys_names, vec!["imagegen", "skill-creator"]);
+        assert!(sys_src
+            .skills
+            .iter()
+            .all(|s| s.status == DiscoveredSkillStatus::Importable));
     }
 
     /// A symlinked source library (the whole `~/.claude/skills` is a link)
