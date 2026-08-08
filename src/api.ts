@@ -10,7 +10,7 @@ import type {
   SheetGuidance,
 } from "./types/dataset";
 import type {
-  DiscoveredServer,
+  DiscoveryResult,
   ImportSource,
   McpProbeResult,
   McpServerConfig,
@@ -418,12 +418,13 @@ export async function probeMcpServer(server: McpServerConfig): Promise<McpProbeR
 
 // Discover MCP servers from an external tool's config (issue #390). The backend
 // reads the source's local config file (Claude Desktop / Codex), parses server
-// definitions, and returns DiscoveredServer entries for the import checklist.
-// Returns an empty array when the config file is not found (NOT an error).
+// definitions, and returns a DiscoveryResult (servers + config file path) for
+// the import checklist. Returns empty servers when the config file is not found
+// (NOT an error).
 export async function discoverMcpServers(
   source: ImportSource,
-): Promise<DiscoveredServer[]> {
-  return invoke<DiscoveredServer[]>("discover_mcp_servers", { source });
+): Promise<DiscoveryResult> {
+  return invoke<DiscoveryResult>("discover_mcp_servers", { source });
 }
 
 // --- Skills registry (issue #362, ADR-0086) --------------------------------

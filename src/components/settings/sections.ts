@@ -7,7 +7,7 @@
 // carries the section id set + order.
 
 /** The settings panes (ADR-0065 + #362 skills + #387 MCP): General / Skills /
- *  Profiles / Engine / Privacy / MCP. */
+ *  MCP / Profiles / Engine / Privacy. */
 export type SettingsSection =
   | "general"
   | "skills"
@@ -24,8 +24,8 @@ export type SettingsSection =
 export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSection> = [
   "general",
   "skills",
+  "mcp",
   "profiles",
   "engine",
   "privacy",
-  "mcp",
 ];

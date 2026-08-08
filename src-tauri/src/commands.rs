@@ -972,7 +972,7 @@ pub async fn probe_mcp_server(
 #[tauri::command]
 pub fn discover_mcp_servers(
     source: crate::mcp::import::ImportSource,
-) -> Result<Vec<crate::mcp::import::DiscoveredServer>, String> {
+) -> Result<crate::mcp::import::DiscoveryResult, String> {
     crate::mcp::import::discover(source)
 }
 
