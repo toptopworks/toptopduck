@@ -96,6 +96,23 @@ describe("normalizeJsonToConfig", () => {
     expect(config).toEqual(json);
   });
 
+  it("rejects internal format with malformed transport (missing command)", () => {
+    // transport.type is "stdio" but command/args are missing — must NOT
+    // pass through as-is (would crash downstream). Falls through to map
+    // parsing where "transport" is not a valid server entry.
+    const json = {
+      transport: { type: "stdio" },
+    };
+    expect(() => normalizeJsonToConfig(json, "")).toThrow();
+  });
+
+  it("rejects internal format with invalid transport type", () => {
+    const json = {
+      transport: { type: "weird" },
+    };
+    expect(() => normalizeJsonToConfig(json, "")).toThrow();
+  });
+
   it("detects SSE transport from type field", () => {
     const json = {
       "sse-server": {
@@ -333,5 +350,29 @@ describe("configToWebJson", () => {
     // → routes to keychain_env_keys (value dropped, consistent round-trip).
     expect(restored.keychain_env_keys).toContain("API_KEY");
     expect(restored.timeout_ms).toBe(30000);
+  });
+
+  it("round-trips http transport with headers through normalizeJsonToConfig", () => {
+    const original: McpServerConfig = {
+      id: "srv-1",
+      display_name: "api-server",
+      transport: { type: "http", url: "https://example.com/mcp" },
+      env: { "X-Custom": "val" },
+      keychain_env_keys: ["Authorization"],
+      timeout_ms: 45000,
+    };
+
+    const json = configToWebJson(original);
+    const restored = normalizeJsonToConfig(JSON.parse(json), "srv-1");
+
+    expect(restored.display_name).toBe("api-server");
+    expect(restored.transport).toEqual({
+      type: "http",
+      url: "https://example.com/mcp",
+    });
+    // http → serialized as "headers", parsed back via config.headers path.
+    expect(restored.env).toEqual({ "X-Custom": "val" });
+    expect(restored.keychain_env_keys).toContain("Authorization");
+    expect(restored.timeout_ms).toBe(45000);
   });
 });

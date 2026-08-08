@@ -56,12 +56,30 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/** Type guard: validates that an unknown value is a well-formed McpTransport
+ *  (per-variant fields checked: stdio needs string command + string[] args;
+ *  sse/http needs string url). */
+function isMcpTransport(v: unknown): v is McpTransport {
+  if (!isRecord(v) || typeof v.type !== "string") return false;
+  if (v.type === "stdio") {
+    return (
+      typeof v.command === "string" &&
+      Array.isArray(v.args) &&
+      v.args.every((a) => typeof a === "string")
+    );
+  }
+  if (v.type === "sse" || v.type === "http") {
+    return typeof v.url === "string";
+  }
+  return false;
+}
+
 /** Whether a parsed object already matches our internal McpServerConfig shape
- *  (has a `transport` with a `type` discriminator). */
-function isInternalConfig(v: unknown): boolean {
-  if (!isRecord(v)) return false;
-  const t = v.transport;
-  return isRecord(t) && typeof t.type === "string";
+ *  (has a well-formed `transport` with per-variant fields validated). */
+function isInternalConfig(
+  v: unknown,
+): v is { transport: McpTransport } & Record<string, unknown> {
+  return isRecord(v) && isMcpTransport(v.transport);
 }
 
 /** Normalize a parsed JSON value into a McpServerConfig. Throws on invalid
@@ -81,10 +99,12 @@ export function normalizeJsonToConfig(
     return {
       id: typeof raw.id === "string" ? raw.id : fallbackId,
       display_name: typeof raw.display_name === "string" ? raw.display_name : "",
-      transport: raw.transport as McpTransport,
+      transport: raw.transport,
       env: isRecord(raw.env) ? stringifyRecord(raw.env) : {},
       keychain_env_keys: Array.isArray(raw.keychain_env_keys)
-        ? raw.keychain_env_keys.map(String)
+        ? raw.keychain_env_keys.filter(
+            (x): x is string => typeof x === "string",
+          )
         : [],
       timeout_ms:
         typeof raw.timeout_ms === "number" ? raw.timeout_ms : null,

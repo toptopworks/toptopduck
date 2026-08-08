@@ -256,6 +256,7 @@
   "settings.mcp.form.modeForm": "Form",
   "settings.mcp.form.modeJson": "JSON",
   "settings.mcp.form.name": "Name",
+  "settings.mcp.form.secretsRequireFormMode": "Secret keys detected ({keys}). Switch to Form mode to enter their values before saving.",
   "settings.mcp.form.type": "Type",
   "settings.mcp.form.timeoutMs": "Timeout (ms)",
   "settings.mcp.form.url": "URL",

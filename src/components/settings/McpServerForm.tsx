@@ -249,16 +249,11 @@ export function McpServerForm({
         setJsonError(result.error);
         return;
       }
-      // Re-inject secret key names from BOTH the Form→JSON switch
-      // (pendingSecrets — captured before keychain_env_keys was stripped from
-      // the JSON view) AND the parsed JSON itself (web-format paste may carry
-      // new secret keys detected by normalizeJsonToConfig).
-      result.config.keychain_env_keys = [
-        ...new Set([
-          ...result.config.keychain_env_keys,
-          ...Object.keys(pendingSecrets.current),
-        ]),
-      ];
+      // Key names come solely from the parsed JSON (configToWebJson includes
+      // secret keys as blanked entries; normalizeJsonToConfig re-detects them
+      // on parse-back). pendingSecrets only restores VALUES via syncFromJson —
+      // do NOT merge key names back, as the user may have intentionally
+      // deleted them from the JSON.
       syncFromJson(result.config);
       setJsonError(null);
     }
@@ -294,6 +289,24 @@ export function McpServerForm({
       config = result.config;
     } else {
       config = buildConfigFromForm();
+    }
+
+    // In JSON mode the normalizer detects secret key names but drops their
+    // values (secrets must go to the OS keychain, not config). Block save
+    // and prompt the user to enter values via Form mode, otherwise the
+    // config is written with keychain_env_keys that have no keychain entries.
+    if (mode === "json" && config.keychain_env_keys.length > 0) {
+      setError(
+        intl.formatMessage(
+          {
+            id: "settings.mcp.form.secretsRequireFormMode",
+            defaultMessage:
+              "Secret keys detected ({keys}). Switch to Form mode to enter their values before saving.",
+          },
+          { keys: config.keychain_env_keys.join(", ") },
+        ),
+      );
+      return;
     }
 
     // Capture secret values from the form's env entries (only populated in

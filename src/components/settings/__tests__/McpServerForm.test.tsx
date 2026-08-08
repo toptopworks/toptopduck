@@ -675,4 +675,70 @@ describe("McpServerForm (issue #388)", () => {
     // LOG_LEVEL is a non-secret env var.
     expect(screen.getByDisplayValue("LOG_LEVEL")).toBeInTheDocument();
   });
+
+  it("blocks JSON-mode save when secret keys are detected", () => {
+    const onSaved = vi.fn();
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({ id: "", display_name: "" })}
+        isEdit={false}
+        onSaved={onSaved}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("JSON"));
+    const textarea = screen.getByTestId("mcp-json-editor").querySelector("textarea")!;
+    fireEvent.change(textarea, {
+      target: {
+        value: JSON.stringify({
+          "secret-server": {
+            command: "npx",
+            args: ["-y", "@pkg/server"],
+            env: {
+              API_KEY: "sk-xxx",
+            },
+          },
+        }, null, 2),
+      },
+    });
+
+    // Click Add — save should be blocked with an error.
+    fireEvent.click(screen.getByText("Add"));
+
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(screen.getByText(/Secret keys detected/)).toBeInTheDocument();
+  });
+
+  it("does not restore deleted secret keys when switching JSON to Form", () => {
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({
+          id: "",
+          display_name: "",
+          env: { LOG_LEVEL: "info" },
+          keychain_env_keys: ["API_KEY"],
+        })}
+        isEdit={false}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    // Switch to JSON — captures pendingSecrets with API_KEY.
+    fireEvent.click(screen.getByText("JSON"));
+    const textarea = screen.getByTestId("mcp-json-editor").querySelector("textarea")!;
+
+    // Edit JSON: remove API_KEY from the serialized config.
+    const edited = JSON.parse(textarea.value);
+    const key = Object.keys(edited)[0];
+    delete edited[key].env.API_KEY;
+    fireEvent.change(textarea, { target: { value: JSON.stringify(edited, null, 2) } });
+
+    // Switch back to Form.
+    fireEvent.click(screen.getByText("Form"));
+
+    // API_KEY should NOT be present — user deleted it from JSON.
+    expect(screen.queryByDisplayValue("API_KEY")).not.toBeInTheDocument();
+  });
 });
