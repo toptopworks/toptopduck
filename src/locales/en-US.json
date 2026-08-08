@@ -398,6 +398,7 @@
   "settings.theme.light": "Light",
   "settings.lazyLoading": "Loading settings…",
   "settings.title": "App Settings",
+  "sessionPane.lazyLoading": "Loading session…",
   "sidebar.ariaLabel": "Sessions",
   "sidebar.brand": "TOPTOPDuck",
   "sidebar.collapse": "Collapse session bar",

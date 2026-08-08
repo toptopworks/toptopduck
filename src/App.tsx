@@ -1,7 +1,14 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { FormattedMessage, IntlProvider } from "react-intl";
-import { SessionPane } from "./session/SessionPane";
+// Lazy-loaded SessionPane (issue #424): defers the ~123-module session subtree
+// (Thread, ResultView, QuestionBar, ComposerContextPanel, DatasetDetail,
+// WorkingSetList, etc.) from cold-start. Only fetched when the user opens or
+// resumes a session. The named export is reshaped to a default export for
+// React.lazy. Once loaded, keep-alive behavior is unchanged (ADR-0051).
+const SessionPane = lazy(() =>
+  import("./session/SessionPane").then((m) => ({ default: m.SessionPane })),
+);
 import { SessionSearchDialog } from "./session/SessionSearchDialog";
 import { SessionSidebar } from "./session/SessionSidebar";
 import { useApprovalEvents } from "./session/useApprovalEvents";
@@ -454,68 +461,84 @@ export default function App() {
                       onOpenSettingsProfiles={openSettingsProfiles}
                     />
                   )}
-                  {openSessions.map((s) => (
-                    <div
-                      key={s.sid}
-                      className={`session-pane-layer${s.sid === activeSessionId ? " active" : " hidden"}`}
-                      aria-hidden={s.sid !== activeSessionId}
-                    >
-                      {/* ADR-0058 L2 session partition: per-session isolation. A
+                  {/* Suspense at the map outer level (not per-item, issue #424):
+                      all sessions share one lazy boundary so the fallback
+                      renders once for the first session, not per pane. */}
+                  <Suspense
+                    fallback={(
+                      <div className="session-pane-lazy-fallback" role="status" aria-busy="true">
+                        <span className="sr-only">
+                          <FormattedMessage
+                            id="sessionPane.lazyLoading"
+                            defaultMessage="Loading session…"
+                          />
+                        </span>
+                      </div>
+                    )}
+                  >
+                    {openSessions.map((s) => (
+                      <div
+                        key={s.sid}
+                        className={`session-pane-layer${s.sid === activeSessionId ? " active" : " hidden"}`}
+                        aria-hidden={s.sid !== activeSessionId}
+                      >
+                        {/* ADR-0058 L2 session partition: per-session isolation. A
                     render crash inside this SessionPane that the Thread /
                     ResultView granular boundaries (inside SessionPane) do not
                     catch degrades only THIS session's pane -- sibling panes
                     stay alive. The key bump remounts the whole pane; onReset
                     drops its cache so the remount re-fetches fresh. */}
-                      <ErrorBoundary
-                        name="session"
-                        onReset={() => {
-                          void queryClient.removeQueries({ queryKey: ["session", s.sid] });
-                        }}
-                      >
-                        <SessionPane
-                          key={s.sid}
-                          sessionId={s.sid}
-                          pendingIngestPath={s.pendingIngestPath}
-                          onIngestConsumed={() => clearPendingIngest(s.sid)}
-                          railCollapsed={railCollapsed}
-                          onToggleRail={toggleRailCollapse}
-                          sessionName={s.name}
-                          approvalEvents={approvalEvents}
-                          // Issue #365 AC #4: the composer "+" panel's skill
-                          // section footer hops to the settings SkillsSection.
-                          // openSettings is shell-owned (ADR-0065 overlay).
-                          onOpenSettingsSkills={() => openSettings({ section: "skills" })}
-                          // ADR-0083 (issue #351): the composer "+" degrades to
-                          // a pure add-files button when the registry has no
-                          // configured MCP server (and no skill system exists
-                          // yet). False until app-config resolves -- the
-                          // degraded button is a safe transient (ingest never
-                          // needs app-config).
-                          mcpConfigured={
-                            appConfig !== null && appConfig.mcp_servers.servers.length > 0
-                          }
-                          providerPicker={
-                          // ADR-0071 (issue #238): the composer provider/model
-                          // picker is app-level state (active profile + writes +
-                          // the settings-open path) rendered at each session's
-                          // QuestionBar edge. Absent until app-config resolves;
-                          // the picker renders only in the visible pane but is
-                          // mounted per keep-alive session like QuestionBar.
-                            appConfig
-                              ? {
-                                  provider: appConfig.provider,
-                                  onSwitchActive: (id) => void switchActiveProfile(id),
-                                  onSwitchModel: (model) =>
-                                    void switchActiveProfileModel(model),
-                                  onOpenSettings: () => openSettings(),
-                                  profileKeyEpoch,
-                                }
-                              : undefined
-                          }
-                        />
-                      </ErrorBoundary>
-                    </div>
-                  ))}
+                        <ErrorBoundary
+                          name="session"
+                          onReset={() => {
+                            void queryClient.removeQueries({ queryKey: ["session", s.sid] });
+                          }}
+                        >
+                          <SessionPane
+                            key={s.sid}
+                            sessionId={s.sid}
+                            pendingIngestPath={s.pendingIngestPath}
+                            onIngestConsumed={() => clearPendingIngest(s.sid)}
+                            railCollapsed={railCollapsed}
+                            onToggleRail={toggleRailCollapse}
+                            sessionName={s.name}
+                            approvalEvents={approvalEvents}
+                            // Issue #365 AC #4: the composer "+" panel's skill
+                            // section footer hops to the settings SkillsSection.
+                            // openSettings is shell-owned (ADR-0065 overlay).
+                            onOpenSettingsSkills={() => openSettings({ section: "skills" })}
+                            // ADR-0083 (issue #351): the composer "+" degrades to
+                            // a pure add-files button when the registry has no
+                            // configured MCP server (and no skill system exists
+                            // yet). False until app-config resolves -- the
+                            // degraded button is a safe transient (ingest never
+                            // needs app-config).
+                            mcpConfigured={
+                              appConfig !== null && appConfig.mcp_servers.servers.length > 0
+                            }
+                            providerPicker={
+                              // ADR-0071 (issue #238): the composer provider/model
+                              // picker is app-level state (active profile + writes +
+                              // the settings-open path) rendered at each session's
+                              // QuestionBar edge. Absent until app-config resolves;
+                              // the picker renders only in the visible pane but is
+                              // mounted per keep-alive session like QuestionBar.
+                              appConfig
+                                ? {
+                                    provider: appConfig.provider,
+                                    onSwitchActive: (id) => void switchActiveProfile(id),
+                                    onSwitchModel: (model) =>
+                                      void switchActiveProfileModel(model),
+                                    onOpenSettings: () => openSettings(),
+                                    profileKeyEpoch,
+                                  }
+                                : undefined
+                            }
+                          />
+                        </ErrorBoundary>
+                      </div>
+                    ))}
+                  </Suspense>
                 </main>
 
                 {shellError && (

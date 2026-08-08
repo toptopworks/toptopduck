@@ -398,6 +398,7 @@
   "settings.theme.light": "浅色",
   "settings.lazyLoading": "正在加载设置…",
   "settings.title": "应用设置",
+  "sessionPane.lazyLoading": "正在加载会话…",
   "sidebar.ariaLabel": "会话",
   "sidebar.brand": "TOPTOPDuck",
   "sidebar.collapse": "收起会话栏",

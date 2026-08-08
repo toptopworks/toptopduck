@@ -271,6 +271,9 @@
 .session-pane-host { grid-column: 2; grid-row: 3; overflow: hidden; position: relative; }
 .session-pane-layer { position: absolute; inset: 0; }
 .session-pane-layer.hidden { display: none; }
+/* Lazy-load fallback (issue #424): fills the host like a session-pane-layer
+ * while the SessionPane chunk resolves. */
+.session-pane-lazy-fallback { position: absolute; inset: 0; }
 /* ADR-0067 (issue #182): the .cold-start-title bespoke font-size (1.4rem) +
  * margin and the .primary-cta bespoke primary teal styling retired onto
  * utility (text-[1.4rem] + m-0 mb-2) + a shadcn Button default variant sized
