@@ -16,7 +16,7 @@ Git-flow (AVH edition): `main` + `develop`, with `feature/ bugfix/ release/ hotf
 
 ### Design system
 
-For all UI generation, follow the design system in DESIGN.md
+For all UI generation, follow the design system in `DESIGN.md`. Before writing `.tsx`/`.css`, read the relevant sections; after writing, self-audit colors, typography, radius, shadows, borders, spacing, and states against the tokens defined there.
 
 ### Domain docs
 
