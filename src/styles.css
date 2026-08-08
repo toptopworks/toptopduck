@@ -192,10 +192,15 @@
  * hand-kept copy would drift on the next migration slice.
  */
 .shell.settings-mode { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-.shell.settings-mode > :not(.settings-overlay):not(.topbar) { display: none; }
+.shell.settings-mode > :not(.settings-overlay):not(.settings-lazy-overlay):not(.topbar) { display: none; }
 /* The overlay drops below the persistent titlebar (row 2) and rides the row
  * height instead of 100vh (which would overflow past the 40px strip). */
 .shell.settings-mode .settings-overlay { grid-row: 2; height: 100%; }
+/* Settings lazy fallback (issue #423): the Suspense fallback for React.lazy
+ * SettingsView. Rides the same row 2 as the real overlay so the titlebar
+ * stays put. An empty grid-placed div is sufficient — the load is a brief
+ * first-open chunk fetch, not a long operation. */
+.shell.settings-mode .settings-lazy-overlay { grid-row: 2; height: 100%; }
 /* ADR-0075 (issue #281): the overlay is now a full-height rail + content grid.
  * The retired single settings header + footer split into the rail's top (brand +
  * back) / bottom (connection row + gear) and each pane's hero; the rail spans
