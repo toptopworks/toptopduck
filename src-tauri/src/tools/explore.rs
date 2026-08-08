@@ -540,7 +540,7 @@ mod tests {
         // A symlink INSIDE temp pointing at the outside file. Canonicalization
         // follows the link, so the resolved path is outside temp_root.
         let link = temp.path().join("alias.csv");
-        symlink(&outside_file, &link).unwrap();
+        symlink(&outside_file, &link).expect("symlink creation failed");
         let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
         let cancel = CancelToken::new();
         let err = dispatch(
@@ -565,8 +565,9 @@ mod tests {
     /// Windows variant of `explore_refuses_symlink_escape_at_gateway`. Uses
     /// `symlink_dir` (mirrors `fs_acl::symlink_escape_is_refused_windows`).
     /// Hard-panics if symlink creation fails (no Developer Mode) -- a silent
-    /// skip would make this test a vacuous pass on Windows CI with no signal
-    /// (issue #402, consistent with #401's NamedTempFile + .expect pattern).
+    /// skip would make this test a vacuous pass on local Windows environments
+    /// without Developer Mode, with no signal (issue #402, consistent with
+    /// #401's NamedTempFile + .expect pattern).
     #[test]
     #[cfg(windows)]
     fn explore_refuses_symlink_escape_at_gateway_windows() {
@@ -597,7 +598,10 @@ mod tests {
             err.contains("outside the allowed"),
             "symlink escape refused: {err}"
         );
-        assert!(err.contains("alias"), "error names the symlink path: {err}");
+        assert!(
+            err.contains("\\alias") || err.contains("/alias"),
+            "error names the symlink path: {err}"
+        );
         assert_eq!(deps.working_set.len(), 0);
     }
 
