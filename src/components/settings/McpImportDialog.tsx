@@ -353,7 +353,7 @@ export function McpImportDialog({ open, onClose, onImported }: McpImportDialogPr
             <Loader2 className="text-muted-foreground size-6 animate-spin" aria-hidden />
             <span className="text-muted-foreground ml-2 text-sm">
               <FormattedMessage
-                id="settings.mcp.import.importing"
+                id="common.importing"
                 defaultMessage="Importing…"
               />
             </span>
@@ -393,7 +393,7 @@ export function McpImportDialog({ open, onClose, onImported }: McpImportDialogPr
                 >
                   <Download className="size-4" aria-hidden />
                   <FormattedMessage
-                    id="settings.mcp.import.import"
+                    id="common.importCount"
                     defaultMessage="Import {count}"
                     values={{ count: selected.size }}
                   />

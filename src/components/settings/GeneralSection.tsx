@@ -82,7 +82,7 @@ export function GeneralSection({ appConfig, onCommitImmediate }: GeneralSectionP
               <SelectContent>
                 <SelectItem value="system">
                   <Monitor aria-hidden />
-                  <FormattedMessage id="settings.theme.system" defaultMessage="Follow system" />
+                  <FormattedMessage id="common.followSystem" defaultMessage="Follow system" />
                 </SelectItem>
                 <SelectItem value="light">
                   <Sun aria-hidden />
@@ -121,7 +121,7 @@ export function GeneralSection({ appConfig, onCommitImmediate }: GeneralSectionP
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="system">
-                  <FormattedMessage id="settings.locale.system" defaultMessage="Follow system" />
+                  <FormattedMessage id="common.followSystem" defaultMessage="Follow system" />
                 </SelectItem>
                 <SelectItem value="zh-CN">
                   <FormattedMessage id="settings.locale.zhCN" defaultMessage="简体中文" />

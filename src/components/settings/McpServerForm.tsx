@@ -413,12 +413,12 @@ export function McpServerForm({
           {saving && <Loader2 className="size-4 animate-spin" aria-hidden />}
           {saving ? (
             <FormattedMessage
-              id="settings.mcp.form.saving"
+              id="common.saving"
               defaultMessage="Saving…"
             />
           ) : (
             <FormattedMessage
-              id="settings.mcp.form.save"
+              id="common.save"
               defaultMessage="Save"
             />
           )}
@@ -516,7 +516,7 @@ function FormView({
         title={(
           <Label htmlFor="mcp-display-name">
             <FormattedMessage
-              id="settings.mcp.form.displayName"
+              id="common.displayName"
               defaultMessage="Display name"
             />
           </Label>

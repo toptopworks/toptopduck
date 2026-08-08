@@ -143,7 +143,7 @@ export function ProviderModelField({
         >
           {testBusy ? (
             <FormattedMessage
-              id="settings.profiles.test.testing"
+              id="common.testing"
               defaultMessage="Testing…"
             />
           ) : (

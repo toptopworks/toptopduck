@@ -587,7 +587,7 @@ export function ProfilesSection({
                     disabled={fieldsDisabled}
                     placeholder={unnamed}
                     aria-label={intl.formatMessage({
-                      id: "settings.profiles.displayName",
+                      id: "common.displayName",
                       defaultMessage: "Display name",
                     })}
                     className="max-w-xs"
@@ -629,7 +629,7 @@ export function ProfilesSection({
                           })
                     }
                     aria-label={intl.formatMessage({
-                      id: "settings.profiles.delete",
+                      id: "common.delete",
                       defaultMessage: "Delete",
                     })}
                   >
@@ -758,7 +758,7 @@ export function ProfilesSection({
                 onClick={() => void handleConfirmDelete()}
               >
                 <FormattedMessage
-                  id="settings.profiles.deleteConfirm.confirm"
+                  id="common.delete"
                   defaultMessage="Delete"
                 />
               </AlertDialogAction>

@@ -304,7 +304,7 @@ export function McpSection({
               }}
             >
               <Download className="size-4" aria-hidden />
-              <FormattedMessage id="settings.mcp.import.button" defaultMessage="Import" />
+              <FormattedMessage id="common.import" defaultMessage="Import" />
             </Button>
             <Button type="button" size="sm" onClick={handleAdd}>
               <Plus className="size-4" aria-hidden />
@@ -393,7 +393,7 @@ export function McpSection({
                   />
                 ) : (
                   <FormattedMessage
-                    id="settings.mcp.confirmDeleteConfirm"
+                    id="common.delete"
                     defaultMessage="Delete"
                   />
                 )}
@@ -552,7 +552,7 @@ function ToolList({ probeState }: { probeState: ProbeState }) {
   if (probeState.kind === "testing") {
     return (
       <div className="text-muted-foreground mt-3 pl-7 text-xs">
-        <FormattedMessage id="settings.mcp.probing" defaultMessage="Testing…" />
+        <FormattedMessage id="common.testing" defaultMessage="Testing…" />
       </div>
     );
   }
@@ -591,7 +591,7 @@ function ToolTable({ tools }: { tools: McpToolInfo[] }) {
               <FormattedMessage id="settings.mcp.toolName" defaultMessage="Tool" />
             </th>
             <th className="text-left font-medium px-2 py-1.5">
-              <FormattedMessage id="settings.mcp.toolDescription" defaultMessage="Description" />
+              <FormattedMessage id="common.description" defaultMessage="Description" />
             </th>
           </tr>
         </thead>

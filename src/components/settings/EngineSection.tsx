@@ -86,9 +86,9 @@ export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
         disabled={saving}
       >
         {savingField === field ? (
-          <FormattedMessage id="settings.saving" defaultMessage="Saving…" />
+          <FormattedMessage id="common.saving" defaultMessage="Saving…" />
         ) : (
-          <FormattedMessage id="settings.save" defaultMessage="Save" />
+          <FormattedMessage id="common.save" defaultMessage="Save" />
         )}
       </Button>
     );
