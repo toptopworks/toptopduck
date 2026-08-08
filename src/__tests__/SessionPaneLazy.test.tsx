@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { AppConfig } from "../types/app-config";
+import { defaultAppConfig } from "./setup/appConfigFixture";
 
 // Fallback contract tests for the lazy-loaded SessionPane (issue #424).
 // The lazy import + Suspense fallback introduce a new observable surface:
@@ -22,31 +23,6 @@ vi.mock("@tauri-apps/api/window", () => buildTauriWindowMock().module);
 // the only thing rendered inside the session pane host.
 vi.mock("../session/SessionPane", () => new Promise(() => {}));
 
-const appConfig: AppConfig = {
-  format_version: 2,
-  theme: "system",
-  locale: "zh-CN" as const,
-  engine: { memory_limit: "512MB", threads: 1, row_cap: 100, statement_timeout_ms: 30000 },
-  privacy: { send_samples: true },
-  provider: {
-    profiles: [
-      {
-        id: "default",
-        display_name: "Anthropic",
-        protocol: "anthropic",
-        base_url: "https://api.anthropic.com",
-        model: "claude-sonnet-4-6",
-      },
-    ],
-    active_profile: "default",
-  },
-  export: { last_dir: null, default_format: "csv" },
-  tunables: { window_turns: 6, far_window: 12 },
-  recent_files: [],
-  shell: { sidebar_collapsed: false, rail_collapsed: false, sidebar_grouping: "flat" },
-  mcp_servers: { servers: [] },
-};
-
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
   return {
@@ -66,7 +42,7 @@ vi.mock("../api", async (importOriginal) => {
       has_key: false,
       keychain_fault: null,
     })),
-    getAppConfig: vi.fn(async () => appConfig),
+    getAppConfig: vi.fn(async () => defaultAppConfig),
     setAppConfig: vi.fn(async (cfg: AppConfig) => cfg),
     recordRecentFile: vi.fn(async () => {}),
   };

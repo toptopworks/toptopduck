@@ -28,6 +28,7 @@ import { ResumeProgress } from "./shell/ResumeProgress";
 import { ColdStartHero } from "./shell/ColdStartHero";
 import { ErrorBanner } from "./components/common/ErrorBanner";
 import { DegradeCard, ErrorBoundary } from "./components/common/ErrorBoundary";
+import { LazyFallback } from "./components/common/LazyFallback";
 // Lazy-loaded settings overlay (issue #423): defers the ~110-module settings
 // subtree (all sections + MCP forms + import dialogs) from cold-start. Only
 // fetched when the user opens the settings overlay. The named export is
@@ -466,14 +467,12 @@ export default function App() {
                       renders once for the first session, not per pane. */}
                   <Suspense
                     fallback={(
-                      <div className="session-pane-lazy-fallback" role="status" aria-busy="true">
-                        <span className="sr-only">
-                          <FormattedMessage
-                            id="sessionPane.lazyLoading"
-                            defaultMessage="Loading session…"
-                          />
-                        </span>
-                      </div>
+                      <LazyFallback className="session-pane-lazy-fallback">
+                        <FormattedMessage
+                          id="sessionPane.lazyLoading"
+                          defaultMessage="Loading session…"
+                        />
+                      </LazyFallback>
                     )}
                   >
                     {openSessions.map((s) => (
@@ -555,14 +554,12 @@ export default function App() {
                   <ErrorBoundary name="settings">
                     <Suspense
                       fallback={(
-                        <div className="settings-lazy-overlay" role="status" aria-busy="true">
-                          <span className="sr-only">
-                            <FormattedMessage
-                              id="settings.lazyLoading"
-                              defaultMessage="Loading settings…"
-                            />
-                          </span>
-                        </div>
+                        <LazyFallback className="settings-lazy-overlay">
+                          <FormattedMessage
+                            id="settings.lazyLoading"
+                            defaultMessage="Loading settings…"
+                          />
+                        </LazyFallback>
                       )}
                     >
                       <SettingsView
