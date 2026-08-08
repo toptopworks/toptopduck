@@ -1986,6 +1986,16 @@ fn build_skill_source_candidates(
             label: "Codex CLI".into(),
             path: home.join(".codex").join("skills"),
         });
+        // Codex nests built-in system skills under `~/.codex/skills/.system/`.
+        // The parent `skills/` dir holds user-installed skills as direct
+        // children; `.system` is a hidden directory that
+        // `scan_source_children` skips, so the two tiers surface as independent
+        // sources in the import dialog (issue #418).
+        candidates.push(SkillSourceCandidate {
+            id: "codex-cli-system".into(),
+            label: "Codex CLI (system)".into(),
+            path: home.join(".codex").join("skills").join(".system"),
+        });
     }
     for raw in custom_paths {
         let path = std::path::PathBuf::from(raw);

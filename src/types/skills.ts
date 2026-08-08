@@ -190,9 +190,9 @@ export interface DiscoveredSkill {
 // these (collapsed) and drills into the skills of an expanded one. Mirrors the
 // Rust SkillSource.
 export interface SkillSource {
-  // Stable id (standard sources carry fixed ids "claude-code" / "codex-cli";
-  // a custom source's id is its path string). The dialog keys expand/collapse
-  // state off it.
+  // Stable id (standard sources carry fixed ids "claude-code" / "codex-cli" /
+  // "codex-cli-system"; a custom source's id is its path string). The dialog
+  // keys expand/collapse state off it.
   id: string;
   // Display label (source name).
   label: string;
