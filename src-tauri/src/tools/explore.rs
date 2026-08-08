@@ -514,6 +514,93 @@ mod tests {
         // escape_file cleans up via Drop on scope exit (incl. panic).
     }
 
+    /// AC#2 symlink vector (issue #310 / #402): a symlink placed INSIDE the
+    /// session temp dir but pointing at a file OUTSIDE is canonicalized to its
+    /// real out-of-bounds target and refused at the gateway door -- the ACL
+    /// never authorizes a path by its in-bounds alias. Symmetric with the
+    /// `fs_acl::symlink_escape_is_refused` unit test, but exercised end to end
+    /// through `dispatch` (the SQL parse + `preflight_read_sql` + `FsAcl::check`
+    /// pipeline the agent actually drives).
+    #[test]
+    #[cfg(unix)]
+    fn explore_refuses_symlink_escape_at_gateway() {
+        use crate::tools::test_support::inert_deps_with_temp;
+        use std::fs;
+        use std::os::unix::fs::symlink;
+        use tempfile::TempDir;
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = crate::workingset::WorkingSet::default();
+        let sources = std::collections::HashMap::new();
+        let temp = TempDir::new().unwrap();
+        // A file outside the session temp dir -- the symlink target.
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("secret.csv");
+        fs::write(&outside_file, "x").unwrap();
+        // A symlink INSIDE temp pointing at the outside file. Canonicalization
+        // follows the link, so the resolved path is outside temp_root.
+        let link = temp.path().join("alias.csv");
+        symlink(&outside_file, &link).unwrap();
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+        let cancel = CancelToken::new();
+        let err = dispatch(
+            &json!({"sql": format!(
+                "SELECT * FROM read_csv_auto('{}')", link.to_string_lossy()
+            )}),
+            &mut deps,
+            &cancel,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("outside the allowed"),
+            "symlink escape refused: {err}"
+        );
+        assert!(
+            err.contains("alias.csv"),
+            "error names the symlink path: {err}"
+        );
+        assert_eq!(deps.working_set.len(), 0);
+    }
+
+    /// Windows variant of `explore_refuses_symlink_escape_at_gateway`. Uses
+    /// `symlink_dir` (mirrors `fs_acl::symlink_escape_is_refused_windows`).
+    /// Hard-panics if symlink creation fails (no Developer Mode) -- a silent
+    /// skip would make this test a vacuous pass on Windows CI with no signal
+    /// (issue #402, consistent with #401's NamedTempFile + .expect pattern).
+    #[test]
+    #[cfg(windows)]
+    fn explore_refuses_symlink_escape_at_gateway_windows() {
+        use crate::tools::test_support::inert_deps_with_temp;
+        use std::os::windows::fs::symlink_dir;
+        use tempfile::TempDir;
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = crate::workingset::WorkingSet::default();
+        let sources = std::collections::HashMap::new();
+        let temp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        // A directory symlink INSIDE temp pointing at the outside dir.
+        let link = temp.path().join("alias");
+        symlink_dir(outside.path(), &link)
+            .expect("Windows symlink creation needs Developer Mode / admin");
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+        let cancel = CancelToken::new();
+        let err = dispatch(
+            &json!({"sql": format!(
+                "SELECT * FROM read_csv_auto('{}')", link.to_string_lossy()
+            )}),
+            &mut deps,
+            &cancel,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("outside the allowed"),
+            "symlink escape refused: {err}"
+        );
+        assert!(err.contains("alias"), "error names the symlink path: {err}");
+        assert_eq!(deps.working_set.len(), 0);
+    }
+
     /// Design-B lockdown backstop (issue #293): a `read_*` call whose path the
     /// gateway whitelist ALLOWS (a file inside the session temp dir) still does
     /// not execute -- the engine-level `disabled_filesystems` lockdown remains
