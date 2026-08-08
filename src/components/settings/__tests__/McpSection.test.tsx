@@ -1,10 +1,13 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { IntlProvider } from "react-intl";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactElement } from "react";
+import { render } from "@testing-library/react";
+import { IntlProvider } from "react-intl";
+import { TooltipProvider } from "../../ui/tooltip";
 
 import { McpSection } from "../McpSection";
-import { clearMcpServerSecret, probeMcpServer, upsertMcpServer } from "../../../api";
+import { clearMcpServerSecret, discoverMcpServers, probeMcpServer, upsertMcpServer } from "../../../api";
 import type { AppConfig } from "../../../types/app-config";
 import type { McpServerConfig, McpProbeResult } from "../../../types/mcp";
 
@@ -12,6 +15,7 @@ import type { McpServerConfig, McpProbeResult } from "../../../types/mcp";
 // touches Tauri.
 vi.mock("../../../api", () => ({
   clearMcpServerSecret: vi.fn(),
+  discoverMcpServers: vi.fn(),
   probeMcpServer: vi.fn(),
   upsertMcpServer: vi.fn(),
   setMcpServerSecret: vi.fn(),
@@ -45,14 +49,20 @@ function makeAppConfig(servers: McpServerConfig[]): AppConfig {
   } as unknown as AppConfig;
 }
 
-// Empty-catalog English IntlProvider: FormattedMessage falls back to
-// defaultMessage (the canonical English source, ADR-0052), so assertions anchor
-// on stable English strings.
+// Empty-catalog English IntlProvider + QueryClient (retry: false) +
+// TooltipProvider (mirrors App ancestor — McpServerRow now uses Tooltip).
 function renderWithProviders(ui: ReactElement) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   return render(
-    <IntlProvider locale="en" messages={{}} onError={() => {}}>
-      {ui}
-    </IntlProvider>,
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <IntlProvider locale="en" messages={{}} onError={() => {}}>
+          {ui}
+        </IntlProvider>
+      </TooltipProvider>
+    </QueryClientProvider>,
   );
 }
 
@@ -78,7 +88,8 @@ describe("McpSection (issue #387)", () => {
     );
 
     expect(screen.getByText("GitHub MCP")).toBeInTheDocument();
-    expect(screen.getByText("/bin/mcp-server")).toBeInTheDocument();
+    // Transport type + command on the second line, separated by "·".
+    expect(screen.getByText(/stdio.*\/bin\/mcp-server/)).toBeInTheDocument();
   });
 
   it("shows the untested hint in expanded row before testing", () => {
@@ -252,10 +263,10 @@ describe("McpSection (issue #387)", () => {
       <McpSection appConfig={makeAppConfig([])} onCommit={vi.fn()} />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /Add/ }));
+    fireEvent.click(screen.getByRole("button", { name: /New/ }));
 
     expect(screen.getByTestId("mcp-server-form")).toBeInTheDocument();
-    expect(screen.getByText("Add MCP server")).toBeInTheDocument();
+    expect(screen.getByText("New MCP server")).toBeInTheDocument();
   });
 
   it("clicking Edit on a server row switches to a pre-filled form (issue #388)", () => {
@@ -268,7 +279,7 @@ describe("McpSection (issue #387)", () => {
 
     expect(screen.getByTestId("mcp-server-form")).toBeInTheDocument();
     expect(screen.getByText("Edit MCP server")).toBeInTheDocument();
-    expect((screen.getByLabelText("Display name") as HTMLInputElement).value).toBe(
+    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe(
       "My Server",
     );
   });
@@ -279,7 +290,7 @@ describe("McpSection (issue #387)", () => {
     );
 
     // Enter the form.
-    fireEvent.click(screen.getByRole("button", { name: /Add/ }));
+    fireEvent.click(screen.getByRole("button", { name: /New/ }));
     expect(screen.getByTestId("mcp-server-form")).toBeInTheDocument();
 
     // Go back.
@@ -294,7 +305,7 @@ describe("McpSection (issue #387)", () => {
       <McpSection appConfig={makeAppConfig([])} onCommit={vi.fn()} />,
     );
 
-    const addButton = screen.getByRole("button", { name: /Add/ });
+    const addButton = screen.getByRole("button", { name: /New/ });
     expect(addButton).not.toBeDisabled();
   });
 
@@ -314,9 +325,14 @@ describe("McpSection (issue #387)", () => {
       <McpSection appConfig={makeAppConfig([])} onCommit={onCommit} />,
     );
 
-    // Enter the form and save.
-    fireEvent.click(screen.getByRole("button", { name: /Add/ }));
-    fireEvent.click(screen.getByText("Save"));
+    // Enter the form.
+    fireEvent.click(screen.getByRole("button", { name: /New/ }));
+
+    // Fill required fields so the Add button is enabled.
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Brand New" } });
+    fireEvent.change(screen.getByLabelText("Command"), { target: { value: "/bin/mcp" } });
+
+    fireEvent.click(screen.getByText("Add"));
 
     await waitFor(() => {
       // Form closed — back to the list view.
@@ -341,9 +357,14 @@ describe("McpSection (issue #387)", () => {
       <McpSection appConfig={makeAppConfig([])} onCommit={onCommit} />,
     );
 
-    // Enter the form and save.
-    fireEvent.click(screen.getByRole("button", { name: /Add/ }));
-    fireEvent.click(screen.getByText("Save"));
+    // Enter the form.
+    fireEvent.click(screen.getByRole("button", { name: /New/ }));
+
+    // Fill required fields so the Add button is enabled.
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Brand New" } });
+    fireEvent.change(screen.getByLabelText("Command"), { target: { value: "/bin/mcp" } });
+
+    fireEvent.click(screen.getByText("Add"));
 
     await waitFor(() => {
       expect(screen.getByText("disk write error")).toBeInTheDocument();
@@ -364,15 +385,18 @@ describe("McpSection (issue #387)", () => {
     expect(screen.getByRole("button", { name: /Import/ })).toBeInTheDocument();
   });
 
-  it("opens the import dialog on Import button click", () => {
+  it("opens the import dialog on Import button click", async () => {
+    vi.mocked(discoverMcpServers).mockResolvedValue({ servers: [], config_path: null });
+
     renderWithProviders(
       <McpSection appConfig={makeAppConfig([])} onCommit={vi.fn()} />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: /Import/ }));
 
-    // The import dialog shows source selection.
-    expect(screen.getByText("Claude Desktop")).toBeInTheDocument();
-    expect(screen.getByText("Codex")).toBeInTheDocument();
+    // The import dialog is open (title is always rendered).
+    await waitFor(() => {
+      expect(screen.getByText("Import MCP servers")).toBeInTheDocument();
+    });
   });
 });

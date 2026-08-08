@@ -133,3 +133,10 @@ export interface DiscoveredServer {
   env: Record<string, string>;
   keychain_env_keys: string[];
 }
+
+// Result of discovering servers from one external source (issue #390). Includes
+// the resolved config file path so the import dialog can display it.
+export interface DiscoveryResult {
+  servers: DiscoveredServer[];
+  config_path: string | null;
+}

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import {
   AlertCircle,
@@ -10,9 +10,16 @@ import {
   MinusCircle,
   Pencil,
   Plus,
+  Search,
   Trash2,
   Zap,
 } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+
+// Override the base TooltipContent's teal bg-primary with a popover surface
+// (matches ImportSkillsDialog's info tooltip — bg-popover text-popover-foreground).
+const TOOLTIP_CLASS =
+  "bg-popover text-popover-foreground border shadow-md rounded-lg px-2.5 py-1.5";
 
 import type { AppConfig } from "../../types/app-config";
 import type { McpProbeResult, McpServerConfig, McpToolInfo } from "../../types/mcp";
@@ -29,6 +36,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../ui/alert-dialog";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { PaneHeader, SettingsCard } from "./settings-chrome";
 import { McpImportDialog } from "./McpImportDialog";
@@ -85,8 +93,18 @@ export function McpSection({
   // internal step/state) without a setState-in-effect (react-hooks lint).
   const [importEpoch, setImportEpoch] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const servers = appConfig.mcp_servers.servers;
+  const existingNames = useMemo(
+    () => new Set(servers.map((s) => s.display_name)),
+    [servers],
+  );
+  const filteredServers = searchQuery.trim()
+    ? servers.filter((s) =>
+        s.display_name.toLowerCase().includes(searchQuery.trim().toLowerCase()),
+      )
+    : servers;
 
   function handleAdd() {
     setFormTarget({
@@ -293,7 +311,11 @@ export function McpSection({
           />
         )}
         action={(
-          <div className="flex gap-2">
+          <div className="flex items-center gap-1.5">
+            <Button type="button" size="sm" onClick={handleAdd}>
+              <Plus className="size-4" aria-hidden />
+              <FormattedMessage id="settings.mcp.new" defaultMessage="New" />
+            </Button>
             <Button
               type="button"
               size="sm"
@@ -306,13 +328,40 @@ export function McpSection({
               <Download className="size-4" aria-hidden />
               <FormattedMessage id="common.import" defaultMessage="Import" />
             </Button>
-            <Button type="button" size="sm" onClick={handleAdd}>
-              <Plus className="size-4" aria-hidden />
-              <FormattedMessage id="settings.mcp.add" defaultMessage="Add" />
-            </Button>
           </div>
         )}
       />
+
+      {servers.length > 0 && (
+        <div className="mb-3 flex items-center gap-2">
+          <Search className="text-muted-foreground size-4 shrink-0" aria-hidden />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder={intl.formatMessage({
+              id: "settings.mcp.searchPlaceholder",
+              defaultMessage: "Search servers…",
+            })}
+            className="text-muted-foreground placeholder:text-muted-foreground/70 focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2 h-8 flex-1 rounded-md border-0 bg-transparent text-sm outline-none"
+          />
+        </div>
+      )}
+
+      {servers.length > 0 && (
+        <p className="mb-2 text-sm">
+          <FormattedMessage
+            id="settings.mcp.configuredCount"
+            defaultMessage="Configured MCP servers <muted>{count}</muted>"
+            values={{
+              count: servers.length,
+              muted: (chunks: ReactNode) => (
+                <span className="text-muted-foreground">{chunks}</span>
+              ),
+            }}
+          />
+        </p>
+      )}
 
       <SettingsCard data-testid="mcp-server-list">
         {servers.length === 0 ? (
@@ -322,8 +371,16 @@ export function McpSection({
               defaultMessage="No MCP servers configured yet. Click Add to set one up."
             />
           </div>
+        ) : filteredServers.length === 0 ? (
+          <div className="text-muted-foreground px-4 py-8 text-center text-sm">
+            <FormattedMessage
+              id="settings.mcp.noResults"
+              defaultMessage='No servers match "{query}".'
+              values={{ query: searchQuery.trim() }}
+            />
+          </div>
         ) : (
-          servers.map((server) => (
+          filteredServers.map((server) => (
             <McpServerRow
               key={server.id}
               server={server}
@@ -406,6 +463,7 @@ export function McpSection({
       <McpImportDialog
         key={importEpoch}
         open={importOpen}
+        existingNames={existingNames}
         onClose={() => setImportOpen(false)}
         onImported={(results) => void handleImported(results)}
       />
@@ -453,57 +511,96 @@ function McpServerRow({
         <StatusDot probeState={probeState} />
 
         <div className="min-w-0 flex-1">
-          <span className="text-sm font-medium truncate inline-block">
-            {server.display_name}
-          </span>
-          <span className="text-muted-foreground ml-2 text-xs">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium truncate">
+              {server.display_name}
+            </span>
+            {probeState.kind === "done" && probeState.result.connected && probeState.result.tools.length > 0 && (
+              <Badge variant="secondary" className="shrink-0 text-muted-foreground font-normal">
+                <FormattedMessage
+                  id="settings.mcp.toolCount"
+                  defaultMessage="{count} tools"
+                  values={{ count: probeState.result.tools.length }}
+                />
+              </Badge>
+            )}
+          </div>
+          <div className="text-muted-foreground mt-1 truncate text-xs">
+            {server.transport.type}
+            {" · "}
             {"url" in server.transport ? server.transport.url : server.transport.command}
-          </span>
+          </div>
         </div>
 
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          className="shrink-0"
-          aria-label={intl.formatMessage(
-            { id: "settings.mcp.editLabel", defaultMessage: "Edit server {name}" },
-            { name: server.display_name },
-          )}
-          onClick={onEdit}
-        >
-          <Pencil className="size-4" aria-hidden />
-        </Button>
+        <div className="flex shrink-0 items-center gap-0.5">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="text-muted-foreground h-7 w-7 p-0"
+                disabled={probeState.kind === "testing"}
+                aria-label={intl.formatMessage(
+                  { id: "settings.mcp.testLabel", defaultMessage: "Test server {name}" },
+                  { name: server.display_name },
+                )}
+                onClick={onProbe}
+              >
+                {probeState.kind === "testing" ? (
+                  <Loader2 className="size-4 animate-spin" aria-hidden />
+                ) : (
+                  <Zap className="size-4" aria-hidden />
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top" className={TOOLTIP_CLASS}>
+              <FormattedMessage id="settings.mcp.test" defaultMessage="Test" />
+            </TooltipContent>
+          </Tooltip>
 
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          className="shrink-0"
-          disabled={probeState.kind === "testing"}
-          onClick={onProbe}
-        >
-          {probeState.kind === "testing" ? (
-            <Loader2 className="size-4 animate-spin" aria-hidden />
-          ) : (
-            <Zap className="size-4" aria-hidden />
-          )}
-          <FormattedMessage id="settings.mcp.test" defaultMessage="Test" />
-        </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="text-muted-foreground h-7 w-7 p-0"
+                aria-label={intl.formatMessage(
+                  { id: "settings.mcp.editLabel", defaultMessage: "Edit server {name}" },
+                  { name: server.display_name },
+                )}
+                onClick={onEdit}
+              >
+                <Pencil className="size-4" aria-hidden />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top" className={TOOLTIP_CLASS}>
+              <FormattedMessage id="settings.mcp.edit" defaultMessage="Edit" />
+            </TooltipContent>
+          </Tooltip>
 
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          className="text-muted-foreground hover:text-destructive shrink-0"
-          aria-label={intl.formatMessage(
-            { id: "settings.mcp.deleteLabel", defaultMessage: "Delete server {name}" },
-            { name: server.display_name },
-          )}
-          onClick={onDelete}
-        >
-          <Trash2 className="size-4" aria-hidden />
-        </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="text-muted-foreground hover:text-destructive h-7 w-7 p-0"
+                aria-label={intl.formatMessage(
+                  { id: "settings.mcp.deleteLabel", defaultMessage: "Delete server {name}" },
+                  { name: server.display_name },
+                )}
+                onClick={onDelete}
+              >
+                <Trash2 className="size-4" aria-hidden />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top" className={TOOLTIP_CLASS}>
+              <FormattedMessage id="common.delete" defaultMessage="Delete" />
+            </TooltipContent>
+          </Tooltip>
+        </div>
       </div>
 
       {expanded && <ToolList probeState={probeState} />}
@@ -518,7 +615,14 @@ function StatusDot({ probeState }: { probeState: ProbeState }) {
   const dotClass = "size-2.5 shrink-0 rounded-full";
   if (probeState.kind === "idle") {
     return (
-      <span role="img" aria-label="Not tested" className={cn(dotClass, "bg-muted-foreground/40")} />
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span role="img" aria-label="Not tested" className={cn(dotClass, "bg-muted-foreground/40 cursor-help")} />
+        </TooltipTrigger>
+        <TooltipContent side="top" className={TOOLTIP_CLASS}>
+          <FormattedMessage id="settings.mcp.notTestedHint" defaultMessage="Not tested" />
+        </TooltipContent>
+      </Tooltip>
     );
   }
   if (probeState.kind === "testing") {
@@ -584,10 +688,10 @@ function ToolList({ probeState }: { probeState: ProbeState }) {
 function ToolTable({ tools }: { tools: McpToolInfo[] }) {
   return (
     <div className="border-border mt-3 ml-7 overflow-hidden rounded-md border">
-      <table className="w-full text-xs">
+      <table className="w-full table-fixed text-xs">
         <thead className="bg-muted/50">
           <tr>
-            <th className="text-left font-medium px-2 py-1.5">
+            <th className="text-left font-medium px-2 py-1.5 w-2/5">
               <FormattedMessage id="settings.mcp.toolName" defaultMessage="Tool" />
             </th>
             <th className="text-left font-medium px-2 py-1.5">
@@ -598,9 +702,20 @@ function ToolTable({ tools }: { tools: McpToolInfo[] }) {
         <tbody>
           {tools.map((tool) => (
             <tr key={tool.name} className="border-border border-t">
-              <td className="font-mono px-2 py-1.5 whitespace-nowrap">{tool.name}</td>
-              <td className="text-muted-foreground px-2 py-1.5 break-words">
-                {tool.description || "—"}
+              <td className="font-mono px-2 py-1.5 truncate">{tool.name}</td>
+              <td className="text-muted-foreground px-2 py-1.5">
+                {tool.description ? (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="block truncate">{tool.description}</span>
+                    </TooltipTrigger>
+                    <TooltipContent side="top" className={cn(TOOLTIP_CLASS, "max-w-sm max-h-40 overflow-y-auto")}>
+                      {tool.description}
+                    </TooltipContent>
+                  </Tooltip>
+                ) : (
+                  "—"
+                )}
               </td>
             </tr>
           ))}

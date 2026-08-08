@@ -57,9 +57,23 @@ pub struct DiscoveredServer {
     pub keychain_env_keys: Vec<String>,
 }
 
+/// Result of discovering MCP servers from an external config (issue #390).
+/// Includes the resolved config file path so the frontend can display it
+/// alongside the source label.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveryResult {
+    /// Parsed server entries (empty if the config file was not found).
+    pub servers: Vec<DiscoveredServer>,
+    /// The config file path that was scanned (display string). `None` on
+    /// unsupported platforms where no path can be resolved.
+    #[serde(default)]
+    pub config_path: Option<String>,
+}
+
 /// Discover MCP servers from an external config (issue #390). Returns the
-/// parsed server list, or an empty vec if the config file is not found (the
-/// frontend shows a "not found" message -- this is NOT an error).
+/// parsed server list + the config file path, or empty servers if the config
+/// file is not found (the frontend shows a "not found" message -- this is NOT
+/// an error).
 ///
 /// Parse errors (malformed JSON / TOML) return an error string so the frontend
 /// can tell the user the file exists but could not be read.
@@ -69,7 +83,7 @@ pub struct DiscoveredServer {
 /// Returns `Err` when the config file exists but cannot be read (permissions,
 /// size limit exceeded) or when parsing fails (malformed JSON / TOML). The
 /// frontend shows the error string to the user.
-pub fn discover(source: ImportSource) -> Result<Vec<DiscoveredServer>, String> {
+pub fn discover(source: ImportSource) -> Result<DiscoveryResult, String> {
     match source {
         ImportSource::ClaudeDesktop => discover_claude_desktop(),
         ImportSource::Codex => discover_codex(),
@@ -175,14 +189,27 @@ struct ClaudeDesktopServer {
     env: BTreeMap<String, String>,
 }
 
-fn discover_claude_desktop() -> Result<Vec<DiscoveredServer>, String> {
+fn discover_claude_desktop() -> Result<DiscoveryResult, String> {
     let path = match claude_desktop_config_path() {
         Some(p) => p,
-        None => return Ok(Vec::new()), // Unsupported platform = "not found"
+        None => {
+            return Ok(DiscoveryResult {
+                servers: Vec::new(),
+                config_path: None,
+            })
+        }
     };
+    let config_path = path.display().to_string();
     match read_config(&path)? {
-        None => Ok(Vec::new()),
+        None => Ok(DiscoveryResult {
+            servers: Vec::new(),
+            config_path: Some(config_path),
+        }),
         Some(content) => parse_claude_desktop_config(&content)
+            .map(|servers| DiscoveryResult {
+                servers,
+                config_path: Some(config_path),
+            })
             .map_err(|e| format!("failed to parse {}: {e}", path.display())),
     }
 }
@@ -246,14 +273,27 @@ struct CodexMcpServer {
     env: BTreeMap<String, String>,
 }
 
-fn discover_codex() -> Result<Vec<DiscoveredServer>, String> {
+fn discover_codex() -> Result<DiscoveryResult, String> {
     let path = match codex_config_path() {
         Some(p) => p,
-        None => return Ok(Vec::new()),
+        None => {
+            return Ok(DiscoveryResult {
+                servers: Vec::new(),
+                config_path: None,
+            })
+        }
     };
+    let config_path = path.display().to_string();
     match read_config(&path)? {
-        None => Ok(Vec::new()),
+        None => Ok(DiscoveryResult {
+            servers: Vec::new(),
+            config_path: Some(config_path),
+        }),
         Some(content) => parse_codex_config(&content)
+            .map(|servers| DiscoveryResult {
+                servers,
+                config_path: Some(config_path),
+            })
             .map_err(|e| format!("failed to parse {}: {e}", path.display())),
     }
 }

@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { ArrowLeft, Loader2, Plus, Trash2 } from "lucide-react";
+import { ArrowLeft, ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
 import { FormattedMessage, useIntl } from "react-intl";
 
 import type { McpProbeResult, McpServerConfig, McpTransport } from "../../types/mcp";
@@ -122,6 +122,25 @@ export function McpServerForm({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Field validation: name is always required; command (stdio) or url
+  // (sse/http) is required based on transport type. Disables the Add/Save
+  // button until the minimum required fields are filled.
+  const isFormValid = mode === "json"
+    ? !jsonError && (() => {
+        const result = tryParseConfig(jsonText);
+        if (!result.ok) return false;
+        const c = result.config;
+        if (!c.display_name.trim()) return false;
+        return c.transport.type === "stdio"
+          ? !!c.transport.command.trim()
+          : !!c.transport.url.trim();
+      })()
+    : displayName.trim() !== "" && (
+      transportType === "stdio"
+        ? command.trim() !== ""
+        : url.trim() !== ""
+    );
+
   // Build a McpServerConfig from the current form fields.
   function buildConfigFromForm(): McpServerConfig {
     const transport: McpTransport =
@@ -201,16 +220,22 @@ export function McpServerForm({
   function handleSwitchMode(next: FormMode) {
     if (next === mode) return;
     if (next === "json") {
-      // Capture non-empty secret values before serializing so they can be
-      // restored on the return trip (H2).
+      // Capture ALL secret key names + values before serializing so they
+      // survive the JSON round-trip (H2). keychain_env_keys is stripped from
+      // the JSON view entirely — it is an implementation detail the user
+      // should not edit directly.
+      pendingSecrets.current = {};
       for (const entry of envEntries) {
-        if (entry.isSecret && entry.value) {
+        if (entry.isSecret) {
           pendingSecrets.current[entry.key] = entry.value;
         }
       }
-      // Serialize current form state → JSON text (secret values excluded
-      // — only keychain_env_keys key names appear).
-      setJsonText(JSON.stringify(buildConfigFromForm(), null, 2));
+      // Serialize config WITHOUT keychain_env_keys — the user manages secrets
+      // through the Form's Secret checkbox, not via raw JSON.
+      const config = buildConfigFromForm();
+      const jsonConfig = { ...config, keychain_env_keys: undefined };
+      delete jsonConfig.keychain_env_keys;
+      setJsonText(JSON.stringify(jsonConfig, null, 2));
       setJsonError(null);
     } else {
       // Parse JSON text → form state. If invalid, abort the switch and show
@@ -220,6 +245,9 @@ export function McpServerForm({
         setJsonError(result.error);
         return;
       }
+      // Re-inject secret key names captured before the Form→JSON switch so
+      // initEnvEntries reconstructs the secret rows correctly.
+      result.config.keychain_env_keys = Object.keys(pendingSecrets.current);
       syncFromJson(result.config);
       setJsonError(null);
     }
@@ -319,7 +347,7 @@ export function McpServerForm({
   ) : (
     <FormattedMessage
       id="settings.mcp.form.addTitle"
-      defaultMessage="Add MCP server"
+      defaultMessage="New MCP server"
     />
   );
 
@@ -328,7 +356,7 @@ export function McpServerForm({
       {/* Back link */}
       <button
         type="button"
-        className="text-muted-foreground hover:text-foreground mb-4 flex items-center gap-1.5 text-sm"
+        className="text-muted-foreground hover:text-foreground mb-2 flex items-center gap-1.5 text-sm"
         onClick={onCancel}
         disabled={saving}
       >
@@ -340,6 +368,7 @@ export function McpServerForm({
       </button>
 
       <PaneHeader
+        className="mb-3"
         title={title}
         description={(
           <FormattedMessage
@@ -408,18 +437,23 @@ export function McpServerForm({
       {error && <p className="settings-error mt-3 text-destructive text-sm">{error}</p>}
 
       {/* Save / Cancel */}
-      <div className="mt-4 flex items-center gap-2">
-        <Button type="button" disabled={saving} onClick={() => void handleSave()}>
+      <div className="mt-3 flex items-center gap-2">
+        <Button type="button" disabled={!isFormValid || saving} onClick={() => void handleSave()}>
           {saving && <Loader2 className="size-4 animate-spin" aria-hidden />}
           {saving ? (
             <FormattedMessage
               id="common.saving"
               defaultMessage="Saving…"
             />
-          ) : (
+          ) : isEdit ? (
             <FormattedMessage
               id="common.save"
               defaultMessage="Save"
+            />
+          ) : (
+            <FormattedMessage
+              id="common.add"
+              defaultMessage="Add"
             />
           )}
         </Button>
@@ -513,11 +547,12 @@ function FormView({
   return (
     <>
       <SettingsRow
+        className="py-2.5"
         title={(
-          <Label htmlFor="mcp-display-name">
+          <Label htmlFor="mcp-display-name" className="text-muted-foreground">
             <FormattedMessage
-              id="common.displayName"
-              defaultMessage="Display name"
+              id="settings.mcp.form.name"
+              defaultMessage="Name"
             />
           </Label>
         )}
@@ -531,36 +566,57 @@ function FormView({
       </SettingsRow>
 
       <SettingsRow
+        className="py-2.5"
         title={(
-          <Label htmlFor="mcp-transport">
+          <Label htmlFor="mcp-transport" className="text-muted-foreground">
             <FormattedMessage
-              id="settings.mcp.form.transport"
-              defaultMessage="Transport"
+              id="settings.mcp.form.type"
+              defaultMessage="Type"
             />
           </Label>
         )}
-        action={(
-          <Select
-            value={transportType}
-            onValueChange={(v) => onTransportType(v as "stdio" | "sse" | "http")}
-          >
-            <SelectTrigger id="mcp-transport" className="w-32">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="stdio">stdio</SelectItem>
-              <SelectItem value="sse">SSE</SelectItem>
-              <SelectItem value="http">HTTP</SelectItem>
-            </SelectContent>
-          </Select>
+      >
+        <Select
+          value={transportType}
+          onValueChange={(v) => onTransportType(v as "stdio" | "sse" | "http")}
+        >
+          <SelectTrigger id="mcp-transport">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="stdio">stdio</SelectItem>
+            <SelectItem value="http">HTTP</SelectItem>
+            <SelectItem value="sse">SSE</SelectItem>
+          </SelectContent>
+        </Select>
+      </SettingsRow>
+
+      <SettingsRow
+        className="py-2.5"
+        title={(
+          <Label htmlFor="mcp-timeout" className="text-muted-foreground">
+            <FormattedMessage
+              id="settings.mcp.form.timeoutMs"
+              defaultMessage="Timeout (ms)"
+            />
+          </Label>
         )}
-      />
+      >
+        <Input
+          id="mcp-timeout"
+          type="number"
+          value={timeoutMs}
+          onChange={(e) => onTimeoutMs(e.target.value)}
+          placeholder="30000"
+        />
+      </SettingsRow>
 
       {transportType === "stdio" ? (
         <>
           <SettingsRow
+            className="py-2.5"
             title={(
-              <Label htmlFor="mcp-command">
+              <Label htmlFor="mcp-command" className="text-muted-foreground">
                 <FormattedMessage
                   id="settings.mcp.form.command"
                   defaultMessage="Command"
@@ -576,19 +632,14 @@ function FormView({
             />
           </SettingsRow>
           <SettingsRow
+            className="py-2.5"
             title={(
-              <Label htmlFor="mcp-args">
+              <Label htmlFor="mcp-args" className="text-muted-foreground">
                 <FormattedMessage
                   id="settings.mcp.form.args"
-                  defaultMessage="Arguments"
+                  defaultMessage="Arguments (space-separated)"
                 />
               </Label>
-            )}
-            description={(
-              <FormattedMessage
-                id="settings.mcp.form.argsHint"
-                defaultMessage="Space-separated"
-              />
             )}
           >
             <Input
@@ -601,8 +652,9 @@ function FormView({
         </>
       ) : (
         <SettingsRow
+          className="py-2.5"
           title={(
-            <Label htmlFor="mcp-url">
+            <Label htmlFor="mcp-url" className="text-muted-foreground">
               <FormattedMessage id="settings.mcp.form.url" defaultMessage="URL" />
             </Label>
           )}
@@ -611,7 +663,7 @@ function FormView({
             id="mcp-url"
             value={url}
             onChange={(e) => onUrl(e.target.value)}
-            placeholder="http://localhost:8080/sse"
+            placeholder="https://mcp.example.com/mcp"
           />
         </SettingsRow>
       )}
@@ -622,31 +674,6 @@ function FormView({
         onRemove={onRemoveEnv}
         onUpdate={onUpdateEnv}
       />
-
-      <SettingsRow
-        title={(
-          <Label htmlFor="mcp-timeout">
-            <FormattedMessage
-              id="settings.mcp.form.timeoutMs"
-              defaultMessage="Timeout (ms)"
-            />
-          </Label>
-        )}
-        description={(
-          <FormattedMessage
-            id="settings.mcp.form.timeoutHint"
-            defaultMessage="Leave empty for the gateway default"
-          />
-        )}
-      >
-        <Input
-          id="mcp-timeout"
-          type="number"
-          value={timeoutMs}
-          onChange={(e) => onTimeoutMs(e.target.value)}
-          placeholder="Default"
-        />
-      </SettingsRow>
     </>
   );
 }
@@ -665,88 +692,128 @@ function EnvEditor({
   onUpdate: (index: number, patch: Partial<EnvEntry>) => void;
 }) {
   const intl = useIntl();
-  return (
-    <div data-testid="mcp-env-editor" className="px-4 py-4">
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-sm font-medium">
-          <FormattedMessage
-            id="settings.mcp.form.envVars"
-            defaultMessage="Environment variables"
-          />
-        </span>
-        <Button type="button" variant="ghost" size="sm" onClick={onAdd}>
-          <Plus className="size-4" aria-hidden />
-          <FormattedMessage
-            id="settings.mcp.form.envAdd"
-            defaultMessage="Add variable"
-          />
-        </Button>
-      </div>
+  const [expanded, setExpanded] = useState(entries.length > 0);
 
-      {entries.length === 0 ? (
-        <p className="text-muted-foreground text-xs">
-          <FormattedMessage
-            id="settings.mcp.form.envEmpty"
-            defaultMessage="No environment variables. Click Add variable to create one."
-          />
-        </p>
+  function handleExpand() {
+    setExpanded(true);
+    // Auto-add a blank row when expanding with no entries so the user has
+    // an immediate input to fill in.
+    if (entries.length === 0) {
+      onAdd();
+    }
+  }
+
+  return (
+    <div data-testid="mcp-env-editor" className="px-4 py-2.5">
+      {/* Collapsible header — click to expand/collapse */}
+      {!expanded ? (
+        <button
+          type="button"
+          onClick={handleExpand}
+          className="flex w-full items-center gap-1.5 text-left"
+        >
+          <ChevronRight className="text-muted-foreground size-4 shrink-0" aria-hidden />
+          <span className="text-muted-foreground text-sm font-medium">
+            <FormattedMessage
+              id="settings.mcp.form.envVars"
+              defaultMessage="Environment variables (optional)"
+            />
+          </span>
+        </button>
       ) : (
-        <div className="space-y-2">
-          {entries.map((entry, i) => (
-            <div key={entry.id} className="flex items-center gap-2">
-              <Input
-                className="w-40 font-mono text-xs"
-                value={entry.key}
-                onChange={(e) => onUpdate(i, { key: e.target.value })}
-                placeholder="KEY"
-                aria-label={intl.formatMessage(
-                  { id: "settings.mcp.form.envKeyLabel", defaultMessage: "Variable name (row {row})" },
-                  { row: i + 1 },
-                )}
+        <>
+          <div className="mb-2 flex items-center justify-between">
+            <button
+              type="button"
+              onClick={() => setExpanded(false)}
+              className="flex items-center gap-1.5 text-left"
+            >
+              <ChevronRight
+                className="text-muted-foreground size-4 shrink-0 rotate-90"
+                aria-hidden
               />
-              <Input
-                className="flex-1 font-mono text-xs"
-                value={entry.value}
-                onChange={(e) => onUpdate(i, { value: e.target.value })}
-                placeholder={entry.isSecret ? "Stored in keychain" : "value"}
-                type={entry.isSecret ? "password" : "text"}
-                aria-label={intl.formatMessage(
-                  { id: "settings.mcp.form.envValueLabel", defaultMessage: "Variable value (row {row})" },
-                  { row: i + 1 },
-                )}
-              />
-              <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs">
-                <input
-                  type="checkbox"
-                  checked={entry.isSecret}
-                  onChange={(e) => onUpdate(i, { isSecret: e.target.checked })}
-                  className="size-3.5 cursor-pointer accent-primary"
-                  aria-label={intl.formatMessage(
-                    { id: "settings.mcp.form.envSecretLabel", defaultMessage: "Secret (row {row})" },
-                    { row: i + 1 },
-                  )}
-                />
+              <span className="text-muted-foreground text-sm font-medium">
                 <FormattedMessage
-                  id="settings.mcp.form.envSecret"
-                  defaultMessage="Secret"
+                  id="settings.mcp.form.envVars"
+                  defaultMessage="Environment variables (optional)"
                 />
-              </label>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="text-muted-foreground hover:text-destructive size-7 shrink-0"
-                onClick={() => onRemove(i)}
-                aria-label={intl.formatMessage(
-                  { id: "settings.mcp.form.envRemoveLabel", defaultMessage: "Remove variable (row {row})" },
-                  { row: i + 1 },
-                )}
-              >
-                <Trash2 className="size-3.5" aria-hidden />
-              </Button>
+              </span>
+            </button>
+            <Button type="button" variant="ghost" size="sm" onClick={onAdd}>
+              <Plus className="size-4" aria-hidden />
+              <FormattedMessage
+                id="settings.mcp.form.envAdd"
+                defaultMessage="Add variable"
+              />
+            </Button>
+          </div>
+
+          {entries.length === 0 ? (
+            <p className="text-muted-foreground text-xs">
+              <FormattedMessage
+                id="settings.mcp.form.envEmpty"
+                defaultMessage="No environment variables. Click Add variable to create one."
+              />
+            </p>
+          ) : (
+            <div className="space-y-1.5">
+              {entries.map((entry, i) => (
+                <div key={entry.id} className="flex items-center gap-2">
+                  <Input
+                    className="w-40 font-mono text-xs"
+                    value={entry.key}
+                    onChange={(e) => onUpdate(i, { key: e.target.value })}
+                    placeholder="KEY"
+                    aria-label={intl.formatMessage(
+                      { id: "settings.mcp.form.envKeyLabel", defaultMessage: "Variable name (row {row})" },
+                      { row: i + 1 },
+                    )}
+                  />
+                  <Input
+                    className="flex-1 font-mono text-xs"
+                    value={entry.value}
+                    onChange={(e) => onUpdate(i, { value: e.target.value })}
+                    placeholder={entry.isSecret ? "Stored in keychain" : "value"}
+                    type={entry.isSecret ? "password" : "text"}
+                    aria-label={intl.formatMessage(
+                      { id: "settings.mcp.form.envValueLabel", defaultMessage: "Variable value (row {row})" },
+                      { row: i + 1 },
+                    )}
+                  />
+                  <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={entry.isSecret}
+                      onChange={(e) => onUpdate(i, { isSecret: e.target.checked })}
+                      className="size-3.5 cursor-pointer accent-primary"
+                      aria-label={intl.formatMessage(
+                        { id: "settings.mcp.form.envSecretLabel", defaultMessage: "Secret (row {row})" },
+                        { row: i + 1 },
+                      )}
+                    />
+                    <FormattedMessage
+                      id="settings.mcp.form.envSecret"
+                      defaultMessage="Secret"
+                    />
+                  </label>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="text-muted-foreground hover:text-destructive size-7 shrink-0"
+                    onClick={() => onRemove(i)}
+                    aria-label={intl.formatMessage(
+                      { id: "settings.mcp.form.envRemoveLabel", defaultMessage: "Remove variable (row {row})" },
+                      { row: i + 1 },
+                    )}
+                  >
+                    <Trash2 className="size-3.5" aria-hidden />
+                  </Button>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -764,7 +831,7 @@ function JsonView({
   jsonError: string | null;
 }) {
   return (
-    <div data-testid="mcp-json-editor" className="px-4 py-4">
+    <div data-testid="mcp-json-editor" className="px-4 py-2.5">
       <Textarea
         value={jsonText}
         onChange={(e) => onJsonText(e.target.value)}

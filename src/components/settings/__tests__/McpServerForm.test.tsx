@@ -57,7 +57,46 @@ describe("McpServerForm (issue #388)", () => {
       />,
     );
 
-    expect(screen.getByText("Add MCP server")).toBeInTheDocument();
+    expect(screen.getByText("New MCP server")).toBeInTheDocument();
+  });
+
+  it("disables Add button when required fields are empty", () => {
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({ id: "", display_name: "", transport: { type: "stdio", command: "", args: [] } })}
+        isEdit={false}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Add")).toBeDisabled();
+  });
+
+  it("enables Add button when name + command are filled (stdio)", () => {
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({ id: "", display_name: "My Server", transport: { type: "stdio", command: "/bin/mcp", args: [] } })}
+        isEdit={false}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Add")).not.toBeDisabled();
+  });
+
+  it("disables Add when name is filled but url is empty (sse)", () => {
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({ id: "", display_name: "My Server", transport: { type: "sse", url: "" } })}
+        isEdit={false}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Add")).toBeDisabled();
   });
 
   it("renders the edit title for an existing server", () => {
@@ -98,13 +137,13 @@ describe("McpServerForm (issue #388)", () => {
       />,
     );
 
-    expect((screen.getByLabelText("Display name") as HTMLInputElement).value).toBe(
+    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe(
       "My Server",
     );
     expect((screen.getByLabelText("Command") as HTMLInputElement).value).toBe(
       "/bin/mcp-server",
     );
-    expect((screen.getByLabelText("Arguments") as HTMLInputElement).value).toBe(
+    expect((screen.getByLabelText("Arguments (space-separated)") as HTMLInputElement).value).toBe(
       "--port 8080",
     );
   });
@@ -156,13 +195,15 @@ describe("McpServerForm (issue #388)", () => {
       />,
     );
 
-    expect(screen.getByText(/No environment variables/)).toBeInTheDocument();
+    // Env editor is collapsed by default when empty — click to expand
+    // (auto-adds a blank row).
+    fireEvent.click(screen.getByText(/Environment variables/));
 
     fireEvent.click(screen.getByText("Add variable"));
 
-    // Two new inputs (key + value) appear.
-    expect(screen.queryAllByPlaceholderText("KEY")).toHaveLength(1);
-    expect(screen.queryAllByPlaceholderText("value")).toHaveLength(1);
+    // Expand auto-adds one blank row, then Add variable adds another.
+    expect(screen.queryAllByPlaceholderText("KEY")).toHaveLength(2);
+    expect(screen.queryAllByPlaceholderText("value")).toHaveLength(2);
   });
 
   it("switching to JSON shows serialized config without secret values", () => {
@@ -184,13 +225,12 @@ describe("McpServerForm (issue #388)", () => {
     expect(json).toContain("My Server");
     expect(json).toContain("LOG_LEVEL");
     expect(json).toContain("info");
-    // ...and keychain_env_keys key names...
-    expect(json).toContain("API_KEY");
-    // ...but NOT a secret value (there is no "sk-secret" in the env values).
+    // ...but NOT keychain_env_keys (stripped from JSON view — managed via Form).
+    expect(json).not.toContain("keychain_env_keys");
     // The env object should only contain non-secret entries.
     const parsed = JSON.parse(json);
     expect(parsed.env).toEqual({ LOG_LEVEL: "info" });
-    expect(parsed.keychain_env_keys).toEqual(["API_KEY"]);
+    expect(parsed.keychain_env_keys).toBeUndefined();
   });
 
   it("switching JSON → Form reflects JSON edits in form fields", () => {
@@ -214,7 +254,7 @@ describe("McpServerForm (issue #388)", () => {
     // Switch back to Form.
     fireEvent.click(screen.getByText("Form"));
 
-    expect((screen.getByLabelText("Display name") as HTMLInputElement).value).toBe(
+    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe(
       "Renamed Server",
     );
   });
@@ -383,7 +423,7 @@ describe("McpServerForm (issue #388)", () => {
       ?.querySelector("input[type=\"password\"]") as HTMLInputElement;
     fireEvent.change(secretInput, { target: { value: "sk-secret" } });
 
-    fireEvent.click(screen.getByText("Save"));
+    fireEvent.click(screen.getByText("Add"));
 
     await waitFor(() => {
       expect(screen.getByText("keychain locked")).toBeInTheDocument();
@@ -394,7 +434,7 @@ describe("McpServerForm (issue #388)", () => {
 
     // Fix the secret mock and retry.
     vi.mocked(setMcpServerSecret).mockResolvedValue(undefined);
-    fireEvent.click(screen.getByText("Save"));
+    fireEvent.click(screen.getByText("Add"));
 
     await waitFor(() => {
       expect(upsertMcpServer).toHaveBeenCalledTimes(2);
