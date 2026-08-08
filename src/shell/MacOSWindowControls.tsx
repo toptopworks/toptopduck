@@ -47,7 +47,7 @@ export function MacOSWindowControls(): ReactElement {
     <div className="macos-window-controls group flex items-center gap-2">
       <button
         type="button"
-        aria-label={intl.formatMessage({ id: "window.close", defaultMessage: "Close" })}
+        aria-label={intl.formatMessage({ id: "common.close", defaultMessage: "Close" })}
         onClick={() => fireWindowAction("close")}
         className="inline-flex h-6 w-6 items-center justify-center border-0 bg-transparent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       >

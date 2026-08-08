@@ -310,7 +310,7 @@ export function LiveTurnCard({
               values={{ step: liveTurn.step }}
             />
           ) : (
-            <FormattedMessage id="thread.live.thinking" defaultMessage="Thinking…" />
+            <FormattedMessage id="common.thinking" defaultMessage="Thinking…" />
           )}
         </p>
       )}

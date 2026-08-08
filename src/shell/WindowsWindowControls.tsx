@@ -93,7 +93,7 @@ export function WindowsWindowControls(): ReactElement {
       </button>
       <button
         type="button"
-        aria-label={intl.formatMessage({ id: "window.close", defaultMessage: "Close" })}
+        aria-label={intl.formatMessage({ id: "common.close", defaultMessage: "Close" })}
         onClick={() => fireWindowAction("close")}
         className="inline-flex h-8 w-11 items-center justify-center text-foreground/70 transition-colors hover:bg-destructive hover:text-destructive-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       >

@@ -2,9 +2,10 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { IntlProvider } from "react-intl";
-import type { ReactElement } from "react";
+import type { ReactElement, ReactNode } from "react";
 
 import { ImportSkillsDialog } from "../ImportSkillsDialog";
+import { TooltipProvider } from "../../ui/tooltip";
 import { importSkills, listSkillSources } from "../../../api";
 import * as dialogPlugin from "@tauri-apps/plugin-dialog";
 import type { ImportOutcome, SkillSource } from "../../../types/skills";
@@ -17,6 +18,29 @@ vi.mock("../../../api", () => ({
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
+}));
+
+// Radix Select's portal + animation model does not cooperate with jsdom's
+// synchronous fireEvent inside a Dialog (the dropdown portal never mounts
+// before findByRole times out). Mock the five primitives as a plain <select>
+// so mode-change assertions stay integration-level without depending on
+// Radix internals (which are tested upstream by Radix themselves).
+vi.mock("../../ui/select", () => ({
+  Select: ({ value, onValueChange, children }: { value: string; onValueChange: (v: string) => void; children: ReactNode }) => (
+    <select
+      data-testid="import-mode-select"
+      value={value}
+      onChange={(e) => onValueChange(e.currentTarget.value)}
+    >
+      {children}
+    </select>
+  ),
+  SelectTrigger: ({ children }: { children?: ReactNode }) => <>{children}</>,
+  SelectContent: ({ children }: { children?: ReactNode }) => <>{children}</>,
+  SelectItem: ({ value, children }: { value: string; children?: ReactNode }) => (
+    <option value={value}>{children}</option>
+  ),
+  SelectValue: () => null,
 }));
 
 const importableSkill = {
@@ -60,7 +84,7 @@ function renderWithProviders(ui: ReactElement) {
   return render(
     <QueryClientProvider client={queryClient}>
       <IntlProvider locale="en" messages={{}} onError={() => {}}>
-        {ui}
+        <TooltipProvider>{ui}</TooltipProvider>
       </IntlProvider>
     </QueryClientProvider>,
   );
@@ -199,7 +223,7 @@ describe("ImportSkillsDialog (issue #367)", () => {
     await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 
-  it("switches to copy mode in the bottom dropdown", async () => {
+  it("switches to copy mode in the bottom select", async () => {
     vi.mocked(listSkillSources).mockResolvedValue([claudeSource]);
     vi.mocked(importSkills).mockResolvedValue([]);
     renderWithProviders(<ImportSkillsDialog onClose={() => {}} />);

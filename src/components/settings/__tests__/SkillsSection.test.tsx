@@ -5,6 +5,7 @@ import { IntlProvider } from "react-intl";
 import type { ReactElement } from "react";
 
 import { SkillsSection } from "../SkillsSection";
+import { TooltipProvider } from "../../ui/tooltip";
 import {
   createSkill,
   deleteSkill,
@@ -65,7 +66,7 @@ function renderWithProviders(ui: ReactElement) {
   return render(
     <QueryClientProvider client={queryClient}>
       <IntlProvider locale="en" messages={{}} onError={() => {}}>
-        {ui}
+        <TooltipProvider>{ui}</TooltipProvider>
       </IntlProvider>
     </QueryClientProvider>,
   );

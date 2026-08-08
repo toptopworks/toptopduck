@@ -604,7 +604,7 @@ function SidebarRow({
               className={cn(sessionMenuItemBase, "text-foreground")}
               onClick={onClose}
             >
-              <FormattedMessage id="sidebar.menu.close" defaultMessage="Close" />
+              <FormattedMessage id="common.close" defaultMessage="Close" />
             </button>
           )}
           {entry.path && (
@@ -614,7 +614,7 @@ function SidebarRow({
               className={cn("danger", sessionMenuItemBase, "text-destructive")}
               onClick={onDelete}
             >
-              <FormattedMessage id="sidebar.menu.delete" defaultMessage="Delete" />
+              <FormattedMessage id="common.delete" defaultMessage="Delete" />
             </button>
           )}
         </div>
@@ -739,7 +739,7 @@ export function RenameSessionDialog({
               <FormattedMessage id="session.rename.cancel" defaultMessage="Cancel" />
             </Button>
             <Button type="submit" disabled={!value.trim()}>
-              <FormattedMessage id="session.rename.save" defaultMessage="Save" />
+              <FormattedMessage id="common.save" defaultMessage="Save" />
             </Button>
           </DialogFooter>
         </form>

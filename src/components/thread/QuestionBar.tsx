@@ -112,7 +112,7 @@ function phaseLabel(phase: TurnPhase, intl: IntlShape): string {
           { id: "questionBar.phase.thinkingRetry", defaultMessage: "Thinking (attempt {attempt})…" },
           { attempt },
         )
-      : intl.formatMessage({ id: "questionBar.phase.thinking", defaultMessage: "Thinking…" });
+      : intl.formatMessage({ id: "common.thinking", defaultMessage: "Thinking…" });
   }
   // ToolCallStarted / ToolCallCompleted: the rail renders the call rows; the
   // bar's compact label just names the running wait.

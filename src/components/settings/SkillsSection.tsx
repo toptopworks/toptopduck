@@ -254,7 +254,7 @@ export function SkillsSection({ configuredMcpIds }: { configuredMcpIds: string[]
               }}
             >
               <Download className="size-4" aria-hidden />
-              <FormattedMessage id="settings.skills.import" defaultMessage="Import" />
+              <FormattedMessage id="common.import" defaultMessage="Import" />
             </Button>
             <Button
               type="button"
@@ -398,7 +398,7 @@ export function SkillsSection({ configuredMcpIds }: { configuredMcpIds: string[]
                 onClick={() => deleteMutation.mutate(confirmDelete)}
               >
                 <FormattedMessage
-                  id="settings.skills.confirmDeleteConfirm"
+                  id="common.delete"
                   defaultMessage="Delete"
                 />
               </AlertDialogAction>
@@ -604,7 +604,7 @@ function SkillDrawer({
           <div className="grid gap-1.5">
             <Label htmlFor="skill-description">
               <FormattedMessage
-                id="settings.skills.fieldDescription"
+                id="common.description"
                 defaultMessage="Description"
               />
             </Label>
@@ -727,17 +727,17 @@ function SkillDrawer({
             </Button>
           )}
           <Button type="button" variant="ghost" onClick={onCancel}>
-            <FormattedMessage id="settings.skills.cancel" defaultMessage="Cancel" />
+            <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
           </Button>
           {!isLinked && (
             <Button type="button" onClick={handleSave} disabled={saving}>
               {saving ? (
                 <FormattedMessage
-                  id="settings.skills.saving"
+                  id="common.saving"
                   defaultMessage="Saving…"
                 />
               ) : (
-                <FormattedMessage id="settings.skills.save" defaultMessage="Save" />
+                <FormattedMessage id="common.save" defaultMessage="Save" />
               )}
             </Button>
           )}

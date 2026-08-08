@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ChevronRight, Plus, RefreshCw } from "lucide-react";
+import { ChevronRight, Info, Plus, RefreshCw, X } from "lucide-react";
 
 import type {
   DiscoveredSkill,
@@ -16,6 +16,14 @@ import { skillKeys } from "../../session/queryKeys";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select";
 import {
   Dialog,
   DialogContent,
@@ -50,7 +58,7 @@ export function ImportSkillsDialog({ onClose }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   const sourcesKey = skillKeys.sources(customPaths);
-  const { data: sources, refetch, isFetching } = useQuery({
+  const { data: sources, error: sourcesError, refetch, isFetching } = useQuery({
     queryKey: sourcesKey,
     queryFn: () => listSkillSources(customPaths),
   });
@@ -82,10 +90,21 @@ export function ImportSkillsDialog({ onClose }: Props) {
         onClose();
         return;
       }
-      // Partial failure: fold the FIRST failure's typed reject + stay open so
-      // the user sees which import did not land (the rest imported fine). A
-      // full success closes the dialog; a full failure surfaces the same way.
-      setError(fmtError(failed[0].data, intl));
+      // Partial failure: surface the first typed reject + the total failure
+      // count so the user knows how many imports did not land. The rest
+      // imported fine; a full success closes the dialog.
+      const firstError = fmtError(failed[0].data, intl);
+      setError(
+        failed.length > 1
+          ? intl.formatMessage(
+              {
+                id: "settings.skills.importPartialFailure",
+                defaultMessage: "{error} (+{count} more)",
+              },
+              { error: firstError, count: failed.length - 1 },
+            )
+          : firstError,
+      );
     },
     onError: (e) => setError(fmtError(e, intl)),
   });
@@ -105,6 +124,10 @@ export function ImportSkillsDialog({ onClose }: Props) {
   }, [sources]);
 
   const selectedCount = selected.size;
+  const totalDiscovered = [...importableDirsBySource.values()].reduce(
+    (sum, dirs) => sum + dirs.length,
+    0,
+  );
 
   function toggleSkill(dir: string) {
     setSelected((prev) => {
@@ -175,7 +198,7 @@ export function ImportSkillsDialog({ onClose }: Props) {
     >
       <DialogContent
         className="sm:max-w-2xl"
-        showCloseButton
+        showCloseButton={false}
         onEscapeKeyDown={(e) => {
           if (importMutation.isPending) e.preventDefault();
         }}
@@ -191,22 +214,38 @@ export function ImportSkillsDialog({ onClose }: Props) {
                 defaultMessage="Import skills"
               />
             </DialogTitle>
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              className="text-muted-foreground"
-              aria-label={intl.formatMessage({
-                id: "settings.skills.importRefresh",
-                defaultMessage: "Refresh sources",
-              })}
-              onClick={() => void refetch()}
-            >
-              <RefreshCw
-                className={cn("size-4", isFetching && "animate-spin")}
-                aria-hidden
-              />
-            </Button>
+            <div className="flex items-center gap-1">
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="text-muted-foreground"
+                aria-label={intl.formatMessage({
+                  id: "settings.skills.importRefresh",
+                  defaultMessage: "Refresh sources",
+                })}
+                onClick={() => void refetch()}
+              >
+                <RefreshCw
+                  className={cn("size-4", isFetching && "animate-spin")}
+                  aria-hidden
+                />
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="text-muted-foreground"
+                aria-label={intl.formatMessage({
+                  id: "common.close",
+                  defaultMessage: "Close",
+                })}
+                onClick={onClose}
+                disabled={importMutation.isPending}
+              >
+                <X className="size-4" aria-hidden />
+              </Button>
+            </div>
           </div>
           <DialogDescription>
             <FormattedMessage
@@ -216,7 +255,13 @@ export function ImportSkillsDialog({ onClose }: Props) {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="grid max-h-[60vh] gap-1 overflow-y-auto">
+        {sourcesError && (
+          <p className="settings-error text-destructive text-sm">
+            {fmtError(sourcesError, intl)}
+          </p>
+        )}
+
+        <div className="flex min-h-[40vh] max-h-[60vh] flex-col gap-1 overflow-y-auto">
           {sourceList.length === 0 ? (
             <p className="text-muted-foreground px-4 py-8 text-center text-sm">
               <FormattedMessage
@@ -248,7 +293,7 @@ export function ImportSkillsDialog({ onClose }: Props) {
             <Plus className="size-4" aria-hidden />
             <FormattedMessage
               id="settings.skills.importAddCustomPath"
-              defaultMessage="+ Add custom path"
+              defaultMessage="Add custom path"
             />
           </button>
         </div>
@@ -257,41 +302,73 @@ export function ImportSkillsDialog({ onClose }: Props) {
           <p className="settings-error text-destructive text-sm">{error}</p>
         )}
 
-        <DialogFooter>
-          <label htmlFor="import-mode" className="flex items-center gap-2 text-sm">
+        <DialogFooter className="sm:items-center">
+          <span className="text-muted-foreground text-sm">
             <FormattedMessage
-              id="settings.skills.importModeLabel"
-              defaultMessage="Mode"
+              id="settings.skills.importDiscovered"
+              defaultMessage="Discovered {count} importable {count, plural, one {skill} other {skills}}"
+              values={{ count: totalDiscovered }}
             />
-            <select
-              id="import-mode"
-              data-testid="import-mode-select"
-              className="border-border bg-background text-foreground h-9 rounded-md border px-2 text-sm"
-              value={mode}
-              onChange={(e) => setMode(e.target.value as ImportMode)}
-            >
-              <option value="link">
+          </span>
+          <Select
+            value={mode}
+            onValueChange={(v) => setMode(v as ImportMode)}
+          >
+            <SelectTrigger data-testid="import-mode-select">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="link">
                 {intl.formatMessage({
                   id: "settings.skills.importModeLink",
-                  defaultMessage: "Link (default)",
+                  defaultMessage: "Link",
                 })}
-              </option>
-              <option value="copy">
+              </SelectItem>
+              <SelectItem value="copy">
                 {intl.formatMessage({
                   id: "settings.skills.importModeCopy",
                   defaultMessage: "Copy",
                 })}
-              </option>
-            </select>
-          </label>
+              </SelectItem>
+            </SelectContent>
+          </Select>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className="text-muted-foreground shrink-0"
+                aria-label={intl.formatMessage({
+                  id: "settings.skills.importModeHintAria",
+                  defaultMessage: "Import mode explanation",
+                })}
+              >
+                <Info className="size-4" aria-hidden />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top" align="start" sideOffset={3} className="max-w-[15rem] bg-popover text-popover-foreground border shadow-md rounded-lg px-2.5 py-2">
+              <div className="space-y-1">
+                <p className="text-sm font-medium">
+                  <FormattedMessage id="settings.skills.importModeHintTitle" defaultMessage="Import mode" />
+                </p>
+                <p className="text-muted-foreground text-sm">
+                  {mode === "link" ? (
+                    <FormattedMessage id="settings.skills.importModeLinkHint" defaultMessage="Creates a link to the external Agent skill directory. Follows subsequent changes in the source directory, but the skill depends on the source path remaining available." />
+                  ) : (
+                    <FormattedMessage id="settings.skills.importModeCopyHint" defaultMessage="Copies the complete skill directory. Subsequent changes in the external Agent directory will not sync automatically." />
+                  )}
+                </p>
+              </div>
+            </TooltipContent>
+          </Tooltip>
           <Button
             type="button"
             variant="ghost"
+            className="sm:ml-auto"
             onClick={onClose}
             disabled={importMutation.isPending}
           >
             <FormattedMessage
-              id="settings.skills.cancel"
+              id="common.cancel"
               defaultMessage="Cancel"
             />
           </Button>
@@ -303,12 +380,12 @@ export function ImportSkillsDialog({ onClose }: Props) {
           >
             {importMutation.isPending ? (
               <FormattedMessage
-                id="settings.skills.importing"
+                id="common.importing"
                 defaultMessage="Importing…"
               />
             ) : (
               <FormattedMessage
-                id="settings.skills.importAction"
+                id="common.importCount"
                 defaultMessage="Import {count}"
                 values={{ count: selectedCount }}
               />

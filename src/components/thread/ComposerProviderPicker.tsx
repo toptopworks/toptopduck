@@ -467,7 +467,7 @@ export function ComposerProviderPicker({
             {/* Open settings entry (ADR-0065 overlay). */}
             <Button type="button" variant="outline" size="sm" onClick={handleOpenSettings}>
               <FormattedMessage
-                id="composer.providerPicker.openSettings"
+                id="common.openSettings"
                 defaultMessage="Open settings"
               />
             </Button>

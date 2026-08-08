@@ -179,7 +179,7 @@ export function ColdStartHero({
             className="primary-cta"
             onClick={() => onOpenSettingsProfiles()}
           >
-            <FormattedMessage id="coldStart.openSettings" defaultMessage="Open settings" />
+            <FormattedMessage id="common.openSettings" defaultMessage="Open settings" />
           </Button>
         </>
       ) : mode === "no-key" ? (
@@ -198,7 +198,7 @@ export function ColdStartHero({
             className="primary-cta"
             onClick={() => onOpenSettingsProfiles(activeProfile?.id)}
           >
-            <FormattedMessage id="coldStart.openSettings" defaultMessage="Open settings" />
+            <FormattedMessage id="common.openSettings" defaultMessage="Open settings" />
           </Button>
         </>
       ) : mode === "keychain-fault" ? (
@@ -220,7 +220,7 @@ export function ColdStartHero({
             className="primary-cta"
             onClick={() => onOpenSettingsProfiles(activeProfile?.id)}
           >
-            <FormattedMessage id="coldStart.openSettings" defaultMessage="Open settings" />
+            <FormattedMessage id="common.openSettings" defaultMessage="Open settings" />
           </Button>
         </>
       ) : (
