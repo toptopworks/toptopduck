@@ -1516,6 +1516,9 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
       expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    // SettingsView is lazy-loaded (issue #423): wait for the module to resolve
+    // before interacting with elements inside the overlay.
+    await screen.findByRole("button", { name: "折叠设置导航" });
     // Settings open: the topbar toggle now folds the settings nav. Default is
     // expanded, so the button offers the collapse action.
     const shell = document.querySelector(".shell");
@@ -1542,6 +1545,9 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
       expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    // SettingsView is lazy-loaded (issue #423): wait for the module to resolve
+    // before interacting with elements inside the overlay.
+    await screen.findByRole("button", { name: "折叠设置导航" });
     fireEvent.click(screen.getByRole("button", { name: "折叠设置导航" }));
     expect(
       document.querySelector(".shell")?.classList.contains("settings-nav-collapsed"),
