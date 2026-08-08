@@ -898,10 +898,11 @@ mod tests {
             lower.contains("disabled"),
             "lockdown backstop refuses an in-bounds read_*: {err}"
         );
-        // The lockdown error ("disabled by configuration") classifies as
-        // Resource via classify_duckdb_error, so materialize wraps it as a
-        // resource-cap error (explore wraps it as "SQL failed" -- the two
-        // surfaces classify differently, but both refuse the read_*).
+        // The lockdown error ("disabled by configuration") is classified as
+        // Resource by the sandbox runner at construction time, so the carried
+        // kind propagates through materialize's promotion (explore wraps the
+        // detail as "SQL failed" -- the two surfaces classify differently, but
+        // both refuse the read_*).
         assert!(
             err.contains("result exceeds a resource cap"),
             "lockdown refusal reads as a resource-cap error: {err}"

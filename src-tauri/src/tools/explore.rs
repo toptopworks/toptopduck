@@ -126,7 +126,7 @@ fn run_explore(
         SandboxExecError::Resource { rows, cap } => format!(
             "result row count ({rows}) exceeds the cap {cap}; add a LIMIT or narrow the query"
         ),
-        SandboxExecError::Runtime(s) => format!("SQL failed: {s}"),
+        SandboxExecError::Runtime { detail, .. } => format!("SQL failed: {detail}"),
     })?;
 
     // Tail: derive the shape FROM THE SANDBOX (explore never persists). No
