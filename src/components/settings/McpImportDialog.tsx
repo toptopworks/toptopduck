@@ -127,7 +127,11 @@ export function McpImportDialog({ open, onClose, existingNames, onImported }: Mc
   function toggleSourceAll(sourceId: ImportSource) {
     const src = sources?.find((s) => s.id === sourceId);
     if (!src) return;
-    const keys = src.servers.map((srv) => selectionKey(sourceId, srv.display_name));
+    // Filter out servers already in the config (mirrors serverRegistry) so
+    // select-all never includes duplicates that cannot be imported.
+    const keys = src.servers
+      .filter((srv) => !existingNames.has(srv.display_name))
+      .map((srv) => selectionKey(sourceId, srv.display_name));
     const allSelected = keys.every((k) => selected.has(k));
     setSelected((prev) => {
       const next = new Set(prev);

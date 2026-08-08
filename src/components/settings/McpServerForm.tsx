@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { ArrowLeft, ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
 import { FormattedMessage, useIntl } from "react-intl";
 
@@ -125,21 +125,24 @@ export function McpServerForm({
   // Field validation: name is always required; command (stdio) or url
   // (sse/http) is required based on transport type. Disables the Add/Save
   // button until the minimum required fields are filled.
-  const isFormValid = mode === "json"
-    ? !jsonError && (() => {
-        const result = tryParseConfig(jsonText);
-        if (!result.ok) return false;
-        const c = result.config;
-        if (!c.display_name.trim()) return false;
+  const isFormValid = useMemo(() => {
+    if (mode === "json") {
+      try {
+        const c = JSON.parse(jsonText) as McpServerConfig;
+        if (!c.display_name?.trim()) return false;
         return c.transport.type === "stdio"
-          ? !!c.transport.command.trim()
-          : !!c.transport.url.trim();
-      })()
-    : displayName.trim() !== "" && (
+          ? !!c.transport.command?.trim()
+          : !!c.transport.url?.trim();
+      } catch {
+        return false;
+      }
+    }
+    return displayName.trim() !== "" && (
       transportType === "stdio"
         ? command.trim() !== ""
         : url.trim() !== ""
     );
+  }, [mode, jsonText, displayName, transportType, command, url]);
 
   // Build a McpServerConfig from the current form fields.
   function buildConfigFromForm(): McpServerConfig {

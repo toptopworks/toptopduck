@@ -222,7 +222,7 @@
   "settings.mcp.backToList": "返回 MCP 列表",
   "settings.mcp.confirmDeleteBody": "此操作将永久删除服务器 {name} 并清除其存储的密钥。此操作不可撤销。",
   "settings.mcp.confirmDeleteCancel": "取消",
-  "settings.mcp.confirmDeleteTitle": "删除 MCP 服务器？",
+  "settings.mcp.confirmDeleteTitle": "删除 MCP 服务器 {name}？",
   "settings.mcp.deleteLabel": "删除服务器 {name}",
   "settings.mcp.deleting": "删除中…",
   "settings.mcp.description": "外部模型上下文协议服务器提供代理可调用的工具。点击测试可验证连接并列出工具。",

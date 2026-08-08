@@ -414,7 +414,7 @@ export function McpSection({
               <AlertDialogTitle>
                 <FormattedMessage
                   id="settings.mcp.confirmDeleteTitle"
-                  defaultMessage="Delete MCP server?"
+                  defaultMessage="Delete MCP server {name}?"
                   values={{ name: deleteTarget.displayName }}
                 />
               </AlertDialogTitle>

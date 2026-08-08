@@ -222,7 +222,7 @@
   "settings.mcp.backToList": "Back to MCP list",
   "settings.mcp.confirmDeleteBody": "This permanently removes the server {name} and clears its stored secrets. This cannot be undone.",
   "settings.mcp.confirmDeleteCancel": "Cancel",
-  "settings.mcp.confirmDeleteTitle": "Delete MCP server?",
+  "settings.mcp.confirmDeleteTitle": "Delete MCP server {name}?",
   "settings.mcp.deleteLabel": "Delete server {name}",
   "settings.mcp.deleting": "Deleting…",
   "settings.mcp.description": "External Model Context Protocol servers add tools the agent can call. Test a server to verify connectivity and list its tools.",

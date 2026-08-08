@@ -167,7 +167,7 @@ describe("McpSection (issue #387)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Delete server My Server" }));
 
     expect(
-      screen.getByText("Delete MCP server?"),
+      screen.getByText("Delete MCP server My Server?"),
     ).toBeInTheDocument();
   });
 
@@ -226,7 +226,7 @@ describe("McpSection (issue #387)", () => {
     });
 
     // Dialog should still be visible (deleteTarget not cleared).
-    expect(screen.getByText("Delete MCP server?")).toBeInTheDocument();
+    expect(screen.getByText("Delete MCP server My Server?")).toBeInTheDocument();
     // Keychain secret should NOT have been cleared (config removal failed).
     expect(clearMcpServerSecret).not.toHaveBeenCalled();
   });
