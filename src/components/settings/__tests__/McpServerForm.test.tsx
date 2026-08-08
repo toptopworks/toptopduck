@@ -206,7 +206,7 @@ describe("McpServerForm (issue #388)", () => {
     expect(screen.queryAllByPlaceholderText("value")).toHaveLength(2);
   });
 
-  it("switching to JSON shows serialized config without secret values", () => {
+  it("switching to JSON shows web-format config with secret keys blanked", () => {
     renderWithProviders(
       <McpServerForm
         initialServer={makeServer()}
@@ -221,16 +221,18 @@ describe("McpServerForm (issue #388)", () => {
     const textarea = screen.getByTestId("mcp-json-editor").querySelector("textarea")!;
     const json = textarea.value;
 
-    // The JSON contains the structural config...
+    // The JSON is in the common web format (bare server map)...
     expect(json).toContain("My Server");
+    expect(json).toContain("command");
     expect(json).toContain("LOG_LEVEL");
     expect(json).toContain("info");
-    // ...but NOT keychain_env_keys (stripped from JSON view — managed via Form).
+    // ...with flat transport fields, NOT our internal "transport" wrapper.
+    expect(json).not.toContain("transport");
     expect(json).not.toContain("keychain_env_keys");
-    // The env object should only contain non-secret entries.
+    // Secret keys appear with blanked values (actual values in keychain).
     const parsed = JSON.parse(json);
-    expect(parsed.env).toEqual({ LOG_LEVEL: "info" });
-    expect(parsed.keychain_env_keys).toBeUndefined();
+    const entry = parsed["My Server"];
+    expect(entry.env).toEqual({ LOG_LEVEL: "info", API_KEY: "" });
   });
 
   it("switching JSON → Form reflects JSON edits in form fields", () => {
@@ -246,9 +248,11 @@ describe("McpServerForm (issue #388)", () => {
     // Switch to JSON.
     fireEvent.click(screen.getByText("JSON"));
     const textarea = screen.getByTestId("mcp-json-editor").querySelector("textarea")!;
-    // Edit the JSON: change display_name.
+    // Edit the JSON: rename the server key (web format uses the key as name).
     const edited = JSON.parse(textarea.value);
-    edited.display_name = "Renamed Server";
+    const oldKey = Object.keys(edited)[0];
+    edited["Renamed Server"] = edited[oldKey];
+    delete edited[oldKey];
     fireEvent.change(textarea, { target: { value: JSON.stringify(edited, null, 2) } });
 
     // Switch back to Form.
@@ -521,5 +525,220 @@ describe("McpServerForm (issue #388)", () => {
     // FIRST is gone, SECOND remains — stable keys ensured correct removal.
     expect(screen.queryByDisplayValue("FIRST")).not.toBeInTheDocument();
     expect(screen.getByDisplayValue("SECOND")).toBeInTheDocument();
+  });
+
+  // --- Web-format JSON paste (common online formats) -------------------------
+
+  it("accepts Claude Desktop format {mcpServers: {...}} in JSON mode", () => {
+    vi.mocked(upsertMcpServer).mockResolvedValue(makeServer({
+      id: "new-id",
+      display_name: "filesystem",
+      transport: { type: "stdio", command: "npx", args: ["-y", "@pkg/fs"] },
+      env: {},
+      keychain_env_keys: [],
+    }));
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({ id: "", display_name: "" })}
+        isEdit={false}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("JSON"));
+    const textarea = screen.getByTestId("mcp-json-editor").querySelector("textarea")!;
+    fireEvent.change(textarea, {
+      target: {
+        value: JSON.stringify({
+          mcpServers: {
+            filesystem: {
+              command: "npx",
+              args: ["-y", "@pkg/fs"],
+            },
+          },
+        }, null, 2),
+      },
+    });
+
+    // Add button is enabled (valid config).
+    const addBtn = screen.getByText("Add");
+    expect(addBtn).not.toBeDisabled();
+  });
+
+  it("accepts bare server map {name: {...}} in JSON mode", () => {
+    vi.mocked(upsertMcpServer).mockResolvedValue(makeServer({
+      id: "new-id",
+      display_name: "my-server",
+      transport: { type: "stdio", command: "node", args: ["server.js"] },
+      env: {},
+      keychain_env_keys: [],
+    }));
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({ id: "", display_name: "" })}
+        isEdit={false}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("JSON"));
+    const textarea = screen.getByTestId("mcp-json-editor").querySelector("textarea")!;
+    fireEvent.change(textarea, {
+      target: {
+        value: JSON.stringify({
+          "my-server": { command: "node", args: ["server.js"] },
+        }, null, 2),
+      },
+    });
+
+    expect(screen.getByText("Add")).not.toBeDisabled();
+  });
+
+  it("syncs web-format JSON to Form fields on mode switch", () => {
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({ id: "", display_name: "" })}
+        isEdit={false}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("JSON"));
+    const textarea = screen.getByTestId("mcp-json-editor").querySelector("textarea")!;
+    fireEvent.change(textarea, {
+      target: {
+        value: JSON.stringify({
+          mcpServers: {
+            "web-server": {
+              command: "uvicorn",
+              args: ["main:app"],
+              env: { PORT: "8000" },
+            },
+          },
+        }, null, 2),
+      },
+    });
+
+    // Switch back to Form — fields should reflect the pasted JSON.
+    fireEvent.click(screen.getByText("Form"));
+
+    expect(screen.getByDisplayValue("web-server")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("uvicorn")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("main:app")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("PORT")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("8000")).toBeInTheDocument();
+  });
+
+  it("routes secret env keys to keychain in web-format JSON", () => {
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({ id: "", display_name: "" })}
+        isEdit={false}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("JSON"));
+    const textarea = screen.getByTestId("mcp-json-editor").querySelector("textarea")!;
+    fireEvent.change(textarea, {
+      target: {
+        value: JSON.stringify({
+          "secret-server": {
+            command: "npx",
+            args: ["-y", "@pkg/server"],
+            env: {
+              LOG_LEVEL: "info",
+              API_KEY: "sk-xxx",
+            },
+          },
+        }, null, 2),
+      },
+    });
+
+    // Switch to Form — API_KEY should appear as a Secret row.
+    fireEvent.click(screen.getByText("Form"));
+
+    // API_KEY is in the env editor as a secret (password type input).
+    const apiKeyInput = screen.getByDisplayValue("API_KEY");
+    const row = apiKeyInput.closest("div");
+    const secretCheckbox = row?.querySelector("input[type=\"checkbox\"]") as HTMLInputElement;
+    expect(secretCheckbox.checked).toBe(true);
+
+    // LOG_LEVEL is a non-secret env var.
+    expect(screen.getByDisplayValue("LOG_LEVEL")).toBeInTheDocument();
+  });
+
+  it("blocks JSON-mode save when secret keys are detected", () => {
+    const onSaved = vi.fn();
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({ id: "", display_name: "" })}
+        isEdit={false}
+        onSaved={onSaved}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("JSON"));
+    const textarea = screen.getByTestId("mcp-json-editor").querySelector("textarea")!;
+    fireEvent.change(textarea, {
+      target: {
+        value: JSON.stringify({
+          "secret-server": {
+            command: "npx",
+            args: ["-y", "@pkg/server"],
+            env: {
+              API_KEY: "sk-xxx",
+            },
+          },
+        }, null, 2),
+      },
+    });
+
+    // Click Add — save should be blocked with an error.
+    fireEvent.click(screen.getByText("Add"));
+
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(screen.getByText(/Secret keys detected/)).toBeInTheDocument();
+  });
+
+  it("does not restore deleted secret keys when switching JSON to Form", () => {
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({
+          id: "",
+          display_name: "",
+          env: { LOG_LEVEL: "info" },
+          keychain_env_keys: ["API_KEY"],
+        })}
+        isEdit={false}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    // Switch to JSON — captures pendingSecrets with API_KEY.
+    fireEvent.click(screen.getByText("JSON"));
+    const textarea = screen.getByTestId("mcp-json-editor").querySelector("textarea")!;
+
+    // Edit JSON: remove API_KEY from the serialized config.
+    const edited = JSON.parse(textarea.value);
+    const key = Object.keys(edited)[0];
+    delete edited[key].env.API_KEY;
+    fireEvent.change(textarea, { target: { value: JSON.stringify(edited, null, 2) } });
+
+    // Switch back to Form.
+    fireEvent.click(screen.getByText("Form"));
+
+    // API_KEY should NOT be present — user deleted it from JSON.
+    expect(screen.queryByDisplayValue("API_KEY")).not.toBeInTheDocument();
   });
 });

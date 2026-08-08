@@ -5,6 +5,7 @@ import { FormattedMessage, useIntl } from "react-intl";
 import type { McpProbeResult, McpServerConfig, McpTransport } from "../../types/mcp";
 import { probeMcpServer, setMcpServerSecret, upsertMcpServer } from "../../api";
 import { fmtError } from "../../lib/error-presentation";
+import { configToWebJson, normalizeJsonToConfig } from "../../lib/mcp-json-parse";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -128,7 +129,7 @@ export function McpServerForm({
   const isFormValid = useMemo(() => {
     if (mode === "json") {
       try {
-        const c = JSON.parse(jsonText) as McpServerConfig;
+        const c = normalizeJsonToConfig(JSON.parse(jsonText), serverId);
         if (!c.display_name?.trim()) return false;
         return c.transport.type === "stdio"
           ? !!c.transport.command?.trim()
@@ -142,7 +143,7 @@ export function McpServerForm({
         ? command.trim() !== ""
         : url.trim() !== ""
     );
-  }, [mode, jsonText, displayName, transportType, command, url]);
+  }, [mode, jsonText, displayName, transportType, command, url, serverId]);
 
   // Build a McpServerConfig from the current form fields.
   function buildConfigFromForm(): McpServerConfig {
@@ -183,13 +184,15 @@ export function McpServerForm({
   }
 
   /** Parse JSON text into a McpServerConfig, returning an error string on
-   *  failure. Shared by mode-switch and save to avoid duplicating the
-   *  try/catch (M7). */
+   *  failure. Accepts our internal format AND common web formats (Claude
+   *  Desktop `{"mcpServers": {...}}`, bare `{"name": {...}}` — the first entry
+   *  is used). Shared by mode-switch and save (M7). */
   function tryParseConfig(
     text: string,
   ): { ok: true; config: McpServerConfig } | { ok: false; error: string } {
     try {
-      return { ok: true, config: JSON.parse(text) as McpServerConfig };
+      const raw = JSON.parse(text);
+      return { ok: true, config: normalizeJsonToConfig(raw, serverId) };
     } catch (e) {
       return { ok: false, error: fmtError(e, intl) };
     }
@@ -224,21 +227,19 @@ export function McpServerForm({
     if (next === mode) return;
     if (next === "json") {
       // Capture ALL secret key names + values before serializing so they
-      // survive the JSON round-trip (H2). keychain_env_keys is stripped from
-      // the JSON view entirely — it is an implementation detail the user
-      // should not edit directly.
+      // survive the JSON round-trip (H2). The web-format serializer includes
+      // secret key names with blanked values; the actual values are restored
+      // from pendingSecrets on the JSON → Form switch.
       pendingSecrets.current = {};
       for (const entry of envEntries) {
         if (entry.isSecret) {
           pendingSecrets.current[entry.key] = entry.value;
         }
       }
-      // Serialize config WITHOUT keychain_env_keys — the user manages secrets
-      // through the Form's Secret checkbox, not via raw JSON.
+      // Serialize into the common web format (bare server map) so the user
+      // sees and edits the same shape they'd copy from online docs.
       const config = buildConfigFromForm();
-      const jsonConfig = { ...config, keychain_env_keys: undefined };
-      delete jsonConfig.keychain_env_keys;
-      setJsonText(JSON.stringify(jsonConfig, null, 2));
+      setJsonText(configToWebJson(config));
       setJsonError(null);
     } else {
       // Parse JSON text → form state. If invalid, abort the switch and show
@@ -248,9 +249,11 @@ export function McpServerForm({
         setJsonError(result.error);
         return;
       }
-      // Re-inject secret key names captured before the Form→JSON switch so
-      // initEnvEntries reconstructs the secret rows correctly.
-      result.config.keychain_env_keys = Object.keys(pendingSecrets.current);
+      // Key names come solely from the parsed JSON (configToWebJson includes
+      // secret keys as blanked entries; normalizeJsonToConfig re-detects them
+      // on parse-back). pendingSecrets only restores VALUES via syncFromJson —
+      // do NOT merge key names back, as the user may have intentionally
+      // deleted them from the JSON.
       syncFromJson(result.config);
       setJsonError(null);
     }
@@ -286,6 +289,24 @@ export function McpServerForm({
       config = result.config;
     } else {
       config = buildConfigFromForm();
+    }
+
+    // In JSON mode the normalizer detects secret key names but drops their
+    // values (secrets must go to the OS keychain, not config). Block save
+    // and prompt the user to enter values via Form mode, otherwise the
+    // config is written with keychain_env_keys that have no keychain entries.
+    if (mode === "json" && config.keychain_env_keys.length > 0) {
+      setError(
+        intl.formatMessage(
+          {
+            id: "settings.mcp.form.secretsRequireFormMode",
+            defaultMessage:
+              "Secret keys detected ({keys}). Switch to Form mode to enter their values before saving.",
+          },
+          { keys: config.keychain_env_keys.join(", ") },
+        ),
+      );
+      return;
     }
 
     // Capture secret values from the form's env entries (only populated in
@@ -408,7 +429,7 @@ export function McpServerForm({
         )}
       />
 
-      <SettingsCard data-testid="mcp-server-form-card">
+      <SettingsCard data-testid="mcp-server-form-card" className="divide-y-0">
         {mode === "form" ? (
           <FormView
             displayName={displayName}
@@ -435,43 +456,56 @@ export function McpServerForm({
             jsonError={jsonError}
           />
         )}
+
+        {mode === "json" && (
+          <p className="text-muted-foreground px-4 py-1.5 text-sm">
+            <FormattedMessage
+              id="settings.mcp.form.jsonHint"
+              defaultMessage="Supports pasting {example1} or {example2} directly."
+              values={{
+                example1: "{\"server-name\": {...}}",
+                example2: "{\"mcpServers\": {\"server-name\": {...}}}",
+              }}
+            />
+          </p>
+        )}
+
+        {error && <p className="settings-error text-destructive px-4 py-1.5 text-sm">{error}</p>}
+
+        {/* Save / Cancel */}
+        <div className="flex items-center gap-2 px-4 py-3">
+          <Button type="button" disabled={!isFormValid || saving} onClick={() => void handleSave()}>
+            {saving && <Loader2 className="size-4 animate-spin" aria-hidden />}
+            {saving ? (
+              <FormattedMessage
+                id="common.saving"
+                defaultMessage="Saving…"
+              />
+            ) : isEdit ? (
+              <FormattedMessage
+                id="common.save"
+                defaultMessage="Save"
+              />
+            ) : (
+              <FormattedMessage
+                id="common.add"
+                defaultMessage="Add"
+              />
+            )}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            disabled={saving}
+            onClick={onCancel}
+          >
+            <FormattedMessage
+              id="settings.mcp.form.cancel"
+              defaultMessage="Cancel"
+            />
+          </Button>
+        </div>
       </SettingsCard>
-
-      {error && <p className="settings-error mt-3 text-destructive text-sm">{error}</p>}
-
-      {/* Save / Cancel */}
-      <div className="mt-3 flex items-center gap-2">
-        <Button type="button" disabled={!isFormValid || saving} onClick={() => void handleSave()}>
-          {saving && <Loader2 className="size-4 animate-spin" aria-hidden />}
-          {saving ? (
-            <FormattedMessage
-              id="common.saving"
-              defaultMessage="Saving…"
-            />
-          ) : isEdit ? (
-            <FormattedMessage
-              id="common.save"
-              defaultMessage="Save"
-            />
-          ) : (
-            <FormattedMessage
-              id="common.add"
-              defaultMessage="Add"
-            />
-          )}
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          disabled={saving}
-          onClick={onCancel}
-        >
-          <FormattedMessage
-            id="settings.mcp.form.cancel"
-            defaultMessage="Cancel"
-          />
-        </Button>
-      </div>
     </div>
   );
 }
@@ -564,7 +598,7 @@ function FormView({
           id="mcp-display-name"
           value={displayName}
           onChange={(e) => onDisplayName(e.target.value)}
-          placeholder="My MCP Server"
+          placeholder="my-mcp-server"
         />
       </SettingsRow>
 
@@ -631,7 +665,7 @@ function FormView({
               id="mcp-command"
               value={command}
               onChange={(e) => onCommand(e.target.value)}
-              placeholder="/usr/local/bin/mcp-server"
+              placeholder="npx"
             />
           </SettingsRow>
           <SettingsRow
@@ -649,7 +683,7 @@ function FormView({
               id="mcp-args"
               value={argsText}
               onChange={(e) => onArgsText(e.target.value)}
-              placeholder="--port 8080 --verbose"
+              placeholder="-y @modelcontextprotocol/server_memory"
             />
           </SettingsRow>
         </>
@@ -673,6 +707,7 @@ function FormView({
 
       <EnvEditor
         entries={envEntries}
+        isHeaders={transportType !== "stdio"}
         onAdd={onAddEnv}
         onRemove={onRemoveEnv}
         onUpdate={onUpdateEnv}
@@ -681,15 +716,17 @@ function FormView({
   );
 }
 
-// --- Env var editor ----------------------------------------------------------
+// --- Env var / headers editor ------------------------------------------------
 
 function EnvEditor({
   entries,
+  isHeaders,
   onAdd,
   onRemove,
   onUpdate,
 }: {
   entries: EnvEntry[];
+  isHeaders: boolean;
   onAdd: () => void;
   onRemove: (index: number) => void;
   onUpdate: (index: number, patch: Partial<EnvEntry>) => void;
@@ -706,6 +743,27 @@ function EnvEditor({
     }
   }
 
+  // Label set switches between env-var and header terminology based on
+  // transport type (stdio = env vars, http/sse = request headers). Each
+  // intl.formatMessage call has a literal id so the formatjs extractor finds it.
+  const L = isHeaders
+    ? {
+        section: intl.formatMessage({ id: "settings.mcp.form.headers", defaultMessage: "Request headers (optional)" }),
+        add: intl.formatMessage({ id: "settings.mcp.form.headersAdd", defaultMessage: "Add header" }),
+        empty: intl.formatMessage({ id: "settings.mcp.form.headersEmpty", defaultMessage: "No request headers. Click Add header to create one." }),
+        keyLabel: (row: number) => intl.formatMessage({ id: "settings.mcp.form.headersKeyLabel", defaultMessage: "Header name (row {row})" }, { row }),
+        valueLabel: (row: number) => intl.formatMessage({ id: "settings.mcp.form.headersValueLabel", defaultMessage: "Header value (row {row})" }, { row }),
+        removeLabel: (row: number) => intl.formatMessage({ id: "settings.mcp.form.headersRemoveLabel", defaultMessage: "Remove header (row {row})" }, { row }),
+      }
+    : {
+        section: intl.formatMessage({ id: "settings.mcp.form.envVars", defaultMessage: "Environment variables (optional)" }),
+        add: intl.formatMessage({ id: "settings.mcp.form.envAdd", defaultMessage: "Add variable" }),
+        empty: intl.formatMessage({ id: "settings.mcp.form.envEmpty", defaultMessage: "No environment variables. Click Add variable to create one." }),
+        keyLabel: (row: number) => intl.formatMessage({ id: "settings.mcp.form.envKeyLabel", defaultMessage: "Variable name (row {row})" }, { row }),
+        valueLabel: (row: number) => intl.formatMessage({ id: "settings.mcp.form.envValueLabel", defaultMessage: "Variable value (row {row})" }, { row }),
+        removeLabel: (row: number) => intl.formatMessage({ id: "settings.mcp.form.envRemoveLabel", defaultMessage: "Remove variable (row {row})" }, { row }),
+      };
+
   return (
     <div data-testid="mcp-env-editor" className="px-4 py-2.5">
       {/* Collapsible header — click to expand/collapse */}
@@ -717,10 +775,7 @@ function EnvEditor({
         >
           <ChevronRight className="text-muted-foreground size-4 shrink-0" aria-hidden />
           <span className="text-muted-foreground text-sm font-medium">
-            <FormattedMessage
-              id="settings.mcp.form.envVars"
-              defaultMessage="Environment variables (optional)"
-            />
+            {L.section}
           </span>
         </button>
       ) : (
@@ -736,27 +791,18 @@ function EnvEditor({
                 aria-hidden
               />
               <span className="text-muted-foreground text-sm font-medium">
-                <FormattedMessage
-                  id="settings.mcp.form.envVars"
-                  defaultMessage="Environment variables (optional)"
-                />
+                {L.section}
               </span>
             </button>
             <Button type="button" variant="ghost" size="sm" onClick={onAdd}>
               <Plus className="size-4" aria-hidden />
-              <FormattedMessage
-                id="settings.mcp.form.envAdd"
-                defaultMessage="Add variable"
-              />
+              {L.add}
             </Button>
           </div>
 
           {entries.length === 0 ? (
             <p className="text-muted-foreground text-xs">
-              <FormattedMessage
-                id="settings.mcp.form.envEmpty"
-                defaultMessage="No environment variables. Click Add variable to create one."
-              />
+              {L.empty}
             </p>
           ) : (
             <div className="space-y-1.5">
@@ -766,11 +812,8 @@ function EnvEditor({
                     className="w-40 font-mono text-xs"
                     value={entry.key}
                     onChange={(e) => onUpdate(i, { key: e.target.value })}
-                    placeholder="KEY"
-                    aria-label={intl.formatMessage(
-                      { id: "settings.mcp.form.envKeyLabel", defaultMessage: "Variable name (row {row})" },
-                      { row: i + 1 },
-                    )}
+                    placeholder={isHeaders ? "Header" : "KEY"}
+                    aria-label={L.keyLabel(i + 1)}
                   />
                   <Input
                     className="flex-1 font-mono text-xs"
@@ -778,10 +821,7 @@ function EnvEditor({
                     onChange={(e) => onUpdate(i, { value: e.target.value })}
                     placeholder={entry.isSecret ? "Stored in keychain" : "value"}
                     type={entry.isSecret ? "password" : "text"}
-                    aria-label={intl.formatMessage(
-                      { id: "settings.mcp.form.envValueLabel", defaultMessage: "Variable value (row {row})" },
-                      { row: i + 1 },
-                    )}
+                    aria-label={L.valueLabel(i + 1)}
                   />
                   <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs">
                     <input
@@ -805,10 +845,7 @@ function EnvEditor({
                     size="icon"
                     className="text-muted-foreground hover:text-destructive size-7 shrink-0"
                     onClick={() => onRemove(i)}
-                    aria-label={intl.formatMessage(
-                      { id: "settings.mcp.form.envRemoveLabel", defaultMessage: "Remove variable (row {row})" },
-                      { row: i + 1 },
-                    )}
+                    aria-label={L.removeLabel(i + 1)}
                   >
                     <Trash2 className="size-3.5" aria-hidden />
                   </Button>
@@ -835,12 +872,18 @@ function JsonView({
 }) {
   return (
     <div data-testid="mcp-json-editor" className="px-4 py-2.5">
+      <Label className="text-muted-foreground mb-1.5 text-sm">
+        <FormattedMessage
+          id="settings.mcp.form.jsonFullConfig"
+          defaultMessage="Full configuration"
+        />
+      </Label>
       <Textarea
         value={jsonText}
         onChange={(e) => onJsonText(e.target.value)}
         className="min-h-80 font-mono text-xs"
         spellCheck={false}
-        placeholder="{ &quot;id&quot;: &quot;&quot;, &quot;display_name&quot;: &quot;...&quot; }"
+        placeholder="{ &quot;my-mcp-server&quot;: { &quot;command&quot;: &quot;npx&quot;, &quot;args&quot;: [...] } }"
       />
       {jsonError && (
         <p className="text-destructive mt-2 text-xs">
