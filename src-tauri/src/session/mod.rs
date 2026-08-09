@@ -73,6 +73,12 @@ const GUIDANCE_PREVIEW_ROWS: usize = 12;
 /// table into memory; the physical table still holds the full result.
 const MAX_READ_ROWS: u64 = 10_000;
 
+/// The subdirectory name under the session temp dir where external MCP tools
+/// write their output files (ADR-0087 Decision 3). Created eagerly at session
+/// construction; lifecycle follows the TempDir RAII. The path is passed to each
+/// stdio MCP server via `TOPTOPDUCK_TOOL_OUTPUT_DIR` (see `mcp::client`).
+pub(crate) const TOOL_OUTPUT_DIR_NAME: &str = "tool_output";
+
 /// Why a resume failed (ADR-0035 honest degrade). The interactive re-link /
 /// drift / active-abandoned decisions land via [`SourceIssue`] /
 /// [`ActiveAbandoned`] callbacks; this enum covers the non-interactive
@@ -652,6 +658,21 @@ impl Session {
             .prefix("toptopduck-session-")
             .tempdir()?;
         let temp_path = temp_dir.path().to_path_buf();
+        // Eagerly create the tool-output subdirectory (ADR-0087 Decision 3).
+        // External MCP stdio servers receive this path via
+        // `TOPTOPDUCK_TOOL_OUTPUT_DIR` and write their output files here; the
+        // agent references them via `read_csv_auto` / `read_json` /
+        // `read_parquet`. The directory's lifecycle follows the TempDir RAII
+        // (cleaned on session drop). `create_dir_all` is idempotent; failure
+        // is a disk / OS issue surfaced honestly rather than silently skipped.
+        //
+        // Known gap: the sandbox engine lockdown
+        // (`disabled_filesystems='LocalFileSystem'`, ADR-0080 / #25) still
+        // blocks `read_*` at execution time even after fs_acl passes. End-to-
+        // end file reads on `tool_output/` require a follow-up ADR to lift or
+        // replace the lockdown.
+        fs::create_dir_all(temp_path.join(TOOL_OUTPUT_DIR_NAME))
+            .map_err(|e| anyhow::anyhow!("failed to create tool_output dir: {e}"))?;
         let conn = Connection::open_in_memory()?;
         // Engine-level resource caps (ADR-0005 L3): bind memory + threads before
         // any query runs so a runaway LLM SQL cannot OOM or monopolize the
@@ -683,6 +704,16 @@ impl Session {
             last_mcp_connect: Vec::new(),
             mounted_skills: Vec::new(),
         })
+    }
+
+    /// The session's tool-output directory as a string for env injection
+    /// (ADR-0087 Decision 3). Both production MCP paths (built-in agent loop +
+    /// external gateway) use this to avoid duplicating the path construction.
+    fn tool_output_path(&self) -> String {
+        self.temp_path
+            .join(TOOL_OUTPUT_DIR_NAME)
+            .to_string_lossy()
+            .into_owned()
     }
 
     /// A clone of the shared cancel token (ADR-0021, issue #28). The command
@@ -1826,7 +1857,9 @@ impl Session {
                     // self.working_set (disjoint field, but the assignment
                     // preceding the borrow keeps borrowck structural so the
                     // command layer can mirror it into the SessionHandle).
-                    let mut mcp = crate::mcp::aggregator::McpAggregator::empty();
+                    let mut mcp = crate::mcp::aggregator::McpAggregator::with_tool_output(
+                        self.tool_output_path(),
+                    );
                     self.last_mcp_connect = mcp.connect_all(inputs.mcp_servers, inputs.keychain);
                     request
                         .tools
@@ -2028,7 +2061,8 @@ impl Session {
             // snapshotted into self.last_mcp_connect BEFORE deps borrows &mut
             // self.working_set (disjoint field, assignment-first keeps borrowck
             // structural for the command-layer mirror).
-            let mut mcp = crate::mcp::aggregator::McpAggregator::empty();
+            let mut mcp =
+                crate::mcp::aggregator::McpAggregator::with_tool_output(self.tool_output_path());
             self.last_mcp_connect = mcp.connect_all(inputs.mcp_servers, inputs.keychain);
             let deps = TurnDeps {
                 conn: &self.conn,
@@ -2441,7 +2475,7 @@ impl Drop for Session {
 
 #[cfg(test)]
 mod tests {
-    use super::Session;
+    use super::{Session, TOOL_OUTPUT_DIR_NAME};
     use crate::model::{TurnFailure, TurnOutcome};
     use crate::provider::fake::FakeProvider;
     use crate::provider::tool_calling::{ToolTurnReply, ToolUse};
@@ -2612,6 +2646,18 @@ mod tests {
         let acp = acp_outcome(Vec::new());
         let merged = merge_outcomes(gateway, acp);
         assert!(merged.promotions.is_empty());
+    }
+
+    /// Issue #432 AC#1: `tool_output/` is eagerly created at session
+    /// construction so external MCP stdio servers have a writable target on
+    /// first spawn. The directory's lifecycle follows the TempDir RAII.
+    #[test]
+    fn tool_output_dir_exists_after_session_construction() {
+        let session = Session::new().expect("session");
+        assert!(
+            session.temp_path.join(TOOL_OUTPUT_DIR_NAME).is_dir(),
+            "tool_output/ must exist after session construction"
+        );
     }
 
     #[test]

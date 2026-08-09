@@ -303,8 +303,12 @@ impl StdioClient {
     /// `(env_key, value)` pairs (from
     /// [`McpServerConfig::keychain_env_keys`]); they are injected into the
     /// child env alongside [`McpServerConfig::env`] (the non-secret values).
-    pub fn connect(config: &McpServerConfig, secrets: &[SecretEnv]) -> Result<Self, ClientError> {
-        let mut child = stdio_command(config, secrets)?.spawn()?;
+    pub fn connect(
+        config: &McpServerConfig,
+        secrets: &[SecretEnv],
+        tool_output_dir: Option<&str>,
+    ) -> Result<Self, ClientError> {
+        let mut child = stdio_command(config, secrets, tool_output_dir)?.spawn()?;
         let stdin = child.stdin.take().ok_or(ClientError::NoChildStdin)?;
         let stdout = child.stdout.take().ok_or(ClientError::NoChildStdout)?;
         let mut client = StdioClient {
@@ -345,13 +349,29 @@ impl Drop for StdioClient {
 // Probe helpers (issue #392)
 // ---------------------------------------------------------------------------
 
+/// The env var name the gateway injects so an external MCP tool knows where to
+/// write its output files (ADR-0087 Decision 3). The directory is a per-session
+/// subdirectory under the session temp dir; its path is passed verbatim. Only
+/// injected for stdio servers (local subprocesses); remote transports (SSE /
+/// HTTP) cannot write to a local filesystem path.
+pub const TOOL_OUTPUT_ENV: &str = "TOPTOPDUCK_TOOL_OUTPUT_DIR";
+
 /// Build the [`Command`] for a stdio MCP server from the config (shared by
 /// [`StdioClient::connect`] and [`spawn_stdio_child`]). Extracts the command +
 /// args from the transport, injects env + keychain secrets, and configures
 /// piped stdin/stdout. Keeping this in one place prevents the two spawn paths
 /// (aggregator's per-turn connect vs the probe's timeout-bounded connect)
 /// from diverging on env/secret handling.
-fn stdio_command(config: &McpServerConfig, secrets: &[SecretEnv]) -> Result<Command, ClientError> {
+///
+/// `tool_output_dir` injects [`TOOL_OUTPUT_ENV`] into the child env when
+/// `Some`. The per-turn aggregator passes the session's tool-output directory;
+/// the probe path (`spawn_stdio_child`) passes `None` (connectivity test, no
+/// file output expected).
+fn stdio_command(
+    config: &McpServerConfig,
+    secrets: &[SecretEnv],
+    tool_output_dir: Option<&str>,
+) -> Result<Command, ClientError> {
     let (command, args) = match &config.transport {
         McpTransport::Stdio { command, args } => (command.clone(), args.clone()),
         McpTransport::Sse { .. } | McpTransport::Http { .. } => {
@@ -367,6 +387,19 @@ fn stdio_command(config: &McpServerConfig, secrets: &[SecretEnv]) -> Result<Comm
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
+    if let Some(dir) = tool_output_dir {
+        if config.env.contains_key(TOOL_OUTPUT_ENV)
+            || secrets.iter().any(|(k, _)| k == TOOL_OUTPUT_ENV)
+        {
+            log::warn!(
+                target: "toptopduck::mcp",
+                "MCP server {}: user-configured {TOOL_OUTPUT_ENV} overridden by \
+                 session tool-output dir (ADR-0087 gateway is path authority)",
+                config.id
+            );
+        }
+        cmd.env(TOOL_OUTPUT_ENV, dir);
+    }
     Ok(cmd)
 }
 
@@ -385,7 +418,7 @@ pub fn spawn_stdio_child(
     config: &McpServerConfig,
     secrets: &[SecretEnv],
 ) -> Result<std::process::Child, ClientError> {
-    Ok(stdio_command(config, secrets)?.spawn()?)
+    Ok(stdio_command(config, secrets, None)?.spawn()?)
 }
 
 /// Drive the MCP initialize + tools/list handshake on already-spawned stdio
@@ -808,10 +841,11 @@ impl McpClient for TransportClient {
 pub fn connect_transport(
     config: &McpServerConfig,
     secrets: &[SecretEnv],
+    tool_output_dir: Option<&str>,
 ) -> Result<TransportClient, ClientError> {
     match &config.transport {
         McpTransport::Stdio { .. } => {
-            StdioClient::connect(config, secrets).map(TransportClient::Stdio)
+            StdioClient::connect(config, secrets, tool_output_dir).map(TransportClient::Stdio)
         }
         McpTransport::Sse { url } => SseClient::connect(url).map(TransportClient::Sse),
         McpTransport::Http { url } => HttpClient::connect(url).map(TransportClient::Http),

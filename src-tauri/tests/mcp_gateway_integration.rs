@@ -853,3 +853,79 @@ fn first_text(envelope: &Value) -> String {
         .unwrap_or("")
         .to_string()
 }
+
+#[test]
+fn with_tool_output_injects_env_var_into_child() {
+    // Issue #432 AC#3: a McpAggregator built with `with_tool_output` injects
+    // `TOPTOPDUCK_TOOL_OUTPUT_DIR` into each stdio server's child env at spawn.
+    // The fake server's `echo_env` tool reflects the child process's env, so
+    // routing a call to it verifies the full chain: aggregator field ->
+    // connect_transport -> StdioClient::connect -> stdio_command env injection
+    // -> spawned child sees the var.
+    use toptopduck_lib::mcp::client::TOOL_OUTPUT_ENV;
+    let dir = "/tmp/toptopduck-test-tool-output-432";
+    let mut agg = McpAggregator::with_tool_output(dir.to_string());
+    agg.connect_all(&[fake_config("srv-1", "EnvMCP")], &KeychainStore::new());
+
+    let result = agg
+        .route("mcp__envmcp__echo_env", &json!({"key": TOOL_OUTPUT_ENV}))
+        .expect("route ok");
+    assert_eq!(
+        first_text(&result),
+        dir,
+        "TOPTOPDUCK_TOOL_OUTPUT_DIR injected into child env"
+    );
+}
+
+#[test]
+fn empty_aggregator_does_not_inject_tool_output_env() {
+    // The complement: an aggregator built via `empty()` (no tool_output_dir)
+    // does NOT inject the env var. This confirms the `Option` semantics --
+    // tests and probes that don't set a tool_output dir get a clean child env.
+    use toptopduck_lib::mcp::client::TOOL_OUTPUT_ENV;
+    let mut agg = McpAggregator::empty();
+    agg.connect_all(&[fake_config("srv-1", "NoEnvMCP")], &KeychainStore::new());
+
+    let result = agg
+        .route("mcp__noenvmcp__echo_env", &json!({"key": TOOL_OUTPUT_ENV}))
+        .expect("route ok");
+    assert_eq!(
+        first_text(&result),
+        "<unset>",
+        "empty() aggregator does not inject TOPTOPDUCK_TOOL_OUTPUT_DIR"
+    );
+}
+
+#[test]
+fn tool_output_env_overrides_user_configured_value() {
+    // ADR-0087: the gateway is the path authority for TOPTOPDUCK_TOOL_OUTPUT_DIR.
+    // If a user also sets it in config.env, the session's value must win
+    // (last-write-wins in Command::env). This test locks the override direction
+    // so a future reordering of .envs() calls cannot silently flip it.
+    use std::collections::BTreeMap;
+    use toptopduck_lib::mcp::client::TOOL_OUTPUT_ENV;
+
+    let mut env = BTreeMap::new();
+    env.insert(
+        TOOL_OUTPUT_ENV.to_string(),
+        "/user/should/not/win".to_string(),
+    );
+    let mut config = fake_config("srv-1", "OverrideMCP");
+    config.env = env;
+
+    let gateway_dir = "/tmp/toptopduck-test-tool-output-override";
+    let mut agg = McpAggregator::with_tool_output(gateway_dir.to_string());
+    agg.connect_all(&[config], &KeychainStore::new());
+
+    let result = agg
+        .route(
+            "mcp__overridemcp__echo_env",
+            &json!({"key": TOOL_OUTPUT_ENV}),
+        )
+        .expect("route ok");
+    assert_eq!(
+        first_text(&result),
+        gateway_dir,
+        "gateway tool_output_dir must override user-configured value"
+    );
+}
