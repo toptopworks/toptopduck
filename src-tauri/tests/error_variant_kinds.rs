@@ -156,6 +156,7 @@ fn store_command_error() -> Vec<StoreCommandError> {
     vec![
         StoreCommandError::OpenConflict,
         StoreCommandError::BlankName(RenameSessionError::EmptyName),
+        StoreCommandError::DestinationExists(String::new()),
         StoreCommandError::IoFailure(String::new()),
         StoreCommandError::KeychainFailure(String::new()),
         StoreCommandError::ConfigWriteFailure(String::new()),

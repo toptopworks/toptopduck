@@ -108,6 +108,7 @@
   "error.skillMount.alreadyMounted": "技能「{name}」已挂载",
   "error.skillMount.notMounted": "技能「{name}」未挂载",
   "error.store.configWriteFailure": "保存设置失败",
+  "error.store.destinationExists": "同名文件夹已存在，请更换名称",
   "error.store.ioFailure": "文件操作失败",
   "error.store.keychainFailure": "系统钥匙串访问失败",
   "error.store.openConflict": "该会话已打开，请先关闭后再操作",

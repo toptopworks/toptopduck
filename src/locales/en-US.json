@@ -108,6 +108,7 @@
   "error.skillMount.alreadyMounted": "Skill \"{name}\" is already mounted",
   "error.skillMount.notMounted": "Skill \"{name}\" is not mounted",
   "error.store.configWriteFailure": "Failed to save settings",
+  "error.store.destinationExists": "A folder with this name already exists; choose a different name",
   "error.store.ioFailure": "A file operation failed",
   "error.store.keychainFailure": "Failed to access the OS keychain",
   "error.store.openConflict": "This session is currently open; close it first",

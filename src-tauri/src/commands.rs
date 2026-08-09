@@ -87,6 +87,11 @@ pub enum StoreCommandError {
     /// is typed-identical to `rename_session`'s, not a second shape).
     #[error("{0}")]
     BlankName(RenameSessionError),
+    /// An export targeted a destination that already exists (issue #449). A
+    /// user-correctable refusal, like [`OpenConflict`] — the frontend prompts
+    /// the user to pick a different name. Carries the destination path.
+    #[error("destination already exists: {0}")]
+    DestinationExists(String),
     /// An underlying IO failure (canonicalize / read / atomic-save / file
     /// remove) carrying the English technical detail for the fold.
     #[error("{0}")]
@@ -1415,42 +1420,71 @@ pub async fn rename_persisted_session(
 /// file I/O. Works for both open and closed sessions (path-based, no
 /// session_id). Runs the IO off the async/UI thread, like `delete_session`.
 #[tauri::command]
-pub async fn export_session(duck_path: String, dest_dir: String) -> Result<(), StoreCommandError> {
+pub async fn export_session(
+    sessions_root: State<'_, SessionsRoot>,
+    duck_path: String,
+    dest_dir: String,
+) -> Result<(), StoreCommandError> {
+    use crate::persistence::canonicalize_duck;
+    let root = sessions_root.0.clone();
     let src = PathBuf::from(&duck_path);
     let dest = PathBuf::from(&dest_dir);
-    tauri::async_runtime::spawn_blocking(move || export_session_files(&src, &dest))
-        .await
-        .map_err(|e| StoreCommandError::IoFailure(e.to_string()))?
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), StoreCommandError> {
+        // Validate the source is under the managed sessions root (defense-
+        // in-depth, matching delete_session's M2 guard). canonicalize_duck
+        // succeeds even when the .duck file itself is absent (it canonicalizes
+        // the parent dir), so an Err means the parent is inaccessible.
+        let canonical_src = canonicalize_duck(&src).map_err(|e| {
+            StoreCommandError::IoFailure(format!("cannot resolve source path: {e}"))
+        })?;
+        let session_dir = canonical_src.parent().ok_or_else(|| {
+            StoreCommandError::IoFailure(format!(
+                "source duck_path has no parent directory: {}",
+                src.display()
+            ))
+        })?;
+        let canonical_root = std::fs::canonicalize(&root).unwrap_or(root);
+        if !session_dir.starts_with(&canonical_root) {
+            return Err(StoreCommandError::IoFailure(
+                "source is not under the managed sessions root".into(),
+            ));
+        }
+        export_session_files(&canonical_src, session_dir, &dest)
+    })
+    .await
+    .map_err(|e| StoreCommandError::IoFailure(e.to_string()))?
 }
 
 /// Core export logic (issue #449). Copies `session.duck` + `assets/` from the
-/// per-session directory (parent of `src_duck`) to `dest`. Refuses if `dest`
-/// already exists. On any copy failure after `dest` is created, cleans up
-/// `dest` so no partial export remains.
-fn export_session_files(src_duck: &Path, dest: &Path) -> Result<(), StoreCommandError> {
-    let session_dir = src_duck.parent().ok_or_else(|| {
-        StoreCommandError::IoFailure(format!(
-            "source duck_path has no parent directory: {}",
-            src_duck.display()
-        ))
-    })?;
-
+/// per-session directory to `dest`. Refuses if `dest` already exists
+/// (typed `DestinationExists`). Uses `create_dir` (not `create_dir_all`) so
+/// a race-created leaf fails rather than being silently merged. On any copy
+/// failure after `dest` is created, cleans up `dest` and logs if cleanup
+/// itself fails (so a partial export is never silently left behind).
+fn export_session_files(
+    src_duck: &Path,
+    session_dir: &Path,
+    dest: &Path,
+) -> Result<(), StoreCommandError> {
     // Refuse if destination already exists (prevent data loss).
     if dest.exists() {
-        return Err(StoreCommandError::IoFailure(format!(
-            "destination already exists: {}",
+        return Err(StoreCommandError::DestinationExists(format!(
+            "{}",
             dest.display()
         )));
     }
 
-    // Create the destination directory.
-    std::fs::create_dir_all(dest).map_err(|e| {
+    // Create the destination directory (create_dir, not create_dir_all: the
+    // leaf must not exist; the parent is expected to exist from the save
+    // dialog. This closes the TOCTOU window between the exists() check above
+    // and directory creation).
+    std::fs::create_dir(dest).map_err(|e| {
         StoreCommandError::IoFailure(format!("failed to create destination directory: {e}"))
     })?;
 
     // Copy session.duck (the recipe).
     std::fs::copy(src_duck, dest.join("session.duck")).map_err(|e| {
-        let _ = std::fs::remove_dir_all(dest);
+        cleanup_export_dest(dest);
         StoreCommandError::IoFailure(format!("failed to copy session.duck: {e}"))
     })?;
 
@@ -1458,7 +1492,7 @@ fn export_session_files(src_duck: &Path, dest: &Path) -> Result<(), StoreCommand
     let src_assets = session_dir.join("assets");
     if src_assets.is_dir() {
         copy_dir_all(&src_assets, &dest.join("assets")).map_err(|e| {
-            let _ = std::fs::remove_dir_all(dest);
+            cleanup_export_dest(dest);
             StoreCommandError::IoFailure(format!("failed to copy assets directory: {e}"))
         })?;
     }
@@ -1466,16 +1500,41 @@ fn export_session_files(src_duck: &Path, dest: &Path) -> Result<(), StoreCommand
     Ok(())
 }
 
-/// Recursively copy a directory tree (issue #449). `fs::metadata` follows
-/// symlinks for classification (symlink-to-dir recurses, symlink-to-file
-/// copies by content), matching `cp -rL` semantics.
+/// Best-effort cleanup of a partial export destination. Logs a warning if the
+/// cleanup itself fails so the user is not silently left with a partial tree
+/// (commands.rs:884 / 1714 / 2254 precedent for best-effort + log::warn).
+fn cleanup_export_dest(dest: &Path) {
+    if let Err(cleanup_err) = std::fs::remove_dir_all(dest) {
+        log::warn!(
+            target: "toptopduck::session",
+            "export cleanup failed (partial export may remain at {}): {}",
+            dest.display(),
+            cleanup_err,
+        );
+    }
+}
+
+/// Recursively copy a directory tree (issue #449). Uses `symlink_metadata`
+/// (does NOT follow symlinks) and refuses symlinks outright — a symlink in
+/// `assets/` pointing outside the session directory could exfiltrate
+/// arbitrary files (e.g. `~/.ssh/id_rsa`) into the export destination.
 fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        if std::fs::metadata(&src_path)?.is_dir() {
+        let meta = std::fs::symlink_metadata(&src_path)?;
+        if meta.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to follow symlink in assets/: {}",
+                    src_path.display()
+                ),
+            ));
+        }
+        if meta.is_dir() {
             copy_dir_all(&src_path, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path)?;
@@ -2654,7 +2713,7 @@ mod tests {
         .unwrap();
 
         let dest = tmp.path().join("export-copy");
-        export_session_files(&duck, &dest).expect("export succeeds");
+        export_session_files(&duck, &session_dir, &dest).expect("export succeeds");
 
         assert_eq!(
             std::fs::read_to_string(dest.join("session.duck")).unwrap(),
@@ -2675,7 +2734,7 @@ mod tests {
         std::fs::write(&duck, b"recipe").unwrap();
 
         let dest = tmp.path().join("export-no-assets");
-        export_session_files(&duck, &dest).expect("export succeeds");
+        export_session_files(&duck, &session_dir, &dest).expect("export succeeds");
 
         assert!(dest.join("session.duck").exists());
         assert!(!dest.join("assets").exists());
@@ -2697,7 +2756,7 @@ mod tests {
         .unwrap();
 
         let dest = tmp.path().join("export-nested");
-        export_session_files(&duck, &dest).expect("export succeeds");
+        export_session_files(&duck, &session_dir, &dest).expect("export succeeds");
 
         assert_eq!(
             std::fs::read_to_string(dest.join("assets").join("sub").join("leaf.csv")).unwrap(),
@@ -2716,8 +2775,8 @@ mod tests {
         let dest = tmp.path().join("existing");
         std::fs::create_dir_all(&dest).unwrap();
 
-        let err = export_session_files(&duck, &dest).unwrap_err();
-        assert!(matches!(err, StoreCommandError::IoFailure(_)));
+        let err = export_session_files(&duck, &session_dir, &dest).unwrap_err();
+        assert!(matches!(err, StoreCommandError::DestinationExists(_)));
     }
 
     #[test]
@@ -2729,9 +2788,60 @@ mod tests {
         let duck = session_dir.join("session.duck");
 
         let dest = tmp.path().join("failed-export");
-        let _ = export_session_files(&duck, &dest);
+        let _ = export_session_files(&duck, &session_dir, &dest);
 
         // dest should not remain as a partial export.
         assert!(!dest.exists());
+    }
+
+    #[test]
+    fn export_cleans_up_on_assets_copy_failure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session_dir = tmp.path().join("uuid");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let duck = session_dir.join("session.duck");
+        std::fs::write(&duck, b"recipe").unwrap();
+        // assets/ contains a symlink → copy_dir_all refuses it.
+        let assets = session_dir.join("assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink("/etc/passwd", assets.join("evil")).unwrap();
+        }
+
+        let dest = tmp.path().join("failed-assets-export");
+        let result = export_session_files(&duck, &session_dir, &dest);
+
+        #[cfg(unix)]
+        {
+            // Symlink refusal → error + full cleanup (session.duck removed too).
+            assert!(result.is_err());
+            assert!(!dest.exists());
+        }
+        #[cfg(not(unix))]
+        {
+            // On non-Unix we cannot create symlinks; just verify session.duck
+            // was copied (the assets dir is empty, no failure path triggered).
+            let _ = result;
+            assert!(dest.join("session.duck").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_dir_all_refuses_symlinks() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("real.txt"), b"data").unwrap();
+        use std::os::unix::fs::symlink;
+        // Symlink to a file outside src.
+        symlink("/etc/passwd", src.join("evil")).unwrap();
+
+        let err = copy_dir_all(&src, &dst).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("symlink"));
     }
 }
