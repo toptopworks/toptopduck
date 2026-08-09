@@ -5,8 +5,11 @@
 //! OUT-of-scope (prediction / ML / hypothesis testing / semantic text), and the
 //! "refuse + in-scope alternative, never fake" behavior. Native DuckDB
 //! statistical methods (corr / regr_* / quantile_* ...) are IN-scope and must
-//! be named in `assumption` so a user never mistakes a real method for a
-//! smuggled naive one (e.g. linear extrapolation passed off as "prediction").
+//! be labeled so a user never mistakes a real method for a smuggled naive one
+//! (e.g. linear extrapolation passed off as "prediction"). The legacy path
+//! ([`CAPABILITY_BOUNDARY_PROMPT`]) uses the JSON `assumption` field; the
+//! tool-calling path ([`TOOL_CALLING_PROMPT`]) labels methods in the final
+//! text answer (ADR-0077 retired the JSON contract).
 //!
 //! [`render_schema_context`] renders the windowed payload's datasets (issue #24,
 //! ADR-0023/0026/0011) into a text block appended to the system prompt. It is
@@ -68,8 +71,8 @@ pub fn response_locale_directive(locale: ResponseLocale) -> &'static str {
 /// context. The boundary prompt and schema-context labels are locale-invariant
 /// (layer 4); only the directive carries the locale. The skill fragments ride
 /// between the base prompt and the locale directive so the model reads the
-/// skill-aware boundary clause (in the base prompt) before the skill bodies,
-/// then the locale + schema. Centralized so the assembly order has one source
+/// base prompt's toolbox-aware framing before the skill bodies, then the
+/// locale + schema. Centralized so the assembly order has one source
 /// of truth and the locale directive can never be silently dropped by a call
 /// site -- the legacy single-SQL path ([`build_system_prompt`]) passes an empty
 /// skill slice (skills are not wired into the retired adapters); the tool-
@@ -169,7 +172,8 @@ pub fn resolve_locale_from_tag(tag: &str) -> ResponseLocale {
 }
 
 /// The v1 capability boundary + output contract, frozen as the provider's
-/// system prompt (ADR-0017/0009/0011, recalibrated by ADR-0087). Written once
+/// system prompt (ADR-0017/0009/0011; the boundary framework was recalibrated
+/// by ADR-0087, which left ADR-0009/0011 untouched). Written once
 /// here so the boundary and the one-SQL-per-turn contract have one source of
 /// truth the model sees.
 ///
@@ -740,7 +744,7 @@ mod tests {
         assert_eq!(resolve_locale_from_tag(""), ResponseLocale::EnUS);
     }
 
-    // --- native tool-calling system prompt (ADR-0077/0081, issue #295) -------
+    // --- native tool-calling system prompt (ADR-0077/0081/0087, issue #295/#431) -
     //
     // AC #5: the default skill set's capability boundary is preserved on the
     // tool-calling path. The boundary prose (IN/OUT scope, refuse + alternative,
@@ -820,19 +824,26 @@ mod tests {
     }
 
     #[test]
-    fn both_prompts_use_descriptive_out_of_scope_label() {
-        // ADR-0087 / issue #431: the OUT-OF-SCOPE label changed from
-        // behavior-prescriptive ("拒绝，不要尝试") to pure descriptive
-        // ("DuckDB 原生不支持") -- behavior is owned by the tool-selection +
-        // refuse sections, not the capability list labels.
+    fn both_prompts_use_descriptive_scope_labels() {
+        // ADR-0087 / issue #431: both scope labels changed from
+        // behavior-prescriptive to pure descriptive -- behavior is owned by the
+        // tool-selection + refuse sections, not the capability list labels.
         for p in [TOOL_CALLING_PROMPT, CAPABILITY_BOUNDARY_PROMPT] {
+            assert!(
+                p.contains("IN-SCOPE（DuckDB 原生能力）"),
+                "descriptive IN-SCOPE label present"
+            );
+            assert!(
+                !p.contains("可以做，用 DuckDB"),
+                "old behavior-prescriptive IN-SCOPE label retired"
+            );
             assert!(
                 p.contains("DuckDB 原生不支持"),
                 "descriptive OUT-OF-SCOPE label present"
             );
             assert!(
                 !p.contains("拒绝，不要尝试"),
-                "old behavior-prescriptive label retired"
+                "old behavior-prescriptive OUT-OF-SCOPE label retired"
             );
         }
     }
@@ -868,14 +879,13 @@ mod tests {
         assert!(prompt.contains("active = people"), "schema context present");
     }
 
-    // --- skill-aware clause + skill-body injection (ADR-0086, issue #364) ----
+    // --- capability-extension clause + skill-body injection (ADR-0086/0087) --
     //
-    // AC #2: each base prompt carries the skill-aware clause (unless a mounted
-    // skill explicitly provides the tool, the boundary still refuses + offers
-    // an in-scope alternative). AC #1/#4: mounted-skill bodies inject between
-    // the base prompt and the locale directive in mount order, framed per
-    // ADR-0086; an empty mount set adds nothing so the pre-skill assembly is
-    // preserved.
+    // ADR-0087 broadened the extension trigger from "skill explicitly provides
+    // tools" to "toolbox has matching tools" (both base prompts). ADR-0086
+    // wires skill-body injection: mounted-skill bodies inject between the base
+    // prompt and the locale directive in mount order; an empty mount set adds
+    // nothing so the pre-skill assembly is preserved.
 
     #[test]
     fn capability_boundary_prompt_carries_broadened_extension_clause() {
@@ -887,6 +897,10 @@ mod tests {
         assert!(p.contains("工具箱"), "clause references the toolbox");
         assert!(p.contains("匹配工具"), "clause names matching tools");
         assert!(!p.contains("显式提供"), "old skill-only trigger retired");
+        assert!(
+            !p.contains("挂载技能与能力边界"),
+            "old section header retired"
+        );
         assert!(p.contains("诚实拒绝"), "clause preserves honest refusal");
         assert!(
             p.contains("in-scope 替代"),
@@ -902,6 +916,10 @@ mod tests {
         // + the retired old-clause header.
         let p = TOOL_CALLING_PROMPT;
         assert!(p.contains("默认工具"), "DuckDB named as default tool");
+        assert!(
+            p.contains("查询、聚合、统计"),
+            "default-tool scope (tabular analysis) pinned"
+        );
         assert!(
             p.contains("匹配的外部工具"),
             "matching external tools named"
