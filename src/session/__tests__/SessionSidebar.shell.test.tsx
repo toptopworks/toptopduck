@@ -27,8 +27,8 @@ function renderShell(ui: ReactElement) {
 // stamps `now` for unsaved sessions).
 function twoOpenSessions(): OpenSession[] {
   return [
-    { sid: "sess-active", name: "Active", path: null, pendingIngestPath: null },
-    { sid: "sess-bg", name: "Background", path: null, pendingIngestPath: null },
+    { sid: "sess-active", name: "Active", path: "/sessions/sess-active/session.duck", pendingIngestPath: null },
+    { sid: "sess-bg", name: "Background", path: "/sessions/sess-bg/session.duck", pendingIngestPath: null },
   ];
 }
 
@@ -43,6 +43,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onClose={() => {}}
@@ -80,6 +81,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onClose={() => {}}
@@ -115,6 +117,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onClose={() => {}}
@@ -161,6 +164,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onClose={() => {}}
@@ -200,6 +204,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onClose={() => {}}
@@ -242,6 +247,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onClose={() => {}}
@@ -277,6 +283,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onClose={() => {}}
@@ -327,6 +334,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={true}
         loadError={null}
         onNew={() => {}}
+        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onClose={() => {}}
@@ -357,6 +365,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onClose={() => {}}
@@ -416,6 +425,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         loadError={null}
         grouping="flat"
         onNew={() => {}}
+        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onClose={() => {}}
@@ -444,6 +454,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         loadError={null}
         grouping="flat"
         onNew={() => {}}
+        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onClose={() => {}}
@@ -492,6 +503,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         loadError={null}
         grouping="time"
         onNew={() => {}}
+        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onClose={() => {}}
@@ -528,6 +540,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         loadError={null}
         grouping="flat"
         onNew={() => {}}
+        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onClose={() => {}}
@@ -565,6 +578,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         loadError={null}
         grouping="flat"
         onNew={() => {}}
+        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onClose={() => {}}
@@ -599,6 +613,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         loadError={null}
         grouping="flat"
         onNew={() => {}}
+        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onClose={() => {}}
@@ -635,6 +650,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         loadError={null}
         grouping="flat"
         onNew={() => {}}
+        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onClose={() => {}}
@@ -667,6 +683,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         loadError={null}
         grouping="flat"
         onNew={() => {}}
+        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onClose={() => {}}
@@ -728,6 +745,7 @@ describe("SessionSidebar connection footer (issue #282)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onClose={() => {}}
@@ -826,6 +844,7 @@ describe("SessionSidebar pending-approval coloring (ADR-0083, issue #297)", () =
       disabled: false,
       loadError: null,
       onNew: () => {},
+      onOpenDuck: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
       onClose: () => {},
@@ -876,7 +895,7 @@ describe("DeleteSessionDialog ESC routing (issue #258)", () => {
     renderShell(
       <DeleteSessionDialog
         name="Session"
-        path={null}
+        path="/sessions/test/session.duck"
         onCancel={onCancel}
         onConfirm={() => {}}
       />,

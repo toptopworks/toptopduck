@@ -55,11 +55,19 @@ import type { AdapterEntry, SessionRuntimeChoice } from "./types/runtime";
 // itself (createSession mints one); this single-session shell holds one until
 // the multi-tab UI lands in a later PRD.
 
-// Create a new session (ADR-0056): the backend builds an independent in-memory
-// DuckDB instance + per-session cancel token, binds them to a backend-generated
-// id (UUID), and returns it. This is the `+ tab` action.
-export async function createSession(): Promise<string> {
-  return invoke<string>("create_session");
+/** The wire reply from `create_session` (ADR-0089): the runtime session id +
+ *  the bound `session.duck` path. Every session is persisted from creation. */
+export interface CreateSessionReply {
+  session_id: string;
+  duck_path: string;
+}
+
+// Create a new session (ADR-0056/0089): the backend builds an independent
+// in-memory DuckDB instance + per-session cancel token, binds them to a
+// backend-generated id (UUID), AND immediately persists by creating a
+// per-session directory + initial session.duck. This is the `+ tab` action.
+export async function createSession(): Promise<CreateSessionReply> {
+  return invoke<CreateSessionReply>("create_session");
 }
 
 // Close a session (ADR-0055): fire cancel + mark closing + remove from the

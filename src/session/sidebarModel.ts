@@ -1,14 +1,14 @@
-// Pure sidebar model (ADR-0060/0061, issue #81): merges the persisted-session
-// list (list_sessions) with the open in-memory sessions, Chat-style time-groups
-// the entries, and sorts last-modified descending. Kept out of the component so
-// the merge + grouping + ordering is unit-testable without React, and so the
-// sidebar component stays a thin caller of these functions.
+// Pure sidebar model (ADR-0060/0061/0089, issue #81): merges the persisted-
+// session list (list_sessions) with the open in-memory sessions, Chat-style
+// time-groups the entries, and sorts last-modified descending. Kept out of the
+// component so the merge + grouping + ordering is unit-testable without React,
+// and so the sidebar component stays a thin caller of these functions.
 //
-// Identity split (ADR-0060/0061): a PERSISTED session's stable identity is its
-// `.duck` file path (SessionMetadata.session_id); an OPEN session's runtime
-// identity is its ephemeral UUID (createSession). An open session that has bound
-// a .duck carries that path; a never-saved new session has path = null and only
-// exists in the open set.
+// Identity split (ADR-0060/0061/0089): a PERSISTED session's stable identity is
+// its `.duck` file path (SessionMetadata.session_id); an OPEN session's runtime
+// identity is its ephemeral UUID (createSession). Since ADR-0089 every session
+// is persisted from creation, so every OpenSession carries a non-null path —
+// the "unsaved" state no longer exists.
 //
 // Grouping mode (ADR-0072, issue #251): the user toggles between `flat` (a
 // single Recent group sorted by mtime descending, the default) and `time` (the
@@ -19,26 +19,25 @@
 import type { SessionMetadata } from "../types/session";
 import type { SidebarGrouping } from "../types/app-config";
 
-/** A runtime-open session tracked by the shell (ADR-0060/0051 keep-alive). */
+/** A runtime-open session tracked by the shell (ADR-0060/0051 keep-alive).
+ *  Since ADR-0089 every session is persisted from creation, so `path` is always
+ *  non-null. */
 export interface OpenSession {
   /** Runtime UUID from createSession (ephemeral; not persisted). */
   sid: string;
-  /** Display name. Held in memory for an unsaved session; from the recipe once
-   *  bound (and updated by rename). */
+  /** Display name. Starts empty (placeholder); updated by rename or the first
+   *  turn's auto-naming. */
   name: string;
-  /** Bound `.duck` path (SessionMetadata.session_id shape), or null for a
-   *  never-saved new session. */
-  path: string | null;
+  /** Bound `.duck` path (SessionMetadata.session_id shape). Always non-null
+   *  since ADR-0089: createSession binds immediately. */
+  path: string;
   /** A pending data-file drop routed to this session's ingest but not yet
    *  kicked off (ADR-0061, #81 A1; issue #205). Two routes set it: a cold-start
    *  drop mints a new session carrying the path, and a drop onto an
-   *  ALREADY-active session (new or resumed / .duck-bound) routes the file
-   *  there via the shell's single webview-level drop router -- so a non-null
-   *  pendingIngestPath can coexist with a non-null `path` (the resumed + drop
-   *  combination is legal). The SessionPane consumes it via handleIngest --
-   *  the only path that can surface an xlsx NeedsGuidance result into the
-   *  guidance dialog -- then clears it through onIngestConsumed. null once
-   *  consumed or when the session was opened by a non-drop action. */
+   *  ALREADY-active session (new or resumed) routes the file there via the
+   *  shell's single webview-level drop router. The SessionPane consumes it via
+   *  handleIngest, then clears it through onIngestConsumed. null once consumed
+   *  or when the session was opened by a non-drop action. */
   pendingIngestPath: string | null;
 }
 
@@ -52,18 +51,18 @@ export type TimeGroupKind = "today" | "yesterday" | "last7" | "older";
  *  type-level invariant on SidebarGroup's discriminated union, not this union. */
 export type SidebarGroupKind = TimeGroupKind | "recent";
 
-/** A single merged sidebar entry (persisted, open, or both). */
+/** A single merged sidebar entry (persisted + optionally open). Since ADR-0089
+ *  every session is persisted from creation, so `path` is always non-null. */
 export interface SidebarEntry {
-  /** Stable key for React: the bound path when one exists, else the runtime sid
-   *  (a never-saved session has no path). */
+  /** Stable key for React: the bound path (always present since ADR-0089). */
   key: string;
   /** Display name (user rename > recipe default). */
   name: string;
   /** The runtime sid when the session is OPEN in this shell, else null (the
    *  entry is a cold persisted row; clicking it resumes / mints a sid). */
   sid: string | null;
-  /** Bound `.duck` path, or null for a never-saved new session. */
-  path: string | null;
+  /** Bound `.duck` path. Always non-null since ADR-0089. */
+  path: string;
   /** Whether this entry is the currently active session. */
   active: boolean;
   /** First source display name for the sub-line (null = no sources yet). */
@@ -75,12 +74,10 @@ export interface SidebarEntry {
   lastModifiedAt: number;
 }
 
-/** A search-result row (ADR-0072, issue #252). Narrower than SidebarEntry:
- *  every persisted search row carries a non-null path (m.session_id), so the
- *  modal's choose() can branch on sid-vs-path without the defensive else-throw
- *  the wider SidebarEntry state space (which admits the unsaved-open row with
- *  path=null) would demand. */
-export type SearchEntry = Omit<SidebarEntry, "path"> & { path: string };
+/** A search-result row (ADR-0072, issue #252). Since ADR-0089 every session is
+ *  persisted, so SearchEntry is structurally identical to SidebarEntry — the
+ *  type alias stays for intent documentation and future divergence. */
+export type SearchEntry = SidebarEntry;
 
 /** A rendered sidebar group: heading kind + its entries (already sorted). The
  *  `mode` discriminant makes the kind/mode correspondence a type-level
@@ -135,13 +132,12 @@ export function formatLastModified(lastModifiedAt: number, now: number): LastMod
 }
 
 /** Index open sessions by their bound .duck path so a persisted row can look up
- *  its runtime binding in one read. Unsaved open sessions (path null) are
- *  skipped -- they are not in list_sessions. Shared by buildSearchEntries +
- *  buildSidebarGroups. */
+ *  its runtime binding in one read. Every session has a path since ADR-0089.
+ *  Shared by buildSearchEntries + buildSidebarGroups. */
 function indexOpenByPath(open: OpenSession[]): Map<string, OpenSession> {
   const byPath = new Map<string, OpenSession>();
   for (const o of open) {
-    if (o.path) byPath.set(o.path, o);
+    byPath.set(o.path, o);
   }
   return byPath;
 }
@@ -223,9 +219,9 @@ export function buildSearchEntries(
 /** Build the merged, grouped, last-modified-descending sidebar model. Pure in
  *  (persisted, open, activeSessionId, now, grouping) -- the component supplies
  *  the raw list_sessions result + the open set + the user's grouping choice;
- *  this function does the rest. A persisted session that is also open merges
- *  into one entry (open = true, sid set); an open never-saved session becomes
- *  its own entry; every entry carries the display fields the row renders.
+ *  this function does the rest. Since ADR-0089 every session is persisted from
+ *  creation, so the persisted list and the open set share the same path keys --
+ *  there is no separate "unsaved open" entry set.
  *
  *  Grouping (ADR-0072, issue #251): `flat` -> a single `recent` group sorted by
  *  mtime descending (the "Recent" title); `time` -> the ADR-0060 Chat-style
@@ -239,7 +235,7 @@ export function buildSidebarGroups(
   grouping: SidebarGrouping,
 ): SidebarGroup[] {
   const openByPath = indexOpenByPath(open);
-  const unsavedOpen = open.filter((o) => !o.path);
+  const persistedPaths = new Set(persisted.map((m) => m.session_id));
 
   const entries: SidebarEntry[] = [];
 
@@ -249,15 +245,18 @@ export function buildSidebarGroups(
     entries.push(persistedEntry(m, openByPath.get(m.session_id) ?? null, activeSessionId));
   }
 
-  // Open never-saved sessions: not in list_sessions, so render them as their own
-  // rows. They have no recipe mtime, so stamp `now` to land them under Today at
-  // the top until the first save-as binds a real path + mtime.
-  for (const o of unsavedOpen) {
+  // Open sessions not yet in the persisted list: a just-created session (or one
+  // whose list_sessions refetch hasn't landed yet) carries a real path but is
+  // absent from the persisted scan. Render it as its own entry until the
+  // persisted list catches up (ADR-0089: every session is persisted, but the
+  // sidebar query is async).
+  for (const o of open) {
+    if (persistedPaths.has(o.path)) continue;
     entries.push({
-      key: o.sid,
+      key: o.path,
       name: o.name,
       sid: o.sid,
-      path: null,
+      path: o.path,
       active: o.sid === activeSessionId,
       firstSourceName: null,
       turnCount: 0,

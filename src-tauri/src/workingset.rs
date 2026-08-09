@@ -347,7 +347,8 @@ impl WorkingSet {
     }
 
     /// Update a source's `source_path` in place (issue #433: bind_duck migrates
-    /// derived sources from `temp_path/derived/` to `<duck_stem>.assets/`).
+    /// derived sources from `temp_path/derived/` to the per-session `assets/`
+    /// subdirectory, ADR-0089/0087 D2).
     /// Returns `false` if the reference name isn't registered (a stale view
     /// racing a concurrent mutation). The path is stored verbatim — the caller
     /// ensures it is the persistent (post-migration) location.
@@ -939,7 +940,7 @@ mod tests {
     fn update_source_path_updates_existing_descriptor_and_returns_true() {
         // The happy path: a registered source's source_path is replaced in place.
         // Used by bind_duck to migrate derived files from temp/derived/ to
-        // <duck_stem>.assets/ (issue #433, ADR-0087 D2).
+        // the per-session assets/ subdirectory (issue #433, ADR-0087/0089 D2).
         let mut ws = WorkingSet::default();
         ws.register(descriptor("people")); // source_path "/people.csv"
         let ok = ws.update_source_path("people", "/data/assets/people.csv");

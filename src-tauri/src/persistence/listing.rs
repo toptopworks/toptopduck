@@ -1,29 +1,32 @@
-//! Session-listing metadata (ADR-0060/0061, issue #76): derive the left-sidebar
-//! / cold-start session list from the persisted `.duck` recipes WITHOUT any new
-//! persistence structure. Every field comes from either the recipe (ADR-0034) or
-//! the file itself -- no new at-rest shape is introduced.
+//! Session-listing metadata (ADR-0060/0061/0089, issue #76): derive the
+//! left-sidebar / cold-start session list from the persisted `.duck` recipes.
+//! ADR-0089 moved the data source from the app-config `recent_files` list to a
+//! managed sessions directory scan (`scan_sessions_dir`), but every metadata
+//! field still comes from either the recipe (ADR-0034) or the file itself.
 //!
 //! ## session_id = the `.duck` file path
 //!
 //! A runtime [`crate::SessionId`] is a UUID minted when a session enters the
 //! in-memory [`crate::SessionStore`] and dies with it; it is NOT persisted. The
 //! recipe (ADR-0034) carries no id field either. So the only stable, portable
-//! identity of a persisted session is its **file path** -- already tracked in
-//! the app-config `recent_files` list (ADR-0038) and re-passed to `open_duck`
-//! verbatim. `session_id` here is that path string. This keeps the "zero new
-//! persistence" contract (ADR-0060/0061) literal: nothing new is written to
-//! disk, the path is the existing file locator. The frontend uses it as the
-//! stable sidebar key; clicking a session mints a FRESH runtime id via
-//! `create_session` and resumes the path into it (`open_duck(new_id, path)`),
-//! so the list-sessions id and the runtime id are deliberately different things.
+//! identity of a persisted session is its **file path**. `session_id` here is
+//! that path string. The frontend uses it as the stable sidebar key; clicking a
+//! session mints a FRESH runtime id via `create_session` and resumes the path
+//! into it (`open_duck(new_id, path)`), so the list-sessions id and the runtime
+//! id are deliberately different things.
 
-use std::path::Path;
+use crate::persistence::recipe::RecipeEntry;
+use crate::persistence::{read_duck, LoadError, Recipe};
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 
-use crate::persistence::recipe::RecipeEntry;
-use crate::persistence::{read_duck, LoadError, Recipe};
+/// The root directory of all managed sessions (ADR-0089). Each session lives
+/// in a per-session subdirectory `{uuid}/session.duck`. Resolved once at setup
+/// from `<Documents>/toptopduck/sessions/` and managed as Tauri state so
+/// every session-scoped command shares one path source.
+pub struct SessionsRoot(pub PathBuf);
 
 /// One persisted session's sidebar metadata (ADR-0060/0061). Every field is
 /// derived -- nothing here is authored to disk separately. The frontend renders
@@ -70,21 +73,52 @@ pub struct SourceSummary {
     pub turn_count: usize,
 }
 
-/// Build the session list from the app-config `recent_files` paths
-/// (ADR-0038/0060/0061). A path that cannot be read (file moved/deleted, foreign
-/// format, corrupt) is SKIPPED -- it is no longer a persisted session, and
-/// listing it with fabricated metadata would be a silent lie (ADR-0017). The
-/// returned order matches the input (most-recent-first as `recent_files` keeps
-/// it); the frontend re-sorts by `last_modified_at` for the time grouping.
+/// Build the session list from a set of `.duck` file paths (ADR-0060/0061).
+/// A path that cannot be read (file moved/deleted, foreign format, corrupt) is
+/// SKIPPED -- it is no longer a persisted session, and listing it with
+/// fabricated metadata would be a silent lie (ADR-0017).
 ///
-/// This is a pure library function so the command layer (`list_sessions`) is a
-/// thin wrapper and the derivation is black-box testable without a Tauri
-/// runtime.
+/// Test-only helper: the production sidebar data source is `scan_sessions_dir`
+/// (ADR-0089). This function remains so the per-recipe derivation logic stays
+/// black-box testable without a Tauri runtime or a real directory structure.
 pub fn list_session_metadata(paths: &[String]) -> Vec<SessionMetadata> {
     paths
         .iter()
-        .filter_map(|p| build_session_metadata(p))
+        .filter_map(|p| build_session_metadata(Path::new(p)))
         .collect()
+}
+
+/// Scan a managed sessions directory (ADR-0089) for per-session subdirectories
+/// `{uuid}/session.duck`. Returns one `SessionMetadata` per readable recipe,
+/// sorted by mtime descending (most-recent first) so the sidebar's default
+/// ordering is immediately useful. A missing / unreadable directory yields an
+/// empty vec -- the app boots cleanly on a first launch with no sessions.
+///
+/// Each subdirectory that does not contain a readable `session.duck` is
+/// silently skipped (ADR-0017 honest-skip) -- it may be a partial / stale
+/// directory, not a session the sidebar should fabricate metadata for.
+pub fn scan_sessions_dir(dir: &Path) -> Vec<SessionMetadata> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            log::warn!("failed to scan sessions dir {}: {e}", dir.display());
+            return Vec::new();
+        }
+    };
+    let mut metas: Vec<SessionMetadata> = entries
+        .flatten()
+        .filter_map(|e| {
+            let session_dir = e.path();
+            if !session_dir.is_dir() {
+                return None;
+            }
+            let duck = session_dir.join("session.duck");
+            build_session_metadata(&duck)
+        })
+        .collect();
+    metas.sort_by_key(|m| std::cmp::Reverse(m.last_modified_at));
+    metas
 }
 
 /// Derive one session's metadata from its `.duck` path. Returns `None` on any
@@ -96,8 +130,9 @@ pub fn list_session_metadata(paths: &[String]) -> Vec<SessionMetadata> {
 /// entry was a session but no longer reads, so it is logged at WARN before
 /// being dropped -- the missing sidebar entry stays diagnosable instead of
 /// vanishing without a trace. The list never fabricates metadata either way.
-fn build_session_metadata(path: &str) -> Option<SessionMetadata> {
-    let recipe = match read_duck(Path::new(path)) {
+fn build_session_metadata(path: &Path) -> Option<SessionMetadata> {
+    let path_str = path.to_string_lossy();
+    let recipe = match read_duck(path) {
         Ok(r) => r,
         // ADR-0017 honest-skip: a plain missing / moved file is no longer a
         // session, so it is dropped quietly (the cold-start sidebar only lists
@@ -108,13 +143,13 @@ fn build_session_metadata(path: &str) -> Option<SessionMetadata> {
         // entry they expected, and the typed error names why. The list still
         // drops it (no fabricated metadata), but a WARN leaves a trail.
         Err(e) => {
-            log::warn!("skipped recent_files entry {path}: {e}");
+            log::warn!("skipped session entry {path_str}: {e}");
             return None;
         }
     };
-    let mtime = file_mtime_millis(path).unwrap_or(0);
+    let mtime = file_mtime_millis(&path_str).unwrap_or(0);
     Some(SessionMetadata {
-        session_id: path.to_string(),
+        session_id: path_str.into_owned(),
         display_name: display_name(&recipe),
         last_modified_at: mtime,
         source_summary: source_summary(&recipe),
@@ -324,7 +359,7 @@ mod tests {
 
     #[test]
     fn skips_paths_that_are_not_readable_recipes() {
-        // ADR-0017 honest: a recent_files entry whose file is missing / not a
+        // ADR-0017 honest: a path whose file is missing / not a
         // readable v1 recipe is dropped, never listed with fabricated metadata.
         let dir = tempfile::tempdir().expect("tempdir");
         let good = write_recipe(
@@ -394,5 +429,90 @@ mod tests {
             "two Added events + one turn"
         );
         assert_eq!(m.source_summary.first_source_name.as_deref(), Some("a"));
+    }
+
+    // --- scan_sessions_dir (ADR-0089 production data source) ---------------
+
+    /// Write a recipe into `{dir}/{uuid}/session.duck` so it matches the
+    /// managed-directory layout. Returns the metadata path.
+    fn write_session(root: &std::path::Path, uuid: &str, recipe: Recipe) -> std::path::PathBuf {
+        let session_dir = root.join(uuid);
+        std::fs::create_dir_all(&session_dir).expect("create session dir");
+        let duck = session_dir.join("session.duck");
+        save_atomic(&duck, &recipe).expect("save");
+        duck
+    }
+
+    #[test]
+    fn scan_returns_empty_for_missing_root() {
+        // A non-existent sessions root yields an empty vec — the app boots
+        // cleanly on first launch.
+        let missing = std::env::temp_dir().join("toptopduck-test-nonexistent-scan");
+        let _ = std::fs::remove_dir_all(&missing);
+        assert!(scan_sessions_dir(&missing).is_empty());
+    }
+
+    #[test]
+    fn scan_lists_sessions_sorted_by_mtime_desc() {
+        let root = tempfile::tempdir().expect("tempdir");
+        // Write two sessions; the second is newer.
+        write_session(
+            root.path(),
+            "uuid-a",
+            Recipe::build(
+                "first".into(),
+                vec![csv_source("a")],
+                Vec::new(),
+                Some("a".into()),
+            )
+            .expect("build"),
+        );
+        // Small delay so the mtimes differ reliably on coarse-resolution filesystems.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        write_session(
+            root.path(),
+            "uuid-b",
+            Recipe::build(
+                "second".into(),
+                vec![csv_source("b")],
+                Vec::new(),
+                Some("b".into()),
+            )
+            .expect("build"),
+        );
+        let list = scan_sessions_dir(root.path());
+        assert_eq!(list.len(), 2);
+        // Most-recent first (uuid-b written later).
+        assert!(
+            list[0].last_modified_at >= list[1].last_modified_at,
+            "entries sorted by mtime descending"
+        );
+        assert_eq!(list[0].display_name, "second");
+        assert_eq!(list[1].display_name, "first");
+    }
+
+    #[test]
+    fn scan_skips_non_dir_entries_and_dirs_without_session_duck() {
+        let root = tempfile::tempdir().expect("tempdir");
+        // A valid session.
+        write_session(
+            root.path(),
+            "uuid-ok",
+            Recipe::build(
+                "ok".into(),
+                vec![csv_source("s")],
+                Vec::new(),
+                Some("s".into()),
+            )
+            .expect("build"),
+        );
+        // A loose file in the root (not a session directory).
+        std::fs::write(root.path().join("loose.txt"), "not a session").expect("write");
+        // A subdirectory with no session.duck (partial / stale).
+        std::fs::create_dir_all(root.path().join("uuid-empty")).expect("mkdir");
+
+        let list = scan_sessions_dir(root.path());
+        assert_eq!(list.len(), 1, "only the valid session is listed");
+        assert_eq!(list[0].display_name, "ok");
     }
 }

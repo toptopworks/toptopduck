@@ -21,7 +21,9 @@ pub mod recipe;
 pub mod registry;
 
 pub use io::{read_duck, save_atomic, LoadError, SaveError};
-pub use listing::{list_session_metadata, SessionMetadata, SourceSummary};
+pub use listing::{
+    list_session_metadata, scan_sessions_dir, SessionMetadata, SessionsRoot, SourceSummary,
+};
 pub use migration::{migrate_to_current, MigrationError};
 pub use recipe::{
     ProductiveTurn, Recipe, RecipeEntry, RecipeError, RecipeOutcome, RecipeTurn, SourceRef,

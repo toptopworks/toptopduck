@@ -288,7 +288,7 @@ describe("App window-controls platform placement (ADR-0074)", () => {
 
   it("places macOS traffic lights at the topbar LEFT edge (not the right-side cluster)", async () => {
     // ADR-0074: macOS renders <WindowControls /> before SidebarToggle (left
-    // edge); Windows/Linux renders it after HeaderActions (right edge). This
+    // edge); Windows/Linux renders it after NavButtons (right edge). This
     // pins the App.tsx positional invariant -- a regression that flips or
     // drops the left-edge branch would otherwise pass every other suite
     // (dispatcher unit tests render the component in isolation, and the
@@ -298,19 +298,19 @@ describe("App window-controls platform placement (ADR-0074)", () => {
     vi.mocked(getAppConfig).mockResolvedValue(appConfigWith("en-US"));
     render(<App />);
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Save as .duck" })).toBeInTheDocument(),
+      expect(screen.getByRole("button", { name: "Back" })).toBeInTheDocument(),
     );
 
     const macControls = document.querySelector(".macos-window-controls");
     expect(macControls).not.toBeNull();
-    // The macOS container precedes the right-side HeaderActions (Save) in DOM
-    // order (DOCUMENT_POSITION_FOLLOWING = save comes after macControls). The
+    // The macOS container precedes the NavButtons (Back) in DOM order
+    // (DOCUMENT_POSITION_FOLLOWING = Back comes after macControls). The
     // reference is a topbar action, not the settings gear: since issue #282
     // the gear rides the session sidebar, which precedes the topbar in DOM
     // order and would invert this positional assertion.
-    const save = screen.getByRole("button", { name: "Save as .duck" });
+    const back = screen.getByRole("button", { name: "Back" });
     expect(
-      (macControls as Element).compareDocumentPosition(save) &
+      (macControls as Element).compareDocumentPosition(back) &
       Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     // The Windows right-side cluster must NOT also render on macOS.

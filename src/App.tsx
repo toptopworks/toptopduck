@@ -10,7 +10,6 @@ import { usePersistedSessions } from "./shell/usePersistedSessions";
 import { useShellSessions } from "./shell/useShellSessions";
 import { useAppConfigState } from "./shell/useAppConfigState";
 import { usePlatform } from "./shell/use-platform";
-import { HeaderActions } from "./shell/HeaderActions";
 import type { KeyStatus } from "./types/provider";
 import { SidebarToggle } from "./shell/SidebarToggle";
 import { NavButtons } from "./shell/NavButtons";
@@ -177,7 +176,6 @@ export default function App() {
   const {
     openSessions,
     activeSessionId,
-    activeSession,
     activateSession,
     busy,
     resumeStatus,
@@ -187,7 +185,6 @@ export default function App() {
     closeOpen,
     deletePersisted,
     renameEntry,
-    handleSaveAs,
     handleOpenDuck,
   } = useShellSessions({ intl, queryClient, refreshSessions, setShellError });
 
@@ -341,6 +338,7 @@ export default function App() {
                   grouping={sidebarGrouping}
                   pendingApprovalSids={approvalEvents.pendingApprovalSids}
                   onNew={() => void openNew()}
+                  onOpenDuck={() => void handleOpenDuck()}
                   onActivate={activateSession}
                   onOpenPersisted={(path, name) => void openPersisted(path, name)}
                   onClose={(sid) => {
@@ -362,19 +360,21 @@ export default function App() {
 
                 {/* Row 1: thin top bar (ADR-0060/0062 R1), spans the full shell
               width as a custom titlebar (decorations: false). Shell-wide
-              controls only: the sidebar collapse toggle (left) + header actions
+              controls only: the sidebar collapse toggle (left) + nav buttons
               + window controls (right). The session name + rail collapse toggle
               moved into each SessionPane's own header (session-scoped chrome
-              lives with the session). ADR-0067 (#171): visual rules -> inline
-              utilities; the .topbar grid + flex layout shell stays in styles.css.
-              Settings mode (ADR-0075 overlay) unmounts the WORKSPACE children
-              (sidebar toggle / soft-cap / header actions) but the titlebar
-              itself persists: with decorations:false its window controls +
-              drag region are shell-wide chrome that must stay reachable in
-              every view (ADR-0074) -- the settings-mode CSS exempts .topbar
-              from the overlay hide, and the rail owns settings chrome (the
-              dual-state gear + connection row live at the left columns'
-              bottoms, issue #282 -- the topbar carries no settings entry). */}
+              lives with the session). The Open / Save .duck buttons moved to
+              the session sidebar (below New session). ADR-0067 (#171): visual
+              rules -> inline utilities; the .topbar grid + flex layout shell
+              stays in styles.css. Settings mode (ADR-0075 overlay) unmounts
+              the WORKSPACE children (sidebar toggle / soft-cap badge) but the
+              titlebar itself persists: with decorations:false its window
+              controls + drag region are shell-wide chrome that must stay
+              reachable in every view (ADR-0074) -- the settings-mode CSS
+              exempts .topbar from the overlay hide, and the rail owns settings
+              chrome (the dual-state gear + connection row live at the left
+              columns' bottoms, issue #282 -- the topbar carries no settings
+              entry). */}
                 <header className="topbar gap-3 px-4 border-b border-border bg-background" data-tauri-drag-region>
                   {platform === "macos" && <WindowControls />}
                   {settingsView.open ? (
@@ -418,11 +418,6 @@ export default function App() {
                           />
                         </Alert>
                       )}
-                      <HeaderActions
-                        disabled={busy || !activeSession}
-                        onOpenDuck={() => void handleOpenDuck()}
-                        onSaveAs={() => void handleSaveAs()}
-                      />
                     </>
                   )}
                   {platform !== "macos" && <WindowControls />}

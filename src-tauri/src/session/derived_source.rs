@@ -38,8 +38,9 @@ use crate::session::TOOL_OUTPUT_DIR_NAME;
 use crate::tools::read_paths::{extract_read_paths, is_file_function};
 
 /// Subdirectory under `temp_path` for staging derived source files when no
-/// `.duck` is bound (ADR-0087 D4). Files here are migrated to `<duck_stem>.assets/`
-/// on `bind_duck`. Lifecycle follows the TempDir RAII (cleaned on session drop).
+/// `.duck` is bound (ADR-0087 D4). Files here are migrated to the per-session
+/// directory's `assets/` subdirectory on `bind_duck` (ADR-0089). Lifecycle
+/// follows the TempDir RAII (cleaned on session drop).
 pub(crate) const DERIVED_STAGING_DIR: &str = "derived";
 
 /// Detect `read_*` calls referencing `tool_output` files, copy each file into

@@ -58,7 +58,7 @@ pub use model::{
 };
 pub use persistence::{
     LoadError as DuckLoadError, MigrationError, RecipeError, SaveError, SessionMetadata,
-    SourceSummary,
+    SessionsRoot, SourceSummary,
 };
 pub use provider::anthropic::AnthropicProvider;
 pub use provider::fake::FakeProvider;
@@ -273,12 +273,27 @@ pub fn run() {
 
             let keychain = KeychainStore::new();
             let live = LiveProviderConfig::new(keychain, app_config_path);
+            // ADR-0089: managed sessions directory. Each session lives in a
+            // per-session subdirectory `{uuid}/session.duck`. Default root is
+            // `<Documents>/toptopduck/sessions/` (platform-conventions Documents,
+            // not hidden app-data). Honest temp-dir fallback: the app still
+            // boots, sessions just live in temp instead of Documents.
+            let sessions_root = match app.path().document_dir() {
+                Ok(dir) => dir.join("toptopduck").join("sessions"),
+                Err(e) => {
+                    log::warn!(
+                        "failed to resolve documents dir; sessions fall back to a temp path: {e}"
+                    );
+                    std::env::temp_dir().join("toptopduck-sessions")
+                }
+            };
             // ADR-0056: the multi-session store is the single managed state for
             // session-scoped commands. It starts empty; the frontend creates
             // sessions on demand. LiveProviderConfig is shared -- the per-session
             // provider reads key + endpoint through it.
             app.manage(Arc::new(SessionStore::new()));
             app.manage(live);
+            app.manage(SessionsRoot(sessions_root));
             app.manage(SkillsRoot(skills_root));
 
             // Visibility safety net (issue #268). `visible: false` in

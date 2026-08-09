@@ -38,7 +38,7 @@ use crate::model::{
     ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView, RemoveSourceError, RowPage,
     SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
 };
-use crate::persistence::{list_session_metadata, SaveError, SessionMetadata};
+use crate::persistence::{scan_sessions_dir, SaveError, SessionMetadata, SessionsRoot};
 use crate::provider::live_config::LiveProviderConfig;
 use crate::runtime::acp::adapter::{detect_adapter, v1_adapters, AdapterSpec};
 use crate::session::{RenameSessionError, ResumeEvent, ResumeProgress, Session, TurnInputs};
@@ -135,20 +135,29 @@ fn reject_if_in_flight(handle: &SessionHandle) -> Result<(), SessionError> {
     Ok(())
 }
 
-/// Create a new session (ADR-0056): the backend builds an independent in-memory
-/// DuckDB instance (ADR-0012/0027), allocates a per-session cancel token
-/// (ADR-0021), binds them to a backend-generated id (UUID v4), and returns the
-/// id. The id <-> resource binding is atomic (the id is minted only after the
-/// instance exists and the insert lands -- no "id issued, resource unbuilt"
-/// window, ADR-0056 Why 2). This is the `+ tab` action; the frontend tracks the
-/// returned id and passes it as the first parameter to every session-scoped
-/// command. The returned id is the typed [`SessionId`] Display string (the
-/// wire form the frontend stores and replays).
+/// The wire reply from `create_session` (ADR-0089): the runtime session id +
+/// the bound `session.duck` path. The frontend stores both so every open
+/// session is known-persisted from creation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CreateSessionReply {
+    pub session_id: String,
+    pub duck_path: String,
+}
+
+/// Create a new session (ADR-0056/0089): the backend builds an independent
+/// in-memory DuckDB instance (ADR-0012/0027), allocates a per-session cancel
+/// token (ADR-0021), binds them to a backend-generated id (UUID v4), and
+/// immediately persists by creating a per-session directory + initial
+/// `session.duck` under the managed sessions root (ADR-0089 Decision 1). The
+/// session is bound from creation -- no pure-memory phase, no manual first
+/// save. Returns the id + the bound path so the frontend tracks a
+/// known-persisted session.
 #[tauri::command]
 pub fn create_session(
     store: State<'_, Arc<SessionStore>>,
     live: State<'_, LiveProviderConfig>,
-) -> Result<String, SessionError> {
+    sessions_root: State<'_, SessionsRoot>,
+) -> Result<CreateSessionReply, SessionError> {
     let cancel = Arc::new(CancelToken::new());
     // The real LLM provider (ADR-0007/0064): a LiveProvider router that reads
     // the active profile's protocol per turn and dispatches to the anthropic
@@ -158,7 +167,42 @@ pub fn create_session(
     // before that every turn refuses honestly as not-wired.
     let provider = Box::new(crate::LiveProvider::new(live.inner().clone()));
     let id = store.create(cancel, provider)?;
-    Ok(id.to_string())
+    let id_str = id.to_string();
+    // ADR-0089: per-session directory `{sessions_root}/{uuid}/session.duck`.
+    // The UUID directory name is the stable identity; session.duck is the
+    // fixed recipe filename.
+    let session_dir = sessions_root.0.join(&id_str);
+    let duck_path = session_dir.join("session.duck");
+
+    // Rollback closure: if any step after store.create() fails, the handle is
+    // already in the store map (with a live DuckDB instance + cancel token).
+    // The frontend never receives the id on failure, so it cannot close the
+    // session itself. We must tear it down here to avoid a resource leak +
+    // a held canonical-writer key (C1).
+    let result = (|| -> Result<CreateSessionReply, SessionError> {
+        std::fs::create_dir_all(&session_dir)
+            .map_err(|e| SessionError::Engine(format!("failed to create session dir: {e}")))?;
+        // Bind immediately (ADR-0089 Decision 1): empty session_name is the
+        // placeholder; the first terminal turn's auto-naming overwrites it.
+        let handle = store.get(&id)?;
+        let mut s = handle.session_lock()?;
+        s.bind_duck(duck_path.clone(), String::new())
+            .map_err(|e| SessionError::Engine(e.to_string()))?;
+        Ok(CreateSessionReply {
+            session_id: id_str.clone(),
+            duck_path: duck_path.to_string_lossy().into_owned(),
+        })
+    })();
+
+    if result.is_err() {
+        // Best-effort rollback: drop the handle from the store (releases the
+        // DuckDB instance + cancel token + canonical key via Session::Drop),
+        // then remove the partially-created directory if it exists.
+        let _ = store.close(&id);
+        let _ = std::fs::remove_dir_all(&session_dir);
+    }
+
+    result
 }
 
 /// Close a session (ADR-0055): mark closing, fire cancel, and remove the entry
@@ -1180,92 +1224,90 @@ pub fn record_recent_file(live: State<'_, LiveProviderConfig>, path: String) -> 
     Ok(())
 }
 
-/// List every persisted `.duck` session's metadata for the cold-start left
-/// sidebar (ADR-0060/0061, issue #76). Reads the app-config `recent_files`
-/// paths and derives each entry's metadata from its recipe + file mtime --
-/// zero new persistence. A path that is no longer a readable recipe is skipped
-/// (the listing never fabricates metadata). Thin wrapper over the pure
-/// [`list_session_metadata`] so the derivation stays black-box testable.
-///
-/// Runs the per-entry file reads off the async/UI thread (AC8): each recent
-/// entry pays a `read_duck` (file read + JSON parse) plus a `metadata` stat,
-/// so the whole pass runs in `spawn_blocking` like `read_rows` / `ingest_file`
-/// -- a cold start over slow or network-mounted storage must not freeze the
-/// main window while the sidebar list is being derived.
+/// List every persisted session's metadata for the cold-start left sidebar
+/// (ADR-0060/0061/0089). Scans the managed sessions directory for per-session
+/// `*/session.duck` recipes (ADR-0089), replacing the former app-config
+/// `recent_files` approach. A recipe that is no longer readable is skipped
+/// (the listing never fabricates metadata). Runs the per-entry file reads off
+/// the async/UI thread (AC8): a cold start over slow or network-mounted
+/// storage must not freeze the main window while the sidebar list is being
+/// derived.
 #[tauri::command]
 pub async fn list_sessions(
-    live: State<'_, LiveProviderConfig>,
+    sessions_root: State<'_, SessionsRoot>,
 ) -> Result<Vec<SessionMetadata>, String> {
-    let live = live.inner().clone();
-    let list = tauri::async_runtime::spawn_blocking(move || {
-        let recent = live.load().recent_files;
-        list_session_metadata(&recent)
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    let dir = sessions_root.0.clone();
+    let list = tauri::async_runtime::spawn_blocking(move || scan_sessions_dir(&dir))
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(list)
 }
 
-/// Delete a persisted `.duck` session file (ADR-0060, issue #81). The frontend
-/// closes the session FIRST when it is open (so no canonical-writer key is held
-/// and the in-memory instance is gone), then calls this. Removes the file and
-/// drops the path from recent_files so the next `list_sessions` no longer lists
-/// it. Irreversible -- the frontend gates it behind a strong confirm that names
-/// the .duck explicitly.
+/// Delete a persisted session (ADR-0060/0089, issue #81). The frontend closes
+/// the session FIRST when it is open (so no canonical-writer key is held and
+/// the in-memory instance is gone), then calls this. Removes the entire
+/// per-session directory (`{uuid}/` containing `session.duck` + optional
+/// `assets/`) so the next `list_sessions` (directory scan) no longer lists it.
+/// Irreversible -- the frontend gates it behind a strong confirm.
 ///
-/// A missing file is NOT an error: the outcome the user wants (the session is
-/// gone from the sidebar) already holds, and an idempotent delete tolerates a
-/// stray double-call. Any OTHER removal failure (permission denied, path busy,
-/// an external file handle) IS surfaced -- swallowing it would betray the
-/// strong-confirm contract by silently leaving the file on disk, only for it to
-/// reappear in the sidebar on the next launch.
+/// A missing directory is NOT an error: the outcome the user wants (the session
+/// is gone from the sidebar) already holds, and an idempotent delete tolerates a
+/// stray double-call. Any OTHER removal failure (permission denied, path busy)
+/// IS surfaced -- swallowing it would betray the strong-confirm contract.
 ///
 /// The canonical-writer gate mirrors `rename_persisted_session`: a held key
-/// means an open in-memory session owns this path, so a file-level delete would
-/// race its writer and is refused. The frontend closes first; this is the
-/// backend guard for a broken frontend contract (a second window, an IPC
-/// replay). Runs the file IO off the async/UI thread (AC8), like
-/// `rename_persisted_session` and `list_sessions`.
+/// means an open in-memory session owns this path. The frontend closes first;
+/// this is the backend guard for a broken frontend contract. Runs the IO off
+/// the async/UI thread (AC8).
 #[tauri::command]
 pub async fn delete_session(
-    live: State<'_, LiveProviderConfig>,
+    sessions_root: State<'_, SessionsRoot>,
     path: String,
 ) -> Result<(), StoreCommandError> {
     use crate::persistence::{canonicalize_duck, release, try_acquire};
-    let live = live.inner().clone();
     let trimmed = path.trim().to_string();
+    let root = sessions_root.0.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), StoreCommandError> {
         if trimmed.is_empty() {
             return Ok(());
         }
         let path = PathBuf::from(&trimmed);
-        // Canonicalize for the single-writer gate. canonicalize_duck succeeds
-        // even when the file itself is gone (it canonicalizes the parent dir
-        // and rejoins the file name), so an Err here means the parent is gone
-        // too -- the file is definitely absent; treat as idempotent success.
+        // Canonicalize the .duck for the single-writer gate. canonicalize_duck
+        // succeeds even when the file itself is gone (it canonicalizes the
+        // parent dir and rejoins the file name), so an Err means the parent is
+        // gone too -- the session is definitely absent; idempotent success.
         let canonical = match canonicalize_duck(&path) {
             Ok(c) => c,
-            Err(_) => {
-                live.remove_recent_file(&trimmed);
-                return Ok(());
-            }
+            Err(_) => return Ok(()),
         };
+        // ADR-0089: delete the per-session directory (session.duck + assets/),
+        // not just the .duck file. The .duck's parent is `{uuid}/`.
+        let Some(session_dir) = path.parent().map(PathBuf::from) else {
+            return Err(StoreCommandError::IoFailure(
+                "path has no parent directory; cannot locate session dir".into(),
+            ));
+        };
+        // Guard against a path whose parent is not under the managed sessions
+        // root (M2). Without this, a malformed or future caller passing
+        // `sessions_root/session.duck` would wipe the entire root.
+        let canonical_root = std::fs::canonicalize(&root).unwrap_or(root);
+        if !session_dir.starts_with(&canonical_root) {
+            return Err(StoreCommandError::IoFailure(format!(
+                "session dir {} is not under the managed sessions root {}",
+                session_dir.display(),
+                canonical_root.display()
+            )));
+        }
         // Gate: a held canonical key means an open session owns this path.
         if !try_acquire(&canonical) {
             return Err(StoreCommandError::OpenConflict);
         }
-        let outcome = match std::fs::remove_file(&path) {
+        let outcome = match std::fs::remove_dir_all(&session_dir) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(StoreCommandError::IoFailure(e.to_string())),
         };
         release(&canonical);
-        // Drop from recent_files only when the file is actually gone -- a
-        // failed remove leaves the .duck on disk, so recent_files must stay
-        // consistent with it (and the caller already received the error).
-        if outcome.is_ok() {
-            live.remove_recent_file(&trimmed);
-        }
         outcome
     })
     .await
@@ -1274,9 +1316,8 @@ pub async fn delete_session(
 
 /// Rename the OPEN session bound to `session_id` (ADR-0060, issue #81). Sets the
 /// user-facing session_name and rewrites the bound `.duck` recipe header; the
-/// bound path is untouched, so recent_files / sidebar addressing stay stable.
-/// Rejects a blank name. For a never-saved (unbound) session the name is held in
-/// memory and carried by the next save-as. Delegates to [`Session::rename`].
+/// bound path is untouched, so sidebar addressing stays stable. Rejects a blank
+/// name. Delegates to [`Session::rename`].
 #[tauri::command]
 pub fn rename_session(
     store: State<'_, Arc<SessionStore>>,
@@ -1354,6 +1395,11 @@ pub async fn rename_persisted_session(
 /// Bind the named session to a `.duck` path and write one recipe immediately
 /// (ADR-0034). After this every terminal turn / source event atomically
 /// rewrites the recipe. Synchronous: a small whole-file rewrite.
+///
+/// ADR-0089 note: sessions are now bound at `create_session`, so this command's
+/// "first persistence bind" role is retired. It rebinds the session to a new
+/// path (releasing the managed canonical key) — the future "export a copy"
+/// feature (ADR-0089 Decision 5) will need a separate non-rebinding command.
 #[tauri::command]
 pub fn save_as_duck(
     store: State<'_, Arc<SessionStore>>,

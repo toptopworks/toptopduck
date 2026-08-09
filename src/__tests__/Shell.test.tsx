@@ -473,8 +473,8 @@ describe("App multi-session shell (issue #81 ACs)", () => {
     // thread query is NOT re-issued -- conversation stays at one call per
     // session.
     vi.mocked(createSession)
-      .mockResolvedValueOnce("sess-1")
-      .mockResolvedValueOnce("sess-2");
+      .mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" })
+      .mockResolvedValueOnce({ session_id: "sess-2", duck_path: "/sessions/sess-2/session.duck" });
     render(<App />);
     fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
     await waitFor(() =>
@@ -496,7 +496,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
   });
 
   it("closes the active session: closeSession + drops it from the open set (ADR-0055)", async () => {
-    vi.mocked(createSession).mockResolvedValueOnce("sess-1");
+    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
     render(<App />);
     fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
     await waitFor(() =>
@@ -515,7 +515,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
   });
 
   it("renames the open session via the sidebar context menu (ADR-0060 single entry)", async () => {
-    vi.mocked(createSession).mockResolvedValueOnce("sess-1");
+    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
     vi.mocked(renameSession).mockResolvedValue("季报");
     render(<App />);
     fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
@@ -539,7 +539,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
   // (the only path that can surface an xlsx NeedsGuidance result). Asserts the
   // createSession + ingestFile wiring at the shell boundary.
   it("drop on the cold hero mints a session and ingests the file (ADR-0061, #81 A1)", async () => {
-    vi.mocked(createSession).mockResolvedValueOnce("sess-drop");
+    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-drop", duck_path: "/sessions/sess-drop/session.duck" });
     vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("dropped") });
     render(<App />);
     // Cold start: the hero is showing, no session yet.
@@ -578,6 +578,7 @@ describe("App turn-progress phase feedback (issue #82 / ADR-0059)", () => {
   });
 
   it("renders Thinking / tool-call phase labels during an in-flight ask", async () => {
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
     const { resolve } = pendingAsk();
     render(<App />);
     await openSession();
@@ -621,6 +622,7 @@ describe("App turn-progress phase feedback (issue #82 / ADR-0059)", () => {
   });
 
   it("ignores turn-progress events addressed to a different session (ADR-0056 filter)", async () => {
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
     const { resolve } = pendingAsk();
     render(<App />);
     await openSession();
@@ -676,6 +678,7 @@ describe("App single in-flight + cancel (issue #82 / ADR-0021/0028)", () => {
   });
 
   it("stop fires cancelQuery on the session (ADR-0021)", async () => {
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
     const { resolve } = pendingAsk();
     render(<App />);
     await openSession();
@@ -802,8 +805,8 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
     // The L2 session-body boundary in sess-1 catches its crash; sess-2 is a
     // sibling pane and stays fully functional.
     vi.mocked(createSession)
-      .mockResolvedValueOnce("sess-1")
-      .mockResolvedValueOnce("sess-2");
+      .mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" })
+      .mockResolvedValueOnce({ session_id: "sess-2", duck_path: "/sessions/sess-2/session.duck" });
     vi.mocked(conversation).mockImplementation(async (sid) => {
       if (sid === "sess-1") {
         return [
@@ -871,7 +874,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
       ...src("result_2"),
       stale: { reference_name: "result_2", display_name: "result_2", reason: "Replaced" },
     };
-    vi.mocked(createSession).mockResolvedValue("sess-resume");
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-resume", duck_path: "/sessions/sess-resume/session.duck" });
     vi.mocked(openDuck).mockResolvedValue(undefined);
     vi.mocked(listWorkingSet).mockResolvedValue([r1, r2]);
     vi.mocked(activeDataset).mockResolvedValue(r2);
@@ -906,7 +909,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
     vi.mocked(openDuck).mockImplementation(
       () => new Promise<void>((r) => { resolveOpenDuck = r; }),
     );
-    vi.mocked(createSession).mockResolvedValue("sess-resume");
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-resume", duck_path: "/sessions/sess-resume/session.duck" });
 
     render(<App />);
     await waitFor(() => expect(screen.getByText("季报")).toBeInTheDocument());
@@ -954,7 +957,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
 
   it("closing an in-flight session unmounts the pane at once + fires closeSession (ADR-0055)", async () => {
     const { resolve } = pendingAsk();
-    vi.mocked(createSession).mockResolvedValueOnce("sess-1");
+    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
     // closeSession NEVER resolves in this test -- proves the UI does NOT wait.
     vi.mocked(closeSession).mockImplementation(() => new Promise<void>(() => {}));
 
@@ -995,7 +998,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
   });
 
   it("close still unmounts at once when closeSession rejects (ADR-0055 .catch seam, #83)", async () => {
-    vi.mocked(createSession).mockResolvedValueOnce("sess-1");
+    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
     // closeSession REJECTS -- closeOpen's .catch must swallow it so it does
     // NOT surface as an unhandled rejection. If someone drops the .catch (or
     // re-adds an await on closeSession), this test fails on the reject path.
@@ -1051,7 +1054,7 @@ describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
         format_version: 1,
       },
     ]);
-    vi.mocked(createSession).mockResolvedValue("sess-del");
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-del", duck_path: "/sessions/sess-del/session.duck" });
 
     render(<App />);
     // Open the persisted session (createSession + openDuck).
@@ -1090,7 +1093,7 @@ describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
         format_version: 1,
       },
     ]);
-    vi.mocked(createSession).mockResolvedValue("sess-del");
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-del", duck_path: "/sessions/sess-del/session.duck" });
     // Hold the wait-release pending so we can observe the pane STAYS mounted.
     let resolveWait: () => void = () => {};
     vi.mocked(closeSessionAndWaitRelease).mockImplementation(
@@ -1145,7 +1148,7 @@ describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
         format_version: 1,
       },
     ]);
-    vi.mocked(createSession).mockResolvedValue("sess-del");
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-del", duck_path: "/sessions/sess-del/session.duck" });
     // Real IPC shape (issue #119): a typed SessionError reject, not a JS Error.
     // The close-wait timeout detail rides Engine.data; the shell must surface
     // it in the collapsed fold (review H1), not drop it for "Internal error".
@@ -1560,7 +1563,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // the file to that session's working set (ADR-0022 source event) -- it does
     // NOT mint a new session. createSession is called once (for openSession),
     // never again for the drop.
-    vi.mocked(createSession).mockResolvedValueOnce("sess-1");
+    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
     vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("dropped") });
     render(<App />);
     await openSession();
@@ -1628,7 +1631,7 @@ describe("App session soft-cap hint (ADR-0046/0050, issue #108)", () => {
     // getByRole would match many; the soft-cap Alert is the only status inside
     // the topbar.
     let n = 0;
-    vi.mocked(createSession).mockImplementation(async () => `sess-${++n}`);
+    vi.mocked(createSession).mockImplementation(async () => ({ session_id: `sess-${++n}`, duck_path: `/sessions/sess-${n}/session.duck` }));
     render(<App />);
     for (let i = 0; i < 8; i++) {
       fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
@@ -1663,35 +1666,6 @@ describe("App topbar header actions + sidebar connection footer (issue #182 / #2
       () => new Promise<AppConfig>(() => {}),
     );
     vi.stubGlobal("navigator", { language: "zh-CN" });
-  });
-
-  it("disables both header buttons on cold start (no active session)", async () => {
-    // Cold-start gate: Open/Save ride disabled={busy || !activeSession}. The
-    // settings gear + key badge left the topbar for the sidebar footer (issue
-    // #282); the header cluster is exactly the two file actions. A regression
-    // that drops the gate lets Open/Save fire with nothing to act on.
-    render(<App />);
-    const buttons = await waitFor(() => {
-      const list = document.querySelectorAll(
-        ".header-actions [data-slot='button']",
-      );
-      expect(list.length).toBe(2);
-      return list;
-    });
-    buttons.forEach((btn) =>
-      expect((btn as HTMLButtonElement).disabled).toBe(true),
-    );
-  });
-
-  it("re-enables open/save with a session active", async () => {
-    render(<App />);
-    await openSession();
-    const buttons = document.querySelectorAll(
-      ".header-actions [data-slot='button']",
-    );
-    expect(buttons).toHaveLength(2);
-    expect((buttons[0] as HTMLButtonElement).disabled).toBe(false); // Open
-    expect((buttons[1] as HTMLButtonElement).disabled).toBe(false); // Save
   });
 
   it("keeps the settings entry absent until appConfig resolves (C1 render-when-ready)", async () => {
@@ -1975,7 +1949,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     // survive clearAllMocks, and this describe's ingest / badge assertions
     // depend on the exact sessionId + clean reads. Pin the factory behavior
     // back (mirrors the error-boundary describe's conversation reset).
-    vi.mocked(createSession).mockResolvedValue("sess-1");
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
     vi.mocked(conversation).mockImplementation(async () => state.thread);
     vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
     vi.mocked(activeDataset).mockImplementation(async () => null);
@@ -2073,7 +2047,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
         format_version: 1,
       },
     ]);
-    vi.mocked(createSession).mockResolvedValue("sess-resume");
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-resume", duck_path: "/sessions/sess-resume/session.duck" });
     vi.mocked(openDuck).mockResolvedValue(undefined);
     vi.mocked(getAuthorizationMode).mockResolvedValue("no_confirmation");
 
