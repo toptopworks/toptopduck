@@ -13,9 +13,13 @@
 //! v1 walks the structured FROM/JOIN surface (relations, derived subqueries,
 //! set-op branches, CTEs) plus scalar subqueries nested in projection / WHERE
 //! / GROUP BY / HAVING expressions (issue #441). Provider SQL (ADR-0009
-//! one-SQL-per-turn) overwhelmingly names its dependencies in FROM/JOIN, and
-//! the conservative parse-failure fallback covers any statement this walker
-//! cannot fully resolve.
+//! one-SQL-per-turn) overwhelmingly names its dependencies in FROM/JOIN.
+//!
+//! The parse-failure fallback only triggers when the SQL cannot be parsed at
+//! all — a successful parse with an incomplete walk returns partial results,
+//! not the fallback. The expression walker (`collect_expr_subqueries`) mirrors
+//! the full `Expr` variant set of `rewrite_expr_children` to avoid silently
+//! missing catalog refs the rewrite installed.
 
 use std::collections::HashSet;
 
@@ -90,8 +94,8 @@ fn extract_references(sql: &str) -> Option<HashSet<String>> {
     Some(out)
 }
 
-/// Collect table names from a Query: its WITH/CTE bodies (each a query) and
-/// its body set-expression.
+/// Collect table names from a Query: its WITH/CTE bodies (each a query), its
+/// body set-expression, and its ORDER BY expressions (embedded subqueries).
 fn collect_query(query: &Query, out: &mut HashSet<String>) {
     if let Some(with) = &query.with {
         for cte in &with.cte_tables {
@@ -99,11 +103,17 @@ fn collect_query(query: &Query, out: &mut HashSet<String>) {
         }
     }
     collect_set_expr(query.body.as_ref(), out);
+    if let Some(order_by) = &query.order_by {
+        for ord in &order_by.exprs {
+            collect_expr_subqueries(&ord.expr, out);
+        }
+    }
 }
 
 /// Walk a set-expression: a SELECT (collect its FROM/JOIN targets + any
-/// scalar subqueries in projection / WHERE / GROUP BY / HAVING), a set-op
-/// (recurse both branches), a nested query, or a values list (no tables).
+/// scalar subqueries in projection / WHERE / GROUP BY / HAVING / QUALIFY), a
+/// set-op (recurse both branches), a nested query, or a values list (walk
+/// row expressions for embedded subqueries).
 fn collect_set_expr(expr: &SetExpr, out: &mut HashSet<String>) {
     match expr {
         SetExpr::Select(select) => {
@@ -111,9 +121,10 @@ fn collect_set_expr(expr: &SetExpr, out: &mut HashSet<String>) {
                 collect_table_with_joins(twj, out);
             }
             // Scalar subqueries in projection / selection / group_by / having
-            // may reference catalog tables (e.g. after the derived-source
-            // scalar rewrite in issue #441). Walk each expression for embedded
-            // subqueries and collect their FROM-clause references.
+            // / qualify may reference catalog tables (e.g. after the
+            // derived-source scalar rewrite in issue #441). Walk each
+            // expression for embedded subqueries and collect their FROM-clause
+            // references.
             for item in &select.projection {
                 if let SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } = item
                 {
@@ -131,13 +142,22 @@ fn collect_set_expr(expr: &SetExpr, out: &mut HashSet<String>) {
             if let Some(having) = &select.having {
                 collect_expr_subqueries(having, out);
             }
+            if let Some(qualify) = &select.qualify {
+                collect_expr_subqueries(qualify, out);
+            }
         }
         SetExpr::SetOperation { left, right, .. } => {
             collect_set_expr(left.as_ref(), out);
             collect_set_expr(right.as_ref(), out);
         }
         SetExpr::Query(query) => collect_query(query.as_ref(), out),
-        // Values + any future variant carry no table references.
+        SetExpr::Values(values) => {
+            for row in &values.rows {
+                for e in row {
+                    collect_expr_subqueries(e, out);
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -152,9 +172,14 @@ fn collect_table_with_joins(twj: &TableWithJoins, out: &mut HashSet<String>) {
 
 /// Walk an expression tree looking for embedded subqueries (scalar subquery,
 /// EXISTS, IN-subquery). For each subquery found, collect its FROM-clause table
-/// references via [`collect_query`]. Other expression forms are not walked —
-/// a direct table reference cannot appear in an expression position, so only
-/// subqueries can carry one (issue #441).
+/// references via [`collect_query`]. Other expression forms are not walked
+/// beyond what is needed to find subqueries — a direct table reference cannot
+/// appear in an expression position, so only subqueries can carry one (issue
+/// #441).
+///
+/// Coverage mirrors `derived_source::rewrite_expr_children` so provenance
+/// never misses a catalog ref the rewrite installed: every wrapper variant
+/// that the rewriter descends into is also descended here.
 fn collect_expr_subqueries(expr: &Expr, out: &mut HashSet<String>) {
     match expr {
         Expr::Subquery(query) => collect_query(query.as_ref(), out),
@@ -163,8 +188,7 @@ fn collect_expr_subqueries(expr: &Expr, out: &mut HashSet<String>) {
         }
 
         // Recurse into wrapper expressions that could contain a subquery at
-        // any depth. Coverage mirrors derived_source::rewrite_expr_children
-        // so provenance never misses a catalog ref the rewrite installed.
+        // any depth.
         Expr::Function(func) => {
             if let sqlparser::ast::FunctionArguments::List(list) = &func.args {
                 for arg in &list.args {
@@ -184,33 +208,41 @@ fn collect_expr_subqueries(expr: &Expr, out: &mut HashSet<String>) {
                 collect_expr_subqueries(f, out);
             }
         }
+        Expr::UnaryOp { expr, .. } | Expr::Cast { expr, .. } => {
+            collect_expr_subqueries(expr, out);
+        }
+        Expr::Extract { expr, .. } | Expr::Ceil { expr, .. } | Expr::Floor { expr, .. } => {
+            collect_expr_subqueries(expr, out);
+        }
+        Expr::Collate { expr, .. } => {
+            collect_expr_subqueries(expr, out);
+        }
+
+        Expr::IsFalse(e)
+        | Expr::IsNotFalse(e)
+        | Expr::IsTrue(e)
+        | Expr::IsNotTrue(e)
+        | Expr::IsNull(e)
+        | Expr::IsNotNull(e)
+        | Expr::IsUnknown(e)
+        | Expr::IsNotUnknown(e)
+        | Expr::Nested(e)
+        | Expr::OuterJoin(e)
+        | Expr::Prior(e) => collect_expr_subqueries(e, out),
+
         Expr::BinaryOp { left, right, .. } => {
             collect_expr_subqueries(left, out);
             collect_expr_subqueries(right, out);
         }
-        Expr::UnaryOp { expr, .. } | Expr::Cast { expr, .. } => {
+        Expr::IsDistinctFrom(a, b) | Expr::IsNotDistinctFrom(a, b) => {
+            collect_expr_subqueries(a, out);
+            collect_expr_subqueries(b, out);
+        }
+        Expr::Position { expr, r#in, .. } => {
             collect_expr_subqueries(expr, out);
+            collect_expr_subqueries(r#in, out);
         }
-        Expr::Nested(e) => collect_expr_subqueries(e, out),
-        Expr::Case {
-            operand,
-            conditions,
-            results,
-            else_result,
-        } => {
-            if let Some(e) = operand {
-                collect_expr_subqueries(e, out);
-            }
-            for e in conditions {
-                collect_expr_subqueries(e, out);
-            }
-            for e in results {
-                collect_expr_subqueries(e, out);
-            }
-            if let Some(e) = else_result {
-                collect_expr_subqueries(e, out);
-            }
-        }
+
         Expr::InList { expr, list, .. } => {
             collect_expr_subqueries(expr, out);
             for e in list {
@@ -231,17 +263,90 @@ fn collect_expr_subqueries(expr: &Expr, out: &mut HashSet<String>) {
             collect_expr_subqueries(expr, out);
             collect_expr_subqueries(pattern, out);
         }
+        Expr::Substring {
+            expr,
+            substring_from,
+            substring_for,
+            ..
+        } => {
+            collect_expr_subqueries(expr, out);
+            if let Some(e) = substring_from {
+                collect_expr_subqueries(e, out);
+            }
+            if let Some(e) = substring_for {
+                collect_expr_subqueries(e, out);
+            }
+        }
+        Expr::Trim {
+            expr,
+            trim_what,
+            trim_characters,
+            ..
+        } => {
+            collect_expr_subqueries(expr, out);
+            if let Some(e) = trim_what {
+                collect_expr_subqueries(e, out);
+            }
+            if let Some(chars) = trim_characters {
+                for e in chars {
+                    collect_expr_subqueries(e, out);
+                }
+            }
+        }
         Expr::Tuple(exprs) => {
             for e in exprs {
                 collect_expr_subqueries(e, out);
             }
         }
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            if let Some(e) = operand {
+                collect_expr_subqueries(e, out);
+            }
+            for e in conditions {
+                collect_expr_subqueries(e, out);
+            }
+            for e in results {
+                collect_expr_subqueries(e, out);
+            }
+            if let Some(e) = else_result {
+                collect_expr_subqueries(e, out);
+            }
+        }
+        Expr::InUnnest { expr, .. } => collect_expr_subqueries(expr, out),
+
         Expr::CompositeAccess { expr, .. }
         | Expr::Subscript { expr, .. }
         | Expr::Named { expr, .. }
         | Expr::Convert { expr, .. } => collect_expr_subqueries(expr, out),
         Expr::JsonAccess { value, .. } => collect_expr_subqueries(value, out),
         Expr::MapAccess { column, .. } => collect_expr_subqueries(column, out),
+
+        Expr::AtTimeZone {
+            timestamp,
+            time_zone,
+        } => {
+            collect_expr_subqueries(timestamp, out);
+            collect_expr_subqueries(time_zone, out);
+        }
+        Expr::Overlay {
+            expr,
+            overlay_what,
+            overlay_from,
+            overlay_for,
+        } => {
+            collect_expr_subqueries(expr, out);
+            collect_expr_subqueries(overlay_what, out);
+            collect_expr_subqueries(overlay_from, out);
+            if let Some(e) = overlay_for {
+                collect_expr_subqueries(e, out);
+            }
+        }
+
         Expr::Struct { values, .. } => {
             for e in values {
                 collect_expr_subqueries(e, out);
@@ -265,7 +370,7 @@ fn collect_expr_subqueries(expr: &Expr, out: &mut HashSet<String>) {
         }
         Expr::Lambda(lambda) => collect_expr_subqueries(&lambda.body, out),
 
-        // Leaves and rare variants: no subqueries to find.
+        // Leaves and rare/dialect-specific variants: no subqueries to find.
         _ => {}
     }
 }
@@ -402,5 +507,68 @@ mod tests {
                 .collect()
         );
         assert!(deps.stale_ref.is_none());
+    }
+
+    // --- Scalar subquery provenance (issue #441) ---------------------------
+
+    #[test]
+    fn scalar_subquery_in_projection_records_dependency() {
+        let ws = ws_with_members(&["people", "orders"]);
+        let deps = analyze(
+            r#"SELECT (SELECT count(*) FROM "orders".data) AS cnt FROM "people".data"#,
+            &ws,
+        );
+        assert_eq!(
+            deps.refs,
+            ["people".to_string(), "orders".to_string()]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
+    fn scalar_subquery_in_where_records_dependency() {
+        let ws = ws_with_members(&["people", "orders"]);
+        let deps = analyze(
+            r#"SELECT * FROM "people".data WHERE id IN (SELECT id FROM "orders".data)"#,
+            &ws,
+        );
+        assert_eq!(
+            deps.refs,
+            ["people".to_string(), "orders".to_string()]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
+    fn scalar_subquery_in_wrapper_expr_records_dependency() {
+        // A subquery nested inside an IS NOT NULL wrapper — regression guard
+        // for the coverage gap where collect_expr_subqueries was missing the
+        // IsNotNull variant (issue #441 review I1).
+        let ws = ws_with_members(&["people", "orders"]);
+        let deps = analyze(
+            r#"SELECT * FROM "people".data WHERE (SELECT count(*) FROM "orders".data) > 0 IS NOT NULL"#,
+            &ws,
+        );
+        assert!(
+            deps.refs.contains("orders"),
+            "subquery inside IS NOT NULL wrapper found: {:?}",
+            deps.refs
+        );
+    }
+
+    #[test]
+    fn scalar_subquery_in_order_by_records_dependency() {
+        let ws = ws_with_members(&["people", "orders"]);
+        let deps = analyze(
+            r#"SELECT * FROM "people".data ORDER BY (SELECT count(*) FROM "orders".data)"#,
+            &ws,
+        );
+        assert!(
+            deps.refs.contains("orders"),
+            "subquery in ORDER BY found: {:?}",
+            deps.refs
+        );
     }
 }

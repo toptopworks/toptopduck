@@ -280,12 +280,13 @@ fn is_in_tool_output(path_str: &str, tool_output_dir: &Path) -> bool {
 
 // --- SQL rewrite -------------------------------------------------------
 
-/// Rewrite `sql` by replacing each `read_*('path')` table-function call whose
-/// path is in `path_to_ref` with the corresponding catalog reference
-/// (`"ref".data`). Only FROM-clause table factors are rewritten — the common
-/// pattern (`FROM read_csv_auto('path')`). Scalar `read_*` in projections /
-/// WHERE are left as-is (the tool_output file still exists during the session;
-/// provenance tracking for scalar reads is a v1 accepted gap).
+/// Rewrite `sql` by replacing each `read_*('path')` call whose path is in
+/// `path_to_ref` with the corresponding catalog reference (`"ref".data`).
+/// FROM-clause table factors are rewritten to `"ref".data`; scalar `read_*`
+/// calls in projection / WHERE / GROUP BY / HAVING / QUALIFY / ORDER BY
+/// expressions are rewritten to `(SELECT t FROM "ref".data t LIMIT 1)`
+/// (issue #441). A `read_*` whose path is NOT in `path_to_ref` is left
+/// untouched.
 ///
 /// The re-serialized SQL replaces the original for preflight + sandbox exec +
 /// recipe storage. sqlparser's Display may reformat whitespace / quoting, but
@@ -315,8 +316,9 @@ fn rewrite_sql(sql: &str, path_to_ref: &HashMap<String, String>) -> Result<Strin
     Ok(out)
 }
 
-/// Walk a `Query` recursively, rewriting FROM-clause `read_*` table-function
-/// calls in its body + each CTE.
+/// Walk a `Query` recursively, rewriting `read_*` calls in its body + each
+/// CTE + ORDER BY expressions. Mirrors `read_paths::walk_query` so every
+/// position the extractor visits is also rewritten.
 fn rewrite_query(query: &mut Query, path_to_ref: &HashMap<String, String>) {
     if let Some(with) = &mut query.with {
         for cte in &mut with.cte_tables {
@@ -324,11 +326,17 @@ fn rewrite_query(query: &mut Query, path_to_ref: &HashMap<String, String>) {
         }
     }
     rewrite_set_expr(query.body.as_mut(), path_to_ref);
+    if let Some(order_by) = &mut query.order_by {
+        for ord in &mut order_by.exprs {
+            rewrite_expr(&mut ord.expr, path_to_ref);
+        }
+    }
 }
 
 /// Walk a set-expression: a SELECT (rewrite its FROM + scalar `read_*` in
-/// projection / WHERE / GROUP BY / HAVING), a set-op (recurse both
-/// branches), or a nested query (recurse).
+/// projection / WHERE / GROUP BY / HAVING / QUALIFY), a set-op (recurse
+/// both branches), a nested query (recurse), or a values list (rewrite row
+/// expressions).
 ///
 /// The scalar-expression rewrite (issue #441) complements the FROM-clause
 /// rewrite: `SELECT read_csv_auto('path')` or `WHERE id IN (SELECT id FROM
@@ -360,12 +368,22 @@ fn rewrite_set_expr(expr: &mut SetExpr, path_to_ref: &HashMap<String, String>) {
             if let Some(having) = &mut select.having {
                 rewrite_expr(having, path_to_ref);
             }
+            if let Some(qualify) = &mut select.qualify {
+                rewrite_expr(qualify, path_to_ref);
+            }
         }
         SetExpr::SetOperation { left, right, .. } => {
             rewrite_set_expr(left.as_mut(), path_to_ref);
             rewrite_set_expr(right.as_mut(), path_to_ref);
         }
         SetExpr::Query(query) => rewrite_query(query.as_mut(), path_to_ref),
+        SetExpr::Values(values) => {
+            for row in &mut values.rows {
+                for e in row {
+                    rewrite_expr(e, path_to_ref);
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -1087,6 +1105,101 @@ mod tests {
         assert!(
             !rewritten.contains("read_csv_auto"),
             "all read_csv_auto removed: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn rewrite_replaces_scalar_read_in_order_by() {
+        // ORDER BY expressions are walked by rewrite_query, mirroring
+        // walk_query in read_paths.rs (review I2).
+        let path = "/tmp/tool_output/data.csv";
+        let sql = format!("SELECT 1 ORDER BY length(read_csv_auto('{path}'))");
+        let rewritten = rewrite_sql(&sql, &map(&[(path, "data")])).unwrap();
+        assert!(
+            rewritten.contains(r#""data".data"#),
+            "catalog ref present in ORDER BY: {rewritten}"
+        );
+        assert!(
+            !rewritten.contains("read_csv_auto"),
+            "read_csv_auto removed: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn rewrite_replaces_scalar_read_in_qualify() {
+        // QUALIFY clause is walked by rewrite_set_expr, mirroring
+        // walk_set_expr in read_paths.rs (review I3).
+        let path = "/tmp/tool_output/data.csv";
+        let sql = format!("SELECT * FROM read_csv_auto('{path}') QUALIFY row_number() OVER () = 1");
+        let rewritten = rewrite_sql(&sql, &map(&[(path, "data")])).unwrap();
+        assert!(
+            !rewritten.contains("read_csv_auto"),
+            "read_csv_auto removed from QUALIFY: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn rewrite_replaces_scalar_read_in_values() {
+        // VALUES row expressions are walked by rewrite_set_expr, mirroring
+        // walk_set_expr in read_paths.rs (review I4).
+        let path = "/tmp/tool_output/data.csv";
+        let sql = format!("SELECT * FROM (VALUES (read_csv_auto('{path}')))");
+        let rewritten = rewrite_sql(&sql, &map(&[(path, "data")])).unwrap();
+        assert!(
+            rewritten.contains(r#""data".data"#),
+            "catalog ref present from VALUES: {rewritten}"
+        );
+        assert!(
+            !rewritten.contains("read_csv_auto"),
+            "read_csv_auto removed from VALUES: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn rewrite_replaces_scalar_read_in_exists() {
+        // EXISTS subquery — exercises Expr::Exists branch.
+        let path = "/tmp/tool_output/data.csv";
+        let sql = format!("SELECT 1 WHERE EXISTS (SELECT count(*) FROM read_csv_auto('{path}'))");
+        let rewritten = rewrite_sql(&sql, &map(&[(path, "data")])).unwrap();
+        assert!(
+            rewritten.contains(r#""data".data"#),
+            "catalog ref present in EXISTS: {rewritten}"
+        );
+        assert!(
+            !rewritten.contains("read_csv_auto"),
+            "read_csv_auto removed: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn rewrite_replaces_scalar_read_in_in_subquery() {
+        // IN-subquery — exercises Expr::InSubquery branch.
+        let path = "/tmp/tool_output/data.csv";
+        let sql = format!("SELECT 1 WHERE 1 IN (SELECT count(*) FROM read_csv_auto('{path}'))");
+        let rewritten = rewrite_sql(&sql, &map(&[(path, "data")])).unwrap();
+        assert!(
+            rewritten.contains(r#""data".data"#),
+            "catalog ref present in IN-subquery: {rewritten}"
+        );
+        assert!(
+            !rewritten.contains("read_csv_auto"),
+            "read_csv_auto removed: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn rewrite_replaces_scalar_read_in_nested_wrappers() {
+        // Multi-level wrapper recursion: read_* nested three levels deep.
+        let path = "/tmp/tool_output/data.csv";
+        let sql = format!("SELECT length(coalesce(read_csv_auto('{path}'), NULL))");
+        let rewritten = rewrite_sql(&sql, &map(&[(path, "data")])).unwrap();
+        assert!(
+            rewritten.contains(r#""data".data"#),
+            "catalog ref present through nested wrappers: {rewritten}"
+        );
+        assert!(
+            !rewritten.contains("read_csv_auto"),
+            "read_csv_auto removed: {rewritten}"
         );
     }
 
