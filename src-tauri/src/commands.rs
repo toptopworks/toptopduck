@@ -1408,27 +1408,80 @@ pub async fn rename_persisted_session(
 // thread + active pointer are restored. Resume progress is emitted as a
 // `resume-progress` Tauri event the frontend renders.
 
-/// Bind the named session to a `.duck` path and write one recipe immediately
-/// (ADR-0034). After this every terminal turn / source event atomically
-/// rewrites the recipe. Synchronous: a small whole-file rewrite.
-///
-/// ADR-0089 note: sessions are now bound at `create_session`, so this command's
-/// "first persistence bind" role is retired. It rebinds the session to a new
-/// path (releasing the managed canonical key) — the future "export a copy"
-/// feature (ADR-0089 Decision 5) will need a separate non-rebinding command.
+/// Export a copy of the per-session directory to a user-chosen destination
+/// (ADR-0089 Decision 5, issue #449). Copies `session.duck` + `assets/` (if
+/// any) from the source session directory to `dest_dir`. Does NOT rebind the
+/// session, touch the single-writer registry, or modify the original — pure
+/// file I/O. Works for both open and closed sessions (path-based, no
+/// session_id). Runs the IO off the async/UI thread, like `delete_session`.
 #[tauri::command]
-pub fn save_as_duck(
-    store: State<'_, Arc<SessionStore>>,
-    session_id: String,
-    path: String,
-    session_name: String,
-) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    reject_if_resuming(&handle)?;
-    let mut s = handle.session_lock()?;
-    s.bind_duck(PathBuf::from(path), session_name)
-        .map_err(|e| SessionError::Engine(e.to_string()))
+pub async fn export_session(duck_path: String, dest_dir: String) -> Result<(), StoreCommandError> {
+    let src = PathBuf::from(&duck_path);
+    let dest = PathBuf::from(&dest_dir);
+    tauri::async_runtime::spawn_blocking(move || export_session_files(&src, &dest))
+        .await
+        .map_err(|e| StoreCommandError::IoFailure(e.to_string()))?
+}
+
+/// Core export logic (issue #449). Copies `session.duck` + `assets/` from the
+/// per-session directory (parent of `src_duck`) to `dest`. Refuses if `dest`
+/// already exists. On any copy failure after `dest` is created, cleans up
+/// `dest` so no partial export remains.
+fn export_session_files(src_duck: &Path, dest: &Path) -> Result<(), StoreCommandError> {
+    let session_dir = src_duck.parent().ok_or_else(|| {
+        StoreCommandError::IoFailure(format!(
+            "source duck_path has no parent directory: {}",
+            src_duck.display()
+        ))
+    })?;
+
+    // Refuse if destination already exists (prevent data loss).
+    if dest.exists() {
+        return Err(StoreCommandError::IoFailure(format!(
+            "destination already exists: {}",
+            dest.display()
+        )));
+    }
+
+    // Create the destination directory.
+    std::fs::create_dir_all(dest).map_err(|e| {
+        StoreCommandError::IoFailure(format!("failed to create destination directory: {e}"))
+    })?;
+
+    // Copy session.duck (the recipe).
+    std::fs::copy(src_duck, dest.join("session.duck")).map_err(|e| {
+        let _ = std::fs::remove_dir_all(dest);
+        StoreCommandError::IoFailure(format!("failed to copy session.duck: {e}"))
+    })?;
+
+    // Copy assets/ if it exists (derived sources, ADR-0087 D2).
+    let src_assets = session_dir.join("assets");
+    if src_assets.is_dir() {
+        copy_dir_all(&src_assets, &dest.join("assets")).map_err(|e| {
+            let _ = std::fs::remove_dir_all(dest);
+            StoreCommandError::IoFailure(format!("failed to copy assets directory: {e}"))
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Recursively copy a directory tree (issue #449). `fs::metadata` follows
+/// symlinks for classification (symlink-to-dir recurses, symlink-to-file
+/// copies by content), matching `cp -rL` semantics.
+fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if std::fs::metadata(&src_path)?.is_dir() {
+            copy_dir_all(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Open a `.duck` and resume the named session across the restart boundary
@@ -2581,5 +2634,104 @@ mod tests {
             error.contains("5000 ms"),
             "error should include the deadline, got: {error}"
         );
+    }
+
+    // --- export_session_files (issue #449) ----------------------------------
+
+    #[test]
+    fn export_copies_session_duck_and_assets() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session_dir = tmp.path().join("uuid-abc");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let duck = session_dir.join("session.duck");
+        std::fs::write(&duck, b"recipe content").unwrap();
+        // Create assets/ with a derived source file.
+        std::fs::create_dir_all(session_dir.join("assets")).unwrap();
+        std::fs::write(
+            session_dir.join("assets").join("derived.csv"),
+            b"col\nval\n",
+        )
+        .unwrap();
+
+        let dest = tmp.path().join("export-copy");
+        export_session_files(&duck, &dest).expect("export succeeds");
+
+        assert_eq!(
+            std::fs::read_to_string(dest.join("session.duck")).unwrap(),
+            "recipe content"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("assets").join("derived.csv")).unwrap(),
+            "col\nval\n"
+        );
+    }
+
+    #[test]
+    fn export_copies_only_session_duck_when_no_assets() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session_dir = tmp.path().join("uuid-noassets");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let duck = session_dir.join("session.duck");
+        std::fs::write(&duck, b"recipe").unwrap();
+
+        let dest = tmp.path().join("export-no-assets");
+        export_session_files(&duck, &dest).expect("export succeeds");
+
+        assert!(dest.join("session.duck").exists());
+        assert!(!dest.join("assets").exists());
+    }
+
+    #[test]
+    fn export_copies_nested_assets_subdirectories() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session_dir = tmp.path().join("uuid-nested");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let duck = session_dir.join("session.duck");
+        std::fs::write(&duck, b"recipe").unwrap();
+        // Create assets/ with a nested subdirectory.
+        std::fs::create_dir_all(session_dir.join("assets").join("sub")).unwrap();
+        std::fs::write(
+            session_dir.join("assets").join("sub").join("leaf.csv"),
+            b"deep",
+        )
+        .unwrap();
+
+        let dest = tmp.path().join("export-nested");
+        export_session_files(&duck, &dest).expect("export succeeds");
+
+        assert_eq!(
+            std::fs::read_to_string(dest.join("assets").join("sub").join("leaf.csv")).unwrap(),
+            "deep"
+        );
+    }
+
+    #[test]
+    fn export_refuses_existing_destination() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session_dir = tmp.path().join("uuid");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let duck = session_dir.join("session.duck");
+        std::fs::write(&duck, b"recipe").unwrap();
+
+        let dest = tmp.path().join("existing");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let err = export_session_files(&duck, &dest).unwrap_err();
+        assert!(matches!(err, StoreCommandError::IoFailure(_)));
+    }
+
+    #[test]
+    fn export_cleans_up_on_copy_failure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session_dir = tmp.path().join("uuid");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        // session.duck does NOT exist → copy will fail.
+        let duck = session_dir.join("session.duck");
+
+        let dest = tmp.path().join("failed-export");
+        let _ = export_session_files(&duck, &dest);
+
+        // dest should not remain as a partial export.
+        assert!(!dest.exists());
     }
 }

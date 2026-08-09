@@ -409,6 +409,7 @@
   "sidebar.loadError": "Could not load saved sessions.",
   "sidebar.menu.ariaLabel": "Session actions",
   "sidebar.menu.rename": "Rename",
+  "sidebar.menu.export": "Save a copy…",
   "sidebar.newSession": "New session",
   "sidebar.importSession": "Import session",
   "sidebar.importSession.title": "Import a .duck to resume a prior session",

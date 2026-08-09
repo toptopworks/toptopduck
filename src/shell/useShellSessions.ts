@@ -21,7 +21,7 @@
 // with keep-alive panes and fired N ingests per single drop.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { IntlShape } from "react-intl";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { QueryClient } from "@tanstack/react-query";
 import {
@@ -29,6 +29,7 @@ import {
   closeSessionAndWaitRelease,
   createSession,
   deleteSession,
+  exportSession,
   getSessionName,
   onResumeProgress,
   openDuck,
@@ -99,6 +100,10 @@ export function useShellSessions({
   deletePersisted: (path: string, sid: string | null) => Promise<void>;
   renameEntry: (sid: string | null, path: string, newName: string) => Promise<void>;
   handleOpenDuck: () => Promise<void>;
+  /** Export a copy of the session directory to a user-chosen location
+   *  (ADR-0089 Decision 5, issue #449). Opens a save dialog, then calls the
+   *  backend file-copy IPC. Silent on success; errors go to setShellError. */
+  handleExportSession: (duckPath: string, displayName: string) => Promise<void>;
   /** Sync an open session's display name after the backend auto-names it
    *  (ADR-0089 Decision 4: first terminal turn). Reads the live name from the
    *  backend, updates the in-memory open-session entry, and refreshes the
@@ -521,9 +526,8 @@ export function useShellSessions({
   );
 
   // --- Open .duck (ADR-0034/0036/0089) ------------------------------------
-  // ADR-0089: sessions auto-persist from creation. The "Save as .duck" / export
-  // feature (ADR-0089 Decision 5) is deferred — it will need a non-rebinding
-  // export command (saveAsDuck rebinds, which is the retired first-bind path).
+  // ADR-0089: sessions auto-persist from creation. Open = import a .duck from
+  // outside the managed sessions tree (resume into a new per-session dir).
   const handleOpenDuck = useCallback(async () => {
     setPersistenceBusy(true);
     try {
@@ -543,6 +547,29 @@ export function useShellSessions({
       setPersistenceBusy(false);
     }
   }, [intl, openPersisted, refreshSessions, setShellError]);
+
+  // --- Export session (ADR-0089 Decision 5, issue #449) -------------------
+  // Export a copy of the per-session directory (session.duck + assets/) to a
+  // user-chosen destination. The save dialog collects a directory name; the
+  // backend copies the files. No rebind, no registry touch — pure file I/O.
+  // Silent on success; errors go to setShellError.
+  const handleExportSession = useCallback(
+    async (duckPath: string, displayName: string) => {
+      setPersistenceBusy(true);
+      try {
+        const dest = await saveDialog({
+          defaultPath: displayName,
+        });
+        if (!dest) return;
+        await exportSession(duckPath, dest);
+      } catch (e) {
+        setShellError(toAppError(e, intl, "shell"));
+      } finally {
+        setPersistenceBusy(false);
+      }
+    },
+    [intl, setShellError],
+  );
 
   // ADR-0089 Decision 4: after the first terminal turn, the backend auto-names
   // the session from the first question's bounded truncation. This syncs the
@@ -580,6 +607,7 @@ export function useShellSessions({
     deletePersisted,
     renameEntry,
     handleOpenDuck,
+    handleExportSession,
     syncSessionName,
   };
 }

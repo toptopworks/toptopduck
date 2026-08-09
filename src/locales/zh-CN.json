@@ -409,6 +409,7 @@
   "sidebar.loadError": "无法加载已保存的会话。",
   "sidebar.menu.ariaLabel": "会话操作",
   "sidebar.menu.rename": "重命名",
+  "sidebar.menu.export": "另存为副本…",
   "sidebar.newSession": "新建会话",
   "sidebar.importSession": "导入会话",
   "sidebar.importSession.title": "导入会话数据恢复此前的会话",

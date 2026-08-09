@@ -43,6 +43,7 @@ vi.mock("../../api", async (importOriginal) => {
     closeSession: vi.fn(async () => {}),
     closeSessionAndWaitRelease: vi.fn(async () => {}),
     deleteSession: vi.fn(async () => {}),
+    exportSession: vi.fn(async () => {}),
     onResumeProgress: vi.fn(async () => () => {}),
     openDuck: vi.fn(async () => {}),
     renamePersistedSession: vi.fn(async () => {}),
@@ -67,13 +68,14 @@ vi.mock("../../lib/log", () => ({
 import {
   closeSession,
   createSession,
+  exportSession,
   getSessionName,
   openDuck,
   onResumeProgress,
   renamePersistedSession,
   renameSession,
 } from "../../api";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { log } from "../../lib/log";
 import { useShellSessions } from "../useShellSessions";
 
@@ -421,6 +423,44 @@ describe("useShellSessions", () => {
     expect(openDuck).not.toHaveBeenCalled();
     expect(createSession).not.toHaveBeenCalled();
     expect(refreshSessions).not.toHaveBeenCalled();
+    expect(result.current.busy).toBe(false);
+  });
+
+  // --- handleExportSession (ADR-0089 Decision 5, issue #449) -----------------
+
+  it("handleExportSession calls exportSession with duck path + save dialog result", async () => {
+    vi.mocked(saveDialog).mockResolvedValueOnce("/dest/my-copy");
+    vi.mocked(exportSession).mockResolvedValueOnce();
+    const { result, setShellError } = renderSessions();
+    await act(async () => {
+      await result.current.handleExportSession("/src/uuid/session.duck", "My Session");
+    });
+    expect(saveDialog).toHaveBeenCalledWith({ defaultPath: "My Session" });
+    expect(exportSession).toHaveBeenCalledWith("/src/uuid/session.duck", "/dest/my-copy");
+    expect(setShellError).not.toHaveBeenCalled();
+    expect(result.current.busy).toBe(false);
+  });
+
+  it("handleExportSession bails on a cancelled save dialog (null): no export, busy clears", async () => {
+    vi.mocked(saveDialog).mockResolvedValueOnce(null);
+    const { result, setShellError } = renderSessions();
+    await act(async () => {
+      await result.current.handleExportSession("/src/uuid/session.duck", "S");
+    });
+    expect(exportSession).not.toHaveBeenCalled();
+    expect(setShellError).not.toHaveBeenCalled();
+    expect(result.current.busy).toBe(false);
+  });
+
+  it("handleExportSession surfaces errors via setShellError", async () => {
+    vi.mocked(saveDialog).mockResolvedValueOnce("/dest/copy");
+    vi.mocked(exportSession).mockRejectedValueOnce(new Error("disk full"));
+    const { result, setShellError } = renderSessions();
+    await act(async () => {
+      await result.current.handleExportSession("/src/uuid/session.duck", "S");
+    });
+    expect(exportSession).toHaveBeenCalled();
+    expect(setShellError).toHaveBeenCalledOnce();
     expect(result.current.busy).toBe(false);
   });
 

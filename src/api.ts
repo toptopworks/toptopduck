@@ -254,13 +254,14 @@ export async function testProfile(
 
 // --- Cross-session persistence (issue #48, ADR-0034/0036) -----------------
 
-// Bind the named session to a .duck path and write one recipe immediately.
-export async function saveAsDuck(
-  sessionId: string,
-  path: string,
-  sessionName: string,
+// Export a copy of the per-session directory (session.duck + assets/) to a
+// user-chosen destination (ADR-0089 Decision 5, issue #449). Does NOT rebind
+// the session or touch the registry — pure file I/O.
+export async function exportSession(
+  duckPath: string,
+  destDir: string,
 ): Promise<void> {
-  await invoke<void>("save_as_duck", { sessionId, path, sessionName });
+  await invoke<void>("export_session", { duckPath, destDir });
 }
 
 // Open a .duck and resume the named session WITHIN THE SAME session_id
