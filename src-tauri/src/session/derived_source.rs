@@ -612,25 +612,7 @@ mod tests {
     use crate::workingset::WorkingSet;
     use duckdb::Connection;
     use std::collections::HashMap;
-    use std::path::PathBuf;
     use tempfile::TempDir;
-
-    /// Build TurnDeps over a real in-memory connection + real temp dir.
-    fn real_deps<'a>(
-        conn: &'a Connection,
-        ws: &'a mut WorkingSet,
-        sources: &'a mut HashMap<String, PathBuf>,
-        temp: &'a Path,
-    ) -> TurnDeps<'a> {
-        TurnDeps {
-            conn,
-            source_files: sources,
-            working_set: ws,
-            result_row_cap: 1_000,
-            result_count_cap: 100,
-            temp_path: temp,
-        }
-    }
 
     /// Full process(): a CSV in tool_output/ is detected, copy_in'd, ATTACHed,
     /// registered, and the SQL rewritten to a catalog reference. The rewritten
@@ -655,7 +637,7 @@ mod tests {
         );
 
         {
-            let mut deps = real_deps(&conn, &mut ws, &mut sources, temp.path());
+            let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path());
             let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
             // SQL was rewritten to a catalog reference.
@@ -713,7 +695,7 @@ mod tests {
             outside_csv.to_string_lossy()
         );
 
-        let mut deps = real_deps(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path());
         let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
         // SQL unchanged — no tool_output paths detected.
@@ -731,7 +713,7 @@ mod tests {
         let mut sources = HashMap::new();
 
         let sql = "SELECT 1 AS x";
-        let mut deps = real_deps(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path());
         let rewritten = process(sql, &mut deps).expect("process succeeds");
         assert_eq!(rewritten, "SELECT 1 AS x");
     }
@@ -754,7 +736,7 @@ mod tests {
         let mut sources = HashMap::new();
 
         let sql = format!("SELECT * FROM read_csv_auto('{traversal}')");
-        let mut deps = real_deps(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path());
         let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
         // SQL unchanged — traversal path rejected by is_in_tool_output.
@@ -787,7 +769,7 @@ mod tests {
             foo_path.to_string_lossy()
         );
 
-        let mut deps = real_deps(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path());
         let result = process(&sql, &mut deps);
 
         assert!(result.is_err(), "process fails on unsupported format");
