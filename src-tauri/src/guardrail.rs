@@ -19,19 +19,13 @@
 //! two ways. COPY/ATTACH/INSTALL/LOAD are statements, not query expressions, so
 //! the `CREATE TABLE ... AS <query>` wrapping rejects them as syntax errors.
 //! The remaining surface -- read_* table functions (read_csv_auto / read_parquet
-//! / read_json_auto) in a SELECT -- is blocked by running provider SQL on a
-//! sandboxed connection whose LocalFileSystem is disabled (see
-//! `session::sandbox`); the engine's "... disabled by configuration" refusal is
-//! classified [`ExecErrorKind::Resource`] (no retry).
-//!
-//! ADR-0080 (issue #293) layers a gateway path whitelist ON TOP of that engine
-//! lockdown for the `explore` tool: read_* literal paths are classified against
+//! / read_json_auto) in a SELECT -- is constrained by the gateway FsAcl
+//! whitelist (ADR-0080 + ADR-0088): read_* literal paths are classified against
 //! the session source set (read-only) + working temp dir (read-write) before
-//! execution, so an out-of-bounds path becomes a structured, path-naming tool
-//! error the agent self-corrects from (ADR-0077) instead of the engine's opaque
-//! "disabled" message. See [`crate::fs_acl`] + [`crate::tools::read_paths`]. The
-//! lockdown remains the file-reachability GUARANTEE; the whitelist is additive
-//! guidance (and the sole constraint for the future built-in file tools).
+//! execution, and non-literal read_* paths are refused outright. An out-of-
+//! bounds path becomes a structured, path-naming tool error the agent self-
+//! corrects from (ADR-0077). See [`crate::fs_acl`] +
+//! [`crate::tools::read_paths`].
 
 use duckdb::Connection;
 
@@ -48,9 +42,8 @@ pub(crate) enum ExecErrorKind {
     /// A runtime/logic error (type conversion, divide-by-zero, etc.). The
     /// model may rephrase the SQL on its next call.
     Runtime,
-    /// A resource cap was hit (memory ceiling, result-row ceiling, or a
-    /// filesystem function blocked on the sandbox's disabled LocalFileSystem
-    /// -- ADR-0005, issue #25). The same SQL would hit the same wall, so a
+    /// A resource cap was hit (memory ceiling, result-row ceiling). The same
+    /// SQL would hit the same wall, so a
     /// model that keeps re-issuing it exhausts the step cap rather than
     /// converging (ADR-0005/0081).
     Resource,

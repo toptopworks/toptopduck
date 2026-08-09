@@ -28,6 +28,7 @@ ADR-0079 把能力边界降位后，强制点挪到工具面。ADR-0029 定「�
 ## Consequences
 
 - **了结 issue #25**：方向 = per-session 引擎实例 + 网关路径白名单（源集只读 + 临时目录读写）；`disabled_filesystems` 的全局性不再构成障碍（实例级隔离本已有，ADR-0027）。
+- **校准（ADR-0088）**：`disabled_filesystems` lockdown 已移除——FsAcl 成为 `read_*` 路径唯一约束（字面量路径白名单 + 非字面量显式拒绝）。lockdown 不再作为 `read_*` 保证层；双层防御降为 preflight 单层。
 - **校准 ADR-0029**：联网边界陈述改写（ADR-0076 已做）；「key 仅 keychain、解密后仅存 Rust」不变量不变。
 - **延伸 ADR-0011**：隐私披露覆盖工具面（会话启用的外部工具骑审计）。
 - **未决「审批 UI 形态」被 ADR-0083 闭合**：定为流内审批卡片（pending 态轨迹条目 + 允许一次 / 始终允许 / 拒绝三按钮），非窗口模态。见 ADR-0083。

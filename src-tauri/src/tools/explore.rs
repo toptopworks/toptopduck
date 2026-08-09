@@ -14,7 +14,7 @@
 //! 2), matching the legacy materialize path.
 //!
 //! The sandbox setup mirrors [`crate::session::materializer::RealMaterializer`]
-//! (open / attach sources / mirror results / lockdown / interrupt handle) so
+//! (open / attach sources / mirror results / interrupt handle) so
 //! the SQL resolves identically to the admin instance. The divergence is after
 //! the query: explore derives the shape FROM THE SANDBOX and drops it, while
 //! materialize installs onto admin + registers + GCs.
@@ -33,8 +33,7 @@ use crate::tools::definitions::{self, EXPLORE_DEFAULT_SAMPLE_ROWS, EXPLORE_MAX_S
 use crate::tools::ToolPayload;
 
 /// The scratch table name on the explore sandbox. The sandbox is single-use
-/// (LocalFileSystem lockdown is irreversible, so the connection is dropped per
-/// call), so a fixed name cannot collide across calls.
+/// (per-turn isolation, ADR-0027), so a fixed name cannot collide across calls.
 const SCRATCH_TABLE: &str = "_explore_scratch";
 
 /// Parse the tool input + run the explore query on a scratch sandbox.
@@ -606,15 +605,14 @@ mod tests {
         assert_eq!(deps.working_set.len(), 0);
     }
 
-    /// Design-B lockdown backstop (issue #293): a `read_*` call whose path the
-    /// gateway whitelist ALLOWS (a file inside the session temp dir) still does
-    /// not execute -- the engine-level `disabled_filesystems` lockdown remains
-    /// the file-reachability GUARANTEE for SQL-embedded read_*, so the agent
-    /// cannot read files through explore; it reaches sources via the
-    /// `"<ref>".data` catalog. The gateway adds structured out-of-bounds
-    /// guidance (ADR-0080); the lockdown guarantees the rest (ADR-0005).
+    /// A `read_*` call whose path the gateway whitelist ALLOWS (a file inside
+    /// the session temp dir) executes end-to-end through the sandbox (ADR-0088):
+    /// with the engine lockdown removed, FsAcl is the sole constraint -- an
+    /// in-bounds path passes the gateway and DuckDB reads the file
+    /// successfully. Symmetric with materialize's
+    /// `materialize_executes_in_bounds_read_path`.
     #[test]
-    fn explore_lockdown_still_refuses_in_bounds_read_path() {
+    fn explore_executes_in_bounds_read_path() {
         use crate::tools::test_support::inert_deps_with_temp;
         use std::fs;
         use tempfile::TempDir;
@@ -623,34 +621,25 @@ mod tests {
         let mut ws = crate::workingset::WorkingSet::default();
         let sources = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
-        // A file INSIDE the temp dir: the gateway whitelist allows it (in-
-        // bounds), so the call proceeds to the sandbox, where the engine
-        // lockdown refuses read_* with its "... disabled" message.
+        // A CSV file INSIDE the temp dir: the gateway whitelist allows it
+        // (in-bounds), and with the lockdown removed (ADR-0088), the sandbox
+        // engine executes read_csv_auto successfully.
         let inside = temp.path().join("scratch.csv");
-        fs::write(&inside, "x").unwrap();
+        fs::write(&inside, "val\n1\n2\n").unwrap();
         let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
         let cancel = CancelToken::new();
-        let err = dispatch(
+        let payload = dispatch(
             &json!({"sql": format!("SELECT * FROM read_csv_auto('{}')", inside.to_string_lossy())}),
             &mut deps,
             &cancel,
         )
-        .unwrap_err();
-        let lower = err.to_ascii_lowercase();
-        assert!(
-            lower.contains("disabled"),
-            "lockdown backstop refuses an in-bounds read_*: {err}"
-        );
-        assert!(
-            lower.contains("sql failed"),
-            "refusal reads as a SQL failure: {err}"
-        );
-        // The gateway let the in-bounds path through (it is inside temp_root);
-        // the refusal is from the engine lockdown, not the FsAcl door.
-        assert!(
-            !lower.contains("outside the allowed"),
-            "gateway must have let the in-bounds path through: {err}"
-        );
+        .expect("in-bounds read_* should execute successfully");
+        // The read succeeded -- explore returns the shape of the CSV.
+        assert!(payload.promotion.is_none());
+        assert_eq!(payload.content["row_count"], 2);
+        let cols = payload.content["columns"].as_array().unwrap();
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0]["name"], "val");
     }
 
     /// A SQL anchored on a stale result_N is refused up front (ADR-0013

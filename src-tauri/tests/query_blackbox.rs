@@ -768,7 +768,8 @@ fn privacy_type_only_column_hides_name_and_values() {
 // honestly. The guarantees are engine-level -- READ_ONLY attach, the
 // `CREATE TABLE result_N AS <query>` wrapping (a non-SELECT statement is a
 // parser error before it can touch a source or the filesystem), the sandbox
-// lockdown (read_* closure), and resource caps -- never SQL text filtering.
+// lockdown (read_* closure, removed by ADR-0088 -- now the FsAcl gateway
+// whitelist), and resource caps -- never SQL text filtering.
 
 #[test]
 fn all_mutating_statements_against_the_source_are_rejected() {
@@ -865,16 +866,15 @@ fn a_query_under_the_row_cap_materializes_normally() {
 #[test]
 fn a_read_function_into_arbitrary_disk_is_refused_and_never_promotes() {
     // AC2 (issue #25, read_* closure): a SELECT calling a read_* table
-    // function (read_csv_auto / read_parquet / read_json_auto) would let the
-    // model read arbitrary disk. The sandbox runs provider SQL with
-    // LocalFileSystem disabled, so the engine refuses with "disabled by
-    // configuration" -- a tool error that routes back to the model (ADR-0077).
-    // The non-correcting script exhausts the step cap; nothing is ever read
-    // into a result.
+    // function (read_csv_auto / read_parquet / read_json_auto) on an out-of-
+    // bounds path is refused by the gateway FsAcl whitelist before execution
+    // (ADR-0080 + ADR-0088) -- a structured tool error that routes back to
+    // the model (ADR-0077). The non-correcting script exhausts the step cap;
+    // nothing is ever read into a result.
     //
     // The leak target is a real temp file carrying a sentinel secret so the
-    // assertion is concrete: had the sandbox not blocked read_csv_auto, the
-    // secret would have materialized into result_1.
+    // assertion is concrete: had the gateway not refused the out-of-bounds
+    // read_csv_auto, the secret would have materialized into result_1.
     let leak_dir = tempfile::tempdir().expect("temp dir");
     let leak = leak_dir.path().join("secret.csv");
     std::fs::write(&leak, "secret\nPASSWORD-LEAKED\n").expect("write leak");

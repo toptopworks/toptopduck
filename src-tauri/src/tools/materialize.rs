@@ -592,10 +592,8 @@ mod tests {
     /// AC (issue #334): a `read_*` call whose path resolves OUTSIDE the session
     /// source set + working temp dir is refused by the gateway door BEFORE the
     /// sandbox runs -- symmetric with `explore_refuses_out_of_bounds_read_path_
-    /// at_gateway`. Before #334 the materialize path skipped the FsAcl whitelist
-    /// (only explore ran it), so an out-of-bounds read_* hit the engine's opaque
-    /// "disabled by configuration"; now it returns the structured "outside the
-    /// allowed area" the agent can self-correct from (ADR-0077 / ADR-0080).
+    /// at_gateway`. The structured "outside the allowed area" message lets the
+    /// agent self-correct (ADR-0077 / ADR-0080).
     #[test]
     fn materialize_refuses_out_of_bounds_read_path_at_gateway() {
         use crate::session::materializer::RealMaterializer;
@@ -861,16 +859,14 @@ mod tests {
         assert_eq!(deps_m.working_set.len(), 0);
     }
 
-    /// AC#1 (issue #310): a `read_*` call whose path the gateway whitelist
-    /// ALLOWS (a file inside the session temp dir) still does not execute --
-    /// the engine-level `disabled_filesystems` lockdown remains the file-
-    /// reachability GUARANTEE, so the agent cannot read arbitrary files through
-    /// materialize; it reaches sources via the `"<ref>".data` catalog. The
-    /// gateway adds structured out-of-bounds guidance (ADR-0080); the lockdown
-    /// guarantees the rest (ADR-0005). Symmetric with explore's
-    /// `explore_lockdown_still_refuses_in_bounds_read_path`.
+    /// A `read_*` call whose path the gateway whitelist ALLOWS (a file inside
+    /// the session temp dir) executes end-to-end through the sandbox and
+    /// promotes a result (ADR-0088): with the engine lockdown removed, FsAcl
+    /// is the sole constraint -- an in-bounds path passes the gateway, DuckDB
+    /// reads the file, and materialize promotes the result. Symmetric with
+    /// explore's `explore_executes_in_bounds_read_path`.
     #[test]
-    fn materialize_lockdown_still_refuses_in_bounds_read_path() {
+    fn materialize_executes_in_bounds_read_path() {
         use crate::session::materializer::RealMaterializer;
         use std::fs;
         use tempfile::TempDir;
@@ -879,44 +875,30 @@ mod tests {
         let mut ws = crate::workingset::WorkingSet::default();
         let sources = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
-        // A file INSIDE the temp dir: the gateway whitelist allows it (in-
-        // bounds), so the call proceeds to the sandbox, where the engine
-        // lockdown refuses read_* with its "... disabled" message.
+        // A CSV file INSIDE the temp dir: the gateway whitelist allows it
+        // (in-bounds), and with the lockdown removed (ADR-0088), the sandbox
+        // engine executes read_csv_auto and materialize promotes the result.
         let inside = temp.path().join("scratch.csv");
-        fs::write(&inside, "x").unwrap();
+        fs::write(&inside, "val\n1\n2\n").unwrap();
         let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
-        let err = dispatch(
+        let payload = dispatch(
             &json!({"sql": format!("SELECT * FROM read_csv_auto('{}')", inside.to_string_lossy())}),
             &mut deps,
             &cancel,
             &mut materializer,
         )
-        .unwrap_err();
-        let lower = err.to_ascii_lowercase();
-        assert!(
-            lower.contains("disabled"),
-            "lockdown backstop refuses an in-bounds read_*: {err}"
-        );
-        // The lockdown error ("disabled by configuration") is classified as
-        // Resource at the sandbox-primitive boundary and carried through the
-        // runner, so the kind propagates through materialize's promotion
-        // (explore wraps the detail as "SQL failed" -- the two surfaces
-        // present the error differently, but both refuse the read_*).
-        assert!(
-            err.contains("result exceeds a resource cap"),
-            "lockdown refusal reads as a resource-cap error: {err}"
-        );
-        // The gateway let the in-bounds path through (it is inside temp_root);
-        // the refusal is from the engine lockdown, not the FsAcl door.
-        assert!(
-            !err.contains("outside the allowed"),
-            "gateway must have let the in-bounds path through: {err}"
-        );
-        // No promotion landed.
-        assert_eq!(deps.working_set.len(), 0);
-        assert_eq!(deps.working_set.next_result_number(), 1);
+        .expect("in-bounds read_* should execute and promote successfully");
+        // The read succeeded -- materialize promoted result_1.
+        let promotion = payload.promotion.as_ref().expect("materialize promotes");
+        assert_eq!(promotion.dataset.reference_name, "result_1");
+        assert_eq!(payload.content["row_count"], 2);
+        let cols = payload.content["columns"].as_array().unwrap();
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0]["name"], "val");
+        assert_eq!(deps.working_set.len(), 1);
+        assert_eq!(deps.working_set.next_result_number(), 2);
     }
 
     /// A cancel requested before the call surfaces as "materialize cancelled"
