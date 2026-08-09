@@ -3379,4 +3379,93 @@ mod tests {
             "memory_limit={mem}"
         );
     }
+
+    // --- Derived source migration (issue #439 AC2) ----------------------------
+
+    #[test]
+    fn bind_duck_migrates_derived_sources_to_assets_dir() {
+        // Stage a derived CSV in temp_path/derived/ (the staging area used by
+        // derived_source::process when no .duck is bound, ADR-0087 D4), register
+        // it in the working set with the staging path, then bind_duck. The
+        // migration should copy the file to <duck_stem>.assets/ and update the
+        // descriptor's source_path so the recipe carries the portable location.
+        let mut session = Session::new().expect("session");
+
+        let staging_dir = session
+            .temp_path
+            .join(super::derived_source::DERIVED_STAGING_DIR);
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        let staging_csv = staging_dir.join("data.csv");
+        std::fs::write(&staging_csv, "id,name\n1,alice\n").unwrap();
+
+        // Register as a non-result source pointing at the staging path.
+        session
+            .working_set
+            .register(crate::model::DatasetDescriptor {
+                reference_name: "data".to_string(),
+                display_name: "data".to_string(),
+                source_path: staging_csv.to_string_lossy().to_string(),
+                columns: vec![crate::model::ColumnSchema {
+                    name: "id".into(),
+                    canonical_type: "BIGINT".into(),
+                }],
+                row_count: 1,
+                sample: vec![vec!["1".into(), "alice".into()]],
+                fingerprint: "abc".into(),
+                rectify: crate::model::RectifyProvenance::NotApplicable,
+                privacy: crate::model::DatasetPrivacy::default(),
+                stale: None,
+            });
+
+        // Use a temp dir for the .duck so .assets/ goes alongside it.
+        let duck_dir = tempfile::tempdir().expect("duck dir");
+        let duck_path = duck_dir.path().join("session.duck");
+
+        session
+            .bind_duck(duck_path.clone(), "test session".into())
+            .expect("bind_duck");
+
+        // AC2a: file was copied to <duck_stem>.assets/.
+        let assets_csv = duck_dir.path().join("session.assets").join("data.csv");
+        assert!(
+            assets_csv.exists(),
+            "derived file migrated to .assets/: {assets_csv:?}"
+        );
+
+        // AC2b: descriptor source_path updated to the .assets/ path.
+        let d = session
+            .working_set
+            .get("data")
+            .expect("data still registered");
+        assert!(
+            d.source_path.contains("session.assets"),
+            "source_path updated to .assets/: {}",
+            d.source_path
+        );
+        assert!(
+            !d.source_path.contains("derived"),
+            "staging path replaced: {}",
+            d.source_path
+        );
+
+        // AC2c: recipe carries the portable (relative) path.
+        let recipe = crate::persistence::read_duck(&duck_path).expect("read recipe");
+        let src = recipe
+            .sources
+            .iter()
+            .find(|s| s.reference_name == "data")
+            .expect("data in recipe sources");
+        assert!(
+            src.source_path.contains("session.assets"),
+            "recipe source_path is .assets/: {}",
+            src.source_path
+        );
+        assert!(
+            src.relative_path
+                .as_ref()
+                .is_some_and(|p| p.contains("session.assets")),
+            "recipe relative_path is .assets/: {:?}",
+            src.relative_path
+        );
+    }
 }

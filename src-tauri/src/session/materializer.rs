@@ -343,3 +343,82 @@ mod fake {
         }
     }
 }
+
+/// End-to-end tests for [`RealMaterializer::try_materialize] with real DuckDB +
+/// filesystem (issue #439 AC4). The existing materializer tests use
+/// [`FakeMaterializer] and never exercise the derived-source branch.
+#[cfg(test)]
+mod real_tests {
+    use super::{Materializer, RealMaterializer, TurnDeps};
+    use crate::cancel::CancelToken;
+    use crate::session::TOOL_OUTPUT_DIR_NAME;
+    use crate::workingset::WorkingSet;
+    use duckdb::Connection;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
+
+    fn real_deps<'a>(
+        conn: &'a Connection,
+        ws: &'a mut WorkingSet,
+        sources: &'a mut HashMap<String, PathBuf>,
+        temp: &'a Path,
+    ) -> TurnDeps<'a> {
+        TurnDeps {
+            conn,
+            source_files: sources,
+            working_set: ws,
+            result_row_cap: 1_000,
+            result_count_cap: 100,
+            temp_path: temp,
+        }
+    }
+
+    #[test]
+    fn try_materialize_persists_tool_output_derived_source() {
+        // A TABLE(read_csv_auto(...)) pointing at a tool_output CSV triggers
+        // derived_source::process (copy_in + ATTACH + register), the SQL is
+        // rewritten to a catalog ref, and the result is materialized from the
+        // rewritten SQL — the full RealMaterializer pipeline (issue #439 AC4).
+        // Uses the TABLE() form so the fix for the TableFunction rewrite gap
+        // (AC1) is exercised through the complete pipeline (parse -> extract
+        // -> stage -> ATTACH -> register -> rewrite -> preflight -> exec).
+        let temp = TempDir::new().unwrap();
+        let tool_output_dir = temp.path().join(TOOL_OUTPUT_DIR_NAME);
+        std::fs::create_dir_all(&tool_output_dir).unwrap();
+        let csv_path = tool_output_dir.join("data.csv");
+        std::fs::write(&csv_path, "id,name\n1,alice\n2,bob\n").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+
+        let sql = format!(
+            "SELECT * FROM TABLE(read_csv_auto('{}'))",
+            csv_path.to_string_lossy()
+        );
+        let cancel = CancelToken::new();
+        let mat = RealMaterializer;
+
+        let mut deps = real_deps(&conn, &mut ws, &mut sources, temp.path());
+        let descriptor = mat
+            .try_materialize(&sql, &cancel, "result_1".to_string(), &mut deps)
+            .expect("materialize succeeds");
+
+        // The result was materialized.
+        assert_eq!(descriptor.reference_name, "result_1");
+        assert_eq!(descriptor.row_count, 2);
+        assert!(ws.is_result("result_1"));
+
+        // The derived source was registered as a non-result source.
+        let d = ws.get("data").expect("derived source registered");
+        assert_eq!(d.row_count, 2);
+        assert!(!ws.is_result("data"), "data is a source, not a result");
+
+        // result_1 has the data on admin.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM result_1", [], |r| r.get(0))
+            .expect("result_1 exists on admin");
+        assert_eq!(count, 2);
+    }
+}

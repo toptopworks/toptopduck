@@ -23,8 +23,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use sqlparser::ast::{
-    FunctionArg, FunctionArgExpr, Ident, ObjectName, Query, SetExpr, Statement, TableAlias,
-    TableFactor, TableWithJoins,
+    Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, ObjectName, Query, SetExpr,
+    Statement, TableAlias, TableFactor, TableWithJoins,
 };
 use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser;
@@ -340,6 +340,22 @@ fn rewrite_table_factor(factor: &mut TableFactor, path_to_ref: &HashMap<String, 
                 *factor = catalog_table_factor(&ref_name, alias.clone());
             }
         }
+        // `TABLE(read_csv_auto('path'))` — the expr wraps the read_* call.
+        // Without this arm the file is staged + ATTACHed + registered (path
+        // extraction covers TableFunction), but the SQL retains the original
+        // read_* — provenance misses it and resume breaks (issue #439 AC1).
+        TableFactor::TableFunction {
+            expr: Expr::Function(func),
+            alias,
+        } => {
+            let args: &[FunctionArg] = match &func.args {
+                FunctionArguments::List(list) => &list.args,
+                _ => &[],
+            };
+            if let Some(ref_name) = try_match_read_function(&func.name, args, path_to_ref) {
+                *factor = catalog_table_factor(&ref_name, alias.clone());
+            }
+        }
         TableFactor::Derived { subquery, .. } => {
             rewrite_query(subquery.as_mut(), path_to_ref);
         }
@@ -566,6 +582,26 @@ mod tests {
         assert!(
             rewritten.contains(r#""data".data"#),
             "catalog ref present: {rewritten}"
+        );
+        assert!(rewritten.contains("AS t"), "alias preserved: {rewritten}");
+    }
+
+    #[test]
+    fn rewrite_handles_table_function_form() {
+        // `TABLE(read_csv_auto('path'))` parses as TableFactor::TableFunction,
+        // distinct from the bare `read_csv_auto('path')` Function form. Without
+        // the TableFunction arm in rewrite_table_factor, the catalog rewrite is
+        // skipped — provenance misses the source and resume breaks (issue #439).
+        let path = "/tmp/tool_output/data.csv";
+        let sql = format!("SELECT t.* FROM TABLE(read_csv_auto('{path}')) AS t");
+        let rewritten = rewrite_sql(&sql, &map(&[(path, "data")])).unwrap();
+        assert!(
+            rewritten.contains(r#""data".data"#),
+            "catalog ref present: {rewritten}"
+        );
+        assert!(
+            !rewritten.contains("read_csv_auto"),
+            "read_csv_auto removed: {rewritten}"
         );
         assert!(rewritten.contains("AS t"), "alias preserved: {rewritten}");
     }

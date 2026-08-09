@@ -933,6 +933,35 @@ mod tests {
         assert_eq!(ws.source_paths(), vec!["/people.csv", "/orders.csv"]);
     }
 
+    // --- update_source_path (issue #433: derived source migration) -----------
+
+    #[test]
+    fn update_source_path_updates_existing_descriptor_and_returns_true() {
+        // The happy path: a registered source's source_path is replaced in place.
+        // Used by bind_duck to migrate derived files from temp/derived/ to
+        // <duck_stem>.assets/ (issue #433, ADR-0087 D2).
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("people")); // source_path "/people.csv"
+        let ok = ws.update_source_path("people", "/data/assets/people.csv");
+        assert!(ok, "returns true for a registered source");
+        assert_eq!(
+            ws.get("people").unwrap().source_path,
+            "/data/assets/people.csv"
+        );
+    }
+
+    #[test]
+    fn update_source_path_returns_false_for_unknown_reference() {
+        // Stale-view guard: an unregistered name returns false rather than
+        // silently creating a phantom entry.
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("people"));
+        let ok = ws.update_source_path("ghost", "/x.csv");
+        assert!(!ok, "returns false for unknown reference");
+        assert_eq!(ws.len(), 1); // no phantom created
+        assert_eq!(ws.get("people").unwrap().source_path, "/people.csv"); // untouched
+    }
+
     // --- Source removal (issue #38) -------------------------------------------
 
     #[test]
