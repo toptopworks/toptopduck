@@ -1668,35 +1668,6 @@ describe("App topbar header actions + sidebar connection footer (issue #182 / #2
     vi.stubGlobal("navigator", { language: "zh-CN" });
   });
 
-  it("disables both header buttons on cold start (no active session)", async () => {
-    // Cold-start gate: Open/Save ride disabled={busy || !activeSession}. The
-    // settings gear + key badge left the topbar for the sidebar footer (issue
-    // #282); the header cluster is exactly the two file actions. A regression
-    // that drops the gate lets Open/Save fire with nothing to act on.
-    render(<App />);
-    const buttons = await waitFor(() => {
-      const list = document.querySelectorAll(
-        ".header-actions [data-slot='button']",
-      );
-      expect(list.length).toBe(2);
-      return list;
-    });
-    buttons.forEach((btn) =>
-      expect((btn as HTMLButtonElement).disabled).toBe(true),
-    );
-  });
-
-  it("re-enables Open with a session active; Save stays disabled (ADR-0089)", async () => {
-    render(<App />);
-    await openSession();
-    const buttons = document.querySelectorAll(
-      ".header-actions [data-slot='button']",
-    );
-    expect(buttons).toHaveLength(2);
-    expect((buttons[0] as HTMLButtonElement).disabled).toBe(false); // Open
-    expect((buttons[1] as HTMLButtonElement).disabled).toBe(true); // Save (always disabled, ADR-0089)
-  });
-
   it("keeps the settings entry absent until appConfig resolves (C1 render-when-ready)", async () => {
     // C1: opening settings while appConfig is null white-screens the shell
     // (.settings-mode hides the shell but SettingsView does not render, no

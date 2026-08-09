@@ -151,23 +151,19 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     // Window controls persist across the view switch...
     expect(screen.getByRole("button", { name: "关闭" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "最小化" })).toBeInTheDocument();
-    // ...the topbar's workspace children unmount (header actions) while the
-    // left slot swaps to the SETTINGS nav toggle (issue #285: the same slot
-    // the session-sidebar toggle occupies in the workspace carries the settings
-    // left-nav collapse toggle while settings are open). The dual-state gear
-    // still rides the left columns' bottoms (issue #282)...
+    // ...the left slot swaps to the SETTINGS nav toggle (issue #285: the same
+    // slot the session-sidebar toggle occupies in the workspace carries the
+    // settings left-nav collapse toggle while settings are open). The
+    // dual-state gear still rides the left columns' bottoms (issue #282)...
     const topbar = document.querySelector(".topbar") as HTMLElement;
-    expect(topbar.querySelector(".header-actions")).toBeNull();
     // The sidebar-toggle slot persists -- it is now the settings-nav toggle.
     expect(topbar.querySelector(".sidebar-toggle")).not.toBeNull();
     // ...and the topbar keeps its drag region.
     expect(document.querySelector(".topbar [data-tauri-drag-region]")).not.toBeNull();
-    // Returning to the workspace restores the workspace actions.
+    // Returning to the workspace restores the session shell.
     fireEvent.click(document.querySelector(".settings-back") as HTMLElement);
     await waitFor(() =>
-      expect(
-        (document.querySelector(".topbar") as HTMLElement).querySelector(".header-actions"),
-      ).not.toBeNull(),
+      expect(document.querySelector(".settings-overlay")).not.toBeInTheDocument(),
     );
   });
 
