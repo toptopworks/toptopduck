@@ -3,6 +3,7 @@
 //! per-session temp dir holds the snapshot files and is cleared on drop (ADR-0012).
 
 pub mod agent_loop;
+pub mod derived_source;
 pub mod materializer;
 pub mod recipe_persister;
 pub mod resume;
@@ -788,6 +789,11 @@ impl Session {
     /// one `.duck` to another releases the old canonical key so a different
     /// session can open it.
     pub fn bind_duck(&mut self, path: PathBuf, session_name: String) -> Result<(), SaveError> {
+        // Migrate derived source files from temp staging to .duck-adjacent
+        // (issue #433, ADR-0087 D2). Before the recipe is persisted, each
+        // derived source's source_path is updated so SourceRef carries the
+        // portable (relative-to-.duck) location.
+        self.migrate_derived_sources(&path);
         self.persister
             .bind(path, session_name, &self.working_set, &self.timeline)
     }
@@ -796,6 +802,71 @@ impl Session {
     /// session (the pre-persistence behavior).
     pub fn duck_path(&self) -> Option<&Path> {
         self.persister.duck_path()
+    }
+
+    /// Migrate derived source files from temp staging (`temp_path/derived/`)
+    /// to `.duck`-adjacent (`<duck_stem>.assets/`) so they survive session
+    /// close and are portable with the `.duck` file (issue #433, ADR-0087 D2).
+    /// Updates each descriptor's `source_path` in place so the recipe's
+    /// `SourceRef` carries the persistent location. Best-effort + logged: a
+    /// copy failure leaves the staging path in place (the session temp dir is
+    /// wiped on drop, but the recipe write still succeeds — a resume would
+    /// surface the missing file as an interactive re-link).
+    fn migrate_derived_sources(&mut self, duck_path: &Path) {
+        let staging_dir = self.temp_path.join(derived_source::DERIVED_STAGING_DIR);
+        let Some(duck_dir) = duck_path.parent() else {
+            return;
+        };
+        let Some(duck_stem) = duck_path.file_stem().and_then(|s| s.to_str()) else {
+            return;
+        };
+        let assets_dir = duck_dir.join(format!("{duck_stem}.assets"));
+
+        // Collect (ref_name, old_path, new_path) for sources staged in
+        // temp_path/derived/. Iterating the working set immutably first, then
+        // applying updates mutably (borrow split).
+        let staging_prefix = staging_dir.to_string_lossy().to_string();
+        let to_migrate: Vec<(String, PathBuf, PathBuf)> = self
+            .working_set
+            .list()
+            .iter()
+            .filter(|d| !self.working_set.is_result(&d.reference_name))
+            .filter(|d| d.source_path.starts_with(&staging_prefix))
+            .filter_map(|d| {
+                let old_path = PathBuf::from(&d.source_path);
+                let filename = PathBuf::from(old_path.file_name()?);
+                Some((
+                    d.reference_name.clone(),
+                    old_path,
+                    assets_dir.join(filename),
+                ))
+            })
+            .collect();
+
+        if to_migrate.is_empty() {
+            return;
+        }
+
+        if let Err(e) = fs::create_dir_all(&assets_dir) {
+            log::warn!(
+                target: "toptopduck::session",
+                "failed to create derived assets dir {}: {e}",
+                assets_dir.display()
+            );
+            return;
+        }
+
+        for (ref_name, old_path, new_path) in &to_migrate {
+            if let Err(e) = fs::copy(old_path, new_path) {
+                log::warn!(
+                    target: "toptopduck::session",
+                    "failed to migrate derived source {ref_name}: {e}"
+                );
+                continue;
+            }
+            self.working_set
+                .update_source_path(ref_name, &new_path.to_string_lossy());
+        }
     }
 
     /// The user-facing session name, if bound to a `.duck` (ADR-0034).
@@ -915,7 +986,7 @@ impl Session {
             let replay_break = {
                 let mut deps = TurnDeps {
                     conn: &session.conn,
-                    source_files: &session.source_files,
+                    source_files: &mut session.source_files,
                     working_set: &mut session.working_set,
                     result_row_cap: session.result_row_cap,
                     result_count_cap: session.result_count_cap,
@@ -1862,7 +1933,7 @@ impl Session {
                         ));
                     let mut deps = TurnDeps {
                         conn: &self.conn,
-                        source_files: &self.source_files,
+                        source_files: &mut self.source_files,
                         working_set: &mut self.working_set,
                         result_row_cap: self.result_row_cap,
                         result_count_cap: self.result_count_cap,
@@ -2060,7 +2131,7 @@ impl Session {
             self.last_mcp_connect = mcp.connect_all(inputs.mcp_servers, inputs.keychain);
             let deps = TurnDeps {
                 conn: &self.conn,
-                source_files: &self.source_files,
+                source_files: &mut self.source_files,
                 working_set: &mut self.working_set,
                 result_row_cap: self.result_row_cap,
                 result_count_cap: self.result_count_cap,

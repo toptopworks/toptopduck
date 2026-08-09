@@ -190,7 +190,7 @@ pub(crate) mod test_support {
     pub fn inert_deps<'a>(
         conn: &'a Connection,
         ws: &'a mut WorkingSet,
-        sources: &'a HashMap<String, std::path::PathBuf>,
+        sources: &'a mut HashMap<String, std::path::PathBuf>,
     ) -> TurnDeps<'a> {
         TurnDeps {
             conn,
@@ -210,7 +210,7 @@ pub(crate) mod test_support {
     pub fn inert_deps_with_temp<'a>(
         conn: &'a Connection,
         ws: &'a mut WorkingSet,
-        sources: &'a HashMap<String, std::path::PathBuf>,
+        sources: &'a mut HashMap<String, std::path::PathBuf>,
         temp_path: &'a Path,
     ) -> TurnDeps<'a> {
         TurnDeps {
@@ -312,8 +312,8 @@ mod tests {
     fn unknown_tool_name_is_a_tool_error() {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = WorkingSet::default();
-        let sources = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &sources);
+        let mut sources = HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &mut sources);
         let cancel = CancelToken::new();
         let mut materializer = FakeMaterializer::new(vec![]);
         let call = ToolUse {
@@ -361,8 +361,8 @@ mod tests {
             privacy: DatasetPrivacy::default(),
             stale: None,
         });
-        let sources = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &sources);
+        let mut sources = HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &mut sources);
         let cancel = CancelToken::new();
         let mut materializer = FakeMaterializer::new(vec![]);
         let call = ToolUse {
@@ -392,8 +392,8 @@ mod tests {
     fn executor_error_reaches_wire_as_tool_error() {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = WorkingSet::default();
-        let sources = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &sources);
+        let mut sources = HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &mut sources);
         let cancel = CancelToken::new();
         let mut materializer = FakeMaterializer::new(vec![]);
         let call = ToolUse {
@@ -444,9 +444,9 @@ mod tests {
             privacy: DatasetPrivacy::default(),
             stale: None,
         });
-        let sources = HashMap::new();
+        let mut sources = HashMap::new();
         let temp = TempDir::new().unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path());
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
 

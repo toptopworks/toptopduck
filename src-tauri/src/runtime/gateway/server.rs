@@ -530,7 +530,7 @@ mod tests {
     fn fresh_ctx() -> GatewayCtx<'static> {
         let engine: &'static Engine = Box::leak(Box::new(Engine::new()));
         let ws: &'static mut WorkingSet = Box::leak(Box::new(WorkingSet::default()));
-        let sources: &'static HashMap<String, PathBuf> = Box::leak(Box::new(HashMap::new()));
+        let sources: &'static mut HashMap<String, PathBuf> = Box::leak(Box::new(HashMap::new()));
         let fake: &'static mut FakeMaterializer =
             Box::leak(Box::new(FakeMaterializer::new(vec![])));
         let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));

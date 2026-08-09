@@ -43,5 +43,6 @@ ADR-0002 定"Text-to-SQL over DuckDB"为唯一执行模型；ADR-0017 以 DuckDB
 - **延伸 ADR-0076**：网关工具归一在提示层面兑现——系统提示不再比网关更窄。
 - **CONTEXT.md 更新**：首段从 DuckDB 中心叙述改为 agent 中心；新增「派生源」术语。
 - **领域模型不变**：Dataset、Working Set、Intermediate Result、Recipe、Materialize 概念保持——它们仍是 DuckDB 表。派生源是 Dataset 的一种来源（与上传源并列），非新概念。
-- **recipe 格式不变**：派生源的 materialize 步仍是 `{sql, display_name?}`——SQL 中的路径指向持久化目录。不需要升 format_version。
-- **未决（实施期）**：沙箱目录约定与命名、fs_acl 白名单增量、SQL 文件引用检测的实现、派生源存储上限。
+- **recipe 格式不变**：派生源的 materialize 步仍是 `{sql, display_name?}`——不需要升 format_version。
+- **派生源的 recipe SQL 用 catalog 引用**：Decision 4 措辞「SQL 路径指向持久化路径」精确化为——materialize 引用 tool_output 文件时，系统对该文件做 copy_in + ATTACH（与上传源同一管线），SQL 改写为 catalog 引用（`"ref".data`），非路径替换。`provenance::analyze` 只追踪 `TableFactor::Table`；`read_csv_auto` 落入 `_ => {}` 不被追踪，路径替换方案下 stale 级联（ADR-0025/0041）无法覆盖派生源。catalog 引用使派生源完整复用上传源的 provenance / stale / resume 管线。
+- **未决（实施期）**：沙箱目录约定与命名、fs_acl 白名单增量、派生源存储上限。
