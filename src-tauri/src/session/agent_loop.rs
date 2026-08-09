@@ -32,6 +32,7 @@
 //! (issue #318, ADR-0077): tool-calling turns are the sole live contract.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
@@ -39,6 +40,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use super::inline_materialize;
 use crate::approval::{
     ApprovalRequest, ApprovalSink, ApprovalState, GateCancelled, GateOutcome, OperationKind,
     ToolKey,
@@ -505,7 +507,8 @@ fn execute_call(
     // The external path never promotes (external tools do not materialize a
     // working-set result), so `promotion` is always `None` there.
     let outcome = if aggregator::parse_namespaced(&call.name).is_some() {
-        route_external_call(call, mcp)
+        let tool_output_dir = deps.temp_path.join(super::TOOL_OUTPUT_DIR_NAME);
+        route_external_call(call, mcp, &tool_output_dir)
     } else {
         tools::dispatch(call, deps, gate.cancel, materializer)
     };
@@ -611,8 +614,12 @@ pub(crate) fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) 
 /// there is none). A route failure (UnknownServer / Client fault) becomes a
 /// tool error the agent self-corrects from (ADR-0077). No promotion:
 /// external tools never materialize a working-set result.
-fn route_external_call(call: &ToolUse, mcp: &mut McpAggregator) -> tools::ToolOutcome {
-    shape_external_outcome(mcp.route(&call.name, &call.input), call)
+fn route_external_call(
+    call: &ToolUse,
+    mcp: &mut McpAggregator,
+    tool_output_dir: &Path,
+) -> tools::ToolOutcome {
+    shape_external_outcome(mcp.route(&call.name, &call.input), call, tool_output_dir)
 }
 
 /// Reduce a routed external MCP call's `Result` to the loop's `ToolOutcome`
@@ -627,6 +634,7 @@ fn route_external_call(call: &ToolUse, mcp: &mut McpAggregator) -> tools::ToolOu
 fn shape_external_outcome(
     route_result: Result<Value, RouteError>,
     call: &ToolUse,
+    tool_output_dir: &Path,
 ) -> tools::ToolOutcome {
     let (content, is_error) = match route_result {
         Ok(envelope) => {
@@ -634,7 +642,16 @@ fn shape_external_outcome(
                 .get("isError")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            (aggregator::first_text_block(&envelope), is_error)
+            let text = aggregator::first_text_block(&envelope);
+            // Issue #442: on a success envelope, structured inline text is
+            // materialized to tool_output/ (ADR-0087 D3/D4). An error's text
+            // is a message, not data.
+            let content = if is_error {
+                text
+            } else {
+                inline_materialize::augment_with_hint(text, &call.id, tool_output_dir)
+            };
+            (content, is_error)
         }
         Err(e) => (format!("external tool `{}` failed: {}", call.name, e), true),
     };
@@ -890,12 +907,13 @@ mod tests {
     #[test]
     fn route_external_call_surfaces_an_unknown_slug_as_a_tool_error() {
         let mut mcp = McpAggregator::empty();
+        let dir = TempDir::new().unwrap();
         let call = ToolUse {
             id: "tu_1".into(),
             name: "mcp__ghost__echo".into(),
             input: serde_json::json!({}),
         };
-        let outcome = route_external_call(&call, &mut mcp);
+        let outcome = route_external_call(&call, &mut mcp, dir.path());
         assert!(outcome.result.is_error, "unknown slug is a tool error");
         assert!(
             outcome.result.content.contains("ghost"),
@@ -911,6 +929,7 @@ mod tests {
     /// without a live server.
     #[test]
     fn shape_external_outcome_flattens_a_success_envelope() {
+        let dir = TempDir::new().unwrap();
         let call = ToolUse {
             id: "tu_ok".into(),
             name: "mcp__github__search".into(),
@@ -920,7 +939,7 @@ mod tests {
             "content": [{"type": "text", "text": "5 rows"}],
             "isError": false,
         });
-        let outcome = shape_external_outcome(Ok(envelope), &call);
+        let outcome = shape_external_outcome(Ok(envelope), &call, dir.path());
         assert!(!outcome.result.is_error, "isError:false -> success");
         assert_eq!(outcome.result.content, "5 rows");
         assert_eq!(outcome.result.tool_use_id, "tu_ok");
@@ -931,6 +950,7 @@ mod tests {
     /// (the model self-corrects, ADR-0077) but marks the result as an error.
     #[test]
     fn shape_external_outcome_marks_a_server_side_error_envelope() {
+        let dir = TempDir::new().unwrap();
         let call = ToolUse {
             id: "tu_err".into(),
             name: "mcp__github__search".into(),
@@ -940,10 +960,122 @@ mod tests {
             "content": [{"type": "text", "text": "rate limited"}],
             "isError": true,
         });
-        let outcome = shape_external_outcome(Ok(envelope), &call);
+        let outcome = shape_external_outcome(Ok(envelope), &call, dir.path());
         assert!(outcome.result.is_error, "isError:true -> tool error");
         assert_eq!(outcome.result.content, "rate limited");
         assert!(outcome.promotion.is_none());
+    }
+
+    /// A successful envelope whose inline text is structured CSV gets
+    /// materialized to tool_output/ and the model-facing content includes the
+    /// file path so the agent can reference it via read_csv_auto (issue #442).
+    #[test]
+    fn shape_external_outcome_materializes_structured_csv_inline_text() {
+        let dir = TempDir::new().unwrap();
+        let call = ToolUse {
+            id: "tu_csv".into(),
+            name: "mcp__data__export".into(),
+            input: serde_json::json!({}),
+        };
+        let csv = "id,name,value\n1,alice,100\n2,bob,200\n";
+        let envelope = serde_json::json!({
+            "content": [{"type": "text", "text": csv}],
+            "isError": false,
+        });
+        let outcome = shape_external_outcome(Ok(envelope), &call, dir.path());
+        assert!(!outcome.result.is_error);
+        // The content carries the original CSV text plus a materialization hint.
+        assert!(
+            outcome
+                .result
+                .content
+                .contains("Structured output saved to"),
+            "content includes materialization hint: {}",
+            outcome.result.content
+        );
+        assert!(
+            outcome.result.content.contains("tu_csv.csv"),
+            "hint names the materialized file: {}",
+            outcome.result.content
+        );
+        // The file was written to the tool_output directory.
+        let written = std::fs::read_to_string(dir.path().join("tu_csv.csv")).unwrap();
+        assert_eq!(written, csv);
+    }
+
+    /// A successful envelope whose inline text is valid JSON gets materialized
+    /// with a `.json` extension (issue #442).
+    #[test]
+    fn shape_external_outcome_materializes_structured_json_inline_text() {
+        let dir = TempDir::new().unwrap();
+        let call = ToolUse {
+            id: "tu_json".into(),
+            name: "mcp__data__export".into(),
+            input: serde_json::json!({}),
+        };
+        let json = r#"[{"city":"Tokyo","pop":37},{"city":"Osaka","pop":19}]"#;
+        let envelope = serde_json::json!({
+            "content": [{"type": "text", "text": json}],
+            "isError": false,
+        });
+        let outcome = shape_external_outcome(Ok(envelope), &call, dir.path());
+        assert!(!outcome.result.is_error);
+        assert!(
+            outcome.result.content.contains("tu_json.json"),
+            "hint names the JSON file: {}",
+            outcome.result.content
+        );
+        let written = std::fs::read_to_string(dir.path().join("tu_json.json")).unwrap();
+        assert_eq!(written, json);
+    }
+
+    /// A successful envelope whose inline text is TSV gets materialized with
+    /// a `.tsv` extension (issue #442).
+    #[test]
+    fn shape_external_outcome_materializes_structured_tsv_inline_text() {
+        let dir = TempDir::new().unwrap();
+        let call = ToolUse {
+            id: "tu_tsv".into(),
+            name: "mcp__data__export".into(),
+            input: serde_json::json!({}),
+        };
+        let tsv = "id\tname\n1\talice\n2\tbob\n";
+        let envelope = serde_json::json!({
+            "content": [{"type": "text", "text": tsv}],
+            "isError": false,
+        });
+        let outcome = shape_external_outcome(Ok(envelope), &call, dir.path());
+        assert!(!outcome.result.is_error);
+        assert!(
+            outcome.result.content.contains("tu_tsv.tsv"),
+            "hint names the TSV file: {}",
+            outcome.result.content
+        );
+        let written = std::fs::read_to_string(dir.path().join("tu_tsv.tsv")).unwrap();
+        assert_eq!(written, tsv);
+    }
+
+    /// An error envelope with structured text must NOT be materialized — an
+    /// error's text is a message, not data (issue #442 design decision).
+    #[test]
+    fn shape_external_outcome_does_not_materialize_error_envelope_with_structured_text() {
+        let dir = TempDir::new().unwrap();
+        let call = ToolUse {
+            id: "tu_err_csv".into(),
+            name: "mcp__data__export".into(),
+            input: serde_json::json!({}),
+        };
+        let csv = "id,name\n1,alice\n2,bob\n";
+        let envelope = serde_json::json!({
+            "content": [{"type": "text", "text": csv}],
+            "isError": true,
+        });
+        let outcome = shape_external_outcome(Ok(envelope), &call, dir.path());
+        assert!(outcome.result.is_error);
+        // No hint appended — content is the raw text only.
+        assert_eq!(outcome.result.content, csv);
+        // No file was written.
+        assert!(dir.path().read_dir().unwrap().next().is_none());
     }
 
     /// A namespaced name classifies under its server slug (not "unknown") so

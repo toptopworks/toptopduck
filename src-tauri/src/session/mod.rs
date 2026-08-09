@@ -4,6 +4,7 @@
 
 pub mod agent_loop;
 pub mod derived_source;
+pub mod inline_materialize;
 pub mod materializer;
 pub mod recipe_persister;
 pub mod resume;
