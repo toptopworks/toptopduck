@@ -1,19 +1,18 @@
-//! LLM-SQL sandbox for the read_* filesystem guard (ADR-0005, issue #25).
+//! LLM-SQL sandbox lifecycle (ADR-0005, ADR-0088).
 //!
-//! Provider SQL runs on a *separate* DuckDB instance whose LocalFileSystem is
-//! disabled, so a SELECT calling `read_csv_auto` / `read_parquet` /
-//! `read_json_auto` -- the one table-function surface the CTAS wrapping cannot
-//! bar (COPY/ATTACH/INSTALL/LOAD are statements, hence parser errors inside a
-//! subquery) -- is refused by the engine. The admin instance stays LFS-on so
-//! ingest keeps working. This module owns the per-turn sandbox lifecycle.
+//! Provider SQL runs on a *separate* DuckDB instance per turn. The CTAS
+//! wrapping bars mutating statements (DROP/INSERT/COPY/ATTACH/INSTALL/LOAD),
+//! narrowing the in-SELECT file surface to `read_*` functions. File-
+//! reachability for `read_*` is constrained solely by the gateway FsAcl
+//! preflight (ADR-0080 + ADR-0088 Decision 2 + Decision 3: literal-path
+//! whitelist + non-literal refusal) -- the engine-level `disabled_filesystems` lockdown
+//! was removed so DuckDB can read in-bounds files (external-tool output,
+//! session temp). This module owns the per-turn sandbox lifecycle.
 //!
-//! Why a second instance, not a setting on the admin connection: DuckDB's
-//! filesystem isolation is instance-global and irreversible (see memory
-//! `duckdb-filesystem-isolation-instance-global`) -- once disabled it cannot be
-//! re-enabled, and it poisons every connection on the instance, so admin cannot
-//! be both ingest-LFS-on and LLM-LFS-off. The sandbox is therefore a fresh
-//! `open_in_memory` per turn (forced: irreversibility means a locked-down
-//! sandbox cannot be reused).
+//! Why a second instance, not a setting on the admin connection: provider SQL
+//! must never touch the admin connection (security boundary). A per-turn
+//! `open_in_memory` gives each turn a clean instance with its own catalog,
+//! resource caps, and interrupt handle (ADR-0027).
 //!
 //! How sources/results reach the sandbox so provider SQL resolves identically:
 //! - **Sources** (`"<ref>".data`) are READ_ONLY-attached by file. Two instances
@@ -38,24 +37,12 @@ use crate::guardrail::{apply_resource_caps, classify_duckdb_error, ExecError, Ex
 use crate::ingest::schema::quote_ident;
 use crate::workingset::WorkingSet;
 
-/// Open a fresh sandbox instance with the engine resource caps applied. Not
-/// locked down yet -- sources/results must be attached/mirrored before
-/// [`lockdown`] (ATTACH needs LocalFileSystem on).
+/// Open a fresh sandbox instance with the engine resource caps applied.
+/// Sources and results are attached/mirrored after opening.
 pub(crate) fn open() -> Result<Connection, ExecError> {
     let conn = Connection::open_in_memory().map_err(duck_err)?;
     apply_resource_caps(&conn);
     Ok(conn)
-}
-
-/// Disable LocalFileSystem on the sandbox. After this, `read_*` table functions
-/// are refused (`"... disabled by configuration"`), while already-attached
-/// catalogs and own base tables stay readable (probe). Irreversible -- the
-/// sandbox is single-use (dropped at end of turn). The refusal phrase is matched
-/// by the existing Resource classifier, so a blocked `read_*` aborts without
-/// retrying (ADR-0005/0028).
-pub(crate) fn lockdown(conn: &Connection) -> Result<(), ExecError> {
-    conn.execute_batch("SET disabled_filesystems='LocalFileSystem'")
-        .map_err(duck_err)
 }
 
 /// Attach every loaded source into the sandbox READ_ONLY so the `"<ref>".data`

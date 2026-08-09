@@ -665,12 +665,6 @@ impl Session {
         // `read_parquet`. The directory's lifecycle follows the TempDir RAII
         // (cleaned on session drop). `create_dir_all` is idempotent; failure
         // is a disk / OS issue surfaced honestly rather than silently skipped.
-        //
-        // Known gap: the sandbox engine lockdown
-        // (`disabled_filesystems='LocalFileSystem'`, ADR-0080 / #25) still
-        // blocks `read_*` at execution time even after fs_acl passes. End-to-
-        // end file reads on `tool_output/` require a follow-up ADR to lift or
-        // replace the lockdown.
         fs::create_dir_all(temp_path.join(TOOL_OUTPUT_DIR_NAME))
             .map_err(|e| anyhow::anyhow!("failed to create tool_output dir: {e}"))?;
         let conn = Connection::open_in_memory()?;

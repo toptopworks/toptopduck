@@ -1,6 +1,6 @@
 //! The materialize step, abstracted behind a trait (ADR-0053).
 //!
-//! "Execute provider SQL on a locked-down sandbox + install result_N onto
+//! "Execute provider SQL on a sandboxed instance + install result_N onto
 //! admin + derive its shape + register the working set" is the promotion
 //! mechanism behind the `materialize` built-in tool (ADR-0077): the agent
 //! loop ([`crate::session::agent_loop::AgentLoop`]) dispatches the tool here,
@@ -60,7 +60,7 @@ pub(crate) struct TurnDeps<'a> {
 /// is a zero-sized struct; a test injects `FakeMaterializer` to script an
 /// `ExecErrorKind` per call without touching DuckDB.
 pub(crate) trait Materializer: Send {
-    /// Run the provider SQL on a locked-down sandbox, install `result_name`
+    /// Run the provider SQL on a sandboxed instance, install `result_name`
     /// onto admin, derive its shape, register it in the working set, and run
     /// stale-result GC. The caller computes `result_name` (a failed attempt
     /// registers nothing, so `next_result_number` is stable across retries --
@@ -75,15 +75,14 @@ pub(crate) trait Materializer: Send {
     ) -> Result<DatasetDescriptor, ExecError>;
 }
 
-/// The production materializer: runs provider SQL on a locked-down sandbox,
+/// The production materializer: runs provider SQL on a sandboxed instance,
 /// installs the result on admin, derives its shape, registers it, and reclaims
 /// the oldest stale results past the cap. Structurally a move of the pre-
 /// refactor `Session::try_materialize` (ADR-0053), with one behavior change in
 /// #334: the path now also runs the FsAcl `read_*` whitelist (shared with
 /// explore via `sandbox_sql::preflight_read_sql`), so an out-of-bounds
-/// `read_*` surfaces as a structured error instead of the engine's opaque
-/// "disabled by configuration". Stateless; the `RealMaterializer` value
-/// carries no data and exists only to anchor the `impl`.
+/// `read_*` surfaces as a structured error. Stateless; the `RealMaterializer`
+/// value carries no data and exists only to anchor the `impl`.
 pub(crate) struct RealMaterializer;
 
 impl Materializer for RealMaterializer {
@@ -102,17 +101,18 @@ impl Materializer for RealMaterializer {
         // turn -- the chain recreates each result_N under its stable identity.
 
         // Gateway door (ADR-0013 stale-ref + ADR-0080 read_* whitelist), shared
-        // with the explore path. The materialize path now ALSO runs the FsAcl
-        // whitelist (issue #334) -- the sole behavior change -- so an
-        // out-of-bounds read_* becomes a structured "outside the allowed area"
-        // error instead of the engine's opaque "disabled by configuration".
+        // with the explore path. The materialize path also runs the FsAcl
+        // whitelist (issue #334) so an out-of-bounds read_* becomes a
+        // structured "outside the allowed area" error.
         // refs are held for the post-install provenance record (issue #40).
         let analysis =
             preflight_read_sql(sql, deps.working_set, deps.temp_path).map_err(|e| match e {
                 PreflightError::StaleReference(s) => {
                     ExecError::new(ExecErrorKind::StaleReference, s)
                 }
-                PreflightError::FsAcl(s) => ExecError::new(ExecErrorKind::Runtime, s),
+                PreflightError::FsAcl(s)
+                | PreflightError::NonLiteralPath(s)
+                | PreflightError::Unparseable(s) => ExecError::new(ExecErrorKind::Runtime, s),
             })?;
 
         // Sandbox lifecycle + cap + cancel checkpoints, shared with the explore

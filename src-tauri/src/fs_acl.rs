@@ -1,17 +1,19 @@
-//! Gateway-layer filesystem path whitelist (ADR-0080, issue #293).
+//! Gateway-layer filesystem path whitelist (ADR-0080, ADR-0088).
 //!
-//! ADR-0080 supersedes the `disabled_filesystems` blanket lockdown for the
-//! file-reachability surface: the agent's file access is constrained to the
+//! The agent's file access via `read_*` functions is constrained to the
 //! **session source set (read-only) + the session working temp dir
-//! (read-write)**. DuckDB offers no per-path engine ACL --
-//! `disabled_filesystems` is all-or-nothing, instance-global, and irreversible
-//! (ADR-0080 Why 2) -- so a read_* call inside a SELECT cannot be discriminated
-//! per path by the engine. The constraint is therefore enforced at the gateway
-//! layer: a tool extracts every file path it would hand the engine (issue #293:
-//! the `read_*` paths inside an explore query) and validates each against this
-//! whitelist *before* execution. An out-of-bounds path becomes a structured
-//! tool error the agent self-corrects from (ADR-0077); it never reaches the
-//! engine, and never fails silently.
+//! (read-write)**. DuckDB offers no per-path engine ACL, so the constraint is
+//! enforced at the gateway layer: a tool extracts every literal file path it
+//! would hand the engine (the `read_*` paths inside an explore/materialize
+//! query) and validates each against this whitelist *before* execution. An
+//! out-of-bounds path becomes a structured tool error the agent self-corrects
+//! from (ADR-0077); it never reaches the engine, and never fails silently.
+//!
+//! This whitelist is the **sole** file-reachability constraint for `read_*`
+//! (ADR-0088): the engine-level `disabled_filesystems` lockdown was removed so
+//! DuckDB can read in-bounds files. Non-literal `read_*` paths (dynamic
+//! expressions) are refused by the preflight before reaching this module --
+//! FsAcl only validates paths it can see as literal strings.
 //!
 //! Layering vs the engine-level guardrails (ADR-0005): read-only sources
 //! (READ_ONLY catalog attach), resource caps, and the CTAS wrapping that bars
@@ -23,9 +25,11 @@
 //!
 //! Threat model (ADR-0080): the agent is a non-adversarial LLM the user chose
 //! to run, not a dedicated SQL-injection adversary. Path extraction
-//! ([`crate::tools::read_paths`]) is conservative -- a parse failure or a
-//! non-literal `read_*` path is refused -- and per-session instance isolation
-//! (ADR-0027) bounds any blast radius to the session that owns the engine.
+//! ([`crate::tools::read_paths`]) is conservative -- a non-literal `read_*`
+//! path is refused by the preflight, and a `read_*` in an unhandled AST
+//! variant is an accepted residual risk (ADR-0088 Why 4). Per-session
+//! instance isolation (ADR-0027) bounds any blast radius to the session that
+//! owns the engine.
 //!
 //! Symlink handling: canonicalization follows symlinks to their real target,
 //! so an in-bounds symlink that points outside is resolved to the out-of-bounds
@@ -446,11 +450,9 @@ mod tests {
     /// whitelist entry is needed. This test documents and locks that behavior so
     /// a future refactor cannot accidentally narrow the temp-root match.
     ///
-    /// Note: this only locks the gateway admission layer. The sandbox engine
-    /// lockdown (`disabled_filesystems='LocalFileSystem'`, ADR-0080 / #25) still
-    /// blocks `read_*` execution even when fs_acl passes -- see
-    /// `explore::tests::explore_lockdown_still_refuses_in_bounds_read_path`.
-    /// End-to-end `read_csv_auto` on `tool_output/` requires a follow-up ADR.
+    /// With the engine lockdown removed (ADR-0088), fs_acl is the sole
+    /// constraint -- an in-bounds `read_csv_auto` on this file now executes
+    /// end-to-end (see `explore::tests::explore_executes_in_bounds_read_path`).
     #[test]
     fn tool_output_subdir_file_is_read_allowed() {
         let temp = TempDir::new().unwrap();

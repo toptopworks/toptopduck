@@ -3,14 +3,14 @@
 //!
 //! Two read-SQL paths share the same spine: an `explore` scratch query (turn-
 //! local, no promotion) and a `materialize` promotion (installs `result_N`).
-//! Both (1) refuse a stale reference + an out-of-bounds `read_*` path at the
-//! gateway door, then (2) run the provider SQL once on a locked-down sandbox
-//! under the row-count cap with the same cancel checkpoints. Before this
-//! module the two paths mirrored ~60 lines verbatim ("mirrors the materialize
-//! path"), so any change to a cancel checkpoint or the cap logic drifted
-//! silently in the other, and the gateway door was asymmetric -- explore ran
-//! the `FsAcl` whitelist, materialize did not, so an out-of-bounds `read_*`
-//! surfaced as the engine's opaque "disabled by configuration" instead of a
+//! Both (1) refuse a stale reference + a non-literal or out-of-bounds
+//! `read_*` path at the gateway door, then (2) run the provider SQL once on
+//! a sandboxed instance under the row-count cap with the same cancel
+//! checkpoints. Before this module the two paths mirrored ~60 lines verbatim
+//! ("mirrors the materialize path"), so any change to a cancel checkpoint or
+//! the cap logic drifted silently in the other, and the gateway door was
+//! asymmetric -- explore ran the `FsAcl` whitelist, materialize did not, so
+//! an out-of-bounds `read_*` surfaced as an opaque engine error instead of a
 //! structured, path-naming error.
 //!
 //! Two deep modules collapse the duplication (ADR-0053):
@@ -65,11 +65,21 @@ pub(crate) enum PreflightError {
     /// working temp dir (ADR-0080). Carries the structured, path-naming
     /// message the agent self-corrects from (ADR-0077).
     FsAcl(String),
+    /// The SQL embedded a `read_*` call whose path is not a literal string
+    /// (ADR-0088 Decision 3). FsAcl cannot validate a runtime-computed path,
+    /// so the call is refused before execution.
+    NonLiteralPath(String),
+    /// The SQL could not be parsed for path analysis (ADR-0088 Why 4). Rather
+    /// than letting it reach the engine with zero file-reachability checks, the
+    /// preflight refuses it; the agent rewrites as a standard SELECT.
+    Unparseable(String),
 }
 
 /// The shared gateway door for both read-SQL paths: refuse a stale reference
-/// (ADR-0013 invariant 2), then refuse an out-of-bounds `read_*` path
-/// (ADR-0080). Pure -- parses SQL text + checks paths, never touches DuckDB.
+/// (ADR-0013 invariant 2), then refuse an unparseable SQL (ADR-0088 Why 4),
+/// then refuse a non-literal `read_*` path (ADR-0088 Decision 3), then refuse
+/// an out-of-bounds `read_*` path (ADR-0080). Pure -- parses SQL text +
+/// checks paths, never touches DuckDB.
 ///
 /// A stale reference is checked first: it is cheaper (the one parse is shared
 /// with the dependency extraction) and the earlier refusal is the more honest
@@ -85,9 +95,19 @@ pub(crate) fn preflight_read_sql(
     if let Some(stale_ref) = analyzed.stale_ref {
         return Err(PreflightError::StaleReference(stale_ref));
     }
+    let extraction = extract_read_paths(sql).map_err(|_| {
+        PreflightError::Unparseable(
+            "could not analyze SQL for file-path safety; rewrite as a standard SELECT".to_string(),
+        )
+    })?;
+    if extraction.non_literal_read_found {
+        return Err(PreflightError::NonLiteralPath(
+            "read_* requires a literal path string; dynamic paths are not allowed".to_string(),
+        ));
+    }
     let acl = FsAcl::new(working_set, temp_path);
-    for path in extract_read_paths(sql) {
-        if let Err(e) = acl.check(&path, AccessMode::Read) {
+    for path in &extraction.paths {
+        if let Err(e) = acl.check(path, AccessMode::Read) {
             return Err(PreflightError::FsAcl(e.message()));
         }
     }
@@ -120,7 +140,7 @@ pub(crate) struct SandboxDeps<'a> {
 
 /// A sandbox table the runner hands back to the caller for its tail. Owns the
 /// sandbox connection, so dropping it cleans up the scratch/result table
-/// (lockdown is irreversible, so the connection is single-use).
+/// (per-turn isolation, ADR-0027).
 pub(crate) struct SandboxTable {
     /// The sandbox connection holding the table. The caller runs its
     /// tool-controlled tail against it (explore: DESCRIBE + sample;
@@ -148,7 +168,7 @@ pub(crate) enum SandboxExecError {
     /// Silent truncation is forbidden, so the call aborts; the agent can add
     /// its own LIMIT and retry.
     Resource { rows: u64, cap: u64 },
-    /// A sandbox primitive (open / attach / mirror / lockdown / CREATE /
+    /// A sandbox primitive (open / attach / mirror / CREATE /
     /// COUNT) failed with an engine error. The kind is the retry-routing
     /// classification (inferred via `classify_duckdb_error` at construction
     /// time), so each caller uses it directly instead of re-inferring from
@@ -157,7 +177,7 @@ pub(crate) enum SandboxExecError {
     Runtime { kind: ExecErrorKind, detail: String },
 }
 
-/// Run `sql` once on a locked-down sandbox as `table_name`, handing back the
+/// Run `sql` once on a sandboxed instance as `table_name`, handing back the
 /// owned sandbox table. Owns the whole sandbox lifecycle + the row-count cap
 /// + the cancel checkpoints, so both read-SQL paths enforce uniformly.
 ///
@@ -183,14 +203,14 @@ pub(crate) fn run_sandboxed_read(
     cancel: &CancelToken,
 ) -> Result<SandboxTable, SandboxExecError> {
     // Sandbox lifecycle: fresh instance -> attach sources READ_ONLY -> mirror
-    // prior results -> lockdown (refuse read_*). Dropped at end of scope
-    // (lockdown is irreversible, so the connection is single-use).
+    // prior results. Dropped at end of scope (per-turn isolation, ADR-0027).
+    // The engine-level disabled_filesystems lockdown was removed (ADR-0088):
+    // FsAcl + non-literal refusal in preflight is the sole read_* constraint.
     let sandbox_conn = sandbox::open().map_err(lift_exec_error)?;
     sandbox::attach_sources(&sandbox_conn, deps.working_set, deps.source_files)
         .map_err(lift_exec_error)?;
     sandbox::mirror_results(&sandbox_conn, deps.admin_conn, deps.working_set)
         .map_err(lift_exec_error)?;
-    sandbox::lockdown(&sandbox_conn).map_err(lift_exec_error)?;
 
     // Mid-check: cancel arrived during setup -> honest Cancelled, not the
     // later CREATE's generic failure.
@@ -264,7 +284,7 @@ fn runtime_from_duckdb(e: duckdb::Error) -> SandboxExecError {
     }
 }
 
-/// Lift a sandbox-primitive [`ExecError`] (open / attach / mirror / lockdown)
+/// Lift a sandbox-primitive [`ExecError`] (open / attach / mirror)
 /// into the runner's narrow [`SandboxExecError::Runtime`], preserving both the
 /// retry-routing kind and the honest detail. The kind was already classified at
 /// the sandbox-primitive boundary (`duck_err` / `classify_duckdb_error`), so it
@@ -404,5 +424,46 @@ mod tests {
         let analysis = preflight_read_sql("SELECT 1 AS x", &ws, temp.path())
             .expect("SELECT 1 passes preflight");
         assert!(analysis.refs.is_empty(), "{:?}", analysis.refs);
+    }
+
+    /// A non-literal `read_*` path (a column reference, a dynamic expression)
+    /// is refused by the preflight as `NonLiteralPath` -- FsAcl cannot validate
+    /// a runtime-computed path, so the call is refused before execution with a
+    /// message directing the agent to use a literal path string (ADR-0088
+    /// Decision 3).
+    #[test]
+    fn non_literal_read_path_is_refused_by_preflight() {
+        let temp = TempDir::new().unwrap();
+        let ws = WorkingSet::default();
+        let err = preflight_read_sql("SELECT * FROM read_csv_auto(some_column)", &ws, temp.path())
+            .unwrap_err();
+        match err {
+            PreflightError::NonLiteralPath(msg) => {
+                assert!(
+                    msg.contains("literal"),
+                    "non-literal refusal message directs agent to literal path: {msg}"
+                );
+            }
+            other => panic!("expected NonLiteralPath, got {other:?}"),
+        }
+    }
+
+    /// SQL the path-analysis parser cannot understand is refused as
+    /// `Unparseable` rather than passing through unchecked (ADR-0088 Why 4 --
+    /// sqlparser and DuckDB may diverge on dialect coverage).
+    #[test]
+    fn unparseable_sql_is_refused_by_preflight() {
+        let temp = TempDir::new().unwrap();
+        let ws = WorkingSet::default();
+        let err = preflight_read_sql("this is not sql at all", &ws, temp.path()).unwrap_err();
+        match err {
+            PreflightError::Unparseable(msg) => {
+                assert!(
+                    msg.contains("analyze"),
+                    "unparseable refusal mentions analysis: {msg}"
+                );
+            }
+            other => panic!("expected Unparseable, got {other:?}"),
+        }
     }
 }
