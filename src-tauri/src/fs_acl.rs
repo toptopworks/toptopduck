@@ -441,10 +441,16 @@ mod tests {
     }
 
     /// Issue #432 AC#2: a file inside the `tool_output/` subdirectory under the
-    /// session temp dir is read-allowed. The subdir is covered by the existing
-    /// `starts_with(temp_root)` check -- no separate whitelist entry is needed.
-    /// This test documents and locks that behavior so a future refactor cannot
-    /// accidentally narrow the temp-root match and break ADR-0087 Decision 3.
+    /// session temp dir is read-allowed at the gateway (fs_acl) layer. The subdir
+    /// is covered by the existing `starts_with(temp_root)` check -- no separate
+    /// whitelist entry is needed. This test documents and locks that behavior so
+    /// a future refactor cannot accidentally narrow the temp-root match.
+    ///
+    /// Note: this only locks the gateway admission layer. The sandbox engine
+    /// lockdown (`disabled_filesystems='LocalFileSystem'`, ADR-0080 / #25) still
+    /// blocks `read_*` execution even when fs_acl passes -- see
+    /// `explore::tests::explore_lockdown_still_refuses_in_bounds_read_path`.
+    /// End-to-end `read_csv_auto` on `tool_output/` requires a follow-up ADR.
     #[test]
     fn tool_output_subdir_file_is_read_allowed() {
         let temp = TempDir::new().unwrap();

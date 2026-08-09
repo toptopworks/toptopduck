@@ -895,3 +895,37 @@ fn empty_aggregator_does_not_inject_tool_output_env() {
         "empty() aggregator does not inject TOPTOPDUCK_TOOL_OUTPUT_DIR"
     );
 }
+
+#[test]
+fn tool_output_env_overrides_user_configured_value() {
+    // ADR-0087: the gateway is the path authority for TOPTOPDUCK_TOOL_OUTPUT_DIR.
+    // If a user also sets it in config.env, the session's value must win
+    // (last-write-wins in Command::env). This test locks the override direction
+    // so a future reordering of .envs() calls cannot silently flip it.
+    use std::collections::BTreeMap;
+    use toptopduck_lib::mcp::client::TOOL_OUTPUT_ENV;
+
+    let mut env = BTreeMap::new();
+    env.insert(
+        TOOL_OUTPUT_ENV.to_string(),
+        "/user/should/not/win".to_string(),
+    );
+    let mut config = fake_config("srv-1", "OverrideMCP");
+    config.env = env;
+
+    let gateway_dir = "/tmp/toptopduck-test-tool-output-override";
+    let mut agg = McpAggregator::with_tool_output(gateway_dir.to_string());
+    agg.connect_all(&[config], &KeychainStore::new());
+
+    let result = agg
+        .route(
+            "mcp__overridemcp__echo_env",
+            &json!({"key": TOOL_OUTPUT_ENV}),
+        )
+        .expect("route ok");
+    assert_eq!(
+        first_text(&result),
+        gateway_dir,
+        "gateway tool_output_dir must override user-configured value"
+    );
+}

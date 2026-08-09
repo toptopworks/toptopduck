@@ -388,6 +388,16 @@ fn stdio_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
     if let Some(dir) = tool_output_dir {
+        if config.env.contains_key(TOOL_OUTPUT_ENV)
+            || secrets.iter().any(|(k, _)| k == TOOL_OUTPUT_ENV)
+        {
+            log::warn!(
+                target: "toptopduck::mcp",
+                "MCP server {}: user-configured {TOOL_OUTPUT_ENV} overridden by \
+                 session tool-output dir (ADR-0087 gateway is path authority)",
+                config.id
+            );
+        }
         cmd.env(TOOL_OUTPUT_ENV, dir);
     }
     Ok(cmd)
