@@ -45,16 +45,15 @@ vi.mock("../../api", async (importOriginal) => {
     deleteSession: vi.fn(async () => {}),
     onResumeProgress: vi.fn(async () => () => {}),
     openDuck: vi.fn(async () => {}),
-    recordRecentFile: vi.fn(async () => {}),
     renamePersistedSession: vi.fn(async () => {}),
     renameSession: vi.fn(async () => ""),
     saveAsDuck: vi.fn(async () => {}),
   };
 });
 
-// The hook logs closeOpen / recordRecentFile / onResumeProgress outcomes through
-// the structured sink; mock it so the closeOpen kind-triage and the recents /
-// resume defensive catches are assertable (issue #203).
+// The hook logs closeOpen / onResumeProgress outcomes through the structured
+// sink; mock it so the closeOpen kind-triage and the resume defensive catches
+// are assertable (issue #203).
 vi.mock("../../lib/log", () => ({
   log: {
     trace: vi.fn(),
@@ -70,7 +69,6 @@ import {
   createSession,
   openDuck,
   onResumeProgress,
-  recordRecentFile,
   renamePersistedSession,
   renameSession,
   saveAsDuck,
@@ -80,6 +78,11 @@ import { log } from "../../lib/log";
 import { useShellSessions } from "../useShellSessions";
 
 const intl = createIntl({ locale: "en-US", messages: catalogFor("en-US") });
+
+/** Build a CreateSessionReply for mock returns (ADR-0089). */
+function reply(sid: string) {
+  return { session_id: sid, duck_path: `/sessions/${sid}/session.duck` };
+}
 
 function renderSessions() {
   const queryClient = new QueryClient({
@@ -111,7 +114,7 @@ describe("useShellSessions", () => {
   });
 
   it("openNew mints + registers + activates a session", async () => {
-    vi.mocked(createSession).mockResolvedValue("s1");
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
     const { result } = renderSessions();
     await act(async () => {
       await result.current.openNew();
@@ -121,7 +124,7 @@ describe("useShellSessions", () => {
     expect(result.current.openSessions[0]).toMatchObject({
       sid: "s1",
       name: "",
-      path: null,
+      path: "/sessions/s1/session.duck",
       pendingIngestPath: null,
     });
     expect(result.current.activeSessionId).toBe("s1");
@@ -129,7 +132,7 @@ describe("useShellSessions", () => {
   });
 
   it("onWebviewDrop on cold start (activeSessionId null) mints via dropFile with the path as pendingIngestPath (#81 A1)", async () => {
-    vi.mocked(createSession).mockResolvedValue("drop-sid");
+    vi.mocked(createSession).mockResolvedValue(reply("drop-sid"));
     const { result } = renderSessions();
     expect(result.current.activeSessionId).toBeNull();
     act(() => {
@@ -141,7 +144,7 @@ describe("useShellSessions", () => {
   });
 
   it("onWebviewDrop on an active session routes to its pendingIngestPath (no new mint, #81)", async () => {
-    vi.mocked(createSession).mockResolvedValueOnce("s1");
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
     const { result } = renderSessions();
     await act(async () => {
       await result.current.openNew();
@@ -156,7 +159,7 @@ describe("useShellSessions", () => {
   });
 
   it("clearPendingIngest drops the consumed path so a remount cannot re-ingest (#81 A1)", async () => {
-    vi.mocked(createSession).mockResolvedValueOnce("s1");
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
     const { result } = renderSessions();
     await act(async () => {
       await result.current.openNew();
@@ -172,7 +175,7 @@ describe("useShellSessions", () => {
   });
 
   it("closeOpen unmounts synchronously + fires closeSession in the background (ADR-0055)", async () => {
-    vi.mocked(createSession).mockResolvedValueOnce("s1");
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
     const { result } = renderSessions();
     await act(async () => {
       await result.current.openNew();
@@ -188,7 +191,7 @@ describe("useShellSessions", () => {
   it("closeOpen survives a closeSession reject without throwing (ADR-0055 .catch seam)", async () => {
     // closeOpen returns closeSession().catch(...) -- a reject MUST be swallowed
     // (not surface as an unhandled rejection). The session is already unmounted.
-    vi.mocked(createSession).mockResolvedValueOnce("s1");
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
     vi.mocked(closeSession).mockRejectedValueOnce(new Error("backend gone"));
     const { result } = renderSessions();
     await act(async () => {
@@ -207,7 +210,7 @@ describe("useShellSessions", () => {
     // NotFound is the expected outcome when the session already dropped (a
     // double-close, or a close racing a delete's wait-release): debug-level, and
     // NOT an error, so the idempotent path stays quiet in devtools.
-    vi.mocked(createSession).mockResolvedValueOnce("s1");
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
     vi.mocked(closeSession).mockRejectedValueOnce({ kind: "NotFound" });
     const { result } = renderSessions();
     await act(async () => {
@@ -228,7 +231,7 @@ describe("useShellSessions", () => {
     // A non-NotFound reject (panic, lock poison, canonical single-writer leak)
     // must surface at error level with the sid + raw kind so the cause of a
     // later deletePersisted try_acquire gate miss stays diagnosable.
-    vi.mocked(createSession).mockResolvedValueOnce("s1");
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
     vi.mocked(closeSession).mockRejectedValueOnce({
       kind: "Engine",
       data: "lock poison",
@@ -251,15 +254,9 @@ describe("useShellSessions", () => {
     expect(log.debug).not.toHaveBeenCalled();
   });
 
-  it("handleSaveAs refreshes sessions + warns even when recordRecentFile rejects (#203)", async () => {
-    // The recents IPC is best-effort: a reject must NOT block the sidebar
-    // refresh or escape as an unhandled rejection. refreshSessions fires via
-    // .finally regardless, and the reject is logged at warn.
-    vi.mocked(createSession).mockResolvedValueOnce("s1");
+  it("handleSaveAs refreshes sessions after a successful export (ADR-0089)", async () => {
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
     vi.mocked(saveDialog).mockResolvedValueOnce("/x/a.duck");
-    vi.mocked(recordRecentFile).mockRejectedValueOnce(
-      new Error("recents IPC down"),
-    );
     const { result, refreshSessions } = renderSessions();
     await act(async () => {
       await result.current.openNew();
@@ -267,31 +264,18 @@ describe("useShellSessions", () => {
     await act(async () => {
       await result.current.handleSaveAs();
     });
-    expect(refreshSessions).toHaveBeenCalledTimes(1);
-    expect(log.warn).toHaveBeenCalledWith(
-      "recordRecentFile",
-      expect.any(String),
-      expect.anything(),
-    );
+    expect(refreshSessions).toHaveBeenCalled();
   });
 
-  it("handleOpenDuck refreshes sessions + warns even when recordRecentFile rejects (#203)", async () => {
+  it("handleOpenDuck refreshes sessions after a successful resume (ADR-0089)", async () => {
     vi.mocked(openDialog).mockResolvedValueOnce("/x/a.duck");
-    vi.mocked(createSession).mockResolvedValueOnce("o1");
+    vi.mocked(createSession).mockResolvedValueOnce(reply("o1"));
     vi.mocked(openDuck).mockResolvedValueOnce();
-    vi.mocked(recordRecentFile).mockRejectedValueOnce(
-      new Error("recents IPC down"),
-    );
     const { result, refreshSessions } = renderSessions();
     await act(async () => {
       await result.current.handleOpenDuck();
     });
-    expect(refreshSessions).toHaveBeenCalledTimes(1);
-    expect(log.warn).toHaveBeenCalledWith(
-      "recordRecentFile",
-      expect.any(String),
-      expect.anything(),
-    );
+    expect(refreshSessions).toHaveBeenCalled();
   });
 
   it("openPersisted survives a throw inside the onResumeProgress listener (defensive try/catch, #203)", async () => {
@@ -304,7 +288,7 @@ describe("useShellSessions", () => {
       resumeCb = cb as unknown as (ev: unknown) => void;
       return () => {};
     });
-    vi.mocked(createSession).mockResolvedValueOnce("r1");
+    vi.mocked(createSession).mockResolvedValueOnce(reply("r1"));
     vi.mocked(openDuck).mockResolvedValueOnce();
     const { result } = renderSessions();
     await act(async () => {
@@ -341,7 +325,7 @@ describe("useShellSessions", () => {
     vi.mocked(openDialog).mockImplementation(
       () => new Promise<string | null>((resolve) => { resolveDialog = resolve; }),
     );
-    vi.mocked(createSession).mockResolvedValue("drop-sid");
+    vi.mocked(createSession).mockResolvedValue(reply("drop-sid"));
     const { result } = renderSessions();
     // Enter busy: handleOpenDuck holds persistenceBusy true while openDialog
     // is pending (cold start -> activeSessionId null -> a routed drop mints).
@@ -372,9 +356,9 @@ describe("useShellSessions", () => {
     // A second cold-start drop while the first createSession is still in flight
     // is ignored (no second mint); the guard re-arms once the first mint
     // resolves, so a later drop mints again.
-    let resolveCreate: (sid: string) => void = () => {};
+    let resolveCreate: (val: { session_id: string; duck_path: string }) => void = () => {};
     vi.mocked(createSession).mockImplementation(
-      () => new Promise<string>((resolve) => { resolveCreate = resolve; }),
+      () => new Promise((resolve) => { resolveCreate = resolve; }),
     );
     const { result } = renderSessions();
     // First drop: createSession pending, droppingRef held true.
@@ -388,11 +372,11 @@ describe("useShellSessions", () => {
     await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
     // Resolve the first mint: droppingRef releases in the finally block.
     await act(async () => {
-      resolveCreate("s1");
+      resolveCreate(reply("s1"));
     });
     await waitFor(() => expect(result.current.activeSessionId).toBe("s1"));
     // The guard has re-armed: a subsequent drop mints again.
-    vi.mocked(createSession).mockResolvedValueOnce("s2");
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s2"));
     await act(async () => {
       await result.current.dropFile("/c");
     });
@@ -435,7 +419,7 @@ describe("useShellSessions", () => {
     // accidental empty rename cannot trigger a spurious sidebar re-fetch.
     const { result, refreshSessions, setShellError } = renderSessions();
     await act(async () => {
-      await result.current.renameEntry("s1", null, "   ");
+      await result.current.renameEntry("s1", "/sessions/s1/session.duck", "   ");
     });
     expect(renameSession).not.toHaveBeenCalled();
     expect(renamePersistedSession).not.toHaveBeenCalled();
@@ -443,27 +427,27 @@ describe("useShellSessions", () => {
     expect(setShellError).not.toHaveBeenCalled();
   });
 
-  it("handleSaveAs bails on a cancelled save dialog (null path): no save, no recents, no refresh, busy clears (#204)", async () => {
+  it("handleSaveAs bails on a cancelled save dialog (null path): no save, no extra refresh, busy clears (#204)", async () => {
     // saveDialog returning null is the cancel path: the hook returns inside the
-    // try, the finally still clears persistenceBusy, and none of saveAsDuck /
-    // recordRecentFile / refreshSessions fire.
-    vi.mocked(createSession).mockResolvedValueOnce("s1");
+    // try, the finally still clears persistenceBusy. saveAsDuck does not fire;
+    // refreshSessions was called once by openNew (ADR-0089) but NOT again by
+    // the cancelled handleSaveAs.
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
     vi.mocked(saveDialog).mockResolvedValueOnce(null);
     const { result, refreshSessions } = renderSessions();
-    // handleSaveAs early-returns when there is no active session, so open one.
     await act(async () => {
       await result.current.openNew();
     });
+    const callsAfterOpen = refreshSessions.mock.calls.length;
     await act(async () => {
       await result.current.handleSaveAs();
     });
     expect(saveAsDuck).not.toHaveBeenCalled();
-    expect(recordRecentFile).not.toHaveBeenCalled();
-    expect(refreshSessions).not.toHaveBeenCalled();
+    expect(refreshSessions.mock.calls.length).toBe(callsAfterOpen);
     expect(result.current.busy).toBe(false);
   });
 
-  it("handleOpenDuck bails on a cancelled open dialog (null path): no open, no recents, no refresh, busy clears (#204)", async () => {
+  it("handleOpenDuck bails on a cancelled open dialog (null path): no open, no refresh, busy clears (#204)", async () => {
     vi.mocked(openDialog).mockResolvedValueOnce(null);
     const { result, refreshSessions } = renderSessions();
     await act(async () => {
@@ -471,7 +455,6 @@ describe("useShellSessions", () => {
     });
     expect(openDuck).not.toHaveBeenCalled();
     expect(createSession).not.toHaveBeenCalled();
-    expect(recordRecentFile).not.toHaveBeenCalled();
     expect(refreshSessions).not.toHaveBeenCalled();
     expect(result.current.busy).toBe(false);
   });
@@ -482,9 +465,9 @@ describe("useShellSessions", () => {
     // closeOpen test above only covers the -> null path; three sessions pin the
     // first-entry semantics so a regression to next[last] is caught (ADR-0060).
     vi.mocked(createSession)
-      .mockResolvedValueOnce("s1")
-      .mockResolvedValueOnce("s2")
-      .mockResolvedValueOnce("s3");
+      .mockResolvedValueOnce(reply("s1"))
+      .mockResolvedValueOnce(reply("s2"))
+      .mockResolvedValueOnce(reply("s3"));
     const { result } = renderSessions();
     await act(async () => {
       await result.current.openNew();
@@ -515,7 +498,7 @@ describe("useShellSessions", () => {
     // type error. This pins the decision so a future "tighten OpenSession into
     // a discriminated union" refactor cannot silently break the active-session
     // drop route (#81 A1).
-    vi.mocked(createSession).mockResolvedValueOnce("p1");
+    vi.mocked(createSession).mockResolvedValueOnce(reply("p1"));
     vi.mocked(openDuck).mockResolvedValueOnce();
     const { result } = renderSessions();
     await act(async () => {
@@ -549,8 +532,8 @@ describe("useShellSessions", () => {
     // cover, and the most likely regression vector for the unmountOpen
     // refactor's reconciliation.
     vi.mocked(createSession)
-      .mockResolvedValueOnce("s1")
-      .mockResolvedValueOnce("s2");
+      .mockResolvedValueOnce(reply("s1"))
+      .mockResolvedValueOnce(reply("s2"));
     const { result } = renderSessions();
     await act(async () => {
       await result.current.openNew();
@@ -577,7 +560,7 @@ describe("useShellSessions", () => {
     // click racing a close, or a sid never in the set) is a no-op that keeps
     // the current active id rather than silently jumping to sessions[0]. This
     // pins the merged-state contract the refactor introduced.
-    vi.mocked(createSession).mockResolvedValueOnce("s1").mockResolvedValueOnce("s2");
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1")).mockResolvedValueOnce(reply("s2"));
     const { result } = renderSessions();
     await act(async () => {
       await result.current.openNew();

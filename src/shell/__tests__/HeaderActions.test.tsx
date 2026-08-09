@@ -17,11 +17,7 @@ function renderShell(ui: ReactElement) {
   );
 }
 
-describe("HeaderActions (issue #282 retirement: Open / Save only)", () => {
-  // The key-state badge + the settings gear moved to the shared
-  // ConnectionStatus footer at the session sidebar's bottom (ADR-0075
-  // cross-view unification). The topbar cluster keeps exactly the two
-  // session-scoped file actions.
+describe("HeaderActions (ADR-0089: Save permanently disabled)", () => {
   function renderActions({
     disabled = false,
     onOpenDuck = vi.fn(),
@@ -43,24 +39,23 @@ describe("HeaderActions (issue #282 retirement: Open / Save only)", () => {
     expect(buttons).toHaveLength(2);
     expect(screen.getByRole("button", { name: "Open .duck" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save as .duck" })).toBeInTheDocument();
-    // The retired chrome carries no residue: no settings-labelled button, no
-    // key-state badge hooks (.key-ok / .key-missing), no Badge host at all.
     expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
     expect(container.querySelector(".key-ok")).toBeNull();
     expect(container.querySelector(".key-missing")).toBeNull();
     expect(container.querySelector("[data-slot='badge']")).toBeNull();
   });
 
-  it("fires the matching action per button when enabled", () => {
+  it("fires Open but NOT Save (Save permanently disabled per ADR-0089)", () => {
     const { onOpenDuck, onSaveAs } = renderActions();
     fireEvent.click(screen.getByRole("button", { name: "Open .duck" }));
     expect(onOpenDuck).toHaveBeenCalledOnce();
     expect(onSaveAs).not.toHaveBeenCalled();
+    // Save is permanently disabled — clicking it does nothing.
     fireEvent.click(screen.getByRole("button", { name: "Save as .duck" }));
-    expect(onSaveAs).toHaveBeenCalledOnce();
+    expect(onSaveAs).not.toHaveBeenCalled();
   });
 
-  it("disables both buttons together (no active session / busy shell)", () => {
+  it("disables Open together with the shell gate; Save is always disabled", () => {
     const { onOpenDuck, onSaveAs } = renderActions({ disabled: true });
     const open = screen.getByRole("button", { name: "Open .duck" });
     const save = screen.getByRole("button", { name: "Save as .duck" });
@@ -72,20 +67,21 @@ describe("HeaderActions (issue #282 retirement: Open / Save only)", () => {
     expect(onSaveAs).not.toHaveBeenCalled();
   });
 
+  it("Save is always disabled even when the shell is not disabled", () => {
+    renderActions({ disabled: false });
+    expect(screen.getByRole("button", { name: "Save as .duck" })).toBeDisabled();
+  });
+
   it("keeps the native title tooltips alive on the disabled buttons (pointer-events override)", () => {
-    // disabled:pointer-events-auto overrides the shadcn base's
-    // disabled:pointer-events-none so the native title still surfaces on the
-    // disabled buttons (ADR-0067 note); a disabled <button> still never
-    // dispatches click, asserted above.
     const { container } = renderActions({ disabled: true });
     const buttons = container.querySelectorAll(".header-actions [data-slot='button']");
     buttons.forEach((btn) => {
       expect(btn.className.split(/\s+/)).toContain("disabled:pointer-events-auto");
       expect(btn.getAttribute("title")).toBeTruthy();
     });
-    // The disabled Save carries the "open or create a session first" hint.
+    // The Save button carries the auto-save hint (ADR-0089).
     expect(screen.getByRole("button", { name: "Save as .duck" }).getAttribute("title")).toBe(
-      "Open or create a session first",
+      "Sessions auto-save — no manual save needed",
     );
   });
 });

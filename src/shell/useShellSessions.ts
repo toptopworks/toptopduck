@@ -31,7 +31,6 @@ import {
   deleteSession,
   onResumeProgress,
   openDuck,
-  recordRecentFile,
   renamePersistedSession,
   renameSession,
   saveAsDuck,
@@ -68,26 +67,6 @@ export interface UseShellSessionsDeps {
   setShellError: (error: AppError | null) => void;
 }
 
-/** Record a recent file (best-effort) then refresh the sidebar regardless of the
- *  recents IPC outcome. recordRecentFile is advisory bookkeeping: the .duck is
- *  already on disk and the sidebar list re-derives from list_sessions (ADR-0068),
- *  NOT from recents landing. A reject is logged (never blocks the refresh, never
- *  surfaces as an unhandled rejection) so a recents IPC failure stays observable
- *  without breaking the save/open flow (issue #203). */
-function recordRecentAndRefresh(
-  path: string,
-  intl: IntlShape,
-  refresh: () => void,
-): void {
-  void recordRecentFile(path)
-    .catch((e) => {
-      log.warn("recordRecentFile", "recents record failed", fmtError(e, intl));
-    })
-    .finally(() => {
-      refresh();
-    });
-}
-
 /** Merged open-set state (issue #205): the session list + the active id move as
  *  one value so the invariant `activeId !== null => activeId ∈ sessions` is
  *  enforced at a single transition chokepoint (see `apply` in the hook) instead
@@ -119,7 +98,7 @@ export function useShellSessions({
   clearPendingIngest: (sid: string) => void;
   closeOpen: (sid: string) => Promise<void>;
   deletePersisted: (path: string, sid: string | null) => Promise<void>;
-  renameEntry: (sid: string | null, path: string | null, newName: string) => Promise<void>;
+  renameEntry: (sid: string | null, path: string, newName: string) => Promise<void>;
   handleSaveAs: () => Promise<void>;
   handleOpenDuck: () => Promise<void>;
 } {
@@ -226,38 +205,42 @@ export function useShellSessions({
     [apply],
   );
 
-  // "+ New session" (ADR-0061): mint an empty session and enter its empty state.
+  // "+ New session" (ADR-0061/0089): mint a session — the backend creates +
+  // persists immediately, returning both the runtime id and the bound .duck
+  // path. name starts empty; the display layer renders a localized "New
+  // session" placeholder until the first turn auto-names or the user renames.
   const openNew = useCallback(async () => {
     try {
-      const sid = await createSession();
-      // name starts empty; the display layer renders a localized "New session"
-      // placeholder until the user saves-as or renames (data, not chrome).
-      registerOpen({ sid, name: "", path: null, pendingIngestPath: null });
+      const { session_id: sid, duck_path: path } = await createSession();
+      registerOpen({ sid, name: "", path, pendingIngestPath: null });
+      refreshSessions();
     } catch (e) {
       setShellError(toAppError(e, intl, "shell"));
     }
-  }, [intl, registerOpen, setShellError]);
+  }, [intl, registerOpen, refreshSessions, setShellError]);
 
-  // Drop-to-create on the cold-start hero (ADR-0061, #81 A1): mint a session
-  // and hand the dropped path to the new SessionPane as pendingIngestPath. The
-  // pane consumes it via handleIngest (the only path that can surface an xlsx
-  // NeedsGuidance dialog); the shell never ingests directly. droppingRef guards
-  // a second drop landing while the first createSession is still in flight.
+  // Drop-to-create on the cold-start hero (ADR-0061/0089, #81 A1): mint a
+  // persisted session and hand the dropped path to the new SessionPane as
+  // pendingIngestPath. The pane consumes it via handleIngest (the only path
+  // that can surface an xlsx NeedsGuidance dialog); the shell never ingests
+  // directly. droppingRef guards a second drop landing while the first
+  // createSession is still in flight.
   const droppingRef = useRef(false);
   const dropFile = useCallback(
     async (path: string) => {
       if (droppingRef.current) return;
       droppingRef.current = true;
       try {
-        const sid = await createSession();
-        registerOpen({ sid, name: "", path: null, pendingIngestPath: path });
+        const { session_id: sid, duck_path: duckPath } = await createSession();
+        registerOpen({ sid, name: "", path: duckPath, pendingIngestPath: path });
+        refreshSessions();
       } catch (e) {
         setShellError(toAppError(e, intl, "shell"));
       } finally {
         droppingRef.current = false;
       }
     },
-    [intl, registerOpen, setShellError],
+    [intl, registerOpen, refreshSessions, setShellError],
   );
 
   // Single webview-level drop router (#81): Tauri's onDragDropEvent is a
@@ -361,7 +344,7 @@ export function useShellSessions({
         }
       });
       try {
-        const sid = await createSession();
+        const { session_id: sid } = await createSession();
         targetSid = sid;
         await openDuck(sid, path);
         await queryClient.invalidateQueries({ queryKey: ["session", sid] });
@@ -526,7 +509,10 @@ export function useShellSessions({
     [intl, mapSessions, refreshSessions, setShellError],
   );
 
-  // --- Save / Open .duck (ADR-0034/0036) ----------------------------------
+  // --- Save / Open .duck (ADR-0034/0036/0089) -----------------------------
+  // ADR-0089: sessions auto-persist from creation. handleSaveAs remains for the
+  // future "export a copy" feature (ADR-0089 Decision 5) — the UI button is
+  // disabled until that feature lands.
   const handleSaveAs = useCallback(async () => {
     if (!activeSession) return;
     setPersistenceBusy(true);
@@ -538,20 +524,13 @@ export function useShellSessions({
       const stem =
         path.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? "session";
       await saveAsDuck(activeSession.sid, path, stem);
-      // Bind the path + name on the open entry; the sidebar list refreshes.
-      mapSessions((sessions) =>
-        sessions.map((s) =>
-          s.sid === activeSession.sid ? { ...s, path, name: stem } : s,
-        ),
-      );
-      // Best-effort recents record + sidebar refresh (see recordRecentAndRefresh).
-      recordRecentAndRefresh(path, intl, refreshSessions);
+      refreshSessions();
     } catch (e) {
       setShellError(toAppError(e, intl, "shell"));
     } finally {
       setPersistenceBusy(false);
     }
-  }, [intl, activeSession, mapSessions, refreshSessions, setShellError]);
+  }, [intl, activeSession, refreshSessions, setShellError]);
 
   const handleOpenDuck = useCallback(async () => {
     setPersistenceBusy(true);
@@ -565,8 +544,7 @@ export function useShellSessions({
       const stem =
         path.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? "session";
       await openPersisted(path, stem);
-      // Best-effort recents record + sidebar refresh (see recordRecentAndRefresh).
-      recordRecentAndRefresh(path, intl, refreshSessions);
+      refreshSessions();
     } catch (e) {
       setShellError(toAppError(e, intl, "shell"));
     } finally {

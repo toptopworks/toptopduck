@@ -93,7 +93,7 @@ interface SessionSidebarProps {
   onOpenPersisted: (path: string, name: string) => void;
   onClose: (sid: string) => void;
   onDelete: (path: string, sid: string | null) => void;
-  onRename: (sid: string | null, path: string | null, newName: string) => void;
+  onRename: (sid: string | null, path: string, newName: string) => void;
   onSwitchGrouping: (mode: SidebarGrouping) => void;
   // Open the Ctrl/⌘+K search modal (ADR-0072, issue #252). The
   // shell owns the open state so the global keydown + this button share one
@@ -253,7 +253,7 @@ export function SessionSidebar({
                   onActivate={() => {
                     setOpenMenuKey(null);
                     if (entry.sid) onActivate(entry.sid);
-                    else if (entry.path) onOpenPersisted(entry.path, entry.name);
+                    else onOpenPersisted(entry.path, entry.name);
                   }}
                   onRename={() => {
                     setOpenMenuKey(null);
@@ -318,11 +318,8 @@ export function SessionSidebar({
           path={pendingAction.entry.path}
           onCancel={() => setPendingAction(null)}
           onConfirm={() => {
-            // Delete only enters this dialog from an entry with a path (the menu
-            // renders Delete solely when entry.path is set); guard for the type.
-            if (pendingAction.entry.path) {
-              onDelete(pendingAction.entry.path, pendingAction.entry.sid);
-            }
+            // path is always non-null since ADR-0089 (sessions auto-persist).
+            onDelete(pendingAction.entry.path, pendingAction.entry.sid);
             setPendingAction(null);
           }}
         />
@@ -537,7 +534,7 @@ function SidebarRow({
         aria-current={entry.active ? "true" : undefined}
         disabled={disabled}
         onClick={onActivate}
-        title={entry.path ?? undefined}
+        title={entry.path}
       >
         {/* ADR-0072 (issue #249): unified leading chat-bubble glyph on every
             row, replacing the persisted/not Database/CircleDot split. */}
@@ -607,16 +604,14 @@ function SidebarRow({
               <FormattedMessage id="common.close" defaultMessage="Close" />
             </button>
           )}
-          {entry.path && (
-            <button
-              type="button"
-              role="menuitem"
-              className={cn("danger", sessionMenuItemBase, "text-destructive")}
-              onClick={onDelete}
-            >
-              <FormattedMessage id="common.delete" defaultMessage="Delete" />
-            </button>
-          )}
+          <button
+            type="button"
+            role="menuitem"
+            className={cn("danger", sessionMenuItemBase, "text-destructive")}
+            onClick={onDelete}
+          >
+            <FormattedMessage id="common.delete" defaultMessage="Delete" />
+          </button>
         </div>
       )}
     </li>
@@ -647,7 +642,7 @@ export function DeleteSessionDialog({
   onConfirm,
 }: {
   name: string;
-  path: string | null;
+  path: string;
   onCancel: () => void;
   onConfirm: () => void;
 }) {

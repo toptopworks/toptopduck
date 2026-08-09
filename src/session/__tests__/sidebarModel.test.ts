@@ -76,11 +76,12 @@ describe("buildSidebarGroups", () => {
     expect(entry.path).toBe("/a.duck");
   });
 
-  it("renders a never-saved open session as its own row under Today", () => {
-    // An unsaved new session has no path, so it is not in list_sessions; it
-    // becomes a standalone entry stamped to `now`.
+  it("renders an open session not yet in the persisted list as its own row under Today (ADR-0089)", () => {
+    // A just-created session (ADR-0089) carries a real path but may not yet be
+    // in the list_sessions result (async refetch). It becomes a standalone
+    // entry stamped to `now` until the persisted list catches up.
     const open: OpenSession[] = [
-      { sid: "uuid-new", name: "", path: null, pendingIngestPath: null },
+      { sid: "uuid-new", name: "", path: "/sessions/uuid-new/session.duck", pendingIngestPath: null },
     ];
 
     const groups = buildSidebarGroups([], open, "uuid-new", NOW, "time");
@@ -89,7 +90,7 @@ describe("buildSidebarGroups", () => {
     expect(groups[0].kind).toBe("today");
     const entry = groups[0].entries[0];
     expect(entry.sid).toBe("uuid-new");
-    expect(entry.path).toBeNull();
+    expect(entry.path).toBe("/sessions/uuid-new/session.duck");
     expect(entry.active).toBe(true);
     expect(entry.firstSourceName).toBeNull();
     expect(entry.turnCount).toBe(0);
@@ -272,7 +273,7 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
     // appears here even when it is the active session. The sidebar still lists
     // it; the modal is a persisted-session jump surface.
     const open: OpenSession[] = [
-      { sid: "uuid-new", name: "unsaved", path: null, pendingIngestPath: null },
+      { sid: "uuid-new", name: "unsaved", path: "/sessions/uuid-new/session.duck", pendingIngestPath: null },
     ];
     const entries = buildSearchEntries(twoPersisted(), open, "uuid-new", "");
     expect(entries.map((e) => e.name)).toEqual(["alpha", "beta"]);

@@ -825,13 +825,12 @@ impl Session {
     /// surface the missing file as an interactive re-link).
     fn migrate_derived_sources(&mut self, duck_path: &Path) {
         let staging_dir = self.temp_path.join(derived_source::DERIVED_STAGING_DIR);
-        let Some(duck_dir) = duck_path.parent() else {
+        // ADR-0089: derived sources live in the per-session directory's `assets/`
+        // subdirectory (previously `{duck_stem}.assets/` adjacent to a flat .duck).
+        let Some(session_dir) = duck_path.parent() else {
             return;
         };
-        let Some(duck_stem) = duck_path.file_stem().and_then(|s| s.to_str()) else {
-            return;
-        };
-        let assets_dir = duck_dir.join(format!("{duck_stem}.assets"));
+        let assets_dir = session_dir.join("assets");
 
         // Collect (ref_name, old_path, new_path) for sources staged in
         // temp_path/derived/. Iterating the working set immutably first, then
@@ -3444,21 +3443,23 @@ mod tests {
             .bind_duck(duck_path.clone(), "test session".into())
             .expect("bind_duck");
 
-        // AC2a: file was copied to <duck_stem>.assets/.
-        let assets_csv = duck_dir.path().join("session.assets").join("data.csv");
+        // ADR-0089: derived sources migrate to the per-session directory's
+        // `assets/` subdirectory (replacing the former `{duck_stem}.assets/`).
+        let assets_csv = duck_dir.path().join("assets").join("data.csv");
         assert!(
             assets_csv.exists(),
-            "derived file migrated to .assets/: {assets_csv:?}"
+            "derived file migrated to assets/: {assets_csv:?}"
         );
 
-        // AC2b: descriptor source_path updated to the .assets/ path.
+        // AC2b: descriptor source_path updated to the assets/ path.
         let d = session
             .working_set
             .get("data")
             .expect("data still registered");
         assert!(
-            d.source_path.contains("session.assets"),
-            "source_path updated to .assets/: {}",
+            d.source_path.ends_with("assets\\data.csv")
+                || d.source_path.ends_with("assets/data.csv"),
+            "source_path updated to assets/: {}",
             d.source_path
         );
         assert!(
@@ -3467,7 +3468,8 @@ mod tests {
             d.source_path
         );
 
-        // AC2c: recipe carries the portable (relative) path.
+        // AC2c: recipe carries the portable (relative) path. ADR-0089: the
+        // assets directory is now per-session `assets/` (not `{stem}.assets/`).
         let recipe = crate::persistence::read_duck(&duck_path).expect("read recipe");
         let src = recipe
             .sources
@@ -3475,15 +3477,16 @@ mod tests {
             .find(|s| s.reference_name == "data")
             .expect("data in recipe sources");
         assert!(
-            src.source_path.contains("session.assets"),
-            "recipe source_path is .assets/: {}",
+            src.source_path.ends_with("assets\\data.csv")
+                || src.source_path.ends_with("assets/data.csv"),
+            "recipe source_path is assets/: {}",
             src.source_path
         );
         assert!(
             src.relative_path
                 .as_ref()
-                .is_some_and(|p| p.contains("session.assets")),
-            "recipe relative_path is .assets/: {:?}",
+                .is_some_and(|p| p == "assets/data.csv" || p == "assets\\data.csv"),
+            "recipe relative_path is assets/: {:?}",
             src.relative_path
         );
     }

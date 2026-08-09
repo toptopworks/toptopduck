@@ -41,7 +41,7 @@ describe("DeleteSessionDialog (issue #111)", () => {
     // on ESC. The contract that matters for a destructive dialog is that ESC
     // never fires the destructive action, so onConfirm stays un-called.
     const onConfirm = vi.fn();
-    renderDialog(<DeleteSessionDialog name="sess" path={null} onCancel={() => {}} onConfirm={onConfirm} />);
+    renderDialog(<DeleteSessionDialog name="sess" path="/x/test.duck" onCancel={() => {}} onConfirm={onConfirm} />);
     fireEvent.keyDown(screen.getByRole("alertdialog"), { key: "Escape" });
     expect(onConfirm).not.toHaveBeenCalled();
   });
@@ -49,7 +49,7 @@ describe("DeleteSessionDialog (issue #111)", () => {
   it("Cancel routes to onCancel only (no cross-talk to onConfirm)", () => {
     const onCancel = vi.fn();
     const onConfirm = vi.fn();
-    renderDialog(<DeleteSessionDialog name="sess" path={null} onCancel={onCancel} onConfirm={onConfirm} />);
+    renderDialog(<DeleteSessionDialog name="sess" path="/x/test.duck" onCancel={onCancel} onConfirm={onConfirm} />);
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(onCancel).toHaveBeenCalledOnce();
     expect(onConfirm).not.toHaveBeenCalled();
@@ -58,7 +58,7 @@ describe("DeleteSessionDialog (issue #111)", () => {
   it("Delete routes to onConfirm only (no cross-talk to onCancel)", () => {
     const onCancel = vi.fn();
     const onConfirm = vi.fn();
-    renderDialog(<DeleteSessionDialog name="sess" path={null} onCancel={onCancel} onConfirm={onConfirm} />);
+    renderDialog(<DeleteSessionDialog name="sess" path="/x/test.duck" onCancel={onCancel} onConfirm={onConfirm} />);
     fireEvent.click(screen.getByRole("button", { name: "Delete permanently" }));
     expect(onConfirm).toHaveBeenCalledOnce();
     expect(onCancel).not.toHaveBeenCalled();
