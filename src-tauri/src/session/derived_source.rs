@@ -23,8 +23,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use sqlparser::ast::{
-    Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, ObjectName, Query, SetExpr,
-    Statement, TableAlias, TableFactor, TableWithJoins,
+    Expr, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident, ObjectName, Query,
+    Select, SelectItem, SetExpr, Statement, TableAlias, TableFactor, TableWithJoins,
 };
 use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser;
@@ -326,13 +326,39 @@ fn rewrite_query(query: &mut Query, path_to_ref: &HashMap<String, String>) {
     rewrite_set_expr(query.body.as_mut(), path_to_ref);
 }
 
-/// Walk a set-expression: a SELECT (rewrite its FROM), a set-op (recurse
-/// both branches), or a nested query (recurse).
+/// Walk a set-expression: a SELECT (rewrite its FROM + scalar `read_*` in
+/// projection / WHERE / GROUP BY / HAVING), a set-op (recurse both
+/// branches), or a nested query (recurse).
+///
+/// The scalar-expression rewrite (issue #441) complements the FROM-clause
+/// rewrite: `SELECT read_csv_auto('path')` or `WHERE id IN (SELECT id FROM
+/// read_csv_auto('path'))` are detected by `extract_read_paths` and staged by
+/// `process()`, but the FROM walker never touches them. Without the scalar
+/// rewrite, provenance misses the reference and resume breaks when
+/// `tool_output` is cleared.
 fn rewrite_set_expr(expr: &mut SetExpr, path_to_ref: &HashMap<String, String>) {
     match expr {
         SetExpr::Select(select) => {
             for twj in &mut select.from {
                 rewrite_table_with_joins(twj, path_to_ref);
+            }
+            // Scalar read_* in projection / selection / group_by / having.
+            for item in &mut select.projection {
+                if let SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } = item
+                {
+                    rewrite_expr(e, path_to_ref);
+                }
+            }
+            if let Some(sel) = &mut select.selection {
+                rewrite_expr(sel, path_to_ref);
+            }
+            if let GroupByExpr::Expressions(exprs, _) = &mut select.group_by {
+                for g in exprs {
+                    rewrite_expr(g, path_to_ref);
+                }
+            }
+            if let Some(having) = &mut select.having {
+                rewrite_expr(having, path_to_ref);
             }
         }
         SetExpr::SetOperation { left, right, .. } => {
@@ -424,6 +450,284 @@ fn try_match_read_function(
         // Named arg before any positional — skip (the path is positional).
     }
     None
+}
+
+/// Recursively walk an `Expr` tree, replacing scalar `read_*('path')` calls
+/// whose path is in `path_to_ref` with an equivalent catalog-reference
+/// subquery (issue #441). A table-function call like `read_csv_auto('path')`
+/// used in scalar position returns the first row as a struct; the rewrite
+/// replaces it with `(SELECT t FROM "ref".data t LIMIT 1)` which returns the
+/// same first-row struct from the catalog reference.
+///
+/// This walker mirrors `read_paths::walk_expr` in coverage but mutates
+/// in-place instead of collecting. Subqueries are recursed via `rewrite_query`
+/// so a `read_*` in a nested FROM is caught by the FROM walker, not here.
+fn rewrite_expr(expr: &mut Expr, path_to_ref: &HashMap<String, String>) {
+    // Check if this node itself is a matching scalar read_* call.
+    if let Expr::Function(func) = expr {
+        let args: &[FunctionArg] = match &func.args {
+            FunctionArguments::List(list) => &list.args,
+            _ => &[],
+        };
+        if let Some(ref_name) = try_match_read_function(&func.name, args, path_to_ref) {
+            *expr = scalar_subquery_for_ref(&ref_name);
+            return;
+        }
+    }
+
+    // Recurse into child expressions.
+    rewrite_expr_children(expr, path_to_ref);
+}
+
+/// Descend into every child `Expr` of `expr`, applying [`rewrite_expr`].
+/// Covers the same variant set as `read_paths::walk_expr` so a `read_*`
+/// nested at any depth in the expression tree is found and replaced.
+fn rewrite_expr_children(expr: &mut Expr, path_to_ref: &HashMap<String, String>) {
+    match expr {
+        Expr::Function(func) => {
+            if let FunctionArguments::List(list) = &mut func.args {
+                for arg in &mut list.args {
+                    if let FunctionArg::Unnamed(FunctionArgExpr::Expr(e))
+                    | FunctionArg::Named {
+                        arg: FunctionArgExpr::Expr(e),
+                        ..
+                    } = arg
+                    {
+                        rewrite_expr(e, path_to_ref);
+                    }
+                }
+            }
+            if let Some(f) = &mut func.filter {
+                rewrite_expr(f, path_to_ref);
+            }
+        }
+
+        Expr::UnaryOp { expr, .. } | Expr::Cast { expr, .. } => {
+            rewrite_expr(expr, path_to_ref);
+        }
+        Expr::Extract { expr, .. } | Expr::Ceil { expr, .. } | Expr::Floor { expr, .. } => {
+            rewrite_expr(expr, path_to_ref);
+        }
+        Expr::Collate { expr, .. } => {
+            rewrite_expr(expr, path_to_ref);
+        }
+
+        Expr::IsFalse(e)
+        | Expr::IsNotFalse(e)
+        | Expr::IsTrue(e)
+        | Expr::IsNotTrue(e)
+        | Expr::IsNull(e)
+        | Expr::IsNotNull(e)
+        | Expr::IsUnknown(e)
+        | Expr::IsNotUnknown(e)
+        | Expr::Nested(e)
+        | Expr::OuterJoin(e)
+        | Expr::Prior(e) => rewrite_expr(e, path_to_ref),
+
+        Expr::BinaryOp { left, right, .. } => {
+            rewrite_expr(left, path_to_ref);
+            rewrite_expr(right, path_to_ref);
+        }
+        Expr::IsDistinctFrom(a, b) | Expr::IsNotDistinctFrom(a, b) => {
+            rewrite_expr(a, path_to_ref);
+            rewrite_expr(b, path_to_ref);
+        }
+        Expr::Position { expr, r#in, .. } => {
+            rewrite_expr(expr, path_to_ref);
+            rewrite_expr(r#in, path_to_ref);
+        }
+
+        Expr::InList { expr, list, .. } => {
+            rewrite_expr(expr, path_to_ref);
+            for e in list {
+                rewrite_expr(e, path_to_ref);
+            }
+        }
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            rewrite_expr(expr, path_to_ref);
+            rewrite_expr(low, path_to_ref);
+            rewrite_expr(high, path_to_ref);
+        }
+        Expr::Like { expr, pattern, .. }
+        | Expr::ILike { expr, pattern, .. }
+        | Expr::SimilarTo { expr, pattern, .. }
+        | Expr::RLike { expr, pattern, .. } => {
+            rewrite_expr(expr, path_to_ref);
+            rewrite_expr(pattern, path_to_ref);
+        }
+        Expr::Substring {
+            expr,
+            substring_from,
+            substring_for,
+            ..
+        } => {
+            rewrite_expr(expr, path_to_ref);
+            if let Some(e) = substring_from {
+                rewrite_expr(e, path_to_ref);
+            }
+            if let Some(e) = substring_for {
+                rewrite_expr(e, path_to_ref);
+            }
+        }
+        Expr::Trim {
+            expr,
+            trim_what,
+            trim_characters,
+            ..
+        } => {
+            rewrite_expr(expr, path_to_ref);
+            if let Some(e) = trim_what {
+                rewrite_expr(e, path_to_ref);
+            }
+            if let Some(chars) = trim_characters {
+                for e in chars {
+                    rewrite_expr(e, path_to_ref);
+                }
+            }
+        }
+        Expr::Tuple(exprs) => {
+            for e in exprs {
+                rewrite_expr(e, path_to_ref);
+            }
+        }
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            if let Some(e) = operand {
+                rewrite_expr(e, path_to_ref);
+            }
+            for e in conditions {
+                rewrite_expr(e, path_to_ref);
+            }
+            for e in results {
+                rewrite_expr(e, path_to_ref);
+            }
+            if let Some(e) = else_result {
+                rewrite_expr(e, path_to_ref);
+            }
+        }
+
+        // Subqueries — recurse via rewrite_query so the FROM walker catches
+        // any read_* inside the nested query body.
+        Expr::Subquery(query) => rewrite_query(query.as_mut(), path_to_ref),
+        Expr::Exists { subquery, .. } | Expr::InSubquery { subquery, .. } => {
+            rewrite_query(subquery.as_mut(), path_to_ref);
+        }
+        Expr::InUnnest { expr, .. } => rewrite_expr(expr, path_to_ref),
+
+        Expr::CompositeAccess { expr, .. }
+        | Expr::Subscript { expr, .. }
+        | Expr::Named { expr, .. }
+        | Expr::Convert { expr, .. } => rewrite_expr(expr, path_to_ref),
+        Expr::JsonAccess { value, .. } => rewrite_expr(value, path_to_ref),
+        Expr::MapAccess { column, .. } => rewrite_expr(column, path_to_ref),
+
+        Expr::AtTimeZone {
+            timestamp,
+            time_zone,
+        } => {
+            rewrite_expr(timestamp, path_to_ref);
+            rewrite_expr(time_zone, path_to_ref);
+        }
+        Expr::Overlay {
+            expr,
+            overlay_what,
+            overlay_from,
+            overlay_for,
+        } => {
+            rewrite_expr(expr, path_to_ref);
+            rewrite_expr(overlay_what, path_to_ref);
+            rewrite_expr(overlay_from, path_to_ref);
+            if let Some(e) = overlay_for {
+                rewrite_expr(e, path_to_ref);
+            }
+        }
+
+        Expr::Struct { values, .. } => {
+            for e in values {
+                rewrite_expr(e, path_to_ref);
+            }
+        }
+        Expr::Dictionary(fields) => {
+            for f in fields {
+                rewrite_expr(&mut f.value, path_to_ref);
+            }
+        }
+        Expr::Map(map) => {
+            for entry in &mut map.entries {
+                rewrite_expr(&mut entry.key, path_to_ref);
+                rewrite_expr(&mut entry.value, path_to_ref);
+            }
+        }
+        Expr::Array(arr) => {
+            for e in &mut arr.elem {
+                rewrite_expr(e, path_to_ref);
+            }
+        }
+        Expr::Lambda(lambda) => rewrite_expr(&mut lambda.body, path_to_ref),
+
+        // Leaves and rare/dialect-specific variants: no children to walk.
+        _ => {}
+    }
+}
+
+/// Build an `Expr::Subquery` equivalent to a scalar `read_*('path')` call:
+/// `(SELECT t FROM "ref".data t LIMIT 1)`. Returns the first row as a
+/// struct via the table alias `t`, matching DuckDB's scalar-position
+/// semantics for table functions (issue #441).
+fn scalar_subquery_for_ref(ref_name: &str) -> Expr {
+    let select = Select {
+        distinct: None,
+        top: None,
+        top_before_distinct: false,
+        projection: vec![SelectItem::UnnamedExpr(Expr::Identifier(Ident::new("t")))],
+        into: None,
+        from: vec![TableWithJoins {
+            relation: catalog_table_factor(
+                ref_name,
+                Some(TableAlias {
+                    name: Ident::new("t"),
+                    columns: vec![],
+                }),
+            ),
+            joins: vec![],
+        }],
+        lateral_views: vec![],
+        prewhere: None,
+        selection: None,
+        group_by: GroupByExpr::Expressions(vec![], vec![]),
+        cluster_by: vec![],
+        distribute_by: vec![],
+        sort_by: vec![],
+        having: None,
+        named_window: vec![],
+        qualify: None,
+        window_before_qualify: false,
+        value_table_mode: None,
+        connect_by: None,
+    };
+
+    Expr::Subquery(Box::new(Query {
+        with: None,
+        body: Box::new(SetExpr::Select(Box::new(select))),
+        order_by: None,
+        limit: Some(Expr::Value(sqlparser::ast::Value::Number(
+            "1".to_string(),
+            false,
+        ))),
+        limit_by: vec![],
+        offset: None,
+        fetch: None,
+        locks: vec![],
+        for_clause: None,
+        settings: None,
+        format_clause: None,
+    }))
 }
 
 /// Build a `TableFactor::Table` for the catalog reference `"ref".data`,
@@ -640,6 +944,150 @@ mod tests {
             "read_csv_auto removed: {rewritten}"
         );
         assert!(rewritten.contains("AS t"), "alias preserved: {rewritten}");
+    }
+
+    // --- Scalar read_* rewrite (issue #441) -----------------------------
+
+    #[test]
+    fn rewrite_replaces_scalar_read_in_projection() {
+        let path = "/tmp/tool_output/data.csv";
+        let sql = format!("SELECT read_csv_auto('{path}')");
+        let rewritten = rewrite_sql(&sql, &map(&[(path, "data")])).unwrap();
+        assert!(
+            rewritten.contains(r#""data".data"#),
+            "catalog ref present: {rewritten}"
+        );
+        assert!(
+            !rewritten.contains("read_csv_auto"),
+            "read_csv_auto removed: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn rewrite_replaces_scalar_read_in_where() {
+        let path = "/tmp/tool_output/data.csv";
+        let sql = format!("SELECT 1 FROM t WHERE length(read_csv_auto('{path}')) > 0");
+        let rewritten = rewrite_sql(&sql, &map(&[(path, "data")])).unwrap();
+        assert!(
+            rewritten.contains(r#""data".data"#),
+            "catalog ref present in WHERE: {rewritten}"
+        );
+        assert!(
+            !rewritten.contains("read_csv_auto"),
+            "read_csv_auto removed: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn rewrite_replaces_scalar_read_in_group_by() {
+        let path = "/tmp/tool_output/data.csv";
+        let sql = format!(
+            "SELECT count(*) FROM read_csv_auto('{path}') GROUP BY read_csv_auto('{path}')"
+        );
+        let rewritten = rewrite_sql(&sql, &map(&[(path, "data")])).unwrap();
+        // FROM clause rewrite + scalar GROUP BY rewrite — both present.
+        let ref_count = rewritten.matches(r#""data".data"#).count();
+        assert!(
+            ref_count >= 2,
+            "catalog ref appears in both FROM and GROUP BY: {rewritten} (found {ref_count})"
+        );
+        assert!(
+            !rewritten.contains("read_csv_auto"),
+            "read_csv_auto fully removed: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn rewrite_replaces_scalar_read_in_having() {
+        let path = "/tmp/tool_output/data.csv";
+        let sql = format!(
+            "SELECT count(*) FROM read_csv_auto('{path}') GROUP BY id HAVING count(read_csv_auto('{path}')) > 0"
+        );
+        let rewritten = rewrite_sql(&sql, &map(&[(path, "data")])).unwrap();
+        assert!(
+            !rewritten.contains("read_csv_auto"),
+            "read_csv_auto fully removed from HAVING: {rewritten}"
+        );
+        assert!(
+            rewritten.contains(r#""data".data"#),
+            "catalog ref present: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn rewrite_replaces_scalar_read_in_subquery_expression() {
+        // A read_* inside a scalar subquery in the projection.
+        let path = "/tmp/tool_output/data.csv";
+        let sql = format!("SELECT (SELECT count(*) FROM read_csv_auto('{path}'))");
+        let rewritten = rewrite_sql(&sql, &map(&[(path, "data")])).unwrap();
+        assert!(
+            rewritten.contains(r#""data".data"#),
+            "catalog ref present in subquery: {rewritten}"
+        );
+        assert!(
+            !rewritten.contains("read_csv_auto"),
+            "read_csv_auto removed: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn rewrite_preserves_non_matching_scalar_read() {
+        // A read_* whose path is NOT in path_to_ref is left untouched.
+        let sql = "SELECT read_csv_auto('/other/path.csv')";
+        let rewritten = rewrite_sql(sql, &map(&[])).unwrap();
+        assert!(
+            rewritten.contains("read_csv_auto"),
+            "non-derived read_* preserved: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn rewrite_scalar_strips_read_options() {
+        // read_csv_auto with options after the path — the scalar call is
+        // replaced wholesale (options stripped, same as FROM rewrite).
+        let path = "/tmp/tool_output/data.csv";
+        let sql = format!("SELECT read_csv_auto('{path}', header=true)");
+        let rewritten = rewrite_sql(&sql, &map(&[(path, "data")])).unwrap();
+        assert!(
+            rewritten.contains(r#""data".data"#),
+            "catalog ref replaces entire call: {rewritten}"
+        );
+        assert!(
+            !rewritten.contains("header"),
+            "options stripped: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn rewrite_scalar_in_mixed_from_and_projection() {
+        // Same file referenced in both FROM (table factor) and SELECT
+        // (scalar) — both positions are rewritten.
+        let path = "/tmp/tool_output/data.csv";
+        let sql = format!("SELECT read_csv_auto('{path}') FROM read_csv_auto('{path}')");
+        let rewritten = rewrite_sql(&sql, &map(&[(path, "data")])).unwrap();
+        assert!(
+            !rewritten.contains("read_csv_auto"),
+            "all read_csv_auto removed: {rewritten}"
+        );
+        let ref_count = rewritten.matches(r#""data".data"#).count();
+        assert!(
+            ref_count >= 2,
+            "catalog ref in both projection and FROM: {rewritten} (found {ref_count})"
+        );
+    }
+
+    #[test]
+    fn rewrite_scalar_in_union_branches() {
+        // Scalar read_* in one UNION branch, table-factor read_* in the other.
+        let path = "/tmp/tool_output/data.csv";
+        let sql = format!(
+            "SELECT read_csv_auto('{path}') UNION ALL SELECT * FROM read_csv_auto('{path}')"
+        );
+        let rewritten = rewrite_sql(&sql, &map(&[(path, "data")])).unwrap();
+        assert!(
+            !rewritten.contains("read_csv_auto"),
+            "all read_csv_auto removed: {rewritten}"
+        );
     }
 
     // --- Integration: process() with real DuckDB + filesystem ----------
