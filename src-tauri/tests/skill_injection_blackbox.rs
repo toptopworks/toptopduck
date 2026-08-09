@@ -112,9 +112,10 @@ fn mounted_skill_body_in_prompt_and_provenance() {
         system.contains(body.trim()),
         "skill body must be verbatim in the system prompt"
     );
-    // The skill-aware boundary clause (AC #2) also rides the base prompt.
-    assert!(system.contains("挂载技能"));
-    assert!(system.contains("显式提供"));
+    // The tool-selection section (ADR-0087) rides the base prompt, guiding
+    // the agent to use matching external tools regardless of source.
+    assert!(system.contains("默认工具"));
+    assert!(system.contains("不区分工具来源"));
     drop(guard);
 
     // AC #3: the turn's provenance records {name, content_hash}. The recipe is
@@ -140,8 +141,8 @@ fn mounted_skill_body_in_prompt_and_provenance() {
 }
 
 /// AC #4 (negative space): with no skills mounted, the system prompt carries no
-/// skill-body section (only the always-on skill-aware clause in the base
-/// prompt), and the provenance skills vec is empty. Every existing black-box
+/// skill-body section (the base prompt's tool-selection section is always
+/// present), and the provenance skills vec is empty. Every existing black-box
 /// test also exercises this via `&[]`; pinned here for locality.
 #[test]
 fn empty_mount_set_omits_skill_section_and_provenance() {
@@ -169,9 +170,10 @@ fn empty_mount_set_omits_skill_section_and_provenance() {
         !system.contains("【挂载技能】"),
         "no skill-body section when nothing is mounted"
     );
-    // The skill-aware clause is always present in the base prompt (AC #2) --
-    // it names 挂载技能 in prose without injecting a body.
-    assert!(system.contains("挂载技能"));
+    // The tool-selection section is always present in the base prompt
+    // (ADR-0087) -- it names DuckDB as the default tool without injecting
+    // a skill body.
+    assert!(system.contains("默认工具"));
     drop(guard);
 
     let recipe = session.build_recipe();
