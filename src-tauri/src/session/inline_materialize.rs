@@ -29,21 +29,23 @@ impl InlineFormat {
     }
 }
 
-/// Sniff inline text for a structured format (issue #442 locked design
-/// decisions).
+/// Sniff inline text for a structured format (ADR-0087 Decision 3).
 ///
-/// Detection order (JSON before CSV/TSV — pretty-printed JSON contains commas
+/// Detection order (JSON before TSV/CSV — pretty-printed JSON contains commas
 /// and newlines):
 /// - **JSON**: `serde_json::from_str` yields an array or object. Scalars
 ///   (`"text"`, `42`, `true`, `null`) are valid JSON but not tabular — not
 ///   detected.
-/// - **CSV**: first line has ≥1 comma and there are ≥2 lines.
-/// - **TSV**: first line has ≥1 tab and there are ≥2 lines.
+/// - **TSV**: first two lines each have ≥1 tab.
+/// - **CSV**: first two lines each have ≥1 comma.
 /// - **None**: anything else (natural language, error messages, single-line
-///   values).
+///   values, prose whose second line lacks the delimiter).
 ///
 /// No length threshold and no column-count consistency check — ragged CSV is
-/// left to DuckDB's `read_csv_auto` tolerance.
+/// left to DuckDB's `read_csv_auto` tolerance. Requiring the delimiter on
+/// both the header and the first data line rejects multi-line prose whose
+/// header happens to contain a comma (e.g. `"3 rows, including alice.\nSee
+/// attached."`).
 fn detect_format(text: &str) -> Option<InlineFormat> {
     // JSON first: a valid array/object is unambiguously structured, and
     // pretty-printed JSON would false-positive the CSV check below.
@@ -52,20 +54,18 @@ fn detect_format(text: &str) -> Option<InlineFormat> {
     {
         return Some(InlineFormat::Json);
     }
-    // CSV/TSV: the first line carries a delimiter (≥1 occurrence — two
-    // columns) and at least one data line follows. A single line is not
-    // tabular. A one-column file has no delimiter and is not CSV.
+    // CSV/TSV: both the header and the first data line carry the delimiter.
+    // Requiring it on both lines rejects multi-line prose whose header
+    // happens to contain a comma but whose body does not. A single line is
+    // not tabular. A one-column file has no delimiter and is not CSV/TSV.
     let mut lines = text.lines();
     let first = lines.next()?;
-    lines.next()?;
+    let second = lines.next()?;
     // Tabs checked before commas: a tab-separated line is a stronger tabular
-    // signal than commas (CSV values may contain commas inside quotes; tabs in
-    // prose are rare).
-    let tabs = first.matches('\t').count();
-    let commas = first.matches(',').count();
-    if tabs >= 1 {
+    // signal (tabs in prose are rare; quoted CSV values may contain commas).
+    if first.contains('\t') && second.contains('\t') {
         Some(InlineFormat::Tsv)
-    } else if commas >= 1 {
+    } else if first.contains(',') && second.contains(',') {
         Some(InlineFormat::Csv)
     } else {
         None
@@ -75,11 +75,13 @@ fn detect_format(text: &str) -> Option<InlineFormat> {
 /// Try to materialize inline text to a file under `tool_output/`.
 ///
 /// Returns the written file path when the text is structured (CSV/TSV/JSON),
-/// or `None` when it is non-structured (no file written). The file is named
-/// `{tool_call_id}.{ext}` to avoid collisions between concurrent tool calls.
-///
-/// Write failures are best-effort: the caller falls back to the inline text
-/// (no materialization, the pre-#442 behavior).
+/// or `None` when: (a) the text is non-structured (no file written), (b) the
+/// `tool_call_id` contains unsafe characters — anything outside
+/// `[A-Za-z0-9_-]` — rejected as a path-traversal defense (ADR-0080), or
+/// (c) the write fails (best-effort: the caller falls back to the inline
+/// text, the pre-#442 behavior). The file is named `{tool_call_id}.{ext}` —
+/// the per-call unique ID ensures deterministic filenames matching the
+/// provider's tool-use ID.
 pub(crate) fn try_materialize(
     text: &str,
     tool_call_id: &str,
@@ -87,20 +89,22 @@ pub(crate) fn try_materialize(
 ) -> Option<PathBuf> {
     let format = detect_format(text)?;
     // Defensive: the tool_call_id comes from the provider's tool_use ID and is
-    // expected to be alphanumeric (e.g. "toolu_xxx", "tu_1"). Reject anything
-    // with path separators or traversal characters so the join cannot escape
-    // tool_output_dir (ADR-0080 threat model).
-    if !tool_call_id
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    // expected to contain only alphanumeric characters, underscores, and
+    // hyphens (e.g. "toolu_xxx", "tu_1"). The allowlist rejects everything
+    // else — path separators, dots, spaces, and all non-ASCII characters — so
+    // the join cannot escape tool_output_dir (ADR-0080 threat model).
+    if tool_call_id.is_empty()
+        || !tool_call_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
         log::warn!(
             target: "toptopduck::inline_materialize",
-            "skipping inline materialization for `{tool_call_id}`: unsafe characters in id"
+            "skipping inline materialization for `{tool_call_id}`: empty or unsafe characters in id"
         );
         return None;
     }
-    let dest = tool_output_dir.join(format!("{tool_call_id}.{}", format.extension()));
+    let dest = tool_output_dir.join(format!("{}.{}", tool_call_id, format.extension()));
     match std::fs::write(&dest, text) {
         Ok(()) => {
             log::info!(
@@ -118,6 +122,29 @@ pub(crate) fn try_materialize(
             );
             None
         }
+    }
+}
+
+/// Return the inline text, augmented with a file-path hint when it was
+/// successfully materialized. Non-structured, unsafe-id, or write-failed
+/// text is returned unchanged (pre-#442 behavior). Call this only on a
+/// success envelope (`!is_error`) — an error's text is a message, not data.
+pub(crate) fn augment_with_hint(
+    text: String,
+    tool_call_id: &str,
+    tool_output_dir: &Path,
+) -> String {
+    match try_materialize(&text, tool_call_id, tool_output_dir) {
+        Some(path) => format!(
+            concat!(
+                "{text}\n\n[Structured output saved to '{path}'. ",
+                "Use read_csv_auto or read_json to load it ",
+                "into DuckDB for analysis.]"
+            ),
+            text = text,
+            path = path.display()
+        ),
+        None => text,
     }
 }
 
@@ -189,6 +216,16 @@ mod tests {
         );
         assert_eq!(
             detect_format("Error: connection refused.\nPlease check the server."),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_prose_with_commas_on_first_line_only() {
+        // Multi-line prose whose first line happens to contain a comma but
+        // whose second line does not — must not be detected as CSV.
+        assert_eq!(
+            detect_format("The query returned 3 rows, including alice.\nSee attached for details."),
             None
         );
     }
@@ -267,5 +304,23 @@ mod tests {
         assert_eq!(try_materialize("a,b,c\n1,2,3\n", "tu/1", dir.path()), None);
         // No file was written.
         assert!(dir.path().read_dir().unwrap().next().is_none());
+    }
+
+    #[test]
+    fn rejects_empty_tool_call_id() {
+        // An empty tool_call_id passes chars().all() vacuously but would
+        // produce a dotfile — reject explicitly.
+        let dir = TempDir::new().unwrap();
+        assert_eq!(try_materialize("a,b\nc,d\n", "", dir.path()), None);
+        assert!(dir.path().read_dir().unwrap().next().is_none());
+    }
+
+    #[test]
+    fn returns_none_on_write_failure() {
+        // Pointing at a non-existent directory forces an IO error — the
+        // best-effort contract returns None (caller falls back to inline).
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("nonexistent_subdir");
+        assert_eq!(try_materialize("a,b\nc,d\n", "tu_1", &missing), None);
     }
 }

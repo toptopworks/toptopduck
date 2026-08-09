@@ -643,26 +643,13 @@ fn shape_external_outcome(
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             let text = aggregator::first_text_block(&envelope);
-            // Issue #442: when the inline text is structured (CSV/TSV/JSON),
-            // write it to tool_output/ so the agent can reference the file via
-            // read_csv_auto / read_json in a subsequent materialize call,
-            // flowing through the derived-source pipeline (ADR-0087 D3/D4).
-            // Only on a success envelope -- an error's text is a message, not
-            // data. A non-structured or write-failed result stays inline.
-            let content = if !is_error {
-                if let Some(path) =
-                    inline_materialize::try_materialize(&text, &call.id, tool_output_dir)
-                {
-                    format!(
-                        "{text}\n\n[Structured output saved to {}. Use read_csv_auto \
-                         or read_json to load it into DuckDB for analysis.]",
-                        path.display()
-                    )
-                } else {
-                    text
-                }
-            } else {
+            // Issue #442: on a success envelope, structured inline text is
+            // materialized to tool_output/ (ADR-0087 D3/D4). An error's text
+            // is a message, not data.
+            let content = if is_error {
                 text
+            } else {
+                inline_materialize::augment_with_hint(text, &call.id, tool_output_dir)
             };
             (content, is_error)
         }
@@ -1040,6 +1027,55 @@ mod tests {
         );
         let written = std::fs::read_to_string(dir.path().join("tu_json.json")).unwrap();
         assert_eq!(written, json);
+    }
+
+    /// A successful envelope whose inline text is TSV gets materialized with
+    /// a `.tsv` extension (issue #442).
+    #[test]
+    fn shape_external_outcome_materializes_structured_tsv_inline_text() {
+        let dir = TempDir::new().unwrap();
+        let call = ToolUse {
+            id: "tu_tsv".into(),
+            name: "mcp__data__export".into(),
+            input: serde_json::json!({}),
+        };
+        let tsv = "id\tname\n1\talice\n2\tbob\n";
+        let envelope = serde_json::json!({
+            "content": [{"type": "text", "text": tsv}],
+            "isError": false,
+        });
+        let outcome = shape_external_outcome(Ok(envelope), &call, dir.path());
+        assert!(!outcome.result.is_error);
+        assert!(
+            outcome.result.content.contains("tu_tsv.tsv"),
+            "hint names the TSV file: {}",
+            outcome.result.content
+        );
+        let written = std::fs::read_to_string(dir.path().join("tu_tsv.tsv")).unwrap();
+        assert_eq!(written, tsv);
+    }
+
+    /// An error envelope with structured text must NOT be materialized — an
+    /// error's text is a message, not data (issue #442 design decision).
+    #[test]
+    fn shape_external_outcome_does_not_materialize_error_envelope_with_structured_text() {
+        let dir = TempDir::new().unwrap();
+        let call = ToolUse {
+            id: "tu_err_csv".into(),
+            name: "mcp__data__export".into(),
+            input: serde_json::json!({}),
+        };
+        let csv = "id,name\n1,alice\n2,bob\n";
+        let envelope = serde_json::json!({
+            "content": [{"type": "text", "text": csv}],
+            "isError": true,
+        });
+        let outcome = shape_external_outcome(Ok(envelope), &call, dir.path());
+        assert!(outcome.result.is_error);
+        // No hint appended — content is the raw text only.
+        assert_eq!(outcome.result.content, csv);
+        // No file was written.
+        assert!(dir.path().read_dir().unwrap().next().is_none());
     }
 
     /// A namespaced name classifies under its server slug (not "unknown") so
