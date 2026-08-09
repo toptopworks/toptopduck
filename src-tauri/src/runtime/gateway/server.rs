@@ -531,6 +531,8 @@ mod tests {
         let engine: &'static Engine = Box::leak(Box::new(Engine::new()));
         let ws: &'static mut WorkingSet = Box::leak(Box::new(WorkingSet::default()));
         let sources: &'static mut HashMap<String, PathBuf> = Box::leak(Box::new(HashMap::new()));
+        let refs: &'static mut HashMap<String, crate::session::materializer::CachedDerivedRef> =
+            Box::leak(Box::new(HashMap::new()));
         let fake: &'static mut FakeMaterializer =
             Box::leak(Box::new(FakeMaterializer::new(vec![])));
         let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
@@ -543,6 +545,7 @@ mod tests {
             result_row_cap: 1_000,
             result_count_cap: 100,
             temp_path: engine.temp.path(),
+            tool_output_refs: refs,
         };
         GatewayCtx {
             deps,

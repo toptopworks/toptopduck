@@ -49,7 +49,7 @@ use crate::runtime::acp::engine::{AcpEngine, AcpTurnInput};
 use crate::runtime::acp::wire::McpServer;
 use crate::runtime::gateway::server::{bind_gateway, serve_connection, GatewayCtx, GatewayOutcome};
 use crate::session::agent_loop::{AgentLoop, LoopOutcome, Termination, TraceEntry};
-use crate::session::materializer::{Materializer, RealMaterializer, TurnDeps};
+use crate::session::materializer::{CachedDerivedRef, Materializer, RealMaterializer, TurnDeps};
 use crate::session_store::ClosingFlag;
 use crate::skills::SkillPromptFragment;
 use crate::tools::definitions::builtin_metadata;
@@ -399,6 +399,15 @@ pub struct Session {
     /// path. Insert-only; stale entries are harmless (the working set is the
     /// source of truth for which sources exist).
     source_files: HashMap<String, PathBuf>,
+    /// Session-level ephemeral cache: tool_output file path → cached
+    /// derived-source registration (issue #440). Prevents re-staging +
+    /// re-copy_in + re-ATTACH when the same tool_output file is referenced
+    /// across multiple materialize calls. Each entry stores the catalog ref
+    /// name plus a file fingerprint (mtime + size) for staleness detection.
+    /// Ephemeral — not persisted to recipe; cleared on Session drop. Resume
+    /// does not need this: recipe SQL already has catalog refs, so process()'s
+    /// extract_read_paths finds no read_* calls.
+    tool_output_refs: HashMap<String, CachedDerivedRef>,
     /// Cancellation + single-in-flight signal for the query loop (ADR-0021,
     /// issue #28). `Arc`-shared with the cancel command (and the timeout
     /// watchdog) so a cancel fires WITHOUT the session lock -- `ask` holds it
@@ -691,6 +700,7 @@ impl Session {
             result_row_cap: DEFAULT_MAX_RESULT_ROWS,
             result_count_cap: DEFAULT_RESULT_COUNT_CAP,
             source_files: HashMap::new(),
+            tool_output_refs: HashMap::new(),
             cancel,
             closing: ClosingFlag::new(),
             persister: recipe_persister::RecipePersister::new(),
@@ -991,6 +1001,7 @@ impl Session {
                     result_row_cap: session.result_row_cap,
                     result_count_cap: session.result_count_cap,
                     temp_path: &session.temp_path,
+                    tool_output_refs: &mut session.tool_output_refs,
                 };
                 resumer.replay(&mut deps, &mut on_progress)?
             };
@@ -1320,6 +1331,11 @@ impl Session {
             );
         }
         self.working_set.remove(reference_name);
+        // Invalidate any derived-source dedup cache entry pointing at this ref
+        // (issue #440): a later materialize referencing the same tool_output
+        // file must re-stage + re-register, not reuse the dangling name.
+        self.tool_output_refs
+            .retain(|_, v| v.ref_name != reference_name);
     }
 
     fn ingest_structured(&mut self, path: &Path, reader: &str) -> LoadOutcome {
@@ -1938,6 +1954,7 @@ impl Session {
                         result_row_cap: self.result_row_cap,
                         result_count_cap: self.result_count_cap,
                         temp_path: &self.temp_path,
+                        tool_output_refs: &mut self.tool_output_refs,
                     };
                     let mut loop_outcome =
                         AgentLoop::new(&*self.provider, Arc::clone(&self.cancel)).run(
@@ -2136,6 +2153,7 @@ impl Session {
                 result_row_cap: self.result_row_cap,
                 result_count_cap: self.result_count_cap,
                 temp_path: &self.temp_path,
+                tool_output_refs: &mut self.tool_output_refs,
             };
             let ctx = GatewayCtx {
                 deps,

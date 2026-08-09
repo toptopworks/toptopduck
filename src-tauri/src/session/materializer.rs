@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::SystemTime;
 
 use duckdb::Connection;
 
@@ -32,6 +33,44 @@ use crate::sandbox_sql::{
 };
 use crate::session::{derived_source, sandbox, snapshot::derive_table};
 use crate::workingset::WorkingSet;
+
+/// Cached derived-source registration (issue #440). Stores the catalog ref
+/// name alongside a file fingerprint (mtime + size) so a cache hit can detect
+/// that the underlying `tool_output` file was overwritten since first
+/// registration — avoiding silent stale-data reuse (review H1).
+#[derive(Clone, Debug)]
+pub(crate) struct CachedDerivedRef {
+    pub ref_name: String,
+    mtime: SystemTime,
+    size: u64,
+}
+
+impl CachedDerivedRef {
+    /// Capture the catalog ref name + file fingerprint at registration time.
+    /// Falls back to `UNIX_EPOCH` / size 0 if metadata is unavailable, which
+    /// forces a mismatch on the next lookup (safe — just re-registers).
+    pub(crate) fn new(ref_name: String, path: &Path) -> Self {
+        let (mtime, size) = std::fs::metadata(path)
+            .map(|m| (m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()))
+            .unwrap_or((SystemTime::UNIX_EPOCH, 0));
+        Self {
+            ref_name,
+            mtime,
+            size,
+        }
+    }
+
+    /// True if the file at `path` still matches the fingerprint captured at
+    /// registration time (mtime + size). A mismatch means the file was
+    /// overwritten since first registration (review H1).
+    pub(crate) fn file_matches(&self, path: &Path) -> bool {
+        std::fs::metadata(path)
+            .map(|m| {
+                m.modified().unwrap_or(SystemTime::UNIX_EPOCH) == self.mtime && m.len() == self.size
+            })
+            .unwrap_or(false)
+    }
+}
 
 /// The shared session state a materialize step borrows (ADR-0053 Decision 4):
 /// the admin connection, the source snapshot paths, the mutable working set,
@@ -53,6 +92,14 @@ pub(crate) struct TurnDeps<'a> {
     pub result_row_cap: u64,
     pub result_count_cap: usize,
     pub temp_path: &'a Path,
+    /// Session-level ephemeral cache: `tool_output` file path to a cached
+    /// derived-source registration (issue #440). Prevents re-staging +
+    /// re-copy_in + re-ATTACH when the same tool_output file is referenced
+    /// across multiple materialize calls. Each entry stores the catalog ref
+    /// name plus a file fingerprint (mtime + size) for staleness detection.
+    /// Lives on Session, cleared on drop. Not persisted to recipe — resume
+    /// reconstructs refs from recipe SQL.
+    pub tool_output_refs: &'a mut HashMap<String, CachedDerivedRef>,
 }
 
 #[cfg(test)]
@@ -65,6 +112,7 @@ impl<'a> TurnDeps<'a> {
         ws: &'a mut WorkingSet,
         source_files: &'a mut HashMap<String, std::path::PathBuf>,
         temp_path: &'a Path,
+        tool_output_refs: &'a mut HashMap<String, CachedDerivedRef>,
     ) -> Self {
         TurnDeps {
             conn,
@@ -73,6 +121,7 @@ impl<'a> TurnDeps<'a> {
             result_row_cap: 1_000,
             result_count_cap: 100,
             temp_path,
+            tool_output_refs,
         }
     }
 }
@@ -397,6 +446,7 @@ mod real_tests {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
 
         let sql = format!(
             "SELECT * FROM TABLE(read_csv_auto('{}'))",
@@ -405,7 +455,7 @@ mod real_tests {
         let cancel = CancelToken::new();
         let mat = RealMaterializer;
 
-        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
         let descriptor = mat
             .try_materialize(&sql, &cancel, "result_1".to_string(), &mut deps)
             .expect("materialize succeeds");

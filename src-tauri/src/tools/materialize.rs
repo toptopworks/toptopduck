@@ -286,7 +286,8 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources);
+        let mut refs = std::collections::HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = ExplodingMaterializer;
         let err = dispatch(&json!({}), &mut deps, &cancel, &mut materializer).unwrap_err();
@@ -310,8 +311,9 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
+        let mut refs = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
 
@@ -368,8 +370,9 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
+        let mut refs = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
         let payload = dispatch(
@@ -410,8 +413,9 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
+        let mut refs = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
 
@@ -497,8 +501,10 @@ mod tests {
             let conn = Connection::open_in_memory().unwrap();
             let mut ws = crate::workingset::WorkingSet::default();
             let mut sources = std::collections::HashMap::new();
+            let mut refs = std::collections::HashMap::new();
             let temp = TempDir::new().unwrap();
-            let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path());
+            let mut deps =
+                inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
             let cancel = CancelToken::new();
             let mut materializer = RealMaterializer;
             let payload = dispatch(
@@ -603,12 +609,13 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
+        let mut refs = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
         // A file that exists on disk but lives outside the session temp dir.
         let outside = TempDir::new().unwrap();
         let outside_file = outside.path().join("secret.csv");
         fs::write(&outside_file, "x").unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
         let err = dispatch(
@@ -647,6 +654,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
+        let mut refs = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
         // A sibling file in the CWD's parent -- the literal `../<name>` in the
         // SQL resolves against the process CWD to this file, which is outside
@@ -664,7 +672,7 @@ mod tests {
             .file_name()
             .and_then(|n| n.to_str())
             .expect("escape-target filename is valid UTF-8");
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
         let err = dispatch(
@@ -704,6 +712,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
+        let mut refs = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
         // A file outside the session temp dir -- the symlink target.
         let outside = TempDir::new().unwrap();
@@ -713,7 +722,7 @@ mod tests {
         // follows the link, so the resolved path is outside temp_root.
         let link = temp.path().join("alias.csv");
         symlink(&outside_file, &link).expect("symlink creation failed");
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
         let err = dispatch(
@@ -755,13 +764,14 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
+        let mut refs = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
         let outside = TempDir::new().unwrap();
         // A directory symlink INSIDE temp pointing at the outside dir.
         let link = temp.path().join("alias");
         symlink_dir(outside.path(), &link)
             .expect("Windows symlink creation needs Developer Mode / admin");
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
         let err = dispatch(
@@ -814,8 +824,15 @@ mod tests {
         let conn_e = Connection::open_in_memory().unwrap();
         let mut ws_e = crate::workingset::WorkingSet::default();
         let mut sources_e = std::collections::HashMap::new();
+        let mut refs_e = std::collections::HashMap::new();
         let temp_e = TempDir::new().unwrap();
-        let mut deps_e = inert_deps_with_temp(&conn_e, &mut ws_e, &mut sources_e, temp_e.path());
+        let mut deps_e = inert_deps_with_temp(
+            &conn_e,
+            &mut ws_e,
+            &mut sources_e,
+            temp_e.path(),
+            &mut refs_e,
+        );
         let cancel_e = CancelToken::new();
         let explore_err =
             explore::dispatch(&json!({"sql": sql.clone()}), &mut deps_e, &cancel_e).unwrap_err();
@@ -824,8 +841,15 @@ mod tests {
         let conn_m = Connection::open_in_memory().unwrap();
         let mut ws_m = crate::workingset::WorkingSet::default();
         let mut sources_m = std::collections::HashMap::new();
+        let mut refs_m = std::collections::HashMap::new();
         let temp_m = TempDir::new().unwrap();
-        let mut deps_m = inert_deps_with_temp(&conn_m, &mut ws_m, &mut sources_m, temp_m.path());
+        let mut deps_m = inert_deps_with_temp(
+            &conn_m,
+            &mut ws_m,
+            &mut sources_m,
+            temp_m.path(),
+            &mut refs_m,
+        );
         let cancel_m = CancelToken::new();
         let mut materializer = RealMaterializer;
         let materialize_err = dispatch(
@@ -874,13 +898,14 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
+        let mut refs = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
         // A CSV file INSIDE the temp dir: the gateway whitelist allows it
         // (in-bounds), and with the lockdown removed (ADR-0088), the sandbox
         // engine executes read_csv_auto and materialize promotes the result.
         let inside = temp.path().join("scratch.csv");
         fs::write(&inside, "val\n1\n2\n").unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
         let payload = dispatch(
@@ -915,8 +940,9 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
+        let mut refs = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         cancel.request();
         let mut materializer = RealMaterializer;
@@ -945,6 +971,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
+        let mut refs = std::collections::HashMap::new();
         // cap = 2; range(3) yields 3 rows -> cap+1 land on the sandbox, COUNT
         // (3) > cap (2) -> refused. Hand-built for the one-off bound.
         let mut deps = crate::session::materializer::TurnDeps {
@@ -954,6 +981,7 @@ mod tests {
             result_row_cap: 2,
             result_count_cap: 100,
             temp_path: std::path::Path::new("."),
+            tool_output_refs: &mut refs,
         };
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
@@ -1018,8 +1046,9 @@ mod tests {
             }),
         });
         let mut sources = std::collections::HashMap::new();
+        let mut refs = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
         let err = dispatch(
