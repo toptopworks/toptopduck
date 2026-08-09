@@ -734,7 +734,7 @@ mod tests {
     fn inert_deps<'a>(
         conn: &'a Connection,
         ws: &'a mut WorkingSet,
-        sources: &'a HashMap<String, std::path::PathBuf>,
+        sources: &'a mut HashMap<String, std::path::PathBuf>,
     ) -> TurnDeps<'a> {
         TurnDeps {
             conn,
@@ -916,8 +916,8 @@ mod tests {
         ]);
         let conn = Connection::open_in_memory().expect("in-memory db");
         let mut ws = WorkingSet::default();
-        let sources = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &sources);
+        let mut sources = HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &mut sources);
         let mut resumer = Resumer::new(&cancel, &mut fake, &recipe);
         let break_point = resumer.replay(&mut deps, &mut |_| {}).unwrap();
         assert!(break_point.is_none(), "whole chain succeeded -> no break");
@@ -947,8 +947,8 @@ mod tests {
         ]);
         let conn = Connection::open_in_memory().expect("in-memory db");
         let mut ws = WorkingSet::default();
-        let sources = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &sources);
+        let mut sources = HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &mut sources);
         let mut resumer = Resumer::new(&cancel, &mut fake, &recipe);
         let brk = resumer
             .replay(&mut deps, &mut |_| {})
@@ -982,8 +982,8 @@ mod tests {
         let mut fake = FakeMaterializer::new(vec![Ok(result_descriptor("result_1"))]);
         let conn = Connection::open_in_memory().expect("in-memory db");
         let mut ws = WorkingSet::default();
-        let sources = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &sources);
+        let mut sources = HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &mut sources);
         let mut resumer = Resumer::new(&cancel, &mut fake, &recipe);
         let err = resumer.replay(&mut deps, &mut |_| {}).unwrap_err();
         assert!(matches!(err, ResumeError::Cancelled), "got {err:?}");

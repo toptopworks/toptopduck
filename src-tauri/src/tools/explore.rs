@@ -236,8 +236,8 @@ mod tests {
     fn dispatch_errors_when_sql_missing() {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
-        let sources = std::collections::HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &sources);
+        let mut sources = std::collections::HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &mut sources);
         let cancel = CancelToken::new();
         let err = dispatch(&json!({}), &mut deps, &cancel).unwrap_err();
         assert!(
@@ -282,8 +282,8 @@ mod tests {
             privacy: DatasetPrivacy::default(),
             stale: None,
         });
-        let sources = std::collections::HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &sources);
+        let mut sources = std::collections::HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &mut sources);
         let cancel = CancelToken::new();
         let payload = dispatch(
             &json!({"sql": "SELECT * FROM result_1 WHERE id > 1 ORDER BY id"}),
@@ -355,8 +355,8 @@ mod tests {
             privacy: DatasetPrivacy::default(),
             stale: None,
         });
-        let sources = std::collections::HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &sources);
+        let mut sources = std::collections::HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &mut sources);
         let cancel = CancelToken::new();
         let err = dispatch(
             &json!({"sql": "SELECT nonexistent FROM result_1"}),
@@ -380,8 +380,8 @@ mod tests {
     fn explore_returns_cancelled_when_cancel_already_requested() {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
-        let sources = std::collections::HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &sources);
+        let mut sources = std::collections::HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &mut sources);
         let cancel = CancelToken::new();
         cancel.request();
         let err = dispatch(&json!({"sql": "SELECT 1"}), &mut deps, &cancel).unwrap_err();
@@ -398,13 +398,13 @@ mod tests {
     fn explore_refuses_result_exceeding_row_cap() {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
-        let sources = std::collections::HashMap::new();
+        let mut sources = std::collections::HashMap::new();
         // cap = 2; the query yields 3 rows -> cap+1 rows land on the scratch
         // sandbox, COUNT (3) > cap (2) -> refused. The cap is below the helper's
         // default, so this test hand-builds TurnDeps for the one-off bound.
         let mut deps = crate::session::materializer::TurnDeps {
             conn: &conn,
-            source_files: &sources,
+            source_files: &mut sources,
             working_set: &mut ws,
             result_row_cap: 2,
             result_count_cap: 100,
@@ -439,14 +439,14 @@ mod tests {
 
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
-        let sources = std::collections::HashMap::new();
+        let mut sources = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
         // A file that exists on disk but lives outside the session temp dir --
         // an absolute out-of-bounds target the canonicalizer can resolve.
         let outside = TempDir::new().unwrap();
         let outside_file = outside.path().join("secret.csv");
         fs::write(&outside_file, "x").unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path());
         let cancel = CancelToken::new();
         let err = dispatch(
             &json!({"sql": format!("SELECT * FROM read_csv_auto('{}')", outside_file.to_string_lossy())}),
@@ -478,7 +478,7 @@ mod tests {
 
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
-        let sources = std::collections::HashMap::new();
+        let mut sources = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
         // A sibling file in the CWD's parent -- the literal `../<name>` in the
         // SQL resolves against the process CWD to this file, which is outside
@@ -496,7 +496,7 @@ mod tests {
             .file_name()
             .and_then(|n| n.to_str())
             .expect("escape-target filename is valid UTF-8");
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path());
         let cancel = CancelToken::new();
         let err = dispatch(
             &json!({"sql": format!("SELECT * FROM read_csv_auto('../{target_name}')")}),
@@ -532,7 +532,7 @@ mod tests {
 
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
-        let sources = std::collections::HashMap::new();
+        let mut sources = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
         // A file outside the session temp dir -- the symlink target.
         let outside = TempDir::new().unwrap();
@@ -542,7 +542,7 @@ mod tests {
         // follows the link, so the resolved path is outside temp_root.
         let link = temp.path().join("alias.csv");
         symlink(&outside_file, &link).expect("symlink creation failed");
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path());
         let cancel = CancelToken::new();
         let err = dispatch(
             &json!({"sql": format!(
@@ -579,14 +579,14 @@ mod tests {
 
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
-        let sources = std::collections::HashMap::new();
+        let mut sources = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
         let outside = TempDir::new().unwrap();
         // A directory symlink INSIDE temp pointing at the outside dir.
         let link = temp.path().join("alias");
         symlink_dir(outside.path(), &link)
             .expect("Windows symlink creation needs Developer Mode / admin");
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path());
         let cancel = CancelToken::new();
         let err = dispatch(
             &json!({"sql": format!(
@@ -621,14 +621,14 @@ mod tests {
 
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
-        let sources = std::collections::HashMap::new();
+        let mut sources = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
         // A CSV file INSIDE the temp dir: the gateway whitelist allows it
         // (in-bounds), and with the lockdown removed (ADR-0088), the sandbox
         // engine executes read_csv_auto successfully.
         let inside = temp.path().join("scratch.csv");
         fs::write(&inside, "val\n1\n2\n").unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &sources, temp.path());
+        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path());
         let cancel = CancelToken::new();
         let payload = dispatch(
             &json!({"sql": format!("SELECT * FROM read_csv_auto('{}')", inside.to_string_lossy())}),
@@ -673,8 +673,8 @@ mod tests {
                 reason: StaleReason::Deleted,
             }),
         });
-        let sources = std::collections::HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &sources);
+        let mut sources = std::collections::HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &mut sources);
         let cancel = CancelToken::new();
         let err = dispatch(
             &json!({"sql": "SELECT * FROM result_1"}),

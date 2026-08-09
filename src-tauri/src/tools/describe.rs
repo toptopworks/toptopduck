@@ -71,7 +71,7 @@ mod tests {
     fn returns_cached_columns_and_row_count() {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = WorkingSet::default();
-        let sources = HashMap::new();
+        let mut sources = HashMap::new();
         register_dataset(
             &mut ws,
             "people",
@@ -86,7 +86,7 @@ mod tests {
                 },
             ],
         );
-        let mut deps = inert_deps(&conn, &mut ws, &sources);
+        let mut deps = inert_deps(&conn, &mut ws, &mut sources);
         let payload = dispatch(&json!({"reference_name": "people"}), &mut deps).unwrap();
         // describe is a schema read; no side effect to report.
         assert!(payload.promotion.is_none());
@@ -106,8 +106,8 @@ mod tests {
     fn unknown_dataset_returns_tool_error() {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = WorkingSet::default();
-        let sources = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &sources);
+        let mut sources = HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &mut sources);
         let err = dispatch(&json!({"reference_name": "ghost"}), &mut deps).unwrap_err();
         assert!(err.contains("unknown dataset"), "{err}");
         assert!(err.contains("ghost"), "{err}");
@@ -120,7 +120,7 @@ mod tests {
     fn stale_dataset_is_refused() {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = WorkingSet::default();
-        let sources = HashMap::new();
+        let mut sources = HashMap::new();
         ws.register(DatasetDescriptor {
             reference_name: "result_1".into(),
             display_name: "result_1".into(),
@@ -140,7 +140,7 @@ mod tests {
                 reason: StaleReason::Deleted,
             }),
         });
-        let mut deps = inert_deps(&conn, &mut ws, &sources);
+        let mut deps = inert_deps(&conn, &mut ws, &mut sources);
         let err = dispatch(&json!({"reference_name": "result_1"}), &mut deps).unwrap_err();
         assert!(err.contains("stale"), "{err}");
         assert!(err.contains("result_1"), "{err}");
@@ -153,8 +153,8 @@ mod tests {
     fn missing_parameter_errors_with_field_name() {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = WorkingSet::default();
-        let sources = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &sources);
+        let mut sources = HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &mut sources);
         let err = dispatch(&json!({}), &mut deps).unwrap_err();
         assert!(err.contains("`reference_name`"), "{err}");
     }

@@ -346,6 +346,24 @@ impl WorkingSet {
         self.datasets.is_empty()
     }
 
+    /// Update a source's `source_path` in place (issue #433: bind_duck migrates
+    /// derived sources from `temp_path/derived/` to `<duck_stem>.assets/`).
+    /// Returns `false` if the reference name isn't registered (a stale view
+    /// racing a concurrent mutation). The path is stored verbatim — the caller
+    /// ensures it is the persistent (post-migration) location.
+    pub fn update_source_path(&mut self, reference_name: &str, new_path: &str) -> bool {
+        if let Some(slot) = self
+            .datasets
+            .iter_mut()
+            .find(|d| d.reference_name == reference_name)
+        {
+            slot.source_path = new_path.to_string();
+            true
+        } else {
+            false
+        }
+    }
+
     // --- Stale cascade (issue #40, ADR-0013/0025/0040) ----------------------
     //
     // Dependent result_N are soft-invalidated when an upstream source is

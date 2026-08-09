@@ -439,7 +439,7 @@ fn collect_if_read_function<'a>(
 /// True when `name` (the rendered function call name, possibly dotted) names a
 /// DuckDB file-reading function. Matches the final segment case-insensitively
 /// against the `read_*` family and `sniff_csv`.
-fn is_file_function(name: &str) -> bool {
+pub(crate) fn is_file_function(name: &str) -> bool {
     // `name` renders as e.g. `read_csv_auto` or `catalog.read_csv_auto`; the
     // final segment is the function itself.
     let last = name

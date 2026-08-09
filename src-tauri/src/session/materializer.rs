@@ -30,7 +30,7 @@ use crate::model::{DatasetDescriptor, DatasetPrivacy, RectifyProvenance};
 use crate::sandbox_sql::{
     preflight_read_sql, run_sandboxed_read, PreflightError, SandboxDeps, SandboxExecError,
 };
-use crate::session::{sandbox, snapshot::derive_table};
+use crate::session::{derived_source, sandbox, snapshot::derive_table};
 use crate::workingset::WorkingSet;
 
 /// The shared session state a materialize step borrows (ADR-0053 Decision 4):
@@ -39,11 +39,16 @@ use crate::workingset::WorkingSet;
 /// turn -- the materializer is stateless and owns none of this.
 ///
 /// Disjoint borrows via a struct let one call site hand a materializer
-/// `&mut working_set` alongside `&conn` / `&source_files` / `&temp_path`
-/// without widening to `&mut Session`.
+/// `&mut working_set` alongside `&conn` / `&mut source_files` / `&temp_path`
+/// without widening to `&mut Session`. The `&mut source_files` lets a
+/// materialize step register derived sources mid-turn (issue #433,
+/// ADR-0087 D4).
 pub(crate) struct TurnDeps<'a> {
     pub conn: &'a Connection,
-    pub source_files: &'a HashMap<String, std::path::PathBuf>,
+    /// `&mut` so a materialize step can register derived sources (issue #433,
+    /// ADR-0087 D4): a `read_*` referencing a `tool_output` file triggers
+    /// copy_in + ATTACH, inserting a new snapshot path here.
+    pub source_files: &'a mut HashMap<String, std::path::PathBuf>,
     pub working_set: &'a mut WorkingSet,
     pub result_row_cap: u64,
     pub result_count_cap: usize,
@@ -100,13 +105,24 @@ impl Materializer for RealMaterializer {
         // gap (e.g. result_1 dead, result_2 live) does not renumber the live
         // turn -- the chain recreates each result_N under its stable identity.
 
+        // Derived source persistence (issue #433, ADR-0087 D4): detect
+        // read_* calls referencing tool_output files, copy each into a
+        // persistent snapshot + ATTACH + register in the working set, and
+        // rewrite the SQL to use catalog references ("ref".data). This MUST
+        // run before preflight — provenance::analyze only tracks
+        // TableFactor::Table (catalog refs), not TableFactor::Function
+        // (read_csv_auto), so the rewrite is a hard requirement for stale
+        // cascade coverage. On resume, the recipe's SQL already has catalog
+        // refs (recorded from the rewritten SQL), so this is a no-op then.
+        let sql = derived_source::process(sql, deps)?;
+
         // Gateway door (ADR-0013 stale-ref + ADR-0080 read_* whitelist), shared
         // with the explore path. The materialize path also runs the FsAcl
         // whitelist (issue #334) so an out-of-bounds read_* becomes a
         // structured "outside the allowed area" error.
         // refs are held for the post-install provenance record (issue #40).
         let analysis =
-            preflight_read_sql(sql, deps.working_set, deps.temp_path).map_err(|e| match e {
+            preflight_read_sql(&sql, deps.working_set, deps.temp_path).map_err(|e| match e {
                 PreflightError::StaleReference(s) => {
                     ExecError::new(ExecErrorKind::StaleReference, s)
                 }
@@ -119,7 +135,7 @@ impl Materializer for RealMaterializer {
         // path. The new result_N lands on the sandbox first; the tail below
         // installs it onto admin.
         let table = run_sandboxed_read(
-            sql,
+            &sql,
             &result_name,
             &SandboxDeps {
                 admin_conn: deps.conn,

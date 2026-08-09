@@ -1078,8 +1078,8 @@ mod tests {
                 Ok(ToolTurnReply::Text("done".into())),
             ],
         );
-        let sources = HashMap::new();
-        let mut d = deps(&engine.conn, &mut ws, &sources, engine.temp.path());
+        let mut sources = HashMap::new();
+        let mut d = deps(&engine.conn, &mut ws, &mut sources, engine.temp.path());
         let approval = ApprovalState::new();
         let sink = RecordingSink::default();
         let phases = std::sync::Mutex::new(Vec::new());
@@ -1160,8 +1160,8 @@ mod tests {
                 Ok(ToolTurnReply::Text("done".into())),
             ],
         );
-        let sources = HashMap::new();
-        let mut d = deps(&engine.conn, &mut ws, &sources, engine.temp.path());
+        let mut sources = HashMap::new();
+        let mut d = deps(&engine.conn, &mut ws, &mut sources, engine.temp.path());
         let approval = Arc::new(ApprovalState::new());
         let sink = Arc::new(RecordingSink::default());
         let phases = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1240,7 +1240,7 @@ mod tests {
     fn deps<'a>(
         conn: &'a Connection,
         ws: &'a mut WorkingSet,
-        sources: &'a HashMap<String, std::path::PathBuf>,
+        sources: &'a mut HashMap<String, std::path::PathBuf>,
         temp: &'a Path,
     ) -> TurnDeps<'a> {
         TurnDeps {
@@ -1265,8 +1265,8 @@ mod tests {
         conn: &Connection,
         temp: &Path,
     ) -> LoopOutcome {
-        let sources = HashMap::new();
-        let mut d = deps(conn, ws, &sources, temp);
+        let mut sources = HashMap::new();
+        let mut d = deps(conn, ws, &mut sources, temp);
         let approval = ApprovalState::new();
         let sink = RecordingSink::default();
         AgentLoop::new(provider, cancel)
@@ -1614,8 +1614,8 @@ mod tests {
         let provider = FakeProvider::new()
             .with_cancel(cancel.clone())
             .scripted_tool_turn_blocking("stuck", ToolTurnReply::Text("never".into()));
-        let sources = HashMap::new();
-        let mut d = deps(&engine.conn, &mut ws, &sources, engine.temp.path());
+        let mut sources = HashMap::new();
+        let mut d = deps(&engine.conn, &mut ws, &mut sources, engine.temp.path());
         let approval = ApprovalState::new();
         let sink = RecordingSink::default();
         let start = std::time::Instant::now();
@@ -1962,8 +1962,8 @@ mod tests {
         let mut ws = WorkingSet::default();
         let cancel = Arc::new(CancelToken::new());
         let provider = PanickingProvider;
-        let sources = HashMap::new();
-        let mut d = deps(&engine.conn, &mut ws, &sources, engine.temp.path());
+        let mut sources = HashMap::new();
+        let mut d = deps(&engine.conn, &mut ws, &mut sources, engine.temp.path());
         let approval = ApprovalState::new();
         let sink = RecordingSink::default();
         let outcome = AgentLoop::new(&provider, cancel).with_caps(24, None).run(
@@ -2009,8 +2009,8 @@ mod tests {
             "panic-dispatch",
             call("materialize", json!({"sql": "SELECT 1 AS x"})),
         );
-        let sources = HashMap::new();
-        let mut d = deps(&engine.conn, &mut ws, &sources, engine.temp.path());
+        let mut sources = HashMap::new();
+        let mut d = deps(&engine.conn, &mut ws, &mut sources, engine.temp.path());
         let approval = ApprovalState::new();
         let sink = RecordingSink::default();
         let mut materializer = GhostThenPanicMaterializer;
