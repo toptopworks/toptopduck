@@ -2,7 +2,7 @@
 // + active id (ADR-0060 multi-session) + every action that mutates them:
 // register / openNew / openPersisted / dropFile / onWebviewDrop /
 // clearPendingIngest / activateSession / closeOpen / deletePersisted / renameEntry /
-// handleSaveAs / handleOpenDuck. The resume + persistence-busy indicators live
+// handleOpenDuck. The resume + persistence-busy indicators live
 // here too -- they drive the shell `busy` flag that gates the webview drop
 // listener + the sidebar / topbar / hero disabled states.
 //
@@ -21,7 +21,7 @@
 // with keep-alive panes and fired N ingests per single drop.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { IntlShape } from "react-intl";
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { QueryClient } from "@tanstack/react-query";
 import {
@@ -33,7 +33,6 @@ import {
   openDuck,
   renamePersistedSession,
   renameSession,
-  saveAsDuck,
 } from "../api";
 import { errorDetail, fmtError, toAppError } from "../lib/error-presentation";
 import { log } from "../lib/log";
@@ -84,7 +83,6 @@ export function useShellSessions({
 }: UseShellSessionsDeps): {
   openSessions: OpenSession[];
   activeSessionId: string | null;
-  activeSession: OpenSession | null;
   activateSession: (sid: string) => void;
   /** Shell-wide busy gate: persistenceBusy (save / open / delete wait) OR a
    *  resume in flight. Drives the sidebar / topbar / hero disabled states and
@@ -99,7 +97,6 @@ export function useShellSessions({
   closeOpen: (sid: string) => Promise<void>;
   deletePersisted: (path: string, sid: string | null) => Promise<void>;
   renameEntry: (sid: string | null, path: string, newName: string) => Promise<void>;
-  handleSaveAs: () => Promise<void>;
   handleOpenDuck: () => Promise<void>;
 } {
   // The open set + active id live in ONE state object (issue #205) so the
@@ -165,8 +162,6 @@ export function useShellSessions({
 
   const openSessions = state.sessions;
   const activeSessionId = state.activeId;
-  const activeSession =
-    openSessions.find((s) => s.sid === activeSessionId) ?? null;
 
   // Switch the active session by id (sidebar click). Semantic action -- there
   // is no standalone activeId setter: the merged open-set state moves only
@@ -351,13 +346,23 @@ export function useShellSessions({
         registerOpen({ sid, name, path, pendingIngestPath: null });
         setResumeStatus({ kind: "idle" });
       } catch (e) {
+        // C2: if createSession succeeded but openDuck failed, the just-minted
+        // session is persisted on disk (ADR-0089 auto-persist). Close it
+        // best-effort so it does not linger as a ghost empty row in the
+        // sidebar scan. The close IPC itself may fail (the session may have
+        // been partially created); suppress that — the error toast is already
+        // surfaced via setShellError.
+        if (targetSid) {
+          void closeSession(targetSid).catch(() => {});
+          refreshSessions();
+        }
         setShellError(toAppError(e, intl, "shell"));
         setResumeStatus({ kind: "idle" });
       } finally {
         void unlisten();
       }
     },
-    [intl, openSessions, apply, queryClient, registerOpen, setShellError],
+    [intl, openSessions, apply, queryClient, registerOpen, setShellError, refreshSessions],
   );
 
   // Synchronous UI teardown for an open session: drop the cache + open-set
@@ -488,7 +493,7 @@ export function useShellSessions({
   // renames in-memory + re-persists via its sid; a CLOSED .duck rewrites the
   // recipe header in place by path. The bound path is untouched either way.
   const renameEntry = useCallback(
-    async (sid: string | null, path: string | null, newName: string) => {
+    async (sid: string | null, path: string, newName: string) => {
       const trimmed = newName.trim();
       if (!trimmed) return;
       try {
@@ -497,7 +502,7 @@ export function useShellSessions({
           mapSessions((sessions) =>
             sessions.map((s) => (s.sid === sid ? { ...s, name: landed } : s)),
           );
-        } else if (path) {
+        } else {
           await renamePersistedSession(path, trimmed);
         }
       } catch (e) {
@@ -509,29 +514,10 @@ export function useShellSessions({
     [intl, mapSessions, refreshSessions, setShellError],
   );
 
-  // --- Save / Open .duck (ADR-0034/0036/0089) -----------------------------
-  // ADR-0089: sessions auto-persist from creation. handleSaveAs remains for the
-  // future "export a copy" feature (ADR-0089 Decision 5) — the UI button is
-  // disabled until that feature lands.
-  const handleSaveAs = useCallback(async () => {
-    if (!activeSession) return;
-    setPersistenceBusy(true);
-    try {
-      const path = await saveDialog({
-        filters: [{ name: "toptopduck", extensions: ["duck"] }],
-      });
-      if (!path) return;
-      const stem =
-        path.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? "session";
-      await saveAsDuck(activeSession.sid, path, stem);
-      refreshSessions();
-    } catch (e) {
-      setShellError(toAppError(e, intl, "shell"));
-    } finally {
-      setPersistenceBusy(false);
-    }
-  }, [intl, activeSession, refreshSessions, setShellError]);
-
+  // --- Open .duck (ADR-0034/0036/0089) ------------------------------------
+  // ADR-0089: sessions auto-persist from creation. The "Save as .duck" / export
+  // feature (ADR-0089 Decision 5) is deferred — it will need a non-rebinding
+  // export command (saveAsDuck rebinds, which is the retired first-bind path).
   const handleOpenDuck = useCallback(async () => {
     setPersistenceBusy(true);
     try {
@@ -555,7 +541,6 @@ export function useShellSessions({
   return {
     openSessions,
     activeSessionId,
-    activeSession,
     activateSession,
     busy,
     resumeStatus,
@@ -567,7 +552,6 @@ export function useShellSessions({
     closeOpen,
     deletePersisted,
     renameEntry,
-    handleSaveAs,
     handleOpenDuck,
   };
 }

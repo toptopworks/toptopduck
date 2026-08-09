@@ -47,7 +47,6 @@ vi.mock("../../api", async (importOriginal) => {
     openDuck: vi.fn(async () => {}),
     renamePersistedSession: vi.fn(async () => {}),
     renameSession: vi.fn(async () => ""),
-    saveAsDuck: vi.fn(async () => {}),
   };
 });
 
@@ -71,9 +70,8 @@ import {
   onResumeProgress,
   renamePersistedSession,
   renameSession,
-  saveAsDuck,
 } from "../../api";
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { log } from "../../lib/log";
 import { useShellSessions } from "../useShellSessions";
 
@@ -108,7 +106,6 @@ describe("useShellSessions", () => {
     const { result } = renderSessions();
     expect(result.current.openSessions).toEqual([]);
     expect(result.current.activeSessionId).toBeNull();
-    expect(result.current.activeSession).toBeNull();
     expect(result.current.busy).toBe(false);
     expect(result.current.resumeStatus).toEqual({ kind: "idle" });
   });
@@ -128,7 +125,6 @@ describe("useShellSessions", () => {
       pendingIngestPath: null,
     });
     expect(result.current.activeSessionId).toBe("s1");
-    expect(result.current.activeSession?.sid).toBe("s1");
   });
 
   it("onWebviewDrop on cold start (activeSessionId null) mints via dropFile with the path as pendingIngestPath (#81 A1)", async () => {
@@ -252,19 +248,6 @@ describe("useShellSessions", () => {
       "lock poison",
     );
     expect(log.debug).not.toHaveBeenCalled();
-  });
-
-  it("handleSaveAs refreshes sessions after a successful export (ADR-0089)", async () => {
-    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
-    vi.mocked(saveDialog).mockResolvedValueOnce("/x/a.duck");
-    const { result, refreshSessions } = renderSessions();
-    await act(async () => {
-      await result.current.openNew();
-    });
-    await act(async () => {
-      await result.current.handleSaveAs();
-    });
-    expect(refreshSessions).toHaveBeenCalled();
   });
 
   it("handleOpenDuck refreshes sessions after a successful resume (ADR-0089)", async () => {
@@ -427,26 +410,6 @@ describe("useShellSessions", () => {
     expect(setShellError).not.toHaveBeenCalled();
   });
 
-  it("handleSaveAs bails on a cancelled save dialog (null path): no save, no extra refresh, busy clears (#204)", async () => {
-    // saveDialog returning null is the cancel path: the hook returns inside the
-    // try, the finally still clears persistenceBusy. saveAsDuck does not fire;
-    // refreshSessions was called once by openNew (ADR-0089) but NOT again by
-    // the cancelled handleSaveAs.
-    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
-    vi.mocked(saveDialog).mockResolvedValueOnce(null);
-    const { result, refreshSessions } = renderSessions();
-    await act(async () => {
-      await result.current.openNew();
-    });
-    const callsAfterOpen = refreshSessions.mock.calls.length;
-    await act(async () => {
-      await result.current.handleSaveAs();
-    });
-    expect(saveAsDuck).not.toHaveBeenCalled();
-    expect(refreshSessions.mock.calls.length).toBe(callsAfterOpen);
-    expect(result.current.busy).toBe(false);
-  });
-
   it("handleOpenDuck bails on a cancelled open dialog (null path): no open, no refresh, busy clears (#204)", async () => {
     vi.mocked(openDialog).mockResolvedValueOnce(null);
     const { result, refreshSessions } = renderSessions();
@@ -550,7 +513,6 @@ describe("useShellSessions", () => {
     expect(result.current.openSessions).toHaveLength(1);
     expect(result.current.openSessions[0].sid).toBe("s2");
     expect(result.current.activeSessionId).toBe("s2");
-    expect(result.current.activeSession?.sid).toBe("s2");
   });
 
   it("activateSession switches on a valid sid and no-ops on a stale sid (reconciler invariant, #205)", async () => {
@@ -574,13 +536,11 @@ describe("useShellSessions", () => {
       result.current.activateSession("s1");
     });
     expect(result.current.activeSessionId).toBe("s1");
-    expect(result.current.activeSession?.sid).toBe("s1");
     // Stale sid -> no-op; active id stays on s1 (not "ghost", not sessions[0]).
     act(() => {
       result.current.activateSession("ghost");
     });
     expect(result.current.activeSessionId).toBe("s1");
-    expect(result.current.activeSession?.sid).toBe("s1");
     // Invariant holds: activeId ∈ sessions.
     expect(
       result.current.openSessions.some((s) => s.sid === result.current.activeSessionId),

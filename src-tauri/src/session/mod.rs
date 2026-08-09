@@ -809,25 +809,31 @@ impl Session {
             .bind(path, session_name, &self.working_set, &self.timeline)
     }
 
-    /// The bound `.duck` path, if any (ADR-0034). `None` for an in-memory-only
-    /// session (the pre-persistence behavior).
+    /// The bound `.duck` path, if any (ADR-0034/0089). Since ADR-0089 every
+    /// production session is bound at `create_session`, so `None` is reachable
+    /// only from test constructors (`Session::new`, `with_provider`).
     pub fn duck_path(&self) -> Option<&Path> {
         self.persister.duck_path()
     }
 
     /// Migrate derived source files from temp staging (`temp_path/derived/`)
-    /// to `.duck`-adjacent (`<duck_stem>.assets/`) so they survive session
-    /// close and are portable with the `.duck` file (issue #433, ADR-0087 D2).
-    /// Updates each descriptor's `source_path` in place so the recipe's
-    /// `SourceRef` carries the persistent location. Best-effort + logged: a
-    /// copy failure leaves the staging path in place (the session temp dir is
-    /// wiped on drop, but the recipe write still succeeds — a resume would
-    /// surface the missing file as an interactive re-link).
+    /// to the per-session directory's `assets/` subdirectory (ADR-0089, issue
+    /// #433, ADR-0087 D2) so they survive session close and are portable with
+    /// the `.duck` file. Updates each descriptor's `source_path` in place so
+    /// the recipe's `SourceRef` carries the persistent location. Best-effort +
+    /// logged: a copy failure leaves the staging path in place (the session
+    /// temp dir is wiped on drop, but the recipe write still succeeds — a
+    /// resume would surface the missing file as an interactive re-link).
     fn migrate_derived_sources(&mut self, duck_path: &Path) {
         let staging_dir = self.temp_path.join(derived_source::DERIVED_STAGING_DIR);
         // ADR-0089: derived sources live in the per-session directory's `assets/`
         // subdirectory (previously `{duck_stem}.assets/` adjacent to a flat .duck).
         let Some(session_dir) = duck_path.parent() else {
+            log::warn!(
+                target: "toptopduck::session",
+                "skipped derived-source migration: duck_path has no parent: {}",
+                duck_path.display()
+            );
             return;
         };
         let assets_dir = session_dir.join("assets");
@@ -1780,11 +1786,9 @@ impl Session {
     /// [`Self::session_name`] carried in the recipe header, then rewrite the
     /// bound `.duck` so the new name survives resume. Display-only at the
     /// session level -- the bound path is untouched, so every external reference
-    /// (recent_files, sidebar addressing, open_duck) stays valid; nothing else
+    /// (sidebar addressing, open_duck) stays valid; nothing else
     /// is rewritten or propagated. Trims surrounding whitespace and rejects a
-    /// blank name. For a never-saved (unbound) session the name is still set in
-    /// memory so the next save-as carries it; [`Self::persist_if_bound`] is a
-    /// no-op when no `.duck` is bound. The persist is best-effort (like every
+    /// blank name. The persist is best-effort (like every
     /// terminal turn): a write failure does not roll back the in-memory rename --
     /// it surfaces via [`Self::take_persist_error`] and self-heals on the next
     /// successful write. Returns the trimmed name that landed.
