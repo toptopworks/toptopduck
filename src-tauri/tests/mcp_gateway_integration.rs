@@ -853,3 +853,45 @@ fn first_text(envelope: &Value) -> String {
         .unwrap_or("")
         .to_string()
 }
+
+#[test]
+fn with_tool_output_injects_env_var_into_child() {
+    // Issue #432 AC#3: a McpAggregator built with `with_tool_output` injects
+    // `TOPTOPDUCK_TOOL_OUTPUT_DIR` into each stdio server's child env at spawn.
+    // The fake server's `echo_env` tool reflects the child process's env, so
+    // routing a call to it verifies the full chain: aggregator field ->
+    // connect_transport -> StdioClient::connect -> stdio_command env injection
+    // -> spawned child sees the var.
+    use toptopduck_lib::mcp::client::TOOL_OUTPUT_ENV;
+    let dir = "/tmp/toptopduck-test-tool-output-432";
+    let mut agg = McpAggregator::with_tool_output(dir.to_string());
+    agg.connect_all(&[fake_config("srv-1", "EnvMCP")], &KeychainStore::new());
+
+    let result = agg
+        .route("mcp__envmcp__echo_env", &json!({"key": TOOL_OUTPUT_ENV}))
+        .expect("route ok");
+    assert_eq!(
+        first_text(&result),
+        dir,
+        "TOPTOPDUCK_TOOL_OUTPUT_DIR injected into child env"
+    );
+}
+
+#[test]
+fn empty_aggregator_does_not_inject_tool_output_env() {
+    // The complement: an aggregator built via `empty()` (no tool_output_dir)
+    // does NOT inject the env var. This confirms the `Option` semantics --
+    // tests and probes that don't set a tool_output dir get a clean child env.
+    use toptopduck_lib::mcp::client::TOOL_OUTPUT_ENV;
+    let mut agg = McpAggregator::empty();
+    agg.connect_all(&[fake_config("srv-1", "NoEnvMCP")], &KeychainStore::new());
+
+    let result = agg
+        .route("mcp__noenvmcp__echo_env", &json!({"key": TOOL_OUTPUT_ENV}))
+        .expect("route ok");
+    assert_eq!(
+        first_text(&result),
+        "<unset>",
+        "empty() aggregator does not inject TOPTOPDUCK_TOOL_OUTPUT_DIR"
+    );
+}

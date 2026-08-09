@@ -73,6 +73,12 @@ const GUIDANCE_PREVIEW_ROWS: usize = 12;
 /// table into memory; the physical table still holds the full result.
 const MAX_READ_ROWS: u64 = 10_000;
 
+/// The subdirectory name under the session temp dir where external MCP tools
+/// write their output files (ADR-0087 Decision 3). Created eagerly at session
+/// construction; lifecycle follows the TempDir RAII. The path is passed to each
+/// stdio MCP server via `TOPTOPDUCK_TOOL_OUTPUT_DIR` (see `mcp::client`).
+pub(crate) const TOOL_OUTPUT_DIR_NAME: &str = "tool_output";
+
 /// Why a resume failed (ADR-0035 honest degrade). The interactive re-link /
 /// drift / active-abandoned decisions land via [`SourceIssue`] /
 /// [`ActiveAbandoned`] callbacks; this enum covers the non-interactive
@@ -652,6 +658,15 @@ impl Session {
             .prefix("toptopduck-session-")
             .tempdir()?;
         let temp_path = temp_dir.path().to_path_buf();
+        // Eagerly create the tool-output subdirectory (ADR-0087 Decision 3).
+        // External MCP stdio servers receive this path via
+        // `TOPTOPDUCK_TOOL_OUTPUT_DIR` and write their output files here; the
+        // agent references them via `read_csv_auto` / `read_json` / etc. The
+        // directory's lifecycle follows the TempDir RAII (cleaned on session
+        // drop). `create_dir_all` is idempotent; failure is a disk / OS issue
+        // surfaced honestly rather than silently skipped.
+        fs::create_dir_all(temp_path.join(TOOL_OUTPUT_DIR_NAME))
+            .map_err(|e| anyhow::anyhow!("failed to create tool_output dir: {e}"))?;
         let conn = Connection::open_in_memory()?;
         // Engine-level resource caps (ADR-0005 L3): bind memory + threads before
         // any query runs so a runaway LLM SQL cannot OOM or monopolize the
@@ -1826,7 +1841,13 @@ impl Session {
                     // self.working_set (disjoint field, but the assignment
                     // preceding the borrow keeps borrowck structural so the
                     // command layer can mirror it into the SessionHandle).
-                    let mut mcp = crate::mcp::aggregator::McpAggregator::empty();
+                    let tool_output = self
+                        .temp_path
+                        .join(TOOL_OUTPUT_DIR_NAME)
+                        .to_string_lossy()
+                        .into_owned();
+                    let mut mcp =
+                        crate::mcp::aggregator::McpAggregator::with_tool_output(tool_output);
                     self.last_mcp_connect = mcp.connect_all(inputs.mcp_servers, inputs.keychain);
                     request
                         .tools
@@ -2028,7 +2049,12 @@ impl Session {
             // snapshotted into self.last_mcp_connect BEFORE deps borrows &mut
             // self.working_set (disjoint field, assignment-first keeps borrowck
             // structural for the command-layer mirror).
-            let mut mcp = crate::mcp::aggregator::McpAggregator::empty();
+            let tool_output = self
+                .temp_path
+                .join(TOOL_OUTPUT_DIR_NAME)
+                .to_string_lossy()
+                .into_owned();
+            let mut mcp = crate::mcp::aggregator::McpAggregator::with_tool_output(tool_output);
             self.last_mcp_connect = mcp.connect_all(inputs.mcp_servers, inputs.keychain);
             let deps = TurnDeps {
                 conn: &self.conn,

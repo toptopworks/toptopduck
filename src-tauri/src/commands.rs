@@ -951,7 +951,8 @@ pub async fn probe_mcp_server(
     let server_for_blocking = server.clone();
     let result = tokio::time::timeout(deadline, async {
         tauri::async_runtime::spawn_blocking(move || {
-            let mut client = crate::mcp::client::connect_transport(&server_for_blocking, &secrets)?;
+            let mut client =
+                crate::mcp::client::connect_transport(&server_for_blocking, &secrets, None)?;
             client.list_tools()
         })
         .await

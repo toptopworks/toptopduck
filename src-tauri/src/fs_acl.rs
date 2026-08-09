@@ -439,4 +439,40 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.reason, FsAclReason::OutsideAllowedArea);
     }
+
+    /// Issue #432 AC#2: a file inside the `tool_output/` subdirectory under the
+    /// session temp dir is read-allowed. The subdir is covered by the existing
+    /// `starts_with(temp_root)` check -- no separate whitelist entry is needed.
+    /// This test documents and locks that behavior so a future refactor cannot
+    /// accidentally narrow the temp-root match and break ADR-0087 Decision 3.
+    #[test]
+    fn tool_output_subdir_file_is_read_allowed() {
+        let temp = TempDir::new().unwrap();
+        let tool_output = temp.path().join("tool_output");
+        fs::create_dir(&tool_output).unwrap();
+        let file = tool_output.join("result.csv");
+        fs::write(&file, "x").unwrap();
+        let acl = FsAcl::new(&WorkingSet::default(), temp.path());
+        acl.check(&file.to_string_lossy(), AccessMode::Read)
+            .expect("read inside tool_output/ allowed");
+    }
+
+    /// Issue #432 AC#4: a file OUTSIDE the temp root + source roots is still
+    /// refused, even though the `tool_output/` subdir exists. The whitelist
+    /// boundary does not widen -- `tool_output/` is under temp_root, not a new
+    /// independent root.
+    #[test]
+    fn file_outside_temp_root_still_refused_with_tool_output_present() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("tool_output")).unwrap();
+        // A file in a completely separate temp dir.
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("secret.csv");
+        fs::write(&outside_file, "x").unwrap();
+        let acl = FsAcl::new(&WorkingSet::default(), temp.path());
+        let err = acl
+            .check(&outside_file.to_string_lossy(), AccessMode::Read)
+            .unwrap_err();
+        assert_eq!(err.reason, FsAclReason::OutsideAllowedArea);
+    }
 }

@@ -109,14 +109,33 @@ pub fn extract_tool_info(tools: &[Value]) -> Vec<McpToolInfo> {
 /// stdio, stops the reader thread for SSE, no-op for HTTP).
 pub struct McpAggregator {
     servers: Vec<AggregatedServer>,
+    /// The per-session tool-output directory path (ADR-0087 Decision 3). Injected
+    /// as `TOPTOPDUCK_TOOL_OUTPUT_DIR` into each stdio server's child env at
+    /// spawn. `None` in tests (no file output expected).
+    tool_output_dir: Option<String>,
 }
 
 impl McpAggregator {
     /// An empty aggregator (no servers connected). The gateway uses this when
     /// the user has configured no servers, or as the starting point before
-    /// [`Self::connect_one`] calls.
+    /// [`Self::connect_one`] calls. `tool_output_dir` is `None` -- use
+    /// [`Self::with_tool_output`] for the production path.
     pub fn empty() -> Self {
-        Self { servers: vec![] }
+        Self {
+            servers: vec![],
+            tool_output_dir: None,
+        }
+    }
+
+    /// Construct an empty aggregator with the session's tool-output directory
+    /// set (ADR-0087 Decision 3). Each stdio server spawned via
+    /// [`Self::connect_one`] / [`Self::connect_all`] receives the path as
+    /// `TOPTOPDUCK_TOOL_OUTPUT_DIR` in its child env.
+    pub fn with_tool_output(tool_output_dir: String) -> Self {
+        Self {
+            servers: vec![],
+            tool_output_dir: Some(tool_output_dir),
+        }
     }
 
     /// Connect + initialize one server (any transport), list its tools, and
@@ -131,7 +150,7 @@ impl McpAggregator {
         config: &McpServerConfig,
         secrets: &[SecretEnv],
     ) -> ConnectResult {
-        let mut client = match connect_transport(config, secrets) {
+        let mut client = match connect_transport(config, secrets, self.tool_output_dir.as_deref()) {
             Ok(c) => c,
             Err(e) => {
                 log::warn!(
