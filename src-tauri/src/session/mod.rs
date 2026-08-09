@@ -81,6 +81,29 @@ const MAX_READ_ROWS: u64 = 10_000;
 /// stdio MCP server via `TOPTOPDUCK_TOOL_OUTPUT_DIR` (see `mcp::client`).
 pub(crate) const TOOL_OUTPUT_DIR_NAME: &str = "tool_output";
 
+/// Maximum length of an auto-generated session name, in chars (ADR-0089
+/// Decision 4). The name is the first question's verbatim text, bounded by
+/// this cap. Same truncation rule as ADR-0039 (verbatim question cut at a
+/// char boundary with an ellipsis, never an LLM summary) -- the specific
+/// bound is an impl parameter, shorter than the far-window excerpt because a
+/// sidebar title has less horizontal room.
+const SESSION_NAME_MAX_CHARS: usize = 50;
+
+/// Truncate a question into a session name (ADR-0089 Decision 4 + ADR-0039
+/// bounded-truncation rule). The result is the verbatim question (trimmed)
+/// cut at [`SESSION_NAME_MAX_CHARS`] chars with an ellipsis when truncated --
+/// never an LLM summary. An empty / whitespace-only question yields an empty
+/// string, which the display layer falls back from (listing::display_name).
+fn truncate_session_name(question: &str) -> String {
+    let trimmed = question.trim();
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.len() <= SESSION_NAME_MAX_CHARS {
+        return trimmed.to_string();
+    }
+    let head: String = chars.iter().take(SESSION_NAME_MAX_CHARS).collect();
+    format!("{head}…")
+}
+
 /// Why a resume failed (ADR-0035 honest degrade). The interactive re-link /
 /// drift / active-abandoned decisions land via [`SourceIssue`] /
 /// [`ActiveAbandoned`] callbacks; this enum covers the non-interactive
@@ -2210,6 +2233,22 @@ impl Session {
         trace: Vec<TraceEntry>,
         skills: Vec<SkillProvenance>,
     ) -> TurnOutcome {
+        // ADR-0089 Decision 4: on the first terminal turn, auto-name the
+        // session from the first question's bounded truncation (ADR-0039
+        // same-kind rule: verbatim question cut at a char boundary, never an
+        // LLM summary). After this one-time trigger the name is never auto-
+        // changed -- subsequent turns leave it untouched, and a user rename
+        // sticks. Source/skill lifecycle events do not count as turns, so a
+        // session that loaded files or mounted skills before its first
+        // question still auto-names on that first question.
+        let is_first_turn = !self
+            .timeline
+            .iter()
+            .any(|e| matches!(e, TimelineEntry::Turn { .. }));
+        if is_first_turn {
+            self.persister
+                .set_session_name(truncate_session_name(question));
+        }
         // ADR-0078 (issue #297): the DISPLAY view of the trace rides the
         // TurnRecord so the rail can expand a completed turn's tool-call chain
         // (bounded summaries + the failed-call message; the full in-memory
@@ -3492,6 +3531,219 @@ mod tests {
                 .is_some_and(|p| p == "assets/data.csv" || p == "assets\\data.csv"),
             "recipe relative_path is assets/: {:?}",
             src.relative_path
+        );
+    }
+
+    // --- ADR-0089 Decision 4: first-turn auto-naming -----------------------
+
+    #[test]
+    fn truncate_session_name_returns_short_input_unchanged() {
+        assert_eq!(
+            super::truncate_session_name("how many people?"),
+            "how many people?"
+        );
+        assert_eq!(super::truncate_session_name("a"), "a");
+        assert_eq!(super::truncate_session_name(""), "");
+    }
+
+    #[test]
+    fn truncate_session_name_trims_whitespace() {
+        assert_eq!(super::truncate_session_name("  how many?  "), "how many?");
+    }
+
+    #[test]
+    fn truncate_session_name_cuts_with_ellipsis_at_cap() {
+        // Exactly at the cap: no truncation.
+        let exact: String = "x".repeat(super::SESSION_NAME_MAX_CHARS);
+        assert_eq!(super::truncate_session_name(&exact), exact);
+
+        // One over: head + ellipsis, total = cap + 1 chars.
+        let over: String = "x".repeat(super::SESSION_NAME_MAX_CHARS + 1);
+        let name = super::truncate_session_name(&over);
+        let chars: Vec<char> = name.chars().collect();
+        assert_eq!(chars.len(), super::SESSION_NAME_MAX_CHARS + 1);
+        assert!(name.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_session_name_is_char_boundary_safe() {
+        // Multi-byte CJK: each char is 3 bytes. Truncation must never split
+        // a code point.
+        let input: String = "中".repeat(super::SESSION_NAME_MAX_CHARS + 10);
+        let name = super::truncate_session_name(&input);
+        let chars: Vec<char> = name.chars().collect();
+        assert!(chars.len() <= super::SESSION_NAME_MAX_CHARS + 1);
+        assert!(name.ends_with('…'));
+    }
+
+    /// Bind a session to a temp .duck file so record_turn's persist path is
+    /// Some. Returns (session, _duck_file) — the caller holds the guard.
+    fn session_with_duck(name: &str) -> (Session, NamedTempFile) {
+        let duck = NamedTempFile::new().expect("temp .duck");
+        let mut session = Session::new().expect("session");
+        session
+            .bind_duck(duck.path().to_path_buf(), name.to_string())
+            .expect("bind");
+        (session, duck)
+    }
+
+    #[test]
+    fn record_turn_auto_names_on_first_turn() {
+        let (mut session, _duck) = session_with_duck("");
+        assert_eq!(session.session_name(), Some(""));
+
+        // Simulate a terminal turn reaching record_turn.
+        session.record_turn(
+            "how many people?",
+            TurnOutcome::Textual {
+                text_kind: crate::model::TextKind::Agent,
+                body: "42".into(),
+                assumption: None,
+            },
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            session.session_name(),
+            Some("how many people?"),
+            "first terminal turn auto-names the session"
+        );
+    }
+
+    #[test]
+    fn record_turn_does_not_overwrite_on_second_turn() {
+        let (mut session, _duck) = session_with_duck("");
+        session.record_turn(
+            "first question",
+            TurnOutcome::Textual {
+                text_kind: crate::model::TextKind::Agent,
+                body: "answer 1".into(),
+                assumption: None,
+            },
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(session.session_name(), Some("first question"));
+
+        session.record_turn(
+            "second question",
+            TurnOutcome::Textual {
+                text_kind: crate::model::TextKind::Agent,
+                body: "answer 2".into(),
+                assumption: None,
+            },
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(
+            session.session_name(),
+            Some("first question"),
+            "subsequent turns do not overwrite the auto-name"
+        );
+    }
+
+    #[test]
+    fn record_turn_auto_name_truncates_long_question() {
+        let (mut session, _duck) = session_with_duck("");
+        let long_question = "a very long question that exceeds the session name cap".to_string();
+        session.record_turn(
+            &long_question,
+            TurnOutcome::Textual {
+                text_kind: crate::model::TextKind::Agent,
+                body: "answer".into(),
+                assumption: None,
+            },
+            Vec::new(),
+            Vec::new(),
+        );
+        let name = session.session_name().expect("name set");
+        let chars: Vec<char> = name.chars().collect();
+        assert!(
+            chars.len() <= super::SESSION_NAME_MAX_CHARS + 1,
+            "auto-name is bounded: {name}"
+        );
+        assert!(name.ends_with('…'), "truncated name ends with ellipsis");
+    }
+
+    #[test]
+    fn record_turn_first_turn_overwrites_then_subsequent_turns_preserve_rename() {
+        let (mut session, _duck) = session_with_duck("");
+        // User renames before the first turn.
+        session.rename("My Analysis").expect("rename");
+        assert_eq!(session.session_name(), Some("My Analysis"));
+
+        // First terminal turn: per ADR-0089 Decision 4, the auto-name fires
+        // unconditionally on the first turn (the ADR explicitly rejects a
+        // name_is_placeholder flag). The user rename before the first turn
+        // is overwritten -- but this is the designed behavior: the first
+        // question's truncation is more meaningful, and a user is unlikely
+        // to rename before asking.
+        session.record_turn(
+            "what is the total?",
+            TurnOutcome::Textual {
+                text_kind: crate::model::TextKind::Agent,
+                body: "100".into(),
+                assumption: None,
+            },
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(
+            session.session_name(),
+            Some("what is the total?"),
+            "first turn auto-names (ADR-0089: no placeholder flag)"
+        );
+
+        // A SECOND user rename after the first turn sticks -- subsequent turns
+        // never fire auto-naming.
+        session.rename("Final Name").expect("rename");
+        session.record_turn(
+            "another question",
+            TurnOutcome::Textual {
+                text_kind: crate::model::TextKind::Agent,
+                body: "42".into(),
+                assumption: None,
+            },
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(
+            session.session_name(),
+            Some("Final Name"),
+            "user rename after first turn is never overwritten"
+        );
+    }
+
+    #[test]
+    fn record_turn_auto_names_after_source_events() {
+        // ADR-0089: source/skill lifecycle events do not count as turns.
+        // A session that loaded a source before its first question still
+        // auto-names on that first question.
+        let (mut session, _duck) = session_with_duck("");
+        // Simulate a source lifecycle event in the timeline.
+        session.timeline.push(super::TimelineEntry::Source(
+            crate::model::SourceLifecycleEvent {
+                kind: crate::model::SourceLifecycleKind::Added,
+                reference_name: "people".into(),
+                display_name: "people".into(),
+            },
+        ));
+        // First turn: should still auto-name because no Turn entries exist.
+        session.record_turn(
+            "analyze people",
+            TurnOutcome::Textual {
+                text_kind: crate::model::TextKind::Agent,
+                body: "done".into(),
+                assumption: None,
+            },
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(
+            session.session_name(),
+            Some("analyze people"),
+            "source lifecycle events do not block auto-naming"
         );
     }
 }

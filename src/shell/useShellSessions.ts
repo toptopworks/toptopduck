@@ -29,6 +29,7 @@ import {
   closeSessionAndWaitRelease,
   createSession,
   deleteSession,
+  getSessionName,
   onResumeProgress,
   openDuck,
   renamePersistedSession,
@@ -98,6 +99,11 @@ export function useShellSessions({
   deletePersisted: (path: string, sid: string | null) => Promise<void>;
   renameEntry: (sid: string | null, path: string, newName: string) => Promise<void>;
   handleOpenDuck: () => Promise<void>;
+  /** Sync an open session's display name after the backend auto-names it
+   *  (ADR-0089 Decision 4: first terminal turn). Reads the live name from the
+   *  backend, updates the in-memory open-session entry, and refreshes the
+   *  sidebar so the persisted list matches. */
+  syncSessionName: (sid: string) => Promise<void>;
 } {
   // The open set + active id live in ONE state object (issue #205) so the
   // invariant "activeId !== null => activeId ∈ sessions" is enforced at a
@@ -538,6 +544,27 @@ export function useShellSessions({
     }
   }, [intl, openPersisted, refreshSessions, setShellError]);
 
+  // ADR-0089 Decision 4: after the first terminal turn, the backend auto-names
+  // the session from the first question's bounded truncation. This syncs the
+  // in-memory open-session entry + the persisted sidebar list so both surfaces
+  // reflect the new name without a manual refresh.
+  const syncSessionName = useCallback(
+    async (sid: string) => {
+      try {
+        const name = await getSessionName(sid);
+        mapSessions((sessions) =>
+          sessions.map((s) => (s.sid === sid ? { ...s, name } : s)),
+        );
+      } catch (e) {
+        // Best-effort: a failure here means the sidebar/header keep the old
+        // name until the next refresh. The session itself is unaffected.
+        log.warn("syncSessionName", "failed to sync auto-named session", fmtError(e, intl));
+      }
+      refreshSessions();
+    },
+    [intl, mapSessions, refreshSessions],
+  );
+
   return {
     openSessions,
     activeSessionId,
@@ -553,5 +580,6 @@ export function useShellSessions({
     deletePersisted,
     renameEntry,
     handleOpenDuck,
+    syncSessionName,
   };
 }

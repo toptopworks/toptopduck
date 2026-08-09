@@ -129,6 +129,11 @@ export function useSessionState(
   /** Clears this session's approval entries once its turn settles (the
    *  resolved cards fold into the optimistic thread record). */
   onApprovalsSettled?: () => void,
+  /** ADR-0089 Decision 4: called once after the session's FIRST terminal turn
+   *  settles, so the shell can sync the auto-generated name into the sidebar
+   *  + open-session header. Fires only when the thread had zero turns before
+   *  this ask. */
+  onFirstTurnSettled?: () => void,
 ): UseSessionState {
   const queryClient = useQueryClient();
   const intl = useIntl();
@@ -251,6 +256,23 @@ export function useSessionState(
     approvals,
     onApprovalsSettled,
   });
+
+  // ADR-0089 Decision 4: wrap handleAsk so the first terminal turn triggers a
+  // sidebar + header name sync. The thread (TanStack Query cache) reflects the
+  // pre-ask state at call time -- the optimistic append happens INSIDE
+  // handleAsk, so checking thread here is correct. After the first turn, the
+  // name is never auto-changed again (the backend enforces this in
+  // record_turn); subsequent turns never fire onFirstTurnSettled.
+  const handleAskWithAutoName = useCallback(
+    async (question: string) => {
+      const hadTurns = thread.some((e) => e.entry === "Turn");
+      await handleAsk(question);
+      if (!hadTurns) {
+        onFirstTurnSettled?.();
+      }
+    },
+    [handleAsk, thread, onFirstTurnSettled],
+  );
 
   // Ingest orchestration (handleIngest + handleGuidedSubmit + handleGuidedCancel
   // + guidance dialog state + cold-start drop consumption) lives in useIngestFlow
@@ -416,7 +438,7 @@ export function useSessionState(
     persistError,
     guidance,
     pendingActiveDelete,
-    handleAsk,
+    handleAsk: handleAskWithAutoName,
     handleCancel,
     handleIngest,
     handleIngestMany,

@@ -371,6 +371,7 @@ pub fn run() {
             commands::list_sessions,
             commands::delete_session,
             commands::rename_session,
+            commands::get_session_name,
             commands::rename_persisted_session,
             commands::save_as_duck,
             commands::open_duck,

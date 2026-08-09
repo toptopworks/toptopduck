@@ -1331,6 +1331,22 @@ pub fn rename_session(
     s.rename(&new_name).map_err(SessionError::RenameSession)
 }
 
+/// Read the OPEN session's current display name (ADR-0089 Decision 4). After
+/// the first terminal turn auto-names the session, the frontend uses this to
+/// refresh the sidebar entry + the session header without re-reading the
+/// `.duck` file from disk. Returns the name carried by the in-memory
+/// persister (the same value the next atomic write will persist).
+#[tauri::command]
+pub fn get_session_name(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+) -> Result<String, SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    let s = handle.session_lock()?;
+    Ok(s.session_name().unwrap_or_default().to_string())
+}
+
 /// The cold-rename file operation, extracted so the blank-name short-circuit
 /// and gate ordering are unit-testable without a Tauri / async runtime (issue
 /// #130). The command wrapper just moves this onto a blocking thread; every
