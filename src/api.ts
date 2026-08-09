@@ -317,6 +317,13 @@ export async function renameSession(
   return invoke<string>("rename_session", { sessionId, newName });
 }
 
+// Read the OPEN session's current display name (ADR-0089 Decision 4). After the
+// first terminal turn auto-names the session, the frontend calls this to sync
+// the sidebar entry + session header with the backend's auto-generated name.
+export async function getSessionName(sessionId: string): Promise<string> {
+  return invoke<string>("get_session_name", { sessionId });
+}
+
 // Rename a CLOSED .duck recipe's session_name in place (ADR-0060, issue #81).
 // `path` is the .duck file path (SessionMetadata.session_id). The backend reads
 // the recipe, rewrites the header, atomic-saves -- no DuckDB instance is built.

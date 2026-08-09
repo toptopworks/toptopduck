@@ -122,6 +122,7 @@ function renderPane(locale: EffectiveLocale = "zh-CN", sessionName = "Test sessi
         railCollapsed={false}
         onToggleRail={() => {}}
         sessionName={sessionName}
+        onFirstTurnSettled={() => {}}
         approvalEvents={approvalEvents}
         onOpenSettingsSkills={() => {}}
       />,

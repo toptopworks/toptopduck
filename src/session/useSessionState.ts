@@ -129,6 +129,11 @@ export function useSessionState(
   /** Clears this session's approval entries once its turn settles (the
    *  resolved cards fold into the optimistic thread record). */
   onApprovalsSettled?: () => void,
+  /** ADR-0089 Decision 4: called once after the session's FIRST terminal turn
+   *  settles, so the shell can sync the auto-generated name into the sidebar
+   *  + open-session header. Fires only when the thread had zero turns before
+   *  this ask. */
+  onFirstTurnSettled?: () => void,
 ): UseSessionState {
   const queryClient = useQueryClient();
   const intl = useIntl();
@@ -251,6 +256,36 @@ export function useSessionState(
     approvals,
     onApprovalsSettled,
   });
+
+  // ADR-0089 Decision 4: wrap handleAsk so the first terminal turn triggers a
+  // sidebar + header name sync. Reading the query cache directly (not the
+  // reactive `thread`) keeps handleAsk's identity stable across renders -- the
+  // original useTurnFlow handleAsk deliberately excludes thread from its deps.
+  // The optimistic Turn append happens INSIDE handleAsk on the success path
+  // only (the IPC-failure catch early-returns without appending), so checking
+  // the cache AFTER the await distinguishes success from failure. After the
+  // first turn, the name is never auto-changed again (the backend enforces
+  // this in record_turn); subsequent turns never fire onFirstTurnSettled.
+  const handleAskWithAutoName = useCallback(
+    async (question: string) => {
+      const key = sessionKeys.thread(sessionId);
+      const hadTurns = (queryClient.getQueryData<ThreadEntry[]>(key) ?? []).some(
+        (e) => e.entry === "Turn",
+      );
+      await handleAsk(question);
+      // Fire only when this was the first turn AND it actually landed (the
+      // optimistic append happened inside handleAsk on success). On IPC failure
+      // handleAsk catches + returns without appending, so the cache is
+      // unchanged and the guard correctly suppresses the callback.
+      if (!hadTurns) {
+        const after = queryClient.getQueryData<ThreadEntry[]>(key) ?? [];
+        if (after.some((e) => e.entry === "Turn")) {
+          onFirstTurnSettled?.();
+        }
+      }
+    },
+    [handleAsk, queryClient, sessionId, onFirstTurnSettled],
+  );
 
   // Ingest orchestration (handleIngest + handleGuidedSubmit + handleGuidedCancel
   // + guidance dialog state + cold-start drop consumption) lives in useIngestFlow
@@ -416,7 +451,7 @@ export function useSessionState(
     persistError,
     guidance,
     pendingActiveDelete,
-    handleAsk,
+    handleAsk: handleAskWithAutoName,
     handleCancel,
     handleIngest,
     handleIngestMany,

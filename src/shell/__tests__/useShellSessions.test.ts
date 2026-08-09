@@ -47,6 +47,7 @@ vi.mock("../../api", async (importOriginal) => {
     openDuck: vi.fn(async () => {}),
     renamePersistedSession: vi.fn(async () => {}),
     renameSession: vi.fn(async () => ""),
+    getSessionName: vi.fn(async () => ""),
   };
 });
 
@@ -66,6 +67,7 @@ vi.mock("../../lib/log", () => ({
 import {
   closeSession,
   createSession,
+  getSessionName,
   openDuck,
   onResumeProgress,
   renamePersistedSession,
@@ -545,5 +547,51 @@ describe("useShellSessions", () => {
     expect(
       result.current.openSessions.some((s) => s.sid === result.current.activeSessionId),
     ).toBe(true);
+  });
+
+  // ADR-0089 Decision 4: after the first terminal turn, the backend auto-names
+  // the session. syncSessionName reads the live name and updates the in-memory
+  // open-session entry + refreshes the sidebar.
+  describe("syncSessionName (ADR-0089 auto-name sync)", () => {
+    it("reads the backend name, updates the open entry, and refreshes the sidebar", async () => {
+      const { result, refreshSessions } = renderSessions();
+      vi.mocked(createSession).mockResolvedValue(reply("s1"));
+      vi.mocked(getSessionName).mockResolvedValue("how many people?");
+
+      await act(async () => {
+        await result.current.openNew();
+      });
+      // name starts empty (ADR-0089 placeholder).
+      expect(result.current.openSessions[0].name).toBe("");
+
+      await act(async () => {
+        await result.current.syncSessionName("s1");
+      });
+
+      expect(getSessionName).toHaveBeenCalledWith("s1");
+      expect(result.current.openSessions[0].name).toBe("how many people?");
+      expect(refreshSessions).toHaveBeenCalled();
+    });
+
+    it("logs a warning + still refreshes sidebar when getSessionName rejects", async () => {
+      const { result, refreshSessions } = renderSessions();
+      vi.mocked(createSession).mockResolvedValue(reply("s2"));
+      vi.mocked(getSessionName).mockRejectedValue(new Error("ipc down"));
+
+      await act(async () => {
+        await result.current.openNew();
+      });
+      const originalName = result.current.openSessions[0].name;
+
+      await act(async () => {
+        await result.current.syncSessionName("s2");
+      });
+
+      // Best-effort: the open-session name is unchanged (the fetch failed),
+      // but the sidebar still refreshes so a persisted re-read can catch up.
+      expect(result.current.openSessions[0].name).toBe(originalName);
+      expect(refreshSessions).toHaveBeenCalled();
+      expect(log.warn).toHaveBeenCalled();
+    });
   });
 });

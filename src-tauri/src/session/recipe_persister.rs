@@ -110,8 +110,9 @@ impl RecipePersister {
         self.session_name.as_deref()
     }
 
-    /// Set the session name (for rename, ADR-0060). Does NOT persist -- the
-    /// caller follows with [`Self::save_if_bound`].
+    /// Set the session name (for rename, ADR-0060, or first-turn auto-name,
+    /// ADR-0089 Decision 4). Does NOT persist -- the caller follows with
+    /// [`Self::save_if_bound`].
     pub(super) fn set_session_name(&mut self, name: String) {
         self.session_name = Some(name);
     }

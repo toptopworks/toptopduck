@@ -80,6 +80,10 @@ interface SessionPaneProps {
    *  set; each SessionPane receives its own name rather than reaching into
    *  global active-session state (ADR-0060). */
   sessionName: string;
+  /** ADR-0089 Decision 4: the shell syncs the auto-generated session name
+   *  (from the first terminal turn) into the sidebar + header. Called once
+   *  after the session's first turn settles. */
+  onFirstTurnSettled: () => void;
   /** The app-level approval channel (ADR-0083, issue #297): the pane reads
    *  its own session's entries (merged into the live trace by useTurnFlow)
    *  and binds the respond + settled-clear callbacks to its sessionId. */
@@ -90,7 +94,7 @@ interface SessionPaneProps {
 // stable prop for useSessionState / useTurnFlow (no every-render fresh []).
 const NO_APPROVALS: ApprovalEntry[] = [];
 
-export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, providerPicker, mcpConfigured = false, onOpenSettingsSkills, railCollapsed, onToggleRail, sessionName, approvalEvents }: SessionPaneProps) {
+export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, providerPicker, mcpConfigured = false, onOpenSettingsSkills, railCollapsed, onToggleRail, sessionName, onFirstTurnSettled, approvalEvents }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
   // the pane acts on its own session only). The respond / clearSession
@@ -116,6 +120,7 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
     onIngestConsumed,
     sessionApprovals,
     handleApprovalsSettled,
+    onFirstTurnSettled,
   );
   const intl = useIntl();
   const persistDetail = s.persistError ? errorDetail(s.persistError) : null;

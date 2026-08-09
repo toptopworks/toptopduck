@@ -186,6 +186,7 @@ export default function App() {
     deletePersisted,
     renameEntry,
     handleOpenDuck,
+    syncSessionName,
   } = useShellSessions({ intl, queryClient, refreshSessions, setShellError });
 
   // The tiered-approval side channel (ADR-0083, issue #297) is owned here at
@@ -469,6 +470,7 @@ export default function App() {
                           railCollapsed={railCollapsed}
                           onToggleRail={toggleRailCollapse}
                           sessionName={s.name}
+                          onFirstTurnSettled={() => syncSessionName(s.sid)}
                           approvalEvents={approvalEvents}
                           // Issue #365 AC #4: the composer "+" panel's skill
                           // section footer hops to the settings SkillsSection.
