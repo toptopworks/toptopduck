@@ -495,4 +495,71 @@ mod real_tests {
             "provenance edge result_1 -> data exists (rewrite happened): {cascaded:?}"
         );
     }
+
+    /// A `read_csv_auto('<tool_output>')` inside a scalar subquery in the
+    /// projection is reached by the new expression walker (issue #441
+    /// AC#1 + AC#4). Without `rewrite_set_expr` walking projection
+    /// expressions, the FROM clause inside the subquery would never be
+    /// rewritten — provenance misses the derived source and resume breaks.
+    #[test]
+    fn try_materialize_rewrites_scalar_read_in_projection() {
+        let temp = TempDir::new().unwrap();
+        let tool_output_dir = temp.path().join(TOOL_OUTPUT_DIR_NAME);
+        std::fs::create_dir_all(&tool_output_dir).unwrap();
+        let csv_path = tool_output_dir.join("data.csv");
+        std::fs::write(&csv_path, "id,name\n1,alice\n2,bob\n").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+
+        // read_csv_auto inside a scalar subquery in the projection. The
+        // subquery's FROM has the read_* call. Before issue #441,
+        // rewrite_set_expr only walked top-level FROM — a subquery nested in
+        // a projection Expr was unreachable, so the SQL retained the original
+        // read_csv_auto call (provenance missed it, resume breaks).
+        let sql = format!(
+            "SELECT (SELECT count(*) FROM read_csv_auto('{}')) AS cnt",
+            csv_path.to_string_lossy()
+        );
+        let cancel = CancelToken::new();
+        let mat = RealMaterializer;
+
+        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let descriptor = mat
+            .try_materialize(&sql, &cancel, "result_1".to_string(), &mut deps)
+            .expect("materialize succeeds");
+
+        assert_eq!(descriptor.reference_name, "result_1");
+
+        // The derived source was registered.
+        assert!(
+            ws.get("data").is_some(),
+            "derived source registered for scalar read"
+        );
+
+        // The rewritten SQL executed — result_1 has the count.
+        let count: i64 = conn
+            .query_row("SELECT cnt FROM result_1", [], |r| r.get(0))
+            .expect("result_1 exists and has cnt column");
+        assert_eq!(count, 2, "scalar subquery returned correct count");
+
+        // Provenance tracks the derived source (AC#4). The catalog ref
+        // "data".data appears inside a scalar subquery in the projection.
+        // Without collect_expr_subqueries in provenance::collect_set_expr,
+        // this edge is missed.
+        let cascaded = ws.cascade_stale(
+            "data",
+            StaleAnchor {
+                reference_name: "data".to_string(),
+                display_name: "data".to_string(),
+                reason: StaleReason::Deleted,
+            },
+        );
+        assert!(
+            cascaded.contains(&"result_1".to_string()),
+            "provenance edge exists for scalar read rewrite: {cascaded:?}"
+        );
+    }
 }
