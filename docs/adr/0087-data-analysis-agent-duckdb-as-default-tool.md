@@ -46,3 +46,4 @@ ADR-0002 定"Text-to-SQL over DuckDB"为唯一执行模型；ADR-0017 以 DuckDB
 - **recipe 格式不变**：派生源的 materialize 步仍是 `{sql, display_name?}`——不需要升 format_version。
 - **派生源的 recipe SQL 用 catalog 引用**：Decision 4 措辞「SQL 路径指向持久化路径」精确化为——materialize 引用 tool_output 文件时，系统对该文件做 copy_in + ATTACH（与上传源同一管线），SQL 改写为 catalog 引用（`"ref".data`），非路径替换。`provenance::analyze` 只追踪 `TableFactor::Table`；`read_csv_auto` 落入 `_ => {}` 不被追踪，路径替换方案下 stale 级联（ADR-0025/0041）无法覆盖派生源。catalog 引用使派生源完整复用上传源的 provenance / stale / resume 管线。
 - **未决（实施期）**：沙箱目录约定与命名、fs_acl 白名单增量、派生源存储上限。
+- **被 ADR-0089 校准**：本 ADR Decision 4「派生源拷贝到会话持久化目录」的路径从 `<duck_stem>.assets/`（.duck 同级）变为 per-session 目录内的 `assets/` 子目录（`sessions/{uuid}/assets/`）。`migrate_derived_sources` 的路径构造从 `{duck_dir}/{duck_stem}.assets` 变为 `{session_dir}/assets`。

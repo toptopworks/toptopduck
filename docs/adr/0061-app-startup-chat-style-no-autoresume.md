@@ -57,3 +57,4 @@ ADR-0034（recipe 持久化 + eager resume）+ 0035（resume 完整性校验）+
 - **resume 反馈 / 空状态 / 会话栏条目 open item 已闭合**：见上「resume 前端反馈（已决）」「空状态（已决）」；会话栏条目见 ADR-0060。
 - **被 ADR-0062 精确化（拖放落点二分）**：本 ADR 拖放路径补「有活跃会话 → 加源（0022 / 0040），无活跃会话（hero）→ createSession + 加源」。见 ADR-0062 R3。
 - **被 ADR-0062 补（resume 后 viewedResult 初始化）**：本 ADR resume 路径补「重放完成后前端 setViewedResult ← thread 末个 Materialized」。见 ADR-0062 R5。
+- **被 ADR-0089 精确化**：本 ADR session 列表来源（`list_sessions` 扫描 .duck）的扫描根变为 `sessions/` 管理子目录；每个会话是一个 per-session 目录（`{uuid}/session.duck`）。启动行为（Chat 风格、不自动 resume、不预创建实例）不变。
