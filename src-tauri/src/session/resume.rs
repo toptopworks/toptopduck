@@ -735,7 +735,7 @@ mod tests {
         conn: &'a Connection,
         ws: &'a mut WorkingSet,
         sources: &'a mut HashMap<String, std::path::PathBuf>,
-        tool_output_refs: &'a mut HashMap<String, String>,
+        tool_output_refs: &'a mut HashMap<String, crate::session::materializer::CachedDerivedRef>,
     ) -> TurnDeps<'a> {
         TurnDeps {
             conn,

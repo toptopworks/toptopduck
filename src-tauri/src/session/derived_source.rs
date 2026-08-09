@@ -33,7 +33,7 @@ use crate::guardrail::{ExecError, ExecErrorKind};
 use crate::ingest::schema::quote_ident;
 use crate::ingest::{self, loader};
 use crate::model::{DatasetDescriptor, DatasetPrivacy, RectifyProvenance};
-use crate::session::materializer::TurnDeps;
+use crate::session::materializer::{CachedDerivedRef, TurnDeps};
 use crate::session::TOOL_OUTPUT_DIR_NAME;
 use crate::tools::read_paths::{extract_read_paths, is_file_function};
 
@@ -93,15 +93,30 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
         // Session-level dedup (issue #440): if this tool_output file was
         // already staged + registered in a prior materialize call, reuse the
         // existing catalog ref. Skip stage + copy_in + ATTACH + register.
-        // Defensive: verify the ref still exists in the working set — a user
-        // delete between calls invalidates the cache entry; drop it and
-        // re-register rather than trusting a dangling name.
-        if let Some(existing_ref) = deps.tool_output_refs.get(*path_str).cloned() {
-            if deps.working_set.get(&existing_ref).is_some() {
-                path_to_ref.insert(path_str.to_string(), existing_ref);
+        // Two invalidation checks keep the cache honest:
+        //   1. The ref still exists in the working set (user delete between
+        //      calls drops it; release_snapshot also proactively invalidates).
+        //   2. The file fingerprint matches (mtime + size) — a tool that
+        //      overwrites the same path with new content invalidates the
+        //      snapshot (review H1).
+        if let Some(cached) = deps.tool_output_refs.get(*path_str).cloned() {
+            let ref_live = deps.working_set.get(&cached.ref_name).is_some();
+            let content_fresh = ref_live && cached.file_matches(Path::new(path_str));
+
+            if ref_live && content_fresh {
+                path_to_ref.insert(path_str.to_string(), cached.ref_name);
                 continue;
             }
-            // Stale entry — the source was removed since registration.
+
+            // Drop stale entry — either the ref was removed (user delete) or
+            // the file was overwritten since first registration (content
+            // drift). Re-register below.
+            log::warn!(
+                target: "toptopduck::session",
+                "derived-source cache stale for {path_str}: {}",
+                if ref_live { "file content changed since registration" }
+                else { "ref no longer in working set" }
+            );
             deps.tool_output_refs.remove(*path_str);
         }
 
@@ -113,8 +128,10 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
 
         match process_one_derived(src_path, &ref_name, &staging_dir, deps) {
             Ok(()) => {
-                deps.tool_output_refs
-                    .insert(path_str.to_string(), ref_name.clone());
+                deps.tool_output_refs.insert(
+                    path_str.to_string(),
+                    CachedDerivedRef::new(ref_name.clone(), src_path),
+                );
                 path_to_ref.insert(path_str.to_string(), ref_name.clone());
                 registered.push(ref_name);
             }
@@ -127,7 +144,7 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
                     deps.source_files.remove(prev);
                     deps.working_set.remove(prev);
                     // Remove from session cache — the ref was just rolled back.
-                    deps.tool_output_refs.retain(|_, v| v != prev);
+                    deps.tool_output_refs.retain(|_, v| v.ref_name != *prev);
                 }
                 return Err(e);
             }
@@ -879,11 +896,10 @@ mod tests {
             sources.keys().collect::<Vec<_>>()
         );
         // Session cache has the mapping.
-        assert_eq!(
-            refs.get(&csv_path.to_string_lossy().to_string()),
-            Some(&"data".to_string()),
-            "session cache maps path to ref"
-        );
+        let cached = refs
+            .get(&csv_path.to_string_lossy().to_string())
+            .expect("session cache has entry");
+        assert_eq!(cached.ref_name, "data", "session cache maps path to ref");
     }
 
     /// Different tool_output files in separate calls each get their own ref —
@@ -1014,12 +1030,14 @@ mod tests {
         }
         assert_eq!(refs.len(), 1, "cache populated");
 
-        // Simulate user delete: remove from working set + DETACH + source_files,
-        // then drop the stale cache entry (mirrors release_snapshot).
+        // Simulate user delete: remove from working set + DETACH + source_files.
+        // The cache entry is left in place so the second process() call
+        // exercises the defensive stale-entry removal (derived_source.rs
+        // lines 104-105) — the ref is gone from the working set, so the cache
+        // must detect this and re-register rather than trusting a dangling name.
         let _ = conn.execute_batch("DETACH \"data\"");
         sources.remove("data");
         ws.remove("data");
-        refs.clear();
 
         // Second call: re-registers "data" (not a dangling reuse).
         {
@@ -1045,5 +1063,64 @@ mod tests {
             "re-registered in source_files"
         );
         assert_eq!(refs.len(), 1, "cache repopulated");
+    }
+
+    /// If the underlying tool_output file is overwritten between materialize
+    /// calls, the cache must detect the content drift (mtime + size mismatch)
+    /// and re-stage the new content — not silently reuse the stale snapshot
+    /// (review H1 regression guard).
+    #[test]
+    fn process_re_registers_after_content_drift() {
+        let temp = TempDir::new().unwrap();
+        let tool_output_dir = temp.path().join(TOOL_OUTPUT_DIR_NAME);
+        std::fs::create_dir_all(&tool_output_dir).unwrap();
+
+        let csv_path = tool_output_dir.join("data.csv");
+        std::fs::write(&csv_path, "id,name\n1,alice\n2,bob\n").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+
+        let sql = format!(
+            "SELECT * FROM read_csv_auto('{}')",
+            csv_path.to_string_lossy()
+        );
+
+        // First call: registers "data" with 2 rows.
+        {
+            let mut deps =
+                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+            let rewritten = process(&sql, &mut deps).expect("first process succeeds");
+            let count: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM ({rewritten}) AS _c"),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 2);
+        }
+        assert_eq!(refs.len(), 1, "cache populated");
+
+        // Overwrite the file with different content + different row count.
+        std::fs::write(&csv_path, "id,name\n3,carol\n4,dave\n5,eve\n").unwrap();
+
+        // Second call: must detect content drift and re-stage, NOT reuse the
+        // stale snapshot. The rewritten SQL must return the NEW row count.
+        {
+            let mut deps =
+                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+            let rewritten = process(&sql, &mut deps).expect("second process succeeds");
+            let count: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM ({rewritten}) AS _c"),
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("re-staged SQL executes");
+            assert_eq!(count, 3, "re-staged with new content, not stale snapshot");
+        }
     }
 }
