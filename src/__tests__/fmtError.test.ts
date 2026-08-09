@@ -46,6 +46,7 @@ const intl = createIntl({
     "error.session.renameEmpty": "Session name must not be empty",
     "error.session.resuming": "Session is resuming, please try again shortly",
     "error.store.configWriteFailure": "Failed to save settings",
+    "error.store.destinationExists": "A folder with this name already exists; choose a different name",
     "error.store.ioFailure": "A file operation failed",
     "error.store.keychainFailure": "Failed to access the OS keychain",
     "error.store.openConflict": "This session is currently open; close it first",
@@ -255,6 +256,10 @@ describe("fmtError — StoreCommandError", () => {
         { kind: "BlankName", data: { kind: "EmptyName" } },
         "Session name must not be empty",
       ],
+      [
+        { kind: "DestinationExists", data: "/dest/existing" },
+        "A folder with this name already exists; choose a different name",
+      ],
       [{ kind: "IoFailure", data: "io-fail" }, "A file operation failed"],
       [{ kind: "KeychainFailure", data: "kc-fail" }, "Failed to access the OS keychain"],
       [{ kind: "ConfigWriteFailure", data: "cfg-fail" }, "Failed to save settings"],
@@ -354,6 +359,7 @@ describe("errorDetail", () => {
   });
 
   it("extracts StoreCommandError failure detail for the fold (issue #130)", () => {
+    expect(errorDetail({ kind: "DestinationExists", data: "/dest/path" })).toBe("/dest/path");
     expect(errorDetail({ kind: "IoFailure", data: "io-fail" })).toBe("io-fail");
     expect(errorDetail({ kind: "KeychainFailure", data: "kc-fail" })).toBe("kc-fail");
     expect(errorDetail({ kind: "ConfigWriteFailure", data: "cfg-fail" })).toBe("cfg-fail");

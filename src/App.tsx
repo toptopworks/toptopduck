@@ -186,6 +186,7 @@ export default function App() {
     deletePersisted,
     renameEntry,
     handleOpenDuck,
+    handleExportSession,
     syncSessionName,
   } = useShellSessions({ intl, queryClient, refreshSessions, setShellError });
 
@@ -341,6 +342,7 @@ export default function App() {
                   onNew={() => void openNew()}
                   onOpenDuck={() => void handleOpenDuck()}
                   onActivate={activateSession}
+                  onExport={(path, name) => void handleExportSession(path, name)}
                   onOpenPersisted={(path, name) => void openPersisted(path, name)}
                   onClose={(sid) => {
                     void closeOpen(sid);

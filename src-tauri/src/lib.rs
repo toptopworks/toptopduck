@@ -373,7 +373,7 @@ pub fn run() {
             commands::rename_session,
             commands::get_session_name,
             commands::rename_persisted_session,
-            commands::save_as_duck,
+            commands::export_session,
             commands::open_duck,
             commands::take_persist_error,
             commands::take_pending_conflict,

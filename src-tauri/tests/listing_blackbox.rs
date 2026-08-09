@@ -22,7 +22,7 @@ use toptopduck_lib::persistence::{
 use toptopduck_lib::RectifyProvenance;
 
 /// Build a minimal one-source recipe (one productive turn) and persist it to
-/// `dir/file`, returning the path string. Mirrors what a real `save_as_duck`
+/// `dir/file`, returning the path string. Mirrors what a real `create_session`
 /// writes, so `list_session_metadata` reads exactly the same shape resume reads.
 fn write_recipe(dir: &std::path::Path, file: &str, session_name: &str, src: &str) -> String {
     let source = SourceRef {

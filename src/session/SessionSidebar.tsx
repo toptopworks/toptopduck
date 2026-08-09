@@ -91,6 +91,9 @@ interface SessionSidebarProps {
   onNew: () => void;
   onOpenDuck: () => void;
   onActivate: (sid: string) => void;
+  /** Export a copy of the session directory (ADR-0089 Decision 5, issue #449).
+   *  Receives the .duck path + display name (for the save dialog default). */
+  onExport: (path: string, name: string) => void;
   onOpenPersisted: (path: string, name: string) => void;
   onClose: (sid: string) => void;
   onDelete: (path: string, sid: string | null) => void;
@@ -134,6 +137,7 @@ export function SessionSidebar({
   onNew,
   onOpenDuck,
   onActivate,
+  onExport,
   onOpenPersisted,
   onClose,
   onDelete,
@@ -273,6 +277,10 @@ export function SessionSidebar({
                   onRename={() => {
                     setOpenMenuKey(null);
                     setPendingAction({ kind: "rename", entry });
+                  }}
+                  onExport={() => {
+                    setOpenMenuKey(null);
+                    onExport(entry.path, resolveDisplayName(entry.name, intl));
                   }}
                   onClose={() => {
                     setOpenMenuKey(null);
@@ -476,6 +484,7 @@ function SidebarRow({
   onToggleMenu,
   onActivate,
   onRename,
+  onExport,
   onClose,
   onDelete,
 }: {
@@ -490,6 +499,8 @@ function SidebarRow({
   onToggleMenu: () => void;
   onActivate: () => void;
   onRename: () => void;
+  /** Export a copy of the session (ADR-0089 Decision 5, issue #449). */
+  onExport: () => void;
   onClose: () => void;
   onDelete: () => void;
 }) {
@@ -608,6 +619,14 @@ function SidebarRow({
             onClick={onRename}
           >
             <FormattedMessage id="sidebar.menu.rename" defaultMessage="Rename" />
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className={cn(sessionMenuItemBase, "text-foreground")}
+            onClick={onExport}
+          >
+            <FormattedMessage id="sidebar.menu.export" defaultMessage="Save a copy…" />
           </button>
           {entry.sid && (
             <button

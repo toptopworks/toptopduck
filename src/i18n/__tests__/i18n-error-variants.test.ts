@@ -99,6 +99,7 @@ const CATALOG_IDS: Readonly<Record<string, Readonly<Record<string, string | null
   StoreCommandError: {
     OpenConflict: "error.store.openConflict",
     BlankName: "error.session.renameEmpty", // reuses rename_session's id
+    DestinationExists: "error.store.destinationExists",
     IoFailure: "error.store.ioFailure",
     KeychainFailure: "error.store.keychainFailure",
     ConfigWriteFailure: "error.store.configWriteFailure",
