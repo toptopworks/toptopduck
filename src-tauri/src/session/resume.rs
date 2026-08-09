@@ -288,8 +288,9 @@ impl<'a> Resumer<'a> {
     /// **Trust boundary (ADR-0036 Decision 5):** the recipe SQL re-executed
     /// here is parse-time untrusted at the resume boundary. v1 treats the
     /// `.duck` as a single-user, self-produced document, so resume reuses the
-    /// SAME defenses a live turn relies on (sandbox `LocalFileSystem` disabled,
-    /// subquery wrapping rejects non-SELECT) rather than a recipe-specific SQL
+    /// SAME defenses a live turn relies on (sandbox preflight FsAcl
+    /// read_* path whitelist, subquery wrapping rejects non-SELECT) rather
+    /// than a recipe-specific SQL
     /// AST whitelist. A portable / cross-user `.duck` (email / USB / attach)
     /// would additionally need a SQL AST whitelist + PII redaction + an
     /// "opened an external .duck" risk prompt -- all three are explicitly v2.

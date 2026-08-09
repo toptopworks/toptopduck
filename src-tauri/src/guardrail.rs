@@ -89,8 +89,10 @@ impl ExecError {
 /// resource-cap phrases that must NOT burn the budget.
 pub(crate) fn classify_duckdb_error(detail: &str) -> ExecErrorKind {
     let lower = detail.to_ascii_lowercase();
-    // Resource caps: memory ceiling / a filesystem function blocked by engine
-    // configuration. These never recover on a re-run with the same SQL.
+    // Resource caps: memory ceiling. These never recover on a re-run with the
+    // same SQL. (The "disabled by configuration" phrases matched the removed
+    // engine lockdown; kept as harmless defense-in-depth in case DuckDB emits
+    // them from another context.)
     if lower.contains("out of memory")
         || lower.contains("memory limit")
         || lower.contains("disabled by configuration")

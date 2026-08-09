@@ -11,9 +11,9 @@
 //! in-SELECT file surface to `read_*` functions. This extractor classifies
 //! each call: a literal path is validated by FsAcl; a non-literal (dynamic)
 //! path is flagged for preflight refusal, because FsAcl cannot validate a
-//! runtime-computed path (ADR-0088 Decision 1).
+//! runtime-computed path (ADR-0088 Decision 3).
 //!
-//! Residual risk (ADR-0088 Decision 3): a `read_*` call this walk does not
+//! Residual risk (ADR-0088 Why 4): a `read_*` call this walk does not
 //! reach -- a rare expression variant in an unhandled AST node -- is not
 //! detected. Under the non-adversarial threat model (ADR-0080) and per-session
 //! instance isolation (ADR-0027), this is accepted; the walker's coverage
@@ -41,7 +41,7 @@ use sqlparser::parser::Parser;
 /// `non_literal_read_found` is set when a `read_*` / `sniff_csv` call was
 /// detected but its first positional argument was not a literal string -- a
 /// dynamic path FsAcl cannot validate. The preflight refuses such calls
-/// (ADR-0088 Decision 1) so a non-literal `read_*` never reaches the engine
+/// (ADR-0088 Decision 3) so a non-literal `read_*` never reaches the engine
 /// unconstrained.
 pub(crate) struct ReadPathAnalysis {
     pub paths: Vec<String>,
@@ -50,15 +50,13 @@ pub(crate) struct ReadPathAnalysis {
 
 /// Scan SQL for `read_*` file-function calls. See [`ReadPathAnalysis`].
 ///
-/// SQL the parser rejects yields an empty analysis (no paths, no flag): the
-/// caller proceeds normally so the agent sees the engine's own parse error
-/// rather than a fabricated path message.
-pub(crate) fn extract_read_paths(sql: &str) -> ReadPathAnalysis {
+/// Returns `Err(())` when the SQL cannot be parsed -- the preflight refuses
+/// such SQL rather than letting it reach the engine with zero path analysis
+/// (ADR-0088 Why 4: sqlparser and DuckDB's own parser have different dialect
+/// coverage, so a parse failure does not guarantee DuckDB will also reject).
+pub(crate) fn extract_read_paths(sql: &str) -> Result<ReadPathAnalysis, ()> {
     let Ok(statements) = Parser::parse_sql(&DuckDbDialect {}, sql) else {
-        return ReadPathAnalysis {
-            paths: Vec::new(),
-            non_literal_read_found: false,
-        };
+        return Err(());
     };
     let mut out = ReadPathAnalysis {
         paths: Vec::new(),
@@ -71,7 +69,7 @@ pub(crate) fn extract_read_paths(sql: &str) -> ReadPathAnalysis {
             walk_query(query, &mut out);
         }
     }
-    out
+    Ok(out)
 }
 
 /// Walk a Query: its WITH/CTE bodies, its body set-expression, and its
@@ -125,6 +123,13 @@ fn walk_set_expr(expr: &SetExpr, out: &mut ReadPathAnalysis) {
             walk_set_expr(right.as_ref(), out);
         }
         SetExpr::Query(query) => walk_query(query.as_ref(), out),
+        SetExpr::Values(values) => {
+            for row in &values.rows {
+                for e in row {
+                    walk_expr(e, out);
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -164,7 +169,7 @@ fn walk_table_factor(factor: &TableFactor, out: &mut ReadPathAnalysis) {
 /// Recursively walk an expression, collecting any `read_*` literal path and
 /// descending into every sub-expression position a `read_*` could hide in.
 /// Rare variants fall to the `_ => {}` arm -- accepted residual risk under the
-/// non-adversarial threat model (ADR-0088 Decision 3).
+/// non-adversarial threat model (ADR-0088 Why 4).
 fn walk_expr(expr: &Expr, out: &mut ReadPathAnalysis) {
     match expr {
         // Leaves -- no sub-expressions, no function call.
@@ -183,6 +188,11 @@ fn walk_expr(expr: &Expr, out: &mut ReadPathAnalysis) {
                 if let FunctionArgExpr::Expr(e) = arg_arg(arg) {
                     walk_expr(e, out);
                 }
+            }
+            // DuckDB FILTER (WHERE ...) clause -- a scalar read_* (read_text /
+            // read_blob) hiding in the predicate is caught.
+            if let Some(f) = &func.filter {
+                walk_expr(f, out);
             }
         }
 
@@ -307,7 +317,7 @@ fn walk_expr(expr: &Expr, out: &mut ReadPathAnalysis) {
         // read_* could hide behind (composite field access, JSON/map lookup,
         // subscripted column, named/converted arg). The subscript's index
         // expression itself is left as an accepted residual risk
-        // (ADR-0088 Decision 3); the indexed object is still walked.
+        // (ADR-0088 Why 4); the indexed object is still walked.
         Expr::CompositeAccess { expr, .. }
         | Expr::Subscript { expr, .. }
         | Expr::Named { expr, .. }
@@ -363,7 +373,7 @@ fn walk_expr(expr: &Expr, out: &mut ReadPathAnalysis) {
         Expr::Lambda(lambda) => walk_expr(&lambda.body, out),
 
         // Rare / dialect-specific variants: best-effort skip. A read_* in one of
-        // these is an accepted residual risk (ADR-0088 Decision 3); only the
+        // these is an accepted residual risk (ADR-0088 Why 4); only the
         // structured guidance is lost.
         _ => {}
     }
@@ -448,7 +458,7 @@ mod tests {
     /// common form an agent would use and the form the AC #4 escape tests take.
     #[test]
     fn extracts_read_csv_auto_path_from_from() {
-        let result = extract_read_paths("SELECT * FROM read_csv_auto('/etc/passwd')");
+        let result = extract_read_paths("SELECT * FROM read_csv_auto('/etc/passwd')").unwrap();
         assert_eq!(result.paths, vec!["/etc/passwd".to_string()]);
         assert!(!result.non_literal_read_found);
     }
@@ -457,14 +467,15 @@ mod tests {
     /// read_blob call does not need a FROM to reach a file.
     #[test]
     fn extracts_scalar_read_text_path_from_projection() {
-        let result = extract_read_paths("SELECT read_text('/etc/passwd')");
+        let result = extract_read_paths("SELECT read_text('/etc/passwd')").unwrap();
         assert_eq!(result.paths, vec!["/etc/passwd".to_string()]);
     }
 
     /// A read_* nested in WHERE is caught -- the recursion covers the predicate.
     #[test]
     fn extracts_read_path_from_where() {
-        let result = extract_read_paths("SELECT 1 FROM t WHERE length(read_blob('/secret')) > 0");
+        let result =
+            extract_read_paths("SELECT 1 FROM t WHERE length(read_blob('/secret')) > 0").unwrap();
         assert_eq!(result.paths, vec!["/secret".to_string()]);
     }
 
@@ -473,7 +484,8 @@ mod tests {
     #[test]
     fn extracts_read_path_from_subquery() {
         let result =
-            extract_read_paths("SELECT * FROM (SELECT * FROM read_parquet('/secret.pq')) x");
+            extract_read_paths("SELECT * FROM (SELECT * FROM read_parquet('/secret.pq')) x")
+                .unwrap();
         assert_eq!(result.paths, vec!["/secret.pq".to_string()]);
     }
 
@@ -482,7 +494,8 @@ mod tests {
     fn extracts_read_path_from_cte() {
         let result = extract_read_paths(
             "WITH t AS (SELECT * FROM read_csv_auto('/data.csv')) SELECT * FROM t",
-        );
+        )
+        .unwrap();
         assert_eq!(result.paths, vec!["/data.csv".to_string()]);
     }
 
@@ -491,7 +504,8 @@ mod tests {
     fn extracts_both_branches_of_a_union() {
         let result = extract_read_paths(
             "SELECT * FROM read_csv_auto('/a.csv') UNION ALL SELECT * FROM read_csv_auto('/b.csv')",
-        );
+        )
+        .unwrap();
         assert_eq!(
             result.paths,
             vec!["/a.csv".to_string(), "/b.csv".to_string()]
@@ -503,7 +517,7 @@ mod tests {
     /// `read_` is, so analytics helpers are not false-positive file functions.
     #[test]
     fn non_file_function_is_not_matched() {
-        let result = extract_read_paths("SELECT bread_count('x') FROM t");
+        let result = extract_read_paths("SELECT bread_count('x') FROM t").unwrap();
         assert!(
             result.paths.is_empty(),
             "non-read_* function not matched: {:?}",
@@ -514,10 +528,10 @@ mod tests {
 
     /// A non-literal (dynamic) read_* path flags `non_literal_read_found`. The
     /// preflight refuses it with a structured error directing the agent to use
-    /// a literal path string (ADR-0088 Decision 1); no path is fabricated.
+    /// a literal path string (ADR-0088 Why 4); no path is fabricated.
     #[test]
     fn dynamic_read_path_flags_non_literal() {
-        let result = extract_read_paths("SELECT * FROM read_csv_auto(col)");
+        let result = extract_read_paths("SELECT * FROM read_csv_auto(col)").unwrap();
         assert!(
             result.paths.is_empty(),
             "dynamic path not fabricated: {:?}",
@@ -529,20 +543,20 @@ mod tests {
         );
     }
 
-    /// SQL the parser rejects yields no paths and no flag (best-effort): the
-    /// caller proceeds, and the engine surfaces its own parse error.
+    /// SQL the parser cannot understand is refused (fail-closed): the preflight
+    /// rejects it rather than letting it reach the engine with zero path
+    /// analysis (ADR-0088 Why 4 -- sqlparser and DuckDB diverge on dialects).
     #[test]
-    fn unparseable_sql_yields_no_paths() {
-        let result = extract_read_paths("this is not sql at all");
-        assert!(result.paths.is_empty());
-        assert!(!result.non_literal_read_found);
+    fn unparseable_sql_is_refused() {
+        assert!(extract_read_paths("this is not sql at all").is_err());
     }
 
     /// A read_* with a dotted/catalog-qualified name still matches on its final
     /// segment.
     #[test]
     fn dotted_function_name_matches_on_final_segment() {
-        let result = extract_read_paths("SELECT * FROM catalog.read_csv_auto('/etc/hosts')");
+        let result =
+            extract_read_paths("SELECT * FROM catalog.read_csv_auto('/etc/hosts')").unwrap();
         assert_eq!(result.paths, vec!["/etc/hosts".to_string()]);
     }
 
@@ -560,7 +574,8 @@ mod tests {
     /// (catalog references only) produces nothing for the ACL to classify.
     #[test]
     fn no_file_functions_yields_no_paths() {
-        let result = extract_read_paths(r#"SELECT id, COUNT(*) FROM "people".data GROUP BY id"#);
+        let result =
+            extract_read_paths(r#"SELECT id, COUNT(*) FROM "people".data GROUP BY id"#).unwrap();
         assert!(result.paths.is_empty());
         assert!(!result.non_literal_read_found);
     }
@@ -572,7 +587,8 @@ mod tests {
     fn extracts_path_from_first_positional_ignoring_named_options() {
         let result = extract_read_paths(
             "SELECT * FROM read_csv_auto('/data.csv', header=true, compression='gzip')",
-        );
+        )
+        .unwrap();
         assert_eq!(result.paths, vec!["/data.csv".to_string()]);
         assert!(!result.non_literal_read_found);
     }
@@ -582,7 +598,8 @@ mod tests {
     /// non-literal for preflight refusal; no path is fabricated.
     #[test]
     fn dynamic_path_with_named_string_option_is_not_misread() {
-        let result = extract_read_paths("SELECT * FROM read_csv_auto(col, compression='gzip')");
+        let result =
+            extract_read_paths("SELECT * FROM read_csv_auto(col, compression='gzip')").unwrap();
         assert!(
             result.paths.is_empty(),
             "option value not misread as path: {:?}",
@@ -596,11 +613,11 @@ mod tests {
 
     /// A list-arg read_* (`read_csv(['/a','/b'])`) yields no paths and flags
     /// non-literal: the first positional is a list, not a literal string. The
-    /// preflight refuses it (ADR-0088 Decision 1); a future change to extract
+    /// preflight refuses it (ADR-0088 Why 4); a future change to extract
     /// list elements would be intentional.
     #[test]
     fn list_arg_read_flags_non_literal() {
-        let result = extract_read_paths("SELECT * FROM read_csv(['/a.csv','/b.csv'])");
+        let result = extract_read_paths("SELECT * FROM read_csv(['/a.csv','/b.csv'])").unwrap();
         assert!(
             result.paths.is_empty(),
             "list-arg behavior pinned: {:?}",
@@ -616,7 +633,7 @@ mod tests {
     /// recursion -- the agent cannot hide a file read inside a struct value.
     #[test]
     fn extracts_read_path_from_struct_literal() {
-        let result = extract_read_paths("SELECT {'a': read_blob('/secret')}");
+        let result = extract_read_paths("SELECT {'a': read_blob('/secret')}").unwrap();
         assert_eq!(result.paths, vec!["/secret".to_string()]);
     }
 
@@ -624,7 +641,55 @@ mod tests {
     /// recursion.
     #[test]
     fn extracts_read_path_from_array_literal() {
-        let result = extract_read_paths("SELECT [read_text('/x'), read_text('/y')]");
+        let result = extract_read_paths("SELECT [read_text('/x'), read_text('/y')]").unwrap();
         assert_eq!(result.paths, vec!["/x".to_string(), "/y".to_string()]);
+    }
+
+    /// A scalar read_* (read_text / read_blob) inside a VALUES clause is caught
+    /// via the SetExpr::Values recursion -- the walker enters every row's
+    /// expression list.
+    #[test]
+    fn extracts_read_path_from_values_clause() {
+        let result = extract_read_paths("SELECT * FROM (VALUES (read_text('/secret')))").unwrap();
+        assert_eq!(result.paths, vec!["/secret".to_string()]);
+    }
+
+    /// A scalar read_* inside a FILTER (WHERE ...) clause is caught via the
+    /// Function.filter recursion.
+    #[test]
+    fn extracts_read_path_from_filter_clause() {
+        let result = extract_read_paths(
+            "SELECT COUNT(*) FILTER (WHERE length(read_blob('/secret')) > 0) FROM t",
+        )
+        .unwrap();
+        assert_eq!(result.paths, vec!["/secret".to_string()]);
+    }
+
+    /// Mixed literal + non-literal read_* in the same SQL: the non-literal
+    /// flag is set (priority for preflight refusal) while the literal path is
+    /// also collected. The preflight checks the flag before paths, so the whole
+    /// SQL is refused.
+    #[test]
+    fn mixed_literal_and_non_literal_flags_non_literal() {
+        let result = extract_read_paths(
+            "SELECT * FROM read_csv_auto('/a.csv') UNION ALL SELECT * FROM read_csv_auto(col)",
+        )
+        .unwrap();
+        assert!(
+            result.non_literal_read_found,
+            "non-literal read_* must be flagged even alongside literal paths"
+        );
+    }
+
+    /// A file function with no positional arg (all named, or zero args) flags
+    /// non-literal: the extractor cannot confidently classify it, so it
+    /// fails closed.
+    #[test]
+    fn read_function_with_no_positional_arg_flags_non_literal() {
+        let result = extract_read_paths("SELECT * FROM read_csv_auto(header=true)").unwrap();
+        assert!(
+            result.non_literal_read_found,
+            "no-positional-arg must fail closed"
+        );
     }
 }

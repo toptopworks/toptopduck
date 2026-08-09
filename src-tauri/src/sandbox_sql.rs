@@ -65,12 +65,21 @@ pub(crate) enum PreflightError {
     /// working temp dir (ADR-0080). Carries the structured, path-naming
     /// message the agent self-corrects from (ADR-0077).
     FsAcl(String),
+    /// The SQL embedded a `read_*` call whose path is not a literal string
+    /// (ADR-0088 Decision 3). FsAcl cannot validate a runtime-computed path,
+    /// so the call is refused before execution.
+    NonLiteralPath(String),
+    /// The SQL could not be parsed for path analysis (ADR-0088 Why 4). Rather
+    /// than letting it reach the engine with zero file-reachability checks, the
+    /// preflight refuses it; the agent rewrites as a standard SELECT.
+    Unparseable(String),
 }
 
 /// The shared gateway door for both read-SQL paths: refuse a stale reference
-/// (ADR-0013 invariant 2), then refuse a non-literal `read_*` path
-/// (ADR-0088 Decision 1), then refuse an out-of-bounds `read_*` path
-/// (ADR-0080). Pure -- parses SQL text + checks paths, never touches DuckDB.
+/// (ADR-0013 invariant 2), then refuse an unparseable SQL (ADR-0088 Why 4),
+/// then refuse a non-literal `read_*` path (ADR-0088 Decision 3), then refuse
+/// an out-of-bounds `read_*` path (ADR-0080). Pure -- parses SQL text +
+/// checks paths, never touches DuckDB.
 ///
 /// A stale reference is checked first: it is cheaper (the one parse is shared
 /// with the dependency extraction) and the earlier refusal is the more honest
@@ -86,9 +95,13 @@ pub(crate) fn preflight_read_sql(
     if let Some(stale_ref) = analyzed.stale_ref {
         return Err(PreflightError::StaleReference(stale_ref));
     }
-    let extraction = extract_read_paths(sql);
+    let extraction = extract_read_paths(sql).map_err(|_| {
+        PreflightError::Unparseable(
+            "could not analyze SQL for file-path safety; rewrite as a standard SELECT".to_string(),
+        )
+    })?;
     if extraction.non_literal_read_found {
-        return Err(PreflightError::FsAcl(
+        return Err(PreflightError::NonLiteralPath(
             "read_* requires a literal path string; dynamic paths are not allowed".to_string(),
         ));
     }
@@ -164,7 +177,7 @@ pub(crate) enum SandboxExecError {
     Runtime { kind: ExecErrorKind, detail: String },
 }
 
-/// Run `sql` once on a locked-down sandbox as `table_name`, handing back the
+/// Run `sql` once on a sandboxed instance as `table_name`, handing back the
 /// owned sandbox table. Owns the whole sandbox lifecycle + the row-count cap
 /// + the cancel checkpoints, so both read-SQL paths enforce uniformly.
 ///
@@ -414,10 +427,10 @@ mod tests {
     }
 
     /// A non-literal `read_*` path (a column reference, a dynamic expression)
-    /// is refused by the preflight as `FsAcl` -- FsAcl cannot validate a
-    /// runtime-computed path, so the call is refused before execution with a
+    /// is refused by the preflight as `NonLiteralPath` -- FsAcl cannot validate
+    /// a runtime-computed path, so the call is refused before execution with a
     /// message directing the agent to use a literal path string (ADR-0088
-    /// Decision 1).
+    /// Decision 3).
     #[test]
     fn non_literal_read_path_is_refused_by_preflight() {
         let temp = TempDir::new().unwrap();
@@ -425,13 +438,32 @@ mod tests {
         let err = preflight_read_sql("SELECT * FROM read_csv_auto(some_column)", &ws, temp.path())
             .unwrap_err();
         match err {
-            PreflightError::FsAcl(msg) => {
+            PreflightError::NonLiteralPath(msg) => {
                 assert!(
                     msg.contains("literal"),
                     "non-literal refusal message directs agent to literal path: {msg}"
                 );
             }
-            other => panic!("expected FsAcl, got {other:?}"),
+            other => panic!("expected NonLiteralPath, got {other:?}"),
+        }
+    }
+
+    /// SQL the path-analysis parser cannot understand is refused as
+    /// `Unparseable` rather than passing through unchecked (ADR-0088 Why 4 --
+    /// sqlparser and DuckDB may diverge on dialect coverage).
+    #[test]
+    fn unparseable_sql_is_refused_by_preflight() {
+        let temp = TempDir::new().unwrap();
+        let ws = WorkingSet::default();
+        let err = preflight_read_sql("this is not sql at all", &ws, temp.path()).unwrap_err();
+        match err {
+            PreflightError::Unparseable(msg) => {
+                assert!(
+                    msg.contains("analyze"),
+                    "unparseable refusal mentions analysis: {msg}"
+                );
+            }
+            other => panic!("expected Unparseable, got {other:?}"),
         }
     }
 }

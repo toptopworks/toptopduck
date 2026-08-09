@@ -27,7 +27,7 @@
 //! to run, not a dedicated SQL-injection adversary. Path extraction
 //! ([`crate::tools::read_paths`]) is conservative -- a non-literal `read_*`
 //! path is refused by the preflight, and a `read_*` in an unhandled AST
-//! variant is an accepted residual risk (ADR-0088 Decision 3). Per-session
+//! variant is an accepted residual risk (ADR-0088 Why 4). Per-session
 //! instance isolation (ADR-0027) bounds any blast radius to the session that
 //! owns the engine.
 //!

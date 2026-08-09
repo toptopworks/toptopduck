@@ -4,16 +4,15 @@
 //! wrapping bars mutating statements (DROP/INSERT/COPY/ATTACH/INSTALL/LOAD),
 //! narrowing the in-SELECT file surface to `read_*` functions. File-
 //! reachability for `read_*` is constrained solely by the gateway FsAcl
-//! preflight (ADR-0080 + ADR-0088 Decision 1: literal-path whitelist +
-//! non-literal refusal) -- the engine-level `disabled_filesystems` lockdown
+//! preflight (ADR-0080 + ADR-0088 Decision 2 + Decision 3: literal-path
+//! whitelist + non-literal refusal) -- the engine-level `disabled_filesystems` lockdown
 //! was removed so DuckDB can read in-bounds files (external-tool output,
 //! session temp). This module owns the per-turn sandbox lifecycle.
 //!
-//! Why a second instance, not a setting on the admin connection: DuckDB's
-//! filesystem isolation is instance-global and irreversible -- once disabled it
-//! cannot be re-enabled, and it poisons every connection on the instance, so
-//! admin cannot be both ingest-LFS-on and LLM-LFS-off. The sandbox is therefore
-//! a fresh `open_in_memory` per turn.
+//! Why a second instance, not a setting on the admin connection: provider SQL
+//! must never touch the admin connection (security boundary). A per-turn
+//! `open_in_memory` gives each turn a clean instance with its own catalog,
+//! resource caps, and interrupt handle (ADR-0027).
 //!
 //! How sources/results reach the sandbox so provider SQL resolves identically:
 //! - **Sources** (`"<ref>".data`) are READ_ONLY-attached by file. Two instances
@@ -38,9 +37,8 @@ use crate::guardrail::{apply_resource_caps, classify_duckdb_error, ExecError, Ex
 use crate::ingest::schema::quote_ident;
 use crate::workingset::WorkingSet;
 
-/// Open a fresh sandbox instance with the engine resource caps applied. Sources
-/// and results are attached/mirrored after opening (ATTACH needs LocalFileSystem
-/// on, which is always the case now -- the lockdown was removed, ADR-0088).
+/// Open a fresh sandbox instance with the engine resource caps applied.
+/// Sources and results are attached/mirrored after opening.
 pub(crate) fn open() -> Result<Connection, ExecError> {
     let conn = Connection::open_in_memory().map_err(duck_err)?;
     apply_resource_caps(&conn);

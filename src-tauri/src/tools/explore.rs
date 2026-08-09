@@ -103,7 +103,9 @@ fn run_explore(
         PreflightError::StaleReference(s) => {
             format!("stale reference: `{s}` has been invalidated and may not anchor a new query")
         }
-        PreflightError::FsAcl(s) => s,
+        PreflightError::FsAcl(s)
+        | PreflightError::NonLiteralPath(s)
+        | PreflightError::Unparseable(s) => s,
     })?;
 
     // Sandbox lifecycle + cap + cancel checkpoints, shared with the materialize

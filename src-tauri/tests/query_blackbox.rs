@@ -767,9 +767,9 @@ fn privacy_type_only_column_hides_name_and_values() {
 // clamps to the same failing call) exhausts the step cap and the turn fails
 // honestly. The guarantees are engine-level -- READ_ONLY attach, the
 // `CREATE TABLE result_N AS <query>` wrapping (a non-SELECT statement is a
-// parser error before it can touch a source or the filesystem), the sandbox
-// lockdown (read_* closure, removed by ADR-0088 -- now the FsAcl gateway
-// whitelist), and resource caps -- never SQL text filtering.
+// parser error before it can touch a source or the filesystem), the FsAcl
+// gateway whitelist (read_* path closure, ADR-0080 + ADR-0088), and resource
+// caps -- never SQL text filtering.
 
 #[test]
 fn all_mutating_statements_against_the_source_are_rejected() {
