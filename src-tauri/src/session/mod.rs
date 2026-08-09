@@ -2234,6 +2234,14 @@ impl Session {
     /// Rewrite the recipe at the bound path (ADR-0034 atomic write). Facade
     /// delegate to [`RecipePersister::save_if_bound`](recipe_persister::RecipePersister::save_if_bound).
     fn persist_if_bound(&mut self) {
+        // Migrate derived sources before building the recipe so their
+        // source_path carries the portable (.duck-adjacent) location instead
+        // of the temp staging path (issue #433, ADR-0087 D2). Without this,
+        // derived sources created after the initial bind_duck would carry temp
+        // paths in the recipe — wiped on session drop, breaking resume.
+        if let Some(duck_path) = self.persister.duck_path().map(PathBuf::from) {
+            self.migrate_derived_sources(&duck_path);
+        }
         self.persister
             .save_if_bound(&self.working_set, &self.timeline);
     }

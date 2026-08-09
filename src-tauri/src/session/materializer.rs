@@ -39,8 +39,10 @@ use crate::workingset::WorkingSet;
 /// turn -- the materializer is stateless and owns none of this.
 ///
 /// Disjoint borrows via a struct let one call site hand a materializer
-/// `&mut working_set` alongside `&conn` / `&source_files` / `&temp_path`
-/// without widening to `&mut Session`.
+/// `&mut working_set` alongside `&conn` / `&mut source_files` / `&temp_path`
+/// without widening to `&mut Session`. The `&mut source_files` lets a
+/// materialize step register derived sources mid-turn (issue #433,
+/// ADR-0087 D4).
 pub(crate) struct TurnDeps<'a> {
     pub conn: &'a Connection,
     /// `&mut` so a materialize step can register derived sources (issue #433,

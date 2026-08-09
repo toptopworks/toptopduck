@@ -23,8 +23,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use sqlparser::ast::{
-    FunctionArg, FunctionArgExpr, Ident, ObjectName, Query, SetExpr, Statement, TableFactor,
-    TableWithJoins,
+    FunctionArg, FunctionArgExpr, Ident, ObjectName, Query, SetExpr, Statement, TableAlias,
+    TableFactor, TableWithJoins,
 };
 use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser;
@@ -63,10 +63,8 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
         Err(()) => return Ok(sql.to_string()),
     };
 
-    // Filter to paths inside tool_output/. Canonical comparison is ideal but
-    // the paths come from the agent's SQL (string literals), and the agent
-    // receives the exact tool_output path via TOPTOPDUCK_TOOL_OUTPUT_DIR — so a
-    // prefix check against the known directory is sufficient.
+    // Filter to paths inside tool_output/. Canonicalized comparison prevents
+    // `..` traversal and symlink escapes (ADR-0080 threat model).
     let tool_output_paths: Vec<&String> = extraction
         .paths
         .iter()
@@ -80,87 +78,41 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
     let staging_dir = deps.temp_path.join(DERIVED_STAGING_DIR);
     let mut path_to_ref: HashMap<String, String> = HashMap::new();
 
+    // Track successfully registered ref names so we can roll back on a later
+    // path's failure (issue #433 review I4). Without this, a multi-file SQL
+    // whose second file fails would leave ghost registrations in the working
+    // set + admin conn.
+    let mut registered: Vec<String> = Vec::new();
+
     for path_str in &tool_output_paths {
         // Dedup within this call (same path referenced twice in one SQL).
         if path_to_ref.contains_key(*path_str) {
             continue;
         }
 
-        // Dedup across calls: check if a source whose source_path matches
-        // this tool_output file is already registered. The source_path stored
-        // on the descriptor is the persistent (staged) path, not the original
-        // tool_output path — so this cross-call dedup uses a name match on
-        // the working set instead. A derived source's reference name is
-        // deterministic (file stem + deconflict), so if the file was already
-        // processed, its ref_name is already taken and deconflict yields a
-        // suffixed variant. The original registration is still valid and
-        // usable.
         let src_path = Path::new(path_str);
         let ref_name = match ingest::derive_reference_name(src_path) {
             Some(base) => deps.working_set.deconflict(&base),
             None => deps.working_set.deconflict("derived"),
         };
 
-        let persistent_path = stage_derived_file(src_path, &ref_name, &staging_dir)?;
-
-        // Determine the DuckDB reader function from the file extension.
-        let dispatched = ingest::dispatch(&persistent_path);
-        let reader_fn = match ingest::reader_for(&dispatched) {
-            Some(r) => r,
-            None => {
-                return Err(ExecError::new(
-                    ExecErrorKind::Runtime,
-                    format!(
-                        "derived source `{}` has an unsupported format for DuckDB import",
-                        src_path.display()
-                    ),
-                ));
+        match process_one_derived(src_path, &ref_name, &staging_dir, deps) {
+            Ok(()) => {
+                path_to_ref.insert(path_str.to_string(), ref_name.clone());
+                registered.push(ref_name);
             }
-        };
-
-        // copy_in: create a read-only snapshot (same path as uploaded sources).
-        let snap = loader::copy_in(&persistent_path, deps.temp_path, &ref_name, reader_fn)
-            .map_err(|e| ExecError::new(ExecErrorKind::Runtime, e.to_string()))?;
-
-        // ATTACH the snapshot to admin as a read-only catalog (same as
-        // uploaded sources — `"ref".data` resolves identically).
-        let attach_path = snap.file_path.to_string_lossy();
-        let attach_sql = format!(
-            "ATTACH '{attach_path}' AS {} (READ_ONLY);",
-            quote_ident(&ref_name)
-        );
-        if let Err(e) = deps.conn.execute_batch(&attach_sql) {
-            let _ = std::fs::remove_file(&snap.file_path);
-            return Err(ExecError::new(
-                ExecErrorKind::Runtime,
-                format!("failed to attach derived source snapshot: {e}"),
-            ));
+            Err(e) => {
+                // Rollback previously registered sources from this call.
+                for prev in &registered {
+                    let _ = deps
+                        .conn
+                        .execute_batch(&format!("DETACH {}", quote_ident(prev)));
+                    deps.source_files.remove(prev);
+                    deps.working_set.remove(prev);
+                }
+                return Err(e);
+            }
         }
-
-        // Register in source_files (the snapshot path, same as uploaded
-        // sources). The sandbox path in run_sandboxed_read attaches from here.
-        deps.source_files.insert(ref_name.clone(), snap.file_path);
-
-        // Register in the working set as a source (not a result). Silent —
-        // no SourceLifecycleEvent::Added (ADR-0087 D4: derived source
-        // registration is a materialize side effect, not a user action).
-        // The source_path points to the persistent (staged) copy so resume
-        // can re-ingest it.
-        let descriptor = DatasetDescriptor {
-            reference_name: ref_name.clone(),
-            display_name: ref_name.clone(),
-            source_path: persistent_path.to_string_lossy().to_string(),
-            columns: snap.columns,
-            row_count: snap.row_count,
-            sample: snap.sample,
-            fingerprint: snap.fingerprint,
-            rectify: RectifyProvenance::NotApplicable,
-            privacy: DatasetPrivacy::default(),
-            stale: None,
-        };
-        deps.working_set.register(descriptor);
-
-        path_to_ref.insert(path_str.to_string(), ref_name);
     }
 
     if path_to_ref.is_empty() {
@@ -171,6 +123,85 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
     // reference. The rewritten SQL flows into preflight (provenance now
     // tracks the catalog refs) and sandbox exec (sources are ATTACHed).
     rewrite_sql(sql, &path_to_ref)
+}
+
+/// Stage, copy_in, ATTACH, and register a single derived source file.
+/// Called once per unique tool_output path. Cleans up its own staging +
+/// snapshot files on failure (A5: symmetric cleanup). The caller is
+/// responsible for rolling back previously registered sources if this
+/// returns `Err`.
+fn process_one_derived(
+    src_path: &Path,
+    ref_name: &str,
+    staging_dir: &Path,
+    deps: &mut TurnDeps,
+) -> Result<(), ExecError> {
+    let persistent_path = stage_derived_file(src_path, ref_name, staging_dir)?;
+
+    // Determine the DuckDB reader function from the file extension.
+    let dispatched = ingest::dispatch(&persistent_path);
+    let reader_fn = match ingest::reader_for(&dispatched) {
+        Some(r) => r,
+        None => {
+            let _ = std::fs::remove_file(&persistent_path);
+            return Err(ExecError::new(
+                ExecErrorKind::Runtime,
+                format!(
+                    "derived source `{}` has an unsupported format for DuckDB import",
+                    src_path.display()
+                ),
+            ));
+        }
+    };
+
+    // copy_in: create a read-only snapshot (same path as uploaded sources).
+    let snap =
+        loader::copy_in(&persistent_path, deps.temp_path, ref_name, reader_fn).map_err(|e| {
+            let _ = std::fs::remove_file(&persistent_path);
+            ExecError::new(ExecErrorKind::Runtime, e.to_string())
+        })?;
+
+    // ATTACH the snapshot to admin as a read-only catalog (same as
+    // uploaded sources — `"ref".data` resolves identically).
+    let attach_path = snap.file_path.to_string_lossy();
+    let attach_sql = format!(
+        "ATTACH '{attach_path}' AS {} (READ_ONLY);",
+        quote_ident(ref_name)
+    );
+    if let Err(e) = deps.conn.execute_batch(&attach_sql) {
+        let _ = std::fs::remove_file(&snap.file_path);
+        let _ = std::fs::remove_file(&persistent_path);
+        return Err(ExecError::new(
+            ExecErrorKind::Runtime,
+            format!("failed to attach derived source snapshot: {e}"),
+        ));
+    }
+
+    // Register in source_files (the snapshot path, same as uploaded
+    // sources). The sandbox path in run_sandboxed_read attaches from here.
+    deps.source_files
+        .insert(ref_name.to_string(), snap.file_path);
+
+    // Register in the working set as a source (not a result). Silent —
+    // no SourceLifecycleEvent::Added (ADR-0087 D4: derived source
+    // registration is a materialize side effect, not a user action).
+    // The source_path points to the persistent (staged) copy so resume
+    // can re-ingest it.
+    let descriptor = DatasetDescriptor {
+        reference_name: ref_name.to_string(),
+        display_name: ref_name.to_string(),
+        source_path: persistent_path.to_string_lossy().to_string(),
+        columns: snap.columns,
+        row_count: snap.row_count,
+        sample: snap.sample,
+        fingerprint: snap.fingerprint,
+        rectify: RectifyProvenance::NotApplicable,
+        privacy: DatasetPrivacy::default(),
+        stale: None,
+    };
+    deps.working_set.register(descriptor);
+
+    Ok(())
 }
 
 /// Copy a tool_output file into the persistent staging directory under a
@@ -198,10 +229,17 @@ fn stage_derived_file(
 }
 
 /// Whether `path_str` points inside the session's `tool_output` directory.
-/// The agent receives the exact path via `TOPTOPDUCK_TOOL_OUTPUT_DIR`, so a
-/// prefix match is sufficient (no need for canonicalization).
+/// Canonicalizes both paths so `..` traversal and symlinks cannot escape
+/// (ADR-0080 threat model: agent SQL may be influenced by prompt injection).
+/// Fail-closed: if the path doesn't exist or can't be resolved, reject it.
 fn is_in_tool_output(path_str: &str, tool_output_dir: &Path) -> bool {
-    Path::new(path_str).starts_with(tool_output_dir)
+    let canon = match std::fs::canonicalize(path_str) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let canon_dir =
+        std::fs::canonicalize(tool_output_dir).unwrap_or_else(|_| tool_output_dir.to_path_buf());
+    canon.starts_with(&canon_dir)
 }
 
 // --- SQL rewrite -------------------------------------------------------
@@ -285,18 +323,21 @@ fn rewrite_table_with_joins(twj: &mut TableWithJoins, path_to_ref: &HashMap<Stri
 /// subquery is recursed. Other shapes are left as-is.
 fn rewrite_table_factor(factor: &mut TableFactor, path_to_ref: &HashMap<String, String>) {
     match factor {
-        TableFactor::Function { name, args, .. } => {
+        TableFactor::Function {
+            name, args, alias, ..
+        } => {
             if let Some(ref_name) = try_match_read_function(name, args, path_to_ref) {
-                *factor = catalog_table_factor(&ref_name);
+                *factor = catalog_table_factor(&ref_name, alias.clone());
             }
         }
         TableFactor::Table {
             name,
             args: Some(tvf),
+            alias,
             ..
         } => {
             if let Some(ref_name) = try_match_read_function(name, &tvf.args, path_to_ref) {
-                *factor = catalog_table_factor(&ref_name);
+                *factor = catalog_table_factor(&ref_name, alias.clone());
             }
         }
         TableFactor::Derived { subquery, .. } => {
@@ -333,11 +374,13 @@ fn try_match_read_function(
     None
 }
 
-/// Build a `TableFactor::Table` for the catalog reference `"ref".data`.
-fn catalog_table_factor(ref_name: &str) -> TableFactor {
+/// Build a `TableFactor::Table` for the catalog reference `"ref".data`,
+/// preserving the original table alias if present (e.g. `FROM read_csv_auto(
+/// 'path') AS t` rewrites to `FROM "ref".data AS t`).
+fn catalog_table_factor(ref_name: &str, alias: Option<TableAlias>) -> TableFactor {
     TableFactor::Table {
         name: ObjectName(vec![Ident::with_quote('"', ref_name), Ident::new("data")]),
-        alias: None,
+        alias,
         args: None,
         with_hints: Vec::new(),
         version: None,
@@ -454,22 +497,77 @@ mod tests {
     }
 
     #[test]
-    fn is_in_tool_output_matches_prefix() {
-        let dir = Path::new("/tmp/session/tool_output");
-        assert!(is_in_tool_output("/tmp/session/tool_output/x.csv", dir));
-        assert!(is_in_tool_output("/tmp/session/tool_output/sub/y.csv", dir));
-        assert!(!is_in_tool_output("/tmp/session/other/x.csv", dir));
-        assert!(!is_in_tool_output("/tmp/tool_output/x.csv", dir));
+    fn is_in_tool_output_matches_canonicalized_prefix() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path().join("tool_output");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("x.csv"), "x").unwrap();
+        std::fs::write(dir.join("sub").join("y.csv"), "y").unwrap();
+
+        assert!(is_in_tool_output(
+            &dir.join("x.csv").to_string_lossy(),
+            &dir
+        ));
+        assert!(is_in_tool_output(
+            &dir.join("sub").join("y.csv").to_string_lossy(),
+            &dir
+        ));
+        // A sibling directory with a similar name is NOT a match.
+        let other = temp.path().join("tool_output_evil");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("x.csv"), "x").unwrap();
+        assert!(!is_in_tool_output(
+            &other.join("x.csv").to_string_lossy(),
+            &dir
+        ));
+    }
+
+    #[test]
+    fn is_in_tool_output_rejects_dotdot_traversal() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path().join("tool_output");
+        std::fs::create_dir_all(&dir).unwrap();
+        // A file outside tool_output but reachable via ..
+        let secret = temp.path().join("secret.csv");
+        std::fs::write(&secret, "s").unwrap();
+        let traversal = format!("{}/../secret.csv", dir.to_string_lossy());
+        assert!(
+            !is_in_tool_output(&traversal, &dir),
+            "traversal path must be rejected"
+        );
+    }
+
+    #[test]
+    fn is_in_tool_output_rejects_nonexistent_path() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path().join("tool_output");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!is_in_tool_output(
+            &dir.join("nonexistent.csv").to_string_lossy(),
+            &dir
+        ));
     }
 
     #[test]
     fn catalog_table_factor_renders_correctly() {
-        let f = catalog_table_factor("my_data");
+        let f = catalog_table_factor("my_data", None);
         let rendered = match &f {
             TableFactor::Table { name, .. } => name.to_string(),
             _ => panic!("expected Table"),
         };
         assert_eq!(rendered, r#""my_data".data"#);
+    }
+
+    #[test]
+    fn rewrite_preserves_table_alias() {
+        let path = "/tmp/tool_output/data.csv";
+        let sql = format!("SELECT t.* FROM read_csv_auto('{path}') AS t WHERE t.id > 0");
+        let rewritten = rewrite_sql(&sql, &map(&[(path, "data")])).unwrap();
+        assert!(
+            rewritten.contains(r#""data".data"#),
+            "catalog ref present: {rewritten}"
+        );
+        assert!(rewritten.contains("AS t"), "alias preserved: {rewritten}");
     }
 
     // --- Integration: process() with real DuckDB + filesystem ----------
@@ -600,5 +698,73 @@ mod tests {
         let mut deps = real_deps(&conn, &mut ws, &mut sources, temp.path());
         let rewritten = process(sql, &mut deps).expect("process succeeds");
         assert_eq!(rewritten, "SELECT 1 AS x");
+    }
+
+    /// A path inside tool_output but escaping via `..` is rejected by
+    /// canonicalization — process() leaves it unchanged for preflight's
+    /// FsAcl to catch (C1 security fix).
+    #[test]
+    fn process_rejects_dotdot_traversal_in_tool_output() {
+        let temp = TempDir::new().unwrap();
+        let tool_output_dir = temp.path().join(TOOL_OUTPUT_DIR_NAME);
+        std::fs::create_dir_all(&tool_output_dir).unwrap();
+        // A file outside tool_output but reachable via ..
+        let secret = temp.path().join("secret.csv");
+        std::fs::write(&secret, "id\n999\n").unwrap();
+        let traversal = format!("{}/../secret.csv", tool_output_dir.to_string_lossy());
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+
+        let sql = format!("SELECT * FROM read_csv_auto('{traversal}')");
+        let mut deps = real_deps(&conn, &mut ws, &mut sources, temp.path());
+        let rewritten = process(&sql, &mut deps).expect("process succeeds");
+
+        // SQL unchanged — traversal path rejected by is_in_tool_output.
+        assert_eq!(rewritten, sql, "traversal path not rewritten");
+        assert!(ws.list().is_empty(), "nothing registered");
+    }
+
+    /// Multi-file SQL where the second file has an unsupported format:
+    /// process() returns Err and rolls back the first file's registration.
+    #[test]
+    fn process_rolls_back_on_partial_failure() {
+        let temp = TempDir::new().unwrap();
+        let tool_output_dir = temp.path().join(TOOL_OUTPUT_DIR_NAME);
+        std::fs::create_dir_all(&tool_output_dir).unwrap();
+
+        // First file: valid CSV.
+        let csv_path = tool_output_dir.join("data.csv");
+        std::fs::write(&csv_path, "id,name\n1,alice\n2,bob\n").unwrap();
+        // Second file: unsupported format (.foo).
+        let foo_path = tool_output_dir.join("bad.foo");
+        std::fs::write(&foo_path, "garbage").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+
+        let sql = format!(
+            "SELECT * FROM read_csv_auto('{}') UNION ALL SELECT * FROM read_csv_auto('{}')",
+            csv_path.to_string_lossy(),
+            foo_path.to_string_lossy()
+        );
+
+        let mut deps = real_deps(&conn, &mut ws, &mut sources, temp.path());
+        let result = process(&sql, &mut deps);
+
+        assert!(result.is_err(), "process fails on unsupported format");
+        // Rollback: first file's registration was removed.
+        assert!(
+            ws.list().is_empty(),
+            "working set rolled back, got: {:?}",
+            ws.list()
+        );
+        assert!(
+            sources.is_empty(),
+            "source_files rolled back, got: {:?}",
+            sources
+        );
     }
 }
