@@ -53,6 +53,12 @@ pub(crate) struct TurnDeps<'a> {
     pub result_row_cap: u64,
     pub result_count_cap: usize,
     pub temp_path: &'a Path,
+    /// Session-level ephemeral cache: canonical `tool_output` file path to
+    /// catalog ref name (issue #440). Prevents re-staging + re-copy_in +
+    /// re-ATTACH when the same tool_output file is referenced across multiple
+    /// materialize calls. Lives on Session, cleared on drop. Not persisted to
+    /// recipe — resume reconstructs refs from recipe SQL.
+    pub tool_output_refs: &'a mut HashMap<String, String>,
 }
 
 #[cfg(test)]
@@ -65,6 +71,7 @@ impl<'a> TurnDeps<'a> {
         ws: &'a mut WorkingSet,
         source_files: &'a mut HashMap<String, std::path::PathBuf>,
         temp_path: &'a Path,
+        tool_output_refs: &'a mut HashMap<String, String>,
     ) -> Self {
         TurnDeps {
             conn,
@@ -73,6 +80,7 @@ impl<'a> TurnDeps<'a> {
             result_row_cap: 1_000,
             result_count_cap: 100,
             temp_path,
+            tool_output_refs,
         }
     }
 }
@@ -397,6 +405,7 @@ mod real_tests {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
 
         let sql = format!(
             "SELECT * FROM TABLE(read_csv_auto('{}'))",
@@ -405,7 +414,7 @@ mod real_tests {
         let cancel = CancelToken::new();
         let mat = RealMaterializer;
 
-        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
         let descriptor = mat
             .try_materialize(&sql, &cancel, "result_1".to_string(), &mut deps)
             .expect("materialize succeeds");

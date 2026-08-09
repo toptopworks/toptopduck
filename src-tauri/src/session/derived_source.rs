@@ -90,6 +90,21 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
             continue;
         }
 
+        // Session-level dedup (issue #440): if this tool_output file was
+        // already staged + registered in a prior materialize call, reuse the
+        // existing catalog ref. Skip stage + copy_in + ATTACH + register.
+        // Defensive: verify the ref still exists in the working set — a user
+        // delete between calls invalidates the cache entry; drop it and
+        // re-register rather than trusting a dangling name.
+        if let Some(existing_ref) = deps.tool_output_refs.get(*path_str).cloned() {
+            if deps.working_set.get(&existing_ref).is_some() {
+                path_to_ref.insert(path_str.to_string(), existing_ref);
+                continue;
+            }
+            // Stale entry — the source was removed since registration.
+            deps.tool_output_refs.remove(*path_str);
+        }
+
         let src_path = Path::new(path_str);
         let ref_name = match ingest::derive_reference_name(src_path) {
             Some(base) => deps.working_set.deconflict(&base),
@@ -98,6 +113,8 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
 
         match process_one_derived(src_path, &ref_name, &staging_dir, deps) {
             Ok(()) => {
+                deps.tool_output_refs
+                    .insert(path_str.to_string(), ref_name.clone());
                 path_to_ref.insert(path_str.to_string(), ref_name.clone());
                 registered.push(ref_name);
             }
@@ -109,6 +126,8 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
                         .execute_batch(&format!("DETACH {}", quote_ident(prev)));
                     deps.source_files.remove(prev);
                     deps.working_set.remove(prev);
+                    // Remove from session cache — the ref was just rolled back.
+                    deps.tool_output_refs.retain(|_, v| v != prev);
                 }
                 return Err(e);
             }
@@ -630,6 +649,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
 
         let sql = format!(
             "SELECT * FROM read_csv_auto('{}')",
@@ -637,7 +657,8 @@ mod tests {
         );
 
         {
-            let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path());
+            let mut deps =
+                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
             // SQL was rewritten to a catalog reference.
@@ -689,13 +710,14 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
 
         let sql = format!(
             "SELECT * FROM read_csv_auto('{}')",
             outside_csv.to_string_lossy()
         );
 
-        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
         let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
         // SQL unchanged — no tool_output paths detected.
@@ -711,9 +733,10 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
 
         let sql = "SELECT 1 AS x";
-        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
         let rewritten = process(sql, &mut deps).expect("process succeeds");
         assert_eq!(rewritten, "SELECT 1 AS x");
     }
@@ -734,9 +757,10 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
 
         let sql = format!("SELECT * FROM read_csv_auto('{traversal}')");
-        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
         let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
         // SQL unchanged — traversal path rejected by is_in_tool_output.
@@ -762,6 +786,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
 
         let sql = format!(
             "SELECT * FROM read_csv_auto('{}') UNION ALL SELECT * FROM read_csv_auto('{}')",
@@ -769,7 +794,7 @@ mod tests {
             foo_path.to_string_lossy()
         );
 
-        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
         let result = process(&sql, &mut deps);
 
         assert!(result.is_err(), "process fails on unsupported format");
@@ -784,5 +809,241 @@ mod tests {
             "source_files rolled back, got: {:?}",
             sources
         );
+        assert!(
+            refs.is_empty(),
+            "session cache invalidated on rollback, got: {:?}",
+            refs
+        );
+    }
+
+    // --- Cross-call dedup (issue #440) ---------------------------------------
+
+    /// The same tool_output file referenced in two process() calls reuses the
+    /// existing catalog ref — no `data_2` suffix variant is created (AC #1).
+    #[test]
+    fn process_reuses_catalog_ref_across_calls() {
+        let temp = TempDir::new().unwrap();
+        let tool_output_dir = temp.path().join(TOOL_OUTPUT_DIR_NAME);
+        std::fs::create_dir_all(&tool_output_dir).unwrap();
+
+        let csv_path = tool_output_dir.join("data.csv");
+        std::fs::write(&csv_path, "id,name\n1,alice\n2,bob\n").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+
+        let sql = format!(
+            "SELECT * FROM read_csv_auto('{}')",
+            csv_path.to_string_lossy()
+        );
+
+        // First call: registers "data", populates session cache.
+        {
+            let mut deps =
+                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+            let rewritten = process(&sql, &mut deps).expect("first process succeeds");
+            assert!(
+                rewritten.contains(r#""data".data"#),
+                "first call: catalog ref present: {rewritten}"
+            );
+        }
+
+        // Second call: must reuse "data", NOT create "data_2".
+        {
+            let mut deps =
+                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+            let rewritten = process(&sql, &mut deps).expect("second process succeeds");
+            assert!(
+                rewritten.contains(r#""data".data"#),
+                "second call: reuses same catalog ref: {rewritten}"
+            );
+            assert!(
+                !rewritten.contains(r#""data_2""#),
+                "second call: no deconflict suffix: {rewritten}"
+            );
+        }
+
+        // Only one source registered (no "data_2").
+        assert_eq!(
+            ws.list().len(),
+            1,
+            "exactly one derived source, got: {:?}",
+            ws.list()
+        );
+        assert!(sources.contains_key("data"), "snapshot in source_files");
+        assert!(
+            !sources.contains_key("data_2"),
+            "no duplicate snapshot: {:?}",
+            sources.keys().collect::<Vec<_>>()
+        );
+        // Session cache has the mapping.
+        assert_eq!(
+            refs.get(&csv_path.to_string_lossy().to_string()),
+            Some(&"data".to_string()),
+            "session cache maps path to ref"
+        );
+    }
+
+    /// Different tool_output files in separate calls each get their own ref —
+    /// the cache only deduplicates the same path (AC #3).
+    #[test]
+    fn process_does_not_dedup_different_files() {
+        let temp = TempDir::new().unwrap();
+        let tool_output_dir = temp.path().join(TOOL_OUTPUT_DIR_NAME);
+        std::fs::create_dir_all(&tool_output_dir).unwrap();
+
+        let csv_a = tool_output_dir.join("a.csv");
+        std::fs::write(&csv_a, "id\n1\n").unwrap();
+        let csv_b = tool_output_dir.join("b.csv");
+        std::fs::write(&csv_b, "id\n2\n").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+
+        // First call: file a → ref "a".
+        {
+            let sql = format!("SELECT * FROM read_csv_auto('{}')", csv_a.to_string_lossy());
+            let mut deps =
+                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+            let rewritten = process(&sql, &mut deps).expect("first process succeeds");
+            assert!(rewritten.contains(r#""a".data"#), "first: {rewritten}");
+        }
+
+        // Second call: file b → ref "b" (different path, no reuse).
+        {
+            let sql = format!("SELECT * FROM read_csv_auto('{}')", csv_b.to_string_lossy());
+            let mut deps =
+                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+            let rewritten = process(&sql, &mut deps).expect("second process succeeds");
+            assert!(rewritten.contains(r#""b".data"#), "second: {rewritten}");
+        }
+
+        assert_eq!(ws.list().len(), 2, "two distinct sources registered");
+        assert!(sources.contains_key("a"), "ref a in source_files");
+        assert!(sources.contains_key("b"), "ref b in source_files");
+    }
+
+    /// No duplicate ATTACH on the admin connection when the same file is
+    /// referenced in a second call (AC #2). DuckDB refuses a duplicate ATTACH
+    /// alias with an error, so if process() re-ATTACHed, the rewritten SQL
+    /// execution would fail.
+    #[test]
+    fn no_duplicate_attach_across_calls() {
+        let temp = TempDir::new().unwrap();
+        let tool_output_dir = temp.path().join(TOOL_OUTPUT_DIR_NAME);
+        std::fs::create_dir_all(&tool_output_dir).unwrap();
+
+        let csv_path = tool_output_dir.join("data.csv");
+        std::fs::write(&csv_path, "id,name\n1,alice\n2,bob\n").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+
+        let sql = format!(
+            "SELECT * FROM read_csv_auto('{}')",
+            csv_path.to_string_lossy()
+        );
+
+        // First call stages + ATTACHes "data".
+        {
+            let mut deps =
+                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+            let rewritten = process(&sql, &mut deps).expect("first process succeeds");
+            // Execute the rewritten SQL to confirm ATTACH landed.
+            let count: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM ({rewritten}) AS _c"),
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("first rewritten SQL executes");
+            assert_eq!(count, 2);
+        }
+
+        // Second call: must NOT re-ATTACH. The rewritten SQL still executes
+        // because the existing ATTACH is reused.
+        {
+            let mut deps =
+                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+            let rewritten = process(&sql, &mut deps).expect("second process succeeds");
+            let count: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM ({rewritten}) AS _c"),
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("second rewritten SQL executes — no duplicate ATTACH");
+            assert_eq!(count, 2);
+        }
+    }
+
+    /// If the source registered by a first call is removed (simulating a user
+    /// delete) before a second call references the same file, the stale cache
+    /// entry is dropped and the file is re-registered under a fresh ref — not
+    /// silently reused as a dangling catalog name (HIGH-1 regression guard).
+    #[test]
+    fn process_re_registers_after_source_removal() {
+        let temp = TempDir::new().unwrap();
+        let tool_output_dir = temp.path().join(TOOL_OUTPUT_DIR_NAME);
+        std::fs::create_dir_all(&tool_output_dir).unwrap();
+
+        let csv_path = tool_output_dir.join("data.csv");
+        std::fs::write(&csv_path, "id,name\n1,alice\n2,bob\n").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+
+        let sql = format!(
+            "SELECT * FROM read_csv_auto('{}')",
+            csv_path.to_string_lossy()
+        );
+
+        // First call registers "data".
+        {
+            let mut deps =
+                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+            process(&sql, &mut deps).expect("first process succeeds");
+        }
+        assert_eq!(refs.len(), 1, "cache populated");
+
+        // Simulate user delete: remove from working set + DETACH + source_files,
+        // then drop the stale cache entry (mirrors release_snapshot).
+        let _ = conn.execute_batch("DETACH \"data\"");
+        sources.remove("data");
+        ws.remove("data");
+        refs.clear();
+
+        // Second call: re-registers "data" (not a dangling reuse).
+        {
+            let mut deps =
+                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+            let rewritten = process(&sql, &mut deps).expect("second process succeeds");
+            assert!(
+                rewritten.contains(r#""data".data"#),
+                "re-registered under same base name: {rewritten}"
+            );
+            // The rewritten SQL must execute (the new ATTACH is live).
+            let count: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM ({rewritten}) AS _c"),
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("re-registered SQL executes");
+            assert_eq!(count, 2);
+        }
+        assert!(
+            sources.contains_key("data"),
+            "re-registered in source_files"
+        );
+        assert_eq!(refs.len(), 1, "cache repopulated");
     }
 }

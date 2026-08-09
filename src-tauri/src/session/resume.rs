@@ -735,6 +735,7 @@ mod tests {
         conn: &'a Connection,
         ws: &'a mut WorkingSet,
         sources: &'a mut HashMap<String, std::path::PathBuf>,
+        tool_output_refs: &'a mut HashMap<String, String>,
     ) -> TurnDeps<'a> {
         TurnDeps {
             conn,
@@ -743,6 +744,7 @@ mod tests {
             result_row_cap: 1_000,
             result_count_cap: 100,
             temp_path: Path::new("."),
+            tool_output_refs,
         }
     }
 
@@ -917,7 +919,8 @@ mod tests {
         let conn = Connection::open_in_memory().expect("in-memory db");
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources);
+        let mut refs = HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
         let mut resumer = Resumer::new(&cancel, &mut fake, &recipe);
         let break_point = resumer.replay(&mut deps, &mut |_| {}).unwrap();
         assert!(break_point.is_none(), "whole chain succeeded -> no break");
@@ -948,7 +951,8 @@ mod tests {
         let conn = Connection::open_in_memory().expect("in-memory db");
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources);
+        let mut refs = HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
         let mut resumer = Resumer::new(&cancel, &mut fake, &recipe);
         let brk = resumer
             .replay(&mut deps, &mut |_| {})
@@ -983,7 +987,8 @@ mod tests {
         let conn = Connection::open_in_memory().expect("in-memory db");
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources);
+        let mut refs = HashMap::new();
+        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
         let mut resumer = Resumer::new(&cancel, &mut fake, &recipe);
         let err = resumer.replay(&mut deps, &mut |_| {}).unwrap_err();
         assert!(matches!(err, ResumeError::Cancelled), "got {err:?}");
