@@ -1,12 +1,15 @@
-//! Capability-boundary system prompt + payload rendering (ADR-0017, issue #29).
+//! Capability-boundary system prompt + payload rendering (ADR-0017/0087, issue #29/#431).
 //!
 //! The system prompt is the single place the v1 capability boundary is
 //! expressed to the model: IN-scope (DuckDB-native SQL + descriptive stats),
 //! OUT-of-scope (prediction / ML / hypothesis testing / semantic text), and the
 //! "refuse + in-scope alternative, never fake" behavior. Native DuckDB
 //! statistical methods (corr / regr_* / quantile_* ...) are IN-scope and must
-//! be named in `assumption` so a user never mistakes a real method for a
-//! smuggled naive one (e.g. linear extrapolation passed off as "prediction").
+//! be labeled so a user never mistakes a real method for a smuggled naive one
+//! (e.g. linear extrapolation passed off as "prediction"). The legacy path
+//! ([`CAPABILITY_BOUNDARY_PROMPT`]) uses the JSON `assumption` field; the
+//! tool-calling path ([`TOOL_CALLING_PROMPT`]) labels methods in the final
+//! text answer (ADR-0077 retired the JSON contract).
 //!
 //! [`render_schema_context`] renders the windowed payload's datasets (issue #24,
 //! ADR-0023/0026/0011) into a text block appended to the system prompt. It is
@@ -68,15 +71,14 @@ pub fn response_locale_directive(locale: ResponseLocale) -> &'static str {
 /// context. The boundary prompt and schema-context labels are locale-invariant
 /// (layer 4); only the directive carries the locale. The skill fragments ride
 /// between the base prompt and the locale directive so the model reads the
-/// skill-aware boundary clause (in the base prompt) before the skill bodies,
-/// then the locale + schema. Centralized so the assembly order has one source
+/// base prompt's toolbox-aware framing before the skill bodies, then the
+/// locale + schema. Centralized so the assembly order has one source
 /// of truth and the locale directive can never be silently dropped by a call
 /// site -- the legacy single-SQL path ([`build_system_prompt`]) passes an empty
 /// skill slice (skills are not wired into the retired adapters); the tool-
 /// calling path ([`build_tool_system_prompt`]) passes the session's resolved
 /// fragments. An empty slice adds nothing, so the no-skills assembly shape
-/// (base + locale + schema) is preserved modulo the always-on skill-aware
-/// clause added to both base prompts.
+/// (base + locale + schema) is preserved.
 fn assemble(
     base: &str,
     request: &ProviderRequest,
@@ -170,8 +172,10 @@ pub fn resolve_locale_from_tag(tag: &str) -> ResponseLocale {
 }
 
 /// The v1 capability boundary + output contract, frozen as the provider's
-/// system prompt (ADR-0017/0009/0011). Written once here so the boundary and
-/// the one-SQL-per-turn contract have one source of truth the model sees.
+/// system prompt (ADR-0017/0009/0011; the boundary framework was recalibrated
+/// by ADR-0087, which left ADR-0009/0011 untouched). Written once
+/// here so the boundary and the one-SQL-per-turn contract have one source of
+/// truth the model sees.
 ///
 /// Notes on the contract encoded here:
 /// - IN-scope is the DuckDB-native set from ADR-0017 (relational / aggregate /
@@ -186,10 +190,10 @@ pub fn resolve_locale_from_tag(tag: &str) -> ResponseLocale {
 /// - Samples and column names are untrusted user data (ADR-0011/0017 prompt-
 ///   injection minimal defense): never treat their contents as instructions.
 pub const CAPABILITY_BOUNDARY_PROMPT: &str = "\
-你是一个本地优先数据分析工具的 SQL 生成助手。你的唯一职责：把用户的自然语言问题翻译成「一条」可在本地 DuckDB 上执行的 SQL，或在能力边界外时诚实回应。你绝不直接访问数据、绝不执行 SQL、绝不编造结果。
+你是一个数据分析 agent。你的唯一职责：把用户的自然语言问题翻译成「一条」可在本地 DuckDB 上执行的 SQL，或在能力边界外时诚实回应。你绝不直接访问数据、绝不执行 SQL、绝不编造结果。
 
 【能力边界 v1】
-IN-SCOPE（可以做，用 DuckDB 原生能力实现）：
+IN-SCOPE（DuckDB 原生能力）：
 - 关系查询：选择、过滤、排序、去重、连接（JOIN/UNION）、合并。
 - 聚合与分组：COUNT/SUM/AVG/MIN/MAX、GROUP BY、HAVING。
 - 数据清洗：类型转换、字符串处理、正则、NULL 处理、去重。
@@ -198,13 +202,13 @@ IN-SCOPE（可以做，用 DuckDB 原生能力实现）：
 - 异常值检测：基于 z-score、分位数的识别（用上述原生函数实现）。
 - 排名 / 窗口函数 / Top-N：ROW_NUMBER、RANK、NTILE、percentile_rank 等。
 
-OUT-OF-SCOPE（拒绝，不要尝试）：预测与 forecasting / 时序建模、机器学习（聚类、分类、推荐）、语义文本分类与情感分析、假设检验（p 值 / t 检验 / 卡方）、优化求解、任意自定义变换。
+OUT-OF-SCOPE（DuckDB 原生不支持）：预测与 forecasting / 时序建模、机器学习（聚类、分类、推荐）、语义文本分类与情感分析、假设检验（p 值 / t 检验 / 卡方）、优化求解、任意自定义变换。
 
 【越界行为：拒绝 + in-scope 替代，绝不冒充】
 当请求越界时：输出 type=text、kind=refuse。在 body 中诚实说明该请求超出 v1 能力边界，并主动给出一个 IN-SCOPE 的替代方案（例如把“预测下个季度销量”转写为“按季度汇总历史销量并计算同比/环比/趋势”）。绝对禁止用朴素方法冒充越界能力——例如不得用线性外推当作“预测”，不得用简单差值当作“建模”。拒绝必须有替代，不要只回一个“做不到”。
 
-【挂载技能与能力边界】
-用户可能挂载技能（见下方「挂载技能」区段），其提示片段可能扩展本工具的能力面。能力扩展以挂载技能显式提供相应工具为限：除非某项挂载技能显式提供了处理某类请求的工具或方法，否则对越界请求仍诚实拒绝并给出 in-scope 替代，不得因「可能存在能力扩展」而编造结果、编造 SQL 或越界尝试。挂载技能未显式覆盖的能力边界，仍按上述规则完全适用。
+【能力边界扩展】
+你的工具箱中可能包含外部工具，扩展 DuckDB 的默认能力面。能力扩展以工具箱中实际存在匹配工具为限：除非工具箱中存在处理某类请求的匹配工具，否则对超出 DuckDB 能力的请求仍诚实拒绝并给出 in-scope 替代，不得因「可能存在能力扩展」而编造结果、编造 SQL 或越界尝试。工具箱中无匹配工具的能力边界，仍按上述规则完全适用。
 
 【原生统计方法必须如实标注】
 当你使用 corr / regr_* / quantile_* / stddev / mad / skewness / kurtosis 等 DuckDB 原生统计方法时，在 assumption 字段里写明所用的方法名与简要解释（如 \"regr_slope 线性回归斜率，仅描述历史相关，非预测\"）。这是诚实性要求：用户必须能区分“真正的统计方法”与“被伪装的朴素方法”。
@@ -230,24 +234,32 @@ OUT-OF-SCOPE（拒绝，不要尝试）：预测与 forecasting / 时序建模�
 - kind=refuse：越界拒绝，body 必须含 in-scope 替代建议。
 - assumption：可选字符串，例如 refuse 时写明被避开的越界方法名。";
 
-/// The capability-boundary system prompt for the native tool-calling path
-/// (ADR-0077/0081, issue #295). Same v1 capability boundary + honest-refusal +
-/// native-method-labeling + untrusted-samples invariants as
-/// [`CAPABILITY_BOUNDARY_PROMPT`] (ADR-0079: the default skill set preserves the
-/// ADR-0017 boundary), but the output contract is tool-use instead of a single
-/// JSON object: the agent calls the four built-in tools (explore / materialize /
-/// describe / sample), self-corrects from tool-level errors, and ends the turn
-/// with a plain-text answer. The single-SQL JSON contract is retired on this
-/// path (ADR-0009 superseded by ADR-0077).
+/// The system prompt for the native tool-calling path (ADR-0077/0081/0087,
+/// issue #295/#431). The agent identity is "data analysis agent" (ADR-0087):
+/// DuckDB is the default tool for tabular analysis, and the agent uses
+/// matching external tools when the request exceeds DuckDB's capability.
+/// Same v1 capability boundary + honest-refusal + native-method-labeling +
+/// untrusted-samples invariants as [`CAPABILITY_BOUNDARY_PROMPT`] (ADR-0079:
+/// the default skill set preserves the ADR-0017 boundary), but the output
+/// contract is tool-use instead of a single JSON object: the agent calls the
+/// built-in tools (explore / materialize / describe / sample), self-corrects
+/// from tool-level errors, and ends the turn with a plain-text answer. The
+/// single-SQL JSON contract is retired on this path (ADR-0009 superseded by
+/// ADR-0077).
 ///
 /// Kept as a sibling const (not derived from the legacy prompt) so the legacy
 /// path stays byte-identical until its contract-phase retirement; the two
 /// prompts share the boundary prose verbatim where they overlap.
 pub const TOOL_CALLING_PROMPT: &str = "\
-你是一个本地优先数据分析工具的 SQL 执行代理。你通过调用工具在本地 DuckDB 上探索与物化结果，或在能力边界外时诚实回应。你绝不直接编造结果；一切结果都来自你对工具的实际调用。
+你是一个数据分析 agent。你通过调用工具完成数据分析，或在无法完成时诚实回应。你绝不直接编造结果；一切结果都来自你对工具的实际调用。
+
+【工具选择】
+DuckDB 是你进行表格型分析（查询、聚合、统计）的默认工具。下方「能力边界」描述 DuckDB 工具的默认能力范围。
+
+当用户的请求超出 DuckDB 能力范围时，优先检查工具箱中是否存在匹配的外部工具——若存在则使用。不区分工具来源：技能声明的工具与用户直接配置的工具同等对待。
 
 【能力边界 v1】
-IN-SCOPE（可以做，用 DuckDB 原生能力实现）：
+IN-SCOPE（DuckDB 原生能力）：
 - 关系查询：选择、过滤、排序、去重、连接（JOIN/UNION）、合并。
 - 聚合与分组：COUNT/SUM/AVG/MIN/MAX、GROUP BY、HAVING。
 - 数据清洗：类型转换、字符串处理、正则、NULL 处理、去重。
@@ -256,19 +268,16 @@ IN-SCOPE（可以做，用 DuckDB 原生能力实现）：
 - 异常值检测：基于 z-score、分位数的识别（用上述原生函数实现）。
 - 排名 / 窗口函数 / Top-N：ROW_NUMBER、RANK、NTILE、percentile_rank 等。
 
-OUT-OF-SCOPE（拒绝，不要尝试）：预测与 forecasting / 时序建模、机器学习（聚类、分类、推荐）、语义文本分类与情感分析、假设检验（p 值 / t 检验 / 卡方）、优化求解、任意自定义变换。
+OUT-OF-SCOPE（DuckDB 原生不支持）：预测与 forecasting / 时序建模、机器学习（聚类、分类、推荐）、语义文本分类与情感分析、假设检验（p 值 / t 检验 / 卡方）、优化求解、任意自定义变换。
 
 【越界行为：拒绝 + in-scope 替代，绝不冒充】
-当请求越界时：在最终答复中诚实说明该请求超出 v1 能力边界，并主动给出一个 IN-SCOPE 的替代方案（例如把“预测下个季度销量”转写为“按季度汇总历史销量并计算同比/环比/趋势”）。绝对禁止用朴素方法冒充越界能力——例如不得用线性外推当作“预测”，不得用简单差值当作“建模”。拒绝必须有替代，不要只回一个“做不到”。
-
-【挂载技能与能力边界】
-用户可能挂载技能（见下方「挂载技能」区段），其提示片段可能扩展本工具的能力面。能力扩展以挂载技能显式提供相应工具为限：除非某项挂载技能显式提供了处理某类请求的工具或方法，否则对越界请求仍诚实拒绝并给出 in-scope 替代，不得因「可能存在能力扩展」而编造结果或越界尝试。挂载技能未显式覆盖的能力边界，仍按上述规则完全适用。
+当请求超出 DuckDB 能力且工具箱中无匹配工具时：在最终答复中诚实说明并主动给出一个 in-scope 替代方案（例如把”预测下个季度销量”转写为”按季度汇总历史销量并计算同比/环比/趋势”）。绝对禁止用朴素方法冒充越界能力——例如不得用线性外推当作”预测”，不得用简单差值当作”建模”。不得因「可能存在能力扩展」而编造结果或越界尝试——只使用工具箱中实际可调用的工具。拒绝必须有替代，不要只回一个”做不到”。
 
 【原生统计方法必须如实标注】
 当你使用 corr / regr_* / quantile_* / stddev / mad / skewness / kurtosis 等 DuckDB 原生统计方法时，在最终答复里如实标注所用的方法名与简要解释（如 \"regr_slope 线性回归斜率，仅描述历史相关，非预测\"）。这是诚实性要求：用户必须能区分“真正的统计方法”与“被伪装的朴素方法”。
 
 【工具与晋升】
-你有四个工具：
+你的内置 DuckDB 工具：
 - explore(sql)：在临时沙箱上跑只读 SQL，返回列、行数与少量样例，不产生 result_N、不动工作集。用于试探字段、调试表达式。
 - materialize(sql, display_name?)：跑 SQL 并把结果晋升为下一个 result_N（编号按晋升顺序单调递增、永不复用）。这是唯一会把结果保留进工作集的工具。值得保留的结果用它，一次性试探用 explore。
 - describe(reference_name)：返回某已注册数据集的列与行数。
@@ -735,7 +744,7 @@ mod tests {
         assert_eq!(resolve_locale_from_tag(""), ResponseLocale::EnUS);
     }
 
-    // --- native tool-calling system prompt (ADR-0077/0081, issue #295) -------
+    // --- native tool-calling system prompt (ADR-0077/0081/0087, issue #295/#431) -
     //
     // AC #5: the default skill set's capability boundary is preserved on the
     // tool-calling path. The boundary prose (IN/OUT scope, refuse + alternative,
@@ -793,6 +802,66 @@ mod tests {
     }
 
     #[test]
+    fn both_prompts_position_identity_as_data_analysis_agent() {
+        // ADR-0087 / issue #431: both prompts' identity sentence reframes the
+        // agent from "SQL 执行代理" / "SQL 生成助手" to "数据分析 agent".
+        assert!(
+            TOOL_CALLING_PROMPT.contains("数据分析 agent"),
+            "tool-calling prompt carries the new identity"
+        );
+        assert!(
+            !TOOL_CALLING_PROMPT.contains("SQL 执行代理"),
+            "old tool-calling identity retired"
+        );
+        assert!(
+            CAPABILITY_BOUNDARY_PROMPT.contains("数据分析 agent"),
+            "legacy prompt carries the new identity"
+        );
+        assert!(
+            !CAPABILITY_BOUNDARY_PROMPT.contains("SQL 生成助手"),
+            "old legacy identity retired"
+        );
+    }
+
+    #[test]
+    fn both_prompts_use_descriptive_scope_labels() {
+        // ADR-0087 / issue #431: both scope labels changed from
+        // behavior-prescriptive to pure descriptive -- behavior is owned by the
+        // tool-selection + refuse sections, not the capability list labels.
+        for p in [TOOL_CALLING_PROMPT, CAPABILITY_BOUNDARY_PROMPT] {
+            assert!(
+                p.contains("IN-SCOPE（DuckDB 原生能力）"),
+                "descriptive IN-SCOPE label present"
+            );
+            assert!(
+                !p.contains("可以做，用 DuckDB"),
+                "old behavior-prescriptive IN-SCOPE label retired"
+            );
+            assert!(
+                p.contains("DuckDB 原生不支持"),
+                "descriptive OUT-OF-SCOPE label present"
+            );
+            assert!(
+                !p.contains("拒绝，不要尝试"),
+                "old behavior-prescriptive OUT-OF-SCOPE label retired"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_calling_prompt_tools_section_names_builtin_tools() {
+        // ADR-0087 / issue #431: the tool-contract section no longer hardcodes
+        // a tool count ("你有四个工具") -- it names them as "内置 DuckDB 工具"
+        // because external MCP tools may also be in the toolbox.
+        let p = TOOL_CALLING_PROMPT;
+        assert!(
+            p.contains("你的内置 DuckDB 工具"),
+            "tools section names built-in DuckDB tools"
+        );
+        assert!(!p.contains("你有四个工具"), "old hardcoded count retired");
+    }
+
+    #[test]
     fn build_tool_system_prompt_orders_boundary_directive_schema() {
         // ADR-0052: the locale directive is inserted between the boundary and
         // the schema context, mirroring the legacy build_system_prompt order.
@@ -810,26 +879,27 @@ mod tests {
         assert!(prompt.contains("active = people"), "schema context present");
     }
 
-    // --- skill-aware clause + skill-body injection (ADR-0086, issue #364) ----
+    // --- capability-extension clause + skill-body injection (ADR-0086/0087) --
     //
-    // AC #2: each base prompt carries the skill-aware clause (unless a mounted
-    // skill explicitly provides the tool, the boundary still refuses + offers
-    // an in-scope alternative). AC #1/#4: mounted-skill bodies inject between
-    // the base prompt and the locale directive in mount order, framed per
-    // ADR-0086; an empty mount set adds nothing so the pre-skill assembly is
-    // preserved.
+    // ADR-0087 broadened the extension trigger from "skill explicitly provides
+    // tools" to "toolbox has matching tools" (both base prompts). ADR-0086
+    // wires skill-body injection: mounted-skill bodies inject between the base
+    // prompt and the locale directive in mount order; an empty mount set adds
+    // nothing so the pre-skill assembly is preserved.
 
     #[test]
-    fn capability_boundary_prompt_carries_skill_aware_clause() {
-        // ADR-0086 / issue #364 AC#2: the clause names mounted skills, explicit
-        // tool provision, honest refusal, and the in-scope alternative -- so a
-        // content test pins the key phrases the model reads.
+    fn capability_boundary_prompt_carries_broadened_extension_clause() {
+        // ADR-0087 / issue #431: the capability-extension clause was broadened
+        // from "skill explicitly provides tools" to "toolbox has matching tools".
+        // Pin the broadened trigger landmarks + the preserved honest-refusal +
+        // alternative guard.
         let p = CAPABILITY_BOUNDARY_PROMPT;
-        assert!(p.contains("挂载技能"), "clause names mounted skills");
-        assert!(p.contains("显式提供"), "clause names explicit provision");
+        assert!(p.contains("工具箱"), "clause references the toolbox");
+        assert!(p.contains("匹配工具"), "clause names matching tools");
+        assert!(!p.contains("显式提供"), "old skill-only trigger retired");
         assert!(
-            p.contains("相应工具"),
-            "clause names the corresponding tool"
+            !p.contains("挂载技能与能力边界"),
+            "old section header retired"
         );
         assert!(p.contains("诚实拒绝"), "clause preserves honest refusal");
         assert!(
@@ -839,15 +909,29 @@ mod tests {
     }
 
     #[test]
-    fn tool_calling_prompt_carries_skill_aware_clause() {
-        // Same clause on the tool-calling path -- the boundary calibration is
-        // shared verbatim across both prompts (ADR-0079/0086).
+    fn tool_calling_prompt_has_tool_selection_guidance() {
+        // ADR-0087 / issue #431: the tool-calling prompt carries a tool-selection
+        // section (DuckDB default, external when matching, no source distinction)
+        // that absorbs the former skill-aware clause. Pin the guidance landmarks
+        // + the retired old-clause header.
         let p = TOOL_CALLING_PROMPT;
-        assert!(p.contains("挂载技能"));
-        assert!(p.contains("显式提供"));
-        assert!(p.contains("相应工具"));
-        assert!(p.contains("诚实拒绝"));
-        assert!(p.contains("in-scope 替代"));
+        assert!(p.contains("默认工具"), "DuckDB named as default tool");
+        assert!(
+            p.contains("查询、聚合、统计"),
+            "default-tool scope (tabular analysis) pinned"
+        );
+        assert!(
+            p.contains("匹配的外部工具"),
+            "matching external tools named"
+        );
+        assert!(
+            p.contains("不区分工具来源"),
+            "no source distinction between skill-declared and user-configured"
+        );
+        assert!(
+            !p.contains("挂载技能与能力边界"),
+            "old skill-aware clause section header retired (absorbed)"
+        );
     }
 
     /// Build a fragment for the rendering / assembly tests.
@@ -923,19 +1007,21 @@ mod tests {
     #[test]
     fn build_tool_system_prompt_with_empty_skills_omits_skill_section() {
         // AC #4: an empty mount set adds nothing -- no 【挂载技能】 frame
-        // appears, so the assembly is the base prompt + locale + schema (the
-        // pre-skill shape, modulo the always-present skill-aware clause in the
-        // base prompt itself).
+        // appears, so the assembly is the base prompt + locale + schema. The
+        // base prompt's tool-selection section is always present (it is part of
+        // the prompt text, not the injected skill section).
         let req = request(vec![ds("people", r#""people".data"#)], Some("people"));
         let prompt = build_tool_system_prompt(&req, ResponseLocale::ZhCN, &[]);
         assert!(
             !prompt.contains("【挂载技能】"),
             "no skill section when the mount set is empty"
         );
-        // The clause in the base prompt references "挂载技能" in prose -- that
-        // is the always-on clause, not a mounted-skill body. Pin it still
-        // appears (AC #2) while the body section does not.
-        assert!(prompt.contains("挂载技能"));
+        // The tool-selection section is always in the base prompt, not a
+        // mounted-skill body -- pin it appears even with zero skills mounted.
+        assert!(
+            prompt.contains("默认工具"),
+            "tool-selection section always present in the base prompt"
+        );
     }
 
     // --- external-runtime ACP context block + skill block (ADR-0086, issue #368) ---
