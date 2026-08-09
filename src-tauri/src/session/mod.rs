@@ -96,11 +96,10 @@ const SESSION_NAME_MAX_CHARS: usize = 50;
 /// string, which the display layer falls back from (listing::display_name).
 fn truncate_session_name(question: &str) -> String {
     let trimmed = question.trim();
-    let chars: Vec<char> = trimmed.chars().collect();
-    if chars.len() <= SESSION_NAME_MAX_CHARS {
+    if trimmed.chars().count() <= SESSION_NAME_MAX_CHARS {
         return trimmed.to_string();
     }
-    let head: String = chars.iter().take(SESSION_NAME_MAX_CHARS).collect();
+    let head: String = trimmed.chars().take(SESSION_NAME_MAX_CHARS).collect();
     format!("{head}…")
 }
 
@@ -3744,6 +3743,42 @@ mod tests {
             session.session_name(),
             Some("analyze people"),
             "source lifecycle events do not block auto-naming"
+        );
+    }
+
+    #[test]
+    fn record_turn_auto_names_on_failed_and_cancelled_first_turn() {
+        // ADR-0089 Decision 4: "first terminal turn" includes all terminal
+        // outcomes -- Failed / Cancelled / Materialized, not just Textual.
+        // The auto-name logic in record_turn is outcome-agnostic (no match on
+        // outcome before set_session_name). This test pins that contract so a
+        // future `match outcome` guard does not silently regress it.
+        let (mut session_a, _duck) = session_with_duck("");
+        session_a.record_turn(
+            "why did it break?",
+            TurnOutcome::Failed(crate::model::TurnFailure::Execute {
+                detail: "cap exhausted".into(),
+            }),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(
+            session_a.session_name(),
+            Some("why did it break?"),
+            "Failed first turn still auto-names"
+        );
+
+        let (mut session_b, _duck) = session_with_duck("");
+        session_b.record_turn(
+            "never finished",
+            TurnOutcome::Cancelled,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(
+            session_b.session_name(),
+            Some("never finished"),
+            "Cancelled first turn still auto-names"
         );
     }
 }
