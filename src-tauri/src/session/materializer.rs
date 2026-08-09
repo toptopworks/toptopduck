@@ -55,6 +55,28 @@ pub(crate) struct TurnDeps<'a> {
     pub temp_path: &'a Path,
 }
 
+#[cfg(test)]
+impl<'a> TurnDeps<'a> {
+    /// Build `TurnDeps` with default caps (1 000 rows / 100 results) over a
+    /// real in-memory connection + real temp dir. Shared by derived-source and
+    /// materializer tests so the field list stays in one place.
+    pub(crate) fn test_deps(
+        conn: &'a Connection,
+        ws: &'a mut WorkingSet,
+        source_files: &'a mut HashMap<String, std::path::PathBuf>,
+        temp_path: &'a Path,
+    ) -> Self {
+        TurnDeps {
+            conn,
+            source_files,
+            working_set: ws,
+            result_row_cap: 1_000,
+            result_count_cap: 100,
+            temp_path,
+        }
+    }
+}
+
 /// Execute provider SQL + materialize `result_N` + register the working set
 /// (ADR-0053). The trait is object-safe: no generic methods, no `Self` return,
 /// so a `Box<dyn Materializer>` lands cleanly on the Session -- shared by the
@@ -341,5 +363,86 @@ mod fake {
                 None => Err(ExecError::new(ExecErrorKind::Runtime, "fake".to_string())),
             }
         }
+    }
+}
+
+/// End-to-end tests for [`RealMaterializer::try_materialize()`] with real
+/// DuckDB + filesystem (issue #439 AC4). The existing materializer tests use
+/// [`FakeMaterializer`] and never exercise the derived-source branch.
+#[cfg(test)]
+mod real_tests {
+    use super::{Materializer, RealMaterializer, TurnDeps};
+    use crate::cancel::CancelToken;
+    use crate::model::{StaleAnchor, StaleReason};
+    use crate::session::TOOL_OUTPUT_DIR_NAME;
+    use crate::workingset::WorkingSet;
+    use duckdb::Connection;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    #[test]
+    fn try_materialize_persists_tool_output_derived_source() {
+        // A TABLE(read_csv_auto(...)) pointing at a tool_output CSV triggers
+        // derived_source::process (copy_in + ATTACH + register), the SQL is
+        // rewritten to a catalog ref, and the result is materialized from the
+        // rewritten SQL — the full RealMaterializer pipeline (issue #439 AC4).
+        // The TABLE() form exercises the TableFunction rewrite gap fix (AC1)
+        // through the complete pipeline.
+        let temp = TempDir::new().unwrap();
+        let tool_output_dir = temp.path().join(TOOL_OUTPUT_DIR_NAME);
+        std::fs::create_dir_all(&tool_output_dir).unwrap();
+        let csv_path = tool_output_dir.join("data.csv");
+        std::fs::write(&csv_path, "id,name\n1,alice\n2,bob\n").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+
+        let sql = format!(
+            "SELECT * FROM TABLE(read_csv_auto('{}'))",
+            csv_path.to_string_lossy()
+        );
+        let cancel = CancelToken::new();
+        let mat = RealMaterializer;
+
+        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path());
+        let descriptor = mat
+            .try_materialize(&sql, &cancel, "result_1".to_string(), &mut deps)
+            .expect("materialize succeeds");
+
+        // The result was materialized.
+        assert_eq!(descriptor.reference_name, "result_1");
+        assert_eq!(descriptor.row_count, 2);
+        assert!(ws.is_result("result_1"));
+
+        // The derived source was registered as a non-result source.
+        let d = ws.get("data").expect("derived source registered");
+        assert_eq!(d.row_count, 2);
+        assert!(!ws.is_result("data"), "data is a source, not a result");
+
+        // result_1 has the data on admin.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM result_1", [], |r| r.get(0))
+            .expect("result_1 exists on admin");
+        assert_eq!(count, 2);
+
+        // AC1 regression guard: the rewrite produced a catalog ref
+        // ("data".data), so provenance::analyze recorded the result_1 -> data
+        // dependency edge. A cascade from data must reach result_1. Without
+        // the rewrite (the bug), provenance misses data — analyze only follows
+        // TableFactor::Table, not TableFunction — so the cascade would not
+        // reach result_1 and this assertion fails.
+        let cascaded = ws.cascade_stale(
+            "data",
+            StaleAnchor {
+                reference_name: "data".to_string(),
+                display_name: "data".to_string(),
+                reason: StaleReason::Deleted,
+            },
+        );
+        assert!(
+            cascaded.contains(&"result_1".to_string()),
+            "provenance edge result_1 -> data exists (rewrite happened): {cascaded:?}"
+        );
     }
 }

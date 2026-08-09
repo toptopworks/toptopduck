@@ -23,8 +23,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use sqlparser::ast::{
-    FunctionArg, FunctionArgExpr, Ident, ObjectName, Query, SetExpr, Statement, TableAlias,
-    TableFactor, TableWithJoins,
+    Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, ObjectName, Query, SetExpr,
+    Statement, TableAlias, TableFactor, TableWithJoins,
 };
 use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser;
@@ -340,6 +340,22 @@ fn rewrite_table_factor(factor: &mut TableFactor, path_to_ref: &HashMap<String, 
                 *factor = catalog_table_factor(&ref_name, alias.clone());
             }
         }
+        // `TABLE(read_csv_auto('path'))` — the expr wraps the read_* call.
+        // Without this arm the file is staged + ATTACHed + registered (path
+        // extraction covers TableFunction), but the SQL retains the original
+        // read_* — provenance misses it and resume breaks (issue #439 AC1).
+        TableFactor::TableFunction {
+            expr: Expr::Function(func),
+            alias,
+        } => {
+            let args: &[FunctionArg] = match &func.args {
+                FunctionArguments::List(list) => &list.args,
+                _ => &[],
+            };
+            if let Some(ref_name) = try_match_read_function(&func.name, args, path_to_ref) {
+                *factor = catalog_table_factor(&ref_name, alias.clone());
+            }
+        }
         TableFactor::Derived { subquery, .. } => {
             rewrite_query(subquery.as_mut(), path_to_ref);
         }
@@ -570,31 +586,33 @@ mod tests {
         assert!(rewritten.contains("AS t"), "alias preserved: {rewritten}");
     }
 
+    #[test]
+    fn rewrite_handles_table_function_form() {
+        // `TABLE(read_csv_auto('path'))` parses as TableFactor::TableFunction,
+        // distinct from the bare `read_csv_auto('path')` Function form. Without
+        // the TableFunction arm in rewrite_table_factor, the catalog rewrite is
+        // skipped — provenance misses the source and resume breaks (issue #439).
+        let path = "/tmp/tool_output/data.csv";
+        let sql = format!("SELECT t.* FROM TABLE(read_csv_auto('{path}')) AS t");
+        let rewritten = rewrite_sql(&sql, &map(&[(path, "data")])).unwrap();
+        assert!(
+            rewritten.contains(r#""data".data"#),
+            "catalog ref present: {rewritten}"
+        );
+        assert!(
+            !rewritten.contains("read_csv_auto"),
+            "read_csv_auto removed: {rewritten}"
+        );
+        assert!(rewritten.contains("AS t"), "alias preserved: {rewritten}");
+    }
+
     // --- Integration: process() with real DuckDB + filesystem ----------
 
     use crate::session::materializer::TurnDeps;
     use crate::workingset::WorkingSet;
     use duckdb::Connection;
     use std::collections::HashMap;
-    use std::path::PathBuf;
     use tempfile::TempDir;
-
-    /// Build TurnDeps over a real in-memory connection + real temp dir.
-    fn real_deps<'a>(
-        conn: &'a Connection,
-        ws: &'a mut WorkingSet,
-        sources: &'a mut HashMap<String, PathBuf>,
-        temp: &'a Path,
-    ) -> TurnDeps<'a> {
-        TurnDeps {
-            conn,
-            source_files: sources,
-            working_set: ws,
-            result_row_cap: 1_000,
-            result_count_cap: 100,
-            temp_path: temp,
-        }
-    }
 
     /// Full process(): a CSV in tool_output/ is detected, copy_in'd, ATTACHed,
     /// registered, and the SQL rewritten to a catalog reference. The rewritten
@@ -619,7 +637,7 @@ mod tests {
         );
 
         {
-            let mut deps = real_deps(&conn, &mut ws, &mut sources, temp.path());
+            let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path());
             let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
             // SQL was rewritten to a catalog reference.
@@ -677,7 +695,7 @@ mod tests {
             outside_csv.to_string_lossy()
         );
 
-        let mut deps = real_deps(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path());
         let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
         // SQL unchanged — no tool_output paths detected.
@@ -695,7 +713,7 @@ mod tests {
         let mut sources = HashMap::new();
 
         let sql = "SELECT 1 AS x";
-        let mut deps = real_deps(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path());
         let rewritten = process(sql, &mut deps).expect("process succeeds");
         assert_eq!(rewritten, "SELECT 1 AS x");
     }
@@ -718,7 +736,7 @@ mod tests {
         let mut sources = HashMap::new();
 
         let sql = format!("SELECT * FROM read_csv_auto('{traversal}')");
-        let mut deps = real_deps(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path());
         let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
         // SQL unchanged — traversal path rejected by is_in_tool_output.
@@ -751,7 +769,7 @@ mod tests {
             foo_path.to_string_lossy()
         );
 
-        let mut deps = real_deps(&conn, &mut ws, &mut sources, temp.path());
+        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path());
         let result = process(&sql, &mut deps);
 
         assert!(result.is_err(), "process fails on unsupported format");
