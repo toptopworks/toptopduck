@@ -1,10 +1,10 @@
-//! Source lifecycle I/O orchestration on [`Session`] (ADR-0053 Q7, issue #67).
+//! Source lifecycle I/O orchestration on [`Session`] (ADR-0053 Decision 5, issue #67).
 //!
-//! These are the methods that change the set of loaded sources: ingest (add),
+//! These are the methods that change the set of loaded sources:
 //! replace_source (re-upload onto an existing name), remove_source /
 //! remove_active_source (delete), and the two private commit/event helpers they
 //! share (commit_removal, append_source_event). They are a physical move out of
-//! `session/mod.rs` for locality -- NOT a deep module: ADR-0053 Q7 evaluated
+//! `session/mod.rs` for locality -- NOT a deep module: ADR-0053 Decision 5 evaluated
 //! extracting them as an independent object and found it moves complexity
 //! rather than concentrating it (the removal tests do not pass without the
 //! `&mut Session` reach), so they stay `&mut Session` methods and only the
@@ -12,14 +12,14 @@
 //! deconflict) already lives in [`WorkingSet`]; what remains here is ATTACH /
 //! DETACH orchestration, snapshot-file deletion, and atomic recipe persistence.
 //!
-//! The impl block is a sibling of the one in `session/mod.rs`: Rust lets a
-//! descendant module (`session::source_lifecycle`) add methods to a type
-//! defined in the ancestor (`session`) and reach its private fields and
-//! private parent-module helpers (`release_snapshot`, `persist_if_bound`,
-//! `ingest_excel`, `ingest_structured`). The reverse direction is NOT allowed,
-//! so [`Session::append_source_event`] is `pub(super)`: the add-path helpers
-//! (`ingest_structured`, `commit_excel`) still in `session/mod.rs` keep calling
-//! it to record `Added` events.
+//! The impl block is a sibling of the ones in `session/mod.rs` and
+//! `session/ingest.rs`: Rust lets a descendant module
+//! (`session::source_lifecycle`) add methods to a type defined in the ancestor
+//! (`session`) and reach its private fields and helpers across sibling modules.
+//! `release_snapshot` (in `session::ingest`) is `pub(super)` so
+//! `commit_removal` here can call it; `append_source_event` below is also
+//! `pub(super)` so the add-path helpers (`ingest_structured`, `commit_excel`)
+//! now in `session::ingest` can record `Added` events.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,33 +32,6 @@ use crate::model::{
 };
 
 impl super::Session {
-    /// Ingest a file. Transactional: on any failure the working set is unchanged
-    /// (bad files never pollute the session -- PRD AC7). CSV/Parquet/JSON share
-    /// one copy-in path -- only the DuckDB reader differs (ADR-0032 shared
-    /// contract, no format-specific branches). Excel (.xlsx) goes through
-    /// [`Self::ingest_excel`]: each sheet becomes its own Dataset.
-    pub fn ingest(&mut self, path: &Path) -> LoadOutcome {
-        let dispatched = ingest::dispatch(path);
-        match dispatched {
-            // Legacy .xls is rejected up front with an actionable hint (ADR-0015)
-            // -- never reaches copy-in, leaves the working set untouched.
-            ingest::Dispatched::Xls => LoadOutcome::Error(LoadError::LegacyExcel),
-            ingest::Dispatched::Xlsx => self.ingest_excel(path),
-            _ => {
-                let Some(reader) = ingest::reader_for(&dispatched) else {
-                    let requested = match dispatched {
-                        ingest::Dispatched::Unsupported(ext) => ext,
-                        // Unreachable today (Xls/Xlsx are handled above); kept
-                        // total so a future variant can't silently fall through.
-                        _ => String::new(),
-                    };
-                    return LoadOutcome::Error(LoadError::UnsupportedFormat { requested });
-                };
-                self.ingest_structured(path, reader)
-            }
-        }
-    }
-
     /// Remove a source Dataset from the working set (issue #38, ADR-0040). The
     /// first source-removal path: detaches the read-only snapshot, deletes its
     /// file, drops the dataset from the shared namespace, and appends a
@@ -496,7 +469,7 @@ impl super::Session {
     /// ADR-0040).
     ///
     /// `pub(super)`: callers span both this module (`commit_removal`,
-    /// `replace_source`) and the add-path helpers still in `session/mod.rs`
+    /// `replace_source`) and the add-path helpers in `session::ingest`
     /// (`ingest_structured`, `commit_excel`), which record `Added` events. The
     /// parent cannot reach a child-module private method, so the minimal
     /// visibility that still names the boundary is `pub(super)`.
