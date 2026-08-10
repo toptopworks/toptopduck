@@ -1,15 +1,15 @@
 //! The resume module -- all session-restart logic in one place (ADR-0053
-//! Decision 3, completed by the candidate-4 extraction).
+//! Decision 3).
 //!
 //! [`Resumer`] owns phase 2/3/4: active-pointer resolution (pure logic over
 //! the working set + recipe), productive-SQL-chain replay (driving the shared
 //! [`Materializer`] trait), and conversation timeline rebuild (pure logic).
-//! It does NOT hold the [`Session`] -- phase methods borrow `working_set` /
+//! It does NOT hold the [`super::Session`] -- phase methods borrow `working_set` /
 //! [`TurnDeps`] and return structured results.
 //!
-//! [`Session::open_duck`] is the entry point that owns the full 5-phase
-//! orchestration: phase 1 (source re-ingest via [`Self::resume_sources`] +
-//! [`Self::resume_ingest_at`] + [`Self::resolve_source_path`]), phases 2-4
+//! [`super::Session::open_duck`] is the entry point that owns the full 5-phase
+//! orchestration: phase 1 (source re-ingest via [`super::Session::resume_sources`] +
+//! [`super::Session::resume_ingest_at`] + [`super::Session::resolve_source_path`]), phases 2-4
 //! (delegated to [`Resumer`]), and phase 5 (persist). It lives here alongside
 //! the [`Resumer`] so a reader of resume holds one file, not two.
 //!
@@ -617,10 +617,9 @@ fn register_stale_placeholders(working_set: &mut WorkingSet, recipe: &Recipe, en
     }
 }
 
-// --- Session resume entry point (candidate-4 extraction) ---------------
+// --- Session resume entry point (ADR-0053 Decision 3) -----------------
 // The full 5-phase open_duck orchestrator + phase 1 source re-ingest
-// helpers, moved here from session/mod.rs so all resume logic lives in
-// one module. Sibling impl block -- same pattern as source_lifecycle.rs
+// helpers. Sibling impl block -- same pattern as source_lifecycle.rs
 // and ingest.rs (ADR-0053 Decision 5 physical-move precedent).
 
 impl super::Session {
@@ -685,7 +684,7 @@ impl super::Session {
         let registry = OpenDuckGuard::acquire(canonical.clone())?;
 
         // Mark resume as in-flight + clear any stale cancel request, mirroring
-        // `ask`'s per-turn guard (ADR-0021). The resume_sources / resume_replay
+        // `ask`'s per-turn guard (ADR-0021). The resume_sources / replay
         // loops poll is_requested() between items so a user cancel lands as
         // [`ResumeError::Cancelled`] (a clean signal), not a masked partial
         // state indistinguishable from data corruption. Drop on exit clears
