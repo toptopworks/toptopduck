@@ -170,9 +170,10 @@ pub enum SessionError {
     #[error("{0}")]
     RenameSession(crate::session::RenameSessionError),
     /// A row read failed (issue #121): `read_rows` wraps the typed
-    /// [`TurnError`](crate::model::TurnError) here.
+    /// [`RowReadError`](crate::model::RowReadError) here.
     #[error("{0}")]
-    Turn(crate::model::TurnError),
+    #[serde(rename = "Turn")]
+    RowRead(crate::model::RowReadError),
     /// A skill mount / unmount was refused (issue #363, ADR-0086):
     /// `mount_skill` / `unmount_skill` wrap the typed
     /// [`SkillMountError`](crate::session::skills::SkillMountError) here instead

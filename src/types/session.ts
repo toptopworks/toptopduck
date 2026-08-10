@@ -30,7 +30,7 @@ export type SessionError =
   | { kind: "RemoveSource"; data: RemoveSourceError }
   | { kind: "RenameDataset"; data: RenameError }
   | { kind: "RenameSession"; data: RenameSessionError }
-  | { kind: "Turn"; data: TurnError }
+  | { kind: "Turn"; data: RowReadError }
   | { kind: "SkillMount"; data: SkillMountError }
   | { kind: "Engine"; data: string };
 
@@ -60,12 +60,12 @@ export type RenameError =
 // blank name; a persist write failure rides take_persist_error instead.
 export type RenameSessionError = { kind: "EmptyName" };
 
-// Why a row read failed (read_rows). Mirrors the Rust `TurnError` (serde
+// Why a row read failed (read_rows). Mirrors the Rust `RowReadError` (serde
 // adjacently-tagged, issue #121). Rides SessionError::Turn; UnknownDataset
 // carries the reference name, Execute carries the engine detail (technical,
 // never an API key per ADR-0029). Turn failures are TurnOutcome::Failed
 // (ADR-0028), NOT this type.
-export type TurnError =
+export type RowReadError =
   | { kind: "UnknownDataset"; data: string }
   | { kind: "Execute"; data: string };
 

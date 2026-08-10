@@ -16,7 +16,7 @@ import type {
   ResumeError,
   SaveError,
   StoreCommandError,
-  TurnError,
+  RowReadError,
 } from "../../types/session";
 import type { SkillError, SkillMountError } from "../../types/skills";
 import { isSaveError, isSessionError, isSkillError, isStoreCommandError } from "./guards";
@@ -234,7 +234,7 @@ function formatSkillError(e: SkillError, intl: IntlShape): string {
 
 // Format a RemoveSourceError through the locale catalog (issue #121). NotFound
 // shares the merged `error.dataset.notFound` id with RenameError::NotFound and
-// TurnError::UnknownDataset (DRY -- one "dataset not found" message, not three
+// RowReadError::UnknownDataset (DRY -- one "dataset not found" message, not three
 // copies of the backend string). IsActive interpolates the display name; the
 // other variants name the reference.
 function formatRemoveSourceError(e: RemoveSourceError, intl: IntlShape): string {
@@ -313,7 +313,7 @@ function formatRenameDatasetError(e: RenameError, intl: IntlShape): string {
   }
 }
 
-// Format a TurnError (read_rows failure) through the locale catalog (issue
+// Format a RowReadError (read_rows failure) through the locale catalog (issue
 // #121). UnknownDataset shares the merged `error.dataset.notFound` id; Execute
 // renders a generic message and the engine detail rides the technical-details
 // fold (the detail is a DuckDB read error, never an API key per ADR-0029).
@@ -345,7 +345,7 @@ function formatSkillMountError(e: SkillMountError, intl: IntlShape): string {
   }
 }
 
-function formatTurnError(e: TurnError, intl: IntlShape): string {
+function formatRowReadError(e: RowReadError, intl: IntlShape): string {
   switch (e.kind) {
     case "UnknownDataset":
       return intl.formatMessage(
@@ -362,7 +362,7 @@ function formatTurnError(e: TurnError, intl: IntlShape): string {
       });
     default: {
       const unhandled: never = e;
-      throw new Error(`unhandled TurnError kind: ${JSON.stringify(unhandled)}`);
+      throw new Error(`unhandled RowReadError kind: ${JSON.stringify(unhandled)}`);
     }
   }
 }
@@ -417,7 +417,7 @@ export function fmtError(e: unknown, intl: IntlShape): string {
           defaultMessage: "Session name must not be empty",
         });
       case "Turn":
-        return formatTurnError(e.data, intl);
+        return formatRowReadError(e.data, intl);
       case "SkillMount":
         return formatSkillMountError(e.data, intl);
       default: {
@@ -468,7 +468,7 @@ export function errorDetail(e: unknown): string | null {
   if (isSessionError(e)) {
     if (e.kind === "Engine") return e.data;
     if (e.kind === "Resume") return resumeErrorDetail(e.data);
-    if (e.kind === "Turn") return turnErrorDetail(e.data);
+    if (e.kind === "Turn") return rowReadErrorDetail(e.data);
     return null;
   }
   if (isSaveError(e)) {
@@ -525,10 +525,10 @@ function resumeErrorDetail(e: ResumeError): string | null {
   }
 }
 
-// Detail for a nested TurnError (issue #121), reached via SessionError::Turn.
+// Detail for a nested RowReadError (issue #121), reached via SessionError::Turn.
 // Execute carries the engine detail for the fold; UnknownDataset's name is
 // already in the message, so it carries no fold detail.
-function turnErrorDetail(e: TurnError): string | null {
+function rowReadErrorDetail(e: RowReadError): string | null {
   switch (e.kind) {
     case "Execute":
       return e.data;
@@ -536,7 +536,7 @@ function turnErrorDetail(e: TurnError): string | null {
       return null;
     default: {
       const unhandled: never = e;
-      throw new Error(`unhandled TurnError kind: ${JSON.stringify(unhandled)}`);
+      throw new Error(`unhandled RowReadError kind: ${JSON.stringify(unhandled)}`);
     }
   }
 }

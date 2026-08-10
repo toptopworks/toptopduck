@@ -14,7 +14,7 @@ import type {
   SaveError,
   SessionError,
   StoreCommandError,
-  TurnError,
+  RowReadError,
 } from "../../types/session";
 import type { SkillError, SkillMountError } from "../../types/skills";
 
@@ -49,7 +49,7 @@ export function isSessionError(e: unknown): e is SessionError {
       );
     }
     case "Turn":
-      return isTurnError((e as { data?: unknown }).data);
+      return isRowReadError((e as { data?: unknown }).data);
     case "SkillMount":
       return isSkillMountError((e as { data?: unknown }).data);
     case "Engine":
@@ -263,10 +263,10 @@ export function isRenameError(e: unknown): e is RenameError {
   }
 }
 
-// Narrow an unknown value to a TurnError (issue #121) -- the read_rows error.
+// Narrow an unknown value to a RowReadError (issue #121) -- the read_rows error.
 // Reached via isSessionError's Turn branch. Both variants carry a string under
 // data (the reference name / the engine detail).
-export function isTurnError(e: unknown): e is TurnError {
+export function isRowReadError(e: unknown): e is RowReadError {
   if (typeof e !== "object" || e === null) return false;
   const kind = (e as { kind?: unknown }).kind;
   switch (kind) {

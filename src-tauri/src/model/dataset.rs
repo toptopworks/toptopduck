@@ -348,12 +348,12 @@ impl std::error::Error for RenameError {}
 /// failures are [`TurnOutcome::Failed`] (ADR-0028), so a turn always produces an
 /// outcome. This type remains only for [`crate::session::Session::read_rows`]: a
 /// row read is not a turn, and its failures cross IPC as this serde struct,
-/// wrapped in [`SessionError::Turn`](crate::session_store::SessionError) (issue
+/// wrapped in [`SessionError::RowRead`](crate::session_store::SessionError) (issue
 /// #121); the frontend narrows on `kind` and renders a locale message. The
 /// hand-written `Display` below is Rust-log-only -- NOT the IPC contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data")]
-pub enum TurnError {
+pub enum RowReadError {
     /// A row read targeted a reference name that is not in the working set.
     UnknownDataset(String),
     /// The row-page query failed in the engine (a read-side DuckDB error while
@@ -362,7 +362,7 @@ pub enum TurnError {
     Execute(String),
 }
 
-impl std::fmt::Display for TurnError {
+impl std::fmt::Display for RowReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         // Rust-log-only (issue #121/#125): the IPC contract is the serde struct
         // above and the authoritative user wording lives in the frontend locale
@@ -375,7 +375,7 @@ impl std::fmt::Display for TurnError {
         }
     }
 }
-impl std::error::Error for TurnError {}
+impl std::error::Error for RowReadError {}
 
 /// One page of a dataset rows (ADR-0024 windowed display). Cells are CAST to
 /// VARCHAR (NULL renders as the empty string) so the frontend renders uniform

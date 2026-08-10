@@ -152,7 +152,7 @@ describe("fmtError — SessionError source-management kinds (issue #121)", () =>
   it("renders RemoveSource kinds via the locale catalog", () => {
     // remove_source / remove_active_source wrap RemoveSourceError in
     // SessionError::RemoveSource. NotFound shares the merged notFound id with
-    // RenameError::NotFound and TurnError::UnknownDataset.
+    // RenameError::NotFound and RowReadError::UnknownDataset.
     const cases: Array<[SessionError, string]> = [
       [
         { kind: "RemoveSource", data: { kind: "NotFound", data: "people" } },

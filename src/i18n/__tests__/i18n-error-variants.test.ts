@@ -57,7 +57,7 @@ const CATALOG_IDS: Readonly<Record<string, Readonly<Record<string, string | null
     RemoveSource: null, // recurses RemoveSourceError
     RenameDataset: null, // recurses RenameError
     RenameSession: "error.session.renameEmpty",
-    Turn: null, // recurses TurnError
+    Turn: null, // recurses RowReadError
     Engine: "error.session.engine",
   },
   RemoveSourceError: {
@@ -71,7 +71,7 @@ const CATALOG_IDS: Readonly<Record<string, Readonly<Record<string, string | null
     DisplayTaken: "error.dataset.displayTaken",
     InvalidLabel: "error.dataset.invalidLabel",
   },
-  TurnError: {
+  RowReadError: {
     UnknownDataset: "error.dataset.notFound",
     Execute: "error.turn.execute",
   },
