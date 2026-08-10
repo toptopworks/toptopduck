@@ -346,8 +346,9 @@ impl<'a> Resumer<'a> {
             match materialized {
                 Ok(descriptor) => {
                     if descriptor.display_name != turn.display_name {
-                        // ADR-0035 honest signal: log a label-restore failure
-                        // during replay instead of swallowing it silently.
+                        // Backend log only: a failure to restore the turn's
+                        // recorded label is logged (not silently swallowed),
+                        // but no IPC event or banner is emitted.
                         if let Err(e) = deps
                             .working_set
                             .rename_display(&turn.reference_name, &turn.display_name)
@@ -807,19 +808,40 @@ impl super::Session {
         let candidate = base.join(relative);
         // canonicalize requires the file to exist; a missing candidate falls
         // through to the absolute fallback (fingerprint check decides there).
-        if let Ok(canonical) = candidate.canonicalize() {
-            if let Ok(base_canonical) = base.canonicalize() {
-                if !canonical.starts_with(&base_canonical) {
-                    return Err(ResumeError::SourceMissing {
-                        reference_name: src.reference_name.clone(),
-                        path: relative.clone(),
-                        detail: "相对路径越出 .duck 目录（已拒绝路径遍历）".into(),
-                    });
-                }
-                return Ok(canonical);
+        let canonical = match candidate.canonicalize() {
+            Ok(c) => c,
+            Err(_) => return Ok(absolute),
+        };
+        let base_canonical = match base.canonicalize() {
+            Ok(c) => c,
+            Err(e) => {
+                // candidate canonicalized but base did not (TOCTOU, transient
+                // permission flip, Windows AV lock). The relative path is
+                // safe direction-wise (a traversal leak would require base
+                // resolution to succeed AND the starts_with check to accept
+                // an escaping candidate), so we fall back to the absolute
+                // path -- but log so ops can diagnose why the portable
+                // relative path was skipped (the user may otherwise receive a
+                // SourceIssue against the less portable absolute path).
+                log::warn!(
+                    target: "toptopduck::session",
+                    "base canonicalize failed for {}: {e} -- relative path「{}」skipped, \
+                     falling back to absolute「{}」",
+                    base.display(),
+                    relative,
+                    absolute.display(),
+                );
+                return Ok(absolute);
             }
+        };
+        if !canonical.starts_with(&base_canonical) {
+            return Err(ResumeError::SourceMissing {
+                reference_name: src.reference_name.clone(),
+                path: relative.clone(),
+                detail: "相对路径越出 .duck 目录（已拒绝路径遍历）".into(),
+            });
         }
-        Ok(absolute)
+        Ok(canonical)
     }
 
     /// Resume phase 1 (ADR-0034/0035/0036/0042, issue #49): re-read and verify
@@ -873,10 +895,13 @@ impl super::Session {
                             // Match -- restore the recipe's display label over
                             // the path-derived one (ADR-0037 rename survives).
                             if descriptor.display_name != src.display_name {
-                                // ADR-0035 honest signal: a failure to restore
-                                // the recipe's label is logged, not swallowed --
-                                // the user would otherwise see a path-derived
-                                // label without knowing the rename was lost.
+                                // Backend log only: a failure to restore the
+                                // recipe's label is logged (not silently
+                                // swallowed), but no IPC event or banner is
+                                // emitted -- the user would otherwise see a
+                                // path-derived label without knowing the rename
+                                // was lost. A future ResumeEvent variant could
+                                // surface this to the frontend.
                                 if let Err(e) =
                                     self.rename_display(&src.reference_name, &src.display_name)
                                 {
@@ -1002,7 +1027,13 @@ impl super::Session {
             quote_ident(reference_name)
         );
         if let Err(e) = self.conn.execute_batch(&attach_sql) {
-            let _ = fs::remove_file(&snap.file_path);
+            if let Err(io_err) = fs::remove_file(&snap.file_path) {
+                log::warn!(
+                    target: "toptopduck::session",
+                    "snapshot file removal failed during resume_ingest_at for \
+                     {reference_name}: {io_err}"
+                );
+            }
             return Err(LoadError::Other {
                 detail: format!("挂载快照失败：{e}"),
             });

@@ -172,7 +172,7 @@ impl Materializer for RealMaterializer {
         // result_N is max+1, never reused (ADR-0022). The caller computes the
         // name: the live turn path derives next_result_number per attempt (a
         // failed attempt registers nothing, so N is stable across retries);
-        // resume_replay passes the recipe's recorded name verbatim so a stale
+        // Resumer::replay passes the recipe's recorded name verbatim so a stale
         // gap (e.g. result_1 dead, result_2 live) does not renumber the live
         // turn -- the chain recreates each result_N under its stable identity.
 
