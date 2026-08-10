@@ -34,8 +34,8 @@ use crate::provider::prompt::{resolve_locale_from_tag, ResponseLocale};
 pub struct LiveProviderConfig {
     keychain: KeychainStore,
     path: PathBuf,
-    /// Serializes the in-process writers (`store` + `record_recent_file`). Both
-    /// do read-modify-write on the config file; without coordination two writers
+    /// Serializes the in-process writers (`store` + MCP upsert/remove + sessions-dir).
+    /// All do read-modify-write on the config file; without coordination two writers
     /// interleave and lose an entire update (`T1 load -> T2 load -> T1 write ->
     /// T2 write` drops T1). Mirrors the `.duck` single-writer (issue #50).
     /// Pure reads (`load`) do NOT take this lock -- they honest-degrade and
@@ -188,10 +188,9 @@ impl LiveProviderConfig {
         server: McpServerConfig,
     ) -> Result<McpServerConfig, app_config::WriteError> {
         // Hold write_lock across the full load -> mutate -> store so a concurrent
-        // upsert / remove / record_recent_file cannot interleave and drop this
-        // server (a lost update would orphan its keychain anchor). store_inner --
-        // not store -- because the guard is already held and std::sync::Mutex is
-        // non-reentrant (mirrors record_recent_file).
+        // upsert / remove cannot interleave and drop this server (a lost update
+        // would orphan its keychain anchor). store_inner -- not store -- because
+        // the guard is already held and std::sync::Mutex is non-reentrant.
         let _guard = self
             .write_lock
             .lock()
@@ -208,7 +207,7 @@ impl LiveProviderConfig {
     /// the removed server's (uuid) id are inert.
     pub fn remove_mcp_server(&self, id: &McpServerId) -> Result<(), app_config::WriteError> {
         // Hold write_lock across the full load -> mutate -> store (same contract
-        // as upsert_mcp_server / record_recent_file); store_inner, not store --
+        // as upsert_mcp_server); store_inner, not store --
         // std::sync::Mutex is non-reentrant.
         let _guard = self
             .write_lock
@@ -313,9 +312,10 @@ impl LiveProviderConfig {
 
     /// Normalize + atomically persist the app-config, returning the normalized
     /// value that was stored. The caller receives exactly what landed on disk.
-    /// Acquires [`Self::write_lock`] so concurrent writers (`store` and
-    /// `record_recent_file`) serialize -- app-config has no version/CAS, so
-    /// last-writer-wins needs the lock to avoid lost updates (issue #53).
+    /// Acquires [`Self::write_lock`] so concurrent writers (`store`, MCP
+    /// upsert/remove, `set_sessions_dir`) serialize -- app-config has no
+    /// version/CAS, so last-writer-wins needs the lock to avoid lost updates
+    /// (issue #53).
     pub fn store(&self, cfg: AppConfig) -> Result<AppConfig, app_config::WriteError> {
         let _guard = self
             .write_lock
@@ -325,66 +325,21 @@ impl LiveProviderConfig {
     }
 
     /// Normalize + persist WITHOUT taking [`Self::write_lock`] -- for callers
-    /// (`record_recent_file`) that already hold the lock as part of a load-
-    /// modify-write transaction. `std::sync::Mutex` is NOT reentrant, so `store`
-    /// cannot recurse into this while a guard is held. (`migrate_from_legacy_blob`
-    /// inlines its own normalize + write_at rather than calling this, because it
-    /// must return the in-memory cfg even when the write fails, and store_inner
-    /// consumes cfg by value.)
+    /// (MCP upsert/remove, `set_sessions_dir`) that already hold the lock as part
+    /// of a load-modify-write transaction. `std::sync::Mutex` is NOT reentrant,
+    /// so `store` cannot recurse into this while a guard is held.
+    /// (`migrate_from_legacy_blob` inlines its own normalize + write_at rather
+    /// than calling this, because it must return the in-memory cfg even when the
+    /// write fails, and store_inner consumes cfg by value.)
     fn store_inner(&self, mut cfg: AppConfig) -> Result<AppConfig, app_config::WriteError> {
         cfg.normalize();
         app_config::write_at(&self.path, &cfg)?;
         Ok(cfg)
     }
 
-    /// Record a recently-opened `.duck` path (read-modify-write). Returns whether
-    /// the recent-files list actually changed so the caller can skip work when it
-    /// did not. A read or write failure is swallowed and reported as "no change"
-    /// -- the recent-files list is a convenience, never a correctness surface.
-    /// Holds [`Self::write_lock`] across the whole load-modify-write so a
-    /// concurrent `store` cannot interleave and lose either side's update.
-    pub fn record_recent_file(&self, path: &str) -> bool {
-        let Ok(_guard) = self.write_lock.lock() else {
-            return false;
-        };
-        let mut cfg = self.load();
-        if !cfg.record_recent_file(path) {
-            return false;
-        }
-        // store_inner (not store): the guard is already held, and std::sync::Mutex
-        // is not reentrant. A failure is swallowed -- the list is advisory; the
-        // next open re-reads whatever is on disk and retries.
-        self.store_inner(cfg).is_ok()
-    }
-
-    /// Drop a `.duck` path from recent-files (issue #81 delete-session). Mirrors
-    /// [`Self::record_recent_file`]: read-modify-write under [`Self::write_lock`],
-    /// advisory -- a write failure is logged and reported as "no change" so the
-    /// caller (`delete_session`) still surfaces the file deletion itself; the
-    /// recent-files list re-reads from disk on the next open and self-heals.
-    pub fn remove_recent_file(&self, path: &str) -> bool {
-        let Ok(_guard) = self.write_lock.lock() else {
-            return false;
-        };
-        let mut cfg = self.load();
-        if !cfg.remove_recent_file(path) {
-            return false;
-        }
-        match self.store_inner(cfg) {
-            Ok(_) => true,
-            Err(e) => {
-                log::warn!(
-                    "recent-files remove write failed for {path}; \
-                     list re-reads from disk on the next open: {e}"
-                );
-                false
-            }
-        }
-    }
-
     /// Set the managed sessions directory override (issue #452, ADR-0089
     /// Decision 2). Read-modify-write under [`Self::write_lock`] (same pattern
-    /// as `record_recent_file`). The caller validates the path before calling;
+    /// as MCP upsert/remove). The caller validates the path before calling;
     /// this method persists the value verbatim + returns the normalized config
     /// that landed on disk.
     pub fn set_sessions_dir(
@@ -593,66 +548,6 @@ mod tests {
 
         let back = live.load();
         assert_eq!(back, stored);
-    }
-
-    #[test]
-    fn record_recent_file_persists_across_loads() {
-        let (_dir, live) = live();
-        assert!(live.record_recent_file("/tmp/a.duck"));
-        assert!(live.record_recent_file("/tmp/b.duck"));
-        let cfg = live.load();
-        assert_eq!(
-            cfg.recent_files,
-            vec!["/tmp/b.duck".to_string(), "/tmp/a.duck".into()]
-        );
-    }
-
-    #[test]
-    fn record_recent_file_dedupes_on_reopen() {
-        let (_dir, live) = live();
-        live.record_recent_file("/tmp/a.duck");
-        live.record_recent_file("/tmp/b.duck");
-        live.record_recent_file("/tmp/a.duck"); // re-open moves a to front
-        let cfg = live.load();
-        assert_eq!(
-            cfg.recent_files,
-            vec!["/tmp/a.duck".to_string(), "/tmp/b.duck".into()]
-        );
-    }
-
-    #[test]
-    fn record_recent_file_concurrent_writers_do_not_lose_updates_or_deadlock() {
-        // H1 regression: store + record_recent_file both take write_lock (shared
-        // across clones via the inner Arc<Mutex>). Multiple concurrent recorders
-        // must each land their path (no lost-update) and the test must complete
-        // (no deadlock). Without the lock, two interleaved read-modify-write
-        // transactions would drop whichever wrote first.
-        use std::thread;
-
-        let (_dir, live) = live();
-        let paths: Vec<String> = (0..8)
-            .map(|i| format!("/tmp/concurrent-{i}.duck"))
-            .collect();
-        let handles: Vec<_> = paths
-            .iter()
-            .map(|p| {
-                let live = live.clone();
-                let p = p.clone();
-                thread::spawn(move || live.record_recent_file(&p))
-            })
-            .collect();
-        for h in handles {
-            assert!(h.join().expect("worker thread panicked"));
-        }
-        // Every path landed -- no lost update. Order depends on the scheduler,
-        // so check set membership, not order.
-        let cfg = live.load();
-        for p in &paths {
-            assert!(
-                cfg.recent_files.contains(p),
-                "concurrent record lost path {p}"
-            );
-        }
     }
 
     #[test]
@@ -957,7 +852,7 @@ mod tests {
     #[test]
     fn upsert_mcp_server_concurrent_writers_do_not_lose_servers() {
         // I1 regression: upsert_mcp_server holds write_lock across the full
-        // load -> mutate -> store (same contract as record_recent_file). Multiple
+        // load -> mutate -> store (same contract as store). Multiple
         // concurrent upserts must each land their server (no lost-update) and the
         // test must complete (no deadlock). Without the full-window lock two
         // interleaved read-modify-write transactions would drop whichever wrote

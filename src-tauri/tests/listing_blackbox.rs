@@ -1,12 +1,12 @@
 //! list_sessions black-box (issue #76, ADR-0060/0061): drive the session-list
 //! derivation through the crate's public API only -- the same pure
-//! `list_session_metadata` the `list_sessions` Tauri command wraps (a thin
-//! `live.load().recent_files` passthrough, zero new persistence). Writes real
+//! `list_session_metadata` the `list_sessions` Tauri command wraps (a directory
+//! scan of per-session `session.duck` recipes, ADR-0089). Writes real
 //! `.duck` recipes via the invariant-validating `Recipe::build` + `save_atomic`,
 //! then asserts the LIST shape the cold-start sidebar consumes: every readable
 //! `.duck` is present, addressed by its file path (the stable key the frontend
 //! sidebar-keys on and passes back to `open_duck`), and an unreadable
-//! recent_files entry is skipped -- never listed under a fabricated id
+//! entry is skipped -- never listed under a fabricated id
 //! (ADR-0017 honest).
 //!
 //! The inline `persistence::listing` unit tests cover single-session field
@@ -61,8 +61,8 @@ fn list_sessions_addresses_each_readable_duck_by_path_and_skips_the_rest() {
     // AC #76 (ADR-0060/0061): list_sessions returns one SessionMetadata per
     // persisted .duck, each addressed by its file path (session_id = the path,
     // NOT a UUID -- the stable identity the frontend sidebar-keys on and passes
-    // back to open_duck), and each carrying the derived field set. A
-    // recent_files entry that no longer resolves to a readable recipe is
+    // back to open_duck), and each carrying the derived field set. An
+    // entry that no longer resolves to a readable recipe is
     // dropped so the list never addresses a fabricated session (ADR-0017).
     let dir = tempfile::tempdir().expect("tempdir");
     let alpha = write_recipe(dir.path(), "alpha.duck", "alpha", "alpha_src");

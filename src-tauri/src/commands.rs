@@ -11,14 +11,14 @@
 //! serde-structured (`#[serde(tag = "kind", content = "data")]`) so the
 //! frontend narrows on `kind` and renders a locale message -- the Chinese
 //! wording no longer crosses IPC. Session-AGNOSTIC commands (api key /
-//! provider / app config / recent file / session listing) return
+//! provider / app config / session listing) return
 //! `Result<T, StoreCommandError>` for the cold-store subset (issue #130):
 //! [`StoreCommandError`] is serde-structured like [`SessionError`], so the
 //! frontend narrows on `kind` and renders a locale message -- the Chinese
 //! wording no longer crosses IPC. The cold-store subset covers `delete_session`
 //! / `rename_persisted_session` (a cross-session `.duck` file), the keychain
 //! commands, and `set_provider_config` / `set_app_config`. The remaining
-//! session-agnostic commands (read-only listing / has-key / recent-file) cannot
+//! session-agnostic commands (read-only listing / has-key) cannot
 //! fail with a user-facing refusal and keep returning `Result<T, String>`.
 
 use std::collections::{HashMap, HashSet};
@@ -1269,11 +1269,11 @@ pub async fn test_profile(
 
 // --- App-level config (issue #53, ADR-0038) --------------------------------
 //
-// The second at-rest artifact: preferences, defaults, recent files, and the
-// no-key endpoint config. Lives in the OS app-data directory, orthogonal to
-// the portable `.duck`. Honest-degrades to defaults on any read failure
-// (missing/corrupt -> built-in defaults, never a crash). The frontend loads it
-// on startup (theme + recent files) and persists edits through `set_app_config`.
+// The second at-rest artifact: preferences, defaults, and the no-key endpoint
+// config. Lives in the OS app-data directory, orthogonal to the portable
+// `.duck`. Honest-degrades to defaults on any read failure (missing/corrupt ->
+// built-in defaults, never a crash). The frontend loads it on startup (theme +
+// locale) and persists edits through `set_app_config`.
 
 /// Read the full app-config (ADR-0038). Honest-degrades to built-in defaults on
 /// any failure, so the frontend always receives a usable config. On the first
@@ -1296,16 +1296,6 @@ pub fn set_app_config(
 ) -> Result<AppConfig, StoreCommandError> {
     live.store(config)
         .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))
-}
-
-/// Record a recently-opened `.duck` path into the app-config recent-files list
-/// (issue #53). Read-modify-write: load, unshift + dedupe + trim, persist.
-/// Returns nothing -- the list is advisory; a write failure is swallowed inside
-/// [`LiveProviderConfig::record_recent_file`] rather than failing the open.
-#[tauri::command]
-pub fn record_recent_file(live: State<'_, LiveProviderConfig>, path: String) -> Result<(), String> {
-    live.record_recent_file(&path);
-    Ok(())
 }
 
 /// List every persisted session's metadata for the cold-start left sidebar
@@ -1565,7 +1555,7 @@ pub async fn export_session(
 
 /// Set the managed sessions directory (issue #452, ADR-0089 Decision 2).
 /// Validates the path exists + is writable, persists to app-config via RMW
-/// (same write-lock as `record_recent_file`), and updates the in-memory
+/// under the app-config write-lock, and updates the in-memory
 /// `SessionsRoot` live — no restart needed. New sessions land in the new
 /// directory immediately; already-open sessions stay in place (their bound
 /// `duck_path` is unchanged). The sidebar re-scans the new directory on the

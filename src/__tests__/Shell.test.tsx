@@ -1217,7 +1217,6 @@ function baseAppConfig(
     },
     export: { last_dir: null, default_format: "csv" },
     tunables: { window_turns: 6, far_window: 12 },
-    recent_files: [],
     shell: { ...shell, sidebar_grouping: "flat" },
     mcp_servers: { servers: [] },
     sessions_dir: null,

@@ -9,7 +9,7 @@
 //
 // ADR-0068: this is advisory state held in React (NOT TanStack Query) -- the
 // app-config blob is the persistence layer for shell prefs (theme / locale /
-// recent files / sidebar + rail collapse / active profile),
+// sidebar + rail collapse / active profile),
 // read once on mount and re-written on each mutation. The optimistic +
 // no-rollback contract on every mutating action lives on commitAppConfig
 // below (the single persistence write all actions route through).
@@ -109,7 +109,7 @@ export function useAppConfigState({
   const [sidebarGrouping, setSidebarGroupingState] = useState<SidebarGrouping>("flat");
   const collapseRestoredRef = useRef(false);
 
-  // Load app-config once on mount (theme/locale/recent files). Also
+  // Load app-config once on mount (theme/locale). Also
   // kicks refreshKeyStatus so the header key indicator reflects the active
   // profile's keychain slot at start.
   useEffect(() => {

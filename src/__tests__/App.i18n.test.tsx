@@ -59,7 +59,6 @@ const { appConfigWith } = vi.hoisted(() => {
       },
       export: { last_dir: null, default_format: "csv" },
       tunables: { window_turns: 6, far_window: 12 },
-      recent_files: [] as string[],
       shell: { sidebar_collapsed: false, rail_collapsed: false, sidebar_grouping: "flat" },
       mcp_servers: { servers: [] },
       sessions_dir: null,
@@ -93,7 +92,6 @@ vi.mock("../api", async (importOriginal) => {
     // Default locale is system; per-test overrides via vi.mocked(...).mockResolvedValue.
     getAppConfig: vi.fn(async () => appConfigWith("system")),
     setAppConfig: vi.fn(async (cfg: AppConfig) => cfg),
-    recordRecentFile: vi.fn(async () => {}),
   };
 });
 
