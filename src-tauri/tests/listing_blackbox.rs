@@ -11,13 +11,13 @@
 //!
 //! The inline `persistence::listing` unit tests cover single-session field
 //! derivation in depth; this seam pins the multi-entry list shape + the
-//! session_id = path addressing invariant at the public-API boundary (issue
+//! duck_path = path addressing invariant at the public-API boundary (issue
 //! #76 AC: "black-box coverage of list_sessions field completeness").
 
 use toptopduck_lib::persistence::recipe::RecipePromotion;
 use toptopduck_lib::persistence::{
-    list_session_metadata, save_atomic, Recipe, RecipeEntry, RecipeOutcome, RecipeTurn, SourceRef,
-    RECIPE_FORMAT_VERSION,
+    list_session_metadata, save_atomic, DuckPath, Recipe, RecipeEntry, RecipeOutcome, RecipeTurn,
+    SourceRef, RECIPE_FORMAT_VERSION,
 };
 use toptopduck_lib::RectifyProvenance;
 
@@ -59,7 +59,7 @@ fn write_recipe(dir: &std::path::Path, file: &str, session_name: &str, src: &str
 #[test]
 fn list_sessions_addresses_each_readable_duck_by_path_and_skips_the_rest() {
     // AC #76 (ADR-0060/0061): list_sessions returns one SessionMetadata per
-    // persisted .duck, each addressed by its file path (session_id = the path,
+    // persisted .duck, each addressed by its file path (duck_path = the path,
     // NOT a UUID -- the stable identity the frontend sidebar-keys on and passes
     // back to open_duck), and each carrying the derived field set. An
     // entry that no longer resolves to a readable recipe is
@@ -71,9 +71,9 @@ fn list_sessions_addresses_each_readable_duck_by_path_and_skips_the_rest() {
 
     let list = list_session_metadata(&[missing, alpha.clone(), beta.clone()]);
     assert_eq!(list.len(), 2, "only the readable recipes are listed");
-    // session_id is the .duck file path -- the addressing key.
-    assert_eq!(list[0].session_id, alpha);
-    assert_eq!(list[1].session_id, beta);
+    // duck_path is the .duck file path -- the addressing key.
+    assert_eq!(list[0].duck_path, DuckPath::new(alpha));
+    assert_eq!(list[1].duck_path, DuckPath::new(beta));
     // Each entry carries the full derived field set (the inline unit test
     // covers single-session derivation in depth; here we pin presence + the
     // path<->id invariant at the public-API boundary).

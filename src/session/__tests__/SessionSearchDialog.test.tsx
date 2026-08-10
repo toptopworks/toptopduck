@@ -19,7 +19,7 @@ function meta(
   opts: Partial<SessionMetadata> = {},
 ): SessionMetadata {
   return {
-    session_id: path,
+    duck_path: path,
     display_name: name,
     last_modified_at: opts.last_modified_at ?? Date.now(),
     source_summary: opts.source_summary ?? {

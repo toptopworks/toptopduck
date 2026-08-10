@@ -44,6 +44,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::cancel::CancelToken;
+use crate::SessionId;
 
 // ---------------------------------------------------------------------------
 // Identifiers + posture
@@ -313,7 +314,7 @@ pub fn truncate_summary(summary: &str, max_chars: usize) -> String {
 /// Mirrored on the frontend as `ApprovalRequestPayload`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ApprovalRequestPayload {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub request_id: String,
     pub server: String,
     pub tool: String,
@@ -325,7 +326,7 @@ pub struct ApprovalRequestPayload {
 /// pending card to its resolved state in place (ADR-0083).
 #[derive(Debug, Clone, Serialize)]
 pub struct ApprovalResolvedPayload {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub request_id: String,
     pub response: ApprovalResponse,
 }

@@ -65,8 +65,22 @@ pub const UNKNOWN_SESSION: &str = "会话不存在或已关闭";
 /// [`SessionError::InvalidId`], NOT collapsed into "unknown session"), and the
 /// store deals only in the typed id. Only [`SessionStore::create`] mints ids;
 /// every other site receives one already typed.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
+#[serde(transparent)]
 pub struct SessionId(uuid::Uuid);
+
+impl<'de> serde::Deserialize<'de> for SessionId {
+    /// Deserialize delegates to [`SessionId::parse`] so the v4-only invariant
+    /// is enforced on both construction paths (parse + serde). A derived
+    /// Deserialize would accept any well-formed UUID regardless of version.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        SessionId::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
 
 impl SessionId {
     /// Parse a wire string into a typed id. A malformed id, OR a well-formed
@@ -807,6 +821,24 @@ mod tests {
             let err = SessionId::parse(wire).expect_err("non-v4 id should reject");
             assert_eq!(err, SessionError::InvalidId, "must be InvalidId: {wire}");
         }
+    }
+
+    /// The manual Deserialize impl delegates to parse(), so non-v4 UUIDs are
+    /// rejected on the serde path too -- not just via parse(). Without this,
+    /// a derived Deserialize would silently accept any well-formed UUID.
+    #[test]
+    fn deserialize_rejects_non_v4_uuid() {
+        for wire in [
+            "\"00000000-0000-0000-0000-000000000000\"", // nil
+            "\"a0eebc99-9c0b-1ef8-bb6d-6249ebb38000\"", // v1
+        ] {
+            serde_json::from_str::<SessionId>(wire)
+                .expect_err("non-v4 UUID must reject via Deserialize: {wire}");
+        }
+        // A valid v4 UUID round-trips through serde.
+        let v4 = "\"550e8400-e29b-41d4-a716-446655440000\"";
+        let id: SessionId = serde_json::from_str(v4).expect("valid v4 UUID deserializes");
+        assert_eq!(id.to_string(), "550e8400-e29b-41d4-a716-446655440000");
     }
 
     /// `NotFound` carries the canonical wording the frontend has always

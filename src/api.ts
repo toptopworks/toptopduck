@@ -311,7 +311,7 @@ export async function onTurnProgress(
 // List every persisted .duck session's metadata for the cold-start sidebar
 // (ADR-0060/0061, issue #76). The backend scans the managed sessions directory
 // (ADR-0089) and derives each entry from its recipe + mtime; unreadable paths
-// are skipped. session_id is the .duck path -- pass it back to openDuck to
+// are skipped. duck_path is the .duck path -- pass it back to openDuck to
 // resume.
 export async function listSessions(): Promise<SessionMetadata[]> {
   return invoke<SessionMetadata[]>("list_sessions");
@@ -320,7 +320,7 @@ export async function listSessions(): Promise<SessionMetadata[]> {
 // Delete a persisted .duck file (ADR-0060, issue #81). The frontend closes the
 // session first when it is open, then calls this. The backend removes the
 // per-session directory; a missing file is idempotent success.
-// `path` is the .duck file path (the SessionMetadata.session_id from listSessions).
+// `path` is the .duck file path (the SessionMetadata.duck_path from listSessions).
 export async function deleteSession(path: string): Promise<void> {
   await invoke<void>("delete_session", { path });
 }
@@ -343,7 +343,7 @@ export async function getSessionName(sessionId: string): Promise<string> {
 }
 
 // Rename a CLOSED .duck recipe's session_name in place (ADR-0060, issue #81).
-// `path` is the .duck file path (SessionMetadata.session_id). The backend reads
+// `path` is the .duck file path (SessionMetadata.duck_path). The backend reads
 // the recipe, rewrites the header, atomic-saves -- no DuckDB instance is built.
 // Refuses a path currently held open (rename those via renameSession by id).
 export async function renamePersistedSession(

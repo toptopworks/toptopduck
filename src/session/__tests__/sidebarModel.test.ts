@@ -22,7 +22,7 @@ function meta(
   opts: Partial<SessionMetadata> = {},
 ): SessionMetadata {
   return {
-    session_id: path,
+    duck_path: path,
     display_name: name,
     last_modified_at: NOW - ageDays * MS_PER_DAY,
     source_summary: {

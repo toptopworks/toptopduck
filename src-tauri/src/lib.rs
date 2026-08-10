@@ -57,7 +57,7 @@ pub use model::{
     VizSpec, DEFAULT_PROFILE_ID, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
 };
 pub use persistence::{
-    LoadError as DuckLoadError, MigrationError, RecipeError, SaveError, SessionMetadata,
+    DuckPath, LoadError as DuckLoadError, MigrationError, RecipeError, SaveError, SessionMetadata,
     SessionsRoot, SourceSummary,
 };
 pub use provider::anthropic::AnthropicProvider;

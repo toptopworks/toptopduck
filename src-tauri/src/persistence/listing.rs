@@ -4,16 +4,17 @@
 //! managed sessions directory scan (`scan_sessions_dir`), but every metadata
 //! field still comes from either the recipe (ADR-0034) or the file itself.
 //!
-//! ## session_id = the `.duck` file path
+//! ## duck_path = the `.duck` file path
 //!
 //! A runtime [`crate::SessionId`] is a UUID minted when a session enters the
 //! in-memory [`crate::SessionStore`] and dies with it; it is NOT persisted. The
 //! recipe (ADR-0034) carries no id field either. So the only stable, portable
-//! identity of a persisted session is its **file path**. `session_id` here is
-//! that path string. The frontend uses it as the stable sidebar key; clicking a
-//! session mints a FRESH runtime id via `create_session` and resumes the path
-//! into it (`open_duck(new_id, path)`), so the list-sessions id and the runtime
-//! id are deliberately different things.
+//! identity of a persisted session is its **file path**. `duck_path` here is
+//! that path string (renamed from `session_id` in issue #462 to disambiguate
+//! from the runtime UUID). The frontend uses it as the stable sidebar key;
+//! clicking a session mints a FRESH runtime id via `create_session` and resumes
+//! the path into it (`open_duck(new_id, path)`), so the list-sessions path and
+//! the runtime id are deliberately different things.
 
 use crate::persistence::recipe::RecipeEntry;
 use crate::persistence::{read_duck, LoadError, Recipe};
@@ -84,6 +85,32 @@ pub(crate) fn default_sessions_root(app: &tauri::AppHandle) -> PathBuf {
     }
 }
 
+/// Typed `.duck` file path — the stable identity of a persisted session
+/// (ADR-0060/0061, issue #462). Distinct from the runtime [`SessionId`] (a
+/// UUID): this is the persisted path the frontend passes back to `open_duck`.
+/// Transparent serde keeps the wire format a bare string so the frontend type
+/// stays `string`. The inner field is private; construction goes through
+/// [`DuckPath::new`] and access through [`DuckPath::as_str`] so future
+/// validation (non-empty, `.duck` suffix) can be added without breaking call
+/// sites.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DuckPath(String);
+
+impl DuckPath {
+    /// Construct from a path string. No validation yet — any string is
+    /// accepted (the only producer is `build_session_metadata`, which feeds a
+    /// verified disk path).
+    pub fn new(path: impl Into<String>) -> Self {
+        Self(path.into())
+    }
+
+    /// Read-only access to the inner path string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// One persisted session's sidebar metadata (ADR-0060/0061). Every field is
 /// derived -- nothing here is authored to disk separately. The frontend renders
 /// the left-sidebar entry from this (name + first source + turn count + mtime,
@@ -93,7 +120,7 @@ pub struct SessionMetadata {
     /// The stable identity of a persisted session: the `.duck` file path (see
     /// the module doc for why this is not a UUID). The frontend passes it back
     /// to `open_duck` to resume.
-    pub session_id: String,
+    pub duck_path: DuckPath,
     /// User-facing name: the recipe's `session_name` when the user named the
     /// session, otherwise the first source's display label (ADR-0060: the
     /// default name is the first source's name). Empty only when the session
@@ -205,7 +232,7 @@ fn build_session_metadata(path: &Path) -> Option<SessionMetadata> {
     };
     let mtime = file_mtime_millis(&path_str).unwrap_or(0);
     Some(SessionMetadata {
-        session_id: path_str.into_owned(),
+        duck_path: DuckPath::new(path_str.into_owned()),
         display_name: display_name(&recipe),
         last_modified_at: mtime,
         source_summary: source_summary(&recipe),
@@ -286,7 +313,7 @@ mod tests {
 
     #[test]
     fn derives_all_fields_from_a_readable_recipe() {
-        // AC: list_sessions returns session_id / display_name / last_modified_at
+        // AC: list_sessions returns duck_path / display_name / last_modified_at
         // / source_summary / format_version, all derived from the recipe + file.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_recipe(
@@ -333,8 +360,8 @@ mod tests {
         let list = list_session_metadata(std::slice::from_ref(&path));
         assert_eq!(list.len(), 1);
         let m = &list[0];
-        // session_id is the file path (the stable identity, see module doc).
-        assert_eq!(m.session_id, path);
+        // duck_path is the file path (the stable identity, see module doc).
+        assert_eq!(m.duck_path, DuckPath::new(path.clone()));
         // display_name = the user-given session_name.
         assert_eq!(m.display_name, "我的分析");
         // source_summary: first source name + 1 source + 2 turns (the source
@@ -437,7 +464,7 @@ mod tests {
         };
         let list = list_session_metadata(&[missing, good.clone(), foreign]);
         assert_eq!(list.len(), 1, "only the readable recipe is listed");
-        assert_eq!(list[0].session_id, good);
+        assert_eq!(list[0].duck_path, DuckPath::new(good));
     }
 
     #[test]

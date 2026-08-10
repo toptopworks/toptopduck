@@ -863,7 +863,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
     // stage-stale disclosure banner (ADR-0047 honest wording).
     vi.mocked(listSessions).mockResolvedValue([
       {
-        session_id: "/x/persisted.duck",
+        duck_path: "/x/persisted.duck",
         display_name: "季报",
         last_modified_at: Date.now(),
         source_summary: { first_source_name: "people", source_count: 1, turn_count: 2 },
@@ -898,7 +898,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
   it("filters resume-progress events by sessionId (ADR-0056 / #76, #83 R5)", async () => {
     vi.mocked(listSessions).mockResolvedValue([
       {
-        session_id: "/x/persisted.duck",
+        duck_path: "/x/persisted.duck",
         display_name: "季报",
         last_modified_at: Date.now(),
         source_summary: { first_source_name: "people", source_count: 1, turn_count: 1 },
@@ -1048,7 +1048,7 @@ describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
     const path = "/x/persisted.duck";
     vi.mocked(listSessions).mockResolvedValue([
       {
-        session_id: path,
+        duck_path: path,
         display_name: "季报",
         last_modified_at: Date.now(),
         source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
@@ -1087,7 +1087,7 @@ describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
     const path = "/x/persisted.duck";
     vi.mocked(listSessions).mockResolvedValue([
       {
-        session_id: path,
+        duck_path: path,
         display_name: "季报",
         last_modified_at: Date.now(),
         source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
@@ -1142,7 +1142,7 @@ describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
     const path = "/x/persisted.duck";
     vi.mocked(listSessions).mockResolvedValue([
       {
-        session_id: path,
+        duck_path: path,
         display_name: "季报",
         last_modified_at: Date.now(),
         source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
@@ -1776,14 +1776,14 @@ describe("App Ctrl/⌘+K session-search modal (ADR-0072, issue #252)", () => {
   function twoSessions() {
     return [
       {
-        session_id: "/x/alpha.duck",
+        duck_path: "/x/alpha.duck",
         display_name: "alpha session",
         last_modified_at: 2000,
         source_summary: { first_source_name: "alpha_src", source_count: 1, turn_count: 3 },
         format_version: 2,
       },
       {
-        session_id: "/x/beta.duck",
+        duck_path: "/x/beta.duck",
         display_name: "beta session",
         last_modified_at: 1000,
         source_summary: { first_source_name: "beta_src", source_count: 1, turn_count: 7 },
@@ -2041,7 +2041,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     // is per_call, which a hardcoded-default chip would also render).
     vi.mocked(listSessions).mockResolvedValue([
       {
-        session_id: "/x/persisted.duck",
+        duck_path: "/x/persisted.duck",
         display_name: "季报",
         last_modified_at: Date.now(),
         source_summary: { first_source_name: "people", source_count: 1, turn_count: 1 },

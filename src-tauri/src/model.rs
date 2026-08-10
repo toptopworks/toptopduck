@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::approval::OperationKind;
+use crate::SessionId;
 
 /// One column's canonical schema (ADR-0032): the DuckDB physical type verbatim,
 /// under a single canonical name (no alias mixing). Nested STRUCT/LIST/MAP
@@ -723,12 +724,12 @@ pub enum TurnPhase {
 /// [`TurnPhase`] with the addressing `session_id` so a multi-session frontend
 /// filters the global Tauri event broadcast down to the one SessionPane that
 /// owns the turn (ADR-0056). `session_id` is the runtime id the `ask` command
-/// received (a UUID string), NOT the persisted-session id [`crate::SessionMetadata`]
+/// received (a typed UUID), NOT the `duck_path` [`crate::SessionMetadata`]
 /// exposes. The field is required -- a phase without a session it belongs to is
 /// not addressable, so the type makes the missing-id state unrepresentable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnProgress {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub phase: TurnPhase,
 }
 
