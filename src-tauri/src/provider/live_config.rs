@@ -381,6 +381,24 @@ impl LiveProviderConfig {
             }
         }
     }
+
+    /// Set the managed sessions directory override (issue #452, ADR-0089
+    /// Decision 2). Read-modify-write under [`Self::write_lock`] (same pattern
+    /// as `record_recent_file`). The caller validates the path before calling;
+    /// this method persists the value verbatim + returns the normalized config
+    /// that landed on disk.
+    pub fn set_sessions_dir(
+        &self,
+        path: Option<String>,
+    ) -> Result<AppConfig, app_config::WriteError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("app-config write_lock poisoned");
+        let mut cfg = self.load();
+        cfg.sessions_dir = path;
+        self.store_inner(cfg)
+    }
 }
 
 /// Splice the legacy pre-#53 `{base_url, model}` blob into the active

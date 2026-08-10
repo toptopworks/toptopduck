@@ -116,6 +116,7 @@ function SectionContent({
   section,
   appConfig,
   onCommit,
+  onSessionsDirChanged,
   onRefreshKeyStatus,
   onIpcBusy,
   initialEditProfileId,
@@ -124,6 +125,7 @@ function SectionContent({
   section: SettingsSection;
   appConfig: AppConfig;
   onCommit: (mutate: (cfg: AppConfig) => AppConfig) => Promise<string | null>;
+  onSessionsDirChanged: (cfg: AppConfig) => void;
   onRefreshKeyStatus: () => void;
   onIpcBusy: (channel: "key" | "test", busy: boolean) => void;
   initialEditProfileId?: string;
@@ -131,7 +133,13 @@ function SectionContent({
 }) {
   switch (section) {
     case "general":
-      return <GeneralSection appConfig={appConfig} onCommitImmediate={onCommit} />;
+      return (
+        <GeneralSection
+          appConfig={appConfig}
+          onCommitImmediate={onCommit}
+          onSessionsDirChanged={onSessionsDirChanged}
+        />
+      );
     case "skills":
       return (
         <SkillsSection configuredMcpIds={appConfig.mcp_servers.servers.map((s) => s.id)} />
@@ -163,6 +171,7 @@ function SectionContent({
 export function SettingsView({
   appConfig,
   onCommitAppConfig,
+  onSessionsDirChanged,
   onClose,
   onRefreshKeyStatus,
   keyStatus,
@@ -178,6 +187,10 @@ export function SettingsView({
   // Persist a full app-config; MUST return the IPC promise so commits can await
   // + catch failures (App passes commitAppConfig unwrapped).
   onCommitAppConfig: (cfg: AppConfig) => Promise<void>;
+  // Replace local appConfig state WITHOUT an IPC write (issue #452). After
+  // setSessionsDir IPC persists + returns the updated config, this syncs the
+  // frontend state + triggers the sidebar re-scan.
+  onSessionsDirChanged: (cfg: AppConfig) => void;
   // Called to exit back to the workspace (rail-top back, the gear, or ESC).
   onClose: () => void;
   // Re-read the active profile's keychain slot (set-active switches inside the
@@ -398,6 +411,7 @@ export function SettingsView({
             section={section}
             appConfig={appConfig}
             onCommit={commitWithRevert}
+            onSessionsDirChanged={onSessionsDirChanged}
             onRefreshKeyStatus={onRefreshKeyStatus}
             onIpcBusy={handlePaneIpcBusy}
             initialEditProfileId={initialEditProfileId}

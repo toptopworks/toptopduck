@@ -95,4 +95,8 @@ export interface AppConfig {
   // fills an empty registry for a pre-#301 file, but serialization ALWAYS
   // carries the field, so the wire shape is non-optional here too.
   mcp_servers: McpServerRegistry;
+  // Managed sessions directory override (issue #452, ADR-0089 Decision 2).
+  // null = runtime-computed default (<Documents>/toptopduck/sessions/).
+  // serde(default) fills null for a pre-#452 file.
+  sessions_dir: string | null;
 }

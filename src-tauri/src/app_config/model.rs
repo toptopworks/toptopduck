@@ -270,6 +270,14 @@ pub struct AppConfig {
     /// (ADR-0029/0036 -- see [`McpServerRegistry`]).
     #[serde(default)]
     pub mcp_servers: McpServerRegistry,
+    /// Managed sessions directory override (issue #452, ADR-0089 Decision 2).
+    /// None = runtime-computed default (`<Documents>/toptopduck/sessions/`).
+    /// Some(path) = user-chosen directory. Forward-compat: a pre-#452 file has
+    /// no `sessions_dir` key, so serde(default) fills None rather than
+    /// rejecting the whole document. The format_version is NOT bumped — the
+    /// new field is additive (same pattern as `mcp_servers` / `shell`).
+    #[serde(default)]
+    pub sessions_dir: Option<String>,
 }
 
 impl AppConfig {
@@ -289,6 +297,7 @@ impl AppConfig {
             recent_files: Vec::new(),
             shell: ShellPrefs::default(),
             mcp_servers: McpServerRegistry::default(),
+            sessions_dir: None,
         }
     }
 
@@ -386,6 +395,15 @@ impl AppConfig {
         // surfaces a connection fault for any malformed entry at spawn time
         // rather than the config layer guessing validity.
         self.mcp_servers.normalize();
+        // Trim whitespace on the sessions_dir override; an all-whitespace
+        // value collapses to None so the runtime falls back to the default
+        // rather than resolving a whitespace-named directory (issue #452).
+        if let Some(ref mut dir) = self.sessions_dir {
+            *dir = dir.trim().to_string();
+            if dir.is_empty() {
+                self.sessions_dir = None;
+            }
+        }
     }
 }
 

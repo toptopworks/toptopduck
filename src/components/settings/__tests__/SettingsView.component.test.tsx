@@ -31,6 +31,7 @@ type CommitFn = (cfg: AppConfig) => Promise<void>;
 function SettingsViewHarness({
   appConfig,
   onCommitAppConfig,
+  onSessionsDirChanged,
   onClose,
   onRefreshKeyStatus,
   keyStatus,
@@ -38,6 +39,7 @@ function SettingsViewHarness({
 }: {
   appConfig: AppConfig;
   onCommitAppConfig: Mock<CommitFn>;
+  onSessionsDirChanged: (cfg: AppConfig) => void;
   onClose: () => void;
   onRefreshKeyStatus: () => void;
   keyStatus: { has_key: boolean; keychain_fault: string | null };
@@ -51,6 +53,7 @@ function SettingsViewHarness({
       section={section}
       onSectionChange={setSection}
       onCommitAppConfig={onCommitAppConfig}
+      onSessionsDirChanged={onSessionsDirChanged}
       onClose={onClose}
       onRefreshKeyStatus={onRefreshKeyStatus}
       keyStatus={keyStatus}
@@ -82,6 +85,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     recent_files: [],
     shell: { sidebar_collapsed: false, rail_collapsed: false, sidebar_grouping: "flat" },
     mcp_servers: { servers: [] },
+    sessions_dir: null,
   };
   const profileKeysDefault = [{ profile_id: "default", has_key: false, keychain_fault: null }];
 
@@ -119,6 +123,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   function renderView({
     appConfig = baseConfig,
     onCommitAppConfig = vi.fn<CommitFn>().mockResolvedValue(undefined),
+    onSessionsDirChanged = vi.fn(),
     onClose = vi.fn(),
     onRefreshKeyStatus = vi.fn(),
     keyStatus = { has_key: true, keychain_fault: null },
@@ -126,6 +131,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   }: {
     appConfig?: AppConfig;
     onCommitAppConfig?: Mock<CommitFn>;
+    onSessionsDirChanged?: (cfg: AppConfig) => void;
     onClose?: () => void;
     onRefreshKeyStatus?: () => void;
     keyStatus?: { has_key: boolean; keychain_fault: string | null };
@@ -135,6 +141,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
       <SettingsViewHarness
         appConfig={appConfig}
         onCommitAppConfig={onCommitAppConfig}
+        onSessionsDirChanged={onSessionsDirChanged ?? (() => undefined)}
         onClose={onClose}
         onRefreshKeyStatus={onRefreshKeyStatus}
         keyStatus={keyStatus}
@@ -173,8 +180,10 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     expect(onCommitAppConfig.mock.calls[0][0].theme).toBe("dark");
     // The rest of the config round-trips unchanged.
     expect(onCommitAppConfig.mock.calls[0][0].engine).toEqual(baseConfig.engine);
-    // No global Save button exists on the General pane.
-    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+    // The only Save button is the sessions-dir row's draft commit; it is
+    // disabled because no directory has been picked, confirming the theme
+    // row itself has no Save button (ADR-0075 case a).
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   });
 
   it("a failed immediate commit surfaces an inline error (revert-on-fail)", async () => {

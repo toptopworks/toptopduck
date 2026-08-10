@@ -9,6 +9,7 @@ import { useShellError } from "./shell/useShellError";
 import { usePersistedSessions } from "./shell/usePersistedSessions";
 import { useShellSessions } from "./shell/useShellSessions";
 import { useAppConfigState } from "./shell/useAppConfigState";
+import type { AppConfig } from "./types/app-config";
 import { usePlatform } from "./shell/use-platform";
 import type { KeyStatus } from "./types/provider";
 import { SidebarToggle } from "./shell/SidebarToggle";
@@ -153,6 +154,7 @@ export default function App() {
     effectiveLocale,
     intl,
     commitAppConfig,
+    replaceAppConfig,
     switchActiveProfile,
     switchActiveProfileModel,
     sidebarCollapsed,
@@ -189,6 +191,18 @@ export default function App() {
     handleExportSession,
     syncSessionName,
   } = useShellSessions({ intl, queryClient, refreshSessions, setShellError });
+
+  // Sessions directory change callback (issue #452): after `setSessionsDir`
+  // IPC persists + returns the updated config, sync local state (no redundant
+  // IPC write — the dedicated IPC already landed it) + refresh the sidebar so
+  // it re-scans the new directory.
+  const handleSessionsDirChanged = useCallback(
+    (cfg: AppConfig) => {
+      replaceAppConfig(cfg);
+      refreshSessions();
+    },
+    [replaceAppConfig, refreshSessions],
+  );
 
   // The tiered-approval side channel (ADR-0083, issue #297) is owned here at
   // the shell root: ONE listener pair feeds the per-session entry map that
@@ -528,6 +542,7 @@ export default function App() {
                     // no-rollback (ADR-0068); the revert is the view's compensating
                     // write on a caught reject.
                     onCommitAppConfig={(cfg) => commitAppConfig(cfg)}
+                    onSessionsDirChanged={handleSessionsDirChanged}
                     onRefreshKeyStatus={() => void refreshKeyStatus()}
                     keyStatus={keyStatus}
                     onClose={() => {

@@ -83,6 +83,7 @@ pub use skills::{
     SkillsRoot, SkippedSkill,
 };
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::Manager;
 
@@ -273,18 +274,30 @@ pub fn run() {
 
             let keychain = KeychainStore::new();
             let live = LiveProviderConfig::new(keychain, app_config_path);
-            // ADR-0089: managed sessions directory. Each session lives in a
-            // per-session subdirectory `{uuid}/session.duck`. Default root is
-            // `<Documents>/toptopduck/sessions/` (platform-conventions Documents,
-            // not hidden app-data). Honest temp-dir fallback: the app still
-            // boots, sessions just live in temp instead of Documents.
-            let sessions_root = match app.path().document_dir() {
-                Ok(dir) => dir.join("toptopduck").join("sessions"),
-                Err(e) => {
-                    log::warn!(
-                        "failed to resolve documents dir; sessions fall back to a temp path: {e}"
-                    );
-                    std::env::temp_dir().join("toptopduck-sessions")
+            // ADR-0089 + issue #452: managed sessions directory. Default root
+            // is `<Documents>/toptopduck/sessions/` (platform-conventions
+            // Documents, not hidden app-data). When app-config carries a
+            // `sessions_dir` override, honor it with honest-degrade — a missing
+            // / non-directory path logs a warning and falls back to the default
+            // WITHOUT clearing the config (the path might be temporarily
+            // unavailable, e.g. an unmounted external drive).
+            let sessions_root = {
+                let cfg = live.load();
+                match cfg.sessions_dir.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    Some(p) => {
+                        let path = PathBuf::from(p);
+                        if path.is_dir() {
+                            path
+                        } else {
+                            log::warn!(
+                                "configured sessions_dir does not exist or is not a directory: {}; \
+                                 falling back to the default (config retained for next launch)",
+                                path.display()
+                            );
+                            persistence::default_sessions_root(app.handle())
+                        }
+                    }
+                    None => persistence::default_sessions_root(app.handle()),
                 }
             };
             // ADR-0056: the multi-session store is the single managed state for
@@ -293,7 +306,7 @@ pub fn run() {
             // provider reads key + endpoint through it.
             app.manage(Arc::new(SessionStore::new()));
             app.manage(live);
-            app.manage(SessionsRoot(sessions_root));
+            app.manage(SessionsRoot::new(sessions_root));
             app.manage(SkillsRoot(skills_root));
 
             // Visibility safety net (issue #268). `visible: false` in
@@ -375,6 +388,8 @@ pub fn run() {
             commands::rename_persisted_session,
             commands::export_session,
             commands::prepare_import_session,
+            commands::set_sessions_dir,
+            commands::get_sessions_dir,
             commands::open_duck,
             commands::take_persist_error,
             commands::take_pending_conflict,
