@@ -24,7 +24,7 @@ vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
   return {
     ...actual,
-    closeSession: vi.fn(async () => {}),
+    closeSession: vi.fn(async () => false),
     createSession: vi.fn(async () => "sess-1"),
     ingestFile: vi.fn(),
     ingestFileGuided: vi.fn(),

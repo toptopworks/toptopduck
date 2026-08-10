@@ -451,6 +451,12 @@ export function useShellSessions({
   // unmount effect. The .duck stays on disk and remains in the sidebar
   // (re-openable). NOT delete -- the delete path uses the wait-release variant
   // (see deletePersisted), not this fire-and-forget close.
+  //
+  // ADR-0089 Decision 6: an empty session (no turns, no sources, no skills)
+  // gets its per-session directory deleted by the backend on close. The return
+  // value is `true` when that cleanup happened -- in that case, the sidebar's
+  // persisted session list is stale (the entry is gone from disk) and needs a
+  // refresh so the "新会话" entry disappears.
   const closeOpen = useCallback(
     (sid: string): Promise<void> => {
       unmountOpen(sid);
@@ -459,40 +465,44 @@ export function useShellSessions({
       // fire-cancel-don't-wait. Best-effort: NotFound is the expected idempotent
       // path (already dropped); other failures log to devtools so IPC/panic
       // stay observable. NOT a user toast -- pane is gone.
-      return closeSession(sid).catch((e: unknown) => {
-        // ADR-0055: the UI is already gone, so neither branch is a user toast.
-        // Split by SessionError kind. NotFound is the expected idempotent path
-        // (the session already dropped -- a double-close, or a close racing a
-        // delete's wait-release); debug-level only. Everything else -- panic,
-        // lock poison, IPC contract break, canonical single-writer leak -- is a
-        // real failure that log.error keeps observable in devtools, so the cause
-        // of a later deletePersisted try_acquire gate miss stays diagnosable. The
-        // raw kind is logged so a non-SessionError panic (kind "unknown") is
-        // distinguishable from a typed SessionError::Engine (issue #203).
-        if (
-          typeof e === "object" &&
-          e !== null &&
-          "kind" in e &&
-          e.kind === "NotFound"
-        ) {
-          log.debug("closeSession", "background close: session already gone", sid);
-          return;
-        }
-        const kind =
-          typeof e === "object" && e !== null && "kind" in e
-            ? String(e.kind)
-            : "unknown";
-        log.error(
-          "closeSession",
-          "background close failed",
-          sid,
-          kind,
-          fmtError(e, intl),
-          errorDetail(e),
-        );
-      });
+      return closeSession(sid)
+        .then((cleanedUp: boolean) => {
+          if (cleanedUp) refreshSessions();
+        })
+        .catch((e: unknown) => {
+          // ADR-0055: the UI is already gone, so neither branch is a user toast.
+          // Split by SessionError kind. NotFound is the expected idempotent path
+          // (the session already dropped -- a double-close, or a close racing a
+          // delete's wait-release); debug-level only. Everything else -- panic,
+          // lock poison, IPC contract break, canonical single-writer leak -- is a
+          // real failure that log.error keeps observable in devtools, so the cause
+          // of a later deletePersisted try_acquire gate miss stays diagnosable. The
+          // raw kind is logged so a non-SessionError panic (kind "unknown") is
+          // distinguishable from a typed SessionError::Engine (issue #203).
+          if (
+            typeof e === "object" &&
+            e !== null &&
+            "kind" in e &&
+            e.kind === "NotFound"
+          ) {
+            log.debug("closeSession", "background close: session already gone", sid);
+            return;
+          }
+          const kind =
+            typeof e === "object" && e !== null && "kind" in e
+              ? String(e.kind)
+              : "unknown";
+          log.error(
+            "closeSession",
+            "background close failed",
+            sid,
+            kind,
+            fmtError(e, intl),
+            errorDetail(e),
+          );
+        });
     },
-    [intl, unmountOpen],
+    [intl, unmountOpen, refreshSessions],
   );
 
   // Delete a persisted .duck (ADR-0060/0063, irreversible). If the session is

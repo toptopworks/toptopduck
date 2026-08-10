@@ -838,6 +838,14 @@ impl Session {
         self.persister.duck_path()
     }
 
+    /// Whether the timeline carries no content at all (ADR-0089 Decision 6):
+    /// no turns, no source lifecycle events, no skill lifecycle events. Used by
+    /// `close_session` to decide whether to delete the per-session directory so
+    /// empty sessions do not linger in the sidebar as "新会话" entries.
+    pub fn is_timeline_empty(&self) -> bool {
+        self.timeline.is_empty()
+    }
+
     /// Migrate derived source files from temp staging (`temp_path/derived/`)
     /// to the per-session directory's `assets/` subdirectory (ADR-0089, issue
     /// #433, ADR-0087 D2) so they survive session close and are portable with
@@ -3779,6 +3787,57 @@ mod tests {
             session_b.session_name(),
             Some("never finished"),
             "Cancelled first turn still auto-names"
+        );
+    }
+
+    // --- is_timeline_empty (ADR-0089 Decision 6) --------------------------
+
+    #[test]
+    fn is_timeline_empty_true_for_fresh_session() {
+        let session = Session::new().expect("session");
+        assert!(
+            session.is_timeline_empty(),
+            "fresh session has an empty timeline"
+        );
+    }
+
+    #[test]
+    fn is_timeline_empty_false_after_ingest() {
+        // An ingest adds a Source lifecycle event to the timeline.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let csv = dir.path().join("people.csv");
+        std::fs::write(&csv, "name,score\nAda,9\n").expect("write csv");
+        let mut session = Session::with_provider(Box::new(FakeProvider::new())).expect("session");
+        match session.ingest(&csv) {
+            crate::model::LoadOutcome::Loaded(d) => assert_eq!(d.reference_name, "people"),
+            other => panic!("ingest should load, got {other:?}"),
+        }
+        assert!(
+            !session.is_timeline_empty(),
+            "session with a source event is not empty"
+        );
+    }
+
+    #[test]
+    fn is_timeline_empty_false_after_turn() {
+        // A turn (even Cancelled) adds a Turn entry to the timeline.
+        let mut session = Session::new().expect("session");
+        session.record_turn("q", TurnOutcome::Cancelled, Vec::new(), Vec::new());
+        assert!(
+            !session.is_timeline_empty(),
+            "session with a turn is not empty"
+        );
+    }
+
+    #[test]
+    fn is_timeline_empty_false_after_skill_mount() {
+        // A skill mount adds a Skill lifecycle event to the timeline
+        // (ADR-0086, the third TimelineEntry variant).
+        let mut session = Session::with_provider(Box::new(FakeProvider::new())).expect("session");
+        session.mount_skill("code-review").expect("mount skill");
+        assert!(
+            !session.is_timeline_empty(),
+            "session with a skill lifecycle event is not empty"
         );
     }
 }

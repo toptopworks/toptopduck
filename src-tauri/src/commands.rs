@@ -289,14 +289,20 @@ pub async fn prepare_import_session(
 /// + the bound `.duck` canonical-writer key are released when the last
 /// `Arc<SessionHandle>` drops (immediately if no ask is in flight, or when the
 /// in-flight ask's clone drops after its discard).
+///
+/// ADR-0089 Decision 6: if the timeline is completely empty (no turns, no
+/// source lifecycle events, no skill lifecycle events), the per-session
+/// directory is deleted so empty sessions do not linger as sidebar entries.
+/// Uses `try_lock` so the close never blocks on an in-flight ask (ADR-0055).
+/// Returns `true` when cleanup happened, `false` for a normal close or when
+/// the lock was unavailable (ask in flight).
 #[tauri::command]
 pub fn close_session(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
-) -> Result<(), SessionError> {
+) -> Result<bool, SessionError> {
     let id = SessionId::parse(&session_id)?;
-    store.close(&id)?;
-    Ok(())
+    store.close_and_cleanup_empty(&id)
 }
 
 /// Close a session AND block until the canonical single-writer key is released

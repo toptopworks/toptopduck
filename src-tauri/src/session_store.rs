@@ -310,6 +310,15 @@ impl SessionHandle {
             .map_err(|_| SessionError::Engine("session lock poisoned".into()))
     }
 
+    /// Like [`Self::session_lock`] but returns `None` instead of blocking when
+    /// the mutex is held or poisoned. Used by `close_and_cleanup_empty` to
+    /// avoid blocking on an in-flight ask (ADR-0055 fire-and-forget — the
+    /// `ask` command holds the session lock for the entire turn inside
+    /// `spawn_blocking`).
+    pub fn try_session_lock(&self) -> Option<std::sync::MutexGuard<'_, Session>> {
+        self.session.try_lock().ok()
+    }
+
     /// Fire cancel on this session's token (ADR-0021). Sets the cooperative
     /// flag and interrupts any running DuckDB query; the in-flight turn lands
     /// as `Cancelled` at its next check. Used by the `cancel` command and
@@ -689,6 +698,53 @@ impl SessionStore {
     pub fn close(&self, session_id: &SessionId) -> Result<(), SessionError> {
         self.detach(session_id)?;
         Ok(())
+    }
+
+    /// Close a session and, if its timeline is completely empty (ADR-0089
+    /// Decision 6), delete the per-session directory so empty sessions do not
+    /// linger as sidebar "新会话" ghost entries.
+    ///
+    /// Uses [`SessionHandle::try_session_lock`] to avoid blocking on an
+    /// in-flight ask: the `ask` command holds the session mutex for the entire
+    /// turn inside `spawn_blocking`, so a blocking `session_lock()` here would
+    /// hang for up to 120s (ADR-0021 HTTP timeout) — violating ADR-0055's
+    /// fire-and-forget contract. When the lock is unavailable (ask in flight),
+    /// cleanup is skipped (`Ok(false)`); the ask will discard its turn because
+    /// [`Self::close`] sets the closing flag, but the directory survives until
+    /// a future cleanup.
+    ///
+    /// Returns `true` when the directory was deleted (or was already gone),
+    /// `false` for a normal close, when the lock was unavailable, or when the
+    /// best-effort `remove_dir_all` failed.
+    pub fn close_and_cleanup_empty(&self, id: &SessionId) -> Result<bool, SessionError> {
+        let handle = self.get(id)?;
+        // try_lock: never blocks. If the ask holds the lock, skip cleanup.
+        let session_dir = handle.try_session_lock().and_then(|s| {
+            if s.is_timeline_empty() {
+                s.duck_path()
+                    .and_then(|p| p.parent())
+                    .map(std::path::PathBuf::from)
+            } else {
+                None
+            }
+        });
+        self.close(id)?;
+        if let Some(dir) = session_dir {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => Ok(true),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+                Err(e) => {
+                    log::warn!(
+                        target: "toptopduck::session",
+                        "close_and_cleanup_empty: failed to remove session dir {}: {e}",
+                        dir.display()
+                    );
+                    Ok(false)
+                }
+            }
+        } else {
+            Ok(false)
+        }
     }
 }
 

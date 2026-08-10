@@ -64,7 +64,7 @@ vi.mock("../api", async (importOriginal) => {
     onApprovalRequest: vi.fn(async () => () => {}),
     onApprovalResolved: vi.fn(async () => () => {}),
     respondToolApproval: vi.fn(async () => {}),
-    closeSession: vi.fn(async () => {}),
+    closeSession: vi.fn(async () => false),
     createSession: vi.fn(async () => "sess-1"),
     listWorkingSet: vi.fn(async () => []),
     activeDataset: vi.fn(async () => null),
