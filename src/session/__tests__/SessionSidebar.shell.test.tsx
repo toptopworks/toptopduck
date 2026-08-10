@@ -152,7 +152,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
 
   it("session-entry-main keeps appearance-none reset + hover:bg-accent + rounded-md on the default row", () => {
     const persisted: SessionMetadata = {
-      session_id: "/x/default.duck",
+      duck_path: "/x/default.duck",
       display_name: "Default",
       last_modified_at: Date.now(),
       source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
@@ -237,7 +237,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
 
   it("session-menu danger item lifts text-destructive (retires .session-menu button.danger)", () => {
     const persisted: SessionMetadata = {
-      session_id: "/x/persisted.duck",
+      duck_path: "/x/persisted.duck",
       display_name: "Persisted",
       last_modified_at: Date.now(),
       source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
@@ -413,7 +413,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
   // has an anchor (the first group-title row).
   function onePersisted(): SessionMetadata {
     return {
-      session_id: "/x/solo.duck",
+      duck_path: "/x/solo.duck",
       display_name: "Solo",
       last_modified_at: Date.now(),
       source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },

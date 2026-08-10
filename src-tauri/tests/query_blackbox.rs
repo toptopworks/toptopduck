@@ -22,8 +22,9 @@ use toptopduck_lib::provider::tool_calling::{
 use toptopduck_lib::{
     ActiveResolution, ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState,
     CancelToken, DatasetPrivacy, FakeProvider, KeychainStore, LoadOutcome, OperationKind,
-    ProviderError, ResumeEvent, ResumeProgress, Session, SourceResolution, TextKind, ThreadEntry,
-    TraceEntryView, TurnFailure, TurnInputs, TurnOutcome, TurnPhase, TurnProgress, TurnRecord,
+    ProviderError, ResumeEvent, ResumeProgress, Session, SessionId, SourceResolution, TextKind,
+    ThreadEntry, TraceEntryView, TurnFailure, TurnInputs, TurnOutcome, TurnPhase, TurnProgress,
+    TurnRecord,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -1399,7 +1400,9 @@ fn turn_progress_events_for_one_turn_share_one_session_id() {
     // the ask's single session_id. The command layer wraps each TurnPhase with
     // that id; this seam drives the same callback and asserts every emitted
     // event carries it, so a multi-session frontend can filter on sessionId.
-    const SID: &str = "turn-session-id";
+    // Issue #462: session_id is now a typed SessionId (valid v4 UUID).
+    const SID: &str = "550e8400-e29b-41d4-a716-446655440000";
+    let sid = SessionId::parse(SID).expect("valid v4 UUID");
     let mut session = session_with(&[("建结果", "SELECT 1 AS n")]);
     let approval = ApprovalState::new();
     let sink = NullSink;
@@ -1410,7 +1413,7 @@ fn turn_progress_events_for_one_turn_share_one_session_id() {
         &sink,
         |phase| {
             addressed.push(TurnProgress {
-                session_id: SID.into(),
+                session_id: sid.clone(),
                 phase,
             });
         },
@@ -1424,7 +1427,7 @@ fn turn_progress_events_for_one_turn_share_one_session_id() {
     // started/completed pair + Thinking{2} (ADR-0078 event stream).
     assert!(addressed.len() >= 2, "got {addressed:?}");
     assert!(
-        addressed.iter().all(|p| p.session_id == SID),
+        addressed.iter().all(|p| p.session_id == sid),
         "every turn-progress event carries the ask's session_id: {addressed:?}"
     );
 }
@@ -1457,7 +1460,8 @@ fn resume_progress_events_carry_one_session_id_and_cover_the_resume_sequence() {
     // single-writer) releases before open_duck re-acquires it.
     drop(session);
 
-    const SID: &str = "resume-session-id";
+    const SID: &str = "550e8400-e29b-41d4-a716-446655440000";
+    let sid = SessionId::parse(SID).expect("valid v4 UUID");
     let mut addressed: Vec<ResumeProgress> = Vec::new();
     let resumed = Session::open_duck(
         &duck,
@@ -1465,7 +1469,7 @@ fn resume_progress_events_carry_one_session_id_and_cover_the_resume_sequence() {
         Box::new(FakeProvider::new()),
         |ev| {
             addressed.push(ResumeProgress {
-                session_id: SID.into(),
+                session_id: sid.clone(),
                 event: ev,
             })
         },
@@ -1490,7 +1494,7 @@ fn resume_progress_events_carry_one_session_id_and_cover_the_resume_sequence() {
     );
     // Every event is addressable by the SAME session_id (frontend filter key).
     assert!(
-        addressed.iter().all(|p| p.session_id == SID),
+        addressed.iter().all(|p| p.session_id == sid),
         "every resume-progress event carries the resume's session_id: {addressed:?}"
     );
     // Sanity: the resumed session reconstructed the turn's result via replay.

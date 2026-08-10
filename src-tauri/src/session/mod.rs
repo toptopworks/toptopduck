@@ -56,6 +56,7 @@ use crate::skills::SkillPromptFragment;
 use crate::tools::definitions::builtin_metadata;
 use crate::window;
 use crate::workingset::{WorkingSet, DEFAULT_RESULT_COUNT_CAP};
+use crate::SessionId;
 
 // Re-export the resume global-state probe (ADR-0053 Decision 3) after its
 // move into `session::resume`. Since ADR-0056 the LIVE command-layer resume
@@ -363,12 +364,12 @@ pub enum ResumeEvent {
 /// filters the global Tauri event broadcast down to the one SessionPane that
 /// owns the resume (ADR-0056/0059 -- v1 emitted a bare ResumeEvent, a
 /// single-session legacy; multi-session lands the sessionId here). `session_id`
-/// is the runtime id the `open_duck` command received (a UUID string). The field
+/// is the runtime id the `open_duck` command received (a typed UUID). The field
 /// is required -- resume progress without a session it belongs to is not
 /// addressable.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResumeProgress {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub event: ResumeEvent,
 }
 

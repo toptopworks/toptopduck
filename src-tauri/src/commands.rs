@@ -148,7 +148,7 @@ fn reject_if_in_flight(handle: &SessionHandle) -> Result<(), SessionError> {
 /// session is known-persisted from creation.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CreateSessionReply {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub duck_path: String,
 }
 
@@ -197,7 +197,7 @@ pub fn create_session(
         s.bind_duck(duck_path.clone(), String::new())
             .map_err(|e| SessionError::Engine(e.to_string()))?;
         Ok(CreateSessionReply {
-            session_id: id_str.clone(),
+            session_id: id.clone(),
             duck_path: duck_path.to_string_lossy().into_owned(),
         })
     })();
@@ -247,12 +247,12 @@ pub async fn prepare_import_session(
 
     let session_dir_for_task = session_dir.clone();
     let duck_path_for_task = duck_path.clone();
-    let id_str_for_task = id_str.clone();
+    let id_for_task = id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         import_session_files(&src, &session_dir_for_task)
             .map_err(|e| SessionError::Engine(format!("failed to import session: {e}")))?;
         Ok::<CreateSessionReply, SessionError>(CreateSessionReply {
-            session_id: id_str_for_task,
+            session_id: id_for_task,
             duck_path: duck_path_for_task.to_string_lossy().into_owned(),
         })
     })
@@ -604,7 +604,7 @@ pub async fn ask(
     // boundary (the only layer holding an AppHandle, ADR-0029) and borrowed
     // per turn, so the Session stays AppHandle-free.
     let approval = handle.approval_state();
-    let sink = TauriApprovalSink::new(app.clone(), session_id.clone());
+    let sink = TauriApprovalSink::new(app.clone(), id.clone());
     let handle = Arc::clone(&handle);
     // The user's configured external MCP servers ride the turn (issue #301
     // slice C-gw): the gateway connects each one per turn (ADR-0076 Q2). A
@@ -631,7 +631,7 @@ pub async fn ask(
     // AppHandle + the id string is cheap; the closure is FnMut (called once
     // per wait boundary + per tool call, across every loop step).
     let app_for_cb = app.clone();
-    let sid = session_id.clone();
+    let sid = id.clone();
     // Clone the skills-root path off the managed State so it can move into the
     // spawn_blocking closure (the State borrow does not cross the await). The
     // registry root is read below to resolve each mounted skill's SKILL.md body
@@ -1785,7 +1785,7 @@ pub async fn open_duck(
     // live provider -- so the provider is wired at open time, not deferred.
     let provider = Box::new(crate::LiveProvider::new(live.inner().clone()));
     let app_for_cb = app.clone();
-    let sid = session_id.clone();
+    let sid = id.clone();
     let inner = tauri::async_runtime::spawn_blocking(move || {
         let mut new_session = Session::open_duck(
             &path,
@@ -1931,11 +1931,11 @@ pub fn take_pending_conflict(
 /// callback's `sid.clone()`).
 pub struct TauriApprovalSink {
     app: tauri::AppHandle,
-    session_id: String,
+    session_id: SessionId,
 }
 
 impl TauriApprovalSink {
-    pub fn new(app: tauri::AppHandle, session_id: String) -> Self {
+    pub fn new(app: tauri::AppHandle, session_id: SessionId) -> Self {
         Self { app, session_id }
     }
 }

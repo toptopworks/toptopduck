@@ -34,7 +34,7 @@ import { usePersistedSessions } from "../usePersistedSessions";
 const intl = createIntl({ locale: "en-US", messages: catalogFor("en-US") });
 
 const SESSION_A: SessionMetadata = {
-  session_id: "/x/a.duck",
+  duck_path: "/x/a.duck",
   display_name: "A",
   last_modified_at: 1000,
   source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },

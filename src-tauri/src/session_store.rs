@@ -65,7 +65,10 @@ pub const UNKNOWN_SESSION: &str = "会话不存在或已关闭";
 /// [`SessionError::InvalidId`], NOT collapsed into "unknown session"), and the
 /// store deals only in the typed id. Only [`SessionStore::create`] mints ids;
 /// every other site receives one already typed.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
 pub struct SessionId(uuid::Uuid);
 
 impl SessionId {

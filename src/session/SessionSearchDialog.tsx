@@ -110,7 +110,7 @@ export function SessionSearchDialog({
     // Mirror the sidebar row contract: an open binding activates by sid; a
     // cold persisted row resumes by path. Either way the dialog closes.
     // SearchEntry guarantees a non-null path (buildSearchEntries sets it from
-    // m.session_id), so no defensive else-throw is needed here.
+    // m.duck_path), so no defensive else-throw is needed here.
     if (entry.sid) onActivate(entry.sid);
     else onOpenPersisted(entry.path, entry.name);
     onOpenChange(false);

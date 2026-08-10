@@ -5,7 +5,7 @@
 // and so the sidebar component stays a thin caller of these functions.
 //
 // Identity split (ADR-0060/0061/0089): a PERSISTED session's stable identity is
-// its `.duck` file path (SessionMetadata.session_id); an OPEN session's runtime
+// its `.duck` file path (SessionMetadata.duck_path); an OPEN session's runtime
 // identity is its ephemeral UUID (createSession). Since ADR-0089 every session
 // is persisted from creation, so every OpenSession carries a non-null path —
 // the "unsaved" state no longer exists.
@@ -28,7 +28,7 @@ export interface OpenSession {
   /** Display name. Starts empty (placeholder); updated by rename or the first
    *  turn's auto-naming. */
   name: string;
-  /** Bound `.duck` path (SessionMetadata.session_id shape). Always non-null
+  /** Bound `.duck` path (SessionMetadata.duck_path shape). Always non-null
    *  since ADR-0089: createSession binds immediately. */
   path: string;
   /** A pending data-file drop routed to this session's ingest but not yet
@@ -146,17 +146,17 @@ function indexOpenByPath(open: OpenSession[]): Map<string, OpenSession> {
  *  binding. An open binding upgrades the row with its runtime sid + the
  *  (possibly renamed) in-memory name; both constructors emit the same
  *  persisted-row shape. Returns SearchEntry (path non-null) since
- *  m.session_id is always a string. */
+ *  m.duck_path is always a string. */
 function persistedEntry(
   m: SessionMetadata,
   bound: OpenSession | null,
   activeSessionId: string | null,
 ): SearchEntry {
   return {
-    key: m.session_id,
+    key: m.duck_path,
     name: bound?.name ?? m.display_name,
     sid: bound?.sid ?? null,
-    path: m.session_id,
+    path: m.duck_path,
     active: bound !== null && bound.sid === activeSessionId,
     firstSourceName: m.source_summary.first_source_name,
     turnCount: m.source_summary.turn_count,
@@ -210,7 +210,7 @@ export function buildSearchEntries(
     // a false positive at the boundary.
     const hay = `${m.display_name} ${m.source_summary.first_source_name ?? ""}`.toLowerCase();
     if (q && !hay.includes(q)) continue;
-    entries.push(persistedEntry(m, openByPath.get(m.session_id) ?? null, activeSessionId));
+    entries.push(persistedEntry(m, openByPath.get(m.duck_path) ?? null, activeSessionId));
   }
   entries.sort(BY_MTIME_DESC);
   return entries;
@@ -235,14 +235,14 @@ export function buildSidebarGroups(
   grouping: SidebarGrouping,
 ): SidebarGroup[] {
   const openByPath = indexOpenByPath(open);
-  const persistedPaths = new Set(persisted.map((m) => m.session_id));
+  const persistedPaths = new Set(persisted.map((m) => m.duck_path));
 
   const entries: SidebarEntry[] = [];
 
   // Persisted rows (resume-on-click targets). An open binding upgrades the row
   // with its runtime sid + the (possibly renamed) in-memory name.
   for (const m of persisted) {
-    entries.push(persistedEntry(m, openByPath.get(m.session_id) ?? null, activeSessionId));
+    entries.push(persistedEntry(m, openByPath.get(m.duck_path) ?? null, activeSessionId));
   }
 
   // Open sessions not yet in the persisted list: a just-created session (or one

@@ -214,12 +214,13 @@ export interface SourceSummary {
 }
 
 // One persisted session's sidebar metadata (ADR-0060/0061, issue #76). Mirrors
-// the Rust `SessionMetadata`. `session_id` is the `.duck` file path -- the
+// the Rust `SessionMetadata`. `duck_path` is the `.duck` file path -- the
 // stable identity of a persisted session (the runtime UUID is not persisted);
 // pass it back to openDuck to resume. Every other field is derived from the
-// recipe + the file mtime (zero new persistence).
+// recipe + the file mtime (zero new persistence). Renamed from `session_id` in
+// issue #462 to disambiguate from the runtime UUID that addresses live IPC.
 export interface SessionMetadata {
-  session_id: string;
+  duck_path: string;
   display_name: string;
   // File mtime, milliseconds since the Unix epoch.
   last_modified_at: number;
