@@ -129,7 +129,7 @@ pub enum ResumeError {
     },
     /// A working-set invariant violation surfaced while rebuilding the
     /// conversation timeline: a Materialized turn that should have been
-    /// re-materialized by [`Resumer::replay`] is not registered. A
+    /// re-materialized by `Resumer::replay` is not registered. A
     /// replay SQL failure itself is NOT reported here -- it lands as a partial
     /// session with that turn rendered as `Failed` (ADR-0035 honest partial
     /// state). This variant signals a logic bug or a hand-edited recipe whose
