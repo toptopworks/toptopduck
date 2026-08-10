@@ -190,6 +190,36 @@ describe("useShellSessions", () => {
     expect(result.current.activeSessionId).toBeNull();
   });
 
+  it("closeOpen refreshes sidebar when closeSession reports cleanup (ADR-0089 D6)", async () => {
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
+    vi.mocked(closeSession).mockResolvedValueOnce(true);
+    const { result, refreshSessions } = renderSessions();
+    await act(async () => {
+      await result.current.openNew();
+    });
+    await act(async () => {
+      await result.current.closeOpen("s1");
+    });
+    expect(closeSession).toHaveBeenCalledWith("s1");
+    expect(refreshSessions).toHaveBeenCalled();
+  });
+
+  it("closeOpen skips refresh when closeSession reports no cleanup (ADR-0089 D6)", async () => {
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
+    // Default mock returns false; explicit for clarity.
+    vi.mocked(closeSession).mockResolvedValueOnce(false);
+    const { result, refreshSessions } = renderSessions();
+    await act(async () => {
+      await result.current.openNew();
+    });
+    refreshSessions.mockClear();
+    await act(async () => {
+      await result.current.closeOpen("s1");
+    });
+    expect(closeSession).toHaveBeenCalledWith("s1");
+    expect(refreshSessions).not.toHaveBeenCalled();
+  });
+
   it("closeOpen survives a closeSession reject without throwing (ADR-0055 .catch seam)", async () => {
     // closeOpen returns closeSession().catch(...) -- a reject MUST be swallowed
     // (not surface as an unhandled rejection). The session is already unmounted.

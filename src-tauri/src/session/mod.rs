@@ -3828,4 +3828,16 @@ mod tests {
             "session with a turn is not empty"
         );
     }
+
+    #[test]
+    fn is_timeline_empty_false_after_skill_mount() {
+        // A skill mount adds a Skill lifecycle event to the timeline
+        // (ADR-0086, the third TimelineEntry variant).
+        let mut session = Session::with_provider(Box::new(FakeProvider::new())).expect("session");
+        session.mount_skill("code-review").expect("mount skill");
+        assert!(
+            !session.is_timeline_empty(),
+            "session with a skill lifecycle event is not empty"
+        );
+    }
 }

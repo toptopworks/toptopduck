@@ -293,52 +293,16 @@ pub async fn prepare_import_session(
 /// ADR-0089 Decision 6: if the timeline is completely empty (no turns, no
 /// source lifecycle events, no skill lifecycle events), the per-session
 /// directory is deleted so empty sessions do not linger as sidebar entries.
-/// Returns `true` when cleanup happened, `false` for a normal close.
+/// Uses `try_lock` so the close never blocks on an in-flight ask (ADR-0055).
+/// Returns `true` when cleanup happened, `false` for a normal close or when
+/// the lock was unavailable (ask in flight).
 #[tauri::command]
 pub fn close_session(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<bool, SessionError> {
     let id = SessionId::parse(&session_id)?;
-    // ADR-0089 Decision 6: snapshot the empty-timeline state + session dir
-    // BEFORE close detaches the handle. After close the Session is dropped and
-    // its fields are inaccessible. The duck_path's parent is the `{uuid}/`
-    // per-session directory created by create_session.
-    let session_dir = {
-        let handle = store.get(&id)?;
-        let s = handle.session_lock()?;
-        if s.is_timeline_empty() {
-            s.duck_path()
-                .map(PathBuf::from)
-                .and_then(|p| p.parent().map(PathBuf::from))
-        } else {
-            None
-        }
-    };
-    store.close(&id)?;
-    if let Some(dir) = session_dir {
-        // The store's Arc is gone; if no ask is in flight, Session::Drop has
-        // run and released the single-writer key. A FIRST-turn ask can still
-        // be in flight with an empty timeline (record_turn fires only after
-        // the turn completes), keeping an Arc clone alive -- so remove_dir_all
-        // may hit an open DuckDB file. Best-effort: log so a stale sidebar
-        // entry stays diagnosable; the session is already closed from the
-        // caller's perspective regardless.
-        match std::fs::remove_dir_all(&dir) {
-            Ok(()) => Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
-            Err(e) => {
-                log::warn!(
-                    target: "toptopduck::session",
-                    "close_session: failed to remove empty session dir {}: {e}",
-                    dir.display()
-                );
-                Ok(false)
-            }
-        }
-    } else {
-        Ok(false)
-    }
+    store.close_and_cleanup_empty(&id)
 }
 
 /// Close a session AND block until the canonical single-writer key is released
