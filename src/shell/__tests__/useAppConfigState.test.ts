@@ -32,7 +32,7 @@ vi.mock("../../api", async (importOriginal) => {
 import { getAppConfig, setAppConfig } from "../../api";
 import { useAppConfigState } from "../useAppConfigState";
 
-function baseAppConfig(shell: Omit<AppConfig["shell"], "sidebar_grouping">): AppConfig {
+function baseAppConfig(shell: Pick<AppConfig["shell"], "sidebar_collapsed">): AppConfig {
   return {
     format_version: 1,
     theme: "system",
@@ -85,18 +85,17 @@ describe("useAppConfigState", () => {
     vi.mocked(setAppConfig).mockImplementation(async (cfg: AppConfig) => cfg);
   });
 
-  it("starts cold: null appConfig, both collapse levels expanded, grouping flat", () => {
+  it("starts cold: null appConfig, sidebar expanded, grouping flat", () => {
     const { result } = renderAppConfigState();
     expect(result.current.appConfig).toBeNull();
     expect(result.current.sidebarCollapsed).toBe(false);
-    expect(result.current.railCollapsed).toBe(false);
     // ADR-0072 (#251): grouping defaults to flat until the persisted pref
     // resolves (the restore effect's one-shot then applies the stored value).
     expect(result.current.sidebarGrouping).toBe("flat");
   });
 
   it("loads app-config once on mount and surfaces it (ADR-0038)", async () => {
-    const cfg = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
+    const cfg = baseAppConfig({ sidebar_collapsed: false });
     vi.mocked(getAppConfig).mockResolvedValue(cfg);
     const { result } = renderAppConfigState();
     await waitFor(() => expect(result.current.appConfig).toBe(cfg));
@@ -114,7 +113,7 @@ describe("useAppConfigState", () => {
     // Hold setAppConfig pending on a controlled resolver so the pre-resolve
     // state is observable (result.current only updates on re-render, so a
     // synchronous read right after the call would miss the flip).
-    const initial = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
+    const initial = baseAppConfig({ sidebar_collapsed: false });
     vi.mocked(getAppConfig).mockResolvedValue(initial);
     let resolveIpc!: (cfg: AppConfig) => void;
     vi.mocked(setAppConfig).mockImplementation(
@@ -155,7 +154,7 @@ describe("useAppConfigState", () => {
   });
 
   it("switchActiveProfile is a no-op when the id matches the active profile", async () => {
-    const cfg = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
+    const cfg = baseAppConfig({ sidebar_collapsed: false });
     vi.mocked(getAppConfig).mockResolvedValue(cfg);
     const { result, refreshKeyStatus } = renderAppConfigState();
     await waitFor(() => expect(result.current.appConfig).toBe(cfg));
@@ -167,7 +166,7 @@ describe("useAppConfigState", () => {
   });
 
   it("switchActiveProfile commits the new active_profile + kicks refreshKeyStatus (#154)", async () => {
-    const cfg = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
+    const cfg = baseAppConfig({ sidebar_collapsed: false });
     vi.mocked(getAppConfig).mockResolvedValue(cfg);
     const { result, refreshKeyStatus } = renderAppConfigState();
     await waitFor(() => expect(result.current.appConfig).toBe(cfg));
@@ -186,7 +185,7 @@ describe("useAppConfigState", () => {
   });
 
   it("switchActiveProfile surfaces a setAppConfig reject via setShellError (no rollback)", async () => {
-    const cfg = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
+    const cfg = baseAppConfig({ sidebar_collapsed: false });
     vi.mocked(getAppConfig).mockResolvedValue(cfg);
     vi.mocked(setAppConfig).mockRejectedValueOnce(new Error("ipc down"));
     const { result, setShellError, refreshKeyStatus } = renderAppConfigState();
@@ -223,7 +222,7 @@ describe("useAppConfigState", () => {
   });
 
   it("switchActiveProfileModel is a no-op when the model matches", async () => {
-    const cfg = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
+    const cfg = baseAppConfig({ sidebar_collapsed: false });
     vi.mocked(getAppConfig).mockResolvedValue(cfg);
     const { result, refreshKeyStatus } = renderAppConfigState();
     await waitFor(() => expect(result.current.appConfig).toBe(cfg));
@@ -239,7 +238,7 @@ describe("useAppConfigState", () => {
     // Two profiles so the immutability + active-only assertions are meaningful:
     // only "default" (active) gets the new model; "glm" is untouched, and the
     // active pointer does NOT move (ADR-0064: model is per-profile).
-    const cfg = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
+    const cfg = baseAppConfig({ sidebar_collapsed: false });
     const twoProfileCfg: AppConfig = {
       ...cfg,
       provider: {
@@ -284,7 +283,7 @@ describe("useAppConfigState", () => {
   });
 
   it("switchActiveProfileModel surfaces a reject via setShellError (no rollback)", async () => {
-    const cfg = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
+    const cfg = baseAppConfig({ sidebar_collapsed: false });
     vi.mocked(getAppConfig).mockResolvedValue(cfg);
     vi.mocked(setAppConfig).mockRejectedValueOnce(new Error("ipc down"));
     const { result, setShellError } = renderAppConfigState();
@@ -303,7 +302,7 @@ describe("useAppConfigState", () => {
   });
 
   it("toggleSidebarCollapse flips sidebar state + persists both shell prefs (ADR-0054)", async () => {
-    const cfg = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
+    const cfg = baseAppConfig({ sidebar_collapsed: false });
     vi.mocked(getAppConfig).mockResolvedValue(cfg);
     const { result } = renderAppConfigState();
     await waitFor(() => expect(result.current.appConfig).toBe(cfg));
@@ -313,32 +312,12 @@ describe("useAppConfigState", () => {
     });
 
     expect(result.current.sidebarCollapsed).toBe(true);
-    expect(result.current.railCollapsed).toBe(false); // rail untouched
     expect(setAppConfig).toHaveBeenCalledWith(
       expect.objectContaining({
         // Nested objectContaining: the commit also carries the current
         // sidebar_grouping (#251), which these collapse-only tests stay
         // agnostic to.
-        shell: expect.objectContaining({ sidebar_collapsed: true, rail_collapsed: false }),
-      }),
-    );
-  });
-
-  it("toggleRailCollapse flips rail state + persists both shell prefs independently (ADR-0054)", async () => {
-    const cfg = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
-    vi.mocked(getAppConfig).mockResolvedValue(cfg);
-    const { result } = renderAppConfigState();
-    await waitFor(() => expect(result.current.appConfig).toBe(cfg));
-
-    act(() => {
-      result.current.toggleRailCollapse();
-    });
-
-    expect(result.current.railCollapsed).toBe(true);
-    expect(result.current.sidebarCollapsed).toBe(false); // sidebar untouched
-    expect(setAppConfig).toHaveBeenCalledWith(
-      expect.objectContaining({
-        shell: expect.objectContaining({ sidebar_collapsed: false, rail_collapsed: true }),
+        shell: expect.objectContaining({ sidebar_collapsed: true }),
       }),
     );
   });
@@ -359,12 +338,11 @@ describe("useAppConfigState", () => {
   });
 
   it("restores persisted collapse prefs once on the first app-config resolve (ADR-0038/0054)", async () => {
-    const cfg = baseAppConfig({ sidebar_collapsed: true, rail_collapsed: true });
+    const cfg = baseAppConfig({ sidebar_collapsed: true });
     vi.mocked(getAppConfig).mockResolvedValue(cfg);
     const { result } = renderAppConfigState();
     await waitFor(() => {
       expect(result.current.sidebarCollapsed).toBe(true);
-      expect(result.current.railCollapsed).toBe(true);
     });
   });
 
@@ -390,7 +368,7 @@ describe("useAppConfigState", () => {
   });
 
   it("switchSidebarGrouping is a no-op when the mode matches", async () => {
-    const cfg = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
+    const cfg = baseAppConfig({ sidebar_collapsed: false });
     vi.mocked(getAppConfig).mockResolvedValue(cfg);
     const { result } = renderAppConfigState();
     await waitFor(() => expect(result.current.appConfig).toBe(cfg));
@@ -405,7 +383,7 @@ describe("useAppConfigState", () => {
   });
 
   it("switchSidebarGrouping flips grouping + persists all three shell prefs (ADR-0072)", async () => {
-    const cfg = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
+    const cfg = baseAppConfig({ sidebar_collapsed: false });
     vi.mocked(getAppConfig).mockResolvedValue(cfg);
     const { result } = renderAppConfigState();
     await waitFor(() => expect(result.current.appConfig).toBe(cfg));
@@ -421,7 +399,6 @@ describe("useAppConfigState", () => {
       expect.objectContaining({
         shell: expect.objectContaining({
           sidebar_collapsed: false,
-          rail_collapsed: false,
           sidebar_grouping: "time",
         }),
       }),
@@ -429,7 +406,7 @@ describe("useAppConfigState", () => {
   });
 
   it("toggleSidebarCollapse carries the current grouping into the shell write (ADR-0072)", async () => {
-    const cfg = baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false });
+    const cfg = baseAppConfig({ sidebar_collapsed: false });
     vi.mocked(getAppConfig).mockResolvedValue(cfg);
     const { result } = renderAppConfigState();
     await waitFor(() => expect(result.current.appConfig).toBe(cfg));
@@ -449,7 +426,6 @@ describe("useAppConfigState", () => {
       expect.objectContaining({
         shell: expect.objectContaining({
           sidebar_collapsed: true,
-          rail_collapsed: false,
           sidebar_grouping: "time",
         }),
       }),
@@ -458,8 +434,8 @@ describe("useAppConfigState", () => {
 
   it("restores persisted grouping once on the first app-config resolve (ADR-0038/0072)", async () => {
     const cfg: AppConfig = {
-      ...baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
-      shell: { sidebar_collapsed: false, rail_collapsed: false, sidebar_grouping: "time" },
+      ...baseAppConfig({ sidebar_collapsed: false }),
+      shell: { sidebar_collapsed: false, sidebar_grouping: "time" },
     };
     vi.mocked(getAppConfig).mockResolvedValue(cfg);
     const { result } = renderAppConfigState();

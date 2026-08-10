@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { FormattedMessage, IntlProvider } from "react-intl";
 import { SessionPane } from "./session/SessionPane";
@@ -9,6 +10,7 @@ import { useShellError } from "./shell/useShellError";
 import { usePersistedSessions } from "./shell/usePersistedSessions";
 import { useShellSessions } from "./shell/useShellSessions";
 import { useAppConfigState } from "./shell/useAppConfigState";
+import { useSidebarResize } from "./shell/useSidebarResize";
 import type { AppConfig } from "./types/app-config";
 import { usePlatform } from "./shell/use-platform";
 import type { KeyStatus } from "./types/provider";
@@ -158,12 +160,16 @@ export default function App() {
     switchActiveProfile,
     switchActiveProfileModel,
     sidebarCollapsed,
-    railCollapsed,
     toggleSidebarCollapse,
-    toggleRailCollapse,
     sidebarGrouping,
     switchSidebarGrouping,
   } = useAppConfigState({ setShellError, refreshKeyStatus });
+
+  // --- Draggable sidebar width (useSidebarResize) ---------------------------
+  // Frontend-only localStorage persistence; the width is exposed as a CSS
+  // custom property on .shell so the grid + resize handle consume it without
+  // a hardcoded px value.
+  const { width: sidebarWidth, isDragging: sidebarDragging, onResizeStart: onSidebarResizeStart } = useSidebarResize();
 
   // --- Session shell (issue #195) -----------------------------------------
   // usePersistedSessions: the disk-derived sidebar list (ADR-0061 cold start;
@@ -340,7 +346,8 @@ export default function App() {
           >
             <NavigationHistoryProvider location={location} restore={restore}>
               <div
-                className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${railCollapsed ? " rail-collapsed" : ""}${settingsView.open ? " settings-mode" : ""}${settingsNavCollapsed ? " settings-nav-collapsed" : ""}`}
+                className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${settingsView.open ? " settings-mode" : ""}${settingsNavCollapsed ? " settings-nav-collapsed" : ""}`}
+                style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
               >
                 {/* Col 1: session sidebar (ADR-0060) -- full height, independent
               column (R1: QuestionBar does NOT span over it). */}
@@ -373,6 +380,15 @@ export default function App() {
                   keyStatus={keyStatus}
                   onOpenSettings={() => openSettings()}
                   onOpenSettingsProfiles={() => openSettingsProfiles()}
+                />
+
+                {/* Draggable resize handle at the sidebar/content boundary.
+                    Absolutely positioned (see .sidebar-resize-handle in
+                    styles.css); hidden via CSS when the sidebar is collapsed
+                    or settings mode is active. */}
+                <div
+                  className={`sidebar-resize-handle${sidebarDragging ? " dragging" : ""}`}
+                  onPointerDown={onSidebarResizeStart}
                 />
 
                 {/* Row 1: thin top bar (ADR-0060/0062 R1), spans the full shell
@@ -483,8 +499,6 @@ export default function App() {
                           sessionId={s.sid}
                           pendingIngestPath={s.pendingIngestPath}
                           onIngestConsumed={() => clearPendingIngest(s.sid)}
-                          railCollapsed={railCollapsed}
-                          onToggleRail={toggleRailCollapse}
                           sessionName={s.name}
                           onFirstTurnSettled={() => syncSessionName(s.sid)}
                           approvalEvents={approvalEvents}

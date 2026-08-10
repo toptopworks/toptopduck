@@ -177,10 +177,6 @@ pub struct ShellPrefs {
     /// toggle calls it back out.
     #[serde(default)]
     pub sidebar_collapsed: bool,
-    /// Thread rail collapsed (ADR-0054). Workspace takes the full pane width;
-    /// the QuestionBar still spans it (ADR-0062 R1).
-    #[serde(default)]
-    pub rail_collapsed: bool,
     /// Session sidebar grouping mode (ADR-0072, issue #251). Forward-compat: a
     /// pre-#251 file has no `sidebar_grouping` key, so serde(default) fills
     /// `Flat` rather than rejecting the whole document.
@@ -631,14 +627,13 @@ mod tests {
 
     #[test]
     fn shell_prefs_default_expanded() {
-        // ADR-0054: both collapse levels default EXPANDED (false). The user
-        // opts into collapse; first launch and the honest-degrade target both
-        // surface the full three-column shell.
+        // ADR-0054: the sidebar defaults EXPANDED (false). The user opts into
+        // collapse; first launch and the honest-degrade target both surface
+        // the full three-column shell.
         let shell = ShellPrefs::default();
         assert!(!shell.sidebar_collapsed);
-        assert!(!shell.rail_collapsed);
         // ADR-0072 (#251): the grouping mode defaults to Flat (the "by recent"
-        // browse default), persisting alongside the two collapse prefs.
+        // browse default), persisting alongside the collapse pref.
         assert_eq!(shell.sidebar_grouping, SidebarGrouping::Flat);
     }
 
@@ -668,15 +663,13 @@ mod tests {
 
     #[test]
     fn shell_prefs_round_trip_collapsed_states() {
-        // A user who collapsed both levels reopens with both collapsed.
+        // A user who collapsed the sidebar reopens with it collapsed.
         let mut cfg = AppConfig::defaults();
         cfg.shell.sidebar_collapsed = true;
-        cfg.shell.rail_collapsed = true;
         let json = serde_json::to_string(&cfg).expect("serialize");
         let back: AppConfig = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.shell, cfg.shell);
         assert!(back.shell.sidebar_collapsed);
-        assert!(back.shell.rail_collapsed);
     }
 
     #[test]
@@ -690,7 +683,6 @@ mod tests {
         assert_eq!(cfg.theme, Theme::Dark);
         assert_eq!(cfg.shell, ShellPrefs::default());
         assert!(!cfg.shell.sidebar_collapsed);
-        assert!(!cfg.shell.rail_collapsed);
     }
 
     #[test]
@@ -702,7 +694,6 @@ mod tests {
         let json = r#"{"format_version":1,"shell":{"sidebar_collapsed":true}}"#;
         let cfg: AppConfig = serde_json::from_str(json).expect("partial shell deserialize");
         assert!(cfg.shell.sidebar_collapsed);
-        assert!(!cfg.shell.rail_collapsed); // absent -> default false
         assert_eq!(cfg.shell.sidebar_grouping, SidebarGrouping::Flat); // absent -> Flat
     }
 

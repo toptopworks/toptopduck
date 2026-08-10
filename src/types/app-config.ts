@@ -71,7 +71,6 @@ export type SidebarGrouping = "flat" | "time";
 // collapse prefs. Mirrors the Rust `ShellPrefs`.
 export interface ShellPrefs {
   sidebar_collapsed: boolean;
-  rail_collapsed: boolean;
   sidebar_grouping: SidebarGrouping;
 }
 

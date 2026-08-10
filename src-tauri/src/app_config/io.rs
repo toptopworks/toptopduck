@@ -304,7 +304,6 @@ mod tests {
         // Issue #84 / #251: non-default shell prefs exercise every shell field's
         // full io round-trip (a default-equal shell would pass == trivially).
         cfg.shell.sidebar_collapsed = true;
-        cfg.shell.rail_collapsed = true;
         cfg.shell.sidebar_grouping = crate::app_config::model::SidebarGrouping::Time;
         cfg
     }

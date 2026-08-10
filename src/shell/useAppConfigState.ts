@@ -77,9 +77,7 @@ export function useAppConfigState({
   switchActiveProfile: (id: string) => Promise<void>;
   switchActiveProfileModel: (model: string) => Promise<void>;
   sidebarCollapsed: boolean;
-  railCollapsed: boolean;
   toggleSidebarCollapse: () => void;
-  toggleRailCollapse: () => void;
   sidebarGrouping: SidebarGrouping;
   switchSidebarGrouping: (mode: SidebarGrouping) => void;
 } {
@@ -105,7 +103,6 @@ export function useAppConfigState({
   // shell-chrome surface -- restores with the two collapse prefs, persists on
   // every switch via commitShellPrefs's single IPC write.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [railCollapsed, setRailCollapsed] = useState(false);
   const [sidebarGrouping, setSidebarGroupingState] = useState<SidebarGrouping>("flat");
   const collapseRestoredRef = useRef(false);
 
@@ -230,14 +227,13 @@ export function useAppConfigState({
   // app-config resolves (appConfigRef null) -- the restore effect's one-shot
   // then applies the persisted value on first load.
   const commitShellPrefs = useCallback(
-    (next: { sidebar: boolean; rail: boolean; grouping: SidebarGrouping }): void => {
+    (next: { sidebar: boolean; grouping: SidebarGrouping }): void => {
       const base = appConfigRef.current;
       if (!base) return;
       void commitAppConfig({
         ...base,
         shell: {
           sidebar_collapsed: next.sidebar,
-          rail_collapsed: next.rail,
           sidebar_grouping: next.grouping,
         },
       }).catch((e) => {
@@ -254,27 +250,21 @@ export function useAppConfigState({
   const toggleSidebarCollapse = useCallback(() => {
     const next = !sidebarCollapsed;
     setSidebarCollapsed(next);
-    commitShellPrefs({ sidebar: next, rail: railCollapsed, grouping: sidebarGrouping });
-  }, [sidebarCollapsed, railCollapsed, sidebarGrouping, commitShellPrefs]);
-
-  const toggleRailCollapse = useCallback(() => {
-    const next = !railCollapsed;
-    setRailCollapsed(next);
-    commitShellPrefs({ sidebar: sidebarCollapsed, rail: next, grouping: sidebarGrouping });
-  }, [sidebarCollapsed, railCollapsed, sidebarGrouping, commitShellPrefs]);
+    commitShellPrefs({ sidebar: next, grouping: sidebarGrouping });
+  }, [sidebarCollapsed, sidebarGrouping, commitShellPrefs]);
 
   // Switch the sidebar's flat/time grouping mode (ADR-0072, issue #251). Sibling
-  // to the two collapse toggles: a one-mode swap that commits immediately via
+  // to the sidebar collapse toggle: a one-mode swap that commits immediately via
   // commitShellPrefs (no debounce -- a low-frequency discrete action, mirroring
-  // the collapse toggles' immediate commit contract). The optimistic + no-
+  // the toggle's immediate commit contract). The optimistic + no-
   // rollback contract is commitAppConfig's; a reject lands in the .catch log.
   const switchSidebarGrouping = useCallback(
     (mode: SidebarGrouping) => {
       if (mode === sidebarGrouping) return;
       setSidebarGroupingState(mode);
-      commitShellPrefs({ sidebar: sidebarCollapsed, rail: railCollapsed, grouping: mode });
+      commitShellPrefs({ sidebar: sidebarCollapsed, grouping: mode });
     },
-    [sidebarCollapsed, railCollapsed, sidebarGrouping, commitShellPrefs],
+    [sidebarCollapsed, sidebarGrouping, commitShellPrefs],
   );
 
   // Restore shell collapse prefs + the sidebar grouping mode ONCE on the first
@@ -285,7 +275,6 @@ export function useAppConfigState({
     if (!appConfig || collapseRestoredRef.current) return;
     collapseRestoredRef.current = true;
     setSidebarCollapsed(appConfig.shell.sidebar_collapsed);
-    setRailCollapsed(appConfig.shell.rail_collapsed);
     setSidebarGroupingState(appConfig.shell.sidebar_grouping);
   }, [appConfig]);
 
@@ -298,9 +287,7 @@ export function useAppConfigState({
     switchActiveProfile,
     switchActiveProfileModel,
     sidebarCollapsed,
-    railCollapsed,
     toggleSidebarCollapse,
-    toggleRailCollapse,
     sidebarGrouping,
     switchSidebarGrouping,
   };
