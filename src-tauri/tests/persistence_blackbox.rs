@@ -672,7 +672,7 @@ fn resume_is_cancellable_mid_replay() {
     // Fire cancel on the FIRST Source event. resume_sources checks
     // is_requested() at the top of each iteration (after on_progress fires),
     // so with a single source the cancel lands cleanly at the first iteration
-    // of resume_replay -- before any SQL runs.
+    // of Resumer::replay -- before any SQL runs.
     let mut fired = false;
     let outcome = Session::open_duck(
         &duck,
@@ -1142,7 +1142,7 @@ fn resume_active_abandoned_no_sources_left_resumes_empty_without_callback() {
 }
 
 #[test]
-fn resume_replay_failure_marks_turn_failed_and_preserves_prior_results() {
+fn replay_failure_marks_turn_failed_and_preserves_prior_results() {
     // AC6: replay reaches turn K whose SQL fails -> turn K is rendered as
     // Failed (ADR-0028 outcome C), replay STOPS at K, and the K-1 results
     // already materialized stay in the working set. Turns after K are dropped.
