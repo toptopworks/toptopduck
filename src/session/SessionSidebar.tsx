@@ -338,10 +338,8 @@ export function SessionSidebar({
       {pendingAction?.kind === "delete" && (
         <DeleteSessionDialog
           name={resolveDisplayName(pendingAction.entry.name, intl)}
-          path={pendingAction.entry.path}
           onCancel={() => setPendingAction(null)}
           onConfirm={() => {
-            // path is always non-null since ADR-0089 (sessions auto-persist).
             onDelete(pendingAction.entry.path, pendingAction.entry.sid);
             setPendingAction(null);
           }}
@@ -671,12 +669,10 @@ function SidebarRow({
 // contract is verified in isolation.
 export function DeleteSessionDialog({
   name,
-  path,
   onCancel,
   onConfirm,
 }: {
   name: string;
-  path: string;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -695,7 +691,6 @@ export function DeleteSessionDialog({
             />
           </AlertDialogDescription>
         </AlertDialogHeader>
-        {path && <p className="text-muted-foreground text-xs break-all">{path}</p>}
         <AlertDialogFooter>
           <AlertDialogCancel onClick={onCancel}>
             <FormattedMessage id="session.delete.cancel" defaultMessage="Cancel" />
