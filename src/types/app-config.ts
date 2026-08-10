@@ -1,6 +1,6 @@
 // App-level config types split from the single-file src/types.ts (issue #197,
 // ADR-0038). The second at-rest artifact (alongside .duck): preferences,
-// defaults, recent files, and the no-key endpoint config. Mirrors the Rust
+// defaults, and the no-key endpoint config. Mirrors the Rust
 // `app_config::model` types verbatim. The API key NEVER appears here -- it
 // lives in the OS keychain; app-config has no key field at all (enforced
 // structurally + a read-time secret scan). Crosses IPC via get/set_app_config.
@@ -57,8 +57,8 @@ export interface Tunables {
 // Session sidebar grouping mode (ADR-0072, issue #251). `flat` renders every
 // session in a single "Recent" group sorted by mtime descending; `time`
 // preserves the ADR-0060 Chat-style Today/Yesterday/Previous 7 days/Older
-// buckets. The variant names avoid `recent` to stay clear of the
-// `recent_files` MRU-list sense (ADR-0072). Mirrors the Rust `SidebarGrouping`;
+// buckets. The variant names avoid `recent` to stay clear of the MRU-list
+// sense (ADR-0072). Mirrors the Rust `SidebarGrouping`;
 // crosses IPC as the bare lowercase variant name.
 export type SidebarGrouping = "flat" | "time";
 
@@ -86,8 +86,6 @@ export interface AppConfig {
   provider: ProviderConfig;
   export: ExportDefaults;
   tunables: Tunables;
-  // Recently-opened .duck paths, most-recent first. Capped server-side.
-  recent_files: string[];
   // Shell collapse preferences (ADR-0054, issue #84).
   shell: ShellPrefs;
   // User-configured external MCP servers (issue #301, ADR-0076). Secret env

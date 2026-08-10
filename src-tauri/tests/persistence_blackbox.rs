@@ -520,8 +520,8 @@ fn resume_emits_visible_progress_events() {
 fn session_rename_persists_and_survives_resume() {
     // Issue #81 ADR-0060: renaming the session sets the recipe header name and
     // rewrites the bound .duck; after a restart the resumed session carries the
-    // new name. The bound path is untouched (recent_files / sidebar addressing
-    // stay stable), and a blank name is rejected.
+    // new name. The bound path is untouched (sidebar addressing stays stable),
+    // and a blank name is rejected.
     let dir = tempfile::tempdir().expect("tempdir");
     let duck = dir.path().join("s.duck");
     let mut session = build_session(&duck);

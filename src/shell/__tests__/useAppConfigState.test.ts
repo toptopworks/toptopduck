@@ -53,7 +53,6 @@ function baseAppConfig(shell: Omit<AppConfig["shell"], "sidebar_grouping">): App
     },
     export: { last_dir: null, default_format: "csv" },
     tunables: { window_turns: 6, far_window: 12 },
-    recent_files: [],
     // The helper fills `sidebar_grouping: "flat"` (the serde default) so callers
     // stay focused on the collapse prefs they actually exercise. Grouping-specific
     // tests build their own AppConfig literal with the mode under test.

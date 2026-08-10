@@ -42,10 +42,6 @@ const DEFAULT_STATEMENT_TIMEOUT_MS: u64 = 30_000;
 /// named constant elsewhere, so pinned here with the ADR pointer.
 const DEFAULT_FAR_WINDOW: u32 = 100;
 
-/// Cap on the recent-files list (issue #53). Keeps the on-disk blob bounded; a
-/// new open unshifts and trims to this length.
-pub const RECENT_FILES_CAP: usize = 10;
-
 /// UI response-locale preference (ADR-0052, issue #78). Three-state, mirroring
 /// [`Theme`]: `System` defers to the OS locale at apply time, `ZhCN` / `EnUS`
 /// are explicit overrides. Crosses IPC as the BCP-47-shaped string the Intl
@@ -154,7 +150,7 @@ fn default_export_format() -> String {
 /// buckets. The default is `Flat` (the "by recent" browse default); the user
 /// toggles between the two from the sidebar's group-title Popover, persisting
 /// alongside the two collapse prefs. The variant names avoid `recent` to stay
-/// clear of the `recent_files` MRU-list sense (ADR-0072).
+/// clear of the MRU-list sense (ADR-0072).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SidebarGrouping {
     #[default]
@@ -254,10 +250,6 @@ pub struct AppConfig {
     pub export: ExportDefaults,
     #[serde(default)]
     pub tunables: Tunables,
-    /// Recently-opened `.duck` paths, most-recent first. Capped at
-    /// [`RECENT_FILES_CAP`]; the open/save path unshifts + dedupes + trims.
-    #[serde(default)]
-    pub recent_files: Vec<String>,
     /// Shell collapse preferences (ADR-0054, issue #84). Forward-compat: a
     /// pre-#84 file has no `shell` key, so serde(default) fills the expanded
     /// defaults rather than rejecting the whole document.
@@ -294,45 +286,10 @@ impl AppConfig {
             provider: ProviderConfig::default(),
             export: ExportDefaults::default(),
             tunables: Tunables::default(),
-            recent_files: Vec::new(),
             shell: ShellPrefs::default(),
             mcp_servers: McpServerRegistry::default(),
             sessions_dir: None,
         }
-    }
-
-    /// Unshift a path onto the recent-files list, dedupe, and trim to the cap.
-    /// Returns whether the list changed (so the caller can skip a write when it
-    /// did not). The path is stored verbatim (a path pointer, not data content).
-    pub fn record_recent_file(&mut self, path: &str) -> bool {
-        let trimmed = path.trim();
-        if trimmed.is_empty() {
-            return false;
-        }
-        if self.recent_files.iter().any(|p| p == trimmed) {
-            let already_at_front = self.recent_files.first().is_some_and(|p| p == trimmed);
-            if already_at_front {
-                return false;
-            }
-            self.recent_files.retain(|p| p != trimmed);
-        }
-        self.recent_files.insert(0, trimmed.to_string());
-        if self.recent_files.len() > RECENT_FILES_CAP {
-            self.recent_files.truncate(RECENT_FILES_CAP);
-        }
-        true
-    }
-
-    /// Drop a path from the recent-files list (issue #81 delete-session).
-    /// Returns whether the list changed (so the caller can skip a write when it
-    /// did not). Like [`Self::record_recent_file`], the list is advisory -- a
-    /// missing entry is a no-op success. The comparison is verbatim (the same
-    /// spelling under which it was recorded); a path synonym stays, matching
-    /// the record-side verbatim contract.
-    pub fn remove_recent_file(&mut self, path: &str) -> bool {
-        let before = self.recent_files.len();
-        self.recent_files.retain(|p| p != path);
-        before != self.recent_files.len()
     }
 
     /// Normalize IPC-supplied fields in place so the stored config is always
@@ -444,60 +401,6 @@ mod tests {
         let json = serde_json::to_string(&cfg).expect("serialize");
         let back: AppConfig = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, cfg);
-    }
-
-    #[test]
-    fn record_recent_file_unshifts_dedupes_and_trims() {
-        // MRU-first, dedupe on re-open, hard cap at RECENT_FILES_CAP.
-        let mut cfg = AppConfig::defaults();
-        assert!(cfg.record_recent_file("/a.duck"));
-        assert!(cfg.record_recent_file("/b.duck"));
-        assert!(cfg.record_recent_file("/a.duck")); // re-open moves to front
-        assert_eq!(
-            cfg.recent_files,
-            vec!["/a.duck".to_string(), "/b.duck".into()]
-        );
-
-        // Re-opening the already-front path is a no-op (no spurious write).
-        assert!(!cfg.record_recent_file("/a.duck"));
-
-        // Cap: push enough distinct paths to overflow.
-        for i in 0..(RECENT_FILES_CAP + 3) {
-            cfg.record_recent_file(&format!("/f{i}.duck"));
-        }
-        assert_eq!(cfg.recent_files.len(), RECENT_FILES_CAP);
-        assert_eq!(
-            cfg.recent_files[0],
-            format!("/f{}.duck", RECENT_FILES_CAP + 2)
-        );
-    }
-
-    #[test]
-    fn record_recent_file_ignores_empty_path() {
-        let mut cfg = AppConfig::defaults();
-        assert!(!cfg.record_recent_file(""));
-        assert!(!cfg.record_recent_file("   "));
-        assert!(cfg.recent_files.is_empty());
-    }
-
-    #[test]
-    fn remove_recent_file_drops_only_the_named_path() {
-        // Issue #81 delete-session: the named path leaves the MRU list; siblings
-        // stay in order. A missing entry is a no-op (no spurious write).
-        let mut cfg = AppConfig::defaults();
-        cfg.record_recent_file("/a.duck");
-        cfg.record_recent_file("/b.duck");
-        cfg.record_recent_file("/c.duck");
-
-        assert!(cfg.remove_recent_file("/b.duck"));
-        assert_eq!(
-            cfg.recent_files,
-            vec!["/c.duck".to_string(), "/a.duck".into()]
-        );
-
-        // A path synonym or unknown entry changes nothing -> false (skip write).
-        assert!(!cfg.remove_recent_file("/b.duck"));
-        assert!(!cfg.remove_recent_file("/never.duck"));
     }
 
     #[test]

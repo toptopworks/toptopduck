@@ -1298,16 +1298,6 @@ pub fn set_app_config(
         .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))
 }
 
-/// Record a recently-opened `.duck` path into the app-config recent-files list
-/// (issue #53). Read-modify-write: load, unshift + dedupe + trim, persist.
-/// Returns nothing -- the list is advisory; a write failure is swallowed inside
-/// [`LiveProviderConfig::record_recent_file`] rather than failing the open.
-#[tauri::command]
-pub fn record_recent_file(live: State<'_, LiveProviderConfig>, path: String) -> Result<(), String> {
-    live.record_recent_file(&path);
-    Ok(())
-}
-
 /// List every persisted session's metadata for the cold-start left sidebar
 /// (ADR-0060/0061/0089). Scans the managed sessions directory for per-session
 /// `*/session.duck` recipes (ADR-0089), replacing the former app-config
@@ -1565,7 +1555,7 @@ pub async fn export_session(
 
 /// Set the managed sessions directory (issue #452, ADR-0089 Decision 2).
 /// Validates the path exists + is writable, persists to app-config via RMW
-/// (same write-lock as `record_recent_file`), and updates the in-memory
+/// under the app-config write-lock, and updates the in-memory
 /// `SessionsRoot` live — no restart needed. New sessions land in the new
 /// directory immediately; already-open sessions stay in place (their bound
 /// `duck_path` is unchanged). The sidebar re-scans the new directory on the

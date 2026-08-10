@@ -93,7 +93,6 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     },
     export: { last_dir: null, default_format: "csv" },
     tunables: { window_turns: 10, far_window: 30 },
-    recent_files: [],
     shell: { sidebar_collapsed: false, rail_collapsed: false, sidebar_grouping: "flat" },
     mcp_servers: { servers: [] },
     sessions_dir: null,

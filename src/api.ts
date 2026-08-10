@@ -51,7 +51,7 @@ import type { AdapterEntry, SessionRuntimeChoice } from "./types/runtime";
 // Multi-session addressing (ADR-0056): every session-scoped function takes
 // `sessionId` as its first parameter -- the backend looks up the target
 // session by id. Session-AGNOSTIC functions (api key / provider config / app
-// config / record_recent_file) take no sessionId. The frontend tracks the ids
+// config / sessions dir) take no sessionId. The frontend tracks the ids
 // itself (createSession mints one); this single-session shell holds one until
 // the multi-tab UI lands in a later PRD.
 
@@ -309,16 +309,17 @@ export async function onTurnProgress(
 }
 
 // List every persisted .duck session's metadata for the cold-start sidebar
-// (ADR-0060/0061, issue #76). The backend reads recent_files and derives each
-// entry from its recipe + mtime (zero new persistence); unreadable paths are
-// skipped. session_id is the .duck path -- pass it back to openDuck to resume.
+// (ADR-0060/0061, issue #76). The backend scans the managed sessions directory
+// (ADR-0089) and derives each entry from its recipe + mtime; unreadable paths
+// are skipped. session_id is the .duck path -- pass it back to openDuck to
+// resume.
 export async function listSessions(): Promise<SessionMetadata[]> {
   return invoke<SessionMetadata[]>("list_sessions");
 }
 
 // Delete a persisted .duck file (ADR-0060, issue #81). The frontend closes the
-// session first when it is open, then calls this. The backend removes the file
-// + drops the path from recent_files; a missing file is idempotent success.
+// session first when it is open, then calls this. The backend removes the
+// per-session directory; a missing file is idempotent success.
 // `path` is the .duck file path (the SessionMetadata.session_id from listSessions).
 export async function deleteSession(path: string): Promise<void> {
   await invoke<void>("delete_session", { path });
@@ -370,10 +371,6 @@ export async function getAppConfig(): Promise<AppConfig> {
 
 export async function setAppConfig(config: AppConfig): Promise<AppConfig> {
   return invoke<AppConfig>("set_app_config", { config });
-}
-
-export async function recordRecentFile(path: string): Promise<void> {
-  await invoke<void>("record_recent_file", { path });
 }
 
 // --- Managed sessions directory (issue #452, ADR-0089 Decision 2) ----------

@@ -38,7 +38,7 @@ pub mod workingset;
 
 pub use app_config::{
     AppConfig, EngineDefaults, ExportDefaults, PrivacyDefaults, Theme, Tunables,
-    APP_CONFIG_FORMAT_VERSION, RECENT_FILES_CAP,
+    APP_CONFIG_FORMAT_VERSION,
 };
 pub use approval::{
     auto_allowed, classify, ApprovalRequest, ApprovalRequestBody, ApprovalRequestPayload,
@@ -380,7 +380,6 @@ pub fn run() {
             commands::discover_mcp_servers,
             commands::toggle_mcp_server,
             commands::list_mcp_server_status,
-            commands::record_recent_file,
             commands::list_sessions,
             commands::delete_session,
             commands::rename_session,
