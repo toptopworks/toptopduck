@@ -48,8 +48,8 @@ use crate::session::{RenameSessionError, ResumeEvent, ResumeProgress, Session, T
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
 use crate::skills::{
     discover_skill_sources, import_skills as import_skills_impl, resolve_prompt_fragments,
-    ImportItem, ImportMode, ImportOutcome, SkillEntry, SkillError, SkillListing, SkillSource,
-    SkillSourceCandidate, SkillUpdate, SkillsRoot,
+    ImportItem, ImportMode, ImportOutcome, SkillEntry, SkillError, SkillListing,
+    SkillPromptFragment, SkillSource, SkillSourceCandidate, SkillUpdate, SkillsRoot,
 };
 
 /// ADR-0063: the close-and-wait-release variant's wait ceiling. Aligned to
@@ -658,12 +658,14 @@ pub async fn ask(
         // instead of taking this lock, which an in-flight turn holds).
         handle.set_mounted_skills_snapshot(mounted.clone());
         // Issue #369: compute the effective MCP set = enabled_mcp (user intent)
-        // ∪ (skill-declared ids ∩ globally configured). Reuse
-        // [`resolve_skill_mcp_map`] so the skill→id mapping has one source of
-        // truth (shared with `list_mcp_server_status`). Mount/unmount does not
-        // change enabled_mcp -- the skill contribution is a computed layer
-        // recalculated each turn.
-        let skill_mcp = resolve_skill_mcp_map(&skills_root, &mounted);
+        // ∪ (skill-declared ids ∩ globally configured). Reuse the fragments
+        // already resolved above via [`fragments_to_mcp_map`] so the skill→id
+        // mapping shares one source of truth with `list_mcp_server_status`
+        // (which reaches the same function via [`resolve_skill_mcp_map`])
+        // without re-reading every mounted `SKILL.md` a second time.
+        // Mount/unmount does not change enabled_mcp -- the skill contribution
+        // is a computed layer recalculated each turn.
+        let skill_mcp = fragments_to_mcp_map(&skill_fragments);
         let active: Vec<McpServerConfig> = mcp_servers
             .iter()
             .filter(|srv| enabled.contains(&srv.id) || skill_mcp.contains_key(&srv.id.0))
@@ -2468,7 +2470,15 @@ pub fn list_mounted_skills(
 /// reuses [`resolve_prompt_fragments`] which degrades honestly (empty
 /// `mcp_servers` on failure).
 fn resolve_skill_mcp_map(root: &Path, mounted: &[String]) -> HashMap<String, String> {
-    let fragments = resolve_prompt_fragments(root, mounted);
+    fragments_to_mcp_map(&resolve_prompt_fragments(root, mounted))
+}
+
+/// Pure projection of resolved skill fragments into the skill-declared MCP
+/// server-id → skill-name map. Extracted so [`ask`] can reuse the fragments
+/// it already resolved for prompt injection (avoiding a second file read of
+/// every mounted `SKILL.md` per turn). [`resolve_skill_mcp_map`] delegates
+/// here so both call sites share one source of truth for the mapping logic.
+fn fragments_to_mcp_map(fragments: &[SkillPromptFragment]) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for frag in fragments {
         for id in &frag.mcp_servers {
