@@ -64,8 +64,7 @@ pub(crate) fn validate_sessions_dir(path: &Path) -> Result<(), String> {
         ));
     }
     let test = path.join(format!(".toptopduck-write-test-{}", std::process::id()));
-    std::fs::write(&test, "")
-        .map_err(|e| format!("sessions directory is not writable: {e}"))?;
+    std::fs::write(&test, "").map_err(|e| format!("sessions directory is not writable: {e}"))?;
     if let Err(e) = std::fs::remove_file(&test) {
         log::warn!("failed to clean up sessions-dir write-test file: {e}");
     }
@@ -79,9 +78,7 @@ pub(crate) fn default_sessions_root(app: &tauri::AppHandle) -> PathBuf {
     match app.path().document_dir() {
         Ok(dir) => dir.join("toptopduck").join("sessions"),
         Err(e) => {
-            log::warn!(
-                "failed to resolve documents dir; sessions fall back to a temp path: {e}"
-            );
+            log::warn!("failed to resolve documents dir; sessions fall back to a temp path: {e}");
             std::env::temp_dir().join("toptopduck-sessions")
         }
     }
@@ -573,5 +570,54 @@ mod tests {
         let list = scan_sessions_dir(root.path());
         assert_eq!(list.len(), 1, "only the valid session is listed");
         assert_eq!(list[0].display_name, "ok");
+    }
+
+    // --- validate_sessions_dir (issue #452) ---------------------------------
+
+    #[test]
+    fn validate_accepts_a_writable_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(validate_sessions_dir(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_a_nonexistent_path() {
+        let missing = std::env::temp_dir().join("toptopduck-test-validate-nonexistent");
+        let result = validate_sessions_dir(&missing);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("does not exist"));
+    }
+
+    #[test]
+    fn validate_rejects_a_file_instead_of_a_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, "").expect("write");
+        let result = validate_sessions_dir(&file);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a directory"));
+    }
+
+    // --- SessionsRoot RwLock (issue #452) -----------------------------------
+
+    #[test]
+    fn sessions_root_new_path_set_round_trip() {
+        let root = SessionsRoot::new(PathBuf::from("/original/path"));
+        assert_eq!(root.path(), PathBuf::from("/original/path"));
+
+        root.set(PathBuf::from("/new/path"));
+        assert_eq!(root.path(), PathBuf::from("/new/path"));
+    }
+
+    #[test]
+    fn sessions_root_path_returns_a_clone_not_a_reference() {
+        // path() must return an owned PathBuf so callers never hold the read
+        // lock across IO (the lock is released when path() returns).
+        let root = SessionsRoot::new(PathBuf::from("/sessions"));
+        let cloned = root.path();
+        // Mutating the root after cloning must not affect the clone.
+        root.set(PathBuf::from("/elsewhere"));
+        assert_eq!(cloned, PathBuf::from("/sessions"));
+        assert_eq!(root.path(), PathBuf::from("/elsewhere"));
     }
 }

@@ -900,4 +900,59 @@ mod tests {
         );
         assert_eq!(cfg.mcp_servers.servers[1].id, McpServerId("uniq".into()));
     }
+
+    // --- sessions_dir (issue #452) -----------------------------------------
+
+    #[test]
+    fn sessions_dir_defaults_to_none() {
+        let cfg = AppConfig::defaults();
+        assert!(cfg.sessions_dir.is_none());
+    }
+
+    #[test]
+    fn normalize_trims_sessions_dir_whitespace() {
+        let mut cfg = AppConfig::defaults();
+        cfg.sessions_dir = Some("  /path/to/sessions  ".into());
+        cfg.normalize();
+        assert_eq!(cfg.sessions_dir.as_deref(), Some("/path/to/sessions"));
+    }
+
+    #[test]
+    fn normalize_collapses_all_whitespace_sessions_dir_to_none() {
+        let mut cfg = AppConfig::defaults();
+        cfg.sessions_dir = Some("   ".into());
+        cfg.normalize();
+        assert!(
+            cfg.sessions_dir.is_none(),
+            "all-whitespace sessions_dir collapses to None (default fallback)"
+        );
+    }
+
+    #[test]
+    fn normalize_collapses_empty_sessions_dir_to_none() {
+        let mut cfg = AppConfig::defaults();
+        cfg.sessions_dir = Some(String::new());
+        cfg.normalize();
+        assert!(cfg.sessions_dir.is_none());
+    }
+
+    #[test]
+    fn sessions_dir_absent_fills_none_for_forward_compat() {
+        // A pre-#452 config file has no `sessions_dir` key. serde(default)
+        // fills None rather than rejecting the document (same forward-compat
+        // pattern as mcp_servers / shell).
+        let json = r#"{"format_version":2,"theme":"dark"}"#;
+        let cfg: AppConfig = serde_json::from_str(json).expect("partial deserialize");
+        assert_eq!(cfg.theme, Theme::Dark);
+        assert!(cfg.sessions_dir.is_none());
+    }
+
+    #[test]
+    fn sessions_dir_round_trips_through_serde() {
+        let mut cfg = AppConfig::defaults();
+        cfg.sessions_dir = Some("/custom/sessions".into());
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: AppConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.sessions_dir.as_deref(), Some("/custom/sessions"));
+    }
 }

@@ -127,7 +127,7 @@ function SectionContent({
   onCommit: (mutate: (cfg: AppConfig) => AppConfig) => Promise<string | null>;
   onSessionsDirChanged: (cfg: AppConfig) => void;
   onRefreshKeyStatus: () => void;
-  onIpcBusy: (channel: "key" | "test", busy: boolean) => void;
+  onIpcBusy: (channel: "key" | "test" | "sessionsDir", busy: boolean) => void;
   initialEditProfileId?: string;
   profilesControlsRef: React.MutableRefObject<ProfilesControls | null>;
 }) {
@@ -138,6 +138,7 @@ function SectionContent({
           appConfig={appConfig}
           onCommitImmediate={onCommit}
           onSessionsDirChanged={onSessionsDirChanged}
+          onIpcBusy={onIpcBusy}
         />
       );
     case "skills":
@@ -266,6 +267,14 @@ export function SettingsView({
     [onCommitAppConfig, intl],
   );
 
+  // Sessions-dir IPC bypasses commitWithRevert (it uses a dedicated IPC, not
+  // set_app_config). Update latestRef synchronously so a concurrent theme/locale
+  // commit reads the true current config instead of a stale snapshot (I-1 race).
+  const handleSessionsDirChanged = useCallback((cfg: AppConfig) => {
+    latestRef.current = cfg;
+    onSessionsDirChanged(cfg);
+  }, [onSessionsDirChanged]);
+
   // The Profiles pane's close-contract controls (flush / addDirty / discardAdd /
   // busy / dialogOpen); null when the pane is not mounted.
   const profilesControlsRef = useRef<ProfilesControls | null>(null);
@@ -276,10 +285,13 @@ export function SettingsView({
   // which runs even after a section switch unmounts the pane -- so the close
   // guard still blocks until that IPC settles (ADR-0075: close is blocked while
   // ANY in-flight IPC, not only while the owning pane stays mounted).
-  const paneIpcBusyRef = useRef({ key: false, test: false });
-  const handlePaneIpcBusy = useCallback((channel: "key" | "test", busy: boolean) => {
-    paneIpcBusyRef.current[channel] = busy;
-  }, []);
+  const paneIpcBusyRef = useRef({ key: false, test: false, sessionsDir: false });
+  const handlePaneIpcBusy = useCallback(
+    (channel: "key" | "test" | "sessionsDir", busy: boolean) => {
+      paneIpcBusyRef.current[channel] = busy;
+    },
+    [],
+  );
 
   // Single close path (ADR-0075): block while any IPC is in flight, flush a
   // still-focused profile field (staying open when the flush fails so the
@@ -287,7 +299,7 @@ export function SettingsView({
   async function requestClose() {
     const ctl = profilesControlsRef.current;
     const paneIpc = paneIpcBusyRef.current;
-    if (commitsInFlightRef.current > 0 || paneIpc.key || paneIpc.test || ctl?.busy) return;
+    if (commitsInFlightRef.current > 0 || paneIpc.key || paneIpc.test || paneIpc.sessionsDir || ctl?.busy) return;
     if (ctl && !(await ctl.flush())) return;
     if (ctl?.addDirty) {
       setConfirmDiscardOpen(true);
@@ -411,7 +423,7 @@ export function SettingsView({
             section={section}
             appConfig={appConfig}
             onCommit={commitWithRevert}
-            onSessionsDirChanged={onSessionsDirChanged}
+            onSessionsDirChanged={handleSessionsDirChanged}
             onRefreshKeyStatus={onRefreshKeyStatus}
             onIpcBusy={handlePaneIpcBusy}
             initialEditProfileId={initialEditProfileId}

@@ -43,12 +43,17 @@ export type GeneralSectionProps = {
    *  setSessionsDir IPC succeeds (issue #452). The IPC already persisted, so
    *  this is a state-only sync — no redundant set_app_config write. */
   onSessionsDirChanged: (cfg: AppConfig) => void;
+  /** Report IPC busy state to SettingsView's close guard (ADR-0075). The
+   *  sessions-dir Save IPC is tracked here so ESC / close is blocked while
+   *  it is in flight (I-2). */
+  onIpcBusy: (channel: "sessionsDir", busy: boolean) => void;
 };
 
 export function GeneralSection({
   appConfig,
   onCommitImmediate,
   onSessionsDirChanged,
+  onIpcBusy,
 }: GeneralSectionProps) {
   const intl = useIntl();
   const [error, setError] = useState<string | null>(null);
@@ -86,8 +91,11 @@ export function GeneralSection({
 
   async function pickSessionsDir() {
     try {
-      const current = await getSessionsDir();
-      const picked = await openDialog({ directory: true, multiple: false, defaultPath: current });
+      const picked = await openDialog({
+        directory: true,
+        multiple: false,
+        defaultPath: displayPath ?? undefined,
+      });
       const path = typeof picked === "string" ? picked : null;
       if (path) {
         setDraftDir(path);
@@ -101,6 +109,7 @@ export function GeneralSection({
   async function saveSessionsDir() {
     if (!draftDir) return;
     setDirBusy(true);
+    onIpcBusy("sessionsDir", true);
     try {
       const updated = await setSessionsDir(draftDir);
       setDraftDir(null);
@@ -110,6 +119,7 @@ export function GeneralSection({
       setDirError(fmtError(e, intl));
     } finally {
       setDirBusy(false);
+      onIpcBusy("sessionsDir", false);
     }
   }
 
@@ -120,9 +130,9 @@ export function GeneralSection({
   const hasDraft = draftDir !== null && draftDir !== appConfig.sessions_dir;
 
   async function revealSessionsDir() {
+    if (!displayPath) return;
     try {
-      const target = displayPath ?? (await getSessionsDir());
-      await revealItemInDir(target);
+      await revealItemInDir(displayPath);
     } catch (e) {
       setDirError(fmtError(e, intl));
     }
@@ -269,7 +279,7 @@ export function GeneralSection({
             </p>
             <button
               type="button"
-              className="text-muted-foreground hover:text-foreground shrink-0 cursor-pointer text-xs underline-offset-2 hover:underline"
+              className="text-muted-foreground hover:text-foreground focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2 shrink-0 cursor-pointer text-xs underline-offset-2 hover:underline"
               onClick={() => void revealSessionsDir()}
             >
               <FormattedMessage

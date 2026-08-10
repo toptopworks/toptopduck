@@ -1582,9 +1582,7 @@ pub async fn set_sessions_dir(
     sessions_root: State<'_, SessionsRoot>,
     path: Option<String>,
 ) -> Result<AppConfig, StoreCommandError> {
-    let normalized = path
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty());
+    let normalized = path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
 
     let new_root = match &normalized {
         Some(p) => {
@@ -1607,9 +1605,7 @@ pub async fn set_sessions_dir(
 /// and the directory-picker's `defaultPath`. Always non-null — the root is
 /// always resolved (to a default or a user-chosen path) at setup.
 #[tauri::command]
-pub fn get_sessions_dir(
-    sessions_root: State<'_, SessionsRoot>,
-) -> Result<String, String> {
+pub fn get_sessions_dir(sessions_root: State<'_, SessionsRoot>) -> Result<String, String> {
     Ok(sessions_root.path().to_string_lossy().into_owned())
 }
 

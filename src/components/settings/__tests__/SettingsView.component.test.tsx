@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import * as dialogPlugin from "@tauri-apps/plugin-dialog";
 import { SettingsView } from "../SettingsView";
-import { listProviderProfiles, setProfileKey } from "../../../api";
+import { listProviderProfiles, setProfileKey, setSessionsDir, getSessionsDir } from "../../../api";
 import type { AppConfig } from "../../../types/app-config";
 import type { SettingsSection } from "../sections";
 import { renderSettings } from "./helpers";
@@ -18,8 +19,18 @@ vi.mock("../../../api", async (importOriginal) => {
     listProviderProfiles: vi.fn(),
     setProfileKey: vi.fn(),
     clearProfileKey: vi.fn(),
+    setSessionsDir: vi.fn(),
+    getSessionsDir: vi.fn(),
   };
 });
+
+// The sessions-dir row uses the directory picker + opener plugins (issue #452).
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn(),
+}));
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  revealItemInDir: vi.fn(),
+}));
 
 // The single write path the view awaits; typed so a commit mock is assignable to
 // the onCommitAppConfig prop and its .mock.calls stay typed.
@@ -113,6 +124,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(listProviderProfiles).mockResolvedValue(profileKeysDefault);
+    vi.mocked(getSessionsDir).mockResolvedValue("/home/user/Documents/toptopduck/sessions");
   });
 
   // Shared render harness: SettingsView now requires the key-status seam
@@ -192,6 +204,83 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     openSelect(screen.getByRole("combobox", { name: "Theme" }));
     chooseOption("Dark");
     expect(await screen.findByText("disk full")).toBeInTheDocument();
+  });
+
+  // --- Sessions directory row (issue #452) ---------------------------------
+
+  it("displays the backend-resolved sessions directory on mount", async () => {
+    renderView();
+    expect(
+      await screen.findByText("/home/user/Documents/toptopduck/sessions"),
+    ).toBeInTheDocument();
+  });
+
+  it("Save is disabled until Browse picks a directory", async () => {
+    renderView();
+    await screen.findByText("/home/user/Documents/toptopduck/sessions");
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
+  it("Browse + Save calls setSessionsDir and syncs state", async () => {
+    const onSessionsDirChanged = vi.fn();
+    const updatedConfig: AppConfig = { ...baseConfig, sessions_dir: "/new/sessions" };
+    vi.mocked(dialogPlugin.open).mockResolvedValue("/new/sessions");
+    vi.mocked(setSessionsDir).mockResolvedValue(updatedConfig);
+
+    renderView({ onSessionsDirChanged });
+    await screen.findByText("/home/user/Documents/toptopduck/sessions");
+
+    fireEvent.click(screen.getByRole("button", { name: "Browse…" }));
+    await waitFor(() => expect(vi.mocked(dialogPlugin.open)).toHaveBeenCalled());
+    // Save becomes enabled after picking a directory.
+    expect(screen.getByRole("button", { name: "Save" })).not.toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(vi.mocked(setSessionsDir)).toHaveBeenCalledWith("/new/sessions"));
+    await waitFor(() => expect(onSessionsDirChanged).toHaveBeenCalledWith(updatedConfig));
+  });
+
+  it("a failed Save surfaces an inline error and keeps the draft for retry", async () => {
+    vi.mocked(dialogPlugin.open).mockResolvedValue("/bad/path");
+    vi.mocked(setSessionsDir).mockRejectedValue(new Error("not writable"));
+
+    renderView();
+    await screen.findByText("/home/user/Documents/toptopduck/sessions");
+
+    fireEvent.click(screen.getByRole("button", { name: "Browse…" }));
+    await waitFor(() => expect(vi.mocked(dialogPlugin.open)).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("not writable")).toBeInTheDocument();
+    // Draft is retained so the user can retry.
+    expect(screen.getByRole("button", { name: "Save" })).not.toBeDisabled();
+  });
+
+  it("ESC is blocked while a sessions-dir Save IPC is in flight", async () => {
+    const updatedConfig: AppConfig = { ...baseConfig, sessions_dir: "/new/sessions" };
+    vi.mocked(dialogPlugin.open).mockResolvedValue("/new/sessions");
+
+    let resolveSave!: (cfg: AppConfig) => void;
+    vi.mocked(setSessionsDir).mockImplementation(
+      () => new Promise<AppConfig>((resolve) => { resolveSave = resolve; }),
+    );
+
+    const { onClose } = renderView();
+    await screen.findByText("/home/user/Documents/toptopduck/sessions");
+    fireEvent.click(screen.getByRole("button", { name: "Browse…" }));
+    await waitFor(() => expect(vi.mocked(dialogPlugin.open)).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(vi.mocked(setSessionsDir)).toHaveBeenCalled());
+
+    // ESC must be blocked while the sessions-dir IPC is in flight (I-2).
+    fireEvent.keyDown(window, { key: "Escape" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(onClose).not.toHaveBeenCalled();
+
+    // Once the IPC settles, ESC closes.
+    resolveSave(updatedConfig);
+    await new Promise((r) => setTimeout(r, 0));
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
   it("overlapping commits serialize: a failed commit's revert lands before the next commit", async () => {
