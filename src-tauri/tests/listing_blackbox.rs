@@ -72,8 +72,8 @@ fn list_sessions_addresses_each_readable_duck_by_path_and_skips_the_rest() {
     let list = list_session_metadata(&[missing, alpha.clone(), beta.clone()]);
     assert_eq!(list.len(), 2, "only the readable recipes are listed");
     // duck_path is the .duck file path -- the addressing key.
-    assert_eq!(list[0].duck_path, DuckPath(alpha));
-    assert_eq!(list[1].duck_path, DuckPath(beta));
+    assert_eq!(list[0].duck_path, DuckPath::new(alpha));
+    assert_eq!(list[1].duck_path, DuckPath::new(beta));
     // Each entry carries the full derived field set (the inline unit test
     // covers single-session derivation in depth; here we pin presence + the
     // path<->id invariant at the public-API boundary).

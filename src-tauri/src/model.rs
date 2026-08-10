@@ -724,7 +724,7 @@ pub enum TurnPhase {
 /// [`TurnPhase`] with the addressing `session_id` so a multi-session frontend
 /// filters the global Tauri event broadcast down to the one SessionPane that
 /// owns the turn (ADR-0056). `session_id` is the runtime id the `ask` command
-/// received (a typed UUID), NOT the persisted-session id [`crate::SessionMetadata`]
+/// received (a typed UUID), NOT the `duck_path` [`crate::SessionMetadata`]
 /// exposes. The field is required -- a phase without a session it belongs to is
 /// not addressable, so the type makes the missing-id state unrepresentable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

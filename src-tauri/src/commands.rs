@@ -146,7 +146,7 @@ fn reject_if_in_flight(handle: &SessionHandle) -> Result<(), SessionError> {
 /// The wire reply from `create_session` (ADR-0089): the runtime session id +
 /// the bound `session.duck` path. The frontend stores both so every open
 /// session is known-persisted from creation.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct CreateSessionReply {
     pub session_id: SessionId,
     pub duck_path: String,
@@ -175,11 +175,10 @@ pub fn create_session(
     // before that every turn refuses honestly as not-wired.
     let provider = Box::new(crate::LiveProvider::new(live.inner().clone()));
     let id = store.create(cancel, provider)?;
-    let id_str = id.to_string();
     // ADR-0089: per-session directory `{sessions_root}/{uuid}/session.duck`.
     // The UUID directory name is the stable identity; session.duck is the
     // fixed recipe filename.
-    let session_dir = sessions_root.path().join(&id_str);
+    let session_dir = sessions_root.path().join(id.to_string());
     let duck_path = session_dir.join("session.duck");
 
     // Rollback closure: if any step after store.create() fails, the handle is
@@ -240,8 +239,7 @@ pub async fn prepare_import_session(
     let cancel = Arc::new(CancelToken::new());
     let provider = Box::new(crate::LiveProvider::new(live.inner().clone()));
     let id = store.create(cancel, provider)?;
-    let id_str = id.to_string();
-    let session_dir = sessions_root.path().join(&id_str);
+    let session_dir = sessions_root.path().join(id.to_string());
     let duck_path = session_dir.join("session.duck");
     let src = PathBuf::from(&external_path);
 

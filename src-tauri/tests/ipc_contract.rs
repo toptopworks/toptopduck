@@ -947,7 +947,7 @@ fn turn_progress_wraps_phase_with_session_id() {
     // -- the addressing id lets a multi-session frontend filter the global
     // broadcast; phase keeps its own externally-tagged shape. Pin the wrapper
     // so a field rename on either side is caught before types.ts drifts.
-    // Issue #462: session_id is now a typed SessionId (transparent serde over a
+    // Issue #462: session_id is a typed SessionId (transparent serde over a
     // UUID v4 string -- the wire format stays a bare string).
     use toptopduck_lib::{SessionId, TurnPhase, TurnProgress};
     const SID: &str = "550e8400-e29b-41d4-a716-446655440000";
@@ -989,7 +989,7 @@ fn resume_progress_wraps_event_with_session_id() {
     // ADR-0056/0059 (issue #76): a resume-progress event is { session_id, event
     // } -- v1 emitted a bare ResumeEvent; multi-session lands the id. Pin the
     // wrapper so the frontend's `{ event }` unwrap (src/App.tsx) stays in sync.
-    // Issue #462: session_id is now a typed SessionId (transparent serde).
+    // Issue #462: session_id is a typed SessionId (transparent serde).
     use toptopduck_lib::{ResumeEvent, ResumeProgress, SessionId};
     const SID: &str = "550e8400-e29b-41d4-a716-446655440000";
     assert_wire(
@@ -1038,7 +1038,7 @@ fn session_metadata_serializes_flat_snake_case() {
     use toptopduck_lib::{DuckPath, SessionMetadata, SourceSummary};
     assert_wire(
         &SessionMetadata {
-            duck_path: DuckPath("/x/analysis.duck".into()),
+            duck_path: DuckPath::new("/x/analysis.duck"),
             display_name: "analysis".into(),
             last_modified_at: 1_700_000_000_000,
             source_summary: SourceSummary {

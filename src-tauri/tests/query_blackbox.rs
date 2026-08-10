@@ -1400,7 +1400,7 @@ fn turn_progress_events_for_one_turn_share_one_session_id() {
     // the ask's single session_id. The command layer wraps each TurnPhase with
     // that id; this seam drives the same callback and asserts every emitted
     // event carries it, so a multi-session frontend can filter on sessionId.
-    // Issue #462: session_id is now a typed SessionId (valid v4 UUID).
+    // Issue #462: session_id is a typed SessionId (valid v4 UUID).
     const SID: &str = "550e8400-e29b-41d4-a716-446655440000";
     let sid = SessionId::parse(SID).expect("valid v4 UUID");
     let mut session = session_with(&[("建结果", "SELECT 1 AS n")]);
