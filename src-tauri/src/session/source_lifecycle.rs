@@ -1,10 +1,10 @@
-//! Source lifecycle I/O orchestration on [`Session`] (ADR-0053 Q7, issue #67).
+//! Source lifecycle I/O orchestration on [`Session`] (ADR-0053 Decision 5, issue #67).
 //!
 //! These are the methods that change the set of loaded sources:
 //! replace_source (re-upload onto an existing name), remove_source /
 //! remove_active_source (delete), and the two private commit/event helpers they
 //! share (commit_removal, append_source_event). They are a physical move out of
-//! `session/mod.rs` for locality -- NOT a deep module: ADR-0053 Q7 evaluated
+//! `session/mod.rs` for locality -- NOT a deep module: ADR-0053 Decision 5 evaluated
 //! extracting them as an independent object and found it moves complexity
 //! rather than concentrating it (the removal tests do not pass without the
 //! `&mut Session` reach), so they stay `&mut Session` methods and only the
@@ -469,7 +469,7 @@ impl super::Session {
     /// ADR-0040).
     ///
     /// `pub(super)`: callers span both this module (`commit_removal`,
-    /// `replace_source`) and the add-path helpers still in `session/mod.rs`
+    /// `replace_source`) and the add-path helpers in `session::ingest`
     /// (`ingest_structured`, `commit_excel`), which record `Added` events. The
     /// parent cannot reach a child-module private method, so the minimal
     /// visibility that still names the boundary is `pub(super)`.

@@ -12,7 +12,7 @@
 //! `session/source_lifecycle.rs`: Rust lets a descendant module
 //! (`session::ingest`) add methods to a type defined in the ancestor
 //! (`session`) and reach its private fields. `release_snapshot` /
-//! `detach_snapshot` are `pub(super)` because `resume_ingest_at` (still in
+//! `detach_snapshot` are `pub(super)` because `resume_sources` (still in
 //! `mod.rs`) and `commit_removal` (in `source_lifecycle.rs`) call them across
 //! module boundaries.
 
@@ -71,11 +71,7 @@ impl super::Session {
     /// leaves a ghost attachment, but the working set is the source of truth
     /// and the session temp dir is wiped on drop.
     pub(super) fn detach_snapshot(&mut self, reference_name: &str) {
-        // Detach + drop the snapshot file + working-set entry, WITHOUT the
-        // cascade-stale / Deleted-event steps of `commit_removal`. Used during
-        // resume re-link / drift retry: the source is being re-ingested under
-        // the same name (re-link) or abandoned mid-resume (Rebuild). The
-        // shared best-effort I/O lives in `release_snapshot`.
+        // Shared best-effort I/O lives in `release_snapshot`.
         self.release_snapshot(reference_name);
     }
 
@@ -139,7 +135,12 @@ impl super::Session {
             quote_ident(&reference_name),
         );
         if let Err(e) = self.conn.execute_batch(&attach_sql) {
-            let _ = std::fs::remove_file(&snap.file_path);
+            if let Err(io_err) = std::fs::remove_file(&snap.file_path) {
+                log::warn!(
+                    target: "toptopduck::session",
+                    "snapshot file removal failed during ingest_structured for {reference_name}: {io_err}"
+                );
+            }
             return LoadOutcome::Error(LoadError::Other {
                 detail: format!("failed to mount snapshot: {e}"),
             });
@@ -378,7 +379,12 @@ impl super::Session {
         ) {
             Ok(s) => s,
             Err(e) => {
-                let _ = fs::remove_file(&csv_path);
+                if let Err(io_err) = fs::remove_file(&csv_path) {
+                    log::warn!(
+                        target: "toptopduck::session",
+                        "temp CSV removal failed for {reference_name}: {io_err}"
+                    );
+                }
                 return Err(e);
             }
         };
@@ -391,7 +397,12 @@ impl super::Session {
             quote_ident(reference_name)
         );
         if let Err(e) = self.conn.execute_batch(&attach_sql) {
-            let _ = fs::remove_file(&snap.file_path);
+            if let Err(io_err) = fs::remove_file(&snap.file_path) {
+                log::warn!(
+                    target: "toptopduck::session",
+                    "snapshot file removal failed during attach_sheet for {reference_name}: {io_err}"
+                );
+            }
             return Err(LoadError::Other {
                 detail: format!("挂载快照失败：{e}"),
             });
