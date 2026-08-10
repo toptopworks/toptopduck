@@ -30,7 +30,7 @@ use std::path::PathBuf;
 
 use toptopduck_lib::{
     DuckLoadError, MigrationError, RemoveSourceError, RenameError, RenameSessionError, ResumeError,
-    SaveError, SessionError, SkillError, StoreCommandError, TurnError, TurnFailure,
+    RowReadError, SaveError, SessionError, SkillError, StoreCommandError, TurnFailure,
 };
 
 /// Read the serde wire `kind` tag off one instance. Every enum here is
@@ -80,7 +80,7 @@ fn session_error() -> Vec<SessionError> {
         SessionError::RemoveSource(RemoveSourceError::NotFound(String::new())),
         SessionError::RenameDataset(RenameError::InvalidLabel),
         SessionError::RenameSession(RenameSessionError::EmptyName),
-        SessionError::Turn(TurnError::UnknownDataset(String::new())),
+        SessionError::RowRead(RowReadError::UnknownDataset(String::new())),
         SessionError::Engine(String::new()),
     ]
 }
@@ -105,10 +105,10 @@ fn rename_error() -> Vec<RenameError> {
     ]
 }
 
-fn turn_error() -> Vec<TurnError> {
+fn row_read_error() -> Vec<RowReadError> {
     vec![
-        TurnError::UnknownDataset(String::new()),
-        TurnError::Execute(String::new()),
+        RowReadError::UnknownDataset(String::new()),
+        RowReadError::Execute(String::new()),
     ]
 }
 
@@ -204,7 +204,7 @@ fn variant_kind_map() -> BTreeMap<&'static str, Vec<String>> {
         ("SessionError", to_kinds(&session_error())),
         ("SkillError", to_kinds(&skill_error())),
         ("StoreCommandError", to_kinds(&store_command_error())),
-        ("TurnError", to_kinds(&turn_error())),
+        ("RowReadError", to_kinds(&row_read_error())),
         ("TurnFailure", to_kinds(&turn_failure())),
     ] {
         kinds.sort();

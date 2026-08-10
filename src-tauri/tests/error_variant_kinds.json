@@ -32,6 +32,10 @@
     "Replay",
     "SourceMissing"
   ],
+  "RowReadError": [
+    "Execute",
+    "UnknownDataset"
+  ],
   "SaveError": [
     "AlreadyOpen",
     "Io",
@@ -65,10 +69,6 @@
     "IoFailure",
     "KeychainFailure",
     "OpenConflict"
-  ],
-  "TurnError": [
-    "Execute",
-    "UnknownDataset"
   ],
   "TurnFailure": [
     "Execute",

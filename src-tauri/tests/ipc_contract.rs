@@ -255,18 +255,18 @@ fn chart_kind_serializes_as_a_lowercase_variant_string() {
 }
 
 #[test]
-fn turn_error_serializes_adjacently_tagged() {
-    // TurnError crosses IPC as a serde struct wrapped in SessionError::Turn
+fn row_read_error_serializes_adjacently_tagged() {
+    // RowReadError crosses IPC as a serde struct wrapped in SessionError::RowRead
     // (issue #121), no longer as its Display string. The hand-written Display is
     // Rust-log-only. Turn failures are TurnOutcome::Failed (ADR-0028); this type
     // now carries only the read_rows errors (UnknownDataset, Execute).
-    use toptopduck_lib::TurnError;
+    use toptopduck_lib::RowReadError;
     assert_wire(
-        &TurnError::Execute("detail".into()),
+        &RowReadError::Execute("detail".into()),
         r#"{"kind":"Execute","data":"detail"}"#,
     );
     assert_wire(
-        &TurnError::UnknownDataset("result_1".into()),
+        &RowReadError::UnknownDataset("result_1".into()),
         r#"{"kind":"UnknownDataset","data":"result_1"}"#,
     );
 }
@@ -756,7 +756,7 @@ fn session_error_serializes_as_adjacently_tagged_kind_data() {
     // Issue #121: source-management domain errors wrap their typed sub-enums the
     // same way Resume wraps ResumeError -- the frontend recurses `<variant>.
     // data.kind` uniformly. Each inner enum keeps its own kind/data shape.
-    use toptopduck_lib::{RemoveSourceError, RenameError, RenameSessionError, TurnError};
+    use toptopduck_lib::{RemoveSourceError, RenameError, RenameSessionError, RowReadError};
     assert_wire(
         &SessionError::RemoveSource(RemoveSourceError::NotFound("people".into())),
         r#"{"kind":"RemoveSource","data":{"kind":"NotFound","data":"people"}}"#,
@@ -770,7 +770,7 @@ fn session_error_serializes_as_adjacently_tagged_kind_data() {
         r#"{"kind":"RenameSession","data":{"kind":"EmptyName"}}"#,
     );
     assert_wire(
-        &SessionError::Turn(TurnError::Execute("detail".into())),
+        &SessionError::RowRead(RowReadError::Execute("detail".into())),
         r#"{"kind":"Turn","data":{"kind":"Execute","data":"detail"}}"#,
     );
 }

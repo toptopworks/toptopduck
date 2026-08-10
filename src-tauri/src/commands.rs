@@ -750,7 +750,7 @@ pub fn conversation(
 /// an O(offset) scan, so holding the session lock on the IPC path would block
 /// every other command on that session. Rejects an unknown session as a typed
 /// `SessionError`; an unknown reference name / engine error crosses IPC as the
-/// typed `SessionError::Turn(TurnError)` (issue #121).
+/// typed `SessionError::RowRead(RowReadError)` (issue #121).
 #[tauri::command]
 pub async fn read_rows(
     store: State<'_, Arc<SessionStore>>,
@@ -765,7 +765,7 @@ pub async fn read_rows(
     tauri::async_runtime::spawn_blocking(move || {
         let s = handle.session_lock()?;
         s.read_rows(&reference_name, offset, limit)
-            .map_err(SessionError::Turn)
+            .map_err(SessionError::RowRead)
     })
     .await
     .map_err(|e| SessionError::Engine(e.to_string()))?

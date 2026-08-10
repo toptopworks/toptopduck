@@ -30,8 +30,8 @@ use crate::ingest::schema::quote_ident;
 use crate::mcp::config::McpServerConfig;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, LoadError, RectifyProvenance, RenameError, RowPage,
-    SkillLifecycleEvent, SkillProvenance, SourceLifecycleEvent, TextKind, ThreadEntry,
-    TraceEntryView, TurnError, TurnFailure, TurnOutcome, TurnPhase, TurnProvenance, TurnRecord,
+    RowReadError, SkillLifecycleEvent, SkillProvenance, SourceLifecycleEvent, TextKind,
+    ThreadEntry, TraceEntryView, TurnFailure, TurnOutcome, TurnPhase, TurnProvenance, TurnRecord,
 };
 use crate::persistence::recipe::{
     Recipe, RecipeTraceEntry, RecipeTurn, RuntimeKind, SourceRef,
@@ -1930,18 +1930,18 @@ impl Session {
         reference_name: &str,
         offset: u64,
         limit: u64,
-    ) -> Result<RowPage, TurnError> {
+    ) -> Result<RowPage, RowReadError> {
         // Clamp the page size to the display cap (ADR-0005/0024) so a malformed
         // or hostile caller can't pull the whole table into memory.
         let limit = limit.min(MAX_READ_ROWS);
         let descriptor = self
             .working_set
             .get(reference_name)
-            .ok_or_else(|| TurnError::UnknownDataset(reference_name.to_string()))?;
+            .ok_or_else(|| RowReadError::UnknownDataset(reference_name.to_string()))?;
         let from = self
             .working_set
             .sql_from(reference_name)
-            .ok_or_else(|| TurnError::UnknownDataset(reference_name.to_string()))?;
+            .ok_or_else(|| RowReadError::UnknownDataset(reference_name.to_string()))?;
         let columns = descriptor.columns.clone();
         let selects: Vec<String> = columns
             .iter()
@@ -1957,16 +1957,20 @@ impl Session {
         let mut stmt = self
             .conn
             .prepare(&sql)
-            .map_err(|e| TurnError::Execute(e.to_string()))?;
+            .map_err(|e| RowReadError::Execute(e.to_string()))?;
         let mut rows = stmt
             .query([])
-            .map_err(|e| TurnError::Execute(e.to_string()))?;
+            .map_err(|e| RowReadError::Execute(e.to_string()))?;
         let mut out = Vec::new();
-        while let Some(row) = rows.next().map_err(|e| TurnError::Execute(e.to_string()))? {
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| RowReadError::Execute(e.to_string()))?
+        {
             let mut cells = Vec::with_capacity(columns.len());
             for i in 0..columns.len() {
-                let v: Option<String> =
-                    row.get(i).map_err(|e| TurnError::Execute(e.to_string()))?;
+                let v: Option<String> = row
+                    .get(i)
+                    .map_err(|e| RowReadError::Execute(e.to_string()))?;
                 cells.push(v.unwrap_or_default());
             }
             out.push(cells);
