@@ -11,14 +11,14 @@
 //! serde-structured (`#[serde(tag = "kind", content = "data")]`) so the
 //! frontend narrows on `kind` and renders a locale message -- the Chinese
 //! wording no longer crosses IPC. Session-AGNOSTIC commands (api key /
-//! provider / app config / recent file / session listing) return
+//! provider / app config / session listing) return
 //! `Result<T, StoreCommandError>` for the cold-store subset (issue #130):
 //! [`StoreCommandError`] is serde-structured like [`SessionError`], so the
 //! frontend narrows on `kind` and renders a locale message -- the Chinese
 //! wording no longer crosses IPC. The cold-store subset covers `delete_session`
 //! / `rename_persisted_session` (a cross-session `.duck` file), the keychain
 //! commands, and `set_provider_config` / `set_app_config`. The remaining
-//! session-agnostic commands (read-only listing / has-key / recent-file) cannot
+//! session-agnostic commands (read-only listing / has-key) cannot
 //! fail with a user-facing refusal and keep returning `Result<T, String>`.
 
 use std::collections::{HashMap, HashSet};
@@ -1269,11 +1269,11 @@ pub async fn test_profile(
 
 // --- App-level config (issue #53, ADR-0038) --------------------------------
 //
-// The second at-rest artifact: preferences, defaults, recent files, and the
-// no-key endpoint config. Lives in the OS app-data directory, orthogonal to
-// the portable `.duck`. Honest-degrades to defaults on any read failure
-// (missing/corrupt -> built-in defaults, never a crash). The frontend loads it
-// on startup (theme + recent files) and persists edits through `set_app_config`.
+// The second at-rest artifact: preferences, defaults, and the no-key endpoint
+// config. Lives in the OS app-data directory, orthogonal to the portable
+// `.duck`. Honest-degrades to defaults on any read failure (missing/corrupt ->
+// built-in defaults, never a crash). The frontend loads it on startup (theme +
+// locale) and persists edits through `set_app_config`.
 
 /// Read the full app-config (ADR-0038). Honest-degrades to built-in defaults on
 /// any failure, so the frontend always receives a usable config. On the first
