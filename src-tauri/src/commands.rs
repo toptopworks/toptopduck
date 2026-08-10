@@ -38,7 +38,10 @@ use crate::model::{
     ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView, RemoveSourceError, RowPage,
     SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
 };
-use crate::persistence::{scan_sessions_dir, SaveError, SessionMetadata, SessionsRoot};
+use crate::persistence::{
+    default_sessions_root, scan_sessions_dir, validate_sessions_dir, SaveError, SessionMetadata,
+    SessionsRoot,
+};
 use crate::provider::live_config::LiveProviderConfig;
 use crate::runtime::acp::adapter::{detect_adapter, v1_adapters, AdapterSpec};
 use crate::session::{RenameSessionError, ResumeEvent, ResumeProgress, Session, TurnInputs};
@@ -176,7 +179,7 @@ pub fn create_session(
     // ADR-0089: per-session directory `{sessions_root}/{uuid}/session.duck`.
     // The UUID directory name is the stable identity; session.duck is the
     // fixed recipe filename.
-    let session_dir = sessions_root.0.join(&id_str);
+    let session_dir = sessions_root.path().join(&id_str);
     let duck_path = session_dir.join("session.duck");
 
     // Rollback closure: if any step after store.create() fails, the handle is
@@ -238,7 +241,7 @@ pub async fn prepare_import_session(
     let provider = Box::new(crate::LiveProvider::new(live.inner().clone()));
     let id = store.create(cancel, provider)?;
     let id_str = id.to_string();
-    let session_dir = sessions_root.0.join(&id_str);
+    let session_dir = sessions_root.path().join(&id_str);
     let duck_path = session_dir.join("session.duck");
     let src = PathBuf::from(&external_path);
 
@@ -1317,7 +1320,7 @@ pub fn record_recent_file(live: State<'_, LiveProviderConfig>, path: String) -> 
 pub async fn list_sessions(
     sessions_root: State<'_, SessionsRoot>,
 ) -> Result<Vec<SessionMetadata>, String> {
-    let dir = sessions_root.0.clone();
+    let dir = sessions_root.path();
     let list = tauri::async_runtime::spawn_blocking(move || scan_sessions_dir(&dir))
         .await
         .map_err(|e| e.to_string())?;
@@ -1347,7 +1350,7 @@ pub async fn delete_session(
 ) -> Result<(), StoreCommandError> {
     use crate::persistence::{canonicalize_duck, release, try_acquire};
     let trimmed = path.trim().to_string();
-    let root = sessions_root.0.clone();
+    let root = sessions_root.path();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), StoreCommandError> {
         if trimmed.is_empty() {
             return Ok(());
@@ -1523,7 +1526,7 @@ pub async fn export_session(
     dest_dir: String,
 ) -> Result<(), StoreCommandError> {
     use crate::persistence::canonicalize_duck;
-    let root = sessions_root.0.clone();
+    let root = sessions_root.path();
     let src = PathBuf::from(&duck_path);
     let dest = PathBuf::from(&dest_dir);
     tauri::async_runtime::spawn_blocking(move || -> Result<(), StoreCommandError> {
@@ -1558,6 +1561,52 @@ pub async fn export_session(
     })
     .await
     .map_err(|e| StoreCommandError::IoFailure(e.to_string()))?
+}
+
+/// Set the managed sessions directory (issue #452, ADR-0089 Decision 2).
+/// Validates the path exists + is writable, persists to app-config via RMW
+/// (same write-lock as `record_recent_file`), and updates the in-memory
+/// `SessionsRoot` live — no restart needed. New sessions land in the new
+/// directory immediately; already-open sessions stay in place (their bound
+/// `duck_path` is unchanged). The sidebar re-scans the new directory on the
+/// frontend's next `list_sessions` call. Returns the updated `AppConfig`.
+///
+/// `path = None` clears the override (falls back to the computed default).
+/// The frontend always sends `Some(path)` (there is no reset button — the
+/// user can navigate to the default path via the directory picker instead),
+/// but the IPC contract accepts `None` for completeness.
+#[tauri::command]
+pub async fn set_sessions_dir(
+    app_handle: tauri::AppHandle,
+    live: State<'_, LiveProviderConfig>,
+    sessions_root: State<'_, SessionsRoot>,
+    path: Option<String>,
+) -> Result<AppConfig, StoreCommandError> {
+    let normalized = path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+
+    let new_root = match &normalized {
+        Some(p) => {
+            let dir = PathBuf::from(p);
+            validate_sessions_dir(&dir).map_err(StoreCommandError::IoFailure)?;
+            dir
+        }
+        None => default_sessions_root(&app_handle),
+    };
+
+    let cfg = live
+        .set_sessions_dir(normalized)
+        .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))?;
+    sessions_root.set(new_root);
+    Ok(cfg)
+}
+
+/// Read the current managed sessions directory (issue #452). Returns the
+/// resolved path string the frontend displays + uses for `revealItemInDir`
+/// and the directory-picker's `defaultPath`. Always non-null — the root is
+/// always resolved (to a default or a user-chosen path) at setup.
+#[tauri::command]
+pub fn get_sessions_dir(sessions_root: State<'_, SessionsRoot>) -> Result<String, String> {
+    Ok(sessions_root.path().to_string_lossy().into_owned())
 }
 
 /// Core export logic (issue #449). Copies `session.duck` + `assets/` from the

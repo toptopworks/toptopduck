@@ -18,15 +18,71 @@
 use crate::persistence::recipe::RecipeEntry;
 use crate::persistence::{read_duck, LoadError, Recipe};
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
+use tauri::Manager; // for AppHandle::path()
 
-/// The root directory of all managed sessions (ADR-0089). Each session lives
-/// in a per-session subdirectory `{uuid}/session.duck`. Resolved once at setup
-/// from `<Documents>/toptopduck/sessions/` and managed as Tauri state so
-/// every session-scoped command shares one path source.
-pub struct SessionsRoot(pub PathBuf);
+/// The root directory of all managed sessions (ADR-0089, issue #452). Each
+/// session lives in a per-session subdirectory `{uuid}/session.duck`. Resolved
+/// at setup from `<Documents>/toptopduck/sessions/` (or the app-config
+/// `sessions_dir` override) and managed as Tauri state so every session-scoped
+/// command shares one path source. The inner [`RwLock`] lets
+/// `set_sessions_dir` swap the root at runtime without a restart — readers
+/// clone under the read lock, the setter writes under the write lock.
+pub struct SessionsRoot(RwLock<PathBuf>);
+
+impl SessionsRoot {
+    /// Wrap a resolved sessions root path.
+    pub fn new(path: PathBuf) -> Self {
+        Self(RwLock::new(path))
+    }
+
+    /// Read the current root path (cloned under the read lock). Every
+    /// session-scoped command calls this to resolve its target directory.
+    pub fn path(&self) -> PathBuf {
+        self.0.read().expect("SessionsRoot lock poisoned").clone()
+    }
+
+    /// Replace the root path (issue #452). Called by `set_sessions_dir` after
+    /// validation + persistence succeeds so new sessions land in the new
+    /// directory immediately.
+    pub fn set(&self, path: PathBuf) {
+        *self.0.write().expect("SessionsRoot lock poisoned") = path;
+    }
+}
+
+/// Validate a sessions directory candidate: must exist, be a directory, and be
+/// writable (temp-file round-trip). Returns `Ok(())` on success or a
+/// user-facing error message on failure (issue #452 decision #10).
+pub(crate) fn validate_sessions_dir(path: &Path) -> Result<(), String> {
+    if !path.is_dir() {
+        return Err(format!(
+            "sessions directory does not exist or is not a directory: {}",
+            path.display()
+        ));
+    }
+    let test = path.join(format!(".toptopduck-write-test-{}", std::process::id()));
+    std::fs::write(&test, "").map_err(|e| format!("sessions directory is not writable: {e}"))?;
+    if let Err(e) = std::fs::remove_file(&test) {
+        log::warn!("failed to clean up sessions-dir write-test file: {e}");
+    }
+    Ok(())
+}
+
+/// Compute the default sessions root from the OS Documents directory, with a
+/// temp-dir fallback mirroring setup's honest-degrade. Shared by `lib.rs`
+/// setup and `set_sessions_dir` (when the override is cleared, None).
+pub(crate) fn default_sessions_root(app: &tauri::AppHandle) -> PathBuf {
+    match app.path().document_dir() {
+        Ok(dir) => dir.join("toptopduck").join("sessions"),
+        Err(e) => {
+            log::warn!("failed to resolve documents dir; sessions fall back to a temp path: {e}");
+            std::env::temp_dir().join("toptopduck-sessions")
+        }
+    }
+}
 
 /// One persisted session's sidebar metadata (ADR-0060/0061). Every field is
 /// derived -- nothing here is authored to disk separately. The frontend renders
@@ -514,5 +570,54 @@ mod tests {
         let list = scan_sessions_dir(root.path());
         assert_eq!(list.len(), 1, "only the valid session is listed");
         assert_eq!(list[0].display_name, "ok");
+    }
+
+    // --- validate_sessions_dir (issue #452) ---------------------------------
+
+    #[test]
+    fn validate_accepts_a_writable_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(validate_sessions_dir(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_a_nonexistent_path() {
+        let missing = std::env::temp_dir().join("toptopduck-test-validate-nonexistent");
+        let result = validate_sessions_dir(&missing);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("does not exist"));
+    }
+
+    #[test]
+    fn validate_rejects_a_file_instead_of_a_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, "").expect("write");
+        let result = validate_sessions_dir(&file);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a directory"));
+    }
+
+    // --- SessionsRoot RwLock (issue #452) -----------------------------------
+
+    #[test]
+    fn sessions_root_new_path_set_round_trip() {
+        let root = SessionsRoot::new(PathBuf::from("/original/path"));
+        assert_eq!(root.path(), PathBuf::from("/original/path"));
+
+        root.set(PathBuf::from("/new/path"));
+        assert_eq!(root.path(), PathBuf::from("/new/path"));
+    }
+
+    #[test]
+    fn sessions_root_path_returns_a_clone_not_a_reference() {
+        // path() must return an owned PathBuf so callers never hold the read
+        // lock across IO (the lock is released when path() returns).
+        let root = SessionsRoot::new(PathBuf::from("/sessions"));
+        let cloned = root.path();
+        // Mutating the root after cloning must not affect the clone.
+        root.set(PathBuf::from("/elsewhere"));
+        assert_eq!(cloned, PathBuf::from("/sessions"));
+        assert_eq!(root.path(), PathBuf::from("/elsewhere"));
     }
 }

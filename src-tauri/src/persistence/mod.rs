@@ -21,6 +21,7 @@ pub mod recipe;
 pub mod registry;
 
 pub use io::{read_duck, save_atomic, LoadError, SaveError};
+pub(crate) use listing::{default_sessions_root, validate_sessions_dir};
 pub use listing::{
     list_session_metadata, scan_sessions_dir, SessionMetadata, SessionsRoot, SourceSummary,
 };

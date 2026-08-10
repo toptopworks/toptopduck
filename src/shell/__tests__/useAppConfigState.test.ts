@@ -59,6 +59,7 @@ function baseAppConfig(shell: Omit<AppConfig["shell"], "sidebar_grouping">): App
     // tests build their own AppConfig literal with the mode under test.
     shell: { ...shell, sidebar_grouping: "flat" },
     mcp_servers: { servers: [] },
+    sessions_dir: null,
   };
 }
 

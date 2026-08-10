@@ -70,6 +70,10 @@ export function useAppConfigState({
   effectiveLocale: EffectiveLocale;
   intl: IntlShape;
   commitAppConfig: (cfg: AppConfig) => Promise<void>;
+  /** Replace the local appConfig state WITHOUT an IPC write (issue #452).
+   *  Used after `setSessionsDir` — that IPC already persisted the config, so
+   *  the caller just needs the frontend state to reflect the disk truth. */
+  replaceAppConfig: (cfg: AppConfig) => void;
   switchActiveProfile: (id: string) => Promise<void>;
   switchActiveProfileModel: (model: string) => Promise<void>;
   sidebarCollapsed: boolean;
@@ -139,6 +143,14 @@ export function useAppConfigState({
     appConfigRef.current = cfg;
     setAppConfigState(cfg);
     await setAppConfig(cfg);
+  }, []);
+
+  // Replace the local appConfig state WITHOUT an IPC write (issue #452).
+  // `setSessionsDir` already persisted; this just syncs the frontend state +
+  // ref so subsequent optimistic commits read the true current config.
+  const replaceAppConfig = useCallback((cfg: AppConfig): void => {
+    appConfigRef.current = cfg;
+    setAppConfigState(cfg);
   }, []);
 
   // Switch the active profile from the top-bar quick switcher (issue #154,
@@ -282,6 +294,7 @@ export function useAppConfigState({
     effectiveLocale,
     intl,
     commitAppConfig,
+    replaceAppConfig,
     switchActiveProfile,
     switchActiveProfileModel,
     sidebarCollapsed,

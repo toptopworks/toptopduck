@@ -49,6 +49,7 @@ const { appConfigWith } = vi.hoisted(() => {
       recent_files: [] as string[],
       shell: { sidebar_collapsed: false, rail_collapsed: false, sidebar_grouping: "flat" },
       mcp_servers: { servers: [] },
+      sessions_dir: null,
     };
   }
   return { appConfigWith };

@@ -376,6 +376,27 @@ export async function recordRecentFile(path: string): Promise<void> {
   await invoke<void>("record_recent_file", { path });
 }
 
+// --- Managed sessions directory (issue #452, ADR-0089 Decision 2) ----------
+//
+// Session-AGNOSTIC (ADR-0056): no sessionId. The dedicated IPC validates the
+// path (exists + writable) + persists to app-config + updates the in-memory
+// SessionsRoot live, returning the updated AppConfig. Unlike set_app_config,
+// this carries the SessionsRoot side-effect (no restart needed).
+
+// Set the managed sessions directory. Validates + persists + updates the live
+// root. Returns the updated AppConfig so the frontend syncs state without a
+// re-fetch. The sidebar (list_sessions) re-scans the new directory on the
+// caller's next refresh.
+export async function setSessionsDir(path: string | null): Promise<AppConfig> {
+  return invoke<AppConfig>("set_sessions_dir", { path });
+}
+
+// Read the current sessions directory's resolved path string. Used for the
+// settings display + revealItemInDir target + the directory-picker defaultPath.
+export async function getSessionsDir(): Promise<string> {
+  return invoke<string>("get_sessions_dir");
+}
+
 // --- User-configured external MCP servers (ADR-0076, issue #301) ---------
 //
 // CRUD over a user's external MCP servers (app-config) + per-secret keychain
