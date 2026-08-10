@@ -46,6 +46,7 @@ vi.mock("../../api", async (importOriginal) => {
     exportSession: vi.fn(async () => {}),
     onResumeProgress: vi.fn(async () => () => {}),
     openDuck: vi.fn(async () => {}),
+    prepareImportSession: vi.fn(),
     renamePersistedSession: vi.fn(async () => {}),
     renameSession: vi.fn(async () => ""),
     getSessionName: vi.fn(async () => ""),
@@ -72,6 +73,7 @@ import {
   getSessionName,
   openDuck,
   onResumeProgress,
+  prepareImportSession,
   renamePersistedSession,
   renameSession,
 } from "../../api";
@@ -254,15 +256,37 @@ describe("useShellSessions", () => {
     expect(log.debug).not.toHaveBeenCalled();
   });
 
-  it("handleOpenDuck refreshes sessions after a successful resume (ADR-0089)", async () => {
+  it("handleOpenDuck imports external .duck then resumes the local copy (#450)", async () => {
     vi.mocked(openDialog).mockResolvedValueOnce("/x/a.duck");
-    vi.mocked(createSession).mockResolvedValueOnce(reply("o1"));
+    // prepareImportSession copies the file + returns the LOCAL duck path;
+    // openDuck resumes from that local copy, not the external path.
+    vi.mocked(prepareImportSession).mockResolvedValueOnce(reply("o1"));
     vi.mocked(openDuck).mockResolvedValueOnce();
     const { result, refreshSessions } = renderSessions();
     await act(async () => {
       await result.current.handleOpenDuck();
     });
+    expect(prepareImportSession).toHaveBeenCalledWith("/x/a.duck");
+    expect(openDuck).toHaveBeenCalledWith("o1", "/sessions/o1/session.duck");
+    expect(createSession).not.toHaveBeenCalled();
     expect(refreshSessions).toHaveBeenCalled();
+  });
+
+  it("handleOpenDuck closes the session + refreshes when openDuck rejects after a successful import (#450)", async () => {
+    // Grilling decision #4: if prepareImportSession succeeds but openDuck
+    // fails, the just-created session is closed best-effort so it does not
+    // linger as a ghost row in the sidebar scan.
+    vi.mocked(openDialog).mockResolvedValueOnce("/x/a.duck");
+    vi.mocked(prepareImportSession).mockResolvedValueOnce(reply("o1"));
+    vi.mocked(openDuck).mockRejectedValueOnce(new Error("resume failed"));
+    const { result, refreshSessions, setShellError } = renderSessions();
+    await act(async () => {
+      await result.current.handleOpenDuck();
+    });
+    expect(closeSession).toHaveBeenCalledWith("o1");
+    expect(refreshSessions).toHaveBeenCalled();
+    expect(setShellError).toHaveBeenCalled();
+    expect(result.current.busy).toBe(false);
   });
 
   it("openPersisted survives a throw inside the onResumeProgress listener (defensive try/catch, #203)", async () => {
@@ -421,6 +445,7 @@ describe("useShellSessions", () => {
       await result.current.handleOpenDuck();
     });
     expect(openDuck).not.toHaveBeenCalled();
+    expect(prepareImportSession).not.toHaveBeenCalled();
     expect(createSession).not.toHaveBeenCalled();
     expect(refreshSessions).not.toHaveBeenCalled();
     expect(result.current.busy).toBe(false);

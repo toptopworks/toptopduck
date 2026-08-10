@@ -374,6 +374,7 @@ pub fn run() {
             commands::get_session_name,
             commands::rename_persisted_session,
             commands::export_session,
+            commands::prepare_import_session,
             commands::open_duck,
             commands::take_persist_error,
             commands::take_pending_conflict,

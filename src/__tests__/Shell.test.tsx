@@ -77,6 +77,7 @@ vi.mock("../api", async (importOriginal) => {
     // #83 R5: capture the resume-progress listener so a test can emit events
     // addressed to a stranger vs this session (ADR-0056 multi-session filter).
     openDuck: vi.fn(async () => {}),
+    prepareImportSession: vi.fn(),
     onResumeProgress: vi.fn(async (cb: (ev: ResumeProgress) => void) => {
       resumeProgressCb.current = cb;
       return () => {};

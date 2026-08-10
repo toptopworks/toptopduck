@@ -24,6 +24,7 @@ import type { IntlShape } from "react-intl";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { QueryClient } from "@tanstack/react-query";
+import type { CreateSessionReply } from "../api";
 import {
   closeSession,
   closeSessionAndWaitRelease,
@@ -33,6 +34,7 @@ import {
   getSessionName,
   onResumeProgress,
   openDuck,
+  prepareImportSession,
   renamePersistedSession,
   renameSession,
 } from "../api";
@@ -298,32 +300,31 @@ export function useShellSessions({
     [mapSessions],
   );
 
-  // Resume a persisted .duck into a fresh runtime instance (ADR-0061/0034).
-  // open_duck reuses the id (ADR-0056), so createSession mints it first, then
-  // openDuck loads the recipe + replays the chain into that id. If the same
-  // path is already open, just switch to it (no second instance, keep-alive).
-  const openPersisted = useCallback(
-    async (path: string, name: string) => {
-      const existing = openSessions.find((s) => s.path === path);
-      if (existing) {
-        apply((prev) => ({ sessions: prev.sessions, activeId: existing.sid }));
-        return;
-      }
+  // Shared resume-into-new-session logic (ADR-0061/0034). Both the sidebar
+  // resume path (openPersisted) and the import path (importAndOpen) funnel
+  // through here: the caller provides a `prepare` step that mints the session
+  // id + returns the duck path to resume from, and this helper handles the
+  // resume-progress listener, openDuck call, registerOpen, and error cleanup.
+  const resumeIntoNewSession = useCallback(
+    async (
+      prepare: () => Promise<CreateSessionReply>,
+      name: string,
+    ) => {
       setResumeStatus({ kind: "opening" });
       // ADR-0056 / issue #76: resume-progress is a global Tauri broadcast keyed
-      // by session_id. The listener registers BEFORE createSession mints the id,
-      // so targetSid starts null and is assigned the instant the id lands; every
-      // event is then filtered to the session THIS resume opened. An event for a
-      // different session (a concurrent resume path, or a stray broadcast) is
-      // dropped before it can move our status indicator. #83 R5: this filter is
-      // the multi-session seam -- without it a sibling resume's Source/Replay
+      // by session_id. The listener registers BEFORE the prepare step mints the
+      // id, so targetSid starts null and is assigned the instant the id lands;
+      // every event is then filtered to the session THIS resume opened. An event
+      // for a different session (a concurrent resume path, or a stray broadcast)
+      // is dropped before it can move our status indicator. #83 R5: this filter
+      // is the multi-session seam -- without it a sibling resume's Source/Replay
       // ticks would hijack this opener's progress strip.
       let targetSid: string | null = null;
       const unlisten = await onResumeProgress((ev) => {
         // Defensive try/catch: this callback runs on the Tauri event loop's
-        // microtask, so a throw escapes PAST openPersisted's outer try/catch --
-        // it surfaces as an unhandled rejection, busy sticks true (soft-lock),
-        // and the listener leaks. Log and bail; the outer flow still clears
+        // microtask, so a throw escapes PAST the outer try/catch -- it surfaces
+        // as an unhandled rejection, busy sticks true (soft-lock), and the
+        // listener leaks. Log and bail; the outer flow still clears
         // resumeStatus when openDuck resolves/rejects. #83 R5: the targetSid
         // filter below is the multi-session isolation seam and is unchanged
         // (issue #203).
@@ -350,14 +351,14 @@ export function useShellSessions({
         }
       });
       try {
-        const { session_id: sid } = await createSession();
+        const { session_id: sid, duck_path } = await prepare();
         targetSid = sid;
-        await openDuck(sid, path);
+        await openDuck(sid, duck_path);
         await queryClient.invalidateQueries({ queryKey: ["session", sid] });
-        registerOpen({ sid, name, path, pendingIngestPath: null });
+        registerOpen({ sid, name, path: duck_path, pendingIngestPath: null });
         setResumeStatus({ kind: "idle" });
       } catch (e) {
-        // C2: if createSession succeeded but openDuck failed, the just-minted
+        // C2: if the prepare step succeeded but openDuck failed, the just-minted
         // session is persisted on disk (ADR-0089 auto-persist). Close it
         // best-effort so it does not linger as a ghost empty row in the
         // sidebar scan. The close IPC itself may fail (the session may have
@@ -373,7 +374,47 @@ export function useShellSessions({
         void unlisten();
       }
     },
-    [intl, openSessions, apply, queryClient, registerOpen, setShellError, refreshSessions],
+    [intl, queryClient, registerOpen, setShellError, refreshSessions],
+  );
+
+  // Resume a persisted .duck into a fresh runtime instance (ADR-0061/0034).
+  // open_duck reuses the id (ADR-0056), so createSession mints it first, then
+  // openDuck loads the recipe + replays the chain into that id. If the same
+  // path is already open, just switch to it (no second instance, keep-alive).
+  const openPersisted = useCallback(
+    async (path: string, name: string) => {
+      const existing = openSessions.find((s) => s.path === path);
+      if (existing) {
+        apply((prev) => ({ sessions: prev.sessions, activeId: existing.sid }));
+        return;
+      }
+      // createSession mints a new session + binds an empty session.duck at
+      // sessions/{new_uuid}/session.duck. The resume target is the EXISTING
+      // file at `path` (a prior session's duck), not the freshly-created empty
+      // one — so override duck_path with the existing path.
+      await resumeIntoNewSession(
+        async () => {
+          const { session_id } = await createSession();
+          return { session_id, duck_path: path };
+        },
+        name,
+      );
+    },
+    [openSessions, apply, resumeIntoNewSession],
+  );
+
+  // Import an external .duck into the managed sessions tree (ADR-0089 Decision
+  // 5, issue #450). prepareImportSession copies the external file (+ companion
+  // assets/) into a fresh sessions/{uuid}/ directory and returns the local duck
+  // path; resumeIntoNewSession then calls openDuck on that local copy.
+  const importAndOpen = useCallback(
+    async (externalPath: string, name: string) => {
+      await resumeIntoNewSession(
+        () => prepareImportSession(externalPath),
+        name,
+      );
+    },
+    [resumeIntoNewSession],
   );
 
   // Synchronous UI teardown for an open session: drop the cache + open-set
@@ -525,9 +566,10 @@ export function useShellSessions({
     [intl, mapSessions, refreshSessions, setShellError],
   );
 
-  // --- Open .duck (ADR-0034/0036/0089) ------------------------------------
-  // ADR-0089: sessions auto-persist from creation. Open = import a .duck from
-  // outside the managed sessions tree (resume into a new per-session dir).
+  // --- Import .duck (ADR-0089 Decision 5, issue #450) ----------------------
+  // Open = import: copy the external .duck (+ companion assets/) into a fresh
+  // per-session directory under the managed sessions root, then resume the
+  // local copy. The original file is never modified.
   const handleOpenDuck = useCallback(async () => {
     setPersistenceBusy(true);
     try {
@@ -539,14 +581,14 @@ export function useShellSessions({
       if (!path) return;
       const stem =
         path.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? "session";
-      await openPersisted(path, stem);
+      await importAndOpen(path, stem);
       refreshSessions();
     } catch (e) {
       setShellError(toAppError(e, intl, "shell"));
     } finally {
       setPersistenceBusy(false);
     }
-  }, [intl, openPersisted, refreshSessions, setShellError]);
+  }, [intl, importAndOpen, refreshSessions, setShellError]);
 
   // --- Export session (ADR-0089 Decision 5, issue #449) -------------------
   // Export a copy of the per-session directory (session.duck + assets/) to a
