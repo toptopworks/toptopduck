@@ -12,8 +12,8 @@
 //! `session/source_lifecycle.rs`: Rust lets a descendant module
 //! (`session::ingest`) add methods to a type defined in the ancestor
 //! (`session`) and reach its private fields. `release_snapshot` /
-//! `detach_snapshot` are `pub(super)` because `resume_sources` (still in
-//! `mod.rs`) and `commit_removal` (in `source_lifecycle.rs`) call them across
+//! `detach_snapshot` are `pub(super)` because `resume_sources` (in
+//! `resume.rs`) and `commit_removal` (in `source_lifecycle.rs`) call them across
 //! module boundaries.
 
 use std::collections::HashSet;
