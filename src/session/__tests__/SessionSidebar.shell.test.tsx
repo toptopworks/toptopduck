@@ -914,7 +914,6 @@ describe("DeleteSessionDialog ESC routing (issue #258)", () => {
     renderShell(
       <DeleteSessionDialog
         name="Session"
-        path="/sessions/test/session.duck"
         onCancel={onCancel}
         onConfirm={() => {}}
       />,

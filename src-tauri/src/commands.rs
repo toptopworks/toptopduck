@@ -1356,8 +1356,12 @@ pub async fn delete_session(
             Err(_) => return Ok(()),
         };
         // ADR-0089: delete the per-session directory (session.duck + assets/),
-        // not just the .duck file. The .duck's parent is `{uuid}/`.
-        let Some(session_dir) = path.parent().map(PathBuf::from) else {
+        // not just the .duck file. The .duck's parent is `{uuid}/`. Derive from
+        // the canonical path (not the raw input) so the starts_with check below
+        // matches the also-canonicalized root — on Windows, canonicalize adds
+        // the `\\?\` verbatim prefix, and a non-prefixed path would never
+        // starts_with a prefixed root (matching export_session's approach).
+        let Some(session_dir) = canonical.parent().map(PathBuf::from) else {
             return Err(StoreCommandError::IoFailure(
                 "path has no parent directory; cannot locate session dir".into(),
             ));
