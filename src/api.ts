@@ -264,6 +264,20 @@ export async function exportSession(
   await invoke<void>("export_session", { duckPath, destDir });
 }
 
+// Import an external .duck into the managed sessions tree (ADR-0089 Decision 5,
+// issue #450). Copies the external file (and companion assets/) into a fresh
+// per-session directory, returns the session id + local duck path. The frontend
+// then calls openDuck on the returned path to resume. The store entry is NOT
+// bound by this call — binding happens inside open_duck, avoiding a canonical-
+// writer registry conflict.
+export async function prepareImportSession(
+  externalPath: string,
+): Promise<CreateSessionReply> {
+  return invoke<CreateSessionReply>("prepare_import_session", {
+    externalPath,
+  });
+}
+
 // Open a .duck and resume the named session WITHIN THE SAME session_id
 // (ADR-0056: open reuses the id; it does NOT create a new session). Runs off
 // the UI thread; a `resume-progress` event fires per source / replayed turn.

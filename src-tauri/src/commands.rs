@@ -210,6 +210,63 @@ pub fn create_session(
     result
 }
 
+/// Import an external `.duck` into the managed sessions tree (ADR-0089
+/// Decision 5, issue #450). Copies the external file (and companion `assets/`
+/// if present) into a fresh per-session directory `{sessions_root}/{uuid}/`,
+/// then returns the session id + the local duck path. The frontend follows up
+/// with `open_duck` on the returned path to resume the copied recipe.
+///
+/// Unlike `create_session`, the store entry is NOT bound here — binding happens
+/// inside `Session::open_duck` when the frontend calls `open_duck` with the
+/// returned path. This avoids a canonical-writer registry conflict: the unbound
+/// store entry holds no key, so `open_duck`'s `OpenDuckGuard::acquire` on the
+/// same path succeeds cleanly.
+///
+/// The original external file is never modified — copy, not move. On any
+/// failure after `store.create()`, the store entry is closed and the partially
+/// created directory is removed (same rollback pattern as `create_session`).
+/// Runs the file I/O off the async/UI thread (matching `export_session`),
+/// because copying a large `assets/` tree can take noticeable time.
+#[tauri::command]
+pub async fn prepare_import_session(
+    store: State<'_, Arc<SessionStore>>,
+    live: State<'_, LiveProviderConfig>,
+    sessions_root: State<'_, SessionsRoot>,
+    external_path: String,
+) -> Result<CreateSessionReply, SessionError> {
+    let cancel = Arc::new(CancelToken::new());
+    let provider = Box::new(crate::LiveProvider::new(live.inner().clone()));
+    let id = store.create(cancel, provider)?;
+    let id_str = id.to_string();
+    let session_dir = sessions_root.0.join(&id_str);
+    let duck_path = session_dir.join("session.duck");
+    let src = PathBuf::from(&external_path);
+
+    let session_dir_for_task = session_dir.clone();
+    let duck_path_for_task = duck_path.clone();
+    let id_str_for_task = id_str.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        import_session_files(&src, &session_dir_for_task)
+            .map_err(|e| SessionError::Engine(format!("failed to import session: {e}")))?;
+        Ok::<CreateSessionReply, SessionError>(CreateSessionReply {
+            session_id: id_str_for_task,
+            duck_path: duck_path_for_task.to_string_lossy().into_owned(),
+        })
+    })
+    .await
+    .map_err(|e| SessionError::Engine(e.to_string()))?;
+
+    if result.is_err() {
+        // Same rollback as create_session: close the store entry (releases the
+        // DuckDB instance + cancel token; no canonical key since never bound)
+        // and remove the partially-created directory.
+        let _ = store.close(&id);
+        let _ = std::fs::remove_dir_all(&session_dir);
+    }
+
+    result
+}
+
 /// Close a session (ADR-0055): mark closing, fire cancel, and remove the entry
 /// from the store. Returns immediately -- it does NOT wait for an in-flight
 /// ask. If a turn is in flight, cancel fires (HTTP still runs to completion
@@ -1497,6 +1554,38 @@ fn export_session_files(
         })?;
     }
 
+    Ok(())
+}
+
+/// Core import logic (issue #450). Copies an external `.duck` into the
+/// destination per-session directory as `session.duck` (fixed name, ADR-0089
+/// D3), then copies a companion `assets/` directory if one exists alongside
+/// the external `.duck`. The original file is never modified.
+fn import_session_files(src_duck: &Path, dest_dir: &Path) -> std::io::Result<()> {
+    // Refuse symlinks (defense-in-depth, matching copy_dir_all's hardening
+    // from #449 c6e63fe). A symlinked .duck pointing outside the source
+    // directory could exfiltrate arbitrary files (e.g. ~/.ssh/id_rsa) into
+    // the managed sessions tree.
+    let meta = std::fs::symlink_metadata(src_duck)?;
+    if meta.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("refusing to follow symlink: {}", src_duck.display()),
+        ));
+    }
+    std::fs::create_dir_all(dest_dir)?;
+    std::fs::copy(src_duck, dest_dir.join("session.duck"))?;
+    // Copy companion assets/ if present (issue #450 AC#2). Detects a sibling
+    // `assets/` directory next to the external .duck — covers per-session
+    // directory exports (#449) and ADR-0089 native structure. Old-style
+    // `{stem}.assets/` flat format is intentionally not detected (resume
+    // surfaces those as Missing → interactive re-link).
+    if let Some(parent) = src_duck.parent() {
+        let src_assets = parent.join("assets");
+        if src_assets.is_dir() {
+            copy_dir_all(&src_assets, &dest_dir.join("assets"))?;
+        }
+    }
     Ok(())
 }
 
@@ -2843,5 +2932,126 @@ mod tests {
         let err = copy_dir_all(&src, &dst).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("symlink"));
+    }
+
+    // --- import_session_files (issue #450) ----------------------------------
+
+    #[test]
+    fn import_copies_duck_as_session_duck() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // External .duck in its own directory (bare file, no assets).
+        let ext_dir = tmp.path().join("external");
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        let ext_duck = ext_dir.join("report.duck");
+        std::fs::write(&ext_duck, b"recipe content").unwrap();
+
+        let dest = tmp.path().join("imported-uuid");
+        import_session_files(&ext_duck, &dest).expect("import succeeds");
+
+        // Destination always uses fixed name session.duck (ADR-0089 D3),
+        // regardless of the source filename.
+        assert_eq!(
+            std::fs::read_to_string(dest.join("session.duck")).unwrap(),
+            "recipe content"
+        );
+        // No companion assets/ → no assets/ in the destination.
+        assert!(!dest.join("assets").exists());
+    }
+
+    #[test]
+    fn import_copies_companion_assets_directory() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // External per-session directory: session.duck + assets/.
+        let ext_dir = tmp.path().join("exported-session");
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        let ext_duck = ext_dir.join("session.duck");
+        std::fs::write(&ext_duck, b"recipe").unwrap();
+        std::fs::create_dir_all(ext_dir.join("assets")).unwrap();
+        std::fs::write(ext_dir.join("assets").join("derived.csv"), b"col\nval\n").unwrap();
+
+        let dest = tmp.path().join("imported-with-assets");
+        import_session_files(&ext_duck, &dest).expect("import succeeds");
+
+        assert!(dest.join("session.duck").exists());
+        assert_eq!(
+            std::fs::read_to_string(dest.join("assets").join("derived.csv")).unwrap(),
+            "col\nval\n"
+        );
+    }
+
+    #[test]
+    fn import_copies_nested_assets_subdirectories() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ext_dir = tmp.path().join("nested-session");
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        let ext_duck = ext_dir.join("session.duck");
+        std::fs::write(&ext_duck, b"recipe").unwrap();
+        std::fs::create_dir_all(ext_dir.join("assets").join("sub")).unwrap();
+        std::fs::write(ext_dir.join("assets").join("sub").join("leaf.csv"), b"deep").unwrap();
+
+        let dest = tmp.path().join("imported-nested");
+        import_session_files(&ext_duck, &dest).expect("import succeeds");
+
+        assert_eq!(
+            std::fs::read_to_string(dest.join("assets").join("sub").join("leaf.csv")).unwrap(),
+            "deep"
+        );
+    }
+
+    #[test]
+    fn import_does_not_modify_original_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ext_dir = tmp.path().join("source");
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        let ext_duck = ext_dir.join("original.duck");
+        std::fs::write(&ext_duck, b"original content").unwrap();
+
+        let dest = tmp.path().join("imported-copy");
+        import_session_files(&ext_duck, &dest).expect("import succeeds");
+
+        // The original file is untouched (copy, not move).
+        assert_eq!(
+            std::fs::read_to_string(&ext_duck).unwrap(),
+            "original content"
+        );
+        assert!(ext_duck.exists());
+    }
+
+    #[test]
+    fn import_ignores_old_style_stem_assets_directory() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ext_dir = tmp.path().join("legacy");
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        let ext_duck = ext_dir.join("report.duck");
+        std::fs::write(&ext_duck, b"recipe").unwrap();
+        // Old-style {stem}.assets/ — should NOT be detected (only sibling
+        // `assets/` is, per issue #450 decision).
+        std::fs::create_dir_all(ext_dir.join("report.assets")).unwrap();
+        std::fs::write(ext_dir.join("report.assets").join("data.csv"), b"old").unwrap();
+
+        let dest = tmp.path().join("imported-legacy");
+        import_session_files(&ext_duck, &dest).expect("import succeeds");
+
+        assert!(dest.join("session.duck").exists());
+        // report.assets was NOT copied — only a sibling `assets/` dir would be.
+        assert!(!dest.join("assets").exists());
+    }
+
+    #[test]
+    fn import_fails_when_source_duck_does_not_exist() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dest = tmp.path().join("imported-fail");
+        let nonexistent = tmp.path().join("no-such.duck");
+
+        let err = import_session_files(&nonexistent, &dest).unwrap_err();
+        // The dest directory may have been created (create_dir_all succeeds
+        // before the copy fails), but session.duck should not exist.
+        assert!(!dest.join("session.duck").exists());
+        // The error is an IO error (file not found).
+        assert!(
+            err.kind() == std::io::ErrorKind::NotFound
+                || err.to_string().contains("no such file")
+                || err.to_string().contains("cannot find")
+        );
     }
 }
