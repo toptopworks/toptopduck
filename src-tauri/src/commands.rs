@@ -259,9 +259,22 @@ pub async fn prepare_import_session(
     if result.is_err() {
         // Same rollback as create_session: close the store entry (releases the
         // DuckDB instance + cancel token; no canonical key since never bound)
-        // and remove the partially-created directory.
-        let _ = store.close(&id);
-        let _ = std::fs::remove_dir_all(&session_dir);
+        // and remove the partially-created directory. Log cleanup failures for
+        // observability (matching cleanup_export_dest's pattern, commands.rs:1595).
+        if let Err(e) = store.close(&id) {
+            log::warn!(
+                target: "toptopduck::session",
+                "import rollback: store.close({id}) failed: {e}",
+            );
+        }
+        if let Err(e) = std::fs::remove_dir_all(&session_dir) {
+            log::warn!(
+                target: "toptopduck::session",
+                "import rollback: remove_dir_all({}) failed (partial dir may remain): {}",
+                session_dir.display(),
+                e,
+            );
+        }
     }
 
     result
@@ -1582,8 +1595,21 @@ fn import_session_files(src_duck: &Path, dest_dir: &Path) -> std::io::Result<()>
     // surfaces those as Missing → interactive re-link).
     if let Some(parent) = src_duck.parent() {
         let src_assets = parent.join("assets");
-        if src_assets.is_dir() {
-            copy_dir_all(&src_assets, &dest_dir.join("assets"))?;
+        // Use symlink_metadata (not is_dir, which follows symlinks) to reject
+        // a symlinked assets/ directory — otherwise `assets -> /etc` would be
+        // traversed and every regular file inside copied into the sessions
+        // tree (same exfiltration threat as the .duck symlink check above).
+        let assets_meta = std::fs::symlink_metadata(&src_assets);
+        if let Ok(m) = assets_meta {
+            if m.file_type().is_symlink() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("refusing to follow symlink: {}", src_assets.display()),
+                ));
+            }
+            if m.is_dir() {
+                copy_dir_all(&src_assets, &dest_dir.join("assets"))?;
+            }
         }
     }
     Ok(())
@@ -3053,5 +3079,46 @@ mod tests {
                 || err.to_string().contains("no such file")
                 || err.to_string().contains("cannot find")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_refuses_symlink_source_duck() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real = tmp.path().join("real-target");
+        std::fs::write(&real, b"secret").unwrap();
+        let symlink_duck = tmp.path().join("link.duck");
+        symlink(&real, &symlink_duck).unwrap();
+
+        let dest = tmp.path().join("imported");
+        let err = import_session_files(&symlink_duck, &dest).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("symlink"));
+        assert!(!dest.join("session.duck").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_refuses_symlink_assets_directory() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ext_dir = tmp.path().join("external");
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        let ext_duck = ext_dir.join("session.duck");
+        std::fs::write(&ext_duck, b"recipe").unwrap();
+        // Create a real directory with a file, then symlink assets/ to it.
+        let real_dir = tmp.path().join("real-assets");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::fs::write(real_dir.join("secret.csv"), b"sensitive").unwrap();
+        symlink(&real_dir, ext_dir.join("assets")).unwrap();
+
+        let dest = tmp.path().join("imported");
+        let err = import_session_files(&ext_duck, &dest).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("symlink"));
+        // The .duck itself was valid, so it was copied before the assets
+        // check — but the symlinked assets must NOT be traversed.
+        assert!(!dest.join("assets").exists());
     }
 }
