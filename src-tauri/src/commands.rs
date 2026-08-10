@@ -1351,9 +1351,18 @@ pub async fn delete_session(
         // succeeds even when the file itself is gone (it canonicalizes the
         // parent dir and rejoins the file name), so an Err means the parent is
         // gone too -- the session is definitely absent; idempotent success.
+        // Log the error so a fabricated success (e.g. permission denied on the
+        // parent) is diagnosable instead of silently lost.
         let canonical = match canonicalize_duck(&path) {
             Ok(c) => c,
-            Err(_) => return Ok(()),
+            Err(e) => {
+                log::warn!(
+                    target: "toptopduck::session",
+                    "delete_session: canonicalize_duck failed for {}: {e}",
+                    path.display()
+                );
+                return Ok(());
+            }
         };
         // ADR-0089: delete the per-session directory (session.duck + assets/),
         // not just the .duck file. The .duck's parent is `{uuid}/`. Derive from
@@ -1368,8 +1377,16 @@ pub async fn delete_session(
         };
         // Guard against a path whose parent is not under the managed sessions
         // root (M2). Without this, a malformed or future caller passing
-        // `sessions_root/session.duck` would wipe the entire root.
-        let canonical_root = std::fs::canonicalize(&root).unwrap_or(root);
+        // `sessions_root/session.duck` would wipe the entire root. Propagate
+        // canonicalize errors rather than falling back to the raw root — a
+        // non-prefixed fallback would cause starts_with to fail against the
+        // canonical session_dir on Windows.
+        let canonical_root = std::fs::canonicalize(&root).map_err(|e| {
+            StoreCommandError::IoFailure(format!(
+                "cannot canonicalize sessions root {}: {e}",
+                root.display()
+            ))
+        })?;
         if !session_dir.starts_with(&canonical_root) {
             return Err(StoreCommandError::IoFailure(format!(
                 "session dir {} is not under the managed sessions root {}",
@@ -1517,7 +1534,15 @@ pub async fn export_session(
                 src.display()
             ))
         })?;
-        let canonical_root = std::fs::canonicalize(&root).unwrap_or(root);
+        // Propagate canonicalize errors — a non-prefixed fallback would cause
+        // starts_with to fail against the canonical session_dir on Windows
+        // (matching delete_session's approach).
+        let canonical_root = std::fs::canonicalize(&root).map_err(|e| {
+            StoreCommandError::IoFailure(format!(
+                "cannot canonicalize sessions root {}: {e}",
+                root.display()
+            ))
+        })?;
         if !session_dir.starts_with(&canonical_root) {
             return Err(StoreCommandError::IoFailure(
                 "source is not under the managed sessions root".into(),

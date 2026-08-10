@@ -340,7 +340,6 @@ export function SessionSidebar({
           name={resolveDisplayName(pendingAction.entry.name, intl)}
           onCancel={() => setPendingAction(null)}
           onConfirm={() => {
-            // path is always non-null since ADR-0089 (sessions auto-persist).
             onDelete(pendingAction.entry.path, pendingAction.entry.sid);
             setPendingAction(null);
           }}
