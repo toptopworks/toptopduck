@@ -851,7 +851,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
     vi.mocked(activeDataset).mockResolvedValue(null);
     vi.mocked(listWorkingSet).mockResolvedValue([]);
     vi.mocked(conversation).mockResolvedValue([]);
-    vi.mocked(closeSession).mockResolvedValue(undefined);
+    vi.mocked(closeSession).mockResolvedValue(false);
     vi.mocked(openDuck).mockResolvedValue(undefined);
     vi.stubGlobal("navigator", { language: "zh-CN" });
   });
@@ -960,7 +960,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
     const { resolve } = pendingAsk();
     vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
     // closeSession NEVER resolves in this test -- proves the UI does NOT wait.
-    vi.mocked(closeSession).mockImplementation(() => new Promise<void>(() => {}));
+    vi.mocked(closeSession).mockImplementation(() => new Promise<boolean>(() => {}));
 
     render(<App />);
     await openSession();
@@ -1033,7 +1033,7 @@ describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
     vi.mocked(activeDataset).mockResolvedValue(null);
     vi.mocked(listWorkingSet).mockResolvedValue([]);
     vi.mocked(conversation).mockResolvedValue([]);
-    vi.mocked(closeSession).mockResolvedValue(undefined);
+    vi.mocked(closeSession).mockResolvedValue(false);
     vi.mocked(closeSessionAndWaitRelease).mockResolvedValue(undefined);
     vi.mocked(deleteSession).mockResolvedValue(undefined);
     vi.mocked(openDuck).mockResolvedValue(undefined);

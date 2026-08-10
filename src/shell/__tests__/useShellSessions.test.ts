@@ -40,7 +40,7 @@ vi.mock("../../api", async (importOriginal) => {
   return {
     ...actual,
     createSession: vi.fn(),
-    closeSession: vi.fn(async () => {}),
+    closeSession: vi.fn(async () => false),
     closeSessionAndWaitRelease: vi.fn(async () => {}),
     deleteSession: vi.fn(async () => {}),
     exportSession: vi.fn(async () => {}),

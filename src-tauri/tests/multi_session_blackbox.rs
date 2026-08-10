@@ -814,3 +814,92 @@ fn close_after_resume_discards_inflight_turn_via_shared_closing_flag() {
         );
     }
 }
+
+// --- ADR-0089 Decision 6: empty-session close cleanup ----------------------
+
+/// The core of `close_session`'s cleanup logic (ADR-0089 Decision 6), extracted
+/// so the integration test can exercise it without the Tauri State wrapper.
+/// Mirrors the command: snapshot empty-timeline + session dir BEFORE close,
+/// then close + delete the directory.
+fn close_and_cleanup(store: &SessionStore, id: &SessionId) -> Result<bool, SessionError> {
+    let session_dir = {
+        let handle = store.get(id)?;
+        let s = handle.session_lock()?;
+        if s.is_timeline_empty() {
+            s.duck_path()
+                .map(std::path::PathBuf::from)
+                .and_then(|p| p.parent().map(std::path::PathBuf::from))
+        } else {
+            None
+        }
+    };
+    store.close(id)?;
+    if let Some(dir) = session_dir {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(_) => Ok(false),
+        }
+    } else {
+        Ok(false)
+    }
+}
+
+#[test]
+fn empty_session_close_deletes_per_session_directory() {
+    // ADR-0089 Decision 6: closing a session whose timeline is completely empty
+    // (no turns, no sources, no skills) deletes the per-session directory so
+    // the sidebar does not accumulate "新会话" ghost entries.
+    let root = tempfile::tempdir().expect("sessions root");
+    let store = SessionStore::new();
+    let id = fresh_session(&store);
+
+    // Bind to a per-session directory (mirrors create_session's setup).
+    let session_dir = root.path().join(id.to_string());
+    let duck_path = session_dir.join("session.duck");
+    std::fs::create_dir_all(&session_dir).expect("create session dir");
+    {
+        let handle = store.get(&id).expect("handle");
+        let mut s = handle.session_lock().unwrap();
+        s.bind_duck(duck_path.clone(), String::new()).expect("bind");
+    }
+    assert!(duck_path.exists(), "session.duck was created");
+    assert!(session_dir.exists(), "session dir exists");
+
+    // Close + cleanup: the session has no timeline content.
+    let cleaned = close_and_cleanup(&store, &id).expect("close + cleanup");
+    assert!(cleaned, "empty session should report cleanup");
+    assert!(!session_dir.exists(), "per-session directory deleted");
+}
+
+#[test]
+fn non_empty_session_close_preserves_directory() {
+    // ADR-0089 Decision 6: a session with ANY timeline content (here: a source
+    // lifecycle event from ingest) is NOT cleaned up on close -- the directory
+    // survives so the session is re-openable from the sidebar.
+    let root = tempfile::tempdir().expect("sessions root");
+    let store = SessionStore::new();
+    let id = fresh_session(&store);
+
+    let session_dir = root.path().join(id.to_string());
+    let duck_path = session_dir.join("session.duck");
+    std::fs::create_dir_all(&session_dir).expect("create session dir");
+    {
+        let handle = store.get(&id).expect("handle");
+        let mut s = handle.session_lock().unwrap();
+        s.bind_duck(duck_path.clone(), "分析".into()).expect("bind");
+        // Ingesting a file adds a Source lifecycle event to the timeline.
+        let csv = session_dir.join("data.csv");
+        std::fs::write(&csv, "name,score\nAda,9\n").expect("write csv");
+        match s.ingest(&csv) {
+            toptopduck_lib::LoadOutcome::Loaded(d) => assert_eq!(d.reference_name, "data"),
+            other => panic!("ingest should load, got {other:?}"),
+        }
+    }
+    assert!(duck_path.exists(), "session.duck exists before close");
+
+    let cleaned = close_and_cleanup(&store, &id).expect("close + cleanup");
+    assert!(!cleaned, "non-empty session should NOT report cleanup");
+    assert!(session_dir.exists(), "per-session directory preserved");
+    assert!(duck_path.exists(), "session.duck still on disk");
+}

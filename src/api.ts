@@ -73,8 +73,10 @@ export async function createSession(): Promise<CreateSessionReply> {
 // Close a session (ADR-0055): fire cancel + mark closing + remove from the
 // store. Returns immediately; an in-flight ask's post-check discards its turn.
 // After this, calls targeting the id reject as unknown session.
-export async function closeSession(sessionId: string): Promise<void> {
-  await invoke<void>("close_session", { sessionId });
+// Returns true when ADR-0089 Decision 6 cleaned up the per-session directory
+// (empty timeline); false for a normal close where the session stays on disk.
+export async function closeSession(sessionId: string): Promise<boolean> {
+  return invoke<boolean>("close_session", { sessionId });
 }
 
 // Close a session AND wait for the canonical single-writer key to be released
