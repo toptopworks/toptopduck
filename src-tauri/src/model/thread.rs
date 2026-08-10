@@ -1,6 +1,6 @@
 //! Source/skill lifecycle events and the unified conversation timeline (issue
 //! #38, ADR-0040). A source or skill lifecycle event is a user-driven mutation
-//! of the working set's membership — first-class in the thread, never a turn: it
+//! of the working set's membership -- first-class in the thread, never a turn: it
 //! never enters the LLM turn window, never occupies an N=20 slot, and never
 //! advances result_N.
 
@@ -45,7 +45,7 @@ pub struct SourceLifecycleEvent {
 /// #363). The lifecycle is intentionally two-state: a skill is either Mounted
 /// into the session's active set or Unmounted from it. A skill CONTENT change
 /// is NOT a lifecycle event -- it is captured per-turn by each
-/// [`crate::persistence::recipe::SkillProvenance`]'s `content_hash`, so the
+/// [`crate::model::SkillProvenance`]'s `content_hash`, so the
 /// timeline stays free of content churn (only membership changes are events).
 /// Mirrors the spec's two-state identity (Mount/Unmount); the frontend narrows
 /// on the bare variant string.
@@ -66,7 +66,7 @@ pub enum SkillLifecycleKind {
 /// equal to its directory name) -- the prompt fragment / MCP references live in
 /// the registry and are looked up at assembly time, never snapshotted into the
 /// timeline (a skill's content evolution is captured per-turn by
-/// [`crate::persistence::recipe::SkillProvenance::content_hash`], not by
+/// [`crate::model::SkillProvenance::content_hash`], not by
 /// lifecycle events). Isomorphic to [`SourceLifecycleEvent`]: always visible,
 /// occupies a timeline slot, but never enters the LLM window or advances
 /// `result_N`.

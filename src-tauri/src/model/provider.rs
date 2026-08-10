@@ -187,15 +187,25 @@ impl ProviderConfig {
     pub fn effective_base_url(&self) -> &str {
         self.active()
             .map(|p| p.base_url.as_str())
-            .unwrap_or(DEFAULT_PROVIDER_BASE_URL)
+            .unwrap_or_else(|| {
+                log::warn!(
+                    "active_profile does not match any profile; falling back to \
+                     default base_url for this read"
+                );
+                DEFAULT_PROVIDER_BASE_URL
+            })
     }
 
     /// The active profile's model, or the canonical default (see
     /// [`Self::effective_base_url`]).
     pub fn effective_model(&self) -> &str {
-        self.active()
-            .map(|p| p.model.as_str())
-            .unwrap_or(DEFAULT_PROVIDER_MODEL)
+        self.active().map(|p| p.model.as_str()).unwrap_or_else(|| {
+            log::warn!(
+                "active_profile does not match any profile; falling back to \
+                     default model for this read"
+            );
+            DEFAULT_PROVIDER_MODEL
+        })
     }
 
     /// The active profile's wire protocol, or [`Protocol::Anthropic`] when no

@@ -238,24 +238,6 @@ impl TurnOutcome {
     }
 }
 
-/// One entry in the conversation thread (ADR-0028/0039): the verbatim user
-/// question paired with its outcome. Every turn appends exactly one -- always
-/// visible, occupying a timeline slot -- regardless of whether the outcome
-/// produced a result_N. Only [`TurnOutcome::Materialized`] advances result_N
-/// numbering; the others occupy a slot but consume no number. The question is
-/// the entry's label in the user's own words (ADR-0039: the step label is the
-/// verbatim question, never an LLM-generated title).
-///
-/// The [`trace`](Self::trace) is the turn's collapsible execution substructure
-/// (ADR-0078, issue #297): the display view of every tool call the turn made.
-/// The rail shows the question + outcome always and expands the trace on
-/// demand. This is the DISPLAY view -- bounded summaries + a failed-call
-/// excerpt only, the same shape the recipe persists ([`crate::persistence::
-/// recipe::RecipeTraceEntry`]); the full in-memory call payloads never cross
-/// IPC, and the far window still carries only the trace's summary (call
-/// count + failure summary), never the entries verbatim. The window assembler
-/// reads [`Self::question`] + [`Self::outcome`] alone, so the trace adds no
-/// LLM tokens. Empty for v1-era migrated turns and zero-call turns.
 /// One skill recorded on a turn's provenance (ADR-0086, issue #363/#381): the
 /// spec `name` (stable identity, equal to the directory name) + the SHA-256 of
 /// the skill's `SKILL.md` bytes at the turn's assembly time. The hash is the
@@ -295,6 +277,24 @@ pub struct TurnProvenance {
     pub skills: Vec<SkillProvenance>,
 }
 
+/// One entry in the conversation thread (ADR-0028/0039): the verbatim user
+/// question paired with its outcome. Every turn appends exactly one -- always
+/// visible, occupying a timeline slot -- regardless of whether the outcome
+/// produced a result_N. Only [`TurnOutcome::Materialized`] advances result_N
+/// numbering; the others occupy a slot but consume no number. The question is
+/// the entry's label in the user's own words (ADR-0039: the step label is the
+/// verbatim question, never an LLM-generated title).
+///
+/// The [`trace`](Self::trace) is the turn's collapsible execution substructure
+/// (ADR-0078, issue #297): the display view of every tool call the turn made.
+/// The rail shows the question + outcome always and expands the trace on
+/// demand. This is the DISPLAY view -- bounded summaries + a failed-call
+/// excerpt only, the same shape the recipe persists ([`crate::persistence::
+/// recipe::RecipeTraceEntry`]); the full in-memory call payloads never cross
+/// IPC, and the far window still carries only the trace's summary (call
+/// count + failure summary), never the entries verbatim. The window assembler
+/// reads [`Self::question`] + [`Self::outcome`] alone, so the trace adds no
+/// LLM tokens. Empty for v1-era migrated turns and zero-call turns.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnRecord {
     pub question: String,
