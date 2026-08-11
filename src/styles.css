@@ -337,6 +337,7 @@
 .shell .session-pane.workspace-collapsed .session-rail { border-right-color: transparent; }
 .shell .session-pane.workspace-collapsed .session-workspace {
   pointer-events: none;
+  visibility: hidden;
 }
 /* Session header (row 1): the session name + the workspace toggle. Moved out
    of the global topbar so session-scoped chrome

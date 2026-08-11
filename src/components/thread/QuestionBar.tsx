@@ -61,7 +61,7 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, childre
     // (vertical: textarea on top, toolbar below) replaces the former flat
     // horizontal row.
     <form
-      className="question-bar flex flex-col rounded-lg border border-border bg-card shadow-md dark:bg-[#21261f]"
+      className="question-bar flex flex-col rounded-lg border border-border bg-card shadow-md"
       onSubmit={(e) => {
         e.preventDefault();
         submit();
@@ -79,7 +79,11 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, childre
           // Enter submits; Shift+Enter inserts a newline (standard chat
           // composer behavior). The form onSubmit is the belt-and-suspenders
           // guard for test-driven submit events.
-          if (e.key === "Enter" && !e.shiftKey) {
+          // Guard against IME composition confirmation (CJK input methods):
+          // Enter confirms the in-progress composition, but isComposing is
+          // still true on this keydown. Without the guard the raw pre-
+          // composition value would be submitted prematurely.
+          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
             e.preventDefault();
             submit();
           }
