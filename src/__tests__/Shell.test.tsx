@@ -338,7 +338,11 @@ describe("App three-column shell (issue #79 ACs)", () => {
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "总共几行" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
     // The new turn's question lands in the rail from the optimistic append.
-    await waitFor(() => expect(screen.getByText("总共几行")).toBeInTheDocument());
+    // Scope to the rail: the textarea's value also renders as text content
+    // (unlike the former <Input>), so a global getByText would match both.
+    await waitFor(() =>
+      expect(within(document.querySelector(".session-rail")!).getByText("总共几行")).toBeInTheDocument(),
+    );
     // No refetch: conversation was not called again (thread never invalidated).
     expect(conversation).toHaveBeenCalledTimes(1);
   });
@@ -1913,48 +1917,41 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     vi.stubGlobal("navigator", { language: "zh-CN" });
   });
 
-  it("renders the three composer slots before the question input", async () => {
+  it("renders the three composer controls inside the question-bar toolbar", async () => {
     render(<App />);
     await openSession();
-    const bar = document.querySelector(".session-questionbar");
+    const bar = document.querySelector(".question-bar");
     expect(bar).toBeInTheDocument();
-    const addSlot = bar?.querySelector(".composer-slot-add");
-    const approvalSlot = bar?.querySelector(".composer-slot-approval");
-    const runtimeSlot = bar?.querySelector(".composer-slot-runtime");
-    expect(addSlot).toBeInTheDocument();
-    expect(approvalSlot).toBeInTheDocument();
-    expect(runtimeSlot).toBeInTheDocument();
-    // The slot order is fixed (ADR-0083): [+] / approval mode / runtime, all
-    // ahead of the question input.
+    // The unified container holds the trigger (+), auth-mode chip, and the
+    // textarea -- all inside .question-bar (ADR-0083 composer row restructured
+    // into a single container).
+    const trigger = screen.getByRole("button", { name: "添加文件" });
+    const chip = await screen.findByRole("button", { name: "授权模式：逐次确认" });
+    expect(bar?.contains(trigger)).toBe(true);
+    expect(bar?.contains(chip)).toBe(true);
+    // The textarea sits above the toolbar row in DOM order.
     const input = screen.getByRole("textbox", { name: "提问" });
     const FOLLOWING = Node.DOCUMENT_POSITION_FOLLOWING;
     expect(
-      (addSlot as HTMLElement).compareDocumentPosition(approvalSlot as HTMLElement) & FOLLOWING,
+      input.compareDocumentPosition(trigger as HTMLElement) & FOLLOWING,
     ).toBeTruthy();
     expect(
-      (approvalSlot as HTMLElement).compareDocumentPosition(runtimeSlot as HTMLElement) & FOLLOWING,
-    ).toBeTruthy();
-    expect(
-      (runtimeSlot as HTMLElement).compareDocumentPosition(input) & FOLLOWING,
+      (trigger as HTMLElement).compareDocumentPosition(chip as HTMLElement) & FOLLOWING,
     ).toBeTruthy();
   });
 
-  it("the [+] slot hosts the context-panel trigger; the approval slot hosts the auth-mode chip", async () => {
+  it("the context-panel trigger and auth-mode chip live inside the question-bar", async () => {
     render(<App />);
     await openSession();
-    const bar = document.querySelector(".session-questionbar");
-    // Issue #351 lights the add slot: with app-config still pending (no
-    // configured MCP, no skill system) the trigger is the degraded pure
-    // add-files button.
-    const addSlot = bar?.querySelector(".composer-slot-add");
+    const bar = document.querySelector(".question-bar");
+    // Issue #351: with app-config still pending (no configured MCP, no skill
+    // system) the trigger is the degraded pure add-files button.
     const trigger = screen.getByRole("button", { name: "添加文件" });
-    expect(addSlot?.contains(trigger)).toBe(true);
-    // Issue #352 lights the approval slot: the chip reads the session's
-    // posture (per_call default) and renders INSIDE the slot, not as a loose
-    // sibling.
+    expect(bar?.contains(trigger)).toBe(true);
+    // Issue #352: the chip reads the session's posture (per_call default) and
+    // renders INSIDE the question-bar, not as a loose sibling.
     const chip = await screen.findByRole("button", { name: "授权模式：逐次确认" });
-    const approvalSlot = bar?.querySelector(".composer-slot-approval");
-    expect(approvalSlot?.contains(chip)).toBe(true);
+    expect(bar?.contains(chip)).toBe(true);
   });
 
   it("toggles the auth-mode chip to no-confirmation with the warning color (ADR-0080)", async () => {
@@ -2093,30 +2090,26 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     ).toBeInTheDocument();
   });
 
-  it("hosts the provider/model picker inside the runtime slot once app-config resolves", async () => {
+  it("hosts the provider/model picker inside the question-bar once app-config resolves", async () => {
     vi.mocked(getAppConfig).mockResolvedValue(
       baseAppConfig({ sidebar_collapsed: false }),
     );
     render(<App />);
     await openSession();
-    // The picker trigger (ADR-0071 + issue #353) lands inside the runtime
-    // slot of the composer row -- not as a loose sibling of the input. Its
-    // accessible name carries the active runtime (built-in -> the active
-    // provider's preset name).
+    // The picker trigger (ADR-0071 + issue #353) lands inside the question-bar
+    // toolbar -- not as a loose sibling. Its accessible name carries the active
+    // runtime (built-in -> the active provider's preset name).
     const trigger = await screen.findByRole("button", { name: "运行时：Anthropic" });
-    const runtimeSlot = document.querySelector(
-      ".session-questionbar .composer-slot-runtime",
-    ) as HTMLElement;
-    expect(runtimeSlot.contains(trigger)).toBe(true);
+    const bar = document.querySelector(".question-bar") as HTMLElement;
+    expect(bar.contains(trigger)).toBe(true);
   });
 
-  it("keeps the runtime slot empty while app-config is pending", async () => {
+  it("does not render the provider/model picker while app-config is pending", async () => {
     // beforeEach holds getAppConfig pending so appConfig stays at its
-    // useState(null) initial -- App does not pass the picker bundle, leaving
-    // the runtime slot empty until app-config resolves (SessionPane.tsx).
+    // useState(null) initial -- App does not pass the picker bundle, so the
+    // picker trigger is absent until app-config resolves.
     render(<App />);
     await openSession();
-    const runtimeSlot = document.querySelector(".composer-slot-runtime");
-    expect(runtimeSlot).toBeEmptyDOMElement();
+    expect(screen.queryByRole("button", { name: /运行时/ })).not.toBeInTheDocument();
   });
 });

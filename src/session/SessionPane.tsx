@@ -242,11 +242,23 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
             )}
           </section>
 
-          {/* --- Composer control row (ADR-0083, issue #350). Three-slot
-              skeleton + the flex-1 question input. Lives inside the
-              conversation column so its width tracks the rail. */}
-          <div className="session-questionbar flex items-center gap-2">
-            <div className="composer-slot-add">
+          {/* --- Composer control row (ADR-0083, issue #350). The QuestionBar
+              is the unified container: the composer slot controls ([+]
+              context / approval mode / runtime picker) pass as children into
+              its bottom toolbar row. Lives inside the conversation column so
+              its width tracks the rail. */}
+          <div className="session-questionbar">
+            <QuestionBar
+              onSubmit={s.handleAsk}
+              onCancel={s.handleCancel}
+              loading={s.loading}
+              phase={s.phase}
+              trailing={
+                providerPicker && (
+                  <ComposerProviderPicker sessionId={sessionId} {...providerPicker} />
+                )
+              }
+            >
               <ComposerContextPanel
                 sessionId={sessionId}
                 onIngestFiles={s.handleIngestMany}
@@ -254,23 +266,8 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
                 mcpConfigured={mcpConfigured}
                 onOpenSettingsSkills={onOpenSettingsSkills}
               />
-            </div>
-            <div className="composer-slot-approval">
               <ComposerAuthModeChip sessionId={sessionId} />
-            </div>
-            <div className="composer-slot-runtime">
-              {providerPicker && (
-                <ComposerProviderPicker sessionId={sessionId} {...providerPicker} />
-              )}
-            </div>
-            <div className="flex-1 min-w-0">
-              <QuestionBar
-                onSubmit={s.handleAsk}
-                onCancel={s.handleCancel}
-                loading={s.loading}
-                phase={s.phase}
-              />
-            </div>
+            </QuestionBar>
           </div>
         </div>
 
@@ -286,7 +283,7 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
             class stay for selector / test stability; twMerge picks
             border-b-primary over border-b-transparent when the tab is active. */}
           <div
-            className="workspace-tabs flex items-center gap-2 px-4 py-1.5 border-b bg-background"
+            className="workspace-tabs flex items-center gap-2 px-4 py-1.5 border-b"
             role="tablist"
           >
             <button

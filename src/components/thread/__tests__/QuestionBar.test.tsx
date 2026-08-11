@@ -50,3 +50,45 @@ describe("QuestionBar (issue #28 single in-flight + cancel)", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 });
+
+describe("QuestionBar keyboard submit (Enter / Shift+Enter / IME)", () => {
+  it("submits on Enter with a non-empty value and prevents the newline", () => {
+    const onSubmit = vi.fn();
+    renderQuestionBar(<QuestionBar onSubmit={onSubmit} onCancel={() => {}} loading={false} />);
+    const textarea = screen.getByRole("textbox", { name: "提问" });
+    fireEvent.change(textarea, { target: { value: "几行" } });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    // onSubmit firing proves preventDefault ran (it is called before submit()
+    // inside the same guard block; without it the form would also fire submit).
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit).toHaveBeenCalledWith("几行");
+  });
+
+  it("does not submit on Shift+Enter (newline insertion)", () => {
+    const onSubmit = vi.fn();
+    renderQuestionBar(<QuestionBar onSubmit={onSubmit} onCancel={() => {}} loading={false} />);
+    const textarea = screen.getByRole("textbox", { name: "提问" });
+    fireEvent.change(textarea, { target: { value: "几行" } });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: true });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("does not submit on Enter while the value is blank", () => {
+    const onSubmit = vi.fn();
+    renderQuestionBar(<QuestionBar onSubmit={onSubmit} onCancel={() => {}} loading={false} />);
+    const textarea = screen.getByRole("textbox", { name: "提问" });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("does not submit on Enter during IME composition (isComposing)", () => {
+    const onSubmit = vi.fn();
+    renderQuestionBar(<QuestionBar onSubmit={onSubmit} onCancel={() => {}} loading={false} />);
+    const textarea = screen.getByRole("textbox", { name: "提问" });
+    fireEvent.change(textarea, { target: { value: "zong" } });
+    // CJK IME: Enter confirms the composition -- isComposing is true on
+    // this keydown, so the guard must bail out without submitting.
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false, isComposing: true });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+});

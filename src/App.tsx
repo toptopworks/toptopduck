@@ -346,7 +346,7 @@ export default function App() {
           >
             <NavigationHistoryProvider location={location} restore={restore}>
               <div
-                className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${settingsView.open ? " settings-mode" : ""}${settingsNavCollapsed ? " settings-nav-collapsed" : ""}`}
+                className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${sidebarDragging ? " sidebar-dragging" : ""}${settingsView.open ? " settings-mode" : ""}${settingsNavCollapsed ? " settings-nav-collapsed" : ""}`}
                 style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
               >
                 {/* Col 1: session sidebar (ADR-0060) -- full height, independent
