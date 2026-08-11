@@ -1195,7 +1195,7 @@ describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
 // `sidebar_grouping: "flat"` (the serde default) so callers stay focused on the
 // collapse prefs they actually exercise (#251 added the grouping field).
 function baseAppConfig(
-  shell: Omit<AppConfig["shell"], "sidebar_grouping">,
+  shell: Pick<AppConfig["shell"], "sidebar_collapsed">,
 ): AppConfig {
   return {
     format_version: 1,
@@ -1255,40 +1255,6 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // sets a long-question turn after beforeEach runs).
     vi.mocked(conversation).mockImplementation(async () => state.thread);
     vi.stubGlobal("navigator", { language: "zh-CN" });
-  });
-
-  it("collapses the thread rail via the top-bar rail toggle (ADR-0054 level 2)", async () => {
-    render(<App />);
-    await openSession();
-    const shell = document.querySelector(".shell");
-    const rail = document.querySelector(".session-rail");
-    expect(shell?.classList.contains("rail-collapsed")).toBe(false);
-    expect(rail?.hasAttribute("inert")).toBe(false);
-    fireEvent.click(screen.getByRole("button", { name: "折叠对话栏" }));
-    expect(shell?.classList.contains("rail-collapsed")).toBe(true);
-    // Collapsed rail is inert (ghost-focus fix, issue #287).
-    expect(rail?.hasAttribute("inert")).toBe(true);
-    // Toggle back expands + restores the Tab sequence.
-    fireEvent.click(screen.getByRole("button", { name: "展开对话栏" }));
-    expect(shell?.classList.contains("rail-collapsed")).toBe(false);
-    expect(rail?.hasAttribute("inert")).toBe(false);
-  });
-
-  it("sidebar and rail collapse stack independently (ADR-0054)", async () => {
-    // Both collapse levels are independent UI states; collapsing both at once
-    // must surface BOTH classes (the cold-start three-column shell retreats to
-    // sidebar-hidden + workspace-full-width).
-    render(<App />);
-    await openSession();
-    fireEvent.click(screen.getByRole("button", { name: "收起会话栏" }));
-    fireEvent.click(screen.getByRole("button", { name: "折叠对话栏" }));
-    const shell = document.querySelector(".shell");
-    expect(shell?.classList.contains("sidebar-collapsed")).toBe(true);
-    expect(shell?.classList.contains("rail-collapsed")).toBe(true);
-    // Expanding the sidebar leaves the rail collapsed (independence).
-    fireEvent.click(screen.getByRole("button", { name: "展开会话栏" }));
-    expect(shell?.classList.contains("sidebar-collapsed")).toBe(false);
-    expect(shell?.classList.contains("rail-collapsed")).toBe(true);
   });
 
   it("starts a session with the workspace collapsed (ADR-0083 cold start, issue #298)", async () => {
@@ -1445,16 +1411,15 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
   });
 
   it("restores persisted collapse prefs from app-config on mount (ADR-0038/0054)", async () => {
-    // A user who left both levels collapsed reopens to both collapsed -- the
-    // prefs ride app-config (ADR-0038), restored once on the first resolve.
+    // A user who left the sidebar collapsed reopens to sidebar collapsed -- the
+    // pref rides app-config (ADR-0038), restored once on the first resolve.
     vi.mocked(getAppConfig).mockResolvedValue(
-      baseAppConfig({ sidebar_collapsed: true, rail_collapsed: true }),
+      baseAppConfig({ sidebar_collapsed: true }),
     );
     render(<App />);
     await waitFor(() => {
       const shell = document.querySelector(".shell");
       expect(shell?.classList.contains("sidebar-collapsed")).toBe(true);
-      expect(shell?.classList.contains("rail-collapsed")).toBe(true);
     });
   });
 
@@ -1462,7 +1427,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // Toggling a collapse level commits the new shell prefs to app-config so
     // the choice survives a restart (the toggle is not a transient UI flip).
     vi.mocked(getAppConfig).mockResolvedValue(
-      baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+      baseAppConfig({ sidebar_collapsed: false }),
     );
     render(<App />);
     // Wait for getAppConfig to resolve AND the mount effect's .then to set
@@ -1478,29 +1443,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
         // Nested objectContaining: the commit also carries sidebar_grouping
         // (#251), which this collapse-only test stays agnostic to.
         expect.objectContaining({
-          shell: expect.objectContaining({ sidebar_collapsed: true, rail_collapsed: false }),
-        }),
-      ),
-    );
-  });
-
-  it("persists a rail collapse toggle into app-config (ADR-0038)", async () => {
-    // Symmetric to the sidebar persist test above: the rail toggle is a SEPARATE
-    // callback (toggleRailCollapse) with its own dependency array, so its commit
-    // path needs its own guard. Unlike the sidebar toggle, the rail toggle is
-    // disabled until a session is active -- open one first. A regression that
-    // drops commitShellPrefs from toggleRailCollapse would leave the rail
-    // collapse a transient UI flip (lost on restart).
-    vi.mocked(getAppConfig).mockResolvedValue(
-      baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
-    );
-    render(<App />);
-    await openSession();
-    fireEvent.click(screen.getByRole("button", { name: "折叠对话栏" }));
-    await waitFor(() =>
-      expect(setAppConfig).toHaveBeenCalledWith(
-        expect.objectContaining({
-          shell: expect.objectContaining({ sidebar_collapsed: false, rail_collapsed: true }),
+          shell: expect.objectContaining({ sidebar_collapsed: true }),
         }),
       ),
     );
@@ -1513,7 +1456,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // never rides app-config, so this test asserts only the className flip, not
     // a setAppConfig commit.
     vi.mocked(getAppConfig).mockResolvedValue(
-      baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+      baseAppConfig({ sidebar_collapsed: false }),
     );
     render(<App />);
     await waitFor(() =>
@@ -1539,7 +1482,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // nav hides its own back button, so the window-level Escape listener is the
     // reachable close path in the collapsed state).
     vi.mocked(getAppConfig).mockResolvedValue(
-      baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+      baseAppConfig({ sidebar_collapsed: false }),
     );
     render(<App />);
     await waitFor(() =>
@@ -1686,7 +1629,7 @@ describe("App topbar header actions + sidebar connection footer (issue #182 / #2
 
   it("mounts the sidebar gear + connection row once appConfig resolves", async () => {
     vi.mocked(getAppConfig).mockResolvedValue(
-      baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+      baseAppConfig({ sidebar_collapsed: false }),
     );
     render(<App />);
     // The gear (workspace half of the dual-state toggle) + the connection row
@@ -1705,7 +1648,7 @@ describe("App topbar header actions + sidebar connection footer (issue #182 / #2
     // semantic tokens: bg-primary (connected), bg-warning (no key),
     // bg-destructive (keychain fault).
     vi.mocked(getAppConfig).mockResolvedValue(
-      baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+      baseAppConfig({ sidebar_collapsed: false }),
     );
     vi.mocked(getProviderConfig).mockResolvedValue({
       base_url: "https://api.anthropic.com",
@@ -1726,7 +1669,7 @@ describe("App topbar header actions + sidebar connection footer (issue #182 / #2
 
   it("anchors the no-key dot on the --warning token + reads 无 key", async () => {
     vi.mocked(getAppConfig).mockResolvedValue(
-      baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+      baseAppConfig({ sidebar_collapsed: false }),
     );
     vi.mocked(getProviderConfig).mockResolvedValue({
       base_url: "https://api.anthropic.com",
@@ -1750,7 +1693,7 @@ describe("App topbar header actions + sidebar connection footer (issue #182 / #2
     // has_key=false; the row now carries keychain_fault and reads 密钥库不可用
     // + the destructive dot instead of misreading as "no key configured".
     vi.mocked(getAppConfig).mockResolvedValue(
-      baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+      baseAppConfig({ sidebar_collapsed: false }),
     );
     vi.mocked(getProviderConfig).mockResolvedValue({
       base_url: "https://api.anthropic.com",
@@ -2106,7 +2049,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
 
   it("with configured MCP servers [+] opens the three-section panel shell", async () => {
     vi.mocked(getAppConfig).mockResolvedValue({
-      ...baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+      ...baseAppConfig({ sidebar_collapsed: false }),
       mcp_servers: { servers: [mcpServer("srv")] },
     });
     // Issue #369: the MCP section renders only when the status list is
@@ -2133,7 +2076,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
 
   it("badges the session-enabled MCP count on the [+] trigger", async () => {
     vi.mocked(getAppConfig).mockResolvedValue({
-      ...baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+      ...baseAppConfig({ sidebar_collapsed: false }),
       mcp_servers: { servers: [mcpServer("srv"), mcpServer("srv2")] },
     });
     vi.mocked(listMcpServerStatus).mockResolvedValue([
@@ -2152,7 +2095,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
 
   it("hosts the provider/model picker inside the runtime slot once app-config resolves", async () => {
     vi.mocked(getAppConfig).mockResolvedValue(
-      baseAppConfig({ sidebar_collapsed: false, rail_collapsed: false }),
+      baseAppConfig({ sidebar_collapsed: false }),
     );
     render(<App />);
     await openSession();

@@ -46,7 +46,7 @@ const { appConfigWith } = vi.hoisted(() => {
       },
       export: { last_dir: null, default_format: "csv" },
       tunables: { window_turns: 6, far_window: 12 },
-      shell: { sidebar_collapsed: false, rail_collapsed: false, sidebar_grouping: "flat" },
+      shell: { sidebar_collapsed: false, sidebar_grouping: "flat" },
       mcp_servers: { servers: [] },
       sessions_dir: null,
     };

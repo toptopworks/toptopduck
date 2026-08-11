@@ -4,7 +4,6 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { fmtError, errorDetail, formatTurnFailure, turnFailureDetail } from "../lib/error-presentation";
 import { log } from "../lib/log";
 import { listSkills } from "../api";
-import { RailToggle } from "../shell/RailToggle";
 import { WorkspaceToggle } from "../shell/WorkspaceToggle";
 import { useSessionState } from "./useSessionState";
 import type { ApprovalEntry, UseApprovalEvents } from "./useApprovalEvents";
@@ -68,14 +67,6 @@ interface SessionPaneProps {
    *  section footer (issue #365 AC #4). Shell-owned navigation; App threads
    *  openSettings({ section: "skills" }) through. */
   onOpenSettingsSkills: () => void;
-  /** Rail collapse state + toggle (ADR-0054 level 2). Shell-owned pref
-   *  rendered per-session: every SessionPane reads the same railCollapsed
-   *  (the pref is app-wide), but only the active pane's header is visible
-   *  (non-active panes stay CSS-hidden), so the toggle is reachable from
-   *  whichever session is active. Moved here from the global topbar so the
-   *  rail's control lives beside the rail. */
-  railCollapsed: boolean;
-  onToggleRail: () => void;
   /** Display name for THIS session's header. The shell owns the open-session
    *  set; each SessionPane receives its own name rather than reaching into
    *  global active-session state (ADR-0060). */
@@ -94,7 +85,7 @@ interface SessionPaneProps {
 // stable prop for useSessionState / useTurnFlow (no every-render fresh []).
 const NO_APPROVALS: ApprovalEntry[] = [];
 
-export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, providerPicker, mcpConfigured = false, onOpenSettingsSkills, railCollapsed, onToggleRail, sessionName, onFirstTurnSettled, approvalEvents }: SessionPaneProps) {
+export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, providerPicker, mcpConfigured = false, onOpenSettingsSkills, sessionName, onFirstTurnSettled, approvalEvents }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
   // the pane acts on its own session only). The respond / clearSession
@@ -113,7 +104,6 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
     () => clearSession(sessionId),
     [clearSession, sessionId],
   );
-  const hasPendingApproval = sessionApprovals.some((a) => a.status.kind === "pending");
   const s = useSessionState(
     sessionId,
     pendingIngestPath,
@@ -183,23 +173,12 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
 
   return (
     <div className={cn("session-pane", s.workspaceCollapsed && "workspace-collapsed")}>
-      {/* Session header (row 1): rail toggle + session name + workspace toggle.
+      {/* Session header (row 1): session name + workspace toggle.
           Moved here from the global topbar so session-scoped chrome lives with
-          the pane. The rail toggle always renders enabled here -- a SessionPane
-          only mounts when its session exists, so there is always a rail to
-          fold (the cold-start hero has no SessionPane). The workspace toggle
-          (ADR-0083, issue #298) sits at the header's right edge: the panel
-          defaults to collapsed and this is its manual open/close path. */}
+          the pane. The workspace toggle (ADR-0083, issue #298) sits at the
+          header's right edge: the panel defaults to collapsed and this is its
+          manual open/close path. */}
       <div className="session-header" data-tauri-drag-region>
-        <RailToggle
-          collapsed={railCollapsed}
-          disabled={false}
-          onToggle={onToggleRail}
-          // ADR-0083 (issue #297): a collapsed rail hides the in-flow
-          // approval card, so the toggle badges the unanswered approval to
-          // invite the expand (the badge retires once the rail is open).
-          alert={hasPendingApproval}
-        />
         <span className="flex-1 min-w-0 font-semibold text-base truncate" data-tauri-drag-region>
           {sessionName ||
             intl.formatMessage({ id: "session.defaultName", defaultMessage: "New session" })}
@@ -223,205 +202,189 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
           visible + session isolated + retry" rather than "region boundary
           catches precisely". See memory: react19-nested-errorboundary-outer-
           catches. */}
-      {/* --- Thread rail (ADR-0045/0047) ---------------------------------- */}
-      <section
-        className="session-rail"
-        aria-label={intl.formatMessage({ id: "session.rail.ariaLabel", defaultMessage: "Conversation timeline" })}
-        inert={railCollapsed}
-      >
-        <ErrorBoundary name="thread" onReset={resetSessionCache}>
-          <Thread
-            entries={s.thread}
-            selectedResult={viewedReference}
-            onSelectResult={s.handleSelectResult}
-            staleByReference={s.staleByReference}
-            datasetLabels={datasetLabels}
-            skillIndex={skillIndex}
-            // ADR-0078/0083 (issue #297): the in-flight turn's progressive
-            // trace card (tool-call rows + approval cards) trails the
-            // recorded thread while a turn runs.
-            liveTurn={s.liveTurn}
-            onRespondApproval={handleRespondApproval}
-          />
-        </ErrorBoundary>
-        {s.thread.length === 0 && s.liveTurn === null && (
-          // ADR-0067 (issue #185): the .rail-empty visual rule (font-size +
-          // padding) + the .muted color rule retired onto utility; the class
-          // hooks had no selector / test dependents and are dropped. Gated on
-          // liveTurn too (issue #297): a brand-new session's FIRST in-flight
-          // turn already renders the live card -- the "no conversations yet"
-          // hint would contradict it.
-          <p className="text-[0.85rem] p-2 text-muted-foreground">
-            <FormattedMessage
-              id="session.rail.empty"
-              defaultMessage="No conversations yet. Ask a question below or load data to begin."
-            />
-          </p>
-        )}
-      </section>
+      {/* session-body: flex container for rail + workspace so both collapses
+          animate via flex-grow / flex-basis (interpolatable). */}
+      <div className="session-body">
+        <div className="session-conversation">
+          {/* --- Thread rail (ADR-0045/0047) ---------------------------------- */}
+          <section
+            className="session-rail"
+            aria-label={intl.formatMessage({ id: "session.rail.ariaLabel", defaultMessage: "Conversation timeline" })}
+          >
+            <ErrorBoundary name="thread" onReset={resetSessionCache}>
+              <Thread
+                entries={s.thread}
+                selectedResult={viewedReference}
+                onSelectResult={s.handleSelectResult}
+                staleByReference={s.staleByReference}
+                datasetLabels={datasetLabels}
+                skillIndex={skillIndex}
+                // ADR-0078/0083 (issue #297): the in-flight turn's progressive
+                // trace card (tool-call rows + approval cards) trails the
+                // recorded thread while a turn runs.
+                liveTurn={s.liveTurn}
+                onRespondApproval={handleRespondApproval}
+              />
+            </ErrorBoundary>
+            {s.thread.length === 0 && s.liveTurn === null && (
+            // ADR-0067 (issue #185): the .rail-empty visual rule (font-size +
+            // padding) + the .muted color rule retired onto utility; the class
+            // hooks had no selector / test dependents and are dropped. Gated on
+            // liveTurn too (issue #297): a brand-new session's FIRST in-flight
+            // turn already renders the live card -- the "no conversations yet"
+            // hint would contradict it.
+              <p className="text-[0.85rem] p-2 text-muted-foreground">
+                <FormattedMessage
+                  id="session.rail.empty"
+                  defaultMessage="No conversations yet. Ask a question below or load data to begin."
+                />
+              </p>
+            )}
+          </section>
 
-      {/* --- Workspace (ADR-0045/0062 R2) -------------------------------- */}
-      <section
-        className="session-workspace"
-        aria-label={intl.formatMessage({ id: "session.workspace.ariaLabel", defaultMessage: "Workspace" })}
-      >
-        {/* ADR-0067 (issue #173): the .workspace-tabs visual chrome (padding,
+          {/* --- Composer control row (ADR-0083, issue #350). Three-slot
+              skeleton + the flex-1 question input. Lives inside the
+              conversation column so its width tracks the rail. */}
+          <div className="session-questionbar flex items-center gap-2">
+            <div className="composer-slot-add">
+              <ComposerContextPanel
+                sessionId={sessionId}
+                onIngestFiles={s.handleIngestMany}
+                loading={s.loading}
+                mcpConfigured={mcpConfigured}
+                onOpenSettingsSkills={onOpenSettingsSkills}
+              />
+            </div>
+            <div className="composer-slot-approval">
+              <ComposerAuthModeChip sessionId={sessionId} />
+            </div>
+            <div className="composer-slot-runtime">
+              {providerPicker && (
+                <ComposerProviderPicker sessionId={sessionId} {...providerPicker} />
+              )}
+            </div>
+            <div className="flex-1 min-w-0">
+              <QuestionBar
+                onSubmit={s.handleAsk}
+                onCancel={s.handleCancel}
+                loading={s.loading}
+                phase={s.phase}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* --- Workspace (ADR-0045/0062 R2) -------------------------------- */}
+        <section
+          className="session-workspace"
+          aria-label={intl.formatMessage({ id: "session.workspace.ariaLabel", defaultMessage: "Workspace" })}
+        >
+          {/* ADR-0067 (issue #173): the .workspace-tabs visual chrome (padding,
             border-bottom, background) + the [role=tab] base + .active
             primary-underline retired from styles.css onto this component as
             utility + ADR-0050 token. The .workspace-tabs hook + bare "active"
             class stay for selector / test stability; twMerge picks
             border-b-primary over border-b-transparent when the tab is active. */}
-        <div
-          className="workspace-tabs flex items-center gap-2 px-4 py-1.5 border-b bg-background"
-          role="tablist"
-        >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === "result"}
-            className={cn(
-              "px-3 py-1.5 cursor-pointer text-sm border-b-2 border-b-transparent text-muted-foreground",
-              tab === "result" && "active text-primary border-b-primary font-semibold",
-            )}
-            onClick={() => setTab("result")}
+          <div
+            className="workspace-tabs flex items-center gap-2 px-4 py-1.5 border-b bg-background"
+            role="tablist"
           >
-            <FormattedMessage id="session.tab.result" defaultMessage="Results" />
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === "workingSet"}
-            className={cn(
-              "px-3 py-1.5 cursor-pointer text-sm border-b-2 border-b-transparent text-muted-foreground",
-              tab === "workingSet" && "active text-primary border-b-primary font-semibold",
-            )}
-            onClick={() => setTab("workingSet")}
-          >
-            <FormattedMessage id="session.tab.workingSet" defaultMessage="Working set" />
-          </button>
-          {/* active (server truth, ADR-0051/0060) shown read-only here so the
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === "result"}
+              className={cn(
+                "px-3 py-1.5 cursor-pointer text-sm border-b-2 border-b-transparent text-muted-foreground",
+                tab === "result" && "active text-primary border-b-primary font-semibold",
+              )}
+              onClick={() => setTab("result")}
+            >
+              <FormattedMessage id="session.tab.result" defaultMessage="Results" />
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === "workingSet"}
+              className={cn(
+                "px-3 py-1.5 cursor-pointer text-sm border-b-2 border-b-transparent text-muted-foreground",
+                tab === "workingSet" && "active text-primary border-b-primary font-semibold",
+              )}
+              onClick={() => setTab("workingSet")}
+            >
+              <FormattedMessage id="session.tab.workingSet" defaultMessage="Working set" />
+            </button>
+            {/* active (server truth, ADR-0051/0060) shown read-only here so the
                 user sees what the next question targets by default. Naming it
                 here, not in QuestionBar, keeps QuestionBar presentational. */}
-          {s.activeName && (
-            <Badge
-              variant="default"
-              className="active-chip"
-              title={intl.formatMessage({
-                id: "session.activeChip.title",
-                defaultMessage: "The next question targets this table by default",
-              })}
-            >
-              <FormattedMessage
-                id="session.activeChip.label"
-                defaultMessage="Targets {name}"
-                values={{
-                  name:
+            {s.activeName && (
+              <Badge
+                variant="default"
+                className="active-chip"
+                title={intl.formatMessage({
+                  id: "session.activeChip.title",
+                  defaultMessage: "The next question targets this table by default",
+                })}
+              >
+                <FormattedMessage
+                  id="session.activeChip.label"
+                  defaultMessage="Targets {name}"
+                  values={{
+                    name:
                     s.datasets.find((d) => d.reference_name === s.activeName)?.display_name ??
                     s.activeName,
-                }}
-              />
-            </Badge>
-          )}
-        </div>
+                  }}
+                />
+              </Badge>
+            )}
+          </div>
 
-        {/* ADR-0067 (issue #173): the .workspace-body visual rule (padding)
+          {/* ADR-0067 (issue #173): the .workspace-body visual rule (padding)
             retired from styles.css; the flex-1 + overflow-y-auto layout could
             move too, but the hook stays for selector / test stability. */}
-        <div className="workspace-body flex-1 overflow-y-auto p-4">
-          {s.error && <ErrorBanner error={s.error} />}
-          {s.persistError && (
-            // ADR-0067 (issue #172): the bespoke .persist-warning container
-            // (hardcoded amber #fff4e5 / #ffd9a0 / #8a5200) retired into a
-            // shadcn Alert warning variant, which consumes the --warning token.
-            // role="status" overrides the Alert's assertive "alert" default:
-            // the disk fell behind but the in-memory work is intact, so it
-            // reads as a polite caution, not an interrupting emergency.
-            <Alert variant="warning" role="status" className="mt-1.5">
-              <AlertDescription>
-                <p className="m-0">
-                  <FormattedMessage
-                    id="error.persist.banner"
-                    defaultMessage="Auto-save failed: {reason} (the latest in-memory changes were not written to disk; retry the save before closing the app.)"
-                    values={{ reason: fmtError(s.persistError, intl) }}
-                  />
-                </p>
-                <TechnicalDetailsFold detail={persistDetail} />
-              </AlertDescription>
-            </Alert>
-          )}
+          <div className="workspace-body flex-1 overflow-y-auto p-4">
+            {s.error && <ErrorBanner error={s.error} />}
+            {s.persistError && (
+              // ADR-0067 (issue #172): the bespoke .persist-warning container
+              // (hardcoded amber #fff4e5 / #ffd9a0 / #8a5200) retired into a
+              // shadcn Alert warning variant, which consumes the --warning token.
+              // role="status" overrides the Alert's assertive "alert" default:
+              // the disk fell behind but the in-memory work is intact, so it
+              // reads as a polite caution, not an interrupting emergency.
+              <Alert variant="warning" role="status" className="mt-1.5">
+                <AlertDescription>
+                  <p className="m-0">
+                    <FormattedMessage
+                      id="error.persist.banner"
+                      defaultMessage="Auto-save failed: {reason} (the latest in-memory changes were not written to disk; retry the save before closing the app.)"
+                      values={{ reason: fmtError(s.persistError, intl) }}
+                    />
+                  </p>
+                  <TechnicalDetailsFold detail={persistDetail} />
+                </AlertDescription>
+              </Alert>
+            )}
 
-          {tab === "result" ? (
-            <WorkspaceResult
-              content={s.workspaceContent}
-              sessionId={sessionId}
-              hasData={s.datasets.length > 0}
-              onResetRegion={resetSessionCache}
-            />
-          ) : (
-            <WorkspaceWorkingSet
-              datasets={s.datasets}
-              activeName={s.activeName}
-              loading={s.loading}
-              viewedDescriptor={viewedDescriptor}
-              onRename={s.handleRename}
-              onReplace={s.handleReplace}
-              onDelete={s.handleDelete}
-              onPrivacyChange={s.handlePrivacyChange}
-            />
-          )}
-        </div>
-      </section>
-
-      {/* --- Composer control row (ADR-0083, issue #350: in-rail, col 1 row 3).
-            Three-slot skeleton + the flex-1 question input, in fixed order:
-            [+] session-context / approval mode / runtime (ADR-0083 puts the
-            assembly entries at the turn-launch point). [+] hosts the context
-            panel shell + file section (issue #351); approval-mode hosts the
-            authorization-posture chip (issue #352); runtime hosts the
-            existing provider/model picker (ADR-0071) until the runtime chip
-            evolves. */}
-      <div className="session-questionbar flex items-center gap-2">
-        {/* [+] session-context panel (ADR-0083, issue #351): three-section
-            shell (files live; skills / MCP disabled placeholders) with the
-            degraded pure-add-files mode. The retired workspace-hero picker
-            moved here; window drag-and-drop is untouched. */}
-        <div className="composer-slot-add">
-          <ComposerContextPanel
-            sessionId={sessionId}
-            onIngestFiles={s.handleIngestMany}
-            loading={s.loading}
-            mcpConfigured={mcpConfigured}
-            onOpenSettingsSkills={onOpenSettingsSkills}
-          />
-        </div>
-        {/* Approval-mode chip (ADR-0083, issue #352): the session's
-            authorization posture (ADR-0080) -- confirm-each-call <->
-            no-confirmation, the latter marked with the --warning token.
-            Session-scoped + resume-resetting; the chip owns its read / write
-            through the get/set authorization-mode IPC. */}
-        <div className="composer-slot-approval">
-          <ComposerAuthModeChip sessionId={sessionId} />
-        </div>
-        {/* Runtime selector slot. ADR-0071 (issue #238) + issue #353: the
-            provider/model picker evolved into a dual-segment runtime picker
-            (built-in BYOK loop + external v1 adapters). The bundle is app-
-            level state (provider + writes + settings-open path) rendered
-            per-session; sessionId is injected here so the picker owns its
-            per-session runtime choice. Undefined until app-config resolves,
-            leaving the slot empty until then. */}
-        <div className="composer-slot-runtime">
-          {providerPicker && (
-            <ComposerProviderPicker sessionId={sessionId} {...providerPicker} />
-          )}
-        </div>
-        <div className="flex-1 min-w-0">
-          <QuestionBar
-            onSubmit={s.handleAsk}
-            onCancel={s.handleCancel}
-            loading={s.loading}
-            phase={s.phase}
-          />
-        </div>
+            {tab === "result" ? (
+              <WorkspaceResult
+                content={s.workspaceContent}
+                sessionId={sessionId}
+                hasData={s.datasets.length > 0}
+                onResetRegion={resetSessionCache}
+              />
+            ) : (
+              <WorkspaceWorkingSet
+                datasets={s.datasets}
+                activeName={s.activeName}
+                loading={s.loading}
+                viewedDescriptor={viewedDescriptor}
+                onRename={s.handleRename}
+                onReplace={s.handleReplace}
+                onDelete={s.handleDelete}
+                onPrivacyChange={s.handlePrivacyChange}
+              />
+            )}
+          </div>
+        </section>
       </div>
 
       {/* --- Dialogs (guidance + active-source delete) ---------------------- */}

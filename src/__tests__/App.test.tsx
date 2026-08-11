@@ -119,8 +119,6 @@ function renderPane(locale: EffectiveLocale = "zh-CN", sessionName = "Test sessi
         sessionId="sess-1"
         pendingIngestPath={null}
         onIngestConsumed={() => {}}
-        railCollapsed={false}
-        onToggleRail={() => {}}
         sessionName={sessionName}
         onFirstTurnSettled={() => {}}
         approvalEvents={approvalEvents}
