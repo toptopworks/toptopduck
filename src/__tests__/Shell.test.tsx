@@ -1926,7 +1926,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     // textarea -- all inside .question-bar (ADR-0083 composer row restructured
     // into a single container).
     const trigger = screen.getByRole("button", { name: "添加文件" });
-    const chip = await screen.findByRole("button", { name: "授权模式：逐次确认" });
+    const chip = await screen.findByRole("combobox", { name: "授权模式：请求批准" });
     expect(bar?.contains(trigger)).toBe(true);
     expect(bar?.contains(chip)).toBe(true);
     // The textarea sits above the toolbar row in DOM order.
@@ -1950,23 +1950,28 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     expect(bar?.contains(trigger)).toBe(true);
     // Issue #352: the chip reads the session's posture (per_call default) and
     // renders INSIDE the question-bar, not as a loose sibling.
-    const chip = await screen.findByRole("button", { name: "授权模式：逐次确认" });
+    const chip = await screen.findByRole("combobox", { name: "授权模式：请求批准" });
     expect(bar?.contains(chip)).toBe(true);
   });
 
   it("toggles the auth-mode chip to no-confirmation with the warning color (ADR-0080)", async () => {
     render(<App />);
     await openSession();
-    const chip = await screen.findByRole("button", { name: "授权模式：逐次确认" });
+    const chip = await screen.findByRole("combobox", { name: "授权模式：请求批准" });
 
+    fireEvent.pointerDown(chip, { button: 0, pointerType: "mouse" });
     fireEvent.click(chip);
+
+    const option = await screen.findByRole("option", { name: /完全访问权限/ });
+    fireEvent.pointerUp(option, { button: 0, pointerType: "mouse" });
+    fireEvent.click(option);
 
     await waitFor(() =>
       expect(setAuthorizationMode).toHaveBeenCalledWith("sess-1", "no_confirmation"),
     );
-    // The flipped face reads 免确认 and rides the --warning token (border /
-    // fill / text all consume it).
-    const flipped = await screen.findByRole("button", { name: "授权模式：免确认" });
+    // The flipped trigger reads 完全访问权限 and rides the --warning token
+    // (border / fill / text all consume it).
+    const flipped = await screen.findByRole("combobox", { name: "授权模式：完全访问权限" });
     expect(flipped.className).toContain("border-warning/40");
     expect(flipped.className).toContain("bg-warning/10");
     expect(flipped.className).toContain("text-warning");
@@ -2002,7 +2007,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     // The chip renders the backend's actual answer for the NEW sid, not a
     // hardcoded per_call default.
     expect(
-      await screen.findByRole("button", { name: "授权模式：免确认" }),
+      await screen.findByRole("combobox", { name: "授权模式：完全访问权限" }),
     ).toBeInTheDocument();
   });
 
@@ -2016,7 +2021,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     render(<App />);
     await openSession();
     // The chip populated the authMode cache for sess-1.
-    await screen.findByRole("button", { name: "授权模式：逐次确认" });
+    await screen.findByRole("combobox", { name: "授权模式：请求批准" });
     removeSpy.mockClear(); // isolate close's own removeQueries call
     // Open the context menu on the one open entry, then Close.
     fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
