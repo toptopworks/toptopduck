@@ -57,7 +57,9 @@ export function useSidebarResize(options?: {
   // Store the latest onDelta in a ref so the global pointermove listener
   // (mounted once) always calls the current callback without re-subscribing.
   const onDeltaRef = useRef(options?.onDelta);
-  onDeltaRef.current = options?.onDelta;
+  useEffect(() => {
+    onDeltaRef.current = options?.onDelta;
+  });
 
   const onResizeStart = useCallback((e: ReactPointerEvent) => {
     e.preventDefault();

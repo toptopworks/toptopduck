@@ -442,8 +442,9 @@
  * grid-column 2 (track 2 of the 4-track grid). Internally still a flex column. */
 .session-conversation {
   grid-column: 2;
-  /* Floor matches useRailResize MIN_WIDTH clamp (280px). Below this the
-     QuestionBar toolbar compresses but stays functional via overflow scroll. */
+  /* Floor matches useRailResize COMPENSATED_MIN_WIDTH clamp (280px, the
+     sidebar-compensation floor). Below this the QuestionBar toolbar
+     compresses but stays functional via overflow scroll. */
   min-width: 280px;
   display: flex;
   flex-direction: column;

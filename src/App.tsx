@@ -170,10 +170,6 @@ export default function App() {
   // Frontend-only localStorage persistence; the width is exposed as a CSS
   // custom property on .shell so the grid + resize handle consume it without
   // a hardcoded px value.
-  // --- Draggable sidebar width (useSidebarResize) ---------------------------
-  // Frontend-only localStorage persistence; the width is exposed as a CSS
-  // custom property on .shell so the grid + resize handle consume it without
-  // a hardcoded px value.
   // The rail width is declared first so the sidebar hook can compensate it
   // (sidebar grows → rail shrinks by the same delta, keeping the workspace
   // visually fixed, like Codex's right-side drag).

@@ -1,28 +1,22 @@
-// Draggable conversation-rail resize (mirrors useSidebarResize). Manages the
-// rail pixel width via pointer events + localStorage persistence. The width is
-// surfaced as a CSS custom property (--rail-width) on the .shell element,
-// which the session-body grid-template-columns consumes -- keeping the
-// CSS-driven layout intact while allowing interactive resize.
+// Draggable conversation-rail resize. Manages the rail pixel width via pointer
+// events. The width is surfaced as a CSS custom property (--rail-width) on the
+// .shell element, which the session-body grid-template-columns consumes --
+// keeping the CSS-driven layout intact while allowing interactive resize.
 //
 // Unlike the sidebar, the rail does NOT start at the window's left edge (it
 // sits after the sidebar column), so clientX cannot map directly to the
 // desired width. Instead the drag is delta-based: the pointer-down position +
 // starting width are captured, and each move adds the delta (clamped).
 //
-// Persistence is frontend-only (localStorage): the width is a live UI pref,
-// not an app-config field, so no Rust/IPC change is needed. The clamp range
-// (350-600) keeps the rail readable without swallowing the workspace.
-// The default (350) matches MIN_WIDTH — the old fixed 320px from DESIGN.md
-// was the pre-resizable width; now that the rail is draggable the floor
-// IS the starting point.
+// The rail width is NOT persisted — it resets to RAIL_DEFAULT_WIDTH on every
+// app launch. Only the sidebar width is persisted (localStorage). The rail is
+// an ephemeral layout adjustment that the user re-sets per session.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 
-const STORAGE_KEY = "toptopduck.rail-width";
-
 /** Default rail width in pixels. Equals MIN_WIDTH so the cold-start width
  *  is always within the clamp range (no handle/column boundary offset on
- *  first render). Users who drag wider persist the new width to localStorage. */
+ *  first render). */
 export const RAIL_DEFAULT_WIDTH = 350;
 
 /** Minimum width when dragged directly via the rail handle -- protects the
@@ -36,18 +30,10 @@ const COMPENSATED_MIN_WIDTH = 280;
  *  entire workspace column. */
 const MAX_WIDTH = 600;
 
-function clampWidth(px: number): number {
-  return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, px));
-}
-
-function loadStoredWidth(): number {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) return clampWidth(Number(stored) || RAIL_DEFAULT_WIDTH);
-  } catch {
-    // localStorage unavailable (SSR / restricted context)
-  }
-  return RAIL_DEFAULT_WIDTH;
+/** Clamp to [min, MAX_WIDTH]. The min parameter lets direct drag and sidebar
+ *  compensation share one clamp path with different floors. */
+function clampWidth(px: number, min = MIN_WIDTH): number {
+  return Math.max(min, Math.min(MAX_WIDTH, px));
 }
 
 export function useRailResize(): {
@@ -61,9 +47,8 @@ export function useRailResize(): {
    *  sidebar grows → rail shrinks by the same delta, keeping workspace fixed. */
   adjustWidth: (delta: number) => void;
 } {
-  // Lazy-init from localStorage so no mount effect is needed (avoids the
-  // cascading-render lint on setState-in-effect).
-  const [width, setWidth] = useState(() => loadStoredWidth());
+  // Ephemeral state — no localStorage; resets to default on every mount.
+  const [width, setWidth] = useState(RAIL_DEFAULT_WIDTH);
   const [isDragging, setIsDragging] = useState(false);
   const widthRef = useRef(width);
   const draggingRef = useRef(false);
@@ -89,7 +74,13 @@ export function useRailResize(): {
     function onPointerMove(e: PointerEvent): void {
       if (!draggingRef.current) return;
       const delta = e.clientX - startXRef.current;
-      const clamped = clampWidth(startWidthRef.current + delta);
+      // Use min(MIN_WIDTH, startWidthRef) as the effective floor so that
+      // if sidebar compensation pushed the rail below MIN_WIDTH (to
+      // COMPENSATED_MIN_WIDTH=280), the first direct-drag move does not
+      // snap the rail back up to 350. When startWidthRef is at or above
+      // MIN_WIDTH the floor stays at MIN_WIDTH (normal case).
+      const effectiveMin = Math.min(MIN_WIDTH, startWidthRef.current);
+      const clamped = clampWidth(startWidthRef.current + delta, effectiveMin);
       widthRef.current = clamped;
       setWidth(clamped);
     }
@@ -100,11 +91,6 @@ export function useRailResize(): {
       setIsDragging(false);
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
-      try {
-        localStorage.setItem(STORAGE_KEY, String(widthRef.current));
-      } catch {
-        // Write failed (quota / private mode) -- width stays in-memory only.
-      }
     }
 
     window.addEventListener("pointermove", onPointerMove);
@@ -124,11 +110,11 @@ export function useRailResize(): {
     };
   }, []);
 
-  // Externally-driven width adjustment (sidebar drag coordination). Updates
-  // both the ref (for the next pointermove) and React state in one call.
+  // Externally-driven width adjustment (sidebar drag coordination). Uses the
+  // lower COMPENSATED_MIN_WIDTH floor so the sidebar can push the rail past
+  // its own direct-drag floor while keeping the workspace usable.
   const adjustWidth = useCallback((delta: number) => {
-    const min = COMPENSATED_MIN_WIDTH;
-    const clamped = Math.max(min, Math.min(MAX_WIDTH, widthRef.current + delta));
+    const clamped = clampWidth(widthRef.current + delta, COMPENSATED_MIN_WIDTH);
     widthRef.current = clamped;
     setWidth(clamped);
   }, []);
