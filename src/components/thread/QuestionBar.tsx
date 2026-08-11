@@ -61,7 +61,7 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, childre
     // (vertical: textarea on top, toolbar below) replaces the former flat
     // horizontal row.
     <form
-      className="question-bar flex flex-col rounded-lg border border-border bg-card shadow-md"
+      className="question-bar @container flex flex-col rounded-lg border border-border bg-card shadow-md"
       onSubmit={(e) => {
         e.preventDefault();
         submit();
