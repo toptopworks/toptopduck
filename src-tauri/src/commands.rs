@@ -1732,6 +1732,109 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Best-effort removal of the orphaned empty per-session directory left when
+/// `open_duck` rebinds a session from the `create_session`-generated path to
+/// the resume target (ADR-0089 Decision 6 parity for the open path, matching
+/// `close_and_cleanup_empty` for the close path).
+///
+/// Guards (all best-effort — a failure logs a warning and the caller's resume
+/// continues):
+/// - `was_empty`: skip if the stale session carried any content (data-loss
+///   guard — a non-empty session's directory must survive a rebind).
+/// - Path equality: skip if the stale binding resolves to the same path as the
+///   resume target (prevents deleting the directory the resume target lives
+///   in). Uses direct `==` then `canonicalize` fallback for Windows path-
+///   format differences (separator case, `\\?\` prefix, `..` components). If
+///   either `canonicalize` fails, equality is indeterminate — skip cleanup
+///   rather than risk deleting an equivalent path's parent.
+/// - `starts_with(sessions_root)`: skip if the stale directory is outside the
+///   managed sessions root (defense-in-depth, matches `delete_session`'s M2
+///   guard at `commands.rs:1377-1395` — an external `.duck` rebind must never
+///   trigger deletion of a user-chosen parent directory).
+fn cleanup_orphaned_session_dir(
+    stale_duck: Option<&Path>,
+    resume_target: &Path,
+    was_empty: bool,
+    sessions_root: &Path,
+) {
+    let Some(stale) = stale_duck else {
+        return;
+    };
+    if !was_empty {
+        return;
+    }
+    // Path equality — prevents self-deletion of the resume target's parent.
+    if stale == resume_target {
+        return;
+    }
+    match (
+        std::fs::canonicalize(stale),
+        std::fs::canonicalize(resume_target),
+    ) {
+        (Ok(a), Ok(b)) if a == b => return,
+        (Err(e), _) | (_, Err(e)) => {
+            log::warn!(
+                target: "toptopduck::session",
+                "cleanup_orphaned_session_dir: cannot canonicalize for equality check, \
+                 skipping: {e}",
+            );
+            return;
+        }
+        _ => {}
+    }
+    let Some(stale_dir) = stale.parent() else {
+        log::warn!(
+            target: "toptopduck::session",
+            "cleanup_orphaned_session_dir: stale duck_path has no parent, skipping: {}",
+            stale.display(),
+        );
+        return;
+    };
+    // Canonicalize both sides for starts_with — on Windows, canonicalize adds
+    // the `\\?\` verbatim prefix, and a non-prefixed path would never
+    // starts_with a prefixed root (matching delete_session's approach).
+    let stale_dir_canonical = match std::fs::canonicalize(stale_dir) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            log::warn!(
+                target: "toptopduck::session",
+                "cleanup_orphaned_session_dir: cannot canonicalize stale_dir, skipping: {e}",
+            );
+            return;
+        }
+    };
+    let root_canonical = match std::fs::canonicalize(sessions_root) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!(
+                target: "toptopduck::session",
+                "cleanup_orphaned_session_dir: cannot canonicalize sessions_root, skipping: {e}",
+            );
+            return;
+        }
+    };
+    if !stale_dir_canonical.starts_with(&root_canonical) {
+        log::warn!(
+            target: "toptopduck::session",
+            "cleanup_orphaned_session_dir: stale_dir {} is not under sessions_root {}, \
+             skipping",
+            stale_dir.display(),
+            sessions_root.display(),
+        );
+        return;
+    }
+    if let Err(e) = std::fs::remove_dir_all(stale_dir) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            log::warn!(
+                target: "toptopduck::session",
+                "cleanup_orphaned_session_dir: failed to remove orphaned session dir {}: {e}",
+                stale_dir.display(),
+            );
+        }
+    }
+}
+
 /// Open a `.duck` and resume the named session across the restart boundary
 /// (ADR-0034/0056). Runs off the async/UI thread (AC8): resume re-reads every
 /// source and re-executes the productive SQL chain, which can take seconds.
@@ -1747,6 +1850,7 @@ pub async fn open_duck(
     app: tauri::AppHandle,
     store: State<'_, Arc<SessionStore>>,
     live: State<'_, LiveProviderConfig>,
+    sessions_root: State<'_, SessionsRoot>,
     session_id: String,
     path: String,
 ) -> Result<(), SessionError> {
@@ -1786,6 +1890,7 @@ pub async fn open_duck(
     let provider = Box::new(crate::LiveProvider::new(live.inner().clone()));
     let app_for_cb = app.clone();
     let sid = id.clone();
+    let sessions_root_path = sessions_root.path();
     let inner = tauri::async_runtime::spawn_blocking(move || {
         let mut new_session = Session::open_duck(
             &path,
@@ -1838,12 +1943,21 @@ pub async fn open_duck(
         new_session.set_drop_signal(drop_tx);
         handle_for_task.set_drop_signal_rx(drop_rx);
         let mut s = handle_for_task.session_lock()?;
+        // Capture the pre-resume binding before the rebind. create_session
+        // bound a fresh empty session.duck in a new per-session directory;
+        // open_duck rebinds the session to `path` (the resume target),
+        // orphaning that directory. Without cleanup, list_sessions surfaces a
+        // phantom empty sidebar entry that multiplies on each click.
+        let stale_duck = s.duck_path().map(|p| p.to_path_buf());
+        let stale_was_empty = s.is_timeline_empty();
         *s = new_session;
+        // Release the session lock before filesystem cleanup.
+        drop(s);
         // ADR-0080 (issue #294): resume 归零. Trust state is session-level and
         // must not survive a resume (it is not in the recipe / app-config), so
         // the moment the resumed contents are live, drop the authorization
         // mode + trust set back to the default PerCall posture. Reset is
-        // independent of the session swap -- the approval state lives on the
+        // independent of the session rebind -- the approval state lives on the
         // handle, not inside the Session mutex.
         handle_for_task.reset_approval();
         // Issue #301 slice D, AC#3: reset the per-session MCP server
@@ -1858,6 +1972,18 @@ pub async fn open_duck(
         // session starts on the built-in default -- the user re-picks an
         // external runtime explicitly (the ADR-0080 reset lineage).
         handle_for_task.reset_runtime_choice();
+        // Remove the orphaned empty per-session directory create_session made
+        // when open_duck rebinds to a different resume target path. The old
+        // Session::Drop (fired by the `*s = new_session` assignment above)
+        // already released the canonical single-writer key, so remove_dir_all
+        // cannot race a writer. Best-effort: a failure logs a warning (the
+        // orphan is a cosmetic sidebar issue, not a correctness problem).
+        cleanup_orphaned_session_dir(
+            stale_duck.as_deref(),
+            &path,
+            stale_was_empty,
+            &sessions_root_path,
+        );
         Ok::<(), SessionError>(())
     })
     .await;
@@ -3202,5 +3328,139 @@ mod tests {
         // The .duck itself was valid, so it was copied before the assets
         // check — but the symlinked assets must NOT be traversed.
         assert!(!dest.join("assets").exists());
+    }
+
+    // --- cleanup_orphaned_session_dir (ADR-0089 D6 parity for open_duck) ---
+
+    /// Helper: create a sessions-root-like temp tree with a stale session
+    /// directory containing a `session.duck` placeholder.
+    fn make_stale_session(root: &Path, uuid: &str) -> PathBuf {
+        let dir = root.join(uuid);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("session.duck"), b"{}").unwrap();
+        dir
+    }
+
+    #[test]
+    fn cleanup_removes_empty_orphan_under_sessions_root() {
+        // AC#1: empty stale session, different resume target → orphan deleted.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        let stale_dir = make_stale_session(&root, "uuid-a");
+        let stale_duck = stale_dir.join("session.duck");
+        let resume_target = tmp.path().join("external.duck");
+        std::fs::write(&resume_target, b"{}").unwrap();
+
+        cleanup_orphaned_session_dir(Some(&stale_duck), &resume_target, true, &root);
+        assert!(!stale_dir.exists(), "orphan dir should be deleted");
+    }
+
+    #[test]
+    fn cleanup_preserves_non_empty_stale_dir() {
+        // AC#2: non-empty stale session → directory survives (data-loss guard).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        let stale_dir = make_stale_session(&root, "uuid-b");
+        let stale_duck = stale_dir.join("session.duck");
+        let resume_target = tmp.path().join("other.duck");
+        std::fs::write(&resume_target, b"{}").unwrap();
+
+        cleanup_orphaned_session_dir(
+            Some(&stale_duck),
+            &resume_target,
+            false, // non-empty
+            &root,
+        );
+        assert!(stale_dir.exists(), "non-empty dir must survive");
+    }
+
+    #[test]
+    fn cleanup_skips_when_resume_target_is_same_path() {
+        // AC#3: stale == resume target (direct ==) → no deletion.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        let stale_dir = make_stale_session(&root, "uuid-c");
+        let stale_duck = stale_dir.join("session.duck");
+
+        cleanup_orphaned_session_dir(
+            Some(&stale_duck),
+            &stale_duck, // same path
+            true,
+            &root,
+        );
+        assert!(stale_dir.exists(), "same-path must not trigger deletion");
+    }
+
+    #[test]
+    fn cleanup_skips_dir_outside_sessions_root() {
+        // C1 guard: stale dir outside sessions root → no deletion.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        let external_dir = tmp.path().join("external-session");
+        std::fs::create_dir_all(&external_dir).unwrap();
+        let external_duck = external_dir.join("session.duck");
+        std::fs::write(&external_duck, b"{}").unwrap();
+        let resume_target = tmp.path().join("other.duck");
+        std::fs::write(&resume_target, b"{}").unwrap();
+
+        cleanup_orphaned_session_dir(Some(&external_duck), &resume_target, true, &root);
+        assert!(
+            external_dir.exists(),
+            "dir outside sessions_root must not be deleted"
+        );
+    }
+
+    #[test]
+    fn cleanup_skips_when_stale_duck_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+
+        // No stale_duck path → pure no-op, must not panic.
+        cleanup_orphaned_session_dir(None, &tmp.path().join("resume.duck"), true, &root);
+    }
+
+    #[test]
+    fn cleanup_silent_when_dir_already_gone() {
+        // NotFound on remove_dir_all → silent, no panic.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        // Create then manually delete to simulate "already gone".
+        let stale_dir = make_stale_session(&root, "uuid-d");
+        let stale_duck = stale_dir.join("session.duck");
+        std::fs::remove_dir_all(&stale_dir).unwrap();
+        let resume_target = tmp.path().join("other.duck");
+        std::fs::write(&resume_target, b"{}").unwrap();
+
+        // stale_duck path still points to the gone dir; canonicalize of the
+        // stale_dir will return NotFound → silent return.
+        cleanup_orphaned_session_dir(Some(&stale_duck), &resume_target, true, &root);
+        // Should not panic — that's the assertion.
+    }
+
+    #[test]
+    fn cleanup_skips_when_stale_and_target_share_parent() {
+        // Parent-equality edge: stale and resume target in the same parent
+        // directory but different filenames. The sessions-root guard already
+        // prevents deletion here because the shared parent IS the sessions
+        // root in this contrived case — but a deeper nesting under root still
+        // allows the orphan to be cleaned (they are in different uuid dirs).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        // Two sessions under the same root, different uuid dirs.
+        let stale_dir = make_stale_session(&root, "uuid-e");
+        let target_dir = make_stale_session(&root, "uuid-f");
+        let stale_duck = stale_dir.join("session.duck");
+        let resume_target = target_dir.join("session.duck");
+
+        cleanup_orphaned_session_dir(Some(&stale_duck), &resume_target, true, &root);
+        assert!(!stale_dir.exists(), "stale orphan should be deleted");
+        assert!(target_dir.exists(), "resume target dir must be preserved");
     }
 }
