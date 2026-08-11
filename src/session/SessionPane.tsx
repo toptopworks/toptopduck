@@ -173,7 +173,7 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
 
   return (
     <div className={cn("session-pane", s.workspaceCollapsed && "workspace-collapsed")}>
-      {/* Session header (row 1): rail toggle + session name + workspace toggle.
+      {/* Session header (row 1): session name + workspace toggle.
           Moved here from the global topbar so session-scoped chrome lives with
           the pane. The workspace toggle (ADR-0083, issue #298) sits at the
           header's right edge: the panel defaults to collapsed and this is its

@@ -69,21 +69,21 @@
  * bg/border/padding, .sidebar-new-button, .sidebar-error, .session-empty,
  * .session-group* typography, .session-entry* three-state bg/color/accent,
  * .session-entry-menu hover, .session-menu popover chrome + shadow + items,
- * .topbar bg/border-bottom, .sidebar-toggle / .rail-toggle, .topbar-session-
+ * .topbar bg/border-bottom, .sidebar-toggle, .topbar-session-
  * name typography + truncation, and the whole .profile-switcher* block
  * (trigger + hover, name, chevron opacity, menu popover + shadow, item three-
  * state + aria-checked typography, error padding) -- were retired into
  * SessionSidebar.tsx + App.tsx as Tailwind utility + ADR-0050 token +
  * conditional className (the .profile-switcher* rules rode ProfileSwitcher.tsx,
  * later deleted wholesale in issue #240 / ADR-0071). The GRID + FLEX LAYOUT
- * shells below -- .shell (three-column grid + the sidebar/rail-collapsed grid
+ * shells below -- .shell (three-column grid + the sidebar-collapsed grid
  * overlays), .session-sidebar (col 1 grid + flex column + overflow-y scroll),
  * .session-list (flex:1 scroll container), and .topbar (row 1 grid + flex row
  * + fixed height) -- remain as semantic layout-only CSS; cramming them into
  * utility long-strings would obscure the three-column shell structure
  * (ADR-0067 Decision 1). The semantic class hooks (.session-sidebar /
  * .session-entry / .session-entry-main / .session-menu / .topbar /
- * .sidebar-toggle / .rail-toggle / .topbar-session-name
+ * .sidebar-toggle / .topbar-session-name
  * etc.) are kept on the components for selector / test stability.
  * ========================================================================= */
 .shell {
@@ -258,7 +258,7 @@
  * inert attribute (issue #287), which drops the subtree from the Tab sequence
  * + blocks pointer events + hides it from the a11y tree (replacing the prior
  * pointer-events:none). The modifier sits on .shell so it scopes exactly like
- * the workspace sidebar-collapsed / rail-collapsed classes (harmless outside
+ * the workspace sidebar-collapsed classes (harmless outside
  * settings-mode: the overlay mounts only while settings are open). */
 .shell.settings-nav-collapsed .settings-overlay { grid-template-columns: 0 1fr; }
 .shell.settings-nav-collapsed .settings-nav { opacity: 0; }
@@ -410,18 +410,16 @@
 }
 
 /* Composer control row. ADR-0083 (issue #298, evolving ADR-0062 R1): the bar
-   sits IN the rail column (col 1, row 3) -- the composer belongs to the
-   conversation surface; the ADR-0062 R1 full-pane span retired once the
-   workspace defaulted to collapsed. The .shell.rail-collapsed override above
-   re-spans it (grid-column 1 / -1) so the input survives a rail fold.
-   Issue #350: the row's children are the three-slot skeleton ([+] /
-   approval mode / runtime -- the .composer-slot-* hooks ride SessionPane)
+   sits inside the conversation flex column (rail + questionbar) so the
+   composer belongs to the conversation surface + its width always tracks
+   the rail. Issue #350: the row's children are the three-slot skeleton ([+]
+   / approval mode / runtime -- the .composer-slot-* hooks ride SessionPane)
    + the flex-1 question input; the rail-as-primary width floor above is
    what fits the three entries when the workspace folds.
    ADR-0067 (issue #172): the .question-bar input/button visual rules (focus
    outline, primary submit, outline cancel) retired into shadcn Input +
    Button variants on QuestionBar.tsx; .session-questionbar stays as the
-   grid-placement + chrome layout shell. */
+   flex-shrink layout shell. */
 .session-questionbar {
   flex-shrink: 0;
   border-top: 1px solid var(--border);

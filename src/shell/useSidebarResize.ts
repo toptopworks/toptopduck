@@ -6,7 +6,7 @@
 //
 // Persistence is frontend-only (localStorage): the width is a live UI pref,
 // not an app-config field, so no Rust/IPC change is needed. The clamp range
-// (200-480) keeps the sidebar usable without overwhelming the content area.
+// (238-518) keeps the sidebar usable without overwhelming the content area.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 
@@ -86,9 +86,18 @@ export function useSidebarResize(): {
 
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
+    // pointercancel fires when the OS aborts the pointer stream (e.g. a
+    // system gesture intercepts on touch devices). Without it the drag
+    // state + body cursor would stick permanently.
+    window.addEventListener("pointercancel", onPointerUp);
     return () => {
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      // Restore body styles if unmounted mid-drag (React Strict Mode, fast
+      // navigation) — the listeners above are gone so onPointerUp cannot fire.
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
     };
   }, []);
 

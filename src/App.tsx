@@ -394,7 +394,7 @@ export default function App() {
                 {/* Row 1: thin top bar (ADR-0060/0062 R1), spans the full shell
               width as a custom titlebar (decorations: false). Shell-wide
               controls only: the sidebar collapse toggle (left) + nav buttons
-              + window controls (right). The session name + rail collapse toggle
+              + window controls (right). The session name + workspace toggle
               moved into each SessionPane's own header (session-scoped chrome
               lives with the session). The Open / Save .duck buttons moved to
               the session sidebar (below New session). ADR-0067 (#171): visual
