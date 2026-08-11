@@ -35,7 +35,12 @@ function loadStoredWidth(): number {
   return SIDEBAR_DEFAULT_WIDTH;
 }
 
-export function useSidebarResize(): {
+export function useSidebarResize(options?: {
+  /** Called with the per-frame sidebar width delta during drag. Used by
+   *  App.tsx to compensate the rail width (−delta) so the workspace stays
+   *  visually fixed when the sidebar is dragged. */
+  onDelta?: (delta: number) => void;
+}): {
   /** Current sidebar width in pixels. */
   width: number;
   /** Whether a drag is in progress (for cursor / highlight styling). */
@@ -49,6 +54,12 @@ export function useSidebarResize(): {
   const [isDragging, setIsDragging] = useState(false);
   const widthRef = useRef(width);
   const draggingRef = useRef(false);
+  // Store the latest onDelta in a ref so the global pointermove listener
+  // (mounted once) always calls the current callback without re-subscribing.
+  const onDeltaRef = useRef(options?.onDelta);
+  useEffect(() => {
+    onDeltaRef.current = options?.onDelta;
+  });
 
   const onResizeStart = useCallback((e: ReactPointerEvent) => {
     e.preventDefault();
@@ -67,8 +78,11 @@ export function useSidebarResize(): {
       // clientX maps directly to the desired sidebar width because the
       // sidebar starts at the window's left edge (x = 0).
       const clamped = clampWidth(e.clientX);
+      const delta = clamped - widthRef.current;
       widthRef.current = clamped;
       setWidth(clamped);
+      // Compensate the rail so the workspace stays fixed.
+      if (delta !== 0) onDeltaRef.current?.(delta);
     }
 
     function onPointerUp(): void {

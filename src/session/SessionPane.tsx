@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import { useIntl, FormattedMessage } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { fmtError, errorDetail, formatTurnFailure, turnFailureDetail } from "../lib/error-presentation";
@@ -79,13 +80,17 @@ interface SessionPaneProps {
    *  its own session's entries (merged into the live trace by useTurnFlow)
    *  and binds the respond + settled-clear callbacks to its sessionId. */
   approvalEvents: UseApprovalEvents;
+  /** Draggable rail resize (conversation/workspace boundary). The width
+   *  itself is shell-owned via the --rail-width CSS var on .shell; this
+   *  callback fires the pointer-driven drag from the per-pane handle. */
+  onRailResizeStart: (e: ReactPointerEvent) => void;
 }
 
 // A frozen empty slice so a session with no approvals keeps a referentially
 // stable prop for useSessionState / useTurnFlow (no every-render fresh []).
 const NO_APPROVALS: ApprovalEntry[] = [];
 
-export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, providerPicker, mcpConfigured = false, onOpenSettingsSkills, sessionName, onFirstTurnSettled, approvalEvents }: SessionPaneProps) {
+export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, providerPicker, mcpConfigured = false, onOpenSettingsSkills, sessionName, onFirstTurnSettled, approvalEvents, onRailResizeStart }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
   // the pane acts on its own session only). The respond / clearSession
@@ -382,6 +387,12 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
             )}
           </div>
         </section>
+
+        {/* Draggable resize handle at the conversation/workspace boundary.
+            Absolutely positioned (see .rail-resize-handle in styles.css) at
+            left:var(--rail-width); hidden via CSS when the workspace is folded
+            (.workspace-collapsed). Mirrors the sidebar resize handle pattern. */}
+        <div className="rail-resize-handle" onPointerDown={onRailResizeStart} />
       </div>
 
       {/* --- Dialogs (guidance + active-source delete) ---------------------- */}
