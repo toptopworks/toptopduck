@@ -101,6 +101,9 @@
   transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 .shell.sidebar-collapsed { grid-template-columns: 0 1fr; }
+/* Disable grid-template-columns transition during sidebar drag so the column
+   tracks the pointer 1:1 instead of lagging behind a 280ms animation. */
+.shell.sidebar-dragging { transition: none; }
 /* display:none would snap both the column width and the sidebar's fade (display
  * is not animatable), so this rides opacity instead -- the element stays in
  * flow at width 0 while its content fades out in step with the grid transition.
@@ -280,7 +283,7 @@
  * layers are display:none (mounted but not laid out -- ADR-0051 keep-alive, no
  * refetch on switch). The cold-start hero is a plain child shown when no layer
  * is active (ADR-0061). */
-.session-pane-host { grid-column: 2; grid-row: 3; overflow: hidden; position: relative; }
+.session-pane-host { grid-column: 2; grid-row: 3; overflow: hidden; position: relative; z-index: 11; }
 .session-pane-layer { position: absolute; inset: 0; }
 .session-pane-layer.hidden { display: none; }
 /* ADR-0067 (issue #182): the .cold-start-title bespoke font-size (1.4rem) +
@@ -309,24 +312,31 @@
   grid-template-columns: 1fr;
   grid-template-rows: auto 1fr;
 }
-/* Workspace folded (ADR-0083, issue #298): the workspace's flex-grow goes
- * 1 -> 0 while the rail's goes 0 -> 1 (both interpolatable, unlike grid
- * length <-> flex). The workspace's opacity / visibility fade masks the
- * tail of the shrink. The rail's flex-basis stays 320px so the promoted
- * rail never narrows past the standard rail width. */
-.shell .session-pane.workspace-collapsed .session-conversation { flex-grow: 1; }
+/* Workspace folded (ADR-0083, issue #298): 4-track grid centers the
+ * conversation when the workspace folds. Tracks: [left-spacer] [conversation]
+ * [workspace] [right-spacer]. Left/right spacers grow 0fr -> 1fr equally so
+ * the conversation slides to center; the workspace column shrinks 1fr -> 0fr.
+ * Every track interpolates (fr->fr, minmax px->px) so no jitter. */
+/* Default (narrow container): spacers stay 0fr -- conversation fills width,
+ * no centering, no jitter. */
+.shell .session-pane.workspace-collapsed .session-body {
+  grid-template-columns: 0fr minmax(0, 800px) 0fr 0fr;
+}
+/* Wide viewport: spacers grow 1fr to center the conversation. */
+@media (min-width: 1280px) {
+  .shell .session-pane.workspace-collapsed .session-body {
+    grid-template-columns: 1fr minmax(0, 800px) 0fr 1fr;
+  }
+}
+/* Sidebar collapsed: container = full viewport, so lower threshold suffices. */
+@media (min-width: 900px) {
+  .shell.sidebar-collapsed .session-pane.workspace-collapsed .session-body {
+    grid-template-columns: 1fr minmax(0, 800px) 0fr 1fr;
+  }
+}
 .shell .session-pane.workspace-collapsed .session-rail { border-right-color: transparent; }
 .shell .session-pane.workspace-collapsed .session-workspace {
-  flex-grow: 0;
-  opacity: 0;
-  visibility: hidden;
   pointer-events: none;
-  min-width: 0;
-  overflow: hidden;
-  /* Fade out, then flip visibility at the end (removes the folded panel from
-   * tab order + the a11y tree); the expanded rule's 0s delay flips it back
-   * instantly on open. */
-  transition: flex-grow 280ms cubic-bezier(0.4, 0, 0.2, 1), opacity 200ms ease, visibility 0s linear 200ms;
 }
 /* Session header (row 1): the session name + the workspace toggle. Moved out
    of the global topbar so session-scoped chrome
@@ -342,26 +352,27 @@
   border-bottom: 1px solid var(--border);
   background: var(--background);
 }
-/* Flex row: conversation + workspace. Conversation is a flex column
- * containing rail + questionbar, so questionbar always tracks rail width.
- * Workspace is a flex sibling. */
+/* Grid row: conversation + workspace. Same grid-template-columns slide
+ * pattern as the shell sidebar -- the transition on grid-template-columns
+ * makes the column boundary slide smoothly (320px 1fr <-> 800px 0fr).
+ * background prevents white flash during the slide. */
 .session-body {
   grid-column: 1; grid-row: 2;
-  display: flex;
+  display: grid;
+  grid-template-columns: 0fr minmax(0, 320px) 1fr 0fr;
   overflow: hidden;
   min-height: 0;
+  background: var(--background);
+  transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
 }
-/* Conversation column: rail (flex:1) + questionbar (flex-shrink:0). Its
- * flex-basis (320px) drives the column width; workspace-collapsed grows
- * flex-grow 0 -> 1 to let rail-as-primary fill the pane. */
+/* Conversation column: rail (flex:1) + questionbar (flex-shrink:0). Placed in
+ * grid-column 2 (track 2 of the 4-track grid). Internally still a flex column. */
 .session-conversation {
-  flex: 0 0 320px;
+  grid-column: 2;
   min-width: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  transition: flex-grow 280ms cubic-bezier(0.4, 0, 0.2, 1),
-    flex-basis 280ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .session-rail {
@@ -370,8 +381,8 @@
   overflow-x: hidden;
   overflow-y: auto;
   border-right: 1px solid var(--border);
-  background: var(--card);
-  padding: 0.5rem;
+  background: var(--background);
+  padding: 0.5rem 1.75rem;
   transition: opacity 200ms ease,
     padding 200ms ease,
     border-right-width 200ms ease,
@@ -384,13 +395,11 @@
    p-2); the class hook had no selector / test dependent and is dropped. */
 
 .session-workspace {
-  flex: 1 1 0;
+  grid-column: 3;
   min-width: 0;
-  overflow-y: auto;
+  overflow: hidden auto;
   display: flex; flex-direction: column;
-  /* Expanded-state motion pair of the .workspace-collapsed rule above: the
-   * visibility flip is instant on open (0s delay) so the panel fades in. */
-  transition: flex-grow 280ms cubic-bezier(0.4, 0, 0.2, 1), opacity 200ms ease, visibility 0s linear 0s;
+  background: var(--card);
 }
 /* ADR-0067 (issue #173): the workspace + textual-card VISUAL rules retired
  * into SessionPane.tsx + App.tsx as Tailwind utility + ADR-0050 token. The
@@ -412,19 +421,19 @@
 /* Composer control row. ADR-0083 (issue #298, evolving ADR-0062 R1): the bar
    sits inside the conversation flex column (rail + questionbar) so the
    composer belongs to the conversation surface + its width always tracks
-   the rail. Issue #350: the row's children are the three-slot skeleton ([+]
-   / approval mode / runtime -- the .composer-slot-* hooks ride SessionPane)
-   + the flex-1 question input; the rail-as-primary width floor above is
-   what fits the three entries when the workspace folds.
+   the rail. The QuestionBar is now the unified container (rounded border +
+   shadow); the .session-questionbar is the flex-shrink layout shell that
+   pads the container inside the conversation column. The .composer-slot-*
+   hooks are retired (the slots pass as QuestionBar children, not separate
+   divs); .session-questionbar stays as the layout hook.
    ADR-0067 (issue #172): the .question-bar input/button visual rules (focus
    outline, primary submit, outline cancel) retired into shadcn Input +
    Button variants on QuestionBar.tsx; .session-questionbar stays as the
    flex-shrink layout shell. */
 .session-questionbar {
   flex-shrink: 0;
-  border-top: 1px solid var(--border);
   background: var(--background);
-  padding: 0.5rem 1rem;
+  padding: 0.5rem 1.75rem 1rem;
 }
 
 /* Phase indicator (ADR-0059 discrete phase feedback). Sits between the input
