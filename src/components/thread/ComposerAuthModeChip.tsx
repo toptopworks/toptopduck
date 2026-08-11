@@ -21,7 +21,7 @@ import { Select, SelectContent, SelectTrigger, SelectValue } from "../ui/select"
 // no-confirmation (ShieldAlert icon, every external tool call auto-passes
 // through the gateway). The posture is session-scoped and resume-resetting --
 // the backend (`open_duck` -> `reset_approval`) returns it to per_call on a
-// resume, and this chip re-reads it via the session-keyed query (a resume
+// resume, and this Select re-reads it via the session-keyed query (a resume
 // mints a NEW session id whose fresh SessionPane mount issues the read). The
 // no-confirmation trigger face rides the --warning token: the posture is an
 // explicit informed widening, and the warning hue marks it while it is on
@@ -35,7 +35,7 @@ import { Select, SelectContent, SelectTrigger, SelectValue } from "../ui/select"
 //
 // Reads + writes go through the get/set authorization-mode IPC (#294); a
 // rejected write (session dropped mid-flight, mid-resume swap) keeps the
-// server posture -- the chip resyncs via refetch and never shows a posture
+// server posture -- the Select resyncs via refetch and never shows a posture
 // the backend did not grant. A rejected READ is surfaced via log.warn.
 
 export type ComposerAuthModeChipProps = {
@@ -92,7 +92,7 @@ export function ComposerAuthModeChip({ sessionId }: ComposerAuthModeChipProps) {
   }, [isError, error, intl]);
 
   async function handleChange(next: AuthMode) {
-    if (switching) return;
+    if (switching || next === mode) return;
     setSwitching(true);
     try {
       await setAuthorizationMode(sessionId, next);
@@ -139,7 +139,7 @@ export function ComposerAuthModeChip({ sessionId }: ComposerAuthModeChipProps) {
       <SelectTrigger
         aria-label={ariaLabel}
         className={cn(
-          "composer-auth-mode-chip gap-1.5 px-2.5",
+          "gap-1.5 px-2.5",
           noConfirmation ? TRIGGER_WARNING : TRIGGER_NEUTRAL,
         )}
       >
@@ -190,7 +190,7 @@ function AuthModeItem({
       data-slot="select-item"
       value={value}
       className={cn(
-        "focus:bg-accent relative flex flex-col gap-0.5 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none",
+        "focus:bg-accent hover:bg-accent relative flex flex-col gap-0.5 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none",
         // The warning item keeps its --warning text on hover (only the
         // background shifts); the neutral item follows the standard accent
         // text swap.

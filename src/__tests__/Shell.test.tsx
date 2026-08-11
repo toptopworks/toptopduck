@@ -1922,7 +1922,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     await openSession();
     const bar = document.querySelector(".question-bar");
     expect(bar).toBeInTheDocument();
-    // The unified container holds the trigger (+), auth-mode chip, and the
+    // The unified container holds the trigger (+), auth-mode Select, and the
     // textarea -- all inside .question-bar (ADR-0083 composer row restructured
     // into a single container).
     const trigger = screen.getByRole("button", { name: "添加文件" });
@@ -1948,19 +1948,19 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     // system) the trigger is the degraded pure add-files button.
     const trigger = screen.getByRole("button", { name: "添加文件" });
     expect(bar?.contains(trigger)).toBe(true);
-    // Issue #352: the chip reads the session's posture (per_call default) and
-    // renders INSIDE the question-bar, not as a loose sibling.
-    const chip = await screen.findByRole("combobox", { name: "授权模式：请求批准" });
-    expect(bar?.contains(chip)).toBe(true);
+    // Issue #352: the Select reads the session's posture (per_call default)
+    // and renders INSIDE the question-bar, not as a loose sibling.
+    const authTrigger = await screen.findByRole("combobox", { name: "授权模式：请求批准" });
+    expect(bar?.contains(authTrigger)).toBe(true);
   });
 
-  it("toggles the auth-mode chip to no-confirmation with the warning color (ADR-0080)", async () => {
+  it("switches the auth-mode Select to no-confirmation with the warning color (ADR-0080)", async () => {
     render(<App />);
     await openSession();
-    const chip = await screen.findByRole("combobox", { name: "授权模式：请求批准" });
+    const authTrigger = await screen.findByRole("combobox", { name: "授权模式：请求批准" });
 
-    fireEvent.pointerDown(chip, { button: 0, pointerType: "mouse" });
-    fireEvent.click(chip);
+    fireEvent.pointerDown(authTrigger, { button: 0, pointerType: "mouse" });
+    fireEvent.click(authTrigger);
 
     const option = await screen.findByRole("option", { name: /完全访问权限/ });
     fireEvent.pointerUp(option, { button: 0, pointerType: "mouse" });
@@ -1983,7 +1983,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     // chip re-reads it for the NEW sid and renders the landed value -- NOT a
     // hardcoded default. Pin a non-default read (no_confirmation) so a
     // regression that ignores the backend would fail (the beforeEach default
-    // is per_call, which a hardcoded-default chip would also render).
+    // is per_call, which a hardcoded-default Select would also render).
     vi.mocked(listSessions).mockResolvedValue([
       {
         duck_path: "/x/persisted.duck",
@@ -2004,7 +2004,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     await waitFor(() =>
       expect(getAuthorizationMode).toHaveBeenCalledWith("sess-resume"),
     );
-    // The chip renders the backend's actual answer for the NEW sid, not a
+    // The Select renders the backend's actual answer for the NEW sid, not a
     // hardcoded per_call default.
     expect(
       await screen.findByRole("combobox", { name: "授权模式：完全访问权限" }),
@@ -2020,7 +2020,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     const removeSpy = vi.spyOn(QueryClient.prototype, "removeQueries");
     render(<App />);
     await openSession();
-    // The chip populated the authMode cache for sess-1.
+    // The Select populated the authMode cache for sess-1.
     await screen.findByRole("combobox", { name: "授权模式：请求批准" });
     removeSpy.mockClear(); // isolate close's own removeQueries call
     // Open the context menu on the one open entry, then Close.

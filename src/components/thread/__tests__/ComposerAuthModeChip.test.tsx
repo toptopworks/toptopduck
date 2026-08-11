@@ -64,6 +64,8 @@ describe("ComposerAuthModeChip (ADR-0080, issue #482)", () => {
     // The neutral face rides the composer chrome tokens, not the warning hue.
     expect(trigger.className).toContain("bg-card");
     expect(trigger.className).not.toContain("bg-warning");
+    // The ItemText → SelectValue echo surfaces the mode label in the trigger.
+    expect(trigger).toHaveTextContent("Request approval");
   });
 
   it("renders the warning-styled trigger when the session is no_confirmation", async () => {
@@ -112,7 +114,7 @@ describe("ComposerAuthModeChip (ADR-0080, issue #482)", () => {
 
     await waitFor(() => expect(setAuthorizationMode).toHaveBeenCalled());
     // The resync refetch lands the backend truth (per_call): the trigger never
-    // shows the toggled posture.
+    // shows the selected posture.
     await waitFor(() =>
       expect(screen.getByRole("combobox", { name: PER_CALL_NAME })).toBeInTheDocument(),
     );
@@ -144,7 +146,7 @@ describe("ComposerAuthModeChip (ADR-0080, issue #482)", () => {
   });
 
   it("shows the honest default face while the session read is pending", async () => {
-    // The read stays pending forever: the chip still renders the default
+    // The read stays pending forever: the trigger still renders the default
     // per-call posture (the backend default), never a blank slot.
     vi.mocked(getAuthorizationMode).mockReturnValue(new Promise(() => {}));
     renderChip();
