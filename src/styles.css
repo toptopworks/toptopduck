@@ -124,15 +124,34 @@
   bottom: 0;
   left: var(--sidebar-width, 238px);
   width: 6px;
-  margin-left: -3px; /* center the 6px strip on the column boundary */
+  margin-left: -3px; /* center the 6px hit area on the column boundary */
   cursor: col-resize;
-  z-index: 10;
+  z-index: 12; /* above .session-pane-host (z-index: 11) so the full hit
+                 area stays interactive — without this the session content
+                 background covers the right half after switching to a session. */
   touch-action: none;
+}
+/* Thin 2px visual line inside the 6px hit area. Fixed left:2px (not 50%)
+   to avoid sub-pixel rounding that thins the line on high-DPI displays. */
+.sidebar-resize-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  background-color: transparent;
   transition: background-color 120ms ease;
 }
-.sidebar-resize-handle:hover,
-.sidebar-resize-handle.dragging {
+.sidebar-resize-handle:hover::before,
+.shell.sidebar-dragging .sidebar-resize-handle::before {
   background-color: var(--border);
+}
+/* Suppress the sidebar's border-r under the handle so hover/drag shows a
+   single 1px line instead of a doubled 2px. */
+.shell:has(.sidebar-resize-handle:hover) .session-sidebar,
+.shell.sidebar-dragging .session-sidebar {
+  border-right-color: transparent;
 }
 .shell.sidebar-collapsed .sidebar-resize-handle,
 .shell.settings-mode .sidebar-resize-handle {
@@ -355,22 +374,77 @@
 }
 /* Grid row: conversation + workspace. Same grid-template-columns slide
  * pattern as the shell sidebar -- the transition on grid-template-columns
- * makes the column boundary slide smoothly (320px 1fr <-> 800px 0fr).
- * background prevents white flash during the slide. */
+ * makes the column boundary slide smoothly (rail-width 1fr <-> 800px 0fr).
+ * background prevents white flash during the slide.
+ *
+ * --rail-width (set inline on .shell by useRailResize) drives the
+ * conversation column's max width so the user can drag-resize the
+ * conversation/workspace boundary, mirroring the sidebar resize pattern.
+ * position:relative anchors the absolutely-positioned .rail-resize-handle. */
 .session-body {
   grid-column: 1; grid-row: 2;
+  position: relative;
   display: grid;
-  grid-template-columns: 0fr minmax(0, 320px) 1fr 0fr;
+  grid-template-columns: 0fr minmax(0, var(--rail-width, 350px)) 1fr 0fr;
   overflow: hidden;
   min-height: 0;
   background: var(--background);
   transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
 }
+/* Disable grid-template-columns transition during rail drag so the column
+   tracks the pointer 1:1 instead of lagging behind a 280ms animation. */
+.shell.rail-dragging .session-body,
+.shell.sidebar-dragging .session-body { transition: none; }
+/* Draggable rail resize handle (conversation/workspace boundary). A thin
+   strip straddling the col-2/col-3 boundary; absolutely positioned so it
+   does not perturb the grid flow. The --rail-width variable (set inline on
+   .shell by useRailResize) drives left placement. Hidden when the workspace
+   is folded (.workspace-collapsed) -- the 4-track grid reflows for centering
+   and the boundary no longer maps to --rail-width. touch-action:none prevents
+   the browser from interpreting the drag as a pan/zoom. */
+.rail-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--rail-width, 350px);
+  width: 6px;
+  margin-left: -3px; /* center the 6px hit area on the column boundary */
+  cursor: col-resize;
+  z-index: 10;
+  touch-action: none;
+}
+/* Thin 2px visual line inside the 6px hit area. Fixed left:2px (not 50%)
+   to avoid sub-pixel rounding that thins the line on high-DPI displays. */
+.rail-resize-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  background-color: transparent;
+  transition: background-color 120ms ease;
+}
+.rail-resize-handle:hover::before,
+.shell.rail-dragging .rail-resize-handle::before {
+  background-color: var(--border);
+}
+/* Suppress the .session-rail permanent border-right under the handle so
+   hover/drag shows a single 1px line instead of a doubled 2px. */
+.session-body:has(.rail-resize-handle:hover) .session-rail,
+.shell.rail-dragging .session-rail {
+  border-right-color: transparent;
+}
+.session-pane.workspace-collapsed .rail-resize-handle {
+  display: none;
+}
 /* Conversation column: rail (flex:1) + questionbar (flex-shrink:0). Placed in
  * grid-column 2 (track 2 of the 4-track grid). Internally still a flex column. */
 .session-conversation {
   grid-column: 2;
-  min-width: 0;
+  /* Floor matches useRailResize MIN_WIDTH clamp (280px). Below this the
+     QuestionBar toolbar compresses but stays functional via overflow scroll. */
+  min-width: 280px;
   display: flex;
   flex-direction: column;
   overflow: hidden;

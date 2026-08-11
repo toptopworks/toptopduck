@@ -123,6 +123,7 @@ function renderPane(locale: EffectiveLocale = "zh-CN", sessionName = "Test sessi
         onFirstTurnSettled={() => {}}
         approvalEvents={approvalEvents}
         onOpenSettingsSkills={() => {}}
+        onRailResizeStart={() => {}}
       />,
     ),
   );

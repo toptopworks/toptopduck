@@ -11,6 +11,7 @@ import { usePersistedSessions } from "./shell/usePersistedSessions";
 import { useShellSessions } from "./shell/useShellSessions";
 import { useAppConfigState } from "./shell/useAppConfigState";
 import { useSidebarResize } from "./shell/useSidebarResize";
+import { useRailResize } from "./shell/useRailResize";
 import type { AppConfig } from "./types/app-config";
 import { usePlatform } from "./shell/use-platform";
 import type { KeyStatus } from "./types/provider";
@@ -169,7 +170,23 @@ export default function App() {
   // Frontend-only localStorage persistence; the width is exposed as a CSS
   // custom property on .shell so the grid + resize handle consume it without
   // a hardcoded px value.
-  const { width: sidebarWidth, isDragging: sidebarDragging, onResizeStart: onSidebarResizeStart } = useSidebarResize();
+  // --- Draggable sidebar width (useSidebarResize) ---------------------------
+  // Frontend-only localStorage persistence; the width is exposed as a CSS
+  // custom property on .shell so the grid + resize handle consume it without
+  // a hardcoded px value.
+  // The rail width is declared first so the sidebar hook can compensate it
+  // (sidebar grows → rail shrinks by the same delta, keeping the workspace
+  // visually fixed, like Codex's right-side drag).
+  // --- Draggable conversation-rail width (useRailResize) -------------------
+  // Mirrors the sidebar resize pattern: frontend-only localStorage persistence
+  // + a CSS custom property (--rail-width) on .shell consumed by the
+  // session-body grid. The handle is per-SessionPane but the width is global
+  // so it stays consistent across keep-alive session switches.
+  const { width: railWidth, isDragging: railDragging, onResizeStart: onRailResizeStart, adjustWidth: adjustRailWidth } = useRailResize();
+
+  const { width: sidebarWidth, isDragging: sidebarDragging, onResizeStart: onSidebarResizeStart } = useSidebarResize({
+    onDelta: (delta) => adjustRailWidth(-delta),
+  });
 
   // --- Session shell (issue #195) -----------------------------------------
   // usePersistedSessions: the disk-derived sidebar list (ADR-0061 cold start;
@@ -346,8 +363,8 @@ export default function App() {
           >
             <NavigationHistoryProvider location={location} restore={restore}>
               <div
-                className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${sidebarDragging ? " sidebar-dragging" : ""}${settingsView.open ? " settings-mode" : ""}${settingsNavCollapsed ? " settings-nav-collapsed" : ""}`}
-                style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
+                className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${sidebarDragging ? " sidebar-dragging" : ""}${railDragging ? " rail-dragging" : ""}${settingsView.open ? " settings-mode" : ""}${settingsNavCollapsed ? " settings-nav-collapsed" : ""}`}
+                style={{ "--sidebar-width": `${sidebarWidth}px`, "--rail-width": `${railWidth}px` } as CSSProperties}
               >
                 {/* Col 1: session sidebar (ADR-0060) -- full height, independent
               column (R1: QuestionBar does NOT span over it). */}
@@ -533,6 +550,10 @@ export default function App() {
                                 }
                               : undefined
                           }
+                          // Draggable rail resize handle (per-pane render, but
+                          // the width is shell-owned via --rail-width so it stays
+                          // consistent across keep-alive session switches).
+                          onRailResizeStart={onRailResizeStart}
                         />
                       </ErrorBoundary>
                     </div>
