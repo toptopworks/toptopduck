@@ -53,7 +53,7 @@ import { PRESET_CUSTOM, derivePresetId, findPreset } from "./provider-presets";
 // is held in memory -- `addingProfile` -- and never listed until committed; its
 // key can still be set first via the ADR-0064 orphan slot), delete commits on
 // confirm (last profile guarded), and set-active commits at once (mirroring the
-// top-bar quick-switcher + a keyStatus refresh). The API-key field keeps its OWN
+// top-bar quick-switcher). The API-key field keeps its OWN
 // immediate Set/Clear IPC (ADR-0029 -- the key never enters app-config) and does
 // NOT participate in the blur / create commit.
 
@@ -85,9 +85,6 @@ export type ProfilesSectionProps = {
   /** Commit a patch (optimistic); on IPC failure the parent reverts + returns
    *  the formatted error (null on success). */
   onCommit: (mutate: (cfg: AppConfig) => AppConfig) => Promise<string | null>;
-  /** Re-read the active profile's keychain slot after a set-active switch so the
-   *  connection row + header indicator reflect the new slot (ADR-0029). */
-  onRefreshKeyStatus: () => void;
   /** Mirror key / test IPC in-flight transitions to the parent's close guard,
    *  which outlives this pane: the field reports from its IPC finally block,
    *  which runs even after a section switch unmounts the pane, so close stays
@@ -180,7 +177,6 @@ function pickInitialSelectedId(
 export function ProfilesSection({
   provider,
   onCommit,
-  onRefreshKeyStatus,
   onIpcBusy,
   initialEditProfileId,
   controlsRef,
@@ -385,9 +381,6 @@ export function ProfilesSection({
     }));
     setCommitBusy(false);
     setFormError(err);
-    // Reflect the new active profile's keychain slot immediately (the settings
-    // connection row + header indicator bind keyStatus).
-    onRefreshKeyStatus();
   }
 
   // Selecting a list item. The in-progress new-profile edits are stashed onto

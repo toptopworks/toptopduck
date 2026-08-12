@@ -89,12 +89,6 @@ vi.mock("../api", async (importOriginal) => {
     onApprovalResolved: vi.fn(async () => () => {}),
     respondToolApproval: vi.fn(async () => {}),
     readRows: vi.fn(),
-    getProviderConfig: vi.fn(async () => ({
-      base_url: "https://api.anthropic.com",
-      model: "claude-sonnet-4-6",
-      has_key: true,
-      keychain_fault: null,
-    })),
     // listProviderProfiles feeds the per-profile has_key overlay consumed by
     // ColdStartHero + ComposerProviderPicker (mounted via SessionPane) on App
     // mount. Default empty; no Shell.test override relies on a populated overlay.
@@ -141,7 +135,6 @@ import {
   deleteSession,
   getAppConfig,
   getAuthorizationMode,
-  getProviderConfig,
   getSessionRuntime,
   ingestFile,
   listAdapters,
@@ -1595,7 +1588,7 @@ describe("App session soft-cap hint (ADR-0046/0050, issue #108)", () => {
   });
 });
 
-describe("App topbar header actions + sidebar connection footer (issue #182 / #282)", () => {
+describe("App topbar header actions + sidebar settings footer (issue #182 / #282)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     state.workingSet = [];
@@ -1621,99 +1614,29 @@ describe("App topbar header actions + sidebar connection footer (issue #182 / #2
     // (.settings-mode hides the shell but SettingsView does not render, no
     // ESC exit). The sidebar footer's render-when-ready keeps the state
     // unreachable -- the sidebar itself mounts (cold start) but carries no
-    // gear + connection row while the config stays pending (the beforeEach
-    // holds getAppConfig pending).
+    // gear while the config stays pending (the beforeEach holds getAppConfig
+    // pending).
     render(<App />);
     await waitFor(() =>
       expect(document.querySelector(".session-sidebar")).toBeInTheDocument(),
     );
     expect(screen.queryByRole("button", { name: "设置" })).toBeNull();
-    expect(document.querySelector(".session-sidebar .connection-status")).toBeNull();
+    expect(document.querySelector(".session-sidebar .sidebar-footer")).toBeNull();
   });
 
-  it("mounts the sidebar gear + connection row once appConfig resolves", async () => {
+  it("mounts the sidebar settings gear once appConfig resolves", async () => {
     vi.mocked(getAppConfig).mockResolvedValue(
       baseAppConfig({ sidebar_collapsed: false }),
     );
     render(<App />);
-    // The gear (workspace half of the dual-state toggle) + the connection row
-    // carrying the active profile land at the sidebar bottom.
+    // The settings gear lands at the sidebar bottom once app-config resolves
+    // (the connection row + status dot were retired with ConnectionStatus).
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument(),
     );
-    const sidebar = document.querySelector(".session-sidebar") as HTMLElement;
-    expect(within(sidebar).getByText("Anthropic")).toBeInTheDocument();
-  });
-
-  it("anchors the connected dot on the --primary token (ADR-0050, issue #182/#282)", async () => {
-    // The key-state visual moved from the topbar badge (hardcoded #1a7a3a /
-    // #b06000, later a shadcn Badge + text-primary / text-warning) to the
-    // sidebar connection row's status dot, re-anchored on the same ADR-0050
-    // semantic tokens: bg-primary (connected), bg-warning (no key),
-    // bg-destructive (keychain fault).
-    vi.mocked(getAppConfig).mockResolvedValue(
-      baseAppConfig({ sidebar_collapsed: false }),
-    );
-    vi.mocked(getProviderConfig).mockResolvedValue({
-      base_url: "https://api.anthropic.com",
-      model: "claude-sonnet-4-6",
-      has_key: true,
-      keychain_fault: null,
-    });
-    render(<App />);
-    await waitFor(() => {
-      const row = document.querySelector(
-        ".session-sidebar .connection-row",
-      ) as HTMLElement;
-      expect(row).not.toBeNull();
-      expect(row.querySelector(".rounded-full")?.classList.contains("bg-primary")).toBe(true);
-      expect(within(row).getByText("已连接")).toBeInTheDocument();
-    });
-  });
-
-  it("anchors the no-key dot on the --warning token + reads 无 key", async () => {
-    vi.mocked(getAppConfig).mockResolvedValue(
-      baseAppConfig({ sidebar_collapsed: false }),
-    );
-    vi.mocked(getProviderConfig).mockResolvedValue({
-      base_url: "https://api.anthropic.com",
-      model: "claude-sonnet-4-6",
-      has_key: false,
-      keychain_fault: null,
-    });
-    render(<App />);
-    await waitFor(() => {
-      const row = document.querySelector(
-        ".session-sidebar .connection-row",
-      ) as HTMLElement;
-      expect(row).not.toBeNull();
-      expect(row.querySelector(".rounded-full")?.classList.contains("bg-warning")).toBe(true);
-      expect(within(row).getByText("无 key")).toBeInTheDocument();
-    });
-  });
-
-  it("renders the keychain-unavailable row when the active read faults (issue #275)", async () => {
-    // The pre-#275 honest-degrade hid a keychain read fault behind
-    // has_key=false; the row now carries keychain_fault and reads 密钥库不可用
-    // + the destructive dot instead of misreading as "no key configured".
-    vi.mocked(getAppConfig).mockResolvedValue(
-      baseAppConfig({ sidebar_collapsed: false }),
-    );
-    vi.mocked(getProviderConfig).mockResolvedValue({
-      base_url: "https://api.anthropic.com",
-      model: "claude-sonnet-4-6",
-      has_key: false,
-      keychain_fault: "keychain access failed: locked",
-    });
-    render(<App />);
-    await waitFor(() => {
-      const row = document.querySelector(
-        ".session-sidebar .connection-row",
-      ) as HTMLElement;
-      expect(row).not.toBeNull();
-      expect(row.querySelector(".rounded-full")?.classList.contains("bg-destructive")).toBe(true);
-      expect(within(row).getByText("密钥库不可用")).toBeInTheDocument();
-    });
+    expect(
+      document.querySelector(".session-sidebar .sidebar-footer"),
+    ).not.toBeNull();
   });
 });
 

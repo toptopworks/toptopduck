@@ -52,7 +52,6 @@ function renderSection(overrides: Partial<React.ComponentProps<typeof RuntimeSec
   const props: React.ComponentProps<typeof RuntimeSection> = {
     provider,
     onCommit: vi.fn(),
-    onRefreshKeyStatus: vi.fn(),
     onIpcBusy: vi.fn(),
     profilesControlsRef: controlsRef,
     ...overrides,

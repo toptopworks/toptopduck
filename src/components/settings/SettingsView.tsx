@@ -6,16 +6,15 @@ import {
   Cable,
   Database,
   Puzzle,
+  Settings,
   ShieldCheck,
   SlidersHorizontal,
 } from "lucide-react";
 
 import { fmtError } from "../../lib/error-presentation";
 import type { AppConfig } from "../../types/app-config";
-import type { KeyStatus } from "../../types/provider";
 import { bareButtonReset } from "../../lib/buttonReset";
 import { cn } from "../../lib/utils";
-import { ConnectionStatus } from "../../shell/ConnectionStatus";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -27,6 +26,7 @@ import {
   AlertDialogTitle,
 } from "../ui/alert-dialog";
 import { Button } from "../ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import { EngineSection } from "./EngineSection";
 import { GeneralSection } from "./GeneralSection";
 import { McpSection } from "./McpSection";
@@ -118,7 +118,6 @@ function SectionContent({
   appConfig,
   onCommit,
   onSessionsDirChanged,
-  onRefreshKeyStatus,
   onIpcBusy,
   initialEditProfileId,
   initialRuntimeTab,
@@ -128,7 +127,6 @@ function SectionContent({
   appConfig: AppConfig;
   onCommit: (mutate: (cfg: AppConfig) => AppConfig) => Promise<string | null>;
   onSessionsDirChanged: (cfg: AppConfig) => void;
-  onRefreshKeyStatus: () => void;
   onIpcBusy: (channel: "key" | "test" | "sessionsDir", busy: boolean) => void;
   initialEditProfileId?: string;
   initialRuntimeTab?: RuntimeTab;
@@ -153,7 +151,6 @@ function SectionContent({
         <RuntimeSection
           provider={appConfig.provider}
           onCommit={onCommit}
-          onRefreshKeyStatus={onRefreshKeyStatus}
           onIpcBusy={onIpcBusy}
           initialEditProfileId={initialEditProfileId}
           initialRuntimeTab={initialRuntimeTab}
@@ -178,8 +175,6 @@ export function SettingsView({
   onCommitAppConfig,
   onSessionsDirChanged,
   onClose,
-  onRefreshKeyStatus,
-  keyStatus,
   section,
   onSectionChange,
   initialEditProfileId,
@@ -199,12 +194,6 @@ export function SettingsView({
   onSessionsDirChanged: (cfg: AppConfig) => void;
   // Called to exit back to the workspace (rail-top back, the gear, or ESC).
   onClose: () => void;
-  // Re-read the active profile's keychain slot (set-active switches inside the
-  // Profiles pane refresh the connection row, ADR-0029).
-  onRefreshKeyStatus: () => void;
-  // The active profile's key status (App-level), bound to the rail's connection
-  // row (the shared ConnectionStatus footer, issue #282).
-  keyStatus: KeyStatus;
   // The live settings section is controlled by the shell (issue #288): the
   // shell's back/forward history restores it, so SettingsView no longer owns it.
   section: SettingsSection;
@@ -350,8 +339,8 @@ export function SettingsView({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // The rail's "back to workspace" label (rail-top back button + the
-  // dual-state gear's accessible name / tooltip via ConnectionStatus).
+  // The rail's "back to workspace" label (rail-top back button + the footer
+  // gear's accessible name / tooltip).
   const backToWorkspaceLabel = intl.formatMessage({
     id: "settings.backToWorkspace",
     defaultMessage: "Back to workspace",
@@ -367,12 +356,12 @@ export function SettingsView({
       className="settings-overlay bg-background outline-none focus-visible:outline-none"
     >
       <nav
-        className="settings-nav border-border bg-muted/30 border-r"
+        className="settings-nav border-border bg-muted border-r p-2"
         aria-label="Settings sections"
         inert={collapsed}
       >
         {/* Rail top: back to workspace. */}
-        <div className="settings-rail-top border-border border-b px-2 pt-2 pb-2">
+        <div className="settings-rail-top border-border border-b pt-2 pb-2">
           <Button
             type="button"
             variant="ghost"
@@ -380,7 +369,7 @@ export function SettingsView({
             // settings-back hook class (ADR-0067 selector stability) so tests can
             // target the rail-top back button distinctly from the gear (both are
             // labelled "Back to workspace").
-            className="settings-back w-full justify-start gap-2"
+            className="settings-back w-full justify-start gap-2 text-muted-foreground"
             onClick={() => void requestClose()}
           >
             <ArrowLeft className="size-4" aria-hidden />
@@ -389,7 +378,7 @@ export function SettingsView({
         </div>
 
         {/* Nav list. */}
-        <div className="settings-nav-list flex-1 space-y-0.5 overflow-y-auto p-2">
+        <div className="settings-nav-list flex-1 space-y-0.5 overflow-y-auto">
           {SETTINGS_SECTIONS.map((s) => (
             <button
               key={s}
@@ -410,17 +399,23 @@ export function SettingsView({
           ))}
         </div>
 
-        {/* Rail bottom: the shared connection status row + dual-state gear
-            (issue #282). Here the gear reads "back to workspace" and the row
-            jumps to the Runtime pane; the workspace sidebar renders the same
-            component with the open-settings half of the semantic. */}
-        <ConnectionStatus
-          provider={appConfig.provider}
-          keyStatus={keyStatus}
-          gearLabel={backToWorkspaceLabel}
-          onGearClick={() => void requestClose()}
-          onRowClick={() => onSectionChange("runtime")}
-        />
+        {/* Rail bottom: the "back to workspace" gear (issue #282). */}
+        <div className="settings-footer border-border border-t p-2">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label={backToWorkspaceLabel}
+                onClick={() => void requestClose()}
+              >
+                <Settings className="size-4" aria-hidden />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{backToWorkspaceLabel}</TooltipContent>
+          </Tooltip>
+        </div>
       </nav>
 
       <main className="settings-content p-6">
@@ -430,7 +425,6 @@ export function SettingsView({
             appConfig={appConfig}
             onCommit={commitWithRevert}
             onSessionsDirChanged={handleSessionsDirChanged}
-            onRefreshKeyStatus={onRefreshKeyStatus}
             onIpcBusy={handlePaneIpcBusy}
             initialEditProfileId={initialEditProfileId}
             initialRuntimeTab={initialRuntimeTab}

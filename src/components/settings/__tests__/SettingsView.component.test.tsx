@@ -55,16 +55,12 @@ function SettingsViewHarness({
   onCommitAppConfig,
   onSessionsDirChanged,
   onClose,
-  onRefreshKeyStatus,
-  keyStatus,
   initialSection,
 }: {
   appConfig: AppConfig;
   onCommitAppConfig: Mock<CommitFn>;
   onSessionsDirChanged: (cfg: AppConfig) => void;
   onClose: () => void;
-  onRefreshKeyStatus: () => void;
-  keyStatus: { has_key: boolean; keychain_fault: string | null };
   initialSection: SettingsSection;
 }) {
   const [section, setSection] = useState<SettingsSection>(initialSection);
@@ -77,8 +73,6 @@ function SettingsViewHarness({
       onCommitAppConfig={onCommitAppConfig}
       onSessionsDirChanged={onSessionsDirChanged}
       onClose={onClose}
-      onRefreshKeyStatus={onRefreshKeyStatus}
-      keyStatus={keyStatus}
     />
   );
 }
@@ -146,26 +140,21 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     vi.mocked(rescanAdapters).mockResolvedValue(mockAdapters);
   });
 
-  // Shared render harness: SettingsView now requires the key-status seam
-  // (keyStatus for the rail connection row) + onRefreshKeyStatus (set-active
-  // refresh) + a controlled section (issue #288: the section is shell-owned so
-  // the back/forward history can restore it; SettingsViewHarness owns it with
-  // useState the way the shell does). Returns the RTL result + the seam mocks.
+  // Shared render harness: SettingsView requires a controlled section (issue
+  // #288: the section is shell-owned so the back/forward history can restore
+  // it; SettingsViewHarness owns it with useState the way the shell does).
+  // Returns the RTL result + the seam mocks.
   function renderView({
     appConfig = baseConfig,
     onCommitAppConfig = vi.fn<CommitFn>().mockResolvedValue(undefined),
     onSessionsDirChanged = vi.fn(),
     onClose = vi.fn(),
-    onRefreshKeyStatus = vi.fn(),
-    keyStatus = { has_key: true, keychain_fault: null },
     initialSection = "general",
   }: {
     appConfig?: AppConfig;
     onCommitAppConfig?: Mock<CommitFn>;
     onSessionsDirChanged?: (cfg: AppConfig) => void;
     onClose?: () => void;
-    onRefreshKeyStatus?: () => void;
-    keyStatus?: { has_key: boolean; keychain_fault: string | null };
     initialSection?: SettingsSection;
   } = {}) {
     const result = renderSettings(
@@ -174,12 +163,10 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
         onCommitAppConfig={onCommitAppConfig}
         onSessionsDirChanged={onSessionsDirChanged ?? (() => undefined)}
         onClose={onClose}
-        onRefreshKeyStatus={onRefreshKeyStatus}
-        keyStatus={keyStatus}
         initialSection={initialSection}
       />,
     );
-    return { ...result, onCommitAppConfig, onClose, onRefreshKeyStatus };
+    return { ...result, onCommitAppConfig, onClose };
   }
 
   // Radix Select in jsdom: the trigger opens on a primary pointer-down + click;
@@ -451,7 +438,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
-  // --- Rail chrome: nav, connection row, dual-state gear -------------------
+  // --- Rail chrome: nav, footer gear ---------------------------------------
 
   it("switches panes via the icon rail nav", async () => {
     renderView();
@@ -462,27 +449,6 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     expect(screen.getByRole("note")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
     expect(await screen.findByRole("button", { name: "New profile" })).toBeInTheDocument();
-  });
-
-  it("connection row shows the active profile + key status and jumps to Profiles", async () => {
-    const { container } = renderView();
-    const row = container.querySelector(".connection-row") as HTMLElement;
-    expect(row).not.toBeNull();
-    expect(within(row).getByText("Anthropic")).toBeInTheDocument();
-    expect(within(row).getByText("Connected")).toBeInTheDocument();
-    fireEvent.click(row);
-    expect(await screen.findByRole("button", { name: "New profile" })).toBeInTheDocument();
-  });
-
-  it("connection row reads Keychain unavailable on a keychain fault", () => {
-    const { container } = renderView({
-      keyStatus: { has_key: false, keychain_fault: "locked" },
-    });
-    expect(
-      within(container.querySelector(".connection-row") as HTMLElement).getByText(
-        "Keychain unavailable",
-      ),
-    ).toBeInTheDocument();
   });
 
   it("the rail-top back button closes the view", async () => {
@@ -570,7 +536,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
 
   it("set-active commits immediately and refreshes key status", async () => {
     vi.mocked(listProviderProfiles).mockResolvedValue(twoProfileKeys);
-    const { onCommitAppConfig, onRefreshKeyStatus } = renderView({
+    const { onCommitAppConfig } = renderView({
       appConfig: twoProfileConfig,
     });
     fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
@@ -578,7 +544,6 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     fireEvent.click(await screen.findByRole("button", { name: "Set as active" }));
     await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalled());
     expect(onCommitAppConfig.mock.calls[0][0].provider.active_profile).toBe("second");
-    expect(onRefreshKeyStatus).toHaveBeenCalled();
   });
 
   it("set key is immediate IPC and reports upward (ADR-0029 one-shot)", async () => {

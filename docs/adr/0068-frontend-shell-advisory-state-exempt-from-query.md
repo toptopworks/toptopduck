@@ -56,3 +56,4 @@ ADR-0051 收口前端状态分层为「服务端态走 Query + 客户端 UI 态�
 - **出口保留**:若未来 advisory state 出现一致性 bug(如 sessions 列表与磁盘不同步),可作为该子项拆出走 Query 的触发点。
 - **CONTEXT.md 不动**:shell 层 advisory state 是实现/状态管理决策,不引入新领域术语——app-config(0038 preference)/ sessions(0060 派生元数据)/ provider config(0029/0064)全是已定义术语。
 - **被 ADR-0075 澄清(设置侧调用,契约不变)**:设置侧调用 `commitAppConfig` 的 surfacing 与**逐控件持久化模型**(即时 / 失焦提交失败 = 补偿写回退 + 行内错;显式保存失败 = 仅行内错;全局 draft 退役)见 ADR-0075;本 ADR 的乐观-不回滚契约不变。
+- **`refreshKeyStatus` + App 级 `keyStatus` state 移除**:Decision 1 line 3 的 `get_provider_config`(`refreshKeyStatus`)已退役——App 不再持有 `keyStatus` state，`refreshKeyStatus` 回调从 `useAppConfigState`(mount + switch profile)和 `ProfilesSection.handleSetActive` 中同步移除。provider config 的 `has_key` 感知降级为 `profileKeyEpoch` invalidation（settings-close 时 bump，驱动 ComposerProviderPicker / ColdStartHero 的 per-profile overlay refetch，ADR-0019 honest gate）。连接状态行（唯一消费 `keyStatus` 的 UI）已删除，详见 ADR-0075 Consequences。

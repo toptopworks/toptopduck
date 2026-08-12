@@ -37,8 +37,7 @@ import { Button } from "../components/ui/button";
 //
 // Error: a fetch failure is logged and the prior snapshot is RETAINED. A
 // refetch error (epoch bump after a settings round-trip) keeps showing the
-// last-known state, mirroring App.refreshKeyStatus ("keep the previous
-// indicator"). On a FIRST-mount failure (no prior snapshot) the empty overlay
+// last-known state, retaining the previous snapshot. On a FIRST-mount failure (no prior snapshot) the empty overlay
 // yields has_key=false, directing the user to the "no-key" CTA -- the
 // conservative direction per the spec's "don't pretend ready when unconfigured"
 // (issue #239); Settings then surfaces the real key status, and the ask path
@@ -128,7 +127,7 @@ export function ColdStartHero({
       .catch((e: unknown) => {
         // Log, keep the prior snapshot, fall through to the ready appearance.
         // The hero is a guidance surface, not an error surface; the ask path
-        // surfaces real missing-key failures (mirrors App.refreshKeyStatus).
+        // surfaces real missing-key failures.
         log.warn("ColdStartHero", "list_provider_profiles failed", e);
       })
       .finally(() => {

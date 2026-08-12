@@ -7,14 +7,13 @@ import type { AppConfig } from "../../types/app-config";
 // the two collapse toggles) + the load / collapse-restore effects + the
 // locale / intl derived from appConfig.locale. These tests pin the contracts
 // hardest to assert through the App black-box (Shell.test.tsx): optimistic
-// commitAppConfig, the switchActiveProfile no-op guards + refreshKeyStatus
-// kick, the two independent collapse toggles writing through commitShellPrefs,
-// and the one-shot collapse restore from persisted prefs. The api mock stubs
-// getAppConfig / setAppConfig; the switchActiveProfile reject path runs the
-// real toAppError (imported from lib/error-presentation, outside the api
-// mock). Window geometry persistence moved to tauri_plugin_window_state
-// (issue #268), so this hook no longer touches the window -- no jsdom
-// window-bridge caveats apply.
+// commitAppConfig, the switchActiveProfile no-op guards, the two independent
+// collapse toggles writing through commitShellPrefs, and the one-shot collapse
+// restore from persisted prefs. The api mock stubs getAppConfig / setAppConfig;
+// the switchActiveProfile reject path runs the real toAppError (imported from
+// lib/error-presentation, outside the api mock). Window geometry persistence
+// moved to tauri_plugin_window_state (issue #268), so this hook no longer
+// touches the window -- no jsdom window-bridge caveats apply.
 
 vi.mock("../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api")>();
@@ -63,12 +62,11 @@ function baseAppConfig(shell: Pick<AppConfig["shell"], "sidebar_collapsed">): Ap
 }
 
 function renderAppConfigState() {
-  const refreshKeyStatus = vi.fn(async () => {});
   const setShellError = vi.fn();
   const helpers = renderHook(() =>
-    useAppConfigState({ setShellError, refreshKeyStatus }),
+    useAppConfigState({ setShellError }),
   );
-  return { ...helpers, refreshKeyStatus, setShellError };
+  return { ...helpers, setShellError };
 }
 
 describe("useAppConfigState", () => {
@@ -100,11 +98,6 @@ describe("useAppConfigState", () => {
     const { result } = renderAppConfigState();
     await waitFor(() => expect(result.current.appConfig).toBe(cfg));
     expect(getAppConfig).toHaveBeenCalledTimes(1);
-  });
-
-  it("kicks refreshKeyStatus once on mount so the header key indicator lands", async () => {
-    const { refreshKeyStatus } = renderAppConfigState();
-    await waitFor(() => expect(refreshKeyStatus).toHaveBeenCalledTimes(1));
   });
 
   it("commitAppConfig writes optimistically: state flips before the IPC resolves (ADR-0068)", async () => {
@@ -144,31 +137,29 @@ describe("useAppConfigState", () => {
   });
 
   it("switchActiveProfile is a no-op before app-config resolves (null guard)", async () => {
-    const { result, refreshKeyStatus } = renderAppConfigState();
+    const { result } = renderAppConfigState();
     expect(result.current.appConfig).toBeNull();
     await act(async () => {
       await result.current.switchActiveProfile("any");
     });
     expect(setAppConfig).not.toHaveBeenCalled();
-    expect(refreshKeyStatus).toHaveBeenCalledTimes(1); // mount-only
   });
 
   it("switchActiveProfile is a no-op when the id matches the active profile", async () => {
     const cfg = baseAppConfig({ sidebar_collapsed: false });
     vi.mocked(getAppConfig).mockResolvedValue(cfg);
-    const { result, refreshKeyStatus } = renderAppConfigState();
+    const { result } = renderAppConfigState();
     await waitFor(() => expect(result.current.appConfig).toBe(cfg));
     await act(async () => {
       await result.current.switchActiveProfile("default");
     });
     expect(setAppConfig).not.toHaveBeenCalled();
-    expect(refreshKeyStatus).toHaveBeenCalledTimes(1); // mount-only
   });
 
-  it("switchActiveProfile commits the new active_profile + kicks refreshKeyStatus (#154)", async () => {
+  it("switchActiveProfile commits the new active_profile (#154)", async () => {
     const cfg = baseAppConfig({ sidebar_collapsed: false });
     vi.mocked(getAppConfig).mockResolvedValue(cfg);
-    const { result, refreshKeyStatus } = renderAppConfigState();
+    const { result } = renderAppConfigState();
     await waitFor(() => expect(result.current.appConfig).toBe(cfg));
 
     await act(async () => {
@@ -180,15 +171,13 @@ describe("useAppConfigState", () => {
         provider: expect.objectContaining({ active_profile: "other" }),
       }),
     );
-    // Mount kick + the post-switch kick.
-    expect(refreshKeyStatus).toHaveBeenCalledTimes(2);
   });
 
   it("switchActiveProfile surfaces a setAppConfig reject via setShellError (no rollback)", async () => {
     const cfg = baseAppConfig({ sidebar_collapsed: false });
     vi.mocked(getAppConfig).mockResolvedValue(cfg);
     vi.mocked(setAppConfig).mockRejectedValueOnce(new Error("ipc down"));
-    const { result, setShellError, refreshKeyStatus } = renderAppConfigState();
+    const { result, setShellError } = renderAppConfigState();
     await waitFor(() => expect(result.current.appConfig).toBe(cfg));
 
     await act(async () => {
@@ -196,10 +185,6 @@ describe("useAppConfigState", () => {
     });
 
     expect(setShellError).toHaveBeenCalledTimes(1);
-    // The post-switch refreshKeyStatus kick is inside the try block after the
-    // await, so a reject skips it -- the count stays at the mount-only 1
-    // (pins the ordering vs the happy-path 2-kick case).
-    expect(refreshKeyStatus).toHaveBeenCalledTimes(1);
     // Optimistic write does NOT roll back: state keeps the new active_profile
     // even though the IPC failed (ADR-0068: live_config reads disk truth next).
     expect(result.current.appConfig?.provider.active_profile).toBe("other");
@@ -208,30 +193,26 @@ describe("useAppConfigState", () => {
   // --- switchActiveProfileModel (issue #238, ADR-0071) ---------------------
   // Sibling action to switchActiveProfile: writes profile.model onto the ACTIVE
   // profile via commitAppConfig (model is per-profile, not a global -- ADR-0064).
-  // No refreshKeyStatus kick: the profile id is unchanged, so the keychain slot
-  // the header indicator reads is unchanged (ADR-0029).
 
   it("switchActiveProfileModel is a no-op before app-config resolves (null guard)", async () => {
-    const { result, refreshKeyStatus } = renderAppConfigState();
+    const { result } = renderAppConfigState();
     expect(result.current.appConfig).toBeNull();
     await act(async () => {
       await result.current.switchActiveProfileModel("any-model");
     });
     expect(setAppConfig).not.toHaveBeenCalled();
-    expect(refreshKeyStatus).toHaveBeenCalledTimes(1); // mount-only
   });
 
   it("switchActiveProfileModel is a no-op when the model matches", async () => {
     const cfg = baseAppConfig({ sidebar_collapsed: false });
     vi.mocked(getAppConfig).mockResolvedValue(cfg);
-    const { result, refreshKeyStatus } = renderAppConfigState();
+    const { result } = renderAppConfigState();
     await waitFor(() => expect(result.current.appConfig).toBe(cfg));
     // The active profile "default" already has model "claude-sonnet-4-6".
     await act(async () => {
       await result.current.switchActiveProfileModel("claude-sonnet-4-6");
     });
     expect(setAppConfig).not.toHaveBeenCalled();
-    expect(refreshKeyStatus).toHaveBeenCalledTimes(1); // mount-only
   });
 
   it("switchActiveProfileModel patches only the active profile's model (ADR-0071)", async () => {
@@ -256,7 +237,7 @@ describe("useAppConfigState", () => {
       },
     };
     vi.mocked(getAppConfig).mockResolvedValue(twoProfileCfg);
-    const { result, refreshKeyStatus } = renderAppConfigState();
+    const { result } = renderAppConfigState();
     await waitFor(() => expect(result.current.appConfig).toBe(twoProfileCfg));
 
     await act(async () => {
@@ -277,9 +258,6 @@ describe("useAppConfigState", () => {
     // The optimistic state flipped to the new model on the active profile.
     const written = vi.mocked(setAppConfig).mock.calls.at(-1)?.[0];
     expect(written?.provider.profiles).toHaveLength(2);
-    // A model swap does NOT touch the keychain slot -> no refreshKeyStatus kick
-    // beyond the mount-only one (contrast switchActiveProfile's 2-kick happy path).
-    expect(refreshKeyStatus).toHaveBeenCalledTimes(1);
   });
 
   it("switchActiveProfileModel surfaces a reject via setShellError (no rollback)", async () => {

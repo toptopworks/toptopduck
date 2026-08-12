@@ -14,7 +14,6 @@ import { useSidebarResize } from "./shell/useSidebarResize";
 import { useRailResize } from "./shell/useRailResize";
 import type { AppConfig } from "./types/app-config";
 import { usePlatform } from "./shell/use-platform";
-import type { KeyStatus } from "./types/provider";
 import { SidebarToggle } from "./shell/SidebarToggle";
 import { NavButtons } from "./shell/NavButtons";
 import { NavigationHistoryProvider } from "./shell/NavigationHistoryContext";
@@ -33,7 +32,6 @@ import { log } from "./lib/log";
 import { createQueryClient } from "./lib/queryClient";
 import { catalogFor } from "./i18n";
 import { useTheme } from "./theme/useTheme";
-import { getProviderConfig } from "./api";
 import { adapterKeys } from "./session/queryKeys";
 
 // The Chat-style three-column shell (ADR-0045/0060/0062, issue #81). App owns
@@ -77,15 +75,6 @@ export default function App() {
   const platform = usePlatform();
 
   // --- App-level UI state --------------------------------------------------
-  // Active-profile key status (issue #275): the connection row's source (the
-  // shared ConnectionStatus footer the sidebar + the settings rail both
-  // render, issue #282). has_key is authoritative when keychain_fault is null;
-  // a non-null fault means the OS keychain read failed and the row renders
-  // "keychain unavailable" instead of misreading as "no key configured".
-  const [keyStatus, setKeyStatus] = useState<KeyStatus>({
-    has_key: false,
-    keychain_fault: null,
-  });
   // settingsView (ADR-0065): the in-app settings overlay state. `open` gates
   // the render + the .settings-mode CSS class; `editProfileId` is a one-shot
   // ENTRY hint consumed by ProfilesSection at mount (issue #239: the "no key"
@@ -132,9 +121,7 @@ export default function App() {
   // (issue #238). Bumped on settings-close so the picker refetches its overlay
   // after a Save that may have changed a keychain slot -- ADR-0019 honest gate:
   // the popover must not keep showing "No key" after the user just configured
-  // one. The connection row refreshes via refreshKeyStatus on the same close;
-  // this counter does the same for the picker's own overlay (which has its own
-  // profileKeys snapshot, separate from keyStatus).
+  // one.
   const [profileKeyEpoch, setProfileKeyEpoch] = useState(0);
 
   // Ctrl/⌘+K session-search modal open state (ADR-0072, issue #252).
@@ -144,28 +131,12 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const openSearch = useCallback(() => setSearchOpen(true), []);
 
-  // refreshKeyStatus: reads the active profile's keychain slot (ADR-0029) into
-  // keyStatus. Fired once on mount by useAppConfigState's load effect, again
-  // after a profile switch, and on settings-close (a Save may have changed the
-  // slot). Stays in App because keyStatus is App-level UI state consumed by
-  // both connection rows (sidebar + settings rail, issue #282); the hook
-  // consumes refreshKeyStatus as a dep.
-  const refreshKeyStatus = useCallback(async () => {
-    try {
-      const view = await getProviderConfig();
-      setKeyStatus({ has_key: view.has_key, keychain_fault: view.keychain_fault });
-    } catch {
-      // keep the previous indicator; the ask path surfaces real failures.
-    }
-  }, []);
-
   // --- App-level config (ADR-0038, issue #196) ----------------------------
   // Delegated to useAppConfigState (see that hook for the ADR-0068/0052
   // contract + restore / persist effects). App injects setShellError
-  // (switchActiveProfile reject path) + refreshKeyStatus (mount + post-switch
-  // kick + settings-close) as deps; reads back AppConfig state + the derived
-  // effectiveLocale / intl + the two collapse toggles. keyStatus + settingsView
-  // are App-local UI state (below).
+  // (switchActiveProfile reject path) as a dep; reads back AppConfig state +
+  // the derived effectiveLocale / intl + the two collapse toggles.
+  // settingsView is App-local UI state (below).
   const {
     appConfig,
     effectiveLocale,
@@ -178,7 +149,7 @@ export default function App() {
     toggleSidebarCollapse,
     sidebarGrouping,
     switchSidebarGrouping,
-  } = useAppConfigState({ setShellError, refreshKeyStatus });
+  } = useAppConfigState({ setShellError });
 
   // --- Draggable sidebar width (useSidebarResize) ---------------------------
   // Frontend-only localStorage persistence; the width is exposed as a CSS
@@ -404,9 +375,7 @@ export default function App() {
                   onSwitchGrouping={switchSidebarGrouping}
                   onOpenSearch={openSearch}
                   provider={appConfig?.provider ?? null}
-                  keyStatus={keyStatus}
                   onOpenSettings={() => openSettings()}
-                  onOpenSettingsProfiles={() => openSettingsProfiles()}
                 />
 
                 {/* Draggable resize handle at the sidebar/content boundary.
@@ -582,12 +551,9 @@ export default function App() {
                     // write on a caught reject.
                     onCommitAppConfig={(cfg) => commitAppConfig(cfg)}
                     onSessionsDirChanged={handleSessionsDirChanged}
-                    onRefreshKeyStatus={() => void refreshKeyStatus()}
-                    keyStatus={keyStatus}
                     onClose={() => {
                       setSettingsView({ open: false });
                       setLiveSettingsSection("general");
-                      void refreshKeyStatus();
                       // A Settings Save may have changed a keychain slot; bump
                       // the epoch so each keep-alive picker + the ColdStartHero
                       // refetch their overlays (ADR-0019 honest gate, issue #238;

@@ -33,7 +33,6 @@ const DEFAULT_TAB: RuntimeTab = "api-access";
 export type RuntimeSectionProps = {
   provider: AppConfig["provider"];
   onCommit: (mutate: (cfg: AppConfig) => AppConfig) => Promise<string | null>;
-  onRefreshKeyStatus: () => void;
   onIpcBusy: (channel: "key" | "test", busy: boolean) => void;
   initialEditProfileId?: string;
   /** Landing sub-tab when the section opens (issue #490). Undefined = default. */
@@ -44,7 +43,6 @@ export type RuntimeSectionProps = {
 export function RuntimeSection({
   provider,
   onCommit,
-  onRefreshKeyStatus,
   onIpcBusy,
   initialEditProfileId,
   initialRuntimeTab,
@@ -138,7 +136,6 @@ export function RuntimeSection({
         <ProfilesSection
           provider={provider}
           onCommit={onCommit}
-          onRefreshKeyStatus={onRefreshKeyStatus}
           onIpcBusy={onIpcBusy}
           initialEditProfileId={initialEditProfileId}
           controlsRef={profilesControlsRef}

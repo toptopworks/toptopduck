@@ -45,3 +45,4 @@ ADR-0065 定设置覆盖视图含 nav 分区 General / Profiles / Engine / Priva
 - **nav 顺序变更**：SETTINGS_SECTIONS（`sections.ts`）重排为 `["general", "runtime", "skills", "mcp", "database-engine", "privacy"]`；section id `profiles` → `runtime`、`engine` → `database-engine`，涉及 SettingsSection type、SectionIcon、SectionLabel、i18n key（`settings.nav.*`）全链路更新。
 - **CONTEXT.md 不变**：「运行时」「适配器」「接入档案」已入 glossary；子 tab 标签（「API 接入配置」「本机 CLI」）是 UI 标签非领域概念，不入 glossary。
 - **未决（实施期）**：子 tab 组件形态（copy-in Radix Tabs 或自建 button 切换）、icon 选择（运行时拟 Cpu、数据库引擎拟 Database）、i18n key 命名（`settings.nav.runtime` / `settings.nav.databaseEngine` / `settings.runtime.tab.*` / `settings.runtime.adapters.*`）、Composer 链接落 tab 的 IPC 参数或 URL state 传递方式。
+- **连接状态行已移除**：上文「rail 外壳...底部连接状态行不变；连接状态行点击目标...」描述的连接状态行已被退役——sidebar 与 settings rail 底部各自渲染独立的齿轮按钮，不再有连接状态行。详见 ADR-0075 Consequences。
