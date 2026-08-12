@@ -9,7 +9,6 @@ import {
   getSessionRuntime,
   listAdapters,
   listProviderProfiles,
-  rescanAdapters,
   setSessionRuntime,
 } from "../../../api";
 import { TooltipProvider } from "../../ui/tooltip";
@@ -32,7 +31,6 @@ vi.mock("../../../api", async (importOriginal) => {
     getSessionRuntime: vi.fn(),
     setSessionRuntime: vi.fn(async () => {}),
     listAdapters: vi.fn(),
-    rescanAdapters: vi.fn(),
   };
 });
 
@@ -117,7 +115,6 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
     vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
     vi.mocked(setSessionRuntime).mockResolvedValue(undefined);
     vi.mocked(listAdapters).mockResolvedValue([]);
-    vi.mocked(rescanAdapters).mockResolvedValue([]);
   });
 
   it("renders the icon trigger with an accessible name carrying the active provider", () => {
@@ -127,7 +124,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
         provider={pickerProvider()}
         onSwitchActive={() => {}}
         onSwitchModel={() => {}}
-        onOpenSettings={() => {}}
+        onOpenSettings={vi.fn()}
       />,
     );
     // The trigger is a real <button> so its implicit role + aria-label are
@@ -144,7 +141,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
         provider={pickerProvider()}
         onSwitchActive={() => {}}
         onSwitchModel={() => {}}
-        onOpenSettings={() => {}}
+        onOpenSettings={vi.fn()}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
@@ -155,12 +152,12 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
     expect(
       screen.getByText("Type a model id, or pick the preset default."),
     ).toBeInTheDocument();
-    // External section: header + the ↻ rescan button.
+    // External section: header + the "Manage external runtimes" link.
     expect(screen.getByText("External")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Rescan adapters" }),
+      screen.getByRole("button", { name: /Manage external runtimes/ }),
     ).toBeInTheDocument();
-    // Open-settings entry.
+    // Open-settings entry (built-in section).
     expect(
       screen.getByRole("button", { name: "Open settings" }),
     ).toBeInTheDocument();
@@ -173,7 +170,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
         provider={pickerProvider()}
         onSwitchActive={() => {}}
         onSwitchModel={() => {}}
-        onOpenSettings={() => {}}
+        onOpenSettings={vi.fn()}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
@@ -193,7 +190,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
         provider={pickerProvider()}
         onSwitchActive={onSwitchActive}
         onSwitchModel={() => {}}
-        onOpenSettings={() => {}}
+        onOpenSettings={vi.fn()}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
@@ -210,7 +207,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
         provider={pickerProvider()}
         onSwitchActive={() => {}}
         onSwitchModel={onSwitchModel}
-        onOpenSettings={() => {}}
+        onOpenSettings={vi.fn()}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
@@ -231,7 +228,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
         provider={pickerProvider()}
         onSwitchActive={() => {}}
         onSwitchModel={onSwitchModel}
-        onOpenSettings={() => {}}
+        onOpenSettings={vi.fn()}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
@@ -249,7 +246,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
         provider={pickerProvider()}
         onSwitchActive={() => {}}
         onSwitchModel={onSwitchModel}
-        onOpenSettings={() => {}}
+        onOpenSettings={vi.fn()}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
@@ -277,7 +274,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
           }}
           onSwitchActive={() => {}}
           onSwitchModel={() => {}}
-          onOpenSettings={() => {}}
+          onOpenSettings={vi.fn()}
         />
       );
     }
@@ -302,7 +299,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
         provider={pickerProvider()}
         onSwitchActive={() => {}}
         onSwitchModel={() => {}}
-        onOpenSettings={() => {}}
+        onOpenSettings={vi.fn()}
         profileKeyEpoch={0}
       />,
     );
@@ -317,7 +314,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
           provider={pickerProvider()}
           onSwitchActive={() => {}}
           onSwitchModel={() => {}}
-          onOpenSettings={() => {}}
+          onOpenSettings={vi.fn()}
           profileKeyEpoch={1}
         />,
         queryClient,
@@ -339,7 +336,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
         provider={pickerProvider()}
         onSwitchActive={() => {}}
         onSwitchModel={() => {}}
-        onOpenSettings={() => {}}
+        onOpenSettings={vi.fn()}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
@@ -358,7 +355,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
         provider={pickerProvider()}
         onSwitchActive={() => {}}
         onSwitchModel={() => {}}
-        onOpenSettings={() => {}}
+        onOpenSettings={vi.fn()}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
@@ -383,7 +380,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
     fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
     const openBtn = await screen.findByRole("button", { name: "Open settings" });
     fireEvent.click(openBtn);
-    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(onOpenSettings).toHaveBeenCalledWith("api-access");
     // The popover must close (its portaled content would otherwise linger
     // atop the settings overlay, ADR-0065 hides the shell via CSS not the host).
     await waitFor(() => {
@@ -401,7 +398,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
         provider={pickerProvider()}
         onSwitchActive={() => {}}
         onSwitchModel={() => {}}
-        onOpenSettings={() => {}}
+        onOpenSettings={vi.fn()}
       />,
     );
     const trigger = screen.getByRole("button", { name: BUILTIN_TRIGGER });
@@ -424,7 +421,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
         provider={pickerProvider()}
         onSwitchActive={() => {}}
         onSwitchModel={() => {}}
-        onOpenSettings={() => {}}
+        onOpenSettings={vi.fn()}
       />,
     );
     const trigger = screen.getByRole("button", { name: BUILTIN_TRIGGER });
@@ -446,7 +443,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
         provider={pickerProvider()}
         onSwitchActive={() => {}}
         onSwitchModel={() => {}}
-        onOpenSettings={() => {}}
+        onOpenSettings={vi.fn()}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
@@ -457,9 +454,9 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
 
   // --- Runtime selection (issue #353) ---------------------------------------
 
-  it("renders the external adapters dynamically from listAdapters", async () => {
-    // Adding a CLI upstream grows the list with zero frontend change: the
-    // picker renders the table verbatim, never a hardcoded list.
+  it("renders only detected external adapters from listAdapters", async () => {
+    // Issue #490: undetected adapters are filtered out (the group is a pure
+    // selector; management moved to Settings → Runtime → Local CLI).
     vi.mocked(listAdapters).mockResolvedValue([
       adapter("claude-code", "claude-code", true),
       adapter("gemini-cli", "gemini-cli", false),
@@ -470,38 +467,15 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
         provider={pickerProvider()}
         onSwitchActive={() => {}}
         onSwitchModel={() => {}}
-        onOpenSettings={() => {}}
+        onOpenSettings={vi.fn()}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    // Both adapters render (the section is not a hardcoded list).
+    // Only the detected adapter renders.
     expect(await screen.findByText("claude-code")).toBeInTheDocument();
-    expect(screen.getByText("gemini-cli")).toBeInTheDocument();
-  });
-
-  it("disables undetected adapters + shows the not-installed mark", async () => {
-    vi.mocked(listAdapters).mockResolvedValue([
-      adapter("claude-code", "claude-code", true),
-      adapter("gemini-cli", "gemini-cli", false),
-    ]);
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={() => {}}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    await screen.findByText("claude-code");
-    // The detected adapter's row is a real, enabled button.
-    const claude = screen.getByRole("button", { name: /claude-code/ });
-    expect(claude).not.toBeDisabled();
-    // The undetected adapter carries the "Not installed" mark and is disabled.
-    expect(screen.getByText("Not installed")).toBeInTheDocument();
-    const gemini = screen.getByRole("button", { name: /gemini-cli/ });
-    expect(gemini).toBeDisabled();
+    expect(screen.queryByText("gemini-cli")).not.toBeInTheDocument();
+    // No "Not installed" mark -- the group is a pure selector.
+    expect(screen.queryByText("Not installed")).not.toBeInTheDocument();
   });
 
   it("selecting an external adapter writes the external choice via setSessionRuntime", async () => {
@@ -512,7 +486,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
         provider={pickerProvider()}
         onSwitchActive={() => {}}
         onSwitchModel={() => {}}
-        onOpenSettings={() => {}}
+        onOpenSettings={vi.fn()}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
@@ -537,7 +511,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
         provider={pickerProvider()}
         onSwitchActive={() => {}}
         onSwitchModel={() => {}}
-        onOpenSettings={() => {}}
+        onOpenSettings={vi.fn()}
       />,
     );
     // The trigger name carries the external adapter while external is active.
@@ -553,31 +527,6 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
     );
   });
 
-  it("the ↻ entry re-runs the PATH scan via rescanAdapters", async () => {
-    vi.mocked(listAdapters).mockResolvedValue([adapter("claude-code", "claude-code", false)]);
-    // The rescan reports the CLI is now detected (the user installed it between
-    // scans; detection is uncached server-side).
-    vi.mocked(rescanAdapters).mockResolvedValue([adapter("claude-code", "claude-code", true)]);
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={() => {}}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    // Initially undetected.
-    await screen.findByText("Not installed");
-    fireEvent.click(screen.getByRole("button", { name: "Rescan adapters" }));
-    await waitFor(() => expect(rescanAdapters).toHaveBeenCalledTimes(1));
-    // After the rescan seeds the cache, the "Not installed" mark is gone.
-    await waitFor(() =>
-      expect(screen.queryByText("Not installed")).not.toBeInTheDocument(),
-    );
-  });
-
   it("renders the external runtime in the trigger name + tooltip when external is active", async () => {
     const external: SessionRuntimeChoice = { kind: "external", data: "claude-code" };
     vi.mocked(getSessionRuntime).mockResolvedValue(external);
@@ -588,7 +537,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
         provider={pickerProvider()}
         onSwitchActive={() => {}}
         onSwitchModel={() => {}}
-        onOpenSettings={() => {}}
+        onOpenSettings={vi.fn()}
       />,
     );
     const trigger = await screen.findByRole("button", { name: "Runtime: claude-code" });
@@ -598,5 +547,31 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
     fireEvent.pointerMove(trigger, { pointerType: "mouse" });
     const tooltip = await screen.findByRole("tooltip");
     expect(tooltip.textContent).toContain("External runtime: claude-code");
+  });
+
+  // --- Issue #490: external group slimmed to a pure selector ---------------
+
+  it("the Manage external runtimes link opens settings on the local-cli tab", async () => {
+    const onOpenSettings = vi.fn();
+    renderPicker(
+      <ComposerProviderPicker
+        sessionId="sess-1"
+        provider={pickerProvider()}
+        onSwitchActive={() => {}}
+        onSwitchModel={() => {}}
+        onOpenSettings={onOpenSettings}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
+    const link = await screen.findByRole("button", { name: /Manage external runtimes/ });
+    fireEvent.click(link);
+    expect(onOpenSettings).toHaveBeenCalledWith("local-cli");
+    // The popover closes (same close-before-open contract as the built-in
+    // entry, ADR-0065).
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", { name: /Manage external runtimes/ }),
+      ).not.toBeInTheDocument();
+    });
   });
 });

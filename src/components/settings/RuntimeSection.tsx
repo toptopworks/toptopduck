@@ -21,8 +21,9 @@ import { PaneHeader } from "./settings-chrome";
 // the ProfilesSection's close-contract controlsRef stays populated and an
 // in-flight add-mode draft survives a tab switch.
 
-/** The two sub-tabs inside the runtime section. */
-type RuntimeTab = "api-access" | "local-cli";
+/** The two sub-tabs inside the runtime section. Exported so the shell
+ *  (App.tsx SettingsEntry) and the composer picker can name a landing tab. */
+export type RuntimeTab = "api-access" | "local-cli";
 
 const TABS: readonly RuntimeTab[] = ["api-access", "local-cli"] as const;
 const DEFAULT_TAB: RuntimeTab = "api-access";
@@ -33,6 +34,8 @@ export type RuntimeSectionProps = {
   onRefreshKeyStatus: () => void;
   onIpcBusy: (channel: "key" | "test", busy: boolean) => void;
   initialEditProfileId?: string;
+  /** Landing sub-tab when the section opens (issue #490). Undefined = default. */
+  initialRuntimeTab?: RuntimeTab;
   profilesControlsRef: React.MutableRefObject<ProfilesControls | null>;
 };
 
@@ -42,9 +45,10 @@ export function RuntimeSection({
   onRefreshKeyStatus,
   onIpcBusy,
   initialEditProfileId,
+  initialRuntimeTab,
   profilesControlsRef,
 }: RuntimeSectionProps) {
-  const [tab, setTab] = useState<RuntimeTab>(DEFAULT_TAB);
+  const [tab, setTab] = useState<RuntimeTab>(initialRuntimeTab ?? DEFAULT_TAB);
 
   // Stable ids for the tab-tabpanel aria association (WAI-ARIA APG).
   const baseId = useId();
