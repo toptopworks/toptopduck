@@ -58,3 +58,4 @@ ADR-0034（recipe 持久化 + eager resume）+ 0035（resume 完整性校验）+
 - **被 ADR-0062 精确化（拖放落点二分）**：本 ADR 拖放路径补「有活跃会话 → 加源（0022 / 0040），无活跃会话（hero）→ createSession + 加源」。见 ADR-0062 R3。
 - **被 ADR-0062 补（resume 后 viewedResult 初始化）**：本 ADR resume 路径补「重放完成后前端 setViewedResult ← thread 末个 Materialized」。见 ADR-0062 R5。
 - **被 ADR-0089 精确化**：本 ADR session 列表来源（`list_sessions` 扫描 .duck）的扫描根变为 `sessions/` 管理子目录；每个会话是一个 per-session 目录（`{uuid}/session.duck`）。启动行为（Chat 风格、不自动 resume、不预创建实例）不变。
+- **被 ADR-0092 校准**：本 ADR「QuestionBar: disabled（无源）」过时（ADR-0087 使 DuckDB 非必须，无源可提问）；「不预创建实例」保留不变；启动空态从 hero 拖放区改为居中 `QuestionBar`（bar 上提 shell 级，取代 `ColdStartHero`）；hero 拖放路径保留，载体从 hero 换成空态主区域。会话创建时机从「点 hero CTA / sidebar +」改为「居中 bar 首次提交」。见 ADR-0092。

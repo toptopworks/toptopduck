@@ -45,3 +45,4 @@ Rail 可调宽的前提也已成熟：本 ADR Considered options 原否决 rail 
 - **Rail 宽度不持久化**：rail 宽度是临时布局调整，每次启动回到 RAIL_DEFAULT_WIDTH=350。仅 sidebar 宽度持久化（localStorage）。
 - **Rail resize handle 在 workspace 折叠时隐藏**：折叠态 4-track grid 以居中为目的重布局，列边界不再映射该变量，handle display:none。
 - **MIN_WIDTH 双层保护 QuestionBar toolbar**：conversation 列 CSS min-width + resize hook JS clamp 双层保护，防止拖窄至 submit 按钮（固定尺寸不收缩）被 auth chip（文本不换行）+ provider / context trigger（固定方形）挤出可见区。
+- **被 ADR-0092 校准**：本 ADR Decision 3「QuestionBar 始终在 conversation 列内」精确化为「有活跃会话时在 conversation 列内，无活跃会话时居中于主区域（session header / rail / workspace 全隐藏，无 conversation 列）」。bar 上提 shell 级，宽度仍跟踪 conversation 列。见 ADR-0092。

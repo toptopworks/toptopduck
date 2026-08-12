@@ -78,3 +78,4 @@ ADR-0046 Consequences 明确写"单 Tauri webview 内 React 状态持有多个�
 - **被 ADR-0062 精确化（workspace 内容派生规则）**：本 ADR「非 Materialized 靠最新轮次自然渲染」含糊——定为派生(viewedResult, thread 末轮, 新增客户端布尔旗 `pinnedToHistory`)，闭合末轮 B/C/D 与点历史 Materialized 的冲突。见 ADR-0062 R2。
 - **被 ADR-0062 补（resume 初始化）**：本 ADR「产出即选中」只覆盖新产出；补「resume 成功 → viewedResult ← thread 末个 Materialized、`pinnedToHistory=false`」。见 ADR-0062 R5。
 - **被 ADR-0068 精确化（shell 层 provider config 状态归属）**：本 ADR line 8 把 provider config 列为服务端态进 Query，在 0064（active_profile 进 app-config）之后该指令的适用范围被收口——shell 层 provider config 随 app-config 容器整体走 React 原生 advisory state，不独立走 Query；本 ADR line 67（collapse / 几何不进 Query）扩展到整个 app-config 容器。见 ADR-0068。
+- **被 ADR-0092 校准**：本 ADR per-tab hidden 保活机制不变；`QuestionBar` 的 per-session state（`loading` / `phase` / 输入草稿 `value`）从 `SessionPane` 内 `useState` 上提到 shell 层按 `activeSessionId` 路由——每个 keep-alive 会话各有自己的 bar 状态，bar 只渲染活跃会话的状态。`SessionPane` 失去 QuestionBar 相关 state。见 ADR-0092。
