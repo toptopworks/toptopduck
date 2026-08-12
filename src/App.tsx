@@ -88,7 +88,7 @@ export default function App() {
   // (liveSettingsSection below, issue #288) so the back/forward history can
   // restore it. openSettings() defaults to the sidebar-gear path (general, no
   // edit target); the hero + the sidebar connection row pass
-  // { section: "profiles", editProfileId? }.
+  // { section: "runtime", editProfileId? }.
   const [settingsView, setSettingsView] = useState<{ open: boolean; editProfileId?: string }>({
     open: false,
   });
@@ -111,7 +111,7 @@ export default function App() {
   // its edit form; the "no profile" path omits it (there is nothing to edit).
   function openSettingsProfiles(editProfileId?: string) {
     openSettings(
-      editProfileId ? { section: "profiles", editProfileId } : { section: "profiles" },
+      editProfileId ? { section: "runtime", editProfileId } : { section: "runtime" },
     );
   }
   // Invalidation counter for the composer picker's per-profile has_key overlay

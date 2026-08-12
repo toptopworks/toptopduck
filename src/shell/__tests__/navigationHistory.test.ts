@@ -112,21 +112,21 @@ describe("navigationHistory pure stack", () => {
     expect(
       entriesEqual(
         { sessionId: "s1", settings: { open: true, section: "general" } },
-        { sessionId: "s1", settings: { open: true, section: "engine" } },
+        { sessionId: "s1", settings: { open: true, section: "database-engine" } },
       ),
     ).toBe(false);
   });
 
   it("settings section switches are distinct navigable entries", () => {
-    // Arrange: general -> profiles -> engine within one open settings overlay.
+    // Arrange: general -> runtime -> database-engine within one open settings overlay.
     let state = createHistory(settingsPane("general"));
-    state = pushEntry(state, settingsPane("profiles"));
-    state = pushEntry(state, settingsPane("engine"));
+    state = pushEntry(state, settingsPane("runtime"));
+    state = pushEntry(state, settingsPane("database-engine"));
 
     // Assert: back walks the section history in reverse.
     expect(canBack(state)).toBe(true);
     state = moveBack(state);
-    expect(state.stack[state.cursor]).toEqual(settingsPane("profiles"));
+    expect(state.stack[state.cursor]).toEqual(settingsPane("runtime"));
     state = moveBack(state);
     expect(state.stack[state.cursor]).toEqual(settingsPane("general"));
   });

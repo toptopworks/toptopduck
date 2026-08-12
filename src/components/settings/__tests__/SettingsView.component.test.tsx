@@ -322,7 +322,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
 
   it("each engine field has its own Save that commits only that field", async () => {
     const { onCommitAppConfig } = renderView();
-    fireEvent.click(screen.getByRole("button", { name: "Engine" }));
+    fireEvent.click(screen.getByRole("button", { name: "Database Engine" }));
     // Four independent Save buttons (memory limit / threads / row cap / timeout).
     expect(screen.getAllByRole("button", { name: "Save" })).toHaveLength(4);
     // Edit the threads input (the first spinbutton) and save just that field.
@@ -339,7 +339,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   it("a failed engine save shows an inline error without closing", async () => {
     const onCommitAppConfig = vi.fn<CommitFn>().mockRejectedValue(new Error("read-only"));
     const { onClose } = renderView({ onCommitAppConfig });
-    fireEvent.click(screen.getByRole("button", { name: "Engine" }));
+    fireEvent.click(screen.getByRole("button", { name: "Database Engine" }));
     fireEvent.click(screen.getAllByRole("button", { name: "Save" })[0]);
     expect(await screen.findByText("read-only")).toBeInTheDocument();
     expect(onClose).not.toHaveBeenCalled();
@@ -359,7 +359,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
       .fn<CommitFn>()
       .mockImplementation(() => new Promise<void>(() => {}));
     const { onClose } = renderView({ onCommitAppConfig });
-    fireEvent.click(screen.getByRole("button", { name: "Engine" }));
+    fireEvent.click(screen.getByRole("button", { name: "Database Engine" }));
     fireEvent.click(screen.getAllByRole("button", { name: "Save" })[0]);
     await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalled());
     fireEvent.keyDown(window, { key: "Escape" });
@@ -370,7 +370,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   it("ESC yields to the open delete-confirm dialog (view stays open)", async () => {
     vi.mocked(listProviderProfiles).mockResolvedValue(twoProfileKeys);
     const { onClose } = renderView({ appConfig: twoProfileConfig });
-    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
     fireEvent.click(await screen.findByRole("button", { name: "GLM" }));
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     await screen.findByRole("alertdialog");
@@ -388,7 +388,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
 
   it("ESC with a dirty invalid edit stays open on the flush error", async () => {
     const { onClose } = renderView();
-    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
     const baseUrl = await screen.findByLabelText("Base URL");
     fireEvent.change(baseUrl, { target: { value: "ftp://nope" } });
     // ESC flushes the still-dirty draft; validation fails, so the view must
@@ -411,7 +411,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
         }),
     );
     const { onClose } = renderView();
-    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
     await screen.findAllByText("Anthropic");
     fireEvent.change(screen.getByPlaceholderText("sk-ant-api03-…"), {
       target: { value: "sk-test-281" },
@@ -436,11 +436,11 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   it("switches panes via the icon rail nav", async () => {
     renderView();
     await screen.findByRole("combobox", { name: "Theme" });
-    fireEvent.click(screen.getByRole("button", { name: "Engine" }));
+    fireEvent.click(screen.getByRole("button", { name: "Database Engine" }));
     expect(screen.getAllByRole("button", { name: "Save" }).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "Privacy" }));
     expect(screen.getByRole("note")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
     expect(await screen.findByRole("button", { name: "New profile" })).toBeInTheDocument();
   });
 
@@ -478,7 +478,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
 
   it("lists profiles with the Active badge", async () => {
     renderView();
-    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
     // "Anthropic" appears in both the connection row and the list; the Active
     // badge is the list-level signal under test.
     await screen.findAllByText("Anthropic");
@@ -487,7 +487,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
 
   it("commit-on-blur persists an edited endpoint (no Save button)", async () => {
     const { onCommitAppConfig } = renderView();
-    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
     const baseUrl = await screen.findByLabelText("Base URL");
     fireEvent.change(baseUrl, { target: { value: "https://my-gw.example/v1" } });
     // Blur to a target outside the edit form fires the commit.
@@ -501,7 +501,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
 
   it("an invalid base URL blocks the blur commit with a validation error", async () => {
     const { onCommitAppConfig } = renderView();
-    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
     const baseUrl = await screen.findByLabelText("Base URL");
     fireEvent.change(baseUrl, { target: { value: "ftp://nope" } });
     fireEvent.blur(baseUrl, { relatedTarget: document.body });
@@ -511,7 +511,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
 
   it("add mode holds the profile in memory until the Create button commits it", async () => {
     const { onCommitAppConfig } = renderView();
-    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
     fireEvent.click(await screen.findByRole("button", { name: "New profile" }));
     // Add mode: the create button appears and nothing is committed yet.
     const create = screen.getByRole("button", { name: "Create profile" });
@@ -527,7 +527,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   it("delete confirms then commits immediately; last profile is guarded", async () => {
     vi.mocked(listProviderProfiles).mockResolvedValue(twoProfileKeys);
     const { onCommitAppConfig } = renderView({ appConfig: twoProfileConfig });
-    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
     // Select the second profile (GLM) for editing. Scope to the list row button:
     // "GLM" also appears as a preset <option> (getByText matches option text).
     fireEvent.click(await screen.findByRole("button", { name: "GLM" }));
@@ -543,7 +543,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
 
   it("the last profile's delete button is disabled", async () => {
     renderView();
-    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
     await screen.findAllByText("Anthropic");
     expect(screen.getByRole("button", { name: "Delete" })).toBeDisabled();
   });
@@ -553,7 +553,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     const { onCommitAppConfig, onRefreshKeyStatus } = renderView({
       appConfig: twoProfileConfig,
     });
-    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
     fireEvent.click(await screen.findByRole("button", { name: "GLM" }));
     fireEvent.click(await screen.findByRole("button", { name: "Set as active" }));
     await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalled());
@@ -564,7 +564,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   it("set key is immediate IPC and reports upward (ADR-0029 one-shot)", async () => {
     vi.mocked(setProfileKey).mockResolvedValue(true);
     renderView();
-    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
     await screen.findAllByText("Anthropic");
     fireEvent.change(screen.getByPlaceholderText("sk-ant-api03-…"), {
       target: { value: "sk-test-281" },
@@ -577,7 +577,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
 
   it("closing with a dirty new profile confirms discard", async () => {
     const { onClose, container } = renderView();
-    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
     fireEvent.click(await screen.findByRole("button", { name: "New profile" }));
     // Make the add-mode form dirty.
     fireEvent.change(screen.getByLabelText("Display name"), {
@@ -593,7 +593,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   it("selecting another profile stashes the add draft; New profile restores it", async () => {
     vi.mocked(listProviderProfiles).mockResolvedValue(twoProfileKeys);
     renderView({ appConfig: twoProfileConfig });
-    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
     fireEvent.click(await screen.findByRole("button", { name: "New profile" }));
     fireEvent.change(screen.getByLabelText("Display name"), {
       target: { value: "Half typed" },
@@ -614,7 +614,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
 
   it("a numeric engine field can be cleared; an empty save clamps to the minimum", async () => {
     const { onCommitAppConfig } = renderView();
-    fireEvent.click(screen.getByRole("button", { name: "Engine" }));
+    fireEvent.click(screen.getByRole("button", { name: "Database Engine" }));
     const threads = screen.getAllByRole("spinbutton")[0];
     fireEvent.change(threads, { target: { value: "" } });
     // The field stays clearable (no snap back to 1). RTL's toHaveValue reads an

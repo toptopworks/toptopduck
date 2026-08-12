@@ -4,7 +4,7 @@ import {
   ArrowLeft,
   Cable,
   Cpu,
-  KeyRound,
+  Database,
   Puzzle,
   ShieldCheck,
   SlidersHorizontal,
@@ -70,10 +70,10 @@ function SectionIcon({ section }: { section: SettingsSection }) {
       return <SlidersHorizontal className="size-4 shrink-0" aria-hidden />;
     case "skills":
       return <Puzzle className="size-4 shrink-0" aria-hidden />;
-    case "profiles":
-      return <KeyRound className="size-4 shrink-0" aria-hidden />;
-    case "engine":
+    case "runtime":
       return <Cpu className="size-4 shrink-0" aria-hidden />;
+    case "database-engine":
+      return <Database className="size-4 shrink-0" aria-hidden />;
     case "privacy":
       return <ShieldCheck className="size-4 shrink-0" aria-hidden />;
     case "mcp":
@@ -94,10 +94,10 @@ function SectionLabel({ section }: { section: SettingsSection }) {
       return <FormattedMessage id="settings.nav.general" defaultMessage="General" />;
     case "skills":
       return <FormattedMessage id="settings.nav.skills" defaultMessage="Skills" />;
-    case "profiles":
-      return <FormattedMessage id="settings.nav.profiles" defaultMessage="Profiles" />;
-    case "engine":
-      return <FormattedMessage id="settings.nav.engine" defaultMessage="Engine" />;
+    case "runtime":
+      return <FormattedMessage id="settings.nav.runtime" defaultMessage="Runtime" />;
+    case "database-engine":
+      return <FormattedMessage id="settings.nav.databaseEngine" defaultMessage="Database Engine" />;
     case "privacy":
       return <FormattedMessage id="settings.nav.privacy" defaultMessage="Privacy" />;
     case "mcp":
@@ -145,7 +145,7 @@ function SectionContent({
       return (
         <SkillsSection configuredMcpIds={appConfig.mcp_servers.servers.map((s) => s.id)} />
       );
-    case "profiles":
+    case "runtime":
       return (
         <ProfilesSection
           provider={appConfig.provider}
@@ -156,7 +156,7 @@ function SectionContent({
           controlsRef={profilesControlsRef}
         />
       );
-    case "engine":
+    case "database-engine":
       return <EngineSection appConfig={appConfig} onCommit={onCommit} />;
     case "privacy":
       return <PrivacySection />;
@@ -413,7 +413,7 @@ export function SettingsView({
           keyStatus={keyStatus}
           gearLabel={backToWorkspaceLabel}
           onGearClick={() => void requestClose()}
-          onRowClick={() => onSectionChange("profiles")}
+          onRowClick={() => onSectionChange("runtime")}
         />
       </nav>
 

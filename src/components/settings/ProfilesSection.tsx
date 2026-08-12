@@ -450,7 +450,7 @@ export function ProfilesSection({
   return (
     <div>
       <PaneHeader
-        title={<FormattedMessage id="settings.nav.profiles" defaultMessage="Profiles" />}
+        title={<FormattedMessage id="settings.nav.runtime" defaultMessage="Runtime" />}
         description={(
           <FormattedMessage
             id="settings.profiles.description"

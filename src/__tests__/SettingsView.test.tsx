@@ -271,8 +271,8 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     await waitFor(() =>
       expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
     );
-    // Navigate to the Engine pane (zh: 引擎) and save the first field.
-    fireEvent.click(screen.getByRole("button", { name: "引擎" }));
+    // Navigate to the Database Engine pane (zh: 数据库引擎) and save the first field.
+    fireEvent.click(screen.getByRole("button", { name: "数据库引擎" }));
     fireEvent.click(screen.getAllByRole("button", { name: "保存" })[0]);
     await waitFor(() => expect(setAppConfig).toHaveBeenCalledTimes(1));
     // Per-field save does NOT close the overlay.
