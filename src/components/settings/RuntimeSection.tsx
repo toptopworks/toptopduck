@@ -1,4 +1,4 @@
-import { useId, useState, type ReactNode } from "react";
+import { useId, useState, type KeyboardEvent, type ReactNode } from "react";
 import { FormattedMessage } from "react-intl";
 
 import type { AppConfig } from "../../types/app-config";
@@ -24,6 +24,7 @@ import { PaneHeader } from "./settings-chrome";
 /** The two sub-tabs inside the runtime section. */
 type RuntimeTab = "api-access" | "local-cli";
 
+const TABS: readonly RuntimeTab[] = ["api-access", "local-cli"] as const;
 const DEFAULT_TAB: RuntimeTab = "api-access";
 
 export type RuntimeSectionProps = {
@@ -45,10 +46,31 @@ export function RuntimeSection({
 }: RuntimeSectionProps) {
   const [tab, setTab] = useState<RuntimeTab>(DEFAULT_TAB);
 
-  // Stable ids for the tab-tabpanel aria-labelledby association (WAI-ARIA APG).
+  // Stable ids for the tab-tabpanel aria association (WAI-ARIA APG).
   const baseId = useId();
-  const apiTabId = `${baseId}-api`;
-  const cliTabId = `${baseId}-cli`;
+  const apiTabId = `${baseId}-api-tab`;
+  const cliTabId = `${baseId}-cli-tab`;
+  const apiPanelId = `${baseId}-api-panel`;
+  const cliPanelId = `${baseId}-cli-panel`;
+
+  // WAI-ARIA APG keyboard activation: ArrowLeft/Right move focus + activate,
+  // Home/End jump to the first/last tab. Roving tabindex: the active tab is
+  // in the tab sequence (tabIndex 0), inactive tabs are removed (-1).
+  function handleTabKeyDown(e: KeyboardEvent<HTMLDivElement>) {
+    const idx = TABS.indexOf(tab);
+    let next: RuntimeTab | null = null;
+    if (e.key === "ArrowRight") next = TABS[(idx + 1) % TABS.length];
+    else if (e.key === "ArrowLeft") next = TABS[(idx - 1 + TABS.length) % TABS.length];
+    else if (e.key === "Home") next = TABS[0];
+    else if (e.key === "End") next = TABS[TABS.length - 1];
+
+    if (next) {
+      e.preventDefault();
+      setTab(next);
+      const nextTabId = next === "api-access" ? apiTabId : cliTabId;
+      document.getElementById(nextTabId)?.focus();
+    }
+  }
 
   return (
     <div>
@@ -70,9 +92,11 @@ export function RuntimeSection({
       <div
         className="mb-6 inline-flex items-center gap-1 rounded-lg bg-muted p-0.5"
         role="tablist"
+        onKeyDown={handleTabKeyDown}
       >
         <TabButton
           id={apiTabId}
+          panelId={apiPanelId}
           active={tab === "api-access"}
           onClick={() => setTab("api-access")}
           label={(
@@ -84,6 +108,7 @@ export function RuntimeSection({
         />
         <TabButton
           id={cliTabId}
+          panelId={cliPanelId}
           active={tab === "local-cli"}
           onClick={() => setTab("local-cli")}
           label={(
@@ -99,6 +124,7 @@ export function RuntimeSection({
           ProfilesSection's controlsRef stays populated and an in-flight
           add-mode draft survives a tab switch. */}
       <div
+        id={apiPanelId}
         className={cn(tab !== "api-access" && "hidden")}
         role="tabpanel"
         aria-labelledby={apiTabId}
@@ -114,6 +140,7 @@ export function RuntimeSection({
         />
       </div>
       <div
+        id={cliPanelId}
         className={cn(tab !== "local-cli" && "hidden")}
         role="tabpanel"
         aria-labelledby={cliTabId}
@@ -126,14 +153,18 @@ export function RuntimeSection({
 
 // A presentational tab button. The label arrives as an already-resolved
 // ReactNode (a static <FormattedMessage> from the call site) so formatjs
-// extract never sees a dynamic id here.
+// extract never sees a dynamic id here. Roving tabindex (APG): the active
+// tab is focusable via Tab key (tabIndex 0), inactive tabs are not (-1) --
+// ArrowLeft/Right (handled by the parent tablist) move focus between them.
 function TabButton({
   id,
+  panelId,
   active,
   onClick,
   label,
 }: {
   id: string;
+  panelId: string;
   active: boolean;
   onClick: () => void;
   label: ReactNode;
@@ -144,6 +175,8 @@ function TabButton({
       id={id}
       role="tab"
       aria-selected={active}
+      aria-controls={panelId}
+      tabIndex={active ? 0 : -1}
       onClick={onClick}
       className={cn(
         bareButtonReset,

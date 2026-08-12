@@ -338,7 +338,6 @@
   "settings.reading": "Reading current config…",
   "settings.runtime.description": "API access profiles and local CLI adapters for driving turns.",
   "settings.runtime.localCli.detected": "Detected",
-  "settings.runtime.localCli.notDetected": "Not found",
   "settings.runtime.localCli.notInstalled": "Not installed",
   "settings.runtime.localCli.rescan": "Rescan",
   "settings.runtime.localCli.rescanAria": "Rescan adapters",

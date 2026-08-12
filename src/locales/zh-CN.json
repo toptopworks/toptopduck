@@ -338,7 +338,6 @@
   "settings.reading": "正在读取当前配置…",
   "settings.runtime.description": "用于驱动对话的 API 接入配置与本机 CLI 适配器。",
   "settings.runtime.localCli.detected": "已检测",
-  "settings.runtime.localCli.notDetected": "未找到",
   "settings.runtime.localCli.notInstalled": "未安装",
   "settings.runtime.localCli.rescan": "重新扫描",
   "settings.runtime.localCli.rescanAria": "重新扫描适配器",

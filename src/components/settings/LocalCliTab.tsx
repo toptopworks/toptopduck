@@ -9,6 +9,7 @@ import { listAdapters, rescanAdapters } from "../../api";
 import { adapterKeys } from "../../session/queryKeys";
 import type { AdapterEntry } from "../../types/runtime";
 import { cn } from "../../lib/utils";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { SettingsCard, SettingsRow } from "./settings-chrome";
 
@@ -35,11 +36,12 @@ export function LocalCliTab() {
   // cache may already be warm from the composer; this read is near-instant in
   // that case. Detection is uncached server-side, so list + rescan share one
   // key and rescan is the explicit user-driven refresh.
-  const { data: adapterData } = useQuery({
+  const { data: adapterData, isPending, isError, error } = useQuery({
     queryKey: adapterKeys.all(),
     queryFn: listAdapters,
   });
   const adapters: AdapterEntry[] = adapterData ?? [];
+  const loadError = isError ? fmtError(error, intl) : null;
 
   async function handleRescan() {
     if (rescanning) return;
@@ -87,48 +89,48 @@ export function LocalCliTab() {
         </Button>
       </div>
 
-      <SettingsCard>
-        {adapters.map((a) => (
-          <SettingsRow
-            key={a.id}
-            title={a.display_name}
-            description={
-              a.detected ? (
+      {isPending && (
+        <p className="text-muted-foreground text-sm">
+          <FormattedMessage id="settings.reading" defaultMessage="Reading current config…" />
+        </p>
+      )}
+
+      {loadError && !adapterData && (
+        <p className="text-destructive text-sm">{loadError}</p>
+      )}
+
+      {!isPending && !loadError && (
+        <SettingsCard>
+          {adapters.map((a) => (
+            <SettingsRow
+              key={a.id}
+              title={a.display_name}
+              description={
                 a.binary_path ? (
-                  <code className="text-xs">{a.binary_path}</code>
-                ) : null
-              ) : (
-                <FormattedMessage
-                  id="settings.runtime.localCli.notInstalled"
-                  defaultMessage="Not installed"
-                />
-              )
-            }
-            action={(
-              <span
-                className={cn(
-                  "inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium",
-                  a.detected
-                    ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                    : "bg-muted text-muted-foreground",
-                )}
-              >
-                {a.detected ? (
-                  <FormattedMessage
-                    id="settings.runtime.localCli.detected"
-                    defaultMessage="Detected"
-                  />
+                  <code className="font-mono text-xs">{a.binary_path}</code>
+                ) : undefined
+              }
+              action={(
+                a.detected ? (
+                  <Badge variant="default">
+                    <FormattedMessage
+                      id="settings.runtime.localCli.detected"
+                      defaultMessage="Detected"
+                    />
+                  </Badge>
                 ) : (
-                  <FormattedMessage
-                    id="settings.runtime.localCli.notDetected"
-                    defaultMessage="Not found"
-                  />
-                )}
-              </span>
-            )}
-          />
-        ))}
-      </SettingsCard>
+                  <Badge variant="secondary">
+                    <FormattedMessage
+                      id="settings.runtime.localCli.notInstalled"
+                      defaultMessage="Not installed"
+                    />
+                  </Badge>
+                )
+              )}
+            />
+          ))}
+        </SettingsCard>
+      )}
 
       {rescanError && <p className="text-destructive text-sm">{rescanError}</p>}
     </div>

@@ -12,9 +12,9 @@ import type { ProfilesControls } from "../ProfilesSection";
 import { renderSettings } from "./helpers";
 
 // Runtime section tests (issue #489, ADR-0091): the two sub-tabs, the adapter
-// list rendering, and the rescan IPC flow. The ProfilesSection's own behavior
-// is covered by SettingsView.component.test.tsx; here we assert ONLY the new
-// runtime-section surface.
+// list rendering, the rescan IPC flow, and WAI-ARIA APG keyboard navigation.
+// The ProfilesSection's own behavior is covered by SettingsView.component.test;
+// here we assert ONLY the new runtime-section surface.
 
 vi.mock("../../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../api")>();
@@ -107,6 +107,48 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
     expect(screen.getByRole("tab", { name: "Local CLI" })).toHaveAttribute("aria-selected", "false");
   });
 
+  // --- WAI-ARIA APG keyboard navigation -----------------------------------
+
+  it("active tab has tabIndex 0, inactive has -1 (roving tabindex)", () => {
+    renderSection();
+    expect(screen.getByRole("tab", { name: "API Access" })).toHaveAttribute("tabindex", "0");
+    expect(screen.getByRole("tab", { name: "Local CLI" })).toHaveAttribute("tabindex", "-1");
+  });
+
+  it("tabs have aria-controls pointing to their panel ids", () => {
+    renderSection();
+    const apiTab = screen.getByRole("tab", { name: "API Access" });
+    const cliTab = screen.getByRole("tab", { name: "Local CLI" });
+    const apiPanelId = apiTab.getAttribute("aria-controls");
+    const cliPanelId = cliTab.getAttribute("aria-controls");
+    expect(apiPanelId).toBeTruthy();
+    expect(cliPanelId).toBeTruthy();
+    expect(apiPanelId).not.toBe(cliPanelId);
+    // The referenced panels exist and have the matching id.
+    expect(document.getElementById(apiPanelId!)).toHaveAttribute("role", "tabpanel");
+    expect(document.getElementById(cliPanelId!)).toHaveAttribute("role", "tabpanel");
+  });
+
+  it("ArrowRight moves focus from API Access to Local CLI", async () => {
+    renderSection();
+    const apiTab = screen.getByRole("tab", { name: "API Access" });
+    apiTab.focus();
+    expect(apiTab).toHaveFocus();
+    fireEvent.keyDown(screen.getByRole("tablist"), { key: "ArrowRight" });
+    expect(screen.getByRole("tab", { name: "Local CLI" })).toHaveFocus();
+    expect(screen.getByRole("tab", { name: "Local CLI" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("ArrowLeft moves focus from Local CLI back to API Access", async () => {
+    renderSection();
+    fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
+    const cliTab = screen.getByRole("tab", { name: "Local CLI" });
+    cliTab.focus();
+    fireEvent.keyDown(screen.getByRole("tablist"), { key: "ArrowLeft" });
+    expect(screen.getByRole("tab", { name: "API Access" })).toHaveFocus();
+    expect(screen.getByRole("tab", { name: "API Access" })).toHaveAttribute("aria-selected", "true");
+  });
+
   // --- Adapter list rendering ---------------------------------------------
 
   it("detected adapters show the binary path", async () => {
@@ -117,21 +159,36 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
     expect(screen.getByText("/opt/homebrew/bin/opencode")).toBeInTheDocument();
   });
 
-  it("undetected adapters show Not installed", async () => {
-    renderSection();
-    fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
-    await screen.findByText("claude-code");
-    // codex and qwen-code are undetected.
-    const notInstalled = screen.getAllByText("Not installed");
-    expect(notInstalled).toHaveLength(2);
-  });
-
-  it("detected adapters show a Detected badge, undetected show Not found", async () => {
+  it("detected adapters show a Detected badge, undetected show Not installed", async () => {
     renderSection();
     fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
     await screen.findByText("claude-code");
     expect(screen.getAllByText("Detected")).toHaveLength(3);
-    expect(screen.getAllByText("Not found")).toHaveLength(2);
+    expect(screen.getAllByText("Not installed")).toHaveLength(2);
+  });
+
+  // --- Adapter list loading + error states --------------------------------
+
+  it("shows a loading indicator while the adapter list is pending", async () => {
+    let resolveList!: (v: AdapterEntry[]) => void;
+    vi.mocked(listAdapters).mockImplementation(
+      () => new Promise((resolve) => { resolveList = resolve; }),
+    );
+
+    renderSection();
+    fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
+    expect(await screen.findByText("Reading current config…")).toBeInTheDocument();
+
+    resolveList(mockAdapters);
+    await waitFor(() => expect(screen.getByText("claude-code")).toBeInTheDocument());
+  });
+
+  it("surfaces an inline error when the initial adapter list fails to load", async () => {
+    vi.mocked(listAdapters).mockRejectedValue(new Error("IPC connection lost"));
+
+    renderSection();
+    fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
+    expect(await screen.findByText("IPC connection lost")).toBeInTheDocument();
   });
 
   // --- Rescan IPC flow ----------------------------------------------------
