@@ -196,8 +196,17 @@ export function ComposerProviderPicker({
     if (switching) return;
     // Null sessionId (cold-start bar, ADR-0092): write to the caller-held
     // pending state. No IPC, no switching gate -- the write is synchronous.
+    // When the callback is absent the selection is logged and discarded so
+    // an unwired cold-start bar is observable instead of silently swallowed.
     if (sessionId === null) {
-      onPendingRuntimeChange?.(next);
+      if (onPendingRuntimeChange) {
+        onPendingRuntimeChange(next);
+      } else {
+        log.warn(
+          "ComposerProviderPicker",
+          "selectRuntime called with null sessionId but no onPendingRuntimeChange handler — selection discarded",
+        );
+      }
       return;
     }
     setSwitching(true);

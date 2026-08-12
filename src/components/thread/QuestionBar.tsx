@@ -4,7 +4,7 @@ import { ArrowUp, Square } from "lucide-react";
 import type { TurnPhase } from "../../types/session";
 import { Button } from "../ui/button";
 
-interface QuestionBarProps {
+type QuestionBarProps = {
   onSubmit: (question: string) => void;
   /** Fire while a turn is in flight (ADR-0021 cancel). Hidden when not loading. */
   onCancel: () => void;
@@ -17,12 +17,6 @@ interface QuestionBarProps {
    *  (the listener clears it on outcome, incl. Cancelled). Optional so call
    *  sites / tests that don't exercise phase feedback omit it. */
   phase?: TurnPhase | null;
-  /** Controlled draft value (ADR-0092 useComposerState). When provided, the
-   *  draft lives in the parent hook so it persists across session switches on
-   *  the future shell-level bar. When omitted, QuestionBar falls back to local
-   *  state (used by tests that render QuestionBar in isolation). */
-  draft?: string;
-  setDraft?: (value: string) => void;
   /** Top-row controls rendered inside the unified container above the
    *  textarea (the Skills / MCP trigger chips threaded from SessionPane). */
   header?: ReactNode;
@@ -32,7 +26,17 @@ interface QuestionBarProps {
   /** Right-side toolbar controls, seated before the phase + submit/stop
    *  button (the runtime / model picker from SessionPane). */
   trailing?: ReactNode;
-}
+} & {
+  /** Controlled draft pair (ADR-0092 useComposerState). Both must be provided
+   *  together so the parent owns the draft state. When omitted, QuestionBar
+   *  falls back to local state (used by tests that render QuestionBar in
+   *  isolation). Partial binding is a type error to prevent the silent
+   *  input-freeze / stale-value desync that independent optionals would
+   *  allow. */
+} & (
+  | { draft: string; setDraft: (value: string) => void }
+  | { draft?: never; setDraft?: never }
+);
 
 // Natural-language question entry (PRD #1, issue #22). A blank or in-flight
 // submit is ignored client-side; the orchestrator runs one turn at a time

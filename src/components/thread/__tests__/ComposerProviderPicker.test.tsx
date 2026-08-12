@@ -500,6 +500,53 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
     );
   });
 
+  // --- Null sessionId (ADR-0092 cold-start bar) ----------------------------
+
+  it("does not call getSessionRuntime when sessionId is null", () => {
+    renderPicker(
+      <ComposerProviderPicker
+        sessionId={null}
+        provider={pickerProvider()}
+        onSwitchActive={() => {}}
+        onSwitchModel={() => {}}
+        onOpenSettings={vi.fn()}
+        onPendingRuntimeChange={vi.fn()}
+      />,
+    );
+    // The query is disabled — no IPC fires for a null session.
+    expect(getSessionRuntime).not.toHaveBeenCalled();
+    // The trigger renders with the built-in default (RUNTIME_CHOICE_DEFAULT).
+    expect(
+      screen.getByRole("button", { name: BUILTIN_TRIGGER }),
+    ).toBeInTheDocument();
+  });
+
+  it("routes runtime selection to onPendingRuntimeChange when sessionId is null", async () => {
+    vi.mocked(listAdapters).mockResolvedValue([
+      adapter("claude-code", "claude-code", true),
+    ]);
+    const onPendingRuntimeChange = vi.fn();
+    renderPicker(
+      <ComposerProviderPicker
+        sessionId={null}
+        provider={pickerProvider()}
+        onSwitchActive={() => {}}
+        onSwitchModel={() => {}}
+        onOpenSettings={vi.fn()}
+        onPendingRuntimeChange={onPendingRuntimeChange}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
+    const row = await screen.findByRole("button", { name: /claude-code/ });
+    fireEvent.click(row);
+    // Selection routes to the pending callback, not the per-session IPC.
+    expect(onPendingRuntimeChange).toHaveBeenCalledWith({
+      kind: "external",
+      data: "claude-code",
+    });
+    expect(setSessionRuntime).not.toHaveBeenCalled();
+  });
+
   it("selecting the built-in header writes the built-in choice via setSessionRuntime", async () => {
     // Start on the external runtime so reverting to built-in is a real switch.
     const external: SessionRuntimeChoice = { kind: "external", data: "claude-code" };

@@ -93,6 +93,27 @@ describe("QuestionBar keyboard submit (Enter / Shift+Enter / IME)", () => {
   });
 });
 
+describe("QuestionBar controlled draft mode (ADR-0092)", () => {
+  it("renders the controlled draft and routes edits to setDraft", () => {
+    const setDraft = vi.fn();
+    renderQuestionBar(
+      <QuestionBar
+        onSubmit={() => {}}
+        onCancel={() => {}}
+        loading={false}
+        draft="prefilled"
+        setDraft={setDraft}
+      />,
+    );
+    const textarea = screen.getByLabelText("提问");
+    // The controlled value renders instead of the local fallback.
+    expect(textarea).toHaveValue("prefilled");
+    // Typing calls the controlled setter, not a local one.
+    fireEvent.change(textarea, { target: { value: "edited" } });
+    expect(setDraft).toHaveBeenCalledWith("edited");
+  });
+});
+
 describe("QuestionBar header slot", () => {
   it("renders header controls in the container without wiring them into submit", () => {
     const onSubmit = vi.fn();
