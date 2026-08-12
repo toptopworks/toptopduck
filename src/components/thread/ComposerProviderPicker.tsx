@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Cpu } from "lucide-react";
+import { Check, Zap } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { fmtError } from "../../lib/error-presentation";
@@ -30,7 +30,7 @@ import { Label } from "../ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
-// Composer runtime picker (issue #238 / #353, ADR-0071/0076/0081/0083). A
+// Composer runtime picker (issue #238 / #353, ADR-0071/0081/0085/0091). A
 // dual-segment popover at the QuestionBar edge that selects which runtime
 // drives the NEXT turn:
 //   - built-in group (ADR-0081) -- the BYOK Rust agent loop on the active
@@ -43,7 +43,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 //     Settings Runtime "Local CLI" tab, ADR-0091). A "Manage external
 //     runtimes" link at the bottom opens that tab.
 //
-// Trigger: a lucide Cpu icon button (a unified entry glyph, NOT a provider
+// Trigger: a lucide Zap icon button (a unified entry glyph, NOT a provider
 // logo; ADR-0071). Hover Tooltip: an honest "{provider} · {model}" preview for
 // the built-in runtime (+ an honest "no key" mark when the active profile has
 // no key, ADR-0019) or the external adapter name. Click Popover: the heavy
@@ -151,9 +151,10 @@ export function ComposerProviderPicker({
 
   // The v1 adapter table (session-agnostic, ADR-0081/0083). Issue #490 slimmed
   // the external group to a pure selector: only detected rows render (adapter
-  // management moved to Settings → Runtime → Local CLI, ADR-0091). Opening the
-  // popover re-fires listAdapters (the query refetches on mount / popover open)
-  // so the detection status is always fresh without an explicit rescan button.
+  // management moved to Settings → Runtime → Local CLI, ADR-0091). The list
+  // reads the shared adapterKeys.all() cache (the same key LocalCliTab uses);
+  // App.tsx invalidates it on Settings close so the next popover open reflects
+  // any rescan the user ran in the Local CLI tab.
   const { data: adapterData } = useQuery({
     queryKey: adapterKeys.all(),
     queryFn: listAdapters,
@@ -162,6 +163,11 @@ export function ComposerProviderPicker({
   const activeAdapter = isExternal
     ? (adapters.find((a) => a.id === activeAdapterId) ?? null)
     : null;
+  // Stale-runtime flag (issue #490): if the session's active external adapter
+  // is no longer detected (CLI uninstalled, PATH changed), it is filtered out
+  // of the selector list. Surface this so the user knows their current pick is
+  // broken before the next turn fails in the backend.
+  const activeAdapterStale = isExternal && activeAdapterId !== null && activeAdapter === null;
 
   // Guards the write window: a click that lands while the set IPC is in flight
   // is dropped instead of re-firing (the disabled attr is the visual half of
@@ -238,7 +244,7 @@ export function ComposerProviderPicker({
     defaultMessage: "Keychain unavailable",
   });
   // The external-runtime tooltip names the selected adapter (the closed chip
-  // shows the Cpu glyph alone; the tooltip is where the user reads WHICH
+  // shows the Zap glyph alone; the tooltip is where the user reads WHICH
   // runtime the next turn will use). Falls back to the raw id if the adapter
   // row has not loaded yet.
   const externalTooltip = intl.formatMessage(
@@ -319,7 +325,7 @@ export function ComposerProviderPicker({
                 },
               )}
             >
-              <Cpu className="size-4" aria-hidden />
+              <Zap className="size-4" aria-hidden />
             </button>
           </PopoverTrigger>
         </TooltipTrigger>
@@ -481,6 +487,14 @@ export function ComposerProviderPicker({
                 defaultMessage="External"
               />
             </span>
+            {activeAdapterStale && (
+              <p className="text-xs text-destructive">
+                <FormattedMessage
+                  id="composer.runtimePicker.staleAdapter"
+                  defaultMessage="Selected adapter is no longer detected — pick another or manage in settings."
+                />
+              </p>
+            )}
             {adapters.map((a) => {
               const selected = isExternal && activeAdapterId === a.id;
               return (
@@ -503,8 +517,8 @@ export function ComposerProviderPicker({
               );
             })}
             {/* Manage external runtimes -- opens Settings → Runtime → Local CLI
-                (ADR-0091, issue #490). A text link, not a button, to read as a
-                secondary navigation affordance beneath the selector list. */}
+                (ADR-0091, issue #490). A button styled as a text link, to read
+                as a secondary navigation affordance beneath the selector list. */}
             <button
               type="button"
               onClick={() => handleOpenSettings("local-cli")}

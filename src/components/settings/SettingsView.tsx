@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import {
   ArrowLeft,
+  Brain,
   Cable,
-  Cpu,
   Database,
   Puzzle,
   ShieldCheck,
@@ -72,7 +72,7 @@ function SectionIcon({ section }: { section: SettingsSection }) {
     case "skills":
       return <Puzzle className="size-4 shrink-0" aria-hidden />;
     case "runtime":
-      return <Cpu className="size-4 shrink-0" aria-hidden />;
+      return <Brain className="size-4 shrink-0" aria-hidden />;
     case "database-engine":
       return <Database className="size-4 shrink-0" aria-hidden />;
     case "privacy":

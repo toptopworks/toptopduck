@@ -54,6 +54,7 @@
   "composer.runtimePicker.builtinTitle": "Built-in",
   "composer.runtimePicker.externalTitle": "External",
   "composer.runtimePicker.manageExternal": "Manage external runtimes →",
+  "composer.runtimePicker.staleAdapter": "Selected adapter is no longer detected — pick another or manage in settings.",
   "composer.runtimePicker.tooltip.external": "External runtime: {adapter}",
   "disclosure.privacy.apiKey": "<bold>API key isolation:</bold> your Anthropic API key lives only in this machine's OS keychain, read by the app's Rust core to make the endpoint call; the frontend and page never hold the key and have no arbitrary network egress. Aside from the LLM endpoint you configured, the app sends data to no server.",
   "disclosure.privacy.loading": "<bold>Loading semantics:</bold> each dataset is a read-only snapshot taken at load time (ADR-0012). An Excel workbook loads each sheet as a separate dataset; hidden sheets are skipped; formula cells take their cached value at load time (not recomputed), so later edits to the original file require a reload to show. Excel sheets are auto-rectified where possible — leading title rows skipped, merged cells un-merged (forward-filled) — to produce a single-header table; when auto-rectify can't pin down the header, you pick the header row and the rows to skip (your choice is recorded as that dataset's rectify params). .xls is not supported — save as .xlsx before loading.",

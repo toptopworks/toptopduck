@@ -574,4 +574,32 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
       ).not.toBeInTheDocument();
     });
   });
+
+  it("shows a stale-adapter warning when the active external adapter is undetected", async () => {
+    // The session's runtime is an external adapter whose detected flag is false
+    // (CLI was uninstalled after selection). The filtered list drops it, and the
+    // picker surfaces a destructive warning so the user knows their pick is
+    // broken before the next turn fails in the backend.
+    const external: SessionRuntimeChoice = { kind: "external", data: "gemini-cli" };
+    vi.mocked(getSessionRuntime).mockResolvedValue(external);
+    vi.mocked(listAdapters).mockResolvedValue([
+      adapter("claude-code", "claude-code", true),
+      adapter("gemini-cli", "gemini-cli", false),
+    ]);
+    renderPicker(
+      <ComposerProviderPicker
+        sessionId="sess-1"
+        provider={pickerProvider()}
+        onSwitchActive={() => {}}
+        onSwitchModel={() => {}}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
+    expect(
+      await screen.findByText("Selected adapter is no longer detected — pick another or manage in settings."),
+    ).toBeInTheDocument();
+    // The undetected adapter does NOT appear as a selectable row.
+    expect(screen.queryByText("gemini-cli")).not.toBeInTheDocument();
+  });
 });

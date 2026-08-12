@@ -34,6 +34,7 @@ import { createQueryClient } from "./lib/queryClient";
 import { catalogFor } from "./i18n";
 import { useTheme } from "./theme/useTheme";
 import { getProviderConfig } from "./api";
+import { adapterKeys } from "./session/queryKeys";
 
 // The Chat-style three-column shell (ADR-0045/0060/0062, issue #81). App owns
 // APP-level state: the OPEN-session set + active id (ADR-0060 multi-session),
@@ -592,6 +593,13 @@ export default function App() {
                       // refetch their overlays (ADR-0019 honest gate, issue #238;
                       // issue #239 extends the epoch to the hero).
                       setProfileKeyEpoch((n) => n + 1);
+                      // The Local CLI tab's Rescan may have changed adapter
+                      // detection; invalidate the shared cache so the next
+                      // popover open shows fresh data (ADR-0051 explicit
+                      // invalidate; staleTime:Infinity means no auto-refetch).
+                      void queryClient.invalidateQueries({
+                        queryKey: adapterKeys.all(),
+                      });
                     }}
                   />
                 )}
