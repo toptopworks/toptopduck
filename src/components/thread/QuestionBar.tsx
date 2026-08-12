@@ -17,6 +17,12 @@ interface QuestionBarProps {
    *  (the listener clears it on outcome, incl. Cancelled). Optional so call
    *  sites / tests that don't exercise phase feedback omit it. */
   phase?: TurnPhase | null;
+  /** Controlled draft value (ADR-0092 useComposerState). When provided, the
+   *  draft lives in the parent hook so it persists across session switches on
+   *  the future shell-level bar. When omitted, QuestionBar falls back to local
+   *  state (used by tests that render QuestionBar in isolation). */
+  draft?: string;
+  setDraft?: (value: string) => void;
   /** Top-row controls rendered inside the unified container above the
    *  textarea (the Skills / MCP trigger chips threaded from SessionPane). */
   header?: ReactNode;
@@ -44,9 +50,11 @@ interface QuestionBarProps {
 // sits below it; a toolbar row at the bottom carries the composer slot
 // controls (passed as children) on the left and the phase + submit/stop
 // button on the right. Enter submits (Shift+Enter inserts a newline).
-export function QuestionBar({ onSubmit, onCancel, loading, phase = null, header, children, trailing }: QuestionBarProps) {
+export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, setDraft, header, children, trailing }: QuestionBarProps) {
   const intl = useIntl();
-  const [value, setValue] = useState("");
+  const [localDraft, setLocalDraft] = useState("");
+  const value = draft ?? localDraft;
+  const setValue = setDraft ?? setLocalDraft;
 
   function submit() {
     const q = value.trim();
