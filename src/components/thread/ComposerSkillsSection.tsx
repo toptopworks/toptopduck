@@ -61,7 +61,7 @@ export function ComposerSkillsSection({
     });
   }
 
-  const { data: listing, isLoading } = useQuery({
+  const { data: listing, isLoading, error: listingQueryError } = useQuery({
     queryKey: skillKeys.all(),
     queryFn: listSkills,
   });
@@ -130,7 +130,9 @@ export function ComposerSkillsSection({
 
   const empty = !isLoading && registry.length === 0;
   const noMatches = !empty && filtered.length === 0;
-  const displayError = error ?? (mountedQueryError ? fmtError(mountedQueryError, intl) : null);
+  const displayError = error
+    ?? (listingQueryError ? fmtError(listingQueryError, intl) : null)
+    ?? (mountedQueryError ? fmtError(mountedQueryError, intl) : null);
 
   return (
     <div className="composer-skill-section grid gap-1.5">

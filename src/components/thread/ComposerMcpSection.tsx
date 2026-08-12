@@ -44,7 +44,7 @@ export function ComposerMcpSection({ sessionId, loading, onOpenSettingsMcp }: Co
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
 
-  const { data: mcpStatus, error: queryError } = useQuery({
+  const { data: mcpStatus, error: queryError, isLoading } = useQuery({
     queryKey: sessionKeys.mcpStatus(sessionId),
     queryFn: () => listMcpServerStatus(sessionId),
   });
@@ -85,9 +85,9 @@ export function ComposerMcpSection({ sessionId, loading, onOpenSettingsMcp }: Co
     return [...matched].sort((a, b) => Number(b.enabled) - Number(a.enabled));
   }, [servers, search]);
 
-  const empty = servers.length === 0;
-  const noMatches = !empty && filtered.length === 0;
   const displayError = error ?? (queryError ? fmtError(queryError, intl) : null);
+  const empty = !isLoading && servers.length === 0;
+  const noMatches = !empty && filtered.length === 0;
 
   return (
     <div className="composer-mcp-section grid gap-1.5">
@@ -165,7 +165,7 @@ export function ComposerMcpSection({ sessionId, loading, onOpenSettingsMcp }: Co
           );
         })}
       </ul>
-      {empty && (
+      {empty && !displayError && (
         <span className="text-muted-foreground px-2 py-2 text-xs">
           <FormattedMessage
             id="composer.contextPanel.mcpEmpty"
