@@ -49,10 +49,9 @@ export interface ProviderConfig {
 // lives only in the Rust core, ADR-0029 invariant 3). The fault detail is a
 // technical English string (locked / service down / permission revoked / corrupt
 // entry) mirroring ProfileTestOutcome.KeychainUnavailable.detail (issue #243).
-// Defined once here so the three carriers cannot drift: the App-level keyStatus
-// UI state (ConnectionStatus footer, issue #282), ProviderConfigView (the
-// get_provider_config IPC view), and ProfileKeyStatus (the per-profile keychain
-// overlay).
+// Defined once here so the two carriers cannot drift: ProviderConfigView
+// (the get_provider_config IPC view) and ProfileKeyStatus (the per-profile
+// keychain overlay).
 export type KeyStatus = { has_key: boolean; keychain_fault: string | null };
 
 // The get_provider_config view (ADR-0029): effective base URL + model plus the

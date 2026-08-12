@@ -53,7 +53,7 @@ import { PRESET_CUSTOM, derivePresetId, findPreset } from "./provider-presets";
 // is held in memory -- `addingProfile` -- and never listed until committed; its
 // key can still be set first via the ADR-0064 orphan slot), delete commits on
 // confirm (last profile guarded), and set-active commits at once (mirroring the
-// top-bar quick-switcher + a keyStatus refresh). The API-key field keeps its OWN
+// top-bar quick-switcher). The API-key field keeps its OWN
 // immediate Set/Clear IPC (ADR-0029 -- the key never enters app-config) and does
 // NOT participate in the blur / create commit.
 

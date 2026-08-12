@@ -690,9 +690,8 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
 });
 
 describe("SessionSidebar settings footer (issue #282)", () => {
-  // The sidebar footer carries a single settings gear; the profile status row
-  // was removed (the settings rail keeps the full ConnectionStatus). The gear
-  // stays absent until app-config resolves.
+  // The sidebar footer carries a single settings gear (the connection row was
+  // removed from both views). The gear stays absent until app-config resolves.
   const footerProvider: ProviderConfig = {
     profiles: [
       {
