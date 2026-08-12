@@ -7,6 +7,7 @@ import { log } from "../lib/log";
 import { listSkills } from "../api";
 import { WorkspaceToggle } from "../shell/WorkspaceToggle";
 import { useSessionState } from "./useSessionState";
+import { useComposerState } from "./useComposerState";
 import type { ApprovalEntry, UseApprovalEvents } from "./useApprovalEvents";
 import type { ApprovalResponse } from "../types/approval";
 import { ActiveSourceDeleteDialog } from "../components/dataset/ActiveSourceDeleteDialog";
@@ -120,6 +121,17 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
   const intl = useIntl();
   const persistDetail = s.persistError ? errorDetail(s.persistError) : null;
   const queryClient = useQueryClient();
+  // Composer bar state (ADR-0092): owns the input draft + provides a null-safe
+  // facade over the session's bar fields. SessionPane always has a non-null
+  // sessionId, so the session values pass through unchanged today. The null
+  // path (idle defaults + owned draft) is exercised by the future shell-level
+  // bar (cold start).
+  const composer = useComposerState(sessionId, {
+    loading: s.loading,
+    phase: s.phase,
+    handleAsk: s.handleAsk,
+    handleCancel: s.handleCancel,
+  });
   // Workspace tab (ADR-0045: 工作集 is a workspace tab, not a persistent
   // column). 结果 = the derived chart+table stage; 工作集 = source management.
   const [tab, setTab] = useState<"result" | "workingSet">("result");
@@ -259,10 +271,12 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
                 opens its own popover with search + checkbox list; the "+"
                 in the toolbar handles files only. */}
             <QuestionBar
-              onSubmit={s.handleAsk}
-              onCancel={s.handleCancel}
-              loading={s.loading}
-              phase={s.phase}
+              onSubmit={composer.handleAsk}
+              onCancel={composer.handleCancel}
+              loading={composer.loading}
+              phase={composer.phase}
+              draft={composer.draft}
+              setDraft={composer.setDraft}
               header={(
                 <>
                   <ComposerSkillsTrigger
