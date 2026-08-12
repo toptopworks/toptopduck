@@ -155,7 +155,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
     const onActivate = vi.fn();
     const onOpenPersisted = vi.fn();
     const openSessions: OpenSession[] = [
-      { sid: "uuid-a", name: "alpha", path: "/a.duck", pendingIngestPath: null },
+      { sid: "uuid-a", name: "alpha", path: "/a.duck", pendingIngestPath: null, pendingQuestion: null },
     ];
     renderDialog(
       <SessionSearchDialog
@@ -176,7 +176,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
     const onActivate = vi.fn();
     const onOpenPersisted = vi.fn();
     const openSessions: OpenSession[] = [
-      { sid: "uuid-a", name: "alpha", path: "/a.duck", pendingIngestPath: null },
+      { sid: "uuid-a", name: "alpha", path: "/a.duck", pendingIngestPath: null, pendingQuestion: null },
     ];
     renderDialog(
       <SessionSearchDialog

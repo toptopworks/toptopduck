@@ -232,10 +232,12 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     // session lifecycle event.
     vi.mocked(getAppConfig).mockResolvedValue(baseAppConfig());
     render(<App />);
-    // Open a session via the sidebar "+ 新建会话".
-    fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
+    // ADR-0092: open a session via the shell-level bar (sidebar "+" navigates
+    // to empty state; submit from the centered bar creates a session).
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
     await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
+      expect(document.querySelector(".session-rail")).toBeInTheDocument(),
     );
     expect(vi.mocked(createSession)).toHaveBeenCalledTimes(1);
     // Open settings.

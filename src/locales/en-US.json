@@ -3,6 +3,7 @@
   "activeSourceDelete.confirm": "Continue",
   "activeSourceDelete.description": "This source is the current focus table. After removing it, pick one of the remaining sources to continue (or cancel — the working set stays unchanged).",
   "activeSourceDelete.title": "Remove focus source {name}",
+  "coldStart.greeting": "What would you like to analyze?",
   "coldStart.hint": "Click “New session” on the left, or open a saved session to resume. Drop a data file to start a new analysis in one step.",
   "coldStart.newSession": "New session",
   "coldStart.noKey.hint": "Your active profile has no API key yet. Add one to start asking questions.",

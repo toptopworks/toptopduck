@@ -13,6 +13,7 @@ const SESSION_FIELDS: ComposerSessionFields = {
   phase: null,
   handleAsk: vi.fn(),
   handleCancel: vi.fn(),
+  handleIngestFiles: vi.fn(),
 };
 
 // Wrapper that always passes both args. The `as string` cast bypasses the
@@ -26,15 +27,15 @@ function useTestComposerState(
   return useComposerState(sid as string, fields);
 }
 
-describe("useComposerState (ADR-0092 null-safe composer hook)", () => {
+describe("useComposerState (ADR-0092 per-session drafts)", () => {
   it("returns idle defaults when sessionId is null", () => {
     const { result } = renderHook(() => useComposerState(null));
     expect(result.current.loading).toBe(false);
     expect(result.current.phase).toBeNull();
     expect(result.current.draft).toBe("");
-    // Idle handlers are no-ops — calling them resolves without throwing.
     expect(result.current.handleAsk).toBeInstanceOf(Function);
     expect(result.current.handleCancel).toBeInstanceOf(Function);
+    expect(result.current.handleIngestFiles).toBeInstanceOf(Function);
   });
 
   it("passes through session fields merged with owned draft when sessionId is non-null", () => {
@@ -45,10 +46,11 @@ describe("useComposerState (ADR-0092 null-safe composer hook)", () => {
     expect(result.current.phase).toBeNull();
     expect(result.current.handleAsk).toBe(SESSION_FIELDS.handleAsk);
     expect(result.current.handleCancel).toBe(SESSION_FIELDS.handleCancel);
+    expect(result.current.handleIngestFiles).toBe(SESSION_FIELDS.handleIngestFiles);
     expect(result.current.draft).toBe("");
   });
 
-  it("draft persists across the null-to-non-null cold-start transition", () => {
+  it("cold-start draft is separate from session drafts (per-session routing)", () => {
     const { result, rerender } = renderHook(
       ({ sid }) => useTestComposerState(sid, SESSION_FIELDS),
       { initialProps: { sid: null as string | null } },
@@ -56,12 +58,31 @@ describe("useComposerState (ADR-0092 null-safe composer hook)", () => {
     // Type a cold-start question before a session exists.
     act(() => result.current.setDraft("cold start question"));
     expect(result.current.draft).toBe("cold start question");
-    // A session is created — sessionId transitions to non-null.
+    // Switch to a session — its draft is empty (a different draft slot).
     rerender({ sid: "sess-1" });
-    // The draft survives the transition (ADR-0092 core contract).
+    expect(result.current.draft).toBe("");
+    // Switch back to cold start — the cold-start draft is retained.
+    rerender({ sid: null });
     expect(result.current.draft).toBe("cold start question");
-    // Session fields now come from the caller, not IDLE defaults.
-    expect(result.current.loading).toBe(true);
+  });
+
+  it("per-session drafts are independent across sessions", () => {
+    const { result, rerender } = renderHook(
+      ({ sid }) => useTestComposerState(sid, SESSION_FIELDS),
+      { initialProps: { sid: "sess-1" as string | null } },
+    );
+    act(() => result.current.setDraft("question for sess-1"));
+    expect(result.current.draft).toBe("question for sess-1");
+    // Switch to a second session — its draft starts empty.
+    rerender({ sid: "sess-2" });
+    expect(result.current.draft).toBe("");
+    act(() => result.current.setDraft("question for sess-2"));
+    // Switch back to sess-1 — its draft is retained.
+    rerender({ sid: "sess-1" });
+    expect(result.current.draft).toBe("question for sess-1");
+    // Switch to sess-2 — its draft is retained.
+    rerender({ sid: "sess-2" });
+    expect(result.current.draft).toBe("question for sess-2");
   });
 
   it("setDraft updates the owned draft", () => {
@@ -72,13 +93,13 @@ describe("useComposerState (ADR-0092 null-safe composer hook)", () => {
     expect(result.current.draft).toBe("");
   });
 
-  it("idle handleAsk resolves without throwing", async () => {
+  it("idle handlers resolve without throwing", async () => {
     const { result } = renderHook(() => useComposerState(null));
     await act(async () => {
       await result.current.handleAsk("test question");
       await result.current.handleCancel();
+      result.current.handleIngestFiles(["/x.csv"]);
     });
-    // No throw = pass. The log.warn inside idleHandleAsk is fire-and-forget;
-    // its IPC rejection is swallowed by the log module (ADR-0029 honest-degrade).
+    // No throw = pass.
   });
 });

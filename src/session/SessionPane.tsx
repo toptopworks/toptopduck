@@ -7,7 +7,8 @@ import { log } from "../lib/log";
 import { listSkills } from "../api";
 import { WorkspaceToggle } from "../shell/WorkspaceToggle";
 import { useSessionState } from "./useSessionState";
-import { useComposerState } from "./useComposerState";
+import { IDLE_SESSION_FIELDS } from "./useComposerState";
+import type { ComposerSessionFields } from "./useComposerState";
 import type { ApprovalEntry, UseApprovalEvents } from "./useApprovalEvents";
 import type { ApprovalResponse } from "../types/approval";
 import { ActiveSourceDeleteDialog } from "../components/dataset/ActiveSourceDeleteDialog";
@@ -15,15 +16,6 @@ import { DatasetDetail } from "../components/dataset/DatasetDetail";
 import { ErrorBanner } from "../components/common/ErrorBanner";
 import { ErrorBoundary } from "../components/common/ErrorBoundary";
 import { GuidedLoadDialog } from "../components/dataset/GuidedLoadDialog";
-import { QuestionBar } from "../components/thread/QuestionBar";
-import { ComposerAuthModeChip } from "../components/thread/ComposerAuthModeChip";
-import { ComposerContextPanel } from "../components/thread/ComposerContextPanel";
-import { ComposerSkillsTrigger } from "../components/thread/ComposerSkillsTrigger";
-import { ComposerMcpTrigger } from "../components/thread/ComposerMcpTrigger";
-import {
-  ComposerProviderPicker,
-  type ComposerProviderPickerProps,
-} from "../components/thread/ComposerProviderPicker";
 import { ResultView } from "../components/thread/ResultView";
 import { TechnicalDetailsFold } from "../components/common/TechnicalDetailsFold";
 import { Thread } from "../components/thread/Thread";
@@ -37,11 +29,17 @@ import type { ThreadEntry } from "../types/thread";
 import type { NonMaterializedTurn, WorkspaceContent } from "./workspace";
 import { sessionKeys, skillKeys } from "./queryKeys";
 
-// The per-session pane (ADR-0051). One `<SessionPane key={sid} sessionId={sid} />`
+// The per-session pane (ADR-0051/0092). One `<SessionPane key={sid} sessionId={sid} />`
 // owns ALL of a session's server state (via useSessionState -> TanStack Query)
 // and client UI state (viewedResult / pinnedToHistory / loading / dialogs).
-// The shell (<App>) places this as the right grid block (rail + workspace +
-// QuestionBar); the session sidebar is a separate, full-height column (R1).
+// The shell (<App>) places this as the right grid block (rail + workspace);
+// the session sidebar is a separate, full-height column (R1).
+//
+// ADR-0092: QuestionBar moved to the shell level. SessionPane no longer owns
+// the bar or its composer controls. It reports its bar-relevant fields
+// (loading / phase / handleAsk / handleCancel / handleIngestFiles) upward via
+// onComposerFields so the shell-level bar can read them for the active session.
+// A pendingQuestion from a cold-start submit is consumed on mount via handleAsk.
 
 interface SessionPaneProps {
   sessionId: string;
@@ -53,30 +51,31 @@ interface SessionPaneProps {
   /** Shell callback after the pending ingest is kicked off, so OpenSession is
    *  cleared and a remount cannot re-ingest (#81 A1). */
   onIngestConsumed: () => void;
-  /** App-level provider/model picker occupying the composer control row's
-   *  runtime slot (ADR-0071, issue #238; slot skeleton ADR-0083, issue #350;
-   *  runtime selector evolution issue #353). Optional because it depends on
-   *  app-config having resolved (App passes it only when appConfig is
-   *  non-null); absent, the runtime slot stays empty. Bundled as one slot so
-   *  the all-or-nothing render stays a single guard. `sessionId` is injected
-   *  at the render site (SessionPane owns it), so the bundle type omits it. */
-  providerPicker?: Omit<ComposerProviderPickerProps, "sessionId">;
-  /** Hop to the settings SkillsSection from the composer "+" panel's skill
-   *  section footer (issue #365 AC #4). Shell-owned navigation; App threads
-   *  openSettings({ section: "skills" }) through. */
-  onOpenSettingsSkills: () => void;
-  /** Hop to the settings MCP section from the composer MCP trigger popover's
-   *  add-server footer. Shell-owned navigation; App threads
-   *  openSettings({ section: "mcp" }) through. */
-  onOpenSettingsMcp: () => void;
+  /** ADR-0092: a pending question from the shell-level cold-start bar. Set
+   *  when the user submits from the centered bar with no active session; the
+   *  shell creates a session carrying the question, and SessionPane fires it
+   *  via handleAsk on mount. null once consumed or for sessions opened by any
+   *  other action. */
+  pendingQuestion: string | null;
+  /** ADR-0092: shell callback after the pending question is fired, so the
+   *  OpenSession entry is cleared and a remount cannot re-fire. */
+  onQuestionConsumed: () => void;
+  /** ADR-0092: lifts this session's bar-relevant fields (loading / phase /
+   *  handleAsk / handleCancel / handleIngestFiles) to the shell-level bar.
+   *  Called via useEffect whenever the fields change. */
+  onComposerFields: (sessionId: string, fields: ComposerSessionFields) => void;
   /** Display name for THIS session's header. The shell owns the open-session
    *  set; each SessionPane receives its own name rather than reaching into
    *  global active-session state (ADR-0060). */
   sessionName: string;
   /** ADR-0089 Decision 4: the shell syncs the auto-generated session name
    *  (from the first terminal turn) into the sidebar + header. Called once
-   *  after the session's first turn settles. */
-  onFirstTurnSettled: () => void;
+   *  after the session's first turn settles with this pane's sessionId. The
+   *  sid-taking shape lets the shell pass a useCallback-stable handler -- an
+   *  inline per-session arrow would rebuild handleAskWithAutoName on every
+   *  App render, and the ADR-0092 composer-fields report compares handleAsk
+   *  by reference (an unstable identity loops the bar's fields registry). */
+  onFirstTurnSettled: (sessionId: string) => void;
   /** The app-level approval channel (ADR-0083, issue #297): the pane reads
    *  its own session's entries (merged into the live trace by useTurnFlow)
    *  and binds the respond + settled-clear callbacks to its sessionId. */
@@ -91,7 +90,7 @@ interface SessionPaneProps {
 // stable prop for useSessionState / useTurnFlow (no every-render fresh []).
 const NO_APPROVALS: ApprovalEntry[] = [];
 
-export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, providerPicker, onOpenSettingsSkills, onOpenSettingsMcp, sessionName, onFirstTurnSettled, approvalEvents, onRailResizeStart }: SessionPaneProps) {
+export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pendingQuestion, onQuestionConsumed, onComposerFields, sessionName, onFirstTurnSettled, approvalEvents, onRailResizeStart }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
   // the pane acts on its own session only). The respond / clearSession
@@ -121,17 +120,59 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
   const intl = useIntl();
   const persistDetail = s.persistError ? errorDetail(s.persistError) : null;
   const queryClient = useQueryClient();
-  // Composer bar state (ADR-0092): owns the input draft + provides a null-safe
-  // facade over the session's bar fields. SessionPane always has a non-null
-  // sessionId, so the session values pass through unchanged today. The null
-  // path (idle defaults + owned draft) is exercised by the future shell-level
-  // bar (cold start).
-  const composer = useComposerState(sessionId, {
-    loading: s.loading,
-    phase: s.phase,
-    handleAsk: s.handleAsk,
-    handleCancel: s.handleCancel,
-  });
+
+  // ADR-0092: lift this session's bar-relevant fields to the shell-level bar.
+  // handleAsk / handleCancel / handleIngestFiles are useCallback-stable inside
+  // useSessionState; loading / phase change during a turn. The effect fires on
+  // those changes, keeping the shell's per-session composerFields registry
+  // fresh for the active session.
+  useEffect(() => {
+    onComposerFields(sessionId, {
+      loading: s.loading,
+      phase: s.phase,
+      handleAsk: s.handleAsk,
+      handleCancel: s.handleCancel,
+      handleIngestFiles: s.handleIngestMany,
+    });
+  }, [
+    sessionId,
+    s.loading,
+    s.phase,
+    s.handleAsk,
+    s.handleCancel,
+    s.handleIngestMany,
+    onComposerFields,
+  ]);
+
+  // ADR-0092: reset this session's bar fields to idle when the pane unmounts.
+  // If the pane is replaced by the session-level error boundary (a render crash)
+  // or removed on close/delete while a turn is mid-flight, the last-reported
+  // `loading: true` would otherwise linger in the shell's composer-fields map —
+  // the in-flight handleAsk's setLoading(false) lands on an unmounted component
+  // (a no-op), so nothing else clears it, and the shell bar would show a stuck
+  // stop button for a session the user can no longer query. Unmount-only (empty
+  // deps): the reporting effect above owns every in-life update.
+  useEffect(() => {
+    return () => {
+      onComposerFields(sessionId, IDLE_SESSION_FIELDS);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ADR-0092: consume a pending question from the cold-start bar submit.
+  // The shell created this session with pendingQuestion set; fire it via
+  // handleAsk immediately, then clear it so a remount cannot re-fire. The
+  // guard on pendingQuestion !== null ensures this runs once (on mount when
+  // the prop is set, or not at all when null). Errors are caught so a mock
+  // chain gap in tests does not crash the worker.
+  useEffect(() => {
+    if (pendingQuestion !== null) {
+      onQuestionConsumed();
+      void s.handleAsk(pendingQuestion).catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingQuestion]);
+
   // Workspace tab (ADR-0045: 工作集 is a workspace tab, not a persistent
   // column). 结果 = the derived chart+table stage; 工作集 = source management.
   const [tab, setTab] = useState<"result" | "workingSet">("result");
@@ -204,24 +245,15 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
       </div>
       {/* ADR-0058 L2 partition boundaries: Thread rail and ResultView each get
           their own ErrorBoundary so a render crash in one degrades only that
-          block (the QuestionBar -- a session-skeleton element, ADR-0062 R1 --
-          is a sibling and always survives). The session-level isolation
-          boundary lives one level up in <App> (wrapping each <SessionPane>) so
-          a render crash elsewhere in the pane degrades only THAT session.
-          KNOWN LIMITATION (React 19 + TanStack Query external store): in the
-          real App tree the per-session boundary is an ANCESTOR of these region
-          boundaries, so a Query-driven re-render throw inside Thread/ResultView
-          can be caught by the outer session boundary first (degrading the whole
-          pane) instead of the granular region boundary. First-render throws are
-          caught by the region boundary as expected; the cross-boundary case
-          surfaces only with external-store-driven updates and could not be
-          reproduced in isolation, so black-box tests assert "degrade card
-          visible + session isolated + retry" rather than "region boundary
-          catches precisely". See memory: react19-nested-errorboundary-outer-
-          catches. */}
+          block. The session-level isolation boundary lives one level up in
+          <App> (wrapping each <SessionPane>) so a render crash elsewhere in
+          the pane degrades only THAT session. */}
       {/* session-body: flex container for rail + workspace so both collapses
-          animate via flex-grow / flex-basis (interpolatable). */}
-      <div className="session-body">
+          animate via flex-grow / flex-basis (interpolatable). ADR-0092: the
+          QuestionBar is no longer inside session-conversation — it lives at
+          the shell level. The session-body fills the available height; the
+          shell-level bar sits below the main area (flex-shrink: 0). */}
+      <div className="session-body session-body-no-bar">
         <div className="session-conversation">
           {/* --- Thread rail (ADR-0045/0047) ---------------------------------- */}
           <section
@@ -244,12 +276,6 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
               />
             </ErrorBoundary>
             {s.thread.length === 0 && s.liveTurn === null && (
-            // ADR-0067 (issue #185): the .rail-empty visual rule (font-size +
-            // padding) + the .muted color rule retired onto utility; the class
-            // hooks had no selector / test dependents and are dropped. Gated on
-            // liveTurn too (issue #297): a brand-new session's FIRST in-flight
-            // turn already renders the live card -- the "no conversations yet"
-            // hint would contradict it.
               <p className="text-[0.85rem] p-2 text-muted-foreground">
                 <FormattedMessage
                   id="session.rail.empty"
@@ -258,52 +284,6 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
               </p>
             )}
           </section>
-
-          {/* --- Composer control row (ADR-0083, issue #350). The QuestionBar
-              is the unified container: the composer slot controls ([+]
-              context / approval mode / runtime picker) pass as children into
-              its bottom toolbar row. Lives inside the conversation column so
-              its width tracks the rail. */}
-          <div className="session-questionbar">
-            {/* Context triggers (Skills / MCP) pass as the QuestionBar header
-                slot: borderless chips riding the container's top row (one
-                shared bg-card surface with the textarea + toolbar). Each
-                opens its own popover with search + checkbox list; the "+"
-                in the toolbar handles files only. */}
-            <QuestionBar
-              onSubmit={composer.handleAsk}
-              onCancel={composer.handleCancel}
-              loading={composer.loading}
-              phase={composer.phase}
-              draft={composer.draft}
-              setDraft={composer.setDraft}
-              header={(
-                <>
-                  <ComposerSkillsTrigger
-                    sessionId={sessionId}
-                    loading={s.loading}
-                    onOpenSettingsSkills={onOpenSettingsSkills}
-                  />
-                  <ComposerMcpTrigger
-                    sessionId={sessionId}
-                    loading={s.loading}
-                    onOpenSettingsMcp={onOpenSettingsMcp}
-                  />
-                </>
-              )}
-              trailing={
-                providerPicker && (
-                  <ComposerProviderPicker sessionId={sessionId} {...providerPicker} />
-                )
-              }
-            >
-              <ComposerContextPanel
-                onIngestFiles={s.handleIngestMany}
-                loading={s.loading}
-              />
-              <ComposerAuthModeChip sessionId={sessionId} />
-            </QuestionBar>
-          </div>
         </div>
 
         {/* --- Workspace (ADR-0045/0062 R2) -------------------------------- */}
@@ -311,12 +291,6 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
           className="session-workspace"
           aria-label={intl.formatMessage({ id: "session.workspace.ariaLabel", defaultMessage: "Workspace" })}
         >
-          {/* ADR-0067 (issue #173): the .workspace-tabs visual chrome (padding,
-            border-bottom, background) + the [role=tab] base + .active
-            primary-underline retired from styles.css onto this component as
-            utility + ADR-0050 token. The .workspace-tabs hook + bare "active"
-            class stay for selector / test stability; twMerge picks
-            border-b-primary over border-b-transparent when the tab is active. */}
           <div
             className="workspace-tabs flex items-center gap-2 px-4 py-1.5 border-b"
             role="tablist"
@@ -345,9 +319,6 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
             >
               <FormattedMessage id="session.tab.workingSet" defaultMessage="Working set" />
             </button>
-            {/* active (server truth, ADR-0051/0060) shown read-only here so the
-                user sees what the next question targets by default. Naming it
-                here, not in QuestionBar, keeps QuestionBar presentational. */}
             {s.activeName && (
               <Badge
                 variant="default"
@@ -370,18 +341,9 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
             )}
           </div>
 
-          {/* ADR-0067 (issue #173): the .workspace-body visual rule (padding)
-            retired from styles.css; the flex-1 + overflow-y-auto layout could
-            move too, but the hook stays for selector / test stability. */}
           <div className="workspace-body flex-1 overflow-y-auto p-4">
             {s.error && <ErrorBanner error={s.error} />}
             {s.persistError && (
-              // ADR-0067 (issue #172): the bespoke .persist-warning container
-              // (hardcoded amber #fff4e5 / #ffd9a0 / #8a5200) retired into a
-              // shadcn Alert warning variant, which consumes the --warning token.
-              // role="status" overrides the Alert's assertive "alert" default:
-              // the disk fell behind but the in-memory work is intact, so it
-              // reads as a polite caution, not an interrupting emergency.
               <Alert variant="warning" role="status" className="mt-1.5">
                 <AlertDescription>
                   <p className="m-0">
@@ -471,9 +433,6 @@ function WorkspaceResult({
       // (ADR-0083, issue #351); window-level drag-and-drop stays the shortcut
       // path, so the hero is now the drop hint + the ask-a-question pivot once
       // a source is loaded (hasData).
-      // ADR-0067 (issue #173): the .workspace-hero visual rule (flex column,
-      // centered, gap, padding, text-align) retired from styles.css onto
-      // utility; the .workspace-hero hook stays for selector stability.
       return (
         <div className="workspace-hero flex flex-col items-center gap-4 p-8 text-center">
           <p className="text-muted-foreground">
@@ -525,23 +484,8 @@ function WorkspaceResult({
 // turn is already narrowed to NonMaterializedTurn (workspace.ts), so Materialized
 // is excluded at the type level and the switch ends in `default: never` -- no
 // defensive `return null` for an unreachable case.
-//
-// ADR-0067 (issue #173): the .textual-card visual rule (padding/bg/border/
-// radius) + the per-outcome border-left retired from styles.css onto this
-// component as utility + ADR-0050 token. The semantic class hooks
-// (.textual-card / .textual-card.{clarify,refuse,failed,cancelled}) are kept on
-// the <article> for selector / test stability (Shell.test.tsx queries
-// .textual-card.failed); the hook doubles as the variant-utility lookup key.
-// Issue #222: shadow-sm lifts the in-content card so it shares one elevation
-// language with the floating dialog (shadow-lg) / popover (shadow-md) layer --
-// a Tailwind scale utility, not a new --shadow-* token (ADR-0067 (2)).
 const TEXTUAL_CARD_BASE =
   "textual-card p-4 bg-card border border-border rounded-lg shadow-sm";
-// The variant key set is a closed domain -- Lowercase<TextKind> ("clarify" |
-// "refuse") for the Textual arm + "failed" + "cancelled" for the other two
-// outcome kinds. A literal-union Record catches key typos at compile time and
-// stays exhaustive if TextKind grows, matching the `default: never` pattern
-// used by the outcome switch below.
 const TEXTUAL_CARD_VARIANT: Record<"clarify" | "refuse" | "failed" | "cancelled", string> = {
   clarify: "border-l-[3px] border-l-primary",
   refuse: "border-l-[3px] border-l-muted-foreground",
@@ -554,10 +498,6 @@ function TextualOutcomeCard({ turn }: { turn: NonMaterializedTurn }) {
     case "Textual": {
       const { text_kind, body, assumption } = turn.outcome.data;
       const isClarify = text_kind === "Clarify";
-      // "clarify" | "refuse" -- the lowercase text_kind is both the kept class
-      // hook and the variant-utility lookup key. Cast to the literal union so
-      // the TEXTUAL_CARD_VARIANT lookup is exhaustive-checked (TextKind is
-      // "Clarify" | "Refuse", so the cast is sound).
       const variantHook = text_kind.toLowerCase() as "clarify" | "refuse";
       return (
         <article className={cn(TEXTUAL_CARD_BASE, variantHook, TEXTUAL_CARD_VARIANT[variantHook])}>
@@ -582,9 +522,6 @@ function TextualOutcomeCard({ turn }: { turn: NonMaterializedTurn }) {
       );
     }
     case "Failed": {
-      // Outcome C (issue #125): render by TurnFailure kind via the locale
-      // catalog (no backend Display string crosses IPC); Execute / Resource
-      // carry a technical detail under the collapsed fold.
       const failure = turn.outcome.data;
       const detail = turnFailureDetail(failure);
       return (
@@ -614,12 +551,6 @@ function TextualOutcomeCard({ turn }: { turn: NonMaterializedTurn }) {
 
 // The "工作集" tab (ADR-0045): source management -- rename / replace / delete /
 // privacy. The list + detail pair moved here from the old single-column layout.
-//
-// Panel card chrome for the master/detail sections (issue #184 + #222): bg-card
-// + border + rounded-lg + p-4 carry the surface (ADR-0067 (1) .panel layout hook
-// + visual utility); shadow-sm shares the elevation language of the workspace
-// textual-card / dialog / popover (Tailwind scale, no new token, ADR-0067 (2)).
-// Shared by the list and detail sections so the pair reads as one surface.
 const PANEL_CARD_BASE = "panel bg-card border rounded-lg shadow-sm p-4";
 function WorkspaceWorkingSet({
   datasets,
@@ -643,20 +574,12 @@ function WorkspaceWorkingSet({
     privacy: DatasetPrivacy,
   ) => void;
 }) {
-  // The 工作集 tab's own selection (which dataset's detail to show). Kept local
-  // and separate from viewedResult: picking a dataset here is a management
-  // action, not a workspace view selection (ADR-0051 active/viewed split).
   const [selected, setSelected] = useState<string | null>(
     viewedDescriptor?.reference_name ?? activeName ?? null,
   );
   const shown = datasets.find((d) => d.reference_name === selected) ?? null;
 
   return (
-    // ADR-0067 (issue #184): the WorkspaceWorkingSet div carries the .layout
-    // grid (280px/1fr two-column master-detail, ADR-0067 Decision 1); both
-    // sections share the PANEL_CARD_BASE chrome (defined above). The .layout /
-    // .working-set-layout / .panel class hooks stay as anchor points;
-    // per-consumer margins live on the consumer, not the shared .layout rule.
     <div className="layout working-set-layout">
       <section className={PANEL_CARD_BASE}>
         <h2>

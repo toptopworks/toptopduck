@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { IntlProvider } from "react-intl";
 import type { ReactNode } from "react";
 import type { DatasetDescriptor } from "../types/dataset";
 import type { TurnOutcome } from "../types/thread";
+import type { ComposerSessionFields } from "../session/useComposerState";
 
 // The composer "+" context panel (the retired FileDropzone's successor, issue
 // #351) touches Tauri APIs that don't exist under jsdom; stub them first.
@@ -113,21 +114,38 @@ function renderPane(locale: EffectiveLocale = "zh-CN", sessionName = "Test sessi
     respond: () => {},
     clearSession: () => {},
   };
+  // ADR-0092: SessionPane no longer renders QuestionBar. Capture the composer
+  // fields (handleAsk etc.) so tests can trigger questions directly.
+  capturedComposerFields = null;
   render(
     wrap(
       <SessionPane
         sessionId="sess-1"
         pendingIngestPath={null}
         onIngestConsumed={() => {}}
+        pendingQuestion={null}
+        onQuestionConsumed={() => {}}
+        onComposerFields={(_sid, fields) => { capturedComposerFields = fields; }}
         sessionName={sessionName}
         onFirstTurnSettled={() => {}}
         approvalEvents={approvalEvents}
-        onOpenSettingsSkills={() => {}}
-        onOpenSettingsMcp={() => {}}
         onRailResizeStart={() => {}}
       />,
     ),
   );
+}
+
+// ADR-0092: captured composer fields from the last renderPane() call. Tests
+// that need to submit a question wait for this to be non-null, then call
+// handleAsk directly (the QuestionBar moved to the shell level).
+let capturedComposerFields: ComposerSessionFields | null = null;
+
+/** Wait for the SessionPane to report its composer fields, then call handleAsk. */
+async function submitQuestion(question: string): Promise<void> {
+  await waitFor(() => expect(capturedComposerFields).not.toBeNull());
+  await act(async () => {
+    await capturedComposerFields!.handleAsk(question);
+  });
 }
 
 // The catalog key for an operation verb (issue #139). The negative prefix
@@ -217,9 +235,12 @@ describe("App guided-load flow", () => {
     await waitFor(() => expect(listWorkingSet).toHaveBeenCalled());
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
-    // Pick a file via the composer "+" Files button -> ingestFile returns
-    // NeedsGuidance -> dialog opens (AC2 seam).
-    fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+    // ADR-0092: the composer "+" Files button moved to the shell-level bar.
+    // Trigger ingest directly via the captured composer fields.
+    await waitFor(() => expect(capturedComposerFields).not.toBeNull());
+    act(() => {
+      capturedComposerFields!.handleIngestFiles(["/x/m.xlsx"]);
+    });
     await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
     expect(screen.getByText(/引导加载：m/)).toBeInTheDocument();
 
@@ -443,11 +464,7 @@ describe("App ask flow", () => {
       },
     });
     renderPane();
-    await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
-    );
-    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "总共几行" } });
-    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await submitQuestion("总共几行");
     await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "总共几行"));
     // the materialized result pane appears (ResultView heading). The thread
     // rail also shows a result link with the same text, so target the heading
@@ -460,11 +477,7 @@ describe("App ask flow", () => {
   it("labels an ask failure distinctly from a load failure", async () => {
     vi.mocked(askQuestion).mockRejectedValueOnce("未配置有效的 LLM 提供方");
     renderPane();
-    await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
-    );
-    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "x" } });
-    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await submitQuestion("x");
     await waitFor(() =>
       expect(screen.getByText(/未配置有效的 LLM 提供方/)).toBeInTheDocument(),
     );
@@ -476,9 +489,6 @@ describe("App ask flow", () => {
     // ADR-0028: a non-result outcome is still always visible (in the thread),
     // occupies a slot, but produces no result_N -- so no result pane opens.
     renderPane();
-    await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
-    );
     // Mount refresh has settled; queue what the turn produces (asked after mount
     // so the mount's own conversation() call doesn't consume the once-mock).
     // No conversation once-mock: the turn flow appends optimistically and
@@ -488,8 +498,7 @@ describe("App ask flow", () => {
       kind: "Textual",
       data: { text_kind: "Clarify", body: "按产品名还是客户名汇总？", assumption: null },
     });
-    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "哪个名字" } });
-    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await submitQuestion("哪个名字");
 
     // The clarify body is visible in the thread AND now also in the workspace
     // textual card, so assert at least one match rather than a unique one.
@@ -505,16 +514,16 @@ describe("App ask flow", () => {
     // live turn card occupies the rail, so the "尚无对话" hint must NOT render
     // alongside it (the two read as contradictory).
     renderPane();
-    await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
-    );
     // The empty hint is up before any ask (the thread query settles empty).
     await waitFor(() => expect(screen.getByText(/尚无对话/)).toBeInTheDocument());
     vi.mocked(askQuestion).mockImplementationOnce(
       () => new Promise<TurnOutcome>(() => {}), // stays in flight
     );
-    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "第一问" } });
-    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    // Fire handleAsk without awaiting — askQuestion never resolves (in-flight).
+    await waitFor(() => expect(capturedComposerFields).not.toBeNull());
+    act(() => {
+      void capturedComposerFields!.handleAsk("第一问");
+    });
     // The live card renders the asking question; the empty hint is gone.
     await waitFor(() =>
       expect(within(document.querySelector(".session-rail")!).getByText("第一问")).toBeInTheDocument(),

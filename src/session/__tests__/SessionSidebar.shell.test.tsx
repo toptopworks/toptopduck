@@ -27,8 +27,8 @@ function renderShell(ui: ReactElement) {
 // stamps `now` for unsaved sessions).
 function twoOpenSessions(): OpenSession[] {
   return [
-    { sid: "sess-active", name: "Active", path: "/sessions/sess-active/session.duck", pendingIngestPath: null },
-    { sid: "sess-bg", name: "Background", path: "/sessions/sess-bg/session.duck", pendingIngestPath: null },
+    { sid: "sess-active", name: "Active", path: "/sessions/sess-active/session.duck", pendingIngestPath: null, pendingQuestion: null },
+    { sid: "sess-bg", name: "Background", path: "/sessions/sess-bg/session.duck", pendingIngestPath: null, pendingQuestion: null },
   ];
 }
 

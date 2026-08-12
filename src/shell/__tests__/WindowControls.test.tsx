@@ -87,7 +87,7 @@ afterEach(async () => {
 });
 
 // Empty-catalog English IntlProvider so aria-labels resolve to defaultMessage
-// (the canonical English source, ADR-0052). Mirrors ColdStartHero.test.tsx.
+// (the canonical English source, ADR-0052).
 async function renderWithPlatform<T extends ReactElement>(
   platform: string,
   ui: T,

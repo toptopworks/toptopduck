@@ -39,6 +39,12 @@ export interface OpenSession {
    *  handleIngest, then clears it through onIngestConsumed. null once consumed
    *  or when the session was opened by a non-drop action. */
   pendingIngestPath: string | null;
+  /** A pending question from the shell-level cold-start bar (ADR-0092). When
+   *  the user submits from the centered bar with no active session, the shell
+   *  creates a session carrying the question here; SessionPane consumes it via
+   *  handleAsk on mount, then clears it through onQuestionConsumed. null for
+   *  sessions opened by any other action. */
+  pendingQuestion: string | null;
 }
 
 /** The four ADR-0060 Chat-style time buckets (Today / Yesterday / Previous 7

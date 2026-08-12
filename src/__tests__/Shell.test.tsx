@@ -58,14 +58,18 @@ vi.mock("../api", async (importOriginal) => {
     ...actual,
     closeSession: vi.fn(async () => false),
     closeSessionAndWaitRelease: vi.fn(async () => {}),
-    createSession: vi.fn(async () => "sess-1"),
+    createSession: vi.fn(async () => ({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" })),
     deleteSession: vi.fn(async () => {}),
     listSessions: vi.fn(async () => []),
     renameSession: vi.fn(async () => ""),
     ingestFile: vi.fn(),
     listWorkingSet: vi.fn(async () => state.workingSet),
     activeDataset: vi.fn(async () => null),
-    askQuestion: vi.fn(),
+    // Default: never resolves — the pendingQuestion from openSession() fires
+    // handleAsk, but the turn stays in-flight without processing a result,
+    // avoiding state updates that could leak across the test cleanup boundary.
+    // Tests that need a result override via mockResolvedValueOnce.
+    askQuestion: vi.fn(() => new Promise(() => {})),
     cancelQuery: vi.fn(async () => {}),
     conversation: vi.fn(async () => state.thread),
     // ADR-0059: capture the listener callback so a test can emit phases; the
@@ -90,7 +94,7 @@ vi.mock("../api", async (importOriginal) => {
     respondToolApproval: vi.fn(async () => {}),
     readRows: vi.fn(),
     // listProviderProfiles feeds the per-profile has_key overlay consumed by
-    // ColdStartHero + ComposerProviderPicker (mounted via SessionPane) on App
+    // ComposerProviderPicker (mounted via shell-level bar) on App
     // mount. Default empty; no Shell.test override relies on a populated overlay.
     listProviderProfiles: vi.fn(async () => []),
     // Per-session MCP status feeds the composer "+" badge (issue #351).
@@ -152,13 +156,41 @@ import {
 import type { AppConfig } from "../types/app-config";
 import type { McpServerConfig, McpServerStatusEntry } from "../types/mcp";
 
-// ADR-0061 cold start: <App/> renders no session on mount, so a session-internal
-// assertion first opens one via the sidebar "+ 新建会话" button (scoped by class
-// to disambiguate from the cold-start hero's same-label CTA).
+// ADR-0092: the sidebar "+" navigates to the centered empty state (no longer
+// creates a session). The test helper creates a session via the drop-to-create
+// path (dropFile), which mints a session with pendingIngestPath — no turn fires,
+// keeping the helper lightweight. For multi-session creation, click "+" first to
+// return to cold start, then drop again.
+// ADR-0092: the sidebar "+" navigates to the centered empty state (no longer
+// creates a session). A session is created by submitting from the shell-level
+// bar. This helper clicks "+" (cold start), types + submits. Can be called
+// multiple times: each call navigates to empty state first, then creates.
 async function openSession(): Promise<void> {
+  // Navigate to empty state (sidebar "+"). No-op on fresh render.
   fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
+  // ADR-0092: submitting from the centered bar creates the session AND fires the
+  // question as the first turn. The helper REJECTS that creation turn so it
+  // settles immediately and the session is idle when we return: a resolved
+  // outcome would APPEND a turn (hiding the hero / last-turn card many tests
+  // assert) and a never-resolving one would leave the bar stuck on the stop
+  // button. handleAsk's catch sets loading=false and appends nothing on reject,
+  // so the thread stays exactly as `state.thread` provides. The reject surfaces
+  // a session error banner, which these black-box assertions ignore. The
+  // one-time rejection is queued ahead of any per-test mock so the creation turn
+  // — not the test's own turn — consumes it.
+  vi.mocked(askQuestion).mockRejectedValueOnce(
+    new Error("openSession: discard the creation turn"),
+  );
+  // The centered bar is always rendered — type and submit to create a session.
+  fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
+  fireEvent.click(screen.getByRole("button", { name: "提问" }));
   await waitFor(() =>
-    expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
+    expect(document.querySelector(".session-rail")).toBeInTheDocument(),
+  );
+  // Wait for the creation turn to settle (reject) so the bar returns to idle
+  // (submit button back) before the test drives its own interactions.
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
   );
 }
 
@@ -229,7 +261,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
     expect(document.querySelector(".session-rail")).toBeInTheDocument();
     expect(document.querySelector(".session-workspace")).toBeInTheDocument();
     expect(document.querySelector(".topbar")).toBeInTheDocument();
-    expect(document.querySelector(".session-questionbar")).toBeInTheDocument();
+    expect(document.querySelector(".shell-bar-slot")).toBeInTheDocument();
   });
 
   it("collapses the session sidebar via the top-bar toggle", async () => {
@@ -295,14 +327,16 @@ describe("App three-column shell (issue #79 ACs)", () => {
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: /结果：result_2/ })).toBeInTheDocument(),
     );
+    // Baseline: openSession's creation turn already fired one (rejected) ask.
+    const asksBeforeClick = vi.mocked(askQuestion).mock.calls.length;
     // Click result_1 in the rail (the Thread result-link button).
     fireEvent.click(screen.getByRole("button", { name: /结果：result_1/ }));
     // viewedResult moved to result_1; the workspace now shows result_1.
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: /结果：result_1/ })).toBeInTheDocument(),
     );
-    // No ask / mutation IPC fired by the click -- active is untouched.
-    expect(askQuestion).not.toHaveBeenCalled();
+    // No NEW ask / mutation IPC fired by the click -- active is untouched.
+    expect(vi.mocked(askQuestion).mock.calls.length).toBe(asksBeforeClick);
   });
 
   it("appends the new turn optimistically without a thread refetch (ADR-0051)", async () => {
@@ -456,12 +490,13 @@ describe("App multi-session shell (issue #81 ACs)", () => {
     vi.stubGlobal("navigator", { language: "zh-CN" });
   });
 
-  it("cold start shows the hero empty state and does not createSession (ADR-0061)", async () => {
-    // No auto-resume, no auto-create: the right side is the new-session hero,
-    // the question bar is absent, and createSession has not been called.
+  it("cold start shows the centered bar + greeting and does not createSession (ADR-0061/0092)", async () => {
+    // ADR-0092: no auto-resume, no auto-create. The centered bar + greeting
+    // show in the main area. createSession has not been called.
     render(<App />);
-    expect(screen.getByText(/开始一次分析/)).toBeInTheDocument();
-    expect(screen.queryByRole("textbox", { name: "提问" })).not.toBeInTheDocument();
+    expect(screen.getByText(/你想分析什么/)).toBeInTheDocument();
+    // The shell-level bar IS rendered (centered), so the textbox is present.
+    expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument();
     expect(createSession).not.toHaveBeenCalled();
   });
 
@@ -474,12 +509,9 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       .mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" })
       .mockResolvedValueOnce({ session_id: "sess-2", duck_path: "/sessions/sess-2/session.duck" });
     render(<App />);
-    fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
-    await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
-    );
-    fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
-    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(2));
+    await openSession();
+    await openSession();
+    expect(createSession).toHaveBeenCalledTimes(2);
     // Wait for both panes to fire their thread query -- conversation runs in
     // the SessionPane mount effect (async), so asserting it synchronously
     // right after createSession races the query fire (flake on slower CI).
@@ -496,19 +528,17 @@ describe("App multi-session shell (issue #81 ACs)", () => {
   it("closes the active session: closeSession + drops it from the open set (ADR-0055)", async () => {
     vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
     render(<App />);
-    fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
-    await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
-    );
+    await openSession();
 
     // Open the context menu on the one open entry, then Close.
     fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
     fireEvent.click(screen.getByRole("menuitem", { name: "关闭" }));
 
     await waitFor(() => expect(closeSession).toHaveBeenCalledWith("sess-1"));
-    // The session pane is gone -- the question bar is no longer in the document.
+    // ADR-0092: the shell-level bar persists (it is always rendered). The
+    // session chrome (rail) is gone — that proves the session was closed.
     await waitFor(() =>
-      expect(screen.queryByRole("textbox", { name: "提问" })).not.toBeInTheDocument(),
+      expect(document.querySelector(".session-rail")).not.toBeInTheDocument(),
     );
   });
 
@@ -516,10 +546,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
     vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
     vi.mocked(renameSession).mockResolvedValue("季报");
     render(<App />);
-    fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
-    await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
-    );
+    await openSession();
 
     fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
     fireEvent.click(screen.getByRole("menuitem", { name: "重命名" }));
@@ -818,19 +845,20 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
     });
     render(<App />);
     // Open sess-1 (the crashing session).
-    fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
-    await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
-    );
+    await openSession();
     // sess-1 shows a degrade card (thread partition caught the crash).
     await waitFor(() =>
       expect(document.querySelector(".degrade-card")).toBeInTheDocument(),
     );
-    // Open sess-2 (a second "+ 新建会话").
-    fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
-    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(2));
-    // sess-2 is now active and shows NO degrade card -- it is unaffected.
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    // Open sess-2 (a second session via the drop path).
+    await openSession();
+    expect(createSession).toHaveBeenCalledTimes(2);
+    // sess-2 is now active and shows NO degrade card -- it is unaffected. Only
+    // sess-1's keep-alive pane carries the single crash card. (Asserted by class
+    // count, not role="alert": the openSession helper rejects each creation turn,
+    // leaving a benign per-session ErrorBanner — also role="alert" — that is a
+    // test artifact, not a crash; querySelector counts hidden keep-alive panes.)
+    expect(document.querySelectorAll(".degrade-card")).toHaveLength(1);
     expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument();
   });
 });
@@ -972,18 +1000,18 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "关闭" }));
 
     // ADR-0055: the pane unmounts IMMEDIATELY -- closeSession is still pending,
-    // yet the question bar is already gone (no await on the IPC).
+    // yet the session chrome is already gone (no await on the IPC). ADR-0092:
+    // the shell-level bar persists (always rendered); the session rail is the
+    // signal that the pane unmounted.
     await waitFor(() =>
-      expect(screen.queryByRole("textbox", { name: "提问" })).not.toBeInTheDocument(),
+      expect(document.querySelector(".session-rail")).not.toBeInTheDocument(),
     );
     expect(closeSession).toHaveBeenCalledWith("sess-1");
 
-    // The orphan ask resolves after the pane is gone; the cold hero shows --
-    // no ghost turn renders. This test asserts only the FRONTEND contract: the
-    // session cache was removed before the orphan resolved, so its optimistic
-    // setQueryData cannot surface a turn. (In production the backend's
-    // post-check also discards the turn on closing -- ADR-0055 -- but that
-    // backend path is not exercised by this IPC mock.)
+    // The orphan ask resolves after the pane is gone; the cold-start centered
+    // bar shows — no ghost turn renders. This test asserts only the FRONTEND
+    // contract: the session cache was removed before the orphan resolved, so
+    // its optimistic setQueryData cannot surface a turn.
     resolve({
       kind: "Materialized",
       data: {
@@ -992,7 +1020,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
         assumption: null,
       },
     });
-    await waitFor(() => expect(screen.getByText(/开始一次分析/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/你想分析什么/)).toBeInTheDocument());
   });
 
   it("close still unmounts at once when closeSession rejects (ADR-0055 .catch seam, #83)", async () => {
@@ -1008,8 +1036,10 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "关闭" }));
 
     // The pane unmounts synchronously even though closeSession rejects.
+    // ADR-0092: the shell-level bar persists (always rendered), so the session
+    // rail — not the bar's textbox — is the pane-unmounted signal.
     await waitFor(() =>
-      expect(screen.queryByRole("textbox", { name: "提问" })).not.toBeInTheDocument(),
+      expect(document.querySelector(".session-rail")).not.toBeInTheDocument(),
     );
     // Drain the microtask queue so the rejected closeSession promise settles
     // through closeOpen's .catch -- the seam this test exists to guard.
@@ -1058,8 +1088,10 @@ describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
     // Open the persisted session (createSession + openDuck).
     await waitFor(() => expect(screen.getByText("季报")).toBeInTheDocument());
     fireEvent.click(screen.getByText("季报"));
+    // ADR-0092: the shell-level bar (textbox) is always rendered, so the session
+    // rail — mounted only with the pane — is the "pane is mounted" signal.
     await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
+      expect(document.querySelector(".session-rail")).toBeInTheDocument(),
     );
 
     // Trigger delete via the sidebar menu: open the menu, click 删除, confirm.
@@ -1104,8 +1136,10 @@ describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
     render(<App />);
     await waitFor(() => expect(screen.getByText("季报")).toBeInTheDocument());
     fireEvent.click(screen.getByText("季报"));
+    // ADR-0092: the shell-level bar (textbox) is always rendered, so the session
+    // rail — mounted only with the pane — is the "pane is mounted" signal.
     await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
+      expect(document.querySelector(".session-rail")).toBeInTheDocument(),
     );
 
     fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
@@ -1117,14 +1151,15 @@ describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
     await waitFor(() =>
       expect(closeSessionAndWaitRelease).toHaveBeenCalledWith("sess-del"),
     );
-    expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument();
+    // The session rail stays mounted with the pane during the wait.
+    expect(document.querySelector(".session-rail")).toBeInTheDocument();
     // deleteSession has NOT fired yet -- it waits on the close-wait variant.
     expect(deleteSession).not.toHaveBeenCalled();
 
     // Resolve the wait -> the pane unmounts -> deleteSession fires.
     resolveWait();
     await waitFor(() =>
-      expect(screen.queryByRole("textbox", { name: "提问" })).not.toBeInTheDocument(),
+      expect(document.querySelector(".session-rail")).not.toBeInTheDocument(),
     );
     await waitFor(() => expect(deleteSession).toHaveBeenCalledWith(path));
   });
@@ -1158,8 +1193,10 @@ describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
     render(<App />);
     await waitFor(() => expect(screen.getByText("季报")).toBeInTheDocument());
     fireEvent.click(screen.getByText("季报"));
+    // ADR-0092: the shell-level bar (textbox) is always rendered, so the session
+    // rail — mounted only with the pane — is the "pane is mounted" signal.
     await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
+      expect(document.querySelector(".session-rail")).toBeInTheDocument(),
     );
 
     fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
@@ -1173,7 +1210,7 @@ describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
       expect(closeSessionAndWaitRelease).toHaveBeenCalledWith("sess-del"),
     );
     await waitFor(() =>
-      expect(screen.queryByRole("textbox", { name: "提问" })).not.toBeInTheDocument(),
+      expect(document.querySelector(".session-rail")).not.toBeInTheDocument(),
     );
     expect(deleteSession).not.toHaveBeenCalled();
 
@@ -1276,6 +1313,11 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
   });
 
   it("the first Materialized promotion auto-expands the workspace ONCE (ADR-0083)", async () => {
+    render(<App />);
+    await openSession();
+    // Queue the test's own turns AFTER openSession so the creation turn consumes
+    // the helper's one-time rejection, not these Materialized outcomes (which
+    // would otherwise auto-expand the workspace during openSession).
     vi.mocked(askQuestion)
       .mockResolvedValueOnce({
         kind: "Materialized",
@@ -1293,8 +1335,6 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
           assumption: null,
         },
       });
-    render(<App />);
-    await openSession();
     expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
     // First promotion -> the panel opens with the produced dataset.
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "第一问" } });
@@ -1308,7 +1348,8 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // A SECOND promotion must not steal focus -- the fold stays.
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "第二问" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
-    await waitFor(() => expect(askQuestion).toHaveBeenCalledTimes(2));
+    // 3 asks total: the creation turn (rejected) + the two user turns.
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledTimes(3));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /结果：result_2/ })).toBeInTheDocument(),
     );
@@ -1322,6 +1363,11 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // the panel. Locks the seam against rerouting R5 through markProduced
     // (which would silently spend the one-shot on a turn the user never asked).
     state.thread = [materializedTurn("result_1")];
+    render(<App />);
+    await openSession();
+    // Queue the test's own turn AFTER openSession so the creation turn consumes
+    // the helper's one-time rejection, not this Materialized outcome (which would
+    // otherwise auto-expand the workspace + spend the one-shot during openSession).
     vi.mocked(askQuestion).mockResolvedValueOnce({
       kind: "Materialized",
       data: {
@@ -1330,8 +1376,6 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
         assumption: null,
       },
     });
-    render(<App />);
-    await openSession();
     // Resume cold-start: folded (the one-shot is intact, not spent by R5).
     expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
     // The first NEW promotion after resume opens the panel.
@@ -1575,12 +1619,11 @@ describe("App session soft-cap hint (ADR-0046/0050, issue #108)", () => {
     vi.mocked(createSession).mockImplementation(async () => ({ session_id: `sess-${++n}`, duck_path: `/sessions/sess-${n}/session.duck` }));
     render(<App />);
     for (let i = 0; i < 8; i++) {
-      fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
-      await waitFor(() =>
-        expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument(),
-      );
+      // ADR-0092: each openSession() clicks "+" (cold start) + drops a file to
+      // create a session. Wait for createSession call count to increment.
+      await openSession();
     }
-    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(8));
+    expect(createSession).toHaveBeenCalledTimes(8);
     const topbar = document.querySelector(".topbar") as HTMLElement;
     const alert = within(topbar).getByRole("status");
     expect(alert.getAttribute("data-slot")).toBe("alert");

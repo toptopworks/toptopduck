@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import type { TurnPhase } from "../types/session";
 import { log } from "../lib/log";
 
@@ -8,16 +8,12 @@ import { log } from "../lib/log";
 // returns idle defaults when no session is active, and the live session's bar
 // state when one is.
 //
-// The hook OWNS the input draft (useState) so it persists across the
-// null-to-non-null cold-start transition (the draft survives session creation
-// so a cold-start question is not lost). The final ADR-0092 shell bar will
-// route per-session drafts via Record<sessionId, string>; the single useState
-// here is a transitional form for the extraction slice. The turn-flow outputs
-// (loading / phase / handleAsk / handleCancel) still live in useSessionState
-// for this slice — moving useTurnFlow out of useSessionState requires a
-// larger refactoring of its dependency graph (sessionId-routed query shards,
-// approval-flow coupling). They are passed through the `session` parameter
-// and merged with the owned draft.
+// Per-session drafts (ADR-0092 Decision 6): the hook owns a
+// Record<sessionId, string> for open sessions + a separate cold-start draft.
+// The draft switches per activeSessionId — each keep-alive session retains its
+// own input text across switches. The turn-flow outputs (loading / phase /
+// handleAsk / handleCancel / handleIngestFiles) are passed through the
+// `session` parameter and merged with the owned drafts.
 
 // Session-derived bar fields the hook can't own yet (sourced from
 // useSessionState -> useTurnFlow). Passed in by the caller and merged with the
@@ -27,12 +23,16 @@ export interface ComposerSessionFields {
   phase: TurnPhase | null;
   handleAsk: (question: string) => Promise<void>;
   handleCancel: () => Promise<void>;
+  /** Multi-file ingest from the composer "+" file section (ADR-0083). Routed
+   *  through useIngestFlow's handleIngestMany inside SessionPane. */
+  handleIngestFiles: (paths: string[]) => void;
 }
 
 export interface ComposerState extends ComposerSessionFields {
-  // The textarea draft. Owned by this hook so it survives the null-to-non-null
-  // cold-start transition (ADR-0092). The empty-string idle default keeps the
-  // QuestionBar submit button disabled via the `value.trim() === ""` guard.
+  // The textarea draft. Owned by this hook so it persists across session
+  // switches (ADR-0092 per-session draft routing). The empty-string default
+  // keeps the QuestionBar submit button disabled via the
+  // `value.trim() === ""` guard.
   draft: string;
   setDraft: (value: string) => void;
 }
@@ -51,22 +51,28 @@ const idleHandleAsk = async (question: string): Promise<void> => {
   );
 };
 const idleHandleCancel = async (): Promise<void> => {};
-const IDLE_SESSION_FIELDS: ComposerSessionFields = {
+const idleHandleIngestFiles = (): void => {};
+/** Idle bar fields. Exported so SessionPane can reset the shell-level bar's
+ *  per-session entry on unmount (a pane replaced by an error boundary or
+ *  closed would otherwise leave a stale `loading: true` stuck on the bar). */
+export const IDLE_SESSION_FIELDS: ComposerSessionFields = {
   loading: false,
   phase: null,
   handleAsk: idleHandleAsk,
   handleCancel: idleHandleCancel,
+  handleIngestFiles: idleHandleIngestFiles,
 };
 
-// Null-safe hook for the composer bar's QuestionBar-facing state. Owns the
-// draft via useState; merges it with the caller-provided session fields (or
-// idle defaults when sessionId is null). The draft persists across the
-// null-to-non-null transition so a cold-start question survives session
-// creation.
+// Null-safe hook for the composer bar's QuestionBar-facing state. Owns
+// per-session drafts + a cold-start draft; merges them with the caller-provided
+// session fields (or idle defaults when sessionId is null). The draft switches
+// per activeSessionId — each keep-alive session retains its own input text.
 //
 // Overloads: when sessionId is null the session parameter is omitted (the
 // idle defaults are used); when sessionId is a string the session fields are
-// required.
+// required. A union overload accepts `string | null` for callers (like the
+// shell-level bar) that pass a reactive activeSessionId without a compile-time
+// narrowing.
 export function useComposerState(sessionId: null): ComposerState;
 export function useComposerState(
   sessionId: string,
@@ -75,8 +81,31 @@ export function useComposerState(
 export function useComposerState(
   sessionId: string | null,
   session?: ComposerSessionFields,
+): ComposerState;
+export function useComposerState(
+  sessionId: string | null,
+  session?: ComposerSessionFields,
 ): ComposerState {
-  const [draft, setDraft] = useState("");
+  // Per-session drafts (ADR-0092 Decision 6): Record<sessionId, string> for
+  // open sessions + a separate cold-start draft for the null state. The draft
+  // switches per activeSessionId — each keep-alive session retains its own
+  // input text across switches.
+  const [sessionDrafts, setSessionDrafts] = useState<Record<string, string>>({});
+  const [coldStartDraft, setColdStartDraft] = useState("");
+
+  const draft =
+    sessionId === null ? coldStartDraft : (sessionDrafts[sessionId] ?? "");
+
+  const setDraft = useCallback(
+    (value: string) => {
+      if (sessionId === null) {
+        setColdStartDraft(value);
+      } else {
+        setSessionDrafts((prev) => ({ ...prev, [sessionId]: value }));
+      }
+    },
+    [sessionId],
+  );
 
   if (sessionId === null) {
     return { ...IDLE_SESSION_FIELDS, draft, setDraft };

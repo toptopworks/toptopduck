@@ -3,6 +3,7 @@
   "activeSourceDelete.confirm": "继续",
   "activeSourceDelete.description": "此源是当前焦点表。删除后请在剩余源中选一个继续分析（或中止，工作集保持不变）。",
   "activeSourceDelete.title": "删除焦点源「{name}」",
+  "coldStart.greeting": "你想分析什么？",
   "coldStart.hint": "点击左侧「新建会话」或打开一个已有会话开始；拖入数据文件可一步开始新分析。",
   "coldStart.newSession": "新建会话",
   "coldStart.noKey.hint": "当前活跃接入档案尚未保存 API 密钥。填写后才能开始提问。",

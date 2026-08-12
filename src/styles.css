@@ -296,30 +296,67 @@
   .profiles-master-detail { grid-template-columns: 1fr; }
 }
 
-/* --- Row 3 (cols 2+): session pane host ---------------------------------
- * The host is a positioning context for the keep-alive layer stack: every open
- * session renders a .session-pane-layer absolutely filling it; non-active
- * layers are display:none (mounted but not laid out -- ADR-0051 keep-alive, no
- * refetch on switch). The cold-start hero is a plain child shown when no layer
- * is active (ADR-0061). */
-.session-pane-host { grid-column: 2; grid-row: 3; overflow: hidden; position: relative; z-index: 11; }
+/* --- Row 3 (cols 2+): main area (ADR-0092) --------------------------------
+ * ADR-0092: the main area replaces the old .session-pane-host grid cell. It
+ * is a flex column containing the session-pane-host (flex:1) + the shell-level
+ * bar slot (flex-shrink:0). In cold-start mode the bar is centered and the
+ * pane host collapses.
+ *
+ * The session-pane-host is a positioning context for the keep-alive layer
+ * stack: every open session renders a .session-pane-layer absolutely filling
+ * it; non-active layers are display:none (mounted but not laid out --
+ * ADR-0051 keep-alive, no refetch on switch). */
+.main-area { grid-column: 2; grid-row: 3; display: flex; flex-direction: column; overflow: hidden; position: relative; z-index: 11; }
+.session-pane-host { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+/* Cold-start mode: no active session, so the pane host has no visible layers.
+ * Collapse it so the centered bar fills the space. */
+.cold-start-mode .session-pane-host { flex: 0; }
 .session-pane-layer { position: absolute; inset: 0; }
 .session-pane-layer.hidden { display: none; }
-/* ADR-0067 (issue #182): the .cold-start-title bespoke font-size (1.4rem) +
- * margin and the .primary-cta bespoke primary teal styling retired onto
- * utility (text-[1.4rem] + m-0 mb-2) + a shadcn Button default variant sized
- * lg on App.tsx (the disabled progress cursor survives via className
- * override). This rule is layout-only now -- the hero is the absolute-
- * positioned overlay that fills the session-pane-host while no layer is
- * active. The .cold-start-hero / .cold-start-title / .primary-cta class hooks
- * stay on the elements for selector / test stability. */
-.cold-start-hero { position: absolute; inset: 0; overflow-y: auto; justify-content: center; }
+
+/* --- Shell-level bar slot (ADR-0092) -------------------------------------
+ * The QuestionBar lives at the shell level as a single instance. Two
+ * positions driven by activeSessionId: centered (cold start) or bottom
+ * (active session). The same DOM node persists across transitions — CSS
+ * handles the repositioning, no React unmount/remount.
+ *
+ * Bottom: sits at the main area's bottom edge, padding matching the old
+ * session-questionbar. The bar's max-width approximates the conversation
+ * column width so it does not span the full workspace.
+ *
+ * Centered: fills the remaining main area height, centers the greeting +
+ * bar vertically and horizontally. The bar's max-width constrains it to a
+ * readable width. */
+.shell-bar-slot { flex-shrink: 0; }
+.shell-bar-slot.bottom {
+  padding: 0.5rem 1.75rem 1rem;
+  background: var(--background);
+}
+.shell-bar-slot.bottom .question-bar {
+  max-width: 800px;
+  margin: 0 auto;
+}
+.shell-bar-slot.centered {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  padding: 2rem;
+}
+.shell-bar-slot.centered .question-bar {
+  max-width: 720px;
+  width: 100%;
+}
 
 /* --- Pane grid: header + session-body (ADR-0083) --------------------------
  * Single column, two rows: header (auto) + session-body (1fr). The
  * session-body is a flex column containing session-rail-workspace (the
- * rail + workspace flex pair) + the QuestionBar at the bottom. This keeps
- * the QuestionBar width in sync with the rail at all times.
+ * rail + workspace flex pair). ADR-0092: the QuestionBar moved to the shell
+ * level; the session-body fills the full height. The session-conversation
+ * gets bottom padding so the rail's scroll content is not hidden behind the
+ * external shell-level bar.
  *
  * ADR-0083 workspace fold (issue #298): the pane carries .workspace-collapsed
  * while the panel is folded away (cold-start default, session-ephemeral) --
@@ -494,22 +531,12 @@
   margin-left: auto;
 }
 
-/* Composer control row. ADR-0083 (issue #298, evolving ADR-0062 R1): the bar
-   sits inside the conversation flex column (rail + questionbar) so the
-   composer belongs to the conversation surface + its width always tracks
-   the rail. The QuestionBar is now the unified container (rounded border +
-   shadow); the .session-questionbar is the flex-shrink layout shell that
-   pads the container inside the conversation column. The .composer-slot-*
-   hooks are retired (the slots pass as QuestionBar children, not separate
-   divs); .session-questionbar stays as the layout hook.
-   ADR-0067 (issue #172): the .question-bar input/button visual rules (focus
-   outline, primary submit, outline cancel) retired into shadcn Input +
-   Button variants on QuestionBar.tsx; .session-questionbar stays as the
-   flex-shrink layout shell. */
+/* ADR-0092: the .session-questionbar CSS is retired — the QuestionBar moved
+ * to the shell level (.shell-bar-slot in App.tsx). The old class hook is kept
+ * here as a no-op for selector / test backward compat during the transition;
+ * it can be removed once all references are migrated. */
 .session-questionbar {
-  flex-shrink: 0;
-  background: var(--background);
-  padding: 0.5rem 1.75rem 1rem;
+  display: none;
 }
 
 /* Phase indicator (ADR-0059 discrete phase feedback). Sits between the input

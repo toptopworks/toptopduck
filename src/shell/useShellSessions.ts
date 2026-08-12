@@ -88,16 +88,24 @@ export function useShellSessions({
   openSessions: OpenSession[];
   activeSessionId: string | null;
   activateSession: (sid: string) => void;
+  /** ADR-0092: navigate to the centered empty state (sidebar "+"). Existing
+   *  keep-alive sessions stay mounted hidden. */
+  goToEmptyState: () => void;
   /** Shell-wide busy gate: persistenceBusy (save / open / delete wait) OR a
-   *  resume in flight. Drives the sidebar / topbar / hero disabled states and
+   *  resume in flight. Drives the sidebar / topbar disabled states and
    *  suspends the webview drop listener while busy. */
   busy: boolean;
   resumeStatus: ResumeStatus;
   openNew: () => Promise<void>;
+  /** ADR-0092: create a session from a cold-start bar submit, carrying the
+   *  question as pendingQuestion for the new SessionPane to fire on mount. */
+  createSessionWithQuestion: (question: string) => Promise<void>;
   openPersisted: (path: string, name: string) => Promise<void>;
   dropFile: (path: string) => Promise<void>;
   onWebviewDrop: (path: string) => void;
   clearPendingIngest: (sid: string) => void;
+  /** ADR-0092: clear a consumed pending question after SessionPane fires it. */
+  clearPendingQuestion: (sid: string) => void;
   closeOpen: (sid: string) => Promise<void>;
   deletePersisted: (path: string, sid: string | null) => Promise<void>;
   renameEntry: (sid: string | null, path: string, newName: string) => Promise<void>;
@@ -147,11 +155,16 @@ export function useShellSessions({
     (transform: (prev: SessionsState) => SessionsState): void => {
       setState((prev) => {
         const next = transform(prev);
+        // ADR-0092: explicit null activeId is a valid target (sidebar "+"
+        // navigates to the centered empty state). The reconciliation only
+        // kicks in for a non-null activeId that is no longer in sessions --
+        // a stale sid falls back to the first remaining entry (then null).
         const activeId =
-          next.activeId !== null &&
-          next.sessions.some((s) => s.sid === next.activeId)
-            ? next.activeId
-            : (next.sessions[0]?.sid ?? null);
+          next.activeId !== null
+            ? (next.sessions.some((s) => s.sid === next.activeId)
+                ? next.activeId
+                : (next.sessions[0]?.sid ?? null))
+            : null;
         return { sessions: next.sessions, activeId };
       });
     },
@@ -200,6 +213,14 @@ export function useShellSessions({
     [apply],
   );
 
+  // ADR-0092: navigate to the centered empty state (sidebar "+"). Sets
+  // activeSessionId to null without closing any keep-alive session — existing
+  // panes stay mounted hidden, in-flight turns continue. The user returns to
+  // the centered bar + greeting; the next submit creates a fresh session.
+  const goToEmptyState = useCallback(() => {
+    apply((prev) => ({ sessions: prev.sessions, activeId: null }));
+  }, [apply]);
+
   /** Add a freshly-minted session to the open set and activate it. The caller
    *  hands the createSession result + an optional bound path/name (resume). */
   const registerOpen = useCallback(
@@ -220,12 +241,30 @@ export function useShellSessions({
   const openNew = useCallback(async () => {
     try {
       const { session_id: sid, duck_path: path } = await createSession();
-      registerOpen({ sid, name: "", path, pendingIngestPath: null });
+      registerOpen({ sid, name: "", path, pendingIngestPath: null, pendingQuestion: null });
       refreshSessions();
     } catch (e) {
       setShellError(toAppError(e, intl, "shell"));
     }
   }, [intl, registerOpen, refreshSessions, setShellError]);
+
+  // ADR-0092 cold-start submit: the centered bar's submit with no active
+  // session mints a session carrying the question as pendingQuestion. The
+  // SessionPane consumes it on mount via handleAsk, then clears it through
+  // clearPendingQuestion. ADR-0089 auto-persist applies (createSession binds
+  // the .duck immediately).
+  const createSessionWithQuestion = useCallback(
+    async (question: string) => {
+      try {
+        const { session_id: sid, duck_path: path } = await createSession();
+        registerOpen({ sid, name: "", path, pendingIngestPath: null, pendingQuestion: question });
+        refreshSessions();
+      } catch (e) {
+        setShellError(toAppError(e, intl, "shell"));
+      }
+    },
+    [intl, registerOpen, refreshSessions, setShellError],
+  );
 
   // Drop-to-create on the cold-start hero (ADR-0061/0089, #81 A1): mint a
   // persisted session and hand the dropped path to the new SessionPane as
@@ -240,7 +279,7 @@ export function useShellSessions({
       droppingRef.current = true;
       try {
         const { session_id: sid, duck_path: duckPath } = await createSession();
-        registerOpen({ sid, name: "", path: duckPath, pendingIngestPath: path });
+        registerOpen({ sid, name: "", path: duckPath, pendingIngestPath: path, pendingQuestion: null });
         refreshSessions();
       } catch (e) {
         setShellError(toAppError(e, intl, "shell"));
@@ -295,6 +334,18 @@ export function useShellSessions({
     (sid: string) => {
       mapSessions((sessions) =>
         sessions.map((o) => (o.sid === sid ? { ...o, pendingIngestPath: null } : o)),
+      );
+    },
+    [mapSessions],
+  );
+
+  // ADR-0092: clear a consumed pending question (the SessionPane fired
+  // handleAsk on mount). Mirrors clearPendingIngest so a remount cannot
+  // re-fire the question.
+  const clearPendingQuestion = useCallback(
+    (sid: string) => {
+      mapSessions((sessions) =>
+        sessions.map((o) => (o.sid === sid ? { ...o, pendingQuestion: null } : o)),
       );
     },
     [mapSessions],
@@ -355,7 +406,7 @@ export function useShellSessions({
         targetSid = sid;
         await openDuck(sid, duck_path);
         await queryClient.invalidateQueries({ queryKey: ["session", sid] });
-        registerOpen({ sid, name, path: duck_path, pendingIngestPath: null });
+        registerOpen({ sid, name, path: duck_path, pendingIngestPath: null, pendingQuestion: null });
         setResumeStatus({ kind: "idle" });
       } catch (e) {
         // C2: if the prepare step succeeded but openDuck failed, the just-minted
@@ -433,7 +484,11 @@ export function useShellSessions({
       queryClient.removeQueries({ queryKey: ["session", sid] });
       apply((prev) => {
         const sessions = prev.sessions.filter((s) => s.sid !== sid);
-        const activeId = prev.activeId === sid ? null : prev.activeId;
+        // Keep the stale sid as activeId so apply's reconciler picks the
+        // fallback (first remaining session, then null). Explicitly setting
+        // null would now be respected as ADR-0092 empty-state navigation
+        // instead of triggering the fallback.
+        const activeId = prev.activeId;
         return { sessions, activeId };
       });
     },
@@ -648,13 +703,16 @@ export function useShellSessions({
     openSessions,
     activeSessionId,
     activateSession,
+    goToEmptyState,
     busy,
     resumeStatus,
     openNew,
+    createSessionWithQuestion,
     openPersisted,
     dropFile,
     onWebviewDrop,
     clearPendingIngest,
+    clearPendingQuestion,
     closeOpen,
     deletePersisted,
     renameEntry,
