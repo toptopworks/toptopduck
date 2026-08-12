@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import {
   ArrowLeft,
+  Brain,
   Cable,
-  Cpu,
   Database,
   Puzzle,
   ShieldCheck,
@@ -32,7 +32,7 @@ import { GeneralSection } from "./GeneralSection";
 import { McpSection } from "./McpSection";
 import { type ProfilesControls } from "./ProfilesSection";
 import { PrivacySection } from "./PrivacySection";
-import { RuntimeSection } from "./RuntimeSection";
+import { RuntimeSection, type RuntimeTab } from "./RuntimeSection";
 import { SkillsSection } from "./SkillsSection";
 import { SETTINGS_SECTIONS, type SettingsSection } from "./sections";
 
@@ -72,7 +72,7 @@ function SectionIcon({ section }: { section: SettingsSection }) {
     case "skills":
       return <Puzzle className="size-4 shrink-0" aria-hidden />;
     case "runtime":
-      return <Cpu className="size-4 shrink-0" aria-hidden />;
+      return <Brain className="size-4 shrink-0" aria-hidden />;
     case "database-engine":
       return <Database className="size-4 shrink-0" aria-hidden />;
     case "privacy":
@@ -121,6 +121,7 @@ function SectionContent({
   onRefreshKeyStatus,
   onIpcBusy,
   initialEditProfileId,
+  initialRuntimeTab,
   profilesControlsRef,
 }: {
   section: SettingsSection;
@@ -130,6 +131,7 @@ function SectionContent({
   onRefreshKeyStatus: () => void;
   onIpcBusy: (channel: "key" | "test" | "sessionsDir", busy: boolean) => void;
   initialEditProfileId?: string;
+  initialRuntimeTab?: RuntimeTab;
   profilesControlsRef: React.MutableRefObject<ProfilesControls | null>;
 }) {
   switch (section) {
@@ -154,6 +156,7 @@ function SectionContent({
           onRefreshKeyStatus={onRefreshKeyStatus}
           onIpcBusy={onIpcBusy}
           initialEditProfileId={initialEditProfileId}
+          initialRuntimeTab={initialRuntimeTab}
           profilesControlsRef={profilesControlsRef}
         />
       );
@@ -180,6 +183,7 @@ export function SettingsView({
   section,
   onSectionChange,
   initialEditProfileId,
+  initialRuntimeTab,
   collapsed,
 }: {
   // Collapse state (issue #287): when true the nav subtree goes inert so
@@ -206,6 +210,7 @@ export function SettingsView({
   section: SettingsSection;
   onSectionChange: (section: SettingsSection) => void;
   initialEditProfileId?: string;
+  initialRuntimeTab?: RuntimeTab;
 }) {
   const intl = useIntl();
   const [confirmDiscardOpen, setConfirmDiscardOpen] = useState(false);
@@ -428,6 +433,7 @@ export function SettingsView({
             onRefreshKeyStatus={onRefreshKeyStatus}
             onIpcBusy={handlePaneIpcBusy}
             initialEditProfileId={initialEditProfileId}
+            initialRuntimeTab={initialRuntimeTab}
             profilesControlsRef={profilesControlsRef}
           />
         </div>

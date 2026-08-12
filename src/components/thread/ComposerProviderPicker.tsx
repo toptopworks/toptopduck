@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Cpu, RefreshCw } from "lucide-react";
+import { Check, Zap } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { fmtError } from "../../lib/error-presentation";
@@ -11,7 +11,6 @@ import {
   getSessionRuntime,
   listAdapters,
   listProviderProfiles,
-  rescanAdapters,
   setSessionRuntime,
 } from "../../api";
 import { adapterKeys, sessionKeys } from "../../session/queryKeys";
@@ -23,6 +22,7 @@ import {
   derivePresetId,
   findPreset,
 } from "../settings/provider-presets";
+import type { RuntimeTab } from "../settings/RuntimeSection";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -30,7 +30,7 @@ import { Label } from "../ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
-// Composer runtime picker (issue #238 / #353, ADR-0071/0076/0081/0083). A
+// Composer runtime picker (issue #238 / #353, ADR-0071/0081/0085/0091). A
 // dual-segment popover at the QuestionBar edge that selects which runtime
 // drives the NEXT turn:
 //   - built-in group (ADR-0081) -- the BYOK Rust agent loop on the active
@@ -38,12 +38,12 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 //     prop; the model + key-status surfaces are ADR-0071's picker, kept as
 //     the built-in group's body.
 //   - external group (ADR-0085) -- the v1 ACP adapters (`list_adapters`,
-//     dynamic, NOT hardcoded): detected rows are selectable, undetected rows
-//     render disabled + "not installed", and the ↻ entry re-runs the PATH
-//     scan (`rescan_adapters`). Adding a CLI upstream grows the list with
-//     zero frontend change.
+//     dynamic, NOT hardcoded): only detected rows render (issue #490 slimmed
+//     this group to a pure selector -- adapter management moved to the
+//     Settings Runtime "Local CLI" tab, ADR-0091). A "Manage external
+//     runtimes" link at the bottom opens that tab.
 //
-// Trigger: a lucide Cpu icon button (a unified entry glyph, NOT a provider
+// Trigger: a lucide Zap icon button (a unified entry glyph, NOT a provider
 // logo; ADR-0071). Hover Tooltip: an honest "{provider} · {model}" preview for
 // the built-in runtime (+ an honest "no key" mark when the active profile has
 // no key, ADR-0019) or the external adapter name. Click Popover: the heavy
@@ -61,10 +61,12 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 // Profile + model + key-status ownership is unchanged from ADR-0071: profile
 // records are single-sourced from the provider prop; the per-profile has_key
 // overlay is fetched on mount AND on a profileKeyEpoch bump; writes route
-// through onSwitchActive / onSwitchModel. The "Open settings" entry closes the
-// popover BEFORE opening the overlay -- PopoverContent is portaled to
-// document.body, so it would otherwise stay visible atop the settings view
-// (ADR-0065 hides the session shell via CSS, not the portal host).
+// through onSwitchActive / onSwitchModel. The two "open settings" entries
+// (built-in "Open settings" → API Access tab; external "Manage external
+// runtimes" → Local CLI tab) close the popover BEFORE opening the overlay --
+// PopoverContent is portaled to document.body, so it would otherwise stay
+// visible atop the settings view (ADR-0065 hides the session shell via CSS,
+// not the portal host).
 
 export type ComposerProviderPickerProps = {
   // The session whose runtime this picker reads / switches. Runtime selection
@@ -79,8 +81,9 @@ export type ComposerProviderPickerProps = {
   // Commit a new model onto the ACTIVE profile (writes profile.model via
   // commitAppConfig, ADR-0071). Fired on blur / Enter, NOT per keystroke.
   onSwitchModel: (model: string) => void;
-  // Open the Settings overlay (ADR-0065). The popover closes first.
-  onOpenSettings: () => void;
+  // Open the Settings overlay on the Runtime section, landing on the named
+  // sub-tab (ADR-0065, issue #490). The popover closes first.
+  onOpenSettings: (runtimeTab: RuntimeTab) => void;
   // Invalidation counter for the per-profile has_key overlay. Bumped by the
   // parent (App) on settings-close -- a Settings Save may have changed a
   // keychain slot, so the mount-time fetch effect re-runs on a bump and the
@@ -146,25 +149,30 @@ export function ComposerProviderPicker({
   const isExternal = runtime.kind === "external";
   const activeAdapterId = isExternal ? runtime.data : null;
 
-  // The v1 adapter table (session-agnostic, ADR-0081/0083). Detected rows are
-  // selectable; undetected render disabled + "not installed". The ↻ entry
-  // re-runs the PATH scan via rescanAdapters and seeds the cache. Detection is
-  // uncached server-side, so list + rescan share one key and the ↻ is the
-  // explicit user-driven refresh.
+  // The v1 adapter table (session-agnostic, ADR-0081/0083). Issue #490 slimmed
+  // the external group to a pure selector: only detected rows render (adapter
+  // management moved to Settings → Runtime → Local CLI, ADR-0091). The list
+  // reads the shared adapterKeys.all() cache (the same key LocalCliTab uses);
+  // App.tsx invalidates it on Settings close so the next popover open reflects
+  // any rescan the user ran in the Local CLI tab.
   const { data: adapterData } = useQuery({
     queryKey: adapterKeys.all(),
     queryFn: listAdapters,
   });
-  const adapters: AdapterEntry[] = adapterData ?? [];
+  const adapters: AdapterEntry[] = (adapterData ?? []).filter((a) => a.detected);
   const activeAdapter = isExternal
     ? (adapters.find((a) => a.id === activeAdapterId) ?? null)
     : null;
+  // Stale-runtime flag (issue #490): if the session's active external adapter
+  // is no longer detected (CLI uninstalled, PATH changed), it is filtered out
+  // of the selector list. Surface this so the user knows their current pick is
+  // broken before the next turn fails in the backend.
+  const activeAdapterStale = isExternal && activeAdapterId !== null && activeAdapter === null;
 
   // Guards the write window: a click that lands while the set IPC is in flight
   // is dropped instead of re-firing (the disabled attr is the visual half of
-  // the same gate). Rescan has its own guard so the two IPCs never share a flag.
+  // the same gate).
   const [switching, setSwitching] = useState(false);
-  const [rescanning, setRescanning] = useState(false);
 
   async function selectRuntime(next: SessionRuntimeChoice) {
     if (switching) return;
@@ -187,19 +195,6 @@ export function ComposerProviderPicker({
       });
     } finally {
       setSwitching(false);
-    }
-  }
-
-  async function rescan() {
-    if (rescanning) return;
-    setRescanning(true);
-    try {
-      const fresh = await rescanAdapters();
-      queryClient.setQueryData(adapterKeys.all(), fresh);
-    } catch (e) {
-      log.warn("ComposerProviderPicker", "adapter rescan failed", fmtError(e, intl));
-    } finally {
-      setRescanning(false);
     }
   }
 
@@ -249,7 +244,7 @@ export function ComposerProviderPicker({
     defaultMessage: "Keychain unavailable",
   });
   // The external-runtime tooltip names the selected adapter (the closed chip
-  // shows the Cpu glyph alone; the tooltip is where the user reads WHICH
+  // shows the Zap glyph alone; the tooltip is where the user reads WHICH
   // runtime the next turn will use). Falls back to the raw id if the adapter
   // row has not loaded yet.
   const externalTooltip = intl.formatMessage(
@@ -294,12 +289,12 @@ export function ComposerProviderPicker({
     if (trimmed && trimmed !== model) onSwitchModel(trimmed);
   }
 
-  function handleOpenSettings() {
+  function handleOpenSettings(tab: RuntimeTab) {
     // Close BEFORE opening: the portaled PopoverContent would otherwise remain
     // visible atop the settings overlay (ADR-0065 hides the shell via CSS, not
     // the portal host in document.body).
     setOpen(false);
-    onOpenSettings();
+    onOpenSettings(tab);
   }
 
   // Unique per-instance id for the model <datalist> (multiple keep-alive
@@ -330,7 +325,7 @@ export function ComposerProviderPicker({
                 },
               )}
             >
-              <Cpu className="size-4" aria-hidden />
+              <Zap className="size-4" aria-hidden />
             </button>
           </PopoverTrigger>
         </TooltipTrigger>
@@ -464,8 +459,14 @@ export function ComposerProviderPicker({
             </div>
             {keysError && <p className="text-destructive text-sm">{keysError}</p>}
 
-            {/* Open settings entry (ADR-0065 overlay). */}
-            <Button type="button" variant="outline" size="sm" onClick={handleOpenSettings}>
+            {/* Open settings entry (ADR-0065 overlay) -- lands on the API
+                Access sub-tab (issue #490). */}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => handleOpenSettings("api-access")}
+            >
               <FormattedMessage
                 id="common.openSettings"
                 defaultMessage="Open settings"
@@ -473,42 +474,34 @@ export function ComposerProviderPicker({
             </Button>
           </section>
 
-          {/* --- External runtime group (ADR-0085, issue #353) ----------------
+          {/* --- External runtime group (ADR-0085, issue #353/#490) -----------
               The v1 ACP adapters, read dynamically from list_adapters (never
-              hardcoded). Detected rows are selectable; undetected rows render
-              disabled + "not installed". The ↻ entry re-runs the PATH scan. */}
+              hardcoded). Issue #490 slimmed this group to a pure selector:
+              only detected rows render (the list is pre-filtered), and adapter
+              management moved to Settings → Runtime → Local CLI (ADR-0091). */}
           <div className="border-t border-border" />
           <section className="grid gap-1.5">
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-medium">
+            <span className="text-sm font-medium">
+              <FormattedMessage
+                id="composer.runtimePicker.externalTitle"
+                defaultMessage="External"
+              />
+            </span>
+            {activeAdapterStale && (
+              <p className="text-xs text-destructive">
                 <FormattedMessage
-                  id="composer.runtimePicker.externalTitle"
-                  defaultMessage="External"
+                  id="composer.runtimePicker.staleAdapter"
+                  defaultMessage="Selected adapter is no longer detected — pick another or manage in settings."
                 />
-              </span>
-              <button
-                type="button"
-                onClick={() => void rescan()}
-                disabled={rescanning}
-                className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted cursor-pointer disabled:pointer-events-none disabled:opacity-50"
-                aria-label={intl.formatMessage({
-                  id: "composer.runtimePicker.rescanAria",
-                  defaultMessage: "Rescan adapters",
-                })}
-              >
-                <RefreshCw
-                  className={cn("size-3.5", rescanning && "animate-spin")}
-                  aria-hidden
-                />
-              </button>
-            </div>
+              </p>
+            )}
             {adapters.map((a) => {
               const selected = isExternal && activeAdapterId === a.id;
               return (
                 <button
                   key={a.id}
                   type="button"
-                  disabled={!a.detected || switching}
+                  disabled={switching}
                   onClick={() => void selectRuntime({ kind: "external", data: a.id })}
                   aria-pressed={selected}
                   className={cn(
@@ -520,17 +513,22 @@ export function ComposerProviderPicker({
                   <span className="flex-1 text-left text-foreground">
                     {a.display_name}
                   </span>
-                  {!a.detected && (
-                    <span className="text-xs text-muted-foreground">
-                      <FormattedMessage
-                        id="composer.runtimePicker.notInstalled"
-                        defaultMessage="Not installed"
-                      />
-                    </span>
-                  )}
                 </button>
               );
             })}
+            {/* Manage external runtimes -- opens Settings → Runtime → Local CLI
+                (ADR-0091, issue #490). A button styled as a text link, to read
+                as a secondary navigation affordance beneath the selector list. */}
+            <button
+              type="button"
+              onClick={() => handleOpenSettings("local-cli")}
+              className="mt-1 justify-self-start text-left text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+            >
+              <FormattedMessage
+                id="composer.runtimePicker.manageExternal"
+                defaultMessage="Manage external runtimes →"
+              />
+            </button>
           </section>
         </div>
       </PopoverContent>

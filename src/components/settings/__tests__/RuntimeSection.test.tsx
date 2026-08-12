@@ -107,6 +107,19 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
     expect(screen.getByRole("tab", { name: "Local CLI" })).toHaveAttribute("aria-selected", "false");
   });
 
+  it("honors initialRuntimeTab as the landing tab when provided", () => {
+    // Issue #490: the composer picker's entry hints thread through to this
+    // one-shot prop. Passing "local-cli" must land on the Local CLI tab.
+    renderSection({ initialRuntimeTab: "local-cli" });
+    expect(screen.getByRole("tab", { name: "Local CLI" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "API Access" })).toHaveAttribute("aria-selected", "false");
+  });
+
+  it("falls back to API Access when initialRuntimeTab is undefined", () => {
+    renderSection();
+    expect(screen.getByRole("tab", { name: "API Access" })).toHaveAttribute("aria-selected", "true");
+  });
+
   // --- WAI-ARIA APG keyboard navigation -----------------------------------
 
   it("active tab has tabIndex 0, inactive has -1 (roving tabindex)", () => {

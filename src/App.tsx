@@ -26,6 +26,7 @@ import { ErrorBanner } from "./components/common/ErrorBanner";
 import { DegradeCard, ErrorBoundary } from "./components/common/ErrorBoundary";
 import { SettingsView } from "./components/settings/SettingsView";
 import type { SettingsSection } from "./components/settings/sections";
+import type { RuntimeTab } from "./components/settings/RuntimeSection";
 import { Alert } from "./components/ui/alert";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { log } from "./lib/log";
@@ -33,6 +34,7 @@ import { createQueryClient } from "./lib/queryClient";
 import { catalogFor } from "./i18n";
 import { useTheme } from "./theme/useTheme";
 import { getProviderConfig } from "./api";
+import { adapterKeys } from "./session/queryKeys";
 
 // The Chat-style three-column shell (ADR-0045/0060/0062, issue #81). App owns
 // APP-level state: the OPEN-session set + active id (ADR-0060 multi-session),
@@ -52,10 +54,14 @@ const SOFT_CAP_OPEN_SESSIONS = 8;
 
 /** Entry hint for the settings overlay (issue #239): which section to land on
  *  when it opens, and (for the Runtime section) which profile to pre-select
- *  for editing. Consumed by SettingsView/ProfilesSection at mount; reset to
- *  the default on close so a later sidebar-gear open does not re-target a
- *  stale profile. */
-type SettingsEntry = { section: SettingsSection; editProfileId?: string };
+ *  for editing and which sub-tab to land on (issue #490). Consumed by
+ *  SettingsView/ProfilesSection/RuntimeSection at mount; reset to the default
+ *  on close so a later sidebar-gear open does not re-target stale hints. */
+type SettingsEntry = {
+  section: SettingsSection;
+  editProfileId?: string;
+  runtimeTab?: RuntimeTab;
+};
 
 export default function App() {
   // QueryClient (ADR-0051): lazy-init once per App mount so test renders never
@@ -83,13 +89,19 @@ export default function App() {
   // settingsView (ADR-0065): the in-app settings overlay state. `open` gates
   // the render + the .settings-mode CSS class; `editProfileId` is a one-shot
   // ENTRY hint consumed by ProfilesSection at mount (issue #239: the "no key"
-  // CTA pre-selects the active profile for key editing). The settings SECTION
-  // is no longer an entry hint: it is shell-owned live state
+  // CTA pre-selects the active profile for key editing); `runtimeTab` is a
+  // one-shot ENTRY hint consumed by RuntimeSection at mount (issue #490: the
+  // composer picker's two entry points each land a specific sub-tab). The
+  // settings SECTION is no longer an entry hint: it is shell-owned live state
   // (liveSettingsSection below, issue #288) so the back/forward history can
   // restore it. openSettings() defaults to the sidebar-gear path (general, no
   // edit target); the hero + the sidebar connection row pass
   // { section: "runtime", editProfileId? }.
-  const [settingsView, setSettingsView] = useState<{ open: boolean; editProfileId?: string }>({
+  const [settingsView, setSettingsView] = useState<{
+    open: boolean;
+    editProfileId?: string;
+    runtimeTab?: RuntimeTab;
+  }>({
     open: false,
   });
   // The live settings section is shell-owned (issue #288): lifted out of
@@ -101,7 +113,11 @@ export default function App() {
   // full nav (issue #285).
   const [settingsNavCollapsed, setSettingsNavCollapsed] = useState(false);
   function openSettings(entry: SettingsEntry = { section: "general" }) {
-    setSettingsView({ open: true, editProfileId: entry.editProfileId });
+    setSettingsView({
+      open: true,
+      editProfileId: entry.editProfileId,
+      runtimeTab: entry.runtimeTab,
+    });
     setLiveSettingsSection(entry.section);
     setSettingsNavCollapsed(false);
   }
@@ -531,7 +547,8 @@ export default function App() {
                                   onSwitchActive: (id) => void switchActiveProfile(id),
                                   onSwitchModel: (model) =>
                                     void switchActiveProfileModel(model),
-                                  onOpenSettings: () => openSettings(),
+                                  onOpenSettings: (tab: RuntimeTab) =>
+                                    openSettings({ section: "runtime", runtimeTab: tab }),
                                   profileKeyEpoch,
                                 }
                               : undefined
@@ -557,6 +574,7 @@ export default function App() {
                     section={liveSettingsSection}
                     onSectionChange={setLiveSettingsSection}
                     initialEditProfileId={settingsView.editProfileId}
+                    initialRuntimeTab={settingsView.runtimeTab}
                     // Returns the IPC promise (unwrapped) so per-control commits
                     // inside SettingsView can await + catch failures and revert
                     // (ADR-0075). commitAppConfig itself stays optimistic /
@@ -575,6 +593,13 @@ export default function App() {
                       // refetch their overlays (ADR-0019 honest gate, issue #238;
                       // issue #239 extends the epoch to the hero).
                       setProfileKeyEpoch((n) => n + 1);
+                      // The Local CLI tab's Rescan may have changed adapter
+                      // detection; invalidate the shared cache so the next
+                      // popover open shows fresh data (ADR-0051 explicit
+                      // invalidate; staleTime:Infinity means no auto-refetch).
+                      void queryClient.invalidateQueries({
+                        queryKey: adapterKeys.all(),
+                      });
                     }}
                   />
                 )}
