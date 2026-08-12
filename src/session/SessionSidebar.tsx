@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { Check, FolderOpen, MessageSquare, Pencil, Search } from "lucide-react";
+import { Check, FolderOpen, MessageSquare, Pencil, Search, Settings } from "lucide-react";
 import {
   buildSidebarGroups,
   type OpenSession,
@@ -10,8 +10,7 @@ import {
 import { resolveDisplayName } from "./displayName";
 import type { SessionMetadata } from "../types/session";
 import type { SidebarGrouping } from "../types/app-config";
-import type { ProviderConfig, KeyStatus } from "../types/provider";
-import { ConnectionStatus } from "../shell/ConnectionStatus";
+import type { ProviderConfig } from "../types/provider";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -37,6 +36,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { bareButtonReset } from "@/lib/buttonReset";
 import { cn } from "@/lib/utils";
 
@@ -104,21 +104,14 @@ interface SessionSidebarProps {
   // entry point; the button is the always-visible affordance for the same
   // shortcut.
   onOpenSearch: () => void;
-  // Footer connection row + dual-state gear (issue #282): the non-secret
-  // provider config (App-level app-config) + the active profile's key status,
-  // rendered by the shared ConnectionStatus so the workspace footer is
-  // isomorphic to the settings rail bottom. `provider` is null until app-config
-  // resolves -- the footer stays ABSENT until then, which keeps the white-screen
-  // state unreachable (opening settings on a null config hides the shell but
-  // mounts no SettingsView, leaving no ESC exit; the absence replaces the
-  // retired topbar gear's settingsDisabled gate).
+  // Footer settings gear (issue #282): `provider` is null until app-config
+  // resolves -- the footer stays ABSENT until then, which keeps the
+  // white-screen state unreachable (opening settings on a null config hides
+  // the shell but mounts no SettingsView, leaving no ESC exit; the absence
+  // replaces the retired topbar gear's settingsDisabled gate).
   provider: ProviderConfig | null;
-  keyStatus: KeyStatus;
-  // The gear's workspace half: open the settings overlay (General pane).
+  // The gear opens the settings overlay (General pane).
   onOpenSettings: () => void;
-  // The whole-row click: open the settings overlay landing on the Profiles
-  // pane (the workspace analogue of the settings rail row's in-view jump).
-  onOpenSettingsProfiles: () => void;
 }
 
 // The context-menu action the user picked, driving which dialog opens.
@@ -145,9 +138,7 @@ export function SessionSidebar({
   onSwitchGrouping,
   onOpenSearch,
   provider,
-  keyStatus,
   onOpenSettings,
-  onOpenSettingsProfiles,
   collapsed,
 }: SessionSidebarProps) {
   const intl = useIntl();
@@ -305,24 +296,32 @@ export function SessionSidebar({
         )}
       </ul>
 
-      {/* Footer: the shared connection status row + dual-state gear (issue
-          #282), same place + structure as the settings rail bottom. The
-          .session-list flex:1 scroll region above keeps this pinned to the
-          column's bottom. Absent until app-config resolves (see the provider
-          prop's C1 note). The gear carries the workspace half of the
-          dual-state semantic (open settings); the settings rail's copy carries
-          the "back to workspace" half. */}
+      {/* Footer: the settings gear (issue #282). The .session-list flex:1
+          scroll region above keeps this pinned to the column's bottom. Absent
+          until app-config resolves (see the provider prop note) to keep the
+          white-screen state unreachable. */}
       {provider && (
-        <ConnectionStatus
-          provider={provider}
-          keyStatus={keyStatus}
-          gearLabel={intl.formatMessage({
-            id: "header.settings",
-            defaultMessage: "Settings",
-          })}
-          onGearClick={onOpenSettings}
-          onRowClick={onOpenSettingsProfiles}
-        />
+        <div className="sidebar-footer border-border border-t p-2">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label={intl.formatMessage({
+                  id: "header.settings",
+                  defaultMessage: "Settings",
+                })}
+                onClick={onOpenSettings}
+              >
+                <Settings className="size-4" aria-hidden />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <FormattedMessage id="header.settings" defaultMessage="Settings" />
+            </TooltipContent>
+          </Tooltip>
+        </div>
       )}
 
       {pendingAction?.kind === "rename" && (

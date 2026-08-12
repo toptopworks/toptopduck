@@ -85,9 +85,6 @@ export type ProfilesSectionProps = {
   /** Commit a patch (optimistic); on IPC failure the parent reverts + returns
    *  the formatted error (null on success). */
   onCommit: (mutate: (cfg: AppConfig) => AppConfig) => Promise<string | null>;
-  /** Re-read the active profile's keychain slot after a set-active switch so the
-   *  connection row + header indicator reflect the new slot (ADR-0029). */
-  onRefreshKeyStatus: () => void;
   /** Mirror key / test IPC in-flight transitions to the parent's close guard,
    *  which outlives this pane: the field reports from its IPC finally block,
    *  which runs even after a section switch unmounts the pane, so close stays
@@ -180,7 +177,6 @@ function pickInitialSelectedId(
 export function ProfilesSection({
   provider,
   onCommit,
-  onRefreshKeyStatus,
   onIpcBusy,
   initialEditProfileId,
   controlsRef,
@@ -385,9 +381,6 @@ export function ProfilesSection({
     }));
     setCommitBusy(false);
     setFormError(err);
-    // Reflect the new active profile's keychain slot immediately (the settings
-    // connection row + header indicator bind keyStatus).
-    onRefreshKeyStatus();
   }
 
   // Selecting a list item. The in-progress new-profile edits are stashed onto

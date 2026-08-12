@@ -44,6 +44,7 @@
 - **关联 ADR-0038 / 0064 / 0029**：app-config 存储形状不变（0038）；key 仍独立即时 keychain 传输、绝不进 app-config（0029），故配置档表单的 API Key 行保留自有 Set / Clear、不参与失焦 / 底部提交；新建的内存 id 孤儿 key 槽沿用 0064 认可。
 - **新增 UI 原语**：shadcn Select copy-in + 新增依赖 `@radix-ui/react-select`（栈内增量，ADR-0049）；卡片 / 行式布局复用既有 token（`bg-card` / `border` / `divide`，ADR-0050 / 0067）。具体组件与 className 属实现，不单独立 ADR。
 - **i18n**：新增 / 修订 `settings.*` keys（面板描述、保存文案、连接状态行、修订后的删除确认、新增态放弃确认）走 ADR-0052，手工双语、defaultMessage 英文、调用点字面量、不跑 extract。
-- **跨视图外壳统一（边界外，未决）**：工作区齿轮 + 连接行下移到 sidebar 左下、两视图同位——超出本决策边界，作为后续工作；本切片设置侧齿轮 / 连接行先落，工作区顶栏齿轮 / keyStatus 暂不动（过渡态：齿轮在两视图位置不一致，可接受）。
+- **跨视图外壳统一（边界外，已实现）**：原 deferred consequence「工作区齿轮 + 连接行下移到 sidebar 左下、两视图同位」已实现，但形态演变——连接行本身已退役（见下条），两视图底部统一为相同样式的独立齿轮按钮（左对齐、`bg-muted` + `p-2` 容器），非共享组件。
 - **不做（边界）**：不引入 per-profile enabled 开关（参考的「已启用 / 禁用」无对应模型）；不引入 per-profile 模型列表（参考的「模型列表 / 添加模型」无对应模型；model 仍单字符串 + `test_profile` 临时下拉，0038）；左列表状态点映射现有 active + has_key。
 - **CONTEXT.md 不动**：逐控件持久化、save-unit、失焦提交、连接状态行、齿轮双态均为前端交互 / 外壳决策，不引入领域术语（接入档案 / 协议 / keyStatus 等已定义）；治理原则是产品交互原则，非领域概念。
+- **连接状态行 + keyStatus 绑定退役**：Decision 6 的连接状态行（绑定 keyStatus + 活跃档案名）+ 齿轮双态已移除；两个视图（sidebar + settings rail）底部各自渲染独立的齿轮按钮（样式统一，非共享组件）。key 状态感知改由 ComposerProviderPicker 的 per-profile overlay 承担；`ConnectionStatus` 共享组件已删除。App 级 `keyStatus` state + `refreshKeyStatus` 回调链同步移除（见 ADR-0068 Consequences）。

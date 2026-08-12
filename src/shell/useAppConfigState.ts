@@ -23,11 +23,6 @@
 // hook that owns appConfig must not also depend on an intl App builds from it).
 // App reads effectiveLocale + intl from the return; the IntlProvider + the
 // document.lang effect + useTheme stay in App (DOM / provider concerns).
-//
-// refreshKeyStatus (the header key indicator for the active profile's keychain
-// slot, ADR-0029) stays in App -- it owns the hasKey UI flag and also fires on
-// settings-close. App passes it in so the load effect can kick it once on mount
-// and switchActiveProfile can kick it after a profile swap.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createIntl } from "react-intl";
 import type { IntlShape } from "react-intl";
@@ -44,13 +39,6 @@ export interface UseAppConfigStateDeps {
   /** From useShellError: surfaces a shell-layer AppError (kind "shell") for a
    *  switchActiveProfile reject. */
   setShellError: (error: AppError | null) => void;
-  /** From App: refreshes the header key indicator (hasKey reflects the active
-   *  profile's keychain slot, ADR-0029 boolean). Fired once on mount by the
-   *  load effect, again after a switchActiveProfile swap so the next ask's
-   *  slot is reflected, and on settings-close (a Save may have changed the
-   *  slot -- App owns that handler). The impl catches its own rejects, so the
-   *  hook can fire-and-forget (`void refreshKeyStatus()`). */
-  refreshKeyStatus: () => Promise<void>;
 }
 
 /** The AppConfig advisory state + every mutating action + the restore
@@ -64,7 +52,6 @@ export interface UseAppConfigStateDeps {
  *  (ADR-0038/0052/0054). */
 export function useAppConfigState({
   setShellError,
-  refreshKeyStatus,
 }: UseAppConfigStateDeps): {
   appConfig: AppConfig | null;
   effectiveLocale: EffectiveLocale;
@@ -106,15 +93,10 @@ export function useAppConfigState({
   const [sidebarGrouping, setSidebarGroupingState] = useState<SidebarGrouping>("flat");
   const collapseRestoredRef = useRef(false);
 
-  // Load app-config once on mount (theme/locale). Also
-  // kicks refreshKeyStatus so the header key indicator reflects the active
-  // profile's keychain slot at start.
+  // Load app-config once on mount (theme/locale).
   useEffect(() => {
     let cancelled = false;
-    // External system -> state: a legitimate one-shot fetch. refreshKeyStatus
-    // is passed in from App; its own setState-in-effect (setHasKey) is governed
-    // at App's call sites, not here (the rule fires in the definer's scope).
-    void refreshKeyStatus();
+    // External system -> state: a legitimate one-shot fetch.
     void getAppConfig()
       .then((cfg) => {
         if (cancelled) return;
@@ -127,7 +109,7 @@ export function useAppConfigState({
     return () => {
       cancelled = true;
     };
-  }, [refreshKeyStatus]);
+  }, []);
 
   // The single persistence write (ADR-0068). OPTIMISTIC -- state + ref flip
   // BEFORE the IPC await; a write failure surfaces the error but does NOT roll
@@ -160,10 +142,8 @@ export function useAppConfigState({
   // IMMEDIATELY (a one-profile swap, no draft) so the next ask picks it up.
   // live_config reads active_profile fresh each turn (ADR-0064 -- the
   // ProviderConfigSource impl does a disk read per call, no caching), so the
-  // next ask uses the new profile's endpoint + keychain slot. Post-swap kick:
-  // refreshKeyStatus so the header key indicator reflects the NEW active
-  // profile's keychain slot (ADR-0029; see UseAppConfigStateDeps for the full
-  // kick surface). The optimistic + no-rollback contract is commitAppConfig's
+  // next ask uses the new profile's endpoint + keychain slot.
+  // The optimistic + no-rollback contract is commitAppConfig's
   // (above) -- a reject here is caught into setShellError.
   const switchActiveProfile = useCallback(
     async (id: string): Promise<void> => {
@@ -174,12 +154,11 @@ export function useAppConfigState({
           ...appConfig,
           provider: { ...appConfig.provider, active_profile: id },
         });
-        void refreshKeyStatus();
       } catch (e) {
         setShellError(toAppError(e, intl, "shell"));
       }
     },
-    [appConfig, commitAppConfig, refreshKeyStatus, intl, setShellError],
+    [appConfig, commitAppConfig, intl, setShellError],
   );
 
   // Switch the active profile's model from the composer popover (issue #238,
