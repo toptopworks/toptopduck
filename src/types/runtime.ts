@@ -14,15 +14,19 @@ export type SessionRuntimeChoice =
   | { kind: "built_in" }
   | { kind: "external"; data: string };
 
-// One v1 adapter projected for the composer picker. The stable id is the
-// `set_session_runtime` key; the display name is the row label; `detected`
-// drives the selectable / disabled + "not installed" rendering. The picker
-// renders this table verbatim -- adding a CLI upstream grows the list with
-// zero frontend change. Mirrors `commands::AdapterEntry`.
+// One v1 adapter projected for the composer picker + the settings adapter
+// panel (issue #489). The stable id is the `set_session_runtime` key; the
+// display name is the row label; `detected` drives the selectable / disabled
+// + "not installed" rendering; `binary_path` is the resolved binary location
+// shown in the settings panel when detected. The picker renders this table
+// verbatim -- adding a CLI upstream grows the list with zero frontend change.
+// Mirrors `commands::AdapterEntry`.
 export interface AdapterEntry {
   id: string;
   display_name: string;
   detected: boolean;
+  /** Absolute path of the resolved binary (null when not detected). */
+  binary_path: string | null;
 }
 
 // The honest default while the read settles (and after a resume, before the

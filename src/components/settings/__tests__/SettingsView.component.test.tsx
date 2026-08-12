@@ -3,15 +3,24 @@ import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import * as dialogPlugin from "@tauri-apps/plugin-dialog";
 import { SettingsView } from "../SettingsView";
-import { listProviderProfiles, setProfileKey, setSessionsDir, getSessionsDir } from "../../../api";
+import {
+  listProviderProfiles,
+  setProfileKey,
+  setSessionsDir,
+  getSessionsDir,
+  listAdapters,
+  rescanAdapters,
+} from "../../../api";
 import type { AppConfig } from "../../../types/app-config";
+import type { AdapterEntry } from "../../../types/runtime";
 import type { SettingsSection } from "../sections";
 import { renderSettings } from "./helpers";
 
 // SettingsView reaches the per-profile keychain surface (issue #153); mock the
 // IPC functions so the view never hits Tauri. listProviderProfiles feeds the
 // Profiles pane key-status overlay; setProfileKey feeds the immediate key IPC
-// (ADR-0029 one-shot).
+// (ADR-0029 one-shot). listAdapters / rescanAdapters feed the Runtime section's
+// Local CLI tab (issue #489) -- always mounted, so must resolve in every test.
 vi.mock("../../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../api")>();
   return {
@@ -21,6 +30,8 @@ vi.mock("../../../api", async (importOriginal) => {
     clearProfileKey: vi.fn(),
     setSessionsDir: vi.fn(),
     getSessionsDir: vi.fn(),
+    listAdapters: vi.fn(),
+    rescanAdapters: vi.fn(),
   };
 });
 
@@ -120,10 +131,19 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     { profile_id: "second", has_key: false, keychain_fault: null },
   ];
 
+  // Fixture adapters for the Local CLI tab (issue #489). Always mounted, so
+  // every test must have the mock resolve.
+  const mockAdapters: AdapterEntry[] = [
+    { id: "claude-code", display_name: "claude-code", detected: true, binary_path: "/usr/local/bin/claude" },
+    { id: "gemini-cli", display_name: "gemini-cli", detected: false, binary_path: null },
+  ];
+
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(listProviderProfiles).mockResolvedValue(profileKeysDefault);
     vi.mocked(getSessionsDir).mockResolvedValue("/home/user/Documents/toptopduck/sessions");
+    vi.mocked(listAdapters).mockResolvedValue(mockAdapters);
+    vi.mocked(rescanAdapters).mockResolvedValue(mockAdapters);
   });
 
   // Shared render harness: SettingsView now requires the key-status seam
