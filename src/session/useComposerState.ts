@@ -26,6 +26,12 @@ export interface ComposerSessionFields {
   /** Multi-file ingest from the composer "+" file section (ADR-0083). Routed
    *  through useIngestFlow's handleIngestMany inside SessionPane. */
   handleIngestFiles: (paths: string[]) => void;
+  /** The session pane's workspace fold (ADR-0083). Bar-shaping, not
+   *  turn-flow: the shell-level bar slot mirrors the pane's conversation-column
+   *  geometry (rail width when the workspace is open, the centered 800px fold
+   *  track when collapsed), so the bar width tracks the conversation column
+   *  (ADR-0090 calibration, ADR-0092). */
+  workspaceCollapsed: boolean;
 }
 
 export interface ComposerState extends ComposerSessionFields {
@@ -35,6 +41,9 @@ export interface ComposerState extends ComposerSessionFields {
   // `value.trim() === ""` guard.
   draft: string;
   setDraft: (value: string) => void;
+  /** Drop a closed/deleted session's draft so the per-session draft map does
+   *  not grow unboundedly (the shell calls this from the close/delete paths). */
+  dropDraft: (sessionId: string) => void;
 }
 
 // Idle handlers for the null-sessionId cold-start bar (ADR-0092). The bar
@@ -54,13 +63,16 @@ const idleHandleCancel = async (): Promise<void> => {};
 const idleHandleIngestFiles = (): void => {};
 /** Idle bar fields. Exported so SessionPane can reset the shell-level bar's
  *  per-session entry on unmount (a pane replaced by an error boundary or
- *  closed would otherwise leave a stale `loading: true` stuck on the bar). */
+ *  closed would otherwise leave a stale `loading: true` stuck on the bar).
+ *  The shell's fields registry treats this exact reference as a removal
+ *  signal (unmount = drop the entry, not a state to render). */
 export const IDLE_SESSION_FIELDS: ComposerSessionFields = {
   loading: false,
   phase: null,
   handleAsk: idleHandleAsk,
   handleCancel: idleHandleCancel,
   handleIngestFiles: idleHandleIngestFiles,
+  workspaceCollapsed: false,
 };
 
 // Null-safe hook for the composer bar's QuestionBar-facing state. Owns
@@ -107,8 +119,19 @@ export function useComposerState(
     [sessionId],
   );
 
+  // Drop a closed/deleted session's draft slot. Identity-stable (no deps):
+  // the shell wires it into its close/delete handlers.
+  const dropDraft = useCallback((sid: string) => {
+    setSessionDrafts((prev) => {
+      if (!(sid in prev)) return prev;
+      const next = { ...prev };
+      delete next[sid];
+      return next;
+    });
+  }, []);
+
   if (sessionId === null) {
-    return { ...IDLE_SESSION_FIELDS, draft, setDraft };
+    return { ...IDLE_SESSION_FIELDS, draft, setDraft, dropDraft };
   }
-  return { ...(session ?? IDLE_SESSION_FIELDS), draft, setDraft };
+  return { ...(session ?? IDLE_SESSION_FIELDS), draft, setDraft, dropDraft };
 }

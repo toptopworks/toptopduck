@@ -36,12 +36,24 @@ vi.mock("../api", async (importOriginal) => {
     onApprovalResolved: vi.fn(async () => () => {}),
     respondToolApproval: vi.fn(async () => {}),
     closeSession: vi.fn(async () => false),
-    createSession: vi.fn(async () => "sess-1"),
+    createSession: vi.fn(async () => ({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" })),
     listSessions: vi.fn(async () => []),
     listWorkingSet: vi.fn(async () => []),
     activeDataset: vi.fn(async () => null),
     conversation: vi.fn(async () => []),
     readRows: vi.fn(),
+    // ADR-0092: the cold-start bar's submit creates the session + fires the
+    // pending question. Keep the creation turn in flight (never resolves) so
+    // it appends nothing and the test's settings assertions stay focused.
+    askQuestion: vi.fn(() => new Promise(() => {})),
+    // The cold-start bar mounts the runtime picker + the ADR-0092 submit-time
+    // honest gate (useProfileKeys): the active profile HAS a key so a
+    // cold-start submit passes the gate and creates the session; the adapter
+    // table stays empty (no external rows).
+    listProviderProfiles: vi.fn(async () => [
+      { profile_id: "default", has_key: true, keychain_fault: null },
+    ]),
+    listAdapters: vi.fn(async () => []),
     // useSessionState mounts a long-lived listener on SessionPane mount; mock
     // it so opening a session does not reach the real Tauri event bus.
     onTurnProgress: vi.fn(async () => () => {}),

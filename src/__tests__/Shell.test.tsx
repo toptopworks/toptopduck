@@ -94,9 +94,14 @@ vi.mock("../api", async (importOriginal) => {
     respondToolApproval: vi.fn(async () => {}),
     readRows: vi.fn(),
     // listProviderProfiles feeds the per-profile has_key overlay consumed by
-    // ComposerProviderPicker (mounted via shell-level bar) on App
-    // mount. Default empty; no Shell.test override relies on a populated overlay.
-    listProviderProfiles: vi.fn(async () => []),
+    // the shell-level bar: the composer picker's badge + the ADR-0092
+    // submit-time honest gate (useProfileKeys). Default: the "default" profile
+    // (baseAppConfig's active profile) HAS a key, so tests that resolve
+    // app-config pass the gate and the centered bar's submit creates a
+    // session. The gate tests override this to has_key:false.
+    listProviderProfiles: vi.fn(async () => [
+      { profile_id: "default", has_key: true, keychain_fault: null },
+    ]),
     // Per-session MCP status feeds the composer "+" badge (issue #351).
     // Default empty read; the badge tests override it.
     listMcpServerStatus: vi.fn(async () => []),
@@ -143,6 +148,7 @@ import {
   ingestFile,
   listAdapters,
   listMcpServerStatus,
+  listProviderProfiles,
   listSessions,
   listWorkingSet,
   openDuck,
@@ -157,14 +163,10 @@ import type { AppConfig } from "../types/app-config";
 import type { McpServerConfig, McpServerStatusEntry } from "../types/mcp";
 
 // ADR-0092: the sidebar "+" navigates to the centered empty state (no longer
-// creates a session). The test helper creates a session via the drop-to-create
-// path (dropFile), which mints a session with pendingIngestPath — no turn fires,
-// keeping the helper lightweight. For multi-session creation, click "+" first to
-// return to cold start, then drop again.
-// ADR-0092: the sidebar "+" navigates to the centered empty state (no longer
-// creates a session). A session is created by submitting from the shell-level
-// bar. This helper clicks "+" (cold start), types + submits. Can be called
-// multiple times: each call navigates to empty state first, then creates.
+// creates a session); a session is created by submitting from the shell-level
+// bar. This helper clicks "+" (cold start), types + submits on the centered
+// bar. Can be called multiple times: each call navigates to the empty state
+// first, then creates.
 async function openSession(): Promise<void> {
   // Navigate to empty state (sidebar "+"). No-op on fresh render.
   fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
@@ -498,6 +500,48 @@ describe("App multi-session shell (issue #81 ACs)", () => {
     // The shell-level bar IS rendered (centered), so the textbox is present.
     expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument();
     expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("cold-start submit without a key opens Settings instead of creating (ADR-0092 D4 honest gate)", async () => {
+    // The centered bar stays typeable (never disabled); a built-in submit
+    // while the active profile has no key redirects to the Settings overlay
+    // instead of minting a session whose first turn would fail on the missing
+    // key (ADR-0019 honest guidance, the retired ColdStartHero's successor).
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false }),
+    );
+    vi.mocked(listProviderProfiles).mockResolvedValue([
+      { profile_id: "default", has_key: false, keychain_fault: null },
+    ]);
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      // Let app-config + the key overlay settle into the gate state before
+      // submitting (both consumers fetch listProviderProfiles).
+      await waitFor(() => expect(listProviderProfiles).toHaveBeenCalled());
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      // The settings overlay opens; no session is created and the centered bar
+      // persists (the submit navigated to settings, not out of cold start).
+      await waitFor(() =>
+        expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
+      );
+      expect(createSession).not.toHaveBeenCalled();
+      expect(screen.getByText(/你想分析什么/)).toBeInTheDocument();
+    } finally {
+      // The beforeEach only clearAllMocks (call history), so mock IMPLEMENTATIONS
+      // leak into later tests. Restore the factory defaults — a lingering
+      // has_key:false overlay would gate every later cold-start bar submit.
+      // (null is an App-level state, not an IPC return — cast per the real
+      // getAppConfig signature.)
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+      vi.mocked(listProviderProfiles).mockResolvedValue([
+        { profile_id: "default", has_key: true, keychain_fault: null },
+      ]);
+    }
   });
 
   it("keep-alive switch does not refetch an inactive session (ADR-0051)", async () => {
@@ -850,7 +894,7 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
     await waitFor(() =>
       expect(document.querySelector(".degrade-card")).toBeInTheDocument(),
     );
-    // Open sess-2 (a second session via the drop path).
+    // Open sess-2 (a second session via the bar-submit path).
     await openSession();
     expect(createSession).toHaveBeenCalledTimes(2);
     // sess-2 is now active and shows NO degrade card -- it is unaffected. Only
@@ -1619,8 +1663,8 @@ describe("App session soft-cap hint (ADR-0046/0050, issue #108)", () => {
     vi.mocked(createSession).mockImplementation(async () => ({ session_id: `sess-${++n}`, duck_path: `/sessions/sess-${n}/session.duck` }));
     render(<App />);
     for (let i = 0; i < 8; i++) {
-      // ADR-0092: each openSession() clicks "+" (cold start) + drops a file to
-      // create a session. Wait for createSession call count to increment.
+      // ADR-0092: each openSession() clicks "+" (cold start), then types +
+      // submits on the centered bar to create a session.
       await openSession();
     }
     expect(createSession).toHaveBeenCalledTimes(8);

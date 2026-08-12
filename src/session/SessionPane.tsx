@@ -123,9 +123,11 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pe
 
   // ADR-0092: lift this session's bar-relevant fields to the shell-level bar.
   // handleAsk / handleCancel / handleIngestFiles are useCallback-stable inside
-  // useSessionState; loading / phase change during a turn. The effect fires on
-  // those changes, keeping the shell's per-session composerFields registry
-  // fresh for the active session.
+  // useSessionState; loading / phase change during a turn; workspaceCollapsed
+  // (bar-shaping, ADR-0083 fold) changes on the fold toggle + the one-shot
+  // first-Materialized expansion. The effect fires on those changes, keeping
+  // the shell's per-session composerFields registry fresh for the active
+  // session.
   useEffect(() => {
     onComposerFields(sessionId, {
       loading: s.loading,
@@ -133,6 +135,7 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pe
       handleAsk: s.handleAsk,
       handleCancel: s.handleCancel,
       handleIngestFiles: s.handleIngestMany,
+      workspaceCollapsed: s.workspaceCollapsed,
     });
   }, [
     sessionId,
@@ -141,6 +144,7 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pe
     s.handleAsk,
     s.handleCancel,
     s.handleIngestMany,
+    s.workspaceCollapsed,
     onComposerFields,
   ]);
 
@@ -163,12 +167,13 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pe
   // The shell created this session with pendingQuestion set; fire it via
   // handleAsk immediately, then clear it so a remount cannot re-fire. The
   // guard on pendingQuestion !== null ensures this runs once (on mount when
-  // the prop is set, or not at all when null). Errors are caught so a mock
-  // chain gap in tests does not crash the worker.
+  // the prop is set, or not at all when null). No .catch here: handleAsk
+  // catches its own failures internally (sets the session error state) and
+  // never rejects.
   useEffect(() => {
     if (pendingQuestion !== null) {
       onQuestionConsumed();
-      void s.handleAsk(pendingQuestion).catch(() => {});
+      void s.handleAsk(pendingQuestion);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingQuestion]);
@@ -245,15 +250,28 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pe
       </div>
       {/* ADR-0058 L2 partition boundaries: Thread rail and ResultView each get
           their own ErrorBoundary so a render crash in one degrades only that
-          block. The session-level isolation boundary lives one level up in
-          <App> (wrapping each <SessionPane>) so a render crash elsewhere in
-          the pane degrades only THAT session. */}
-      {/* session-body: flex container for rail + workspace so both collapses
-          animate via flex-grow / flex-basis (interpolatable). ADR-0092: the
-          QuestionBar is no longer inside session-conversation — it lives at
-          the shell level. The session-body fills the available height; the
-          shell-level bar sits below the main area (flex-shrink: 0). */}
-      <div className="session-body session-body-no-bar">
+          block (the shell-level QuestionBar -- a session-skeleton element,
+          ADR-0062 R1 -- is a sibling of the whole pane and always survives).
+          The session-level isolation boundary lives one level up in <App>
+          (wrapping each <SessionPane>) so a render crash elsewhere in the
+          pane degrades only THAT session.
+          KNOWN LIMITATION (React 19 + TanStack Query external store): in the
+          real App tree the per-session boundary is an ANCESTOR of these region
+          boundaries, so a Query-driven re-render throw inside Thread/ResultView
+          can be caught by the outer session boundary first (degrading the whole
+          pane) instead of the granular region boundary. First-render throws are
+          caught by the region boundary as expected; the cross-boundary case
+          surfaces only with external-store-driven updates and could not be
+          reproduced in isolation, so black-box tests assert "degrade card
+          visible + session isolated + retry" rather than "region boundary
+          catches precisely". See memory: react19-nested-errorboundary-outer-
+          catches. */}
+      {/* session-body: grid container for the conversation column + workspace
+          so both collapses animate via grid-template-columns (interpolatable).
+          ADR-0092: the QuestionBar no longer lives inside session-conversation
+          — it is a shell-level sibling below the pane host, so the session-body
+          fills the pane's full height and never overlaps the bar. */}
+      <div className="session-body">
         <div className="session-conversation">
           {/* --- Thread rail (ADR-0045/0047) ---------------------------------- */}
           <section
@@ -276,6 +294,12 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pe
               />
             </ErrorBoundary>
             {s.thread.length === 0 && s.liveTurn === null && (
+            // ADR-0067 (issue #185): the .rail-empty visual rule (font-size +
+            // padding) + the .muted color rule retired onto utility; the class
+            // hooks had no selector / test dependents and are dropped. Gated on
+            // liveTurn too (issue #297): a brand-new session's FIRST in-flight
+            // turn already renders the live card -- the "no conversations yet"
+            // hint would contradict it.
               <p className="text-[0.85rem] p-2 text-muted-foreground">
                 <FormattedMessage
                   id="session.rail.empty"
@@ -291,6 +315,12 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pe
           className="session-workspace"
           aria-label={intl.formatMessage({ id: "session.workspace.ariaLabel", defaultMessage: "Workspace" })}
         >
+          {/* ADR-0067 (issue #173): the .workspace-tabs visual chrome (padding,
+            border-bottom, background) + the [role=tab] base + .active
+            primary-underline retired from styles.css onto this component as
+            utility + ADR-0050 token. The .workspace-tabs hook + bare "active"
+            class stay for selector / test stability; twMerge picks
+            border-b-primary over border-b-transparent when the tab is active. */}
           <div
             className="workspace-tabs flex items-center gap-2 px-4 py-1.5 border-b"
             role="tablist"
@@ -319,6 +349,9 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pe
             >
               <FormattedMessage id="session.tab.workingSet" defaultMessage="Working set" />
             </button>
+            {/* active (server truth, ADR-0051/0060) shown read-only here so the
+                user sees what the next question targets by default. Naming it
+                here, not in QuestionBar, keeps QuestionBar presentational. */}
             {s.activeName && (
               <Badge
                 variant="default"
@@ -341,9 +374,18 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pe
             )}
           </div>
 
+          {/* ADR-0067 (issue #173): the .workspace-body visual rule (padding)
+            retired from styles.css; the flex-1 + overflow-y-auto layout could
+            move too, but the hook stays for selector / test stability. */}
           <div className="workspace-body flex-1 overflow-y-auto p-4">
             {s.error && <ErrorBanner error={s.error} />}
             {s.persistError && (
+              // ADR-0067 (issue #172): the bespoke .persist-warning container
+              // (hardcoded amber #fff4e5 / #ffd9a0 / #8a5200) retired into a
+              // shadcn Alert warning variant, which consumes the --warning token.
+              // role="status" overrides the Alert's assertive "alert" default:
+              // the disk fell behind but the in-memory work is intact, so it
+              // reads as a polite caution, not an interrupting emergency.
               <Alert variant="warning" role="status" className="mt-1.5">
                 <AlertDescription>
                   <p className="m-0">
@@ -433,6 +475,9 @@ function WorkspaceResult({
       // (ADR-0083, issue #351); window-level drag-and-drop stays the shortcut
       // path, so the hero is now the drop hint + the ask-a-question pivot once
       // a source is loaded (hasData).
+      // ADR-0067 (issue #173): the .workspace-hero visual rule (flex column,
+      // centered, gap, padding, text-align) retired from styles.css onto
+      // utility; the .workspace-hero hook stays for selector stability.
       return (
         <div className="workspace-hero flex flex-col items-center gap-4 p-8 text-center">
           <p className="text-muted-foreground">
@@ -484,8 +529,23 @@ function WorkspaceResult({
 // turn is already narrowed to NonMaterializedTurn (workspace.ts), so Materialized
 // is excluded at the type level and the switch ends in `default: never` -- no
 // defensive `return null` for an unreachable case.
+//
+// ADR-0067 (issue #173): the .textual-card visual rule (padding/bg/border/
+// radius) + the per-outcome border-left retired from styles.css onto this
+// component as utility + ADR-0050 token. The semantic class hooks
+// (.textual-card / .textual-card.{clarify,refuse,failed,cancelled}) are kept on
+// the <article> for selector / test stability (Shell.test.tsx queries
+// .textual-card.failed); the hook doubles as the variant-utility lookup key.
+// Issue #222: shadow-sm lifts the in-content card so it shares one elevation
+// language with the floating dialog (shadow-lg) / popover (shadow-md) layer --
+// a Tailwind scale utility, not a new --shadow-* token (ADR-0067 (2)).
 const TEXTUAL_CARD_BASE =
   "textual-card p-4 bg-card border border-border rounded-lg shadow-sm";
+// The variant key set is a closed domain -- Lowercase<TextKind> ("clarify" |
+// "refuse") for the Textual arm + "failed" + "cancelled" for the other two
+// outcome kinds. A literal-union Record catches key typos at compile time and
+// stays exhaustive if TextKind grows, matching the `default: never` pattern
+// used by the outcome switch below.
 const TEXTUAL_CARD_VARIANT: Record<"clarify" | "refuse" | "failed" | "cancelled", string> = {
   clarify: "border-l-[3px] border-l-primary",
   refuse: "border-l-[3px] border-l-muted-foreground",
@@ -498,6 +558,10 @@ function TextualOutcomeCard({ turn }: { turn: NonMaterializedTurn }) {
     case "Textual": {
       const { text_kind, body, assumption } = turn.outcome.data;
       const isClarify = text_kind === "Clarify";
+      // "clarify" | "refuse" -- the lowercase text_kind is both the kept class
+      // hook and the variant-utility lookup key. Cast to the literal union so
+      // the TEXTUAL_CARD_VARIANT lookup is exhaustive-checked (TextKind is
+      // "Clarify" | "Refuse", so the cast is sound).
       const variantHook = text_kind.toLowerCase() as "clarify" | "refuse";
       return (
         <article className={cn(TEXTUAL_CARD_BASE, variantHook, TEXTUAL_CARD_VARIANT[variantHook])}>
@@ -522,6 +586,9 @@ function TextualOutcomeCard({ turn }: { turn: NonMaterializedTurn }) {
       );
     }
     case "Failed": {
+      // Outcome C (issue #125): render by TurnFailure kind via the locale
+      // catalog (no backend Display string crosses IPC); Execute / Resource
+      // carry a technical detail under the collapsed fold.
       const failure = turn.outcome.data;
       const detail = turnFailureDetail(failure);
       return (
@@ -551,6 +618,12 @@ function TextualOutcomeCard({ turn }: { turn: NonMaterializedTurn }) {
 
 // The "工作集" tab (ADR-0045): source management -- rename / replace / delete /
 // privacy. The list + detail pair moved here from the old single-column layout.
+//
+// Panel card chrome for the master/detail sections (issue #184 + #222): bg-card
+// + border + rounded-lg + p-4 carry the surface (ADR-0067 (1) .panel layout hook
+// + visual utility); shadow-sm shares the elevation language of the workspace
+// textual-card / dialog / popover (Tailwind scale, no new token, ADR-0067 (2)).
+// Shared by the list and detail sections so the pair reads as one surface.
 const PANEL_CARD_BASE = "panel bg-card border rounded-lg shadow-sm p-4";
 function WorkspaceWorkingSet({
   datasets,
@@ -574,12 +647,20 @@ function WorkspaceWorkingSet({
     privacy: DatasetPrivacy,
   ) => void;
 }) {
+  // The 工作集 tab's own selection (which dataset's detail to show). Kept local
+  // and separate from viewedResult: picking a dataset here is a management
+  // action, not a workspace view selection (ADR-0051 active/viewed split).
   const [selected, setSelected] = useState<string | null>(
     viewedDescriptor?.reference_name ?? activeName ?? null,
   );
   const shown = datasets.find((d) => d.reference_name === selected) ?? null;
 
   return (
+    // ADR-0067 (issue #184): the WorkspaceWorkingSet div carries the .layout
+    // grid (280px/1fr two-column master-detail, ADR-0067 Decision 1); both
+    // sections share the PANEL_CARD_BASE chrome (defined above). The .layout /
+    // .working-set-layout / .panel class hooks stay as anchor points;
+    // per-consumer margins live on the consumer, not the shared .layout rule.
     <div className="layout working-set-layout">
       <section className={PANEL_CARD_BASE}>
         <h2>

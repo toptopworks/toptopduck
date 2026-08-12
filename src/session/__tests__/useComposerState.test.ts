@@ -14,6 +14,7 @@ const SESSION_FIELDS: ComposerSessionFields = {
   handleAsk: vi.fn(),
   handleCancel: vi.fn(),
   handleIngestFiles: vi.fn(),
+  workspaceCollapsed: false,
 };
 
 // Wrapper that always passes both args. The `as string` cast bypasses the
@@ -101,5 +102,27 @@ describe("useComposerState (ADR-0092 per-session drafts)", () => {
       result.current.handleIngestFiles(["/x.csv"]);
     });
     // No throw = pass.
+  });
+
+  it("idle fields report workspaceCollapsed false", () => {
+    const { result } = renderHook(() => useComposerState(null));
+    expect(result.current.workspaceCollapsed).toBe(false);
+  });
+
+  it("dropDraft removes a closed session's draft without touching other slots", () => {
+    const { result, rerender } = renderHook(
+      ({ sid }) => useTestComposerState(sid, SESSION_FIELDS),
+      { initialProps: { sid: "sess-1" as string | null } },
+    );
+    act(() => result.current.setDraft("question for sess-1"));
+    rerender({ sid: "sess-2" });
+    act(() => result.current.setDraft("question for sess-2"));
+    // The shell closes sess-1: its draft slot is dropped.
+    act(() => result.current.dropDraft("sess-1"));
+    // sess-2's draft is untouched.
+    expect(result.current.draft).toBe("question for sess-2");
+    // sess-1's slot is gone (back to the empty default, not the old text).
+    rerender({ sid: "sess-1" });
+    expect(result.current.draft).toBe("");
   });
 });
