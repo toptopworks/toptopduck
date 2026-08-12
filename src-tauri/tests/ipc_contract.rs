@@ -1198,3 +1198,33 @@ fn session_runtime_choice_wire_shape() {
         r#"{"kind":"external","data":"claude-code"}"#,
     );
 }
+
+/// AdapterEntry (issue #353/#489, ADR-0083) crosses IPC as a flat snake_case
+/// struct -- the shape `src/types/runtime.ts` mirrors. `binary_path` rides
+/// `Option<PathBuf>` (a JSON string when Some, null when None) with
+/// `#[serde(default)]` so an older payload omitting the field deserializes to
+/// None. Pin both forms (detected + undetected) so a serde attribute change
+/// fails here before the hand-mirror can drift.
+#[test]
+fn adapter_entry_wire_shape() {
+    use std::path::PathBuf;
+    use toptopduck_lib::commands::AdapterEntry;
+    assert_wire(
+        &AdapterEntry {
+            id: "claude-code".into(),
+            display_name: "claude-code".into(),
+            detected: true,
+            binary_path: Some(PathBuf::from("/usr/local/bin/claude")),
+        },
+        r#"{"id":"claude-code","display_name":"claude-code","detected":true,"binary_path":"/usr/local/bin/claude"}"#,
+    );
+    assert_wire(
+        &AdapterEntry {
+            id: "codex".into(),
+            display_name: "codex".into(),
+            detected: false,
+            binary_path: None,
+        },
+        r#"{"id":"codex","display_name":"codex","detected":false,"binary_path":null}"#,
+    );
+}
