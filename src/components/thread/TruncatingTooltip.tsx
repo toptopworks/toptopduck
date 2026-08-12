@@ -7,6 +7,10 @@
 // the same full text but only as the browser's slow, unstyled tooltip). max-w-xs
 // caps the popover so a long question wraps instead of stretching the rail-wide
 // tooltip.
+//
+// The tooltip opens only when the trigger text actually overflows — no tooltip
+// when the text fits (see isTruncated below).
+//
 // `text` is ReactNode so a source marker can append its i18n'd stale suffix
 // alongside the verbatim name. Keyboard recovery is a non-goal: the trigger span
 // carries no tabIndex, matching the v0 native title (which keyboard users could
@@ -14,11 +18,22 @@
 // non-pointer access.
 //
 // Extracted from Thread.tsx (issue #427) as a shared utility consumed by
-// SourceMarker, SkillMarker, and TurnCard. Lives in its own file to avoid a
-// circular dependency between Thread.tsx and TurnCard.tsx.
+// SourceMarker, SkillMarker, TurnCard, and the composer popover sections. Lives
+// in its own file to avoid a circular dependency between Thread.tsx and
+// TurnCard.tsx.
 
-import type { ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+
+// Whether the trigger span's content overflows its visible box (i.e. the
+// `truncate` utility is actively ellipsizing). jsdom reports 0 for both
+// dimensions (no layout engine), so the check defaults to true there — keeping
+// tests that rely on the tooltip showing functional. Real browsers compute
+// actual dimensions and the gate suppresses the tooltip when the text fits.
+function isTruncated(el: HTMLElement): boolean {
+  if (el.clientWidth === 0) return true;
+  return el.scrollWidth > el.clientWidth;
+}
 
 export function TruncatingTooltip({
   text,
@@ -29,10 +44,22 @@ export function TruncatingTooltip({
   className?: string;
   children: ReactNode;
 }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [open, setOpen] = useState(false);
+
   return (
-    <Tooltip>
+    <Tooltip
+      open={open}
+      onOpenChange={(next) => {
+        // Gate: suppress the open when the text isn't actually truncated.
+        if (next && ref.current && !isTruncated(ref.current)) return;
+        setOpen(next);
+      }}
+    >
       <TooltipTrigger asChild>
-        <span className={className}>{children}</span>
+        <span ref={ref} className={className}>
+          {children}
+        </span>
       </TooltipTrigger>
       <TooltipContent className="max-w-xs">{text}</TooltipContent>
     </Tooltip>

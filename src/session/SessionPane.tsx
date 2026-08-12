@@ -17,6 +17,8 @@ import { GuidedLoadDialog } from "../components/dataset/GuidedLoadDialog";
 import { QuestionBar } from "../components/thread/QuestionBar";
 import { ComposerAuthModeChip } from "../components/thread/ComposerAuthModeChip";
 import { ComposerContextPanel } from "../components/thread/ComposerContextPanel";
+import { ComposerSkillsTrigger } from "../components/thread/ComposerSkillsTrigger";
+import { ComposerMcpTrigger } from "../components/thread/ComposerMcpTrigger";
 import {
   ComposerProviderPicker,
   type ComposerProviderPickerProps,
@@ -58,16 +60,14 @@ interface SessionPaneProps {
    *  the all-or-nothing render stays a single guard. `sessionId` is injected
    *  at the render site (SessionPane owns it), so the bundle type omits it. */
   providerPicker?: Omit<ComposerProviderPickerProps, "sessionId">;
-  /** The app-config MCP registry has at least one configured server (App
-   *  derives it; undefined reads as "not configured" until app-config
-   *  resolves). Drives the composer "+" panel's degraded decision (ADR-0083,
-   *  issue #351): with no configured MCP and no skill registry, "+" is a pure
-   *  add-files button instead of the three-section panel. */
-  mcpConfigured?: boolean;
   /** Hop to the settings SkillsSection from the composer "+" panel's skill
    *  section footer (issue #365 AC #4). Shell-owned navigation; App threads
    *  openSettings({ section: "skills" }) through. */
   onOpenSettingsSkills: () => void;
+  /** Hop to the settings MCP section from the composer MCP trigger popover's
+   *  add-server footer. Shell-owned navigation; App threads
+   *  openSettings({ section: "mcp" }) through. */
+  onOpenSettingsMcp: () => void;
   /** Display name for THIS session's header. The shell owns the open-session
    *  set; each SessionPane receives its own name rather than reaching into
    *  global active-session state (ADR-0060). */
@@ -90,7 +90,7 @@ interface SessionPaneProps {
 // stable prop for useSessionState / useTurnFlow (no every-render fresh []).
 const NO_APPROVALS: ApprovalEntry[] = [];
 
-export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, providerPicker, mcpConfigured = false, onOpenSettingsSkills, sessionName, onFirstTurnSettled, approvalEvents, onRailResizeStart }: SessionPaneProps) {
+export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, providerPicker, onOpenSettingsSkills, onOpenSettingsMcp, sessionName, onFirstTurnSettled, approvalEvents, onRailResizeStart }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
   // the pane acts on its own session only). The respond / clearSession
@@ -253,11 +253,30 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
               its bottom toolbar row. Lives inside the conversation column so
               its width tracks the rail. */}
           <div className="session-questionbar">
+            {/* Context triggers (Skills / MCP) pass as the QuestionBar header
+                slot: borderless chips riding the container's top row (one
+                shared bg-card surface with the textarea + toolbar). Each
+                opens its own popover with search + checkbox list; the "+"
+                in the toolbar handles files only. */}
             <QuestionBar
               onSubmit={s.handleAsk}
               onCancel={s.handleCancel}
               loading={s.loading}
               phase={s.phase}
+              header={(
+                <>
+                  <ComposerSkillsTrigger
+                    sessionId={sessionId}
+                    loading={s.loading}
+                    onOpenSettingsSkills={onOpenSettingsSkills}
+                  />
+                  <ComposerMcpTrigger
+                    sessionId={sessionId}
+                    loading={s.loading}
+                    onOpenSettingsMcp={onOpenSettingsMcp}
+                  />
+                </>
+              )}
               trailing={
                 providerPicker && (
                   <ComposerProviderPicker sessionId={sessionId} {...providerPicker} />
@@ -265,11 +284,8 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
               }
             >
               <ComposerContextPanel
-                sessionId={sessionId}
                 onIngestFiles={s.handleIngestMany}
                 loading={s.loading}
-                mcpConfigured={mcpConfigured}
-                onOpenSettingsSkills={onOpenSettingsSkills}
               />
               <ComposerAuthModeChip sessionId={sessionId} />
             </QuestionBar>

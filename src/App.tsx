@@ -519,15 +519,7 @@ export default function App() {
                           // section footer hops to the settings SkillsSection.
                           // openSettings is shell-owned (ADR-0065 overlay).
                           onOpenSettingsSkills={() => openSettings({ section: "skills" })}
-                          // ADR-0083 (issue #351): the composer "+" degrades to
-                          // a pure add-files button when the registry has no
-                          // configured MCP server (and no skill system exists
-                          // yet). False until app-config resolves -- the
-                          // degraded button is a safe transient (ingest never
-                          // needs app-config).
-                          mcpConfigured={
-                            appConfig !== null && appConfig.mcp_servers.servers.length > 0
-                          }
+                          onOpenSettingsMcp={() => openSettings({ section: "mcp" })}
                           providerPicker={
                           // ADR-0071 (issue #238): the composer provider/model
                           // picker is app-level state (active profile + writes +

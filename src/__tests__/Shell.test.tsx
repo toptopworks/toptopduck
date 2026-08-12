@@ -2049,34 +2049,26 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-1", "/b.csv"));
   });
 
-  it("with configured MCP servers [+] opens the three-section panel shell", async () => {
+  it("with configured MCP servers the trigger chips render and open popovers", async () => {
     vi.mocked(getAppConfig).mockResolvedValue({
       ...baseAppConfig({ sidebar_collapsed: false }),
       mcp_servers: { servers: [mcpServer("srv")] },
     });
-    // Issue #369: the MCP section renders only when the status list is
-    // non-empty; mock one server so the section appears alongside files +
-    // skills.
+    // Issue #369: mock one server so the MCP section has content.
     vi.mocked(listMcpServerStatus).mockResolvedValue([mcpStatus("srv", false)]);
     render(<App />);
     await openSession();
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "添加会话上下文" }),
-    );
+    // Skills + MCP trigger chips render above the QuestionBar.
+    expect(await screen.findByRole("button", { name: /技能/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /MCP/ })).toBeInTheDocument();
 
-    // File section live; skills section live (issue #365, empty registry ->
-    // empty-state hint); MCP section live (issue #369).
-    expect(
-      await screen.findByRole("button", { name: "选择数据文件…" }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("技能")).toBeInTheDocument();
-    expect(screen.getByText("暂无技能。在设置中添加。")).toBeInTheDocument();
-    expect(await screen.findByText("MCP 工具")).toBeInTheDocument();
-    expect(screen.getByText("srv")).toBeInTheDocument();
+    // Click MCP chip -> popover opens with the server list.
+    fireEvent.click(screen.getByRole("button", { name: /MCP/ }));
+    expect(await screen.findByText("srv")).toBeInTheDocument();
   });
 
-  it("badges the session-enabled MCP count on the [+] trigger", async () => {
+  it("shows the enabled MCP count on the MCP trigger chip", async () => {
     vi.mocked(getAppConfig).mockResolvedValue({
       ...baseAppConfig({ sidebar_collapsed: false }),
       mcp_servers: { servers: [mcpServer("srv"), mcpServer("srv2")] },
@@ -2088,10 +2080,9 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     render(<App />);
     await openSession();
 
-    // One of the two configured servers is enabled for this session -> the
-    // badge carries the count (and rides the accessible name).
+    // One of the two configured servers is enabled -> chip shows (1/2).
     expect(
-      await screen.findByRole("button", { name: "添加会话上下文（已挂 1 项）" }),
+      await screen.findByRole("button", { name: /MCP \(1\/2\)/ }),
     ).toBeInTheDocument();
   });
 

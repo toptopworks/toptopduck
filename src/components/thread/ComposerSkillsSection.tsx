@@ -1,28 +1,27 @@
 import { useMemo, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Settings } from "lucide-react";
+import { Plus } from "lucide-react";
 
+import { Input } from "../ui/input";
+import { TruncatingTooltip } from "./TruncatingTooltip";
 import { listMountedSkills, listSkills, mountSkill, unmountSkill } from "../../api";
 import { fmtError } from "../../lib/error-presentation";
 import { sessionKeys, skillKeys } from "../../session/queryKeys";
 import type { SkillEntry } from "../../types/skills";
 
-// The skills section of the composer "+" panel (issue #365, ADR-0086). Replaces
-// the prior disabled placeholder (#351). Renders a compact checkbox list of
-// every registry skill (name + checkbox only -- no description, no `acquired`
-// chip; this slice lists ALL spec-valid skills; the muted-skill filter + the
-// popover-internal mounted/total header land in later #303 slices). One toggle
-// per row mounts / unmounts the skill into THIS session's active set: the write
-// appends a SkillLifecycleEvent to the timeline + persists the recipe; the
-// mount SET is folded from that sequence (Mount in / Unmount out), never stored
-// as a snapshot. The trigger badge (mountedSkillCount + enabledMcpCount) lives
-// in the parent ComposerContextPanel -- it shares this query's cache.
+// The skills section of the Skills trigger popover (issue #365, ADR-0086).
+// Rendered inside ComposerSkillsTrigger's PopoverContent -- the trigger chip
+// carries the icon + count header, so this component is pure content: search +
+// checkbox list + add-skill footer. One toggle per row mounts / unmounts the
+// skill into THIS session's active set: the write appends a SkillLifecycleEvent
+// to the timeline + persists the recipe; the mount SET is folded from that
+// sequence (Mount in / Unmount out), never stored as a snapshot.
 //
 // The turn-in-flight `loading` gate (ADR-0040) disables every toggle: the
 // backend `mount_skill` / `unmount_skill` commands also refuse during resume /
 // an in-flight turn (reject_if_resuming + reject_if_in_flight), so the visual
-// gate and the IPC gate agree (AC #5). The "Manage skills" footer hops to the
+// gate and the IPC gate agree (AC #5). The "Add skill" footer hops to the
 // settings SkillsSection via the parent's onOpenSettingsSkills callback.
 
 const ROW_CLASS =
@@ -47,18 +46,9 @@ export function ComposerSkillsSection({
   const intl = useIntl();
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
-  // One pending name per row -- each in-flight toggle disables ONLY its own
-  // checkbox, so rapid cross-row toggles proceed in parallel (the backend
-  // serializes the writes through the session lock). A double-click on the
-  // SAME row still cannot enqueue a redundant write: that row stays disabled
-  // until its own IPC settles.
   const [pendingNames, setPendingNames] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
 
-  // Mark / clear a row as in-flight. Functional updaters so two concurrent
-  // toggles cannot clobber each other's entry; `clearPending` returns the same
-  // Set reference when nothing is pending so downstream `useMemo`/render
-  // bail-outs keep working.
   function markPending(name: string) {
     setPendingNames((prev) => new Set(prev).add(name));
   }
@@ -71,18 +61,10 @@ export function ComposerSkillsSection({
     });
   }
 
-  // The process-global registry (one root shared by every session). The parent
-  // ComposerContextPanel reads the same key for its degraded decision, so the
-  // first mount pays the IPC + every later consumer rides the cache.
   const { data: listing, isLoading } = useQuery({
     queryKey: skillKeys.all(),
     queryFn: listSkills,
   });
-  // The session's active mount set (folded from the timeline on the backend).
-  // Shares the cache with the parent's badge read; mount / unmount invalidate
-  // it so the badge re-reads without a remount (ADR-0083). A query reject
-  // surfaces through `displayError` below so a background refetch failure
-  // never rolls the checkbox back silently.
   const { data: mounted, error: mountedQueryError } = useQuery({
     queryKey: sessionKeys.mountedSkills(sessionId),
     queryFn: () => listMountedSkills(sessionId),
@@ -90,20 +72,12 @@ export function ComposerSkillsSection({
 
   const mountedSet = useMemo(() => new Set(mounted ?? []), [mounted]);
 
-  // Resync the cache + clear the mutation error after a mount / unmount settle.
-  // Central here so both mutations share the identical post-write behavior
-  // (seed the cache for an instant flip, then invalidate so the backend truth
-  // lands).
   function applyMountDelta(delta: (prev: string[] | undefined) => string[]) {
     setError(null);
     queryClient.setQueryData<string[]>(sessionKeys.mountedSkills(sessionId), delta);
     void queryClient.invalidateQueries({ queryKey: sessionKeys.mountedSkills(sessionId) });
   }
 
-  // Issue #369: invalidate mcpStatus once per mutation in onSettled (fires on
-  // both success + error) so the MCP section re-reads the skill-declared server
-  // contributions + the trigger badge recomputes. Centralizing here avoids
-  // repeating the call in onSuccess + onError for each mutation.
   function invalidateAfterSkillMutation(name: string) {
     clearPending(name);
     void queryClient.invalidateQueries({ queryKey: sessionKeys.mcpStatus(sessionId) });
@@ -145,32 +119,22 @@ export function ComposerSkillsSection({
   const registry = useMemo(() => listing?.skills ?? [], [listing]);
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (q === "") return registry;
-    return registry.filter((s) => s.name.toLowerCase().includes(q));
-  }, [registry, search]);
+    const matched =
+      q === "" ? registry : registry.filter((s) => s.name.toLowerCase().includes(q));
+    // Pin mounted (selected) skills to the top; Array.prototype.sort is
+    // stable, so the registry order is preserved within each group.
+    return [...matched].sort(
+      (a, b) => Number(mountedSet.has(b.name)) - Number(mountedSet.has(a.name)),
+    );
+  }, [registry, search, mountedSet]);
 
-  // Suppress the empty-state hint while the registry is still loading so the
-  // first paint does not flicker "No skills yet" before the IPC resolves.
   const empty = !isLoading && registry.length === 0;
   const noMatches = !empty && filtered.length === 0;
-  // Mutation error takes precedence (the user's just-attempted write), then a
-  // query reject from a background refetch. Either lands in the same alert
-  // slot so a failure is never silent.
   const displayError = error ?? (mountedQueryError ? fmtError(mountedQueryError, intl) : null);
 
   return (
-    <section className="composer-skill-section grid gap-1.5">
-      <span className="text-sm font-medium">
-        <FormattedMessage
-          id="composer.contextPanel.skillsTitle"
-          defaultMessage="Skills"
-        />
-      </span>
-      {/* Compact search -- filters by name only. The aria-label reuses the
-          placeholder id: a placeholder alone is not a substitute for an
-          accessible name (it vanishes on input), and the compact popover has
-          no room for a visible <label>. */}
-      <input
+    <div className="composer-skill-section grid gap-1.5">
+      <Input
         type="search"
         value={search}
         onChange={(e) => setSearch(e.target.value)}
@@ -182,9 +146,15 @@ export function ComposerSkillsSection({
           id: "composer.contextPanel.skillsSearchPlaceholder",
           defaultMessage: "Search skills…",
         })}
-        className="border-border bg-background text-foreground h-7 w-full rounded-md border px-2 text-xs"
+        className="h-7 px-2 text-xs dark:bg-background"
       />
-      <ul className="grid max-h-44 gap-0.5 overflow-y-auto pr-0.5">
+      {/* minmax(0,1fr) caps the implicit grid track at the popover width so
+          long names hit the row's truncate instead of widening the track;
+          min-h-0 lets max-h-44 actually cap the list height (without it, the
+          grid item's default min-height:auto overrides max-height and the
+          list grows unbounded); overflow-x-hidden keeps the vertical scroller
+          from ever growing a horizontal one. */}
+      <ul className="grid max-h-44 min-h-0 grid-cols-[minmax(0,1fr)] gap-0.5 overflow-x-hidden overflow-y-auto pr-0.5">
         {filtered.map((skill) => {
           const isMounted = mountedSet.has(skill.name);
           const pending = pendingNames.has(skill.name);
@@ -206,7 +176,9 @@ export function ComposerSkillsSection({
                     { name: skill.name },
                   )}
                 />
-                <span className="truncate">{skill.name}</span>
+                <TruncatingTooltip text={skill.name} className="truncate">
+                  {skill.name}
+                </TruncatingTooltip>
               </label>
             </li>
           );
@@ -216,7 +188,7 @@ export function ComposerSkillsSection({
         <span className="text-muted-foreground px-2 py-2 text-xs">
           <FormattedMessage
             id="composer.contextPanel.skillsEmpty"
-            defaultMessage="No skills yet. Add one in Settings."
+            defaultMessage="No skills"
           />
         </span>
       )}
@@ -233,20 +205,18 @@ export function ComposerSkillsSection({
           {displayError}
         </p>
       )}
-      {/* Footer: hop to the settings SkillsSection. The shell owns the
-          navigation; the parent threads App.openSettings({ section: "skills" })
-          through. */}
+      <div className="border-t border-border" />
       <button
         type="button"
         onClick={onOpenSettingsSkills}
         className="hover:bg-accent focus-visible:outline-ring -mx-1 inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground outline-none focus-visible:outline-2 focus-visible:outline-offset-2"
       >
-        <Settings className="size-3.5" aria-hidden />
+        <Plus className="size-3.5" aria-hidden />
         <FormattedMessage
-          id="composer.contextPanel.manageSkills"
-          defaultMessage="Manage skills"
+          id="composer.contextPanel.addSkill"
+          defaultMessage="Add skill"
         />
       </button>
-    </section>
+    </div>
   );
 }
