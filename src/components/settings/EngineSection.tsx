@@ -97,7 +97,7 @@ export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
   return (
     <div>
       <PaneHeader
-        title={<FormattedMessage id="settings.nav.engine" defaultMessage="Engine" />}
+        title={<FormattedMessage id="settings.nav.databaseEngine" defaultMessage="Database Engine" />}
         description={(
           <FormattedMessage
             id="settings.engine.description"
