@@ -406,7 +406,7 @@ export function SettingsView({
 
         {/* Rail bottom: the shared connection status row + dual-state gear
             (issue #282). Here the gear reads "back to workspace" and the row
-            jumps to the Profiles pane; the workspace sidebar renders the same
+            jumps to the Runtime pane; the workspace sidebar renders the same
             component with the open-settings half of the semantic. */}
         <ConnectionStatus
           provider={appConfig.provider}

@@ -51,7 +51,7 @@ import { getProviderConfig } from "./api";
 const SOFT_CAP_OPEN_SESSIONS = 8;
 
 /** Entry hint for the settings overlay (issue #239): which section to land on
- *  when it opens, and (for the Profiles section) which profile to pre-select
+ *  when it opens, and (for the Runtime section) which profile to pre-select
  *  for editing. Consumed by SettingsView/ProfilesSection at mount; reset to
  *  the default on close so a later sidebar-gear open does not re-target a
  *  stale profile. */
@@ -106,13 +106,11 @@ export default function App() {
     setSettingsNavCollapsed(false);
   }
 
-  // ColdStartHero CTAs (issue #239): open Settings on the Profiles tab. The
+  // ColdStartHero CTAs (issue #239): open Settings on the Runtime tab. The
   // "no key" path forwards the active profile id so ProfilesSection lands on
   // its edit form; the "no profile" path omits it (there is nothing to edit).
   function openSettingsProfiles(editProfileId?: string) {
-    openSettings(
-      editProfileId ? { section: "runtime", editProfileId } : { section: "runtime" },
-    );
+    openSettings({ section: "runtime", editProfileId });
   }
   // Invalidation counter for the composer picker's per-profile has_key overlay
   // (issue #238). Bumped on settings-close so the picker refetches its overlay
