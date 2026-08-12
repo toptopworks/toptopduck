@@ -12,7 +12,23 @@ import { useShellSessions } from "./shell/useShellSessions";
 import { useAppConfigState } from "./shell/useAppConfigState";
 import { useSidebarResize } from "./shell/useSidebarResize";
 import { useRailResize } from "./shell/useRailResize";
+import { useProfileKeys } from "./shell/useProfileKeys";
+import { useComposerState, IDLE_SESSION_FIELDS } from "./session/useComposerState";
+import type { ComposerSessionFields } from "./session/useComposerState";
+import { QuestionBar } from "./components/thread/QuestionBar";
+import { ComposerAuthModeChip } from "./components/thread/ComposerAuthModeChip";
+import { ComposerContextPanel } from "./components/thread/ComposerContextPanel";
+import { ComposerSkillsTrigger } from "./components/thread/ComposerSkillsTrigger";
+import { ComposerMcpTrigger } from "./components/thread/ComposerMcpTrigger";
+import {
+  ComposerProviderPicker,
+  type ComposerProviderPickerProps,
+} from "./components/thread/ComposerProviderPicker";
 import type { AppConfig } from "./types/app-config";
+import type { AuthMode } from "./types/approval";
+import { AUTH_MODE_DEFAULT } from "./types/approval";
+import type { SessionRuntimeChoice } from "./types/runtime";
+import { RUNTIME_CHOICE_DEFAULT } from "./types/runtime";
 import { usePlatform } from "./shell/use-platform";
 import { SidebarToggle } from "./shell/SidebarToggle";
 import { NavButtons } from "./shell/NavButtons";
@@ -20,7 +36,6 @@ import { NavigationHistoryProvider } from "./shell/NavigationHistoryContext";
 import type { NavEntry } from "./shell/navigationHistory";
 import { WindowControls } from "./shell/WindowControls";
 import { ResumeProgress } from "./shell/ResumeProgress";
-import { ColdStartHero } from "./shell/ColdStartHero";
 import { ErrorBanner } from "./components/common/ErrorBanner";
 import { DegradeCard, ErrorBoundary } from "./components/common/ErrorBoundary";
 import { SettingsView } from "./components/settings/SettingsView";
@@ -42,9 +57,11 @@ import { adapterKeys } from "./session/queryKeys";
 // + client UI state. Non-active panes stay mounted under CSS `hidden` keep-alive
 // (ADR-0060): switching is instant, no resume replay, no refetch (ADR-0051).
 //
-// Cold start (ADR-0061): no createSession, no resume, no last_session_id. The
-// left sidebar loads list_sessions; the right shows a new-session hero empty
-// state until the user clicks a session (resume), drops a file, or hits "+ New session".
+// ADR-0092: QuestionBar is a shell-level single instance. Cold start
+// (activeSessionId === null) shows a centered bar + greeting; first submit
+// creates the session. The sidebar "+" navigates to the centered empty state
+// (does not create). SessionPane no longer renders QuestionBar; it reports its
+// bar-relevant fields upward via onComposerFields.
 
 /** Soft cap on keep-alive sessions (ADR-0046, non-blocking memory-pressure
  *  badge). Reaching it surfaces a sidebar badge; it never forces a close. */
@@ -60,6 +77,17 @@ type SettingsEntry = {
   editProfileId?: string;
   runtimeTab?: RuntimeTab;
 };
+
+// Module-level so the IntlProvider `onError` prop is a STABLE reference across
+// App renders. react-intl shallow-compares ALL provider props (incl. onError)
+// to decide whether to rebuild the `intl` context object; an inline arrow here
+// would rebuild `intl` every render, and every session handler that lists
+// `intl` in its useCallback deps (handleAsk / handleCancel / handleIngestMany)
+// would get a fresh identity -- which the ADR-0092 shell-level composer-fields
+// report compares by reference, looping the bar's fields registry forever.
+function handleIntlError(err: Error): void {
+  log.warn("i18n", err.message);
+}
 
 export default function App() {
   // QueryClient (ADR-0051): lazy-init once per App mount so test renders never
@@ -84,8 +112,8 @@ export default function App() {
   // settings SECTION is no longer an entry hint: it is shell-owned live state
   // (liveSettingsSection below, issue #288) so the back/forward history can
   // restore it. openSettings() defaults to the sidebar-gear path (general, no
-  // edit target); the hero + the sidebar connection row pass
-  // { section: "runtime", editProfileId? }.
+  // edit target); the cold-start submit-time honest gate (ADR-0092 Decision 4)
+  // + the composer picker pass { section: "runtime", editProfileId? }.
   const [settingsView, setSettingsView] = useState<{
     open: boolean;
     editProfileId?: string;
@@ -101,27 +129,27 @@ export default function App() {
   // stays here. Reset to expanded on every open so each visit starts from the
   // full nav (issue #285).
   const [settingsNavCollapsed, setSettingsNavCollapsed] = useState(false);
-  function openSettings(entry: SettingsEntry = { section: "general" }) {
-    setSettingsView({
-      open: true,
-      editProfileId: entry.editProfileId,
-      runtimeTab: entry.runtimeTab,
-    });
-    setLiveSettingsSection(entry.section);
-    setSettingsNavCollapsed(false);
-  }
+  // useCallback-stable (setters only): the ADR-0092 submit-time honest gate
+  // lists it in a useCallback dep array.
+  const openSettings = useCallback(
+    (entry: SettingsEntry = { section: "general" }) => {
+      setSettingsView({
+        open: true,
+        editProfileId: entry.editProfileId,
+        runtimeTab: entry.runtimeTab,
+      });
+      setLiveSettingsSection(entry.section);
+      setSettingsNavCollapsed(false);
+    },
+    [],
+  );
 
-  // ColdStartHero CTAs (issue #239): open Settings on the Runtime tab. The
-  // "no key" path forwards the active profile id so ProfilesSection lands on
-  // its edit form; the "no profile" path omits it (there is nothing to edit).
-  function openSettingsProfiles(editProfileId?: string) {
-    openSettings({ section: "runtime", editProfileId });
-  }
-  // Invalidation counter for the composer picker's per-profile has_key overlay
-  // (issue #238). Bumped on settings-close so the picker refetches its overlay
-  // after a Save that may have changed a keychain slot -- ADR-0019 honest gate:
-  // the popover must not keep showing "No key" after the user just configured
-  // one.
+  // Invalidation counter for the per-profile has_key overlay (issue #238).
+  // Bumped on settings-close so the consumers refetch their overlays after a
+  // Save that may have changed a keychain slot -- ADR-0019 honest gate: the
+  // surfaces must not keep showing "No key" after the user just configured
+  // one. Consumers: the composer picker's popover badge + the shell-level
+  // submit-time gate (useProfileKeys, ADR-0092 Decision 4).
   const [profileKeyEpoch, setProfileKeyEpoch] = useState(0);
 
   // Ctrl/⌘+K session-search modal open state (ADR-0072, issue #252).
@@ -136,7 +164,7 @@ export default function App() {
   // contract + restore / persist effects). App injects setShellError
   // (switchActiveProfile reject path) as a dep; reads back AppConfig state +
   // the derived effectiveLocale / intl + the two collapse toggles.
-  // settingsView is App-local UI state (below).
+  // settingsView is App-local UI state (above).
   const {
     appConfig,
     effectiveLocale,
@@ -151,18 +179,14 @@ export default function App() {
     switchSidebarGrouping,
   } = useAppConfigState({ setShellError });
 
-  // --- Draggable sidebar width (useSidebarResize) ---------------------------
-  // Frontend-only localStorage persistence; the width is exposed as a CSS
-  // custom property on .shell so the grid + resize handle consume it without
-  // a hardcoded px value.
-  // The rail width is declared first so the sidebar hook can compensate it
-  // (sidebar grows → rail shrinks by the same delta, keeping the workspace
-  // visually fixed, like Codex's right-side drag).
-  // --- Draggable conversation-rail width (useRailResize) -------------------
-  // Mirrors the sidebar resize pattern: frontend-only localStorage persistence
-  // + a CSS custom property (--rail-width) on .shell consumed by the
-  // session-body grid. The handle is per-SessionPane but the width is global
-  // so it stays consistent across keep-alive session switches.
+  // --- Draggable sidebar + rail widths ------------------------------------
+  // Frontend-only localStorage persistence; the widths are exposed as CSS
+  // custom properties on .shell so the grid + resize handles consume them
+  // without a hardcoded px value. The rail width is declared first so the
+  // sidebar hook can compensate it (sidebar grows -> rail shrinks by the same
+  // delta, keeping the workspace visually fixed). The rail handle is
+  // per-SessionPane but the width is global so it stays consistent across
+  // keep-alive session switches.
   const { width: railWidth, isDragging: railDragging, onResizeStart: onRailResizeStart, adjustWidth: adjustRailWidth } = useRailResize();
 
   const { width: sidebarWidth, isDragging: sidebarDragging, onResizeStart: onSidebarResizeStart } = useSidebarResize({
@@ -183,11 +207,14 @@ export default function App() {
     openSessions,
     activeSessionId,
     activateSession,
+    goToEmptyState,
     busy,
     resumeStatus,
-    openNew,
+    createSessionWithQuestion,
+    createSessionWithIngest,
     openPersisted,
     clearPendingIngest,
+    clearPendingQuestion,
     closeOpen,
     deletePersisted,
     renameEntry,
@@ -221,18 +248,181 @@ export default function App() {
   // never forces a close.
   const atSoftCap = openSessions.length >= SOFT_CAP_OPEN_SESSIONS;
 
+  // --- ADR-0092: Shell-level composer fields registry ---------------------
+  // Each SessionPane reports its bar-relevant fields upward via
+  // onComposerFields. The shell-level QuestionBar reads the active session's
+  // entry (or idle defaults when activeSessionId is null). handleAsk /
+  // handleCancel / handleIngestFiles are useCallback-stable inside
+  // useSessionState; loading / phase change during a turn.
+  const [composerFieldsMap, setComposerFieldsMap] = useState<
+    Record<string, ComposerSessionFields>
+  >({});
+  const handleComposerFields = useCallback(
+    (sid: string, fields: ComposerSessionFields) => {
+      setComposerFieldsMap((prev) => {
+        // SessionPane reports the IDLE_SESSION_FIELDS reference on unmount
+        // (close / delete / error-boundary replacement): drop the entry so
+        // the registry stays bounded by the open set.
+        if (fields === IDLE_SESSION_FIELDS) {
+          if (!(sid in prev)) return prev;
+          const next = { ...prev };
+          delete next[sid];
+          return next;
+        }
+        // Skip if nothing changed (referential equality of all fields).
+        const prevFields = prev[sid];
+        if (
+          prevFields &&
+          prevFields.loading === fields.loading &&
+          prevFields.phase === fields.phase &&
+          prevFields.handleAsk === fields.handleAsk &&
+          prevFields.handleCancel === fields.handleCancel &&
+          prevFields.handleIngestFiles === fields.handleIngestFiles &&
+          prevFields.workspaceCollapsed === fields.workspaceCollapsed
+        ) {
+          return prev;
+        }
+        return { ...prev, [sid]: fields };
+      });
+    },
+    [],
+  );
+
+  // The active session's bar fields (or idle when null). The useComposerState
+  // hook merges these with per-session drafts.
+  const activeSessionFields =
+    activeSessionId !== null ? composerFieldsMap[activeSessionId] : undefined;
+  const composer = useComposerState(
+    activeSessionId,
+    activeSessionFields ?? IDLE_SESSION_FIELDS,
+  );
+
+  // ADR-0092 Decision 6: shell-level pending composer posture for the
+  // cold-start bar. The runtime picker + auth-mode chip render on the
+  // centered bar with NO session; their selections land here and are applied
+  // to the session the first submit mints (consumed = reset to the backend
+  // defaults, so each cold-start visit starts from the default posture).
+  const [pendingRuntime, setPendingRuntime] =
+    useState<SessionRuntimeChoice>(RUNTIME_CHOICE_DEFAULT);
+  const [pendingAuthMode, setPendingAuthMode] = useState<AuthMode>(AUTH_MODE_DEFAULT);
+
+  // ADR-0092 Decision 4 honest gate (submit-time). The centered bar is
+  // always typeable; a cold-start submit on the built-in runtime requires a
+  // profile WITH a key — otherwise the overlay opens on the Runtime tab
+  // instead of minting a session whose first turn would fail on the missing
+  // key (ADR-0019 honest guidance, replacing the retired ColdStartHero CTA
+  // states). An external-runtime pick bypasses the key gate (the picker only
+  // offers detected adapters). While the key overlay is unresolved
+  // (app-config pending or first fetch in flight) the gate defers to
+  // "ready", mirroring the hero's steady-state rule.
+  const provider = appConfig?.provider ?? null;
+  const profileKeys = useProfileKeys(provider, profileKeyEpoch);
+  const builtInGateOpen =
+    provider !== null &&
+    !profileKeys.loading &&
+    (!profileKeys.activeHasKey || profileKeys.activeKeychainFault !== null);
+
+  // ADR-0092: shell-level bar submit handler. When activeSessionId is
+  // non-null, delegate to the active session's handleAsk; when the pane has
+  // not reported its fields yet (activation -> mount-report window), the
+  // submit is a no-op — NEVER mint a second session for an active id. When
+  // null, run the honest gate, then create a session carrying the question.
+  // The draft is deliberately NOT cleared on submit (the pre-ADR-0092 bar
+  // kept the text; a failed creation must never lose the question).
+  const handleShellSubmit = useCallback(
+    (question: string) => {
+      if (activeSessionId !== null) {
+        const fields = composerFieldsMap[activeSessionId];
+        if (fields) void fields.handleAsk(question);
+        return;
+      }
+      if (pendingRuntime.kind === "built_in" && builtInGateOpen) {
+        openSettings({
+          section: "runtime",
+          editProfileId: profileKeys.activeProfileId ?? undefined,
+        });
+        return;
+      }
+      const runtime = pendingRuntime;
+      const authMode = pendingAuthMode;
+      void createSessionWithQuestion(question, { runtime, authMode }).then(
+        (created) => {
+          if (created) {
+            setPendingRuntime(RUNTIME_CHOICE_DEFAULT);
+            setPendingAuthMode(AUTH_MODE_DEFAULT);
+          }
+        },
+      );
+    },
+    [
+      activeSessionId,
+      composerFieldsMap,
+      createSessionWithQuestion,
+      pendingRuntime,
+      pendingAuthMode,
+      builtInGateOpen,
+      profileKeys.activeProfileId,
+      openSettings,
+    ],
+  );
+
+  // ADR-0092: shell-level cancel — delegates to the active session's
+  // handleCancel. Idle when no session is active (no turn to cancel).
+  const handleShellCancel = useCallback(() => {
+    if (activeSessionId !== null) {
+      const fields = composerFieldsMap[activeSessionId];
+      if (fields) void fields.handleCancel();
+    }
+  }, [activeSessionId, composerFieldsMap]);
+
+  // ADR-0092: shell-level file ingest. When active, delegate to the session's
+  // handleIngestMany. On cold start a SINGLE picked file mints a session via
+  // the drop-to-create twin (pendingIngestPath, same posture application as a
+  // bar submit); multi-file cold-start picks are a follow-up (the open-set
+  // pending shape carries one path).
+  const handleShellIngestFiles = useCallback(
+    (paths: string[]) => {
+      if (activeSessionId !== null) {
+        const fields = composerFieldsMap[activeSessionId];
+        if (fields) fields.handleIngestFiles(paths);
+        return;
+      }
+      if (paths.length !== 1) {
+        setShellError({
+          message: intl.formatMessage({
+            id: "coldStart.ingestMultiFileUnsupported",
+            defaultMessage: "Multi-file ingest is not available on the cold-start bar yet — open a session first, or pick one file at a time.",
+          }),
+          kind: "shell",
+          detail: null,
+        });
+        return;
+      }
+      const runtime = pendingRuntime;
+      const authMode = pendingAuthMode;
+      void createSessionWithIngest(paths[0], { runtime, authMode }).then(
+        (created) => {
+          if (created) {
+            setPendingRuntime(RUNTIME_CHOICE_DEFAULT);
+            setPendingAuthMode(AUTH_MODE_DEFAULT);
+          }
+        },
+      );
+    },
+    [activeSessionId, composerFieldsMap, createSessionWithIngest, pendingRuntime, pendingAuthMode, intl, setShellError],
+  );
+
   // --- In-app navigation history (issue #288) -----------------------------
   // The back/forward stack is driven by a derived `location` NavEntry (active
   // session + settings overlay state). NavigationHistoryProvider pushes on
   // every location change; back/forward move the cursor and call `restore` to
   // re-apply the target view via RAW setters (not nav-wrappers), so the
   // resulting location change is skipped, not re-pushed. restore REPORTS
-  // whether it moved the derived location: a non-restorable target (cold-start
-  // hero -- sessionId null, no "close all sessions" path) returns false so the
-  // provider treats the hop as a no-op instead of arming skipNextRef and
-  // leaking the one-shot flag into the next genuine navigation. editProfileId
-  // is deliberately NOT restored -- a back/forward hop is a fresh view, not a
-  // profile-edit intent (issue #239).
+  // whether it moved the derived location: a non-restorable target returns
+  // false so the provider treats the hop as a no-op instead of arming
+  // skipNextRef and leaking the one-shot flag into the next genuine
+  // navigation. editProfileId is deliberately NOT restored -- a back/forward
+  // hop is a fresh view, not a profile-edit intent (issue #239).
   const location = useMemo<NavEntry>(
     () => ({
       sessionId: activeSessionId,
@@ -244,9 +434,10 @@ export default function App() {
     (entry: NavEntry): boolean => {
       // Diff against the live state the location is derived from so the return
       // value is honest: false means this entry cannot move the location (the
-      // provider then treats the hop as a no-op). The cold-start hero target --
-      // sessionId null with matching settings -- lands here: there is no
-      // close-all-sessions path, so reporting false avoids leaking skipNextRef.
+      // provider then treats the hop as a no-op). The centered empty-state
+      // target -- sessionId null with matching settings -- lands here: there
+      // is no close-all-sessions path, so reporting false avoids leaking
+      // skipNextRef.
       let moved = false;
       if (entry.settings.open !== settingsView.open) {
         setSettingsView((prev) => ({ ...prev, open: entry.settings.open }));
@@ -269,10 +460,10 @@ export default function App() {
 
   // Global Ctrl/⌘+K keydown -> toggle the search modal (ADR-0072,
   // issue #252). The listener binds once on mount; a ref carries the latest
-  // busy gate so a busy shell blocks the toggle without re-binding on every busy
-  // change (same shape as SettingsView's Escape listener). preventDefault stops
-  // the browser's native ⌘K page-searcher intercept so the modal is the only
-  // consumer. metaKey covers macOS (⌘), ctrlKey covers Win/Linux (Ctrl).
+  // busy gate so a busy shell blocks the toggle without re-binding on every
+  // busy change (same shape as SettingsView's Escape listener). preventDefault
+  // stops the browser's native ⌘K page-searcher intercept so the modal is the
+  // only consumer. metaKey covers macOS (⌘), ctrlKey covers Win/Linux (Ctrl).
   const busyRef = useRef(false);
   useEffect(() => {
     busyRef.current = busy;
@@ -301,6 +492,24 @@ export default function App() {
     }
   }, [effectiveLocale]);
 
+  // The provider picker bundle for the shell-level bar (ADR-0071/0092):
+  // app-level state (active profile + writes + the settings-open path)
+  // rendered at the bar's trailing slot in BOTH positions — session-active
+  // and cold start (sessionId null reads RUNTIME_CHOICE_DEFAULT + writes to
+  // the shell-level pending state, Decision 6 no-degraded-controls). Absent
+  // until app-config resolves. Explicitly typed so the render site spreads it
+  // without an assertion.
+  const providerPicker: Omit<ComposerProviderPickerProps, "sessionId" | "onPendingRuntimeChange"> | undefined = appConfig
+    ? {
+        provider: appConfig.provider,
+        onSwitchActive: (id: string) => void switchActiveProfile(id),
+        onSwitchModel: (model: string) => void switchActiveProfileModel(model),
+        onOpenSettings: (tab: RuntimeTab) =>
+          openSettings({ section: "runtime", runtimeTab: tab }),
+        profileKeyEpoch,
+      }
+    : undefined;
+
   return (
     <QueryClientProvider client={queryClient}>
       {/* TooltipProvider (ADR-0050/0054, issue #106): one ancestor high in the
@@ -313,9 +522,7 @@ export default function App() {
           locale={effectiveLocale}
           messages={catalogFor(effectiveLocale)}
           defaultLocale="en-US"
-          onError={(err) => {
-            log.warn("i18n", err.message);
-          }}
+          onError={handleIntlError}
         >
           {/* ADR-0058 L3 top-level fallback: the last line of defense against a
             shell-level render throw. Every session is already isolated by its
@@ -344,11 +551,11 @@ export default function App() {
           >
             <NavigationHistoryProvider location={location} restore={restore}>
               <div
-                className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${sidebarDragging ? " sidebar-dragging" : ""}${railDragging ? " rail-dragging" : ""}${settingsView.open ? " settings-mode" : ""}${settingsNavCollapsed ? " settings-nav-collapsed" : ""}`}
+                className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${sidebarDragging ? " sidebar-dragging" : ""}${railDragging ? " rail-dragging" : ""}${settingsView.open ? " settings-mode" : ""}${settingsNavCollapsed ? " settings-nav-collapsed" : ""}${activeSessionId === null ? " cold-start-mode" : ""}`}
                 style={{ "--sidebar-width": `${sidebarWidth}px`, "--rail-width": `${railWidth}px` } as CSSProperties}
               >
                 {/* Col 1: session sidebar (ADR-0060) -- full height, independent
-              column (R1: QuestionBar does NOT span over it). */}
+              column (R1: the shell-level bar does NOT span over it). */}
                 <SessionSidebar
                   collapsed={sidebarCollapsed}
                   sessions={sessions}
@@ -358,7 +565,7 @@ export default function App() {
                   loadError={sessionsError}
                   grouping={sidebarGrouping}
                   pendingApprovalSids={approvalEvents.pendingApprovalSids}
-                  onNew={() => void openNew()}
+                  onNew={goToEmptyState}
                   onOpenDuck={() => void handleOpenDuck()}
                   onActivate={activateSession}
                   onExport={(path, name) => void handleExportSession(path, name)}
@@ -369,8 +576,14 @@ export default function App() {
                     // fires cancel, the gate resolves to deny); drop them so
                     // the coloring + a later reopen start clean.
                     approvalEvents.clearSession(sid);
+                    // A closed session's draft is unreachable (the pane is
+                    // gone); drop the slot so the draft map tracks the open set.
+                    composer.dropDraft(sid);
                   }}
-                  onDelete={(path, sid) => void deletePersisted(path, sid)}
+                  onDelete={(path, sid) => {
+                    void deletePersisted(path, sid);
+                    if (sid !== null) composer.dropDraft(sid);
+                  }}
                   onRename={(sid, path, newName) => void renameEntry(sid, path, newName)}
                   onSwitchGrouping={switchSidebarGrouping}
                   onOpenSearch={openSearch}
@@ -391,8 +604,8 @@ export default function App() {
               width as a custom titlebar (decorations: false). Shell-wide
               controls only: the sidebar collapse toggle (left) + nav buttons
               + window controls (right). The session name + workspace toggle
-              moved into each SessionPane's own header (session-scoped chrome
-              lives with the session). The Open / Save .duck buttons moved to
+              live in each SessionPane's own header (session-scoped chrome
+              lives with the session). The Open / Save .duck buttons live in
               the session sidebar (below New session). ADR-0067 (#171): visual
               rules -> inline utilities; the .topbar grid + flex layout shell
               stays in styles.css. Settings mode (ADR-0075 overlay) unmounts
@@ -401,9 +614,8 @@ export default function App() {
               controls + drag region are shell-wide chrome that must stay
               reachable in every view (ADR-0074) -- the settings-mode CSS
               exempts .topbar from the overlay hide, and the rail owns settings
-              chrome (the dual-state gear + connection row live at the left
-              columns' bottoms, issue #282 -- the topbar carries no settings
-              entry). */}
+              chrome (the dual-state gear lives at the left columns' bottoms,
+              issue #282 -- the topbar carries no settings entry). */}
                 <header className="topbar gap-3 px-4 border-b border-border bg-background" data-tauri-drag-region>
                   {platform === "macos" && <WindowControls />}
                   {settingsView.open ? (
@@ -458,78 +670,119 @@ export default function App() {
                   nullable. */}
                 {resumeStatus.kind !== "idle" && <ResumeProgress status={resumeStatus} />}
 
-                {/* Row 3 (cols 2+): the session pane host. Every open session renders
-              a keep-alive SessionPane; non-active panes are CSS `hidden` (mounted
-              but not laid out) so switching is instant + refetch-free (ADR-0051).
-              No active session = the cold-start hero (ADR-0061). */}
-                <main className="session-pane-host">
-                  {activeSessionId === null && (
-                    <ColdStartHero
-                      disabled={busy}
-                      provider={appConfig?.provider ?? null}
-                      profileKeyEpoch={profileKeyEpoch}
-                      onNew={() => void openNew()}
-                      onOpenSettingsProfiles={openSettingsProfiles}
-                    />
-                  )}
-                  {openSessions.map((s) => (
-                    <div
-                      key={s.sid}
-                      className={`session-pane-layer${s.sid === activeSessionId ? " active" : " hidden"}`}
-                      aria-hidden={s.sid !== activeSessionId}
-                    >
-                      {/* ADR-0058 L2 session partition: per-session isolation. A
+                {/* Row 3 (cols 2+): main area = session panes + shell-level bar.
+                    ADR-0092: the main area is a flex column. The session pane
+                    host fills the available space; the shell bar sits at the
+                    bottom (flex-shrink: 0). In cold-start mode the bar is
+                    centered and the pane host collapses. flex-grow interpolates
+                    between the two postures (CSS transition), so the bar glides
+                    centered <-> bottom on first submit / "+" navigation. */}
+                <main className="main-area">
+                  <div className="session-pane-host">
+                    {openSessions.map((s) => (
+                      <div
+                        key={s.sid}
+                        className={`session-pane-layer${s.sid === activeSessionId ? " active" : " hidden"}`}
+                        aria-hidden={s.sid !== activeSessionId}
+                      >
+                        {/* ADR-0058 L2 session partition: per-session isolation. A
                     render crash inside this SessionPane that the Thread /
                     ResultView granular boundaries (inside SessionPane) do not
                     catch degrades only THIS session's pane -- sibling panes
                     stay alive. The key bump remounts the whole pane; onReset
                     drops its cache so the remount re-fetches fresh. */}
-                      <ErrorBoundary
-                        name="session"
-                        onReset={() => {
-                          void queryClient.removeQueries({ queryKey: ["session", s.sid] });
-                        }}
-                      >
-                        <SessionPane
-                          key={s.sid}
-                          sessionId={s.sid}
-                          pendingIngestPath={s.pendingIngestPath}
-                          onIngestConsumed={() => clearPendingIngest(s.sid)}
-                          sessionName={s.name}
-                          onFirstTurnSettled={() => syncSessionName(s.sid)}
-                          approvalEvents={approvalEvents}
-                          // Issue #365 AC #4: the composer "+" panel's skill
-                          // section footer hops to the settings SkillsSection.
-                          // openSettings is shell-owned (ADR-0065 overlay).
-                          onOpenSettingsSkills={() => openSettings({ section: "skills" })}
-                          onOpenSettingsMcp={() => openSettings({ section: "mcp" })}
-                          providerPicker={
-                          // ADR-0071 (issue #238): the composer provider/model
-                          // picker is app-level state (active profile + writes +
-                          // the settings-open path) rendered at each session's
-                          // QuestionBar edge. Absent until app-config resolves;
-                          // the picker renders only in the visible pane but is
-                          // mounted per keep-alive session like QuestionBar.
-                            appConfig
-                              ? {
-                                  provider: appConfig.provider,
-                                  onSwitchActive: (id) => void switchActiveProfile(id),
-                                  onSwitchModel: (model) =>
-                                    void switchActiveProfileModel(model),
-                                  onOpenSettings: (tab: RuntimeTab) =>
-                                    openSettings({ section: "runtime", runtimeTab: tab }),
-                                  profileKeyEpoch,
-                                }
-                              : undefined
-                          }
-                          // Draggable rail resize handle (per-pane render, but
-                          // the width is shell-owned via --rail-width so it stays
-                          // consistent across keep-alive session switches).
-                          onRailResizeStart={onRailResizeStart}
+                        <ErrorBoundary
+                          name="session"
+                          onReset={() => {
+                            void queryClient.removeQueries({ queryKey: ["session", s.sid] });
+                          }}
+                        >
+                          <SessionPane
+                            key={s.sid}
+                            sessionId={s.sid}
+                            pendingIngestPath={s.pendingIngestPath}
+                            onIngestConsumed={() => clearPendingIngest(s.sid)}
+                            pendingQuestion={s.pendingQuestion}
+                            onQuestionConsumed={() => clearPendingQuestion(s.sid)}
+                            onComposerFields={handleComposerFields}
+                            sessionName={s.name}
+                            onFirstTurnSettled={syncSessionName}
+                            approvalEvents={approvalEvents}
+                            onRailResizeStart={onRailResizeStart}
+                          />
+                        </ErrorBoundary>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* ADR-0092: shell-level QuestionBar — single instance, never
+                      unmount/remount. Centered when cold-start (no active
+                      session), bottom when a session is active. The ws-collapsed
+                      hook mirrors the active pane's workspace fold so the bar
+                      width tracks the conversation column in both postures. */}
+                  <div
+                    className={`shell-bar-slot${activeSessionId === null ? " centered" : " bottom"}${activeSessionFields?.workspaceCollapsed ? " ws-collapsed" : ""}`}
+                  >
+                    {activeSessionId === null && (
+                      <h2 className="cold-start-greeting m-0 text-center text-[1.4rem] font-semibold text-foreground">
+                        <FormattedMessage
+                          id="coldStart.greeting"
+                          defaultMessage="What would you like to analyze?"
                         />
-                      </ErrorBoundary>
+                      </h2>
+                    )}
+                    <div className="shell-bar-track">
+                      <QuestionBar
+                        onSubmit={handleShellSubmit}
+                        onCancel={handleShellCancel}
+                        loading={composer.loading}
+                        phase={composer.phase}
+                        draft={composer.draft}
+                        setDraft={composer.setDraft}
+                        header={
+                          activeSessionId !== null ? (
+                            <>
+                              <ComposerSkillsTrigger
+                                sessionId={activeSessionId}
+                                loading={composer.loading}
+                                onOpenSettingsSkills={() => openSettings({ section: "skills" })}
+                              />
+                              <ComposerMcpTrigger
+                                sessionId={activeSessionId}
+                                loading={composer.loading}
+                                onOpenSettingsMcp={() => openSettings({ section: "mcp" })}
+                              />
+                            </>
+                          ) : undefined
+                          // Cold-start Skills / MCP pending mode (ADR-0092
+                          // Decision 6 "empty mount set + apply on create") is a
+                          // follow-up slice: both popover sections are session-IPC
+                          // bound and need a pending-state redesign. The runtime
+                          // picker + auth-mode chip + context panel below already
+                          // render cold-start.
+                        }
+                        trailing={
+                          providerPicker ? (
+                            <ComposerProviderPicker
+                              sessionId={activeSessionId}
+                              onPendingRuntimeChange={setPendingRuntime}
+                              {...providerPicker}
+                            />
+                          ) : undefined
+                        }
+                      >
+                        <ComposerContextPanel
+                          onIngestFiles={handleShellIngestFiles}
+                          loading={composer.loading}
+                        />
+                        <ComposerAuthModeChip
+                          sessionId={activeSessionId}
+                          pendingMode={pendingAuthMode}
+                          onPendingModeChange={setPendingAuthMode}
+                        />
+                      </QuestionBar>
                     </div>
-                  ))}
+                  </div>
                 </main>
 
                 {shellError && (
@@ -555,9 +808,9 @@ export default function App() {
                       setSettingsView({ open: false });
                       setLiveSettingsSection("general");
                       // A Settings Save may have changed a keychain slot; bump
-                      // the epoch so each keep-alive picker + the ColdStartHero
-                      // refetch their overlays (ADR-0019 honest gate, issue #238;
-                      // issue #239 extends the epoch to the hero).
+                      // the epoch so the picker overlay + the shell-level
+                      // submit-time gate refetch (ADR-0019 honest gate,
+                      // issue #238).
                       setProfileKeyEpoch((n) => n + 1);
                       // The Local CLI tab's Rescan may have changed adapter
                       // detection; invalidate the shared cache so the next

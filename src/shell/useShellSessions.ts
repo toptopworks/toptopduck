@@ -1,7 +1,8 @@
 // Runtime open-session state (issue #195). Owns the in-memory OPEN session set
 // + active id (ADR-0060 multi-session) + every action that mutates them:
-// register / openNew / openPersisted / dropFile / onWebviewDrop /
-// clearPendingIngest / activateSession / closeOpen / deletePersisted / renameEntry /
+// register / createSessionWithQuestion / createSessionWithIngest / openPersisted /
+// dropFile / onWebviewDrop / clearPendingIngest / clearPendingQuestion /
+// activateSession / goToEmptyState / closeOpen / deletePersisted / renameEntry /
 // handleOpenDuck. The resume + persistence-busy indicators live
 // here too -- they drive the shell `busy` flag that gates the webview drop
 // listener + the sidebar / topbar / hero disabled states.
@@ -37,11 +38,27 @@ import {
   prepareImportSession,
   renamePersistedSession,
   renameSession,
+  setAuthorizationMode,
+  setSessionRuntime,
 } from "../api";
 import { errorDetail, fmtError, toAppError } from "../lib/error-presentation";
 import { log } from "../lib/log";
 import type { AppError } from "../types/error";
+import type { AuthMode } from "../types/approval";
+import { AUTH_MODE_DEFAULT } from "../types/approval";
+import type { SessionRuntimeChoice } from "../types/runtime";
 import type { OpenSession } from "../session/sidebarModel";
+
+/** Composer posture the user picked on the cold-start bar before a session
+ *  existed (ADR-0092 Decision 6). The shell applies it to a freshly minted
+ *  session BEFORE registering it open, so the SessionPane's pendingQuestion /
+ *  pendingIngest consumption on mount runs under the chosen runtime +
+ *  authorization mode. Both fields default to the backend defaults; a field
+ *  still at its default skips its IPC (nothing to apply). */
+export interface PendingComposerPosture {
+  runtime: SessionRuntimeChoice;
+  authMode: AuthMode;
+}
 
 /** Resume / open-busy status (ADR-0034). A structured discriminated union, not
  *  a pre-baked string: App sits above <IntlProvider> and cannot format messages
@@ -88,16 +105,37 @@ export function useShellSessions({
   openSessions: OpenSession[];
   activeSessionId: string | null;
   activateSession: (sid: string) => void;
+  /** ADR-0092: navigate to the centered empty state (sidebar "+"). Existing
+   *  keep-alive sessions stay mounted hidden. */
+  goToEmptyState: () => void;
   /** Shell-wide busy gate: persistenceBusy (save / open / delete wait) OR a
-   *  resume in flight. Drives the sidebar / topbar / hero disabled states and
+   *  resume in flight. Drives the sidebar / topbar disabled states and
    *  suspends the webview drop listener while busy. */
   busy: boolean;
   resumeStatus: ResumeStatus;
-  openNew: () => Promise<void>;
+  /** ADR-0092: create a session from a cold-start bar submit, carrying the
+   *  question as pendingQuestion for the new SessionPane to fire on mount.
+   *  The posture (pending runtime + auth mode picked on the centered bar) is
+   *  applied before the pane mounts so the FIRST turn runs under it. Resolves
+   *  true when the session was created (the shell resets its pending state);
+   *  false when createSession rejected (the error rode setShellError). */
+  createSessionWithQuestion: (
+    question: string,
+    posture: PendingComposerPosture,
+  ) => Promise<boolean>;
+  /** ADR-0092: create a session from a cold-start composer "+" file pick,
+   *  carrying the path as pendingIngestPath (the drop-to-create twin, ADR-0061
+   *  empty-state ingest). Same posture semantics as createSessionWithQuestion. */
+  createSessionWithIngest: (
+    path: string,
+    posture: PendingComposerPosture,
+  ) => Promise<boolean>;
   openPersisted: (path: string, name: string) => Promise<void>;
   dropFile: (path: string) => Promise<void>;
   onWebviewDrop: (path: string) => void;
   clearPendingIngest: (sid: string) => void;
+  /** ADR-0092: clear a consumed pending question after SessionPane fires it. */
+  clearPendingQuestion: (sid: string) => void;
   closeOpen: (sid: string) => Promise<void>;
   deletePersisted: (path: string, sid: string | null) => Promise<void>;
   renameEntry: (sid: string | null, path: string, newName: string) => Promise<void>;
@@ -117,8 +155,8 @@ export function useShellSessions({
   // single transition chokepoint (apply) instead of re-derived across two
   // separate useStates. sessions: every session with a live in-memory
   // instance, each rendered as a keep-alive SessionPane. activeId: the visible
-  // one (null = cold hero). A close drops the entry + removeQueries its cache
-  // (ADR-0055).
+  // one (null = the ADR-0092 centered empty state). A close drops the entry +
+  // removeQueries its cache (ADR-0055).
   const [state, setState] = useState<SessionsState>({
     sessions: [],
     activeId: null,
@@ -147,11 +185,16 @@ export function useShellSessions({
     (transform: (prev: SessionsState) => SessionsState): void => {
       setState((prev) => {
         const next = transform(prev);
+        // ADR-0092: explicit null activeId is a valid target (sidebar "+"
+        // navigates to the centered empty state). The reconciliation only
+        // kicks in for a non-null activeId that is no longer in sessions --
+        // a stale sid falls back to the first remaining entry (then null).
         const activeId =
-          next.activeId !== null &&
-          next.sessions.some((s) => s.sid === next.activeId)
-            ? next.activeId
-            : (next.sessions[0]?.sid ?? null);
+          next.activeId !== null
+            ? (next.sessions.some((s) => s.sid === next.activeId)
+                ? next.activeId
+                : (next.sessions[0]?.sid ?? null))
+            : null;
         return { sessions: next.sessions, activeId };
       });
     },
@@ -200,6 +243,14 @@ export function useShellSessions({
     [apply],
   );
 
+  // ADR-0092: navigate to the centered empty state (sidebar "+"). Sets
+  // activeSessionId to null without closing any keep-alive session — existing
+  // panes stay mounted hidden, in-flight turns continue. The user returns to
+  // the centered bar + greeting; the next submit creates a fresh session.
+  const goToEmptyState = useCallback(() => {
+    apply((prev) => ({ sessions: prev.sessions, activeId: null }));
+  }, [apply]);
+
   /** Add a freshly-minted session to the open set and activate it. The caller
    *  hands the createSession result + an optional bound path/name (resume). */
   const registerOpen = useCallback(
@@ -213,42 +264,127 @@ export function useShellSessions({
     [apply],
   );
 
-  // "+ New session" (ADR-0061/0089): mint a session — the backend creates +
-  // persists immediately, returning both the runtime id and the bound .duck
-  // path. name starts empty; the display layer renders a localized "New
-  // session" placeholder until the first turn auto-names or the user renames.
-  const openNew = useCallback(async () => {
-    try {
-      const { session_id: sid, duck_path: path } = await createSession();
-      registerOpen({ sid, name: "", path, pendingIngestPath: null });
-      refreshSessions();
-    } catch (e) {
-      setShellError(toAppError(e, intl, "shell"));
-    }
-  }, [intl, registerOpen, refreshSessions, setShellError]);
+  // Shared mint: createSession (backend creates + persists immediately,
+  // returning the runtime id + bound .duck path, ADR-0061/0089) -> apply the
+  // cold-start composer posture -> registerOpen + activate -> refresh the
+  // sidebar. Every cold-start creation path (bar submit, "+" file pick,
+  // window drop) funnels through here; the three differ only in the pending
+  // payload the new SessionPane consumes on mount. name starts empty; the
+  // display layer renders a localized "New session" placeholder until the
+  // first turn auto-names or the user renames.
+  //
+  // Posture ordering (ADR-0092 Decision 6): the runtime + auth-mode writes
+  // land BEFORE registerOpen so the pane mounts (and fires a pendingQuestion)
+  // only after the session carries the user's pick — the first turn runs on
+  // the chosen runtime. A rejected posture write is logged and skipped (the
+  // session opens on the backend default; the picker's keep-server-posture
+  // semantics) instead of failing the whole creation. A rejected write also
+  // surfaces via setShellError so the user is informed their picker selection
+  // was not applied.
+  //
+  // Reentry guard (review H-1): mintingRef blocks a second creation while the
+  // createSession IPC is in flight — a fast double-submit on the cold-start
+  // bar would otherwise mint two sessions before activeSessionId flips.
+  // Mirrors the droppingRef pattern in dropFile below.
+  const mintingRef = useRef(false);
+  const mintAndRegister = useCallback(
+    async (opts: {
+      pendingIngestPath?: string | null;
+      pendingQuestion?: string | null;
+      posture?: PendingComposerPosture;
+    }): Promise<void> => {
+      if (mintingRef.current) return;
+      mintingRef.current = true;
+      try {
+        const { session_id: sid, duck_path: path } = await createSession();
+        if (opts.posture) {
+          if (opts.posture.runtime.kind === "external") {
+            try {
+              await setSessionRuntime(sid, opts.posture.runtime);
+            } catch (e) {
+              log.warn("useShellSessions", "apply pending runtime failed; the session opens on the built-in default", fmtError(e, intl));
+              setShellError(toAppError(e, intl, "shell"));
+            }
+          }
+          if (opts.posture.authMode !== AUTH_MODE_DEFAULT) {
+            try {
+              await setAuthorizationMode(sid, opts.posture.authMode);
+            } catch (e) {
+              log.warn("useShellSessions", "apply pending auth mode failed; the session opens on the default posture", fmtError(e, intl));
+              setShellError(toAppError(e, intl, "shell"));
+            }
+          }
+        }
+        registerOpen({
+          sid,
+          name: "",
+          path,
+          pendingIngestPath: opts.pendingIngestPath ?? null,
+          pendingQuestion: opts.pendingQuestion ?? null,
+        });
+        refreshSessions();
+      } finally {
+        mintingRef.current = false;
+      }
+    },
+    [intl, registerOpen, refreshSessions, setShellError],
+  );
 
-  // Drop-to-create on the cold-start hero (ADR-0061/0089, #81 A1): mint a
-  // persisted session and hand the dropped path to the new SessionPane as
-  // pendingIngestPath. The pane consumes it via handleIngest (the only path
-  // that can surface an xlsx NeedsGuidance dialog); the shell never ingests
-  // directly. droppingRef guards a second drop landing while the first
-  // createSession is still in flight.
+  // ADR-0092 cold-start submit: the centered bar's submit with no active
+  // session mints a session carrying the question as pendingQuestion. The
+  // SessionPane consumes it on mount via handleAsk, then clears it through
+  // clearPendingQuestion. ADR-0089 auto-persist applies (createSession binds
+  // the .duck immediately).
+  const createSessionWithQuestion = useCallback(
+    async (question: string, posture: PendingComposerPosture): Promise<boolean> => {
+      try {
+        await mintAndRegister({ pendingQuestion: question, posture });
+        return true;
+      } catch (e) {
+        setShellError(toAppError(e, intl, "shell"));
+        return false;
+      }
+    },
+    [intl, mintAndRegister, setShellError],
+  );
+
+  // ADR-0092 cold-start "+" file pick: mint a session carrying the path as
+  // pendingIngestPath — the drop-to-create twin (below), routed through the
+  // composer's file section instead of a window drop.
+  const createSessionWithIngest = useCallback(
+    async (path: string, posture: PendingComposerPosture): Promise<boolean> => {
+      try {
+        await mintAndRegister({ pendingIngestPath: path, posture });
+        return true;
+      } catch (e) {
+        setShellError(toAppError(e, intl, "shell"));
+        return false;
+      }
+    },
+    [intl, mintAndRegister, setShellError],
+  );
+
+  // Drop-to-create on the empty-state main area (ADR-0061/0089/0092, #81 A1):
+  // mint a persisted session and hand the dropped path to the new SessionPane
+  // as pendingIngestPath. The pane consumes it via handleIngest (the only
+  // path that can surface an xlsx NeedsGuidance dialog); the shell never
+  // ingests directly. droppingRef guards a second drop landing while the
+  // first createSession is still in flight. The window-drop path carries no
+  // composer posture (a drop never touches the bar's pending state).
   const droppingRef = useRef(false);
   const dropFile = useCallback(
     async (path: string) => {
       if (droppingRef.current) return;
       droppingRef.current = true;
       try {
-        const { session_id: sid, duck_path: duckPath } = await createSession();
-        registerOpen({ sid, name: "", path: duckPath, pendingIngestPath: path });
-        refreshSessions();
+        await mintAndRegister({ pendingIngestPath: path });
       } catch (e) {
         setShellError(toAppError(e, intl, "shell"));
       } finally {
         droppingRef.current = false;
       }
     },
-    [intl, registerOpen, refreshSessions, setShellError],
+    [intl, mintAndRegister, setShellError],
   );
 
   // Single webview-level drop router (#81): Tauri's onDragDropEvent is a
@@ -295,6 +431,18 @@ export function useShellSessions({
     (sid: string) => {
       mapSessions((sessions) =>
         sessions.map((o) => (o.sid === sid ? { ...o, pendingIngestPath: null } : o)),
+      );
+    },
+    [mapSessions],
+  );
+
+  // ADR-0092: clear a consumed pending question (the SessionPane fired
+  // handleAsk on mount). Mirrors clearPendingIngest so a remount cannot
+  // re-fire the question.
+  const clearPendingQuestion = useCallback(
+    (sid: string) => {
+      mapSessions((sessions) =>
+        sessions.map((o) => (o.sid === sid ? { ...o, pendingQuestion: null } : o)),
       );
     },
     [mapSessions],
@@ -355,7 +503,7 @@ export function useShellSessions({
         targetSid = sid;
         await openDuck(sid, duck_path);
         await queryClient.invalidateQueries({ queryKey: ["session", sid] });
-        registerOpen({ sid, name, path: duck_path, pendingIngestPath: null });
+        registerOpen({ sid, name, path: duck_path, pendingIngestPath: null, pendingQuestion: null });
         setResumeStatus({ kind: "idle" });
       } catch (e) {
         // C2: if the prepare step succeeded but openDuck failed, the just-minted
@@ -433,7 +581,11 @@ export function useShellSessions({
       queryClient.removeQueries({ queryKey: ["session", sid] });
       apply((prev) => {
         const sessions = prev.sessions.filter((s) => s.sid !== sid);
-        const activeId = prev.activeId === sid ? null : prev.activeId;
+        // Keep the stale sid as activeId so apply's reconciler picks the
+        // fallback (first remaining session, then null). Explicitly setting
+        // null would now be respected as ADR-0092 empty-state navigation
+        // instead of triggering the fallback.
+        const activeId = prev.activeId;
         return { sessions, activeId };
       });
     },
@@ -648,13 +800,16 @@ export function useShellSessions({
     openSessions,
     activeSessionId,
     activateSession,
+    goToEmptyState,
     busy,
     resumeStatus,
-    openNew,
+    createSessionWithQuestion,
+    createSessionWithIngest,
     openPersisted,
     dropFile,
     onWebviewDrop,
     clearPendingIngest,
+    clearPendingQuestion,
     closeOpen,
     deletePersisted,
     renameEntry,

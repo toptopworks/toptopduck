@@ -37,10 +37,25 @@ import { Select, SelectContent, SelectTrigger, SelectValue } from "../ui/select"
 // rejected write (session dropped mid-flight, mid-resume swap) keeps the
 // server posture -- the Select resyncs via refetch and never shows a posture
 // the backend did not grant. A rejected READ is surfaced via log.warn.
+//
+// Cold start (ADR-0092): sessionId is null on the shell-level bar before any
+// session exists. The chip renders the caller-held pending posture
+// (AUTH_MODE_DEFAULT initial) with no IPC, and a selection writes to the
+// shell-level pending state via onPendingModeChange; the shell applies it to
+// the session it mints on the first submit.
 
 export type ComposerAuthModeChipProps = {
-  /** The session whose posture this chip reads / switches. */
-  sessionId: string;
+  /** The session whose posture this chip reads / switches. null on the
+   *  cold-start shell-level bar (ADR-0092): the chip reads pendingMode and
+   *  writes via onPendingModeChange instead of per-session IPC. */
+  sessionId: string | null;
+  /** When sessionId is null (cold-start bar, ADR-0092), the shell-held
+   *  pending posture shown by the chip. Defaults to AUTH_MODE_DEFAULT. */
+  pendingMode?: AuthMode;
+  /** When sessionId is null (cold-start bar, ADR-0092), a selection writes
+   *  to the shell-level pending state via this callback instead of the
+   *  per-session IPC. Undefined when sessionId is non-null. */
+  onPendingModeChange?: (mode: AuthMode) => void;
 };
 
 // Trigger face chrome. The neutral face rides the composer chrome tokens
@@ -56,7 +71,7 @@ const TRIGGER_WARNING =
 // copy is unaffected.
 const LABEL_HIDE_NARROW = "@max-[320px]:hidden";
 
-export function ComposerAuthModeChip({ sessionId }: ComposerAuthModeChipProps) {
+export function ComposerAuthModeChip({ sessionId, pendingMode, onPendingModeChange }: ComposerAuthModeChipProps) {
   const intl = useIntl();
   const queryClient = useQueryClient();
   // Guards the write window: a selection that lands while the set IPC is in
@@ -66,15 +81,27 @@ export function ComposerAuthModeChip({ sessionId }: ComposerAuthModeChipProps) {
 
   // The session's posture (backend truth). Under the session prefix so a
   // close's removeQueries drops it with the rest; a resume lands the reset
-  // value via the fresh SessionPane mount (see file header).
+  // value via the fresh SessionPane mount (see file header). Null sessionId
+  // (cold-start bar, ADR-0092): the query is disabled and the caller-held
+  // pending posture drives the chip -- no IPC round-trip.
   const { data, isError, error } = useQuery({
-    queryKey: sessionKeys.authMode(sessionId),
-    queryFn: () => getAuthorizationMode(sessionId),
+    // The queryKey uses a stable placeholder when sessionId is null — the key
+    // is inert (enabled:false prevents the queryFn from running, so no IPC).
+    queryKey: sessionKeys.authMode(sessionId ?? ""),
+    // `as string` is safe: enabled:false guarantees sessionId is non-null
+    // when the queryFn executes, so no fake empty-string session ID reaches
+    // the backend.
+    queryFn: () => getAuthorizationMode(sessionId as string),
+    enabled: sessionId !== null,
   });
   // AUTH_MODE_DEFAULT is the single TS expression of the backend's
   // #[default] PerCall (ADR-0080): the honest-default face renders immediately
-  // while the read settles, never a blank slot.
-  const mode: AuthMode = data ?? AUTH_MODE_DEFAULT;
+  // while the read settles, never a blank slot. Cold start renders the
+  // pending posture the same way.
+  const mode: AuthMode =
+    sessionId === null
+      ? (pendingMode ?? AUTH_MODE_DEFAULT)
+      : (data ?? AUTH_MODE_DEFAULT);
   const noConfirmation = mode === "no_confirmation";
 
   // A persistently failing read (IPC panic, serialization crash, stale sid)
@@ -93,6 +120,21 @@ export function ComposerAuthModeChip({ sessionId }: ComposerAuthModeChipProps) {
 
   async function handleChange(next: AuthMode) {
     if (switching || next === mode) return;
+    // Null sessionId (cold-start bar, ADR-0092): write to the caller-held
+    // pending state. No IPC, no switching gate -- the write is synchronous.
+    // When the callback is absent the selection is logged and discarded so
+    // an unwired cold-start bar is observable instead of silently swallowed.
+    if (sessionId === null) {
+      if (onPendingModeChange) {
+        onPendingModeChange(next);
+      } else {
+        log.warn(
+          "ComposerAuthModeChip",
+          "selection changed with null sessionId but no onPendingModeChange handler — selection discarded",
+        );
+      }
+      return;
+    }
     setSwitching(true);
     try {
       await setAuthorizationMode(sessionId, next);

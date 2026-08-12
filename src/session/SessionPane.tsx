@@ -7,7 +7,8 @@ import { log } from "../lib/log";
 import { listSkills } from "../api";
 import { WorkspaceToggle } from "../shell/WorkspaceToggle";
 import { useSessionState } from "./useSessionState";
-import { useComposerState } from "./useComposerState";
+import { IDLE_SESSION_FIELDS } from "./useComposerState";
+import type { ComposerSessionFields } from "./useComposerState";
 import type { ApprovalEntry, UseApprovalEvents } from "./useApprovalEvents";
 import type { ApprovalResponse } from "../types/approval";
 import { ActiveSourceDeleteDialog } from "../components/dataset/ActiveSourceDeleteDialog";
@@ -15,15 +16,6 @@ import { DatasetDetail } from "../components/dataset/DatasetDetail";
 import { ErrorBanner } from "../components/common/ErrorBanner";
 import { ErrorBoundary } from "../components/common/ErrorBoundary";
 import { GuidedLoadDialog } from "../components/dataset/GuidedLoadDialog";
-import { QuestionBar } from "../components/thread/QuestionBar";
-import { ComposerAuthModeChip } from "../components/thread/ComposerAuthModeChip";
-import { ComposerContextPanel } from "../components/thread/ComposerContextPanel";
-import { ComposerSkillsTrigger } from "../components/thread/ComposerSkillsTrigger";
-import { ComposerMcpTrigger } from "../components/thread/ComposerMcpTrigger";
-import {
-  ComposerProviderPicker,
-  type ComposerProviderPickerProps,
-} from "../components/thread/ComposerProviderPicker";
 import { ResultView } from "../components/thread/ResultView";
 import { TechnicalDetailsFold } from "../components/common/TechnicalDetailsFold";
 import { Thread } from "../components/thread/Thread";
@@ -37,11 +29,17 @@ import type { ThreadEntry } from "../types/thread";
 import type { NonMaterializedTurn, WorkspaceContent } from "./workspace";
 import { sessionKeys, skillKeys } from "./queryKeys";
 
-// The per-session pane (ADR-0051). One `<SessionPane key={sid} sessionId={sid} />`
+// The per-session pane (ADR-0051/0092). One `<SessionPane key={sid} sessionId={sid} />`
 // owns ALL of a session's server state (via useSessionState -> TanStack Query)
 // and client UI state (viewedResult / pinnedToHistory / loading / dialogs).
-// The shell (<App>) places this as the right grid block (rail + workspace +
-// QuestionBar); the session sidebar is a separate, full-height column (R1).
+// The shell (<App>) places this as the right grid block (rail + workspace);
+// the session sidebar is a separate, full-height column (R1).
+//
+// ADR-0092: QuestionBar moved to the shell level. SessionPane no longer owns
+// the bar or its composer controls. It reports its bar-relevant fields
+// (loading / phase / handleAsk / handleCancel / handleIngestFiles) upward via
+// onComposerFields so the shell-level bar can read them for the active session.
+// A pendingQuestion from a cold-start submit is consumed on mount via handleAsk.
 
 interface SessionPaneProps {
   sessionId: string;
@@ -53,30 +51,31 @@ interface SessionPaneProps {
   /** Shell callback after the pending ingest is kicked off, so OpenSession is
    *  cleared and a remount cannot re-ingest (#81 A1). */
   onIngestConsumed: () => void;
-  /** App-level provider/model picker occupying the composer control row's
-   *  runtime slot (ADR-0071, issue #238; slot skeleton ADR-0083, issue #350;
-   *  runtime selector evolution issue #353). Optional because it depends on
-   *  app-config having resolved (App passes it only when appConfig is
-   *  non-null); absent, the runtime slot stays empty. Bundled as one slot so
-   *  the all-or-nothing render stays a single guard. `sessionId` is injected
-   *  at the render site (SessionPane owns it), so the bundle type omits it. */
-  providerPicker?: Omit<ComposerProviderPickerProps, "sessionId">;
-  /** Hop to the settings SkillsSection from the composer "+" panel's skill
-   *  section footer (issue #365 AC #4). Shell-owned navigation; App threads
-   *  openSettings({ section: "skills" }) through. */
-  onOpenSettingsSkills: () => void;
-  /** Hop to the settings MCP section from the composer MCP trigger popover's
-   *  add-server footer. Shell-owned navigation; App threads
-   *  openSettings({ section: "mcp" }) through. */
-  onOpenSettingsMcp: () => void;
+  /** ADR-0092: a pending question from the shell-level cold-start bar. Set
+   *  when the user submits from the centered bar with no active session; the
+   *  shell creates a session carrying the question, and SessionPane fires it
+   *  via handleAsk on mount. null once consumed or for sessions opened by any
+   *  other action. */
+  pendingQuestion: string | null;
+  /** ADR-0092: shell callback after the pending question is fired, so the
+   *  OpenSession entry is cleared and a remount cannot re-fire. */
+  onQuestionConsumed: () => void;
+  /** ADR-0092: lifts this session's bar-relevant fields (loading / phase /
+   *  handleAsk / handleCancel / handleIngestFiles) to the shell-level bar.
+   *  Called via useEffect whenever the fields change. */
+  onComposerFields: (sessionId: string, fields: ComposerSessionFields) => void;
   /** Display name for THIS session's header. The shell owns the open-session
    *  set; each SessionPane receives its own name rather than reaching into
    *  global active-session state (ADR-0060). */
   sessionName: string;
   /** ADR-0089 Decision 4: the shell syncs the auto-generated session name
    *  (from the first terminal turn) into the sidebar + header. Called once
-   *  after the session's first turn settles. */
-  onFirstTurnSettled: () => void;
+   *  after the session's first turn settles with this pane's sessionId. The
+   *  sid-taking shape lets the shell pass a useCallback-stable handler -- an
+   *  inline per-session arrow would rebuild handleAskWithAutoName on every
+   *  App render, and the ADR-0092 composer-fields report compares handleAsk
+   *  by reference (an unstable identity loops the bar's fields registry). */
+  onFirstTurnSettled: (sessionId: string) => void;
   /** The app-level approval channel (ADR-0083, issue #297): the pane reads
    *  its own session's entries (merged into the live trace by useTurnFlow)
    *  and binds the respond + settled-clear callbacks to its sessionId. */
@@ -91,7 +90,7 @@ interface SessionPaneProps {
 // stable prop for useSessionState / useTurnFlow (no every-render fresh []).
 const NO_APPROVALS: ApprovalEntry[] = [];
 
-export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, providerPicker, onOpenSettingsSkills, onOpenSettingsMcp, sessionName, onFirstTurnSettled, approvalEvents, onRailResizeStart }: SessionPaneProps) {
+export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pendingQuestion, onQuestionConsumed, onComposerFields, sessionName, onFirstTurnSettled, approvalEvents, onRailResizeStart }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
   // the pane acts on its own session only). The respond / clearSession
@@ -121,17 +120,66 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
   const intl = useIntl();
   const persistDetail = s.persistError ? errorDetail(s.persistError) : null;
   const queryClient = useQueryClient();
-  // Composer bar state (ADR-0092): owns the input draft + provides a null-safe
-  // facade over the session's bar fields. SessionPane always has a non-null
-  // sessionId, so the session values pass through unchanged today. The null
-  // path (idle defaults + owned draft) is exercised by the future shell-level
-  // bar (cold start).
-  const composer = useComposerState(sessionId, {
-    loading: s.loading,
-    phase: s.phase,
-    handleAsk: s.handleAsk,
-    handleCancel: s.handleCancel,
-  });
+
+  // ADR-0092: lift this session's bar-relevant fields to the shell-level bar.
+  // handleAsk / handleCancel / handleIngestFiles are useCallback-stable inside
+  // useSessionState; loading / phase change during a turn; workspaceCollapsed
+  // (bar-shaping, ADR-0083 fold) changes on the fold toggle + the one-shot
+  // first-Materialized expansion. The effect fires on those changes, keeping
+  // the shell's per-session composerFields registry fresh for the active
+  // session.
+  useEffect(() => {
+    onComposerFields(sessionId, {
+      loading: s.loading,
+      phase: s.phase,
+      handleAsk: s.handleAsk,
+      handleCancel: s.handleCancel,
+      handleIngestFiles: s.handleIngestMany,
+      workspaceCollapsed: s.workspaceCollapsed,
+    });
+  }, [
+    sessionId,
+    s.loading,
+    s.phase,
+    s.handleAsk,
+    s.handleCancel,
+    s.handleIngestMany,
+    s.workspaceCollapsed,
+    onComposerFields,
+  ]);
+
+  // ADR-0092: reset this session's bar fields to idle when the pane unmounts.
+  // If the pane is replaced by the session-level error boundary (a render crash)
+  // or removed on close/delete while a turn is mid-flight, the last-reported
+  // `loading: true` would otherwise linger in the shell's composer-fields map —
+  // the in-flight handleAsk's setLoading(false) lands on an unmounted component
+  // (a no-op), so nothing else clears it, and the shell bar would show a stuck
+  // stop button for a session the user can no longer query. Unmount-only (empty
+  // deps): the reporting effect above owns every in-life update.
+  useEffect(() => {
+    return () => {
+      onComposerFields(sessionId, IDLE_SESSION_FIELDS);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount-only: sessionId is constant (keyed component) + onComposerFields is useCallback-stable
+  }, []);
+
+  // ADR-0092: consume a pending question from the cold-start bar submit.
+  // The shell created this session with pendingQuestion set; fire it via
+  // handleAsk immediately, then clear it so a remount cannot re-fire. The
+  // guard on pendingQuestion !== null ensures this runs once (on mount when
+  // the prop is set, or not at all when null). No .catch here: handleAsk
+  // catches its own failures internally (sets the session error state) and
+  // never rejects.
+  useEffect(() => {
+    if (pendingQuestion !== null) {
+      onQuestionConsumed();
+      void s.handleAsk(pendingQuestion).catch((e) =>
+        log.error("SessionPane", "pendingQuestion handleAsk threw unexpectedly", e),
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot per pendingQuestion value: s.handleAsk is stable inside useSessionState
+  }, [pendingQuestion]);
+
   // Workspace tab (ADR-0045: 工作集 is a workspace tab, not a persistent
   // column). 结果 = the derived chart+table stage; 工作集 = source management.
   const [tab, setTab] = useState<"result" | "workingSet">("result");
@@ -204,10 +252,11 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
       </div>
       {/* ADR-0058 L2 partition boundaries: Thread rail and ResultView each get
           their own ErrorBoundary so a render crash in one degrades only that
-          block (the QuestionBar -- a session-skeleton element, ADR-0062 R1 --
-          is a sibling and always survives). The session-level isolation
-          boundary lives one level up in <App> (wrapping each <SessionPane>) so
-          a render crash elsewhere in the pane degrades only THAT session.
+          block (the shell-level QuestionBar -- a session-skeleton element,
+          ADR-0062 R1 -- is a sibling of the whole pane and always survives).
+          The session-level isolation boundary lives one level up in <App>
+          (wrapping each <SessionPane>) so a render crash elsewhere in the
+          pane degrades only THAT session.
           KNOWN LIMITATION (React 19 + TanStack Query external store): in the
           real App tree the per-session boundary is an ANCESTOR of these region
           boundaries, so a Query-driven re-render throw inside Thread/ResultView
@@ -219,8 +268,11 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
           visible + session isolated + retry" rather than "region boundary
           catches precisely". See memory: react19-nested-errorboundary-outer-
           catches. */}
-      {/* session-body: flex container for rail + workspace so both collapses
-          animate via flex-grow / flex-basis (interpolatable). */}
+      {/* session-body: grid container for the conversation column + workspace
+          so both collapses animate via grid-template-columns (interpolatable).
+          ADR-0092: the QuestionBar no longer lives inside session-conversation
+          — it is a shell-level sibling below the pane host, so the session-body
+          fills the pane's full height and never overlaps the bar. */}
       <div className="session-body">
         <div className="session-conversation">
           {/* --- Thread rail (ADR-0045/0047) ---------------------------------- */}
@@ -258,52 +310,6 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pr
               </p>
             )}
           </section>
-
-          {/* --- Composer control row (ADR-0083, issue #350). The QuestionBar
-              is the unified container: the composer slot controls ([+]
-              context / approval mode / runtime picker) pass as children into
-              its bottom toolbar row. Lives inside the conversation column so
-              its width tracks the rail. */}
-          <div className="session-questionbar">
-            {/* Context triggers (Skills / MCP) pass as the QuestionBar header
-                slot: borderless chips riding the container's top row (one
-                shared bg-card surface with the textarea + toolbar). Each
-                opens its own popover with search + checkbox list; the "+"
-                in the toolbar handles files only. */}
-            <QuestionBar
-              onSubmit={composer.handleAsk}
-              onCancel={composer.handleCancel}
-              loading={composer.loading}
-              phase={composer.phase}
-              draft={composer.draft}
-              setDraft={composer.setDraft}
-              header={(
-                <>
-                  <ComposerSkillsTrigger
-                    sessionId={sessionId}
-                    loading={s.loading}
-                    onOpenSettingsSkills={onOpenSettingsSkills}
-                  />
-                  <ComposerMcpTrigger
-                    sessionId={sessionId}
-                    loading={s.loading}
-                    onOpenSettingsMcp={onOpenSettingsMcp}
-                  />
-                </>
-              )}
-              trailing={
-                providerPicker && (
-                  <ComposerProviderPicker sessionId={sessionId} {...providerPicker} />
-                )
-              }
-            >
-              <ComposerContextPanel
-                onIngestFiles={s.handleIngestMany}
-                loading={s.loading}
-              />
-              <ComposerAuthModeChip sessionId={sessionId} />
-            </QuestionBar>
-          </div>
         </div>
 
         {/* --- Workspace (ADR-0045/0062 R2) -------------------------------- */}

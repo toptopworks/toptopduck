@@ -132,8 +132,12 @@ export function useSessionState(
   /** ADR-0089 Decision 4: called once after the session's FIRST terminal turn
    *  settles, so the shell can sync the auto-generated name into the sidebar
    *  + open-session header. Fires only when the thread had zero turns before
-   *  this ask. */
-  onFirstTurnSettled?: () => void,
+   *  this ask. Takes the sessionId so the shell can pass a useCallback-stable
+   *  handler (an inline per-session arrow would rebuild handleAskWithAutoName
+   *  on every App render -- ADR-0092's composer-fields report effect compares
+   *  the reported handleAsk by reference, so an unstable identity loops the
+   *  shell-level bar's fields registry). */
+  onFirstTurnSettled?: (sessionId: string) => void,
 ): UseSessionState {
   const queryClient = useQueryClient();
   const intl = useIntl();
@@ -280,7 +284,7 @@ export function useSessionState(
       if (!hadTurns) {
         const after = queryClient.getQueryData<ThreadEntry[]>(key) ?? [];
         if (after.some((e) => e.entry === "Turn")) {
-          onFirstTurnSettled?.();
+          onFirstTurnSettled?.(sessionId);
         }
       }
     },
