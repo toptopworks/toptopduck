@@ -4,6 +4,7 @@
   "activeSourceDelete.description": "This source is the current focus table. After removing it, pick one of the remaining sources to continue (or cancel — the working set stays unchanged).",
   "activeSourceDelete.title": "Remove focus source {name}",
   "coldStart.greeting": "What would you like to analyze?",
+  "coldStart.ingestMultiFileUnsupported": "Multi-file ingest is not available on the cold-start bar yet — open a session first, or pick one file at a time.",
   "column.col": "Column",
   "column.type": "DuckDB type",
   "common.cancel": "Cancel",

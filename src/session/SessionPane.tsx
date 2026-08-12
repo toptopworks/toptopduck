@@ -160,7 +160,7 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pe
     return () => {
       onComposerFields(sessionId, IDLE_SESSION_FIELDS);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount-only: sessionId is constant (keyed component) + onComposerFields is useCallback-stable
   }, []);
 
   // ADR-0092: consume a pending question from the cold-start bar submit.
@@ -173,9 +173,11 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pe
   useEffect(() => {
     if (pendingQuestion !== null) {
       onQuestionConsumed();
-      void s.handleAsk(pendingQuestion);
+      void s.handleAsk(pendingQuestion).catch((e) =>
+        log.error("SessionPane", "pendingQuestion handleAsk threw unexpectedly", e),
+      );
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot per pendingQuestion value: s.handleAsk is stable inside useSessionState
   }, [pendingQuestion]);
 
   // Workspace tab (ADR-0045: 工作集 is a workspace tab, not a persistent

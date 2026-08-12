@@ -305,10 +305,6 @@ export default function App() {
   const [pendingRuntime, setPendingRuntime] =
     useState<SessionRuntimeChoice>(RUNTIME_CHOICE_DEFAULT);
   const [pendingAuthMode, setPendingAuthMode] = useState<AuthMode>(AUTH_MODE_DEFAULT);
-  const handlePendingRuntimeChange = useCallback(
-    (runtime: SessionRuntimeChoice) => setPendingRuntime(runtime),
-    [],
-  );
 
   // ADR-0092 Decision 4 honest gate (submit-time). The centered bar is
   // always typeable; a cold-start submit on the built-in runtime requires a
@@ -388,14 +384,18 @@ export default function App() {
     (paths: string[]) => {
       if (activeSessionId !== null) {
         const fields = composerFieldsMap[activeSessionId];
-        if (fields) {
-          fields.handleIngestFiles(paths);
-          return;
-        }
+        if (fields) fields.handleIngestFiles(paths);
         return;
       }
       if (paths.length !== 1) {
-        log.warn("App", "multi-file cold-start ingest is not supported yet");
+        setShellError({
+          message: intl.formatMessage({
+            id: "coldStart.ingestMultiFileUnsupported",
+            defaultMessage: "Multi-file ingest is not available on the cold-start bar yet — open a session first, or pick one file at a time.",
+          }),
+          kind: "shell",
+          detail: null,
+        });
         return;
       }
       const runtime = pendingRuntime;
@@ -409,7 +409,7 @@ export default function App() {
         },
       );
     },
-    [activeSessionId, composerFieldsMap, createSessionWithIngest, pendingRuntime, pendingAuthMode],
+    [activeSessionId, composerFieldsMap, createSessionWithIngest, pendingRuntime, pendingAuthMode, intl, setShellError],
   );
 
   // --- In-app navigation history (issue #288) -----------------------------
@@ -765,7 +765,7 @@ export default function App() {
                           providerPicker ? (
                             <ComposerProviderPicker
                               sessionId={activeSessionId}
-                              onPendingRuntimeChange={handlePendingRuntimeChange}
+                              onPendingRuntimeChange={setPendingRuntime}
                               {...providerPicker}
                             />
                           ) : undefined

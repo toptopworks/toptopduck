@@ -278,40 +278,56 @@ export function useShellSessions({
   // only after the session carries the user's pick — the first turn runs on
   // the chosen runtime. A rejected posture write is logged and skipped (the
   // session opens on the backend default; the picker's keep-server-posture
-  // semantics) instead of failing the whole creation.
+  // semantics) instead of failing the whole creation. A rejected write also
+  // surfaces via setShellError so the user is informed their picker selection
+  // was not applied.
+  //
+  // Reentry guard (review H-1): mintingRef blocks a second creation while the
+  // createSession IPC is in flight — a fast double-submit on the cold-start
+  // bar would otherwise mint two sessions before activeSessionId flips.
+  // Mirrors the droppingRef pattern in dropFile below.
+  const mintingRef = useRef(false);
   const mintAndRegister = useCallback(
     async (opts: {
       pendingIngestPath?: string | null;
       pendingQuestion?: string | null;
       posture?: PendingComposerPosture;
     }): Promise<void> => {
-      const { session_id: sid, duck_path: path } = await createSession();
-      if (opts.posture) {
-        if (opts.posture.runtime.kind === "external") {
-          try {
-            await setSessionRuntime(sid, opts.posture.runtime);
-          } catch (e) {
-            log.warn("useShellSessions", "apply pending runtime failed; the session opens on the built-in default", fmtError(e, intl));
+      if (mintingRef.current) return;
+      mintingRef.current = true;
+      try {
+        const { session_id: sid, duck_path: path } = await createSession();
+        if (opts.posture) {
+          if (opts.posture.runtime.kind === "external") {
+            try {
+              await setSessionRuntime(sid, opts.posture.runtime);
+            } catch (e) {
+              log.warn("useShellSessions", "apply pending runtime failed; the session opens on the built-in default", fmtError(e, intl));
+              setShellError(toAppError(e, intl, "shell"));
+            }
+          }
+          if (opts.posture.authMode !== AUTH_MODE_DEFAULT) {
+            try {
+              await setAuthorizationMode(sid, opts.posture.authMode);
+            } catch (e) {
+              log.warn("useShellSessions", "apply pending auth mode failed; the session opens on the default posture", fmtError(e, intl));
+              setShellError(toAppError(e, intl, "shell"));
+            }
           }
         }
-        if (opts.posture.authMode !== AUTH_MODE_DEFAULT) {
-          try {
-            await setAuthorizationMode(sid, opts.posture.authMode);
-          } catch (e) {
-            log.warn("useShellSessions", "apply pending auth mode failed; the session opens on the default posture", fmtError(e, intl));
-          }
-        }
+        registerOpen({
+          sid,
+          name: "",
+          path,
+          pendingIngestPath: opts.pendingIngestPath ?? null,
+          pendingQuestion: opts.pendingQuestion ?? null,
+        });
+        refreshSessions();
+      } finally {
+        mintingRef.current = false;
       }
-      registerOpen({
-        sid,
-        name: "",
-        path,
-        pendingIngestPath: opts.pendingIngestPath ?? null,
-        pendingQuestion: opts.pendingQuestion ?? null,
-      });
-      refreshSessions();
     },
-    [intl, registerOpen, refreshSessions],
+    [intl, registerOpen, refreshSessions, setShellError],
   );
 
   // ADR-0092 cold-start submit: the centered bar's submit with no active
