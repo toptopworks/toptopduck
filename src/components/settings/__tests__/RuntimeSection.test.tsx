@@ -272,4 +272,35 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
     // The tabs are below it (they exist alongside the heading).
     expect(screen.getByRole("tab", { name: "API Access" })).toBeInTheDocument();
   });
+
+  // --- Edge cases (issue #493) --------------------------------------------
+
+  it("renders an empty adapter list without crashing and keeps Rescan available", async () => {
+    // listAdapters returns [] -- no adapter rows should appear, but the Rescan
+    // button must stay present + enabled.
+    vi.mocked(listAdapters).mockResolvedValue([]);
+
+    renderSection();
+    fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
+
+    // Wait for the loading state to clear (the title is always rendered).
+    expect(await screen.findByText("Detected CLI adapters")).toBeInTheDocument();
+    // No adapter display names or badges leak through.
+    expect(screen.queryByText("Detected")).not.toBeInTheDocument();
+    expect(screen.queryByText("Not installed")).not.toBeInTheDocument();
+    // Rescan is present + not disabled.
+    const rescanButton = screen.getByRole("button", { name: "Rescan adapters" });
+    expect(rescanButton).toBeEnabled();
+  });
+
+  it("keeps the Refresh key status button in the profile-list toolbar when hideHeader is active", async () => {
+    // RuntimeSection always passes hideHeader to ProfilesSection, so the refresh
+    // button must relocate from the PaneHeader action slot to the profile-list
+    // toolbar and remain findable + clickable (issue #489/#493). The button is
+    // disabled while the initial key-status fetch is in flight (keysLoading);
+    // findByRole waits for it to settle + become enabled.
+    renderSection();
+    const refreshButton = await screen.findByRole("button", { name: "Refresh key status" });
+    await waitFor(() => expect(refreshButton).toBeEnabled());
+  });
 });
