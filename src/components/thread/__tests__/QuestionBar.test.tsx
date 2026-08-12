@@ -92,3 +92,25 @@ describe("QuestionBar keyboard submit (Enter / Shift+Enter / IME)", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 });
+
+describe("QuestionBar header slot", () => {
+  it("renders header controls in the container without wiring them into submit", () => {
+    const onSubmit = vi.fn();
+    renderQuestionBar(
+      <QuestionBar
+        onSubmit={onSubmit}
+        onCancel={() => {}}
+        loading={false}
+        header={<button type="button">技能 (0/0)</button>}
+      />,
+    );
+    // The header control rides the container's top row (the Skills / MCP
+    // trigger chips in the real app).
+    const chip = screen.getByRole("button", { name: "技能 (0/0)" });
+    expect(chip).toBeInTheDocument();
+    // A header button click never submits the question form (the real
+    // triggers are type="button" popover openers).
+    fireEvent.click(chip);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+});

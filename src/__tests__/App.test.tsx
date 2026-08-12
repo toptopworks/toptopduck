@@ -123,6 +123,7 @@ function renderPane(locale: EffectiveLocale = "zh-CN", sessionName = "Test sessi
         onFirstTurnSettled={() => {}}
         approvalEvents={approvalEvents}
         onOpenSettingsSkills={() => {}}
+        onOpenSettingsMcp={() => {}}
         onRailResizeStart={() => {}}
       />,
     ),
@@ -216,8 +217,7 @@ describe("App guided-load flow", () => {
     await waitFor(() => expect(listWorkingSet).toHaveBeenCalled());
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
-    // Pick a file via the composer "+" (issue #351: the pane is app-config-less
-    // here, so "+" is the degraded pure add-files button) -> ingestFile returns
+    // Pick a file via the composer "+" Files button -> ingestFile returns
     // NeedsGuidance -> dialog opens (AC2 seam).
     fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
     await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());

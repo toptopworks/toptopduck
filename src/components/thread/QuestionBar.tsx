@@ -17,6 +17,9 @@ interface QuestionBarProps {
    *  (the listener clears it on outcome, incl. Cancelled). Optional so call
    *  sites / tests that don't exercise phase feedback omit it. */
   phase?: TurnPhase | null;
+  /** Top-row controls rendered inside the unified container above the
+   *  textarea (the Skills / MCP trigger chips threaded from SessionPane). */
+  header?: ReactNode;
   /** Left-side toolbar controls rendered inside the unified container (the
    *  composer "+" / auth-mode slots threaded from SessionPane). */
   children?: ReactNode;
@@ -36,11 +39,12 @@ interface QuestionBarProps {
 // (placeholder, aria-label, button labels, phase feedback) ships through the
 // react-intl catalog (ADR-0052); see the questionBar.* keys.
 //
-// Unified composer container: a rounded border + shadow box. The textarea
-// occupies the top; a toolbar row at the bottom carries the composer slot
+// Unified composer container: a rounded border + shadow box. An optional
+// header row (the Skills / MCP trigger chips) rides the top; the textarea
+// sits below it; a toolbar row at the bottom carries the composer slot
 // controls (passed as children) on the left and the phase + submit/stop
 // button on the right. Enter submits (Shift+Enter inserts a newline).
-export function QuestionBar({ onSubmit, onCancel, loading, phase = null, children, trailing }: QuestionBarProps) {
+export function QuestionBar({ onSubmit, onCancel, loading, phase = null, header, children, trailing }: QuestionBarProps) {
   const intl = useIntl();
   const [value, setValue] = useState("");
 
@@ -67,6 +71,11 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, childre
         submit();
       }}
     >
+      {header && (
+        <div className="flex items-center gap-1 px-2 pt-2">
+          {header}
+        </div>
+      )}
       <textarea
         value={value}
         onChange={(e) => setValue(e.target.value)}
