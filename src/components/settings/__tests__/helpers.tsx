@@ -1,5 +1,6 @@
 import { render } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactElement } from "react";
 import { TooltipProvider } from "../../ui/tooltip";
 
@@ -10,13 +11,22 @@ import { TooltipProvider } from "../../ui/tooltip";
 // catalog. onError silences the expected missing-message warnings (the ids
 // intentionally resolve via defaultMessage, not the empty catalog).
 //
+// QueryClientProvider wraps the tree because the Runtime section's Local CLI
+// tab reads the adapter table via TanStack Query (issue #489). retry is off so
+// a rejected query does not retry under waitFor.
+//
 // TooltipProvider mirrors the App ancestor (the rail's dual-state gear carries a
 // Tooltip); App mounts one high in the tree, so the pane tests reproduce that
 // context. Shared by the SettingsView tests (issue #216 split).
 export function renderSettings(ui: ReactElement) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   return render(
-    <TooltipProvider>
-      <IntlProvider locale="en" messages={{}} onError={() => {}}>{ui}</IntlProvider>
-    </TooltipProvider>,
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <IntlProvider locale="en" messages={{}} onError={() => {}}>{ui}</IntlProvider>
+      </TooltipProvider>
+    </QueryClientProvider>,
   );
 }

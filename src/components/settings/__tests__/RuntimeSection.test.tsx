@@ -1,0 +1,205 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { RuntimeSection } from "../RuntimeSection";
+import {
+  listAdapters,
+  rescanAdapters,
+  listProviderProfiles,
+} from "../../../api";
+import type { AdapterEntry } from "../../../types/runtime";
+import type { ProviderConfig } from "../../../types/provider";
+import type { ProfilesControls } from "../ProfilesSection";
+import { renderSettings } from "./helpers";
+
+// Runtime section tests (issue #489, ADR-0091): the two sub-tabs, the adapter
+// list rendering, and the rescan IPC flow. The ProfilesSection's own behavior
+// is covered by SettingsView.component.test.tsx; here we assert ONLY the new
+// runtime-section surface.
+
+vi.mock("../../../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../api")>();
+  return {
+    ...actual,
+    listAdapters: vi.fn(),
+    rescanAdapters: vi.fn(),
+    listProviderProfiles: vi.fn(),
+  };
+});
+
+const mockAdapters: AdapterEntry[] = [
+  { id: "claude-code", display_name: "claude-code", detected: true, binary_path: "/usr/local/bin/claude" },
+  { id: "gemini-cli", display_name: "gemini-cli", detected: true, binary_path: "/usr/bin/gemini" },
+  { id: "codex", display_name: "codex", detected: false, binary_path: null },
+  { id: "qwen-code", display_name: "qwen-code", detected: false, binary_path: null },
+  { id: "opencode", display_name: "opencode", detected: true, binary_path: "/opt/homebrew/bin/opencode" },
+];
+
+const provider: ProviderConfig = {
+  profiles: [
+    {
+      id: "default",
+      display_name: "Anthropic",
+      protocol: "anthropic",
+      base_url: "https://api.anthropic.com",
+      model: "claude-sonnet-4-6",
+    },
+  ],
+  active_profile: "default",
+};
+
+function renderSection(overrides: Partial<React.ComponentProps<typeof RuntimeSection>> = {}) {
+  const controlsRef = { current: null as ProfilesControls | null } as React.MutableRefObject<ProfilesControls | null>;
+  const props: React.ComponentProps<typeof RuntimeSection> = {
+    provider,
+    onCommit: vi.fn(),
+    onRefreshKeyStatus: vi.fn(),
+    onIpcBusy: vi.fn(),
+    profilesControlsRef: controlsRef,
+    ...overrides,
+  };
+  return renderSettings(<RuntimeSection {...props} />);
+}
+
+describe("RuntimeSection (issue #489, ADR-0091)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(listAdapters).mockResolvedValue(mockAdapters);
+    vi.mocked(rescanAdapters).mockResolvedValue(mockAdapters);
+    vi.mocked(listProviderProfiles).mockResolvedValue([
+      { profile_id: "default", has_key: false, keychain_fault: null },
+    ]);
+  });
+
+  // --- Tab infrastructure -------------------------------------------------
+
+  it("renders both tab buttons with the default API Access tab active", () => {
+    renderSection();
+    const apiTab = screen.getByRole("tab", { name: "API Access" });
+    const cliTab = screen.getByRole("tab", { name: "Local CLI" });
+    expect(apiTab).toHaveAttribute("aria-selected", "true");
+    expect(cliTab).toHaveAttribute("aria-selected", "false");
+  });
+
+  it("shows ProfilesSection content (New profile button) under the default tab", async () => {
+    renderSection();
+    expect(await screen.findByRole("button", { name: "New profile" })).toBeInTheDocument();
+  });
+
+  it("switches to Local CLI tab on click and shows the adapter list", async () => {
+    renderSection();
+    fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
+    // The adapter list is rendered from the mock data.
+    expect(await screen.findByText("claude-code")).toBeInTheDocument();
+    expect(screen.getByText("gemini-cli")).toBeInTheDocument();
+    expect(screen.getByText("codex")).toBeInTheDocument();
+  });
+
+  it("tab state resets to API Access on remount (not persisted)", async () => {
+    // RuntimeSection unmounts on a nav switch; remounting must land on the
+    // default tab (issue #489 AC: tab state does not persist).
+    const { unmount } = renderSection();
+    fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
+    expect(screen.getByRole("tab", { name: "Local CLI" })).toHaveAttribute("aria-selected", "true");
+    unmount();
+
+    renderSection();
+    expect(screen.getByRole("tab", { name: "API Access" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Local CLI" })).toHaveAttribute("aria-selected", "false");
+  });
+
+  // --- Adapter list rendering ---------------------------------------------
+
+  it("detected adapters show the binary path", async () => {
+    renderSection();
+    fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
+    expect(await screen.findByText("/usr/local/bin/claude")).toBeInTheDocument();
+    expect(screen.getByText("/usr/bin/gemini")).toBeInTheDocument();
+    expect(screen.getByText("/opt/homebrew/bin/opencode")).toBeInTheDocument();
+  });
+
+  it("undetected adapters show Not installed", async () => {
+    renderSection();
+    fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
+    await screen.findByText("claude-code");
+    // codex and qwen-code are undetected.
+    const notInstalled = screen.getAllByText("Not installed");
+    expect(notInstalled).toHaveLength(2);
+  });
+
+  it("detected adapters show a Detected badge, undetected show Not found", async () => {
+    renderSection();
+    fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
+    await screen.findByText("claude-code");
+    expect(screen.getAllByText("Detected")).toHaveLength(3);
+    expect(screen.getAllByText("Not found")).toHaveLength(2);
+  });
+
+  // --- Rescan IPC flow ----------------------------------------------------
+
+  it("rescan button calls rescanAdapters and refreshes the list", async () => {
+    const freshAdapters: AdapterEntry[] = [
+      ...mockAdapters.slice(0, 2), // still detected
+      { id: "codex", display_name: "codex", detected: true, binary_path: "/usr/bin/codex" }, // now detected
+      ...mockAdapters.slice(3),
+    ];
+    vi.mocked(rescanAdapters).mockResolvedValue(freshAdapters);
+
+    renderSection();
+    fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
+    await screen.findByText("claude-code");
+    // codex is initially undetected.
+    expect(screen.getAllByText("Not installed")).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "Rescan adapters" }));
+    await waitFor(() => expect(vi.mocked(rescanAdapters)).toHaveBeenCalledTimes(1));
+    // After rescan, codex is detected and its binary path appears.
+    await waitFor(() => expect(screen.getByText("/usr/bin/codex")).toBeInTheDocument());
+    // Only qwen-code remains undetected.
+    expect(screen.getAllByText("Not installed")).toHaveLength(1);
+  });
+
+  it("rescan button is disabled and spins while in flight", async () => {
+    let resolveRescan!: (v: AdapterEntry[]) => void;
+    vi.mocked(rescanAdapters).mockImplementation(
+      () => new Promise((resolve) => { resolveRescan = resolve; }),
+    );
+
+    renderSection();
+    fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
+    await screen.findByText("claude-code");
+
+    const rescanButton = screen.getByRole("button", { name: "Rescan adapters" });
+    fireEvent.click(rescanButton);
+    await waitFor(() => expect(vi.mocked(rescanAdapters)).toHaveBeenCalled());
+    expect(rescanButton).toBeDisabled();
+
+    // The spinning icon is present (animate-spin class).
+    const spinIcon = rescanButton.querySelector(".animate-spin");
+    expect(spinIcon).not.toBeNull();
+
+    resolveRescan(mockAdapters);
+    await waitFor(() => expect(rescanButton).not.toBeDisabled());
+  });
+
+  it("a failed rescan surfaces an inline error", async () => {
+    vi.mocked(rescanAdapters).mockRejectedValue(new Error("scan timeout"));
+
+    renderSection();
+    fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
+    await screen.findByText("claude-code");
+
+    fireEvent.click(screen.getByRole("button", { name: "Rescan adapters" }));
+    expect(await screen.findByText("scan timeout")).toBeInTheDocument();
+  });
+
+  // --- PaneHeader ---------------------------------------------------------
+
+  it("renders the section-level PaneHeader above the tabs", () => {
+    renderSection();
+    // The hero heading is above the tabs.
+    const heading = screen.getByRole("heading", { level: 3, name: "Runtime" });
+    expect(heading).toBeInTheDocument();
+    // The tabs are below it (they exist alongside the heading).
+    expect(screen.getByRole("tab", { name: "API Access" })).toBeInTheDocument();
+  });
+});

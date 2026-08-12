@@ -100,6 +100,10 @@ export type ProfilesSectionProps = {
   /** Ref this pane keeps populated with its control surface (flush / addDirty /
    *  discardAdd / busy) for the parent's close contract. */
   controlsRef: MutableRefObject<ProfilesControls | null>;
+  /** When true, skip the PaneHeader -- the parent RuntimeSection owns the
+   *  section-level hero (issue #489). The key-status refresh button relocates
+   *  into the profile-list toolbar so the functionality stays available. */
+  hideHeader?: boolean;
 };
 
 const NEW_PROFILE_DEFAULT_BASE_URL = "https://api.anthropic.com";
@@ -180,6 +184,7 @@ export function ProfilesSection({
   onIpcBusy,
   initialEditProfileId,
   controlsRef,
+  hideHeader = false,
 }: ProfilesSectionProps) {
   const intl = useIntl();
 
@@ -447,37 +452,44 @@ export function ProfilesSection({
   // with no active endpoint; normalize would have to invent one).
   const canDelete = provider.profiles.length > 1;
 
+  // The key-status refresh button -- lives in the PaneHeader action slot when
+  // ProfilesSection owns its header, or in the profile-list toolbar when the
+  // header is hidden (issue #489: RuntimeSection owns the section-level hero).
+  const refreshButton = (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      onClick={handleRefreshKeys}
+      disabled={keysLoading}
+      aria-label={intl.formatMessage({
+        id: "settings.profiles.refresh",
+        defaultMessage: "Refresh key status",
+      })}
+    >
+      <RefreshCw className={cn("size-4", keysLoading && "animate-spin")} aria-hidden />
+    </Button>
+  );
+
   return (
     <div>
-      <PaneHeader
-        title={<FormattedMessage id="settings.nav.runtime" defaultMessage="Runtime" />}
-        description={(
-          <FormattedMessage
-            id="settings.profiles.description"
-            defaultMessage="Named connection endpoints. The active profile drives new turns; edits save as you move away from a field."
-          />
-        )}
-        action={(
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={handleRefreshKeys}
-            disabled={keysLoading}
-            aria-label={intl.formatMessage({
-              id: "settings.profiles.refresh",
-              defaultMessage: "Refresh key status",
-            })}
-          >
-            <RefreshCw className={cn("size-4", keysLoading && "animate-spin")} aria-hidden />
-          </Button>
-        )}
-      />
+      {!hideHeader && (
+        <PaneHeader
+          title={<FormattedMessage id="settings.nav.runtime" defaultMessage="Runtime" />}
+          description={(
+            <FormattedMessage
+              id="settings.profiles.description"
+              defaultMessage="Named connection endpoints. The active profile drives new turns; edits save as you move away from a field."
+            />
+          )}
+          action={refreshButton}
+        />
+      )}
 
       <div className="profiles-master-detail gap-6">
         {/* Left: profile list (master). */}
         <div className="profiles-list flex flex-col gap-2">
-          <div className="profiles-list-actions flex">
+          <div className="profiles-list-actions flex items-center gap-2">
             <Button
               type="button"
               variant="outline"
@@ -494,6 +506,7 @@ export function ProfilesSection({
               <Plus aria-hidden />
               <FormattedMessage id="settings.profiles.new" defaultMessage="New profile" />
             </Button>
+            {hideHeader && refreshButton}
           </div>
           {keysLoading ? (
             <p className="text-muted-foreground text-sm">

@@ -2233,10 +2233,12 @@ pub enum SessionRuntimeChoice {
 }
 
 /// One v1 adapter projected for the composer runtime picker (issue #353,
-/// ADR-0083): the stable id (the `set_session_runtime` key), the display name
-/// (the row label), and the current PATH-scan detection state. Detected rows
-/// are selectable; undetected rows render disabled + "not installed" -- the
-/// picker never hardcodes the list, it renders this table verbatim.
+/// ADR-0083) and the settings adapter panel (issue #489): the stable id (the
+/// `set_session_runtime` key), the display name (the row label), the current
+/// PATH-scan detection state, and the resolved binary path (shown in the
+/// settings panel when detected). Detected rows are selectable; undetected
+/// rows render disabled + "not installed" -- the picker never hardcodes the
+/// list, it renders this table verbatim.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AdapterEntry {
     /// The adapter's stable id (provenance + set key; [`AdapterSpec::id`]).
@@ -2245,6 +2247,11 @@ pub struct AdapterEntry {
     pub display_name: String,
     /// Whether the PATH scan resolved one of the adapter's binary names.
     pub detected: bool,
+    /// The absolute path of the resolved binary (`None` when not detected).
+    /// Surfaced to the settings adapter panel so the user can verify WHICH
+    /// binary was found (issue #489).
+    #[serde(default)]
+    pub binary_path: Option<PathBuf>,
 }
 
 /// Project every v1 adapter to a picker entry with a FRESH PATH-scan
@@ -2254,10 +2261,14 @@ pub struct AdapterEntry {
 fn scan_adapters() -> Vec<AdapterEntry> {
     v1_adapters()
         .iter()
-        .map(|spec| AdapterEntry {
-            id: spec.id.as_str().to_string(),
-            display_name: spec.display_name.to_string(),
-            detected: detect_adapter(spec).is_some(),
+        .map(|spec| {
+            let binary = detect_adapter(spec);
+            AdapterEntry {
+                id: spec.id.as_str().to_string(),
+                display_name: spec.display_name.to_string(),
+                detected: binary.is_some(),
+                binary_path: binary,
+            }
         })
         .collect()
 }
@@ -2895,9 +2906,9 @@ mod tests {
     // --- Runtime selector helpers (issue #353) ------------------------------
 
     /// scan_adapters projects exactly the v1 table (count-agnostic), each entry
-    /// carrying its id + display name + a fresh PATH-scan detection flag. The
-    /// composer picker renders this table verbatim -- a CLI added upstream
-    /// never touches the picker.
+    /// carrying its id + display name + a fresh PATH-scan detection flag + the
+    /// resolved binary path. The composer picker + the settings adapter panel
+    /// render this table verbatim -- a CLI added upstream never touches either.
     #[test]
     fn scan_adapters_projects_the_v1_table_with_detection_state() {
         let entries = scan_adapters();
@@ -2909,10 +2920,15 @@ mod tests {
                 entry.display_name, spec.display_name,
                 "display_name round-trips"
             );
+            let live = detect_adapter(spec);
             assert_eq!(
                 entry.detected,
-                detect_adapter(spec).is_some(),
+                live.is_some(),
                 "detected mirrors the live PATH scan"
+            );
+            assert_eq!(
+                entry.binary_path, live,
+                "binary_path mirrors the live PATH scan"
             );
         }
     }

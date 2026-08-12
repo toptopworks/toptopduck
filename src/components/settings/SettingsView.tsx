@@ -30,8 +30,9 @@ import { Button } from "../ui/button";
 import { EngineSection } from "./EngineSection";
 import { GeneralSection } from "./GeneralSection";
 import { McpSection } from "./McpSection";
-import { ProfilesSection, type ProfilesControls } from "./ProfilesSection";
+import { type ProfilesControls } from "./ProfilesSection";
 import { PrivacySection } from "./PrivacySection";
+import { RuntimeSection } from "./RuntimeSection";
 import { SkillsSection } from "./SkillsSection";
 import { SETTINGS_SECTIONS, type SettingsSection } from "./sections";
 
@@ -147,13 +148,13 @@ function SectionContent({
       );
     case "runtime":
       return (
-        <ProfilesSection
+        <RuntimeSection
           provider={appConfig.provider}
           onCommit={onCommit}
           onRefreshKeyStatus={onRefreshKeyStatus}
           onIpcBusy={onIpcBusy}
           initialEditProfileId={initialEditProfileId}
-          controlsRef={profilesControlsRef}
+          profilesControlsRef={profilesControlsRef}
         />
       );
     case "database-engine":

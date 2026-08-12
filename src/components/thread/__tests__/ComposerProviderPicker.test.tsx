@@ -96,7 +96,12 @@ function adapter(
   display_name: string = id,
   detected: boolean = true,
 ): AdapterEntry {
-  return { id, display_name, detected };
+  return {
+    id,
+    display_name,
+    detected,
+    binary_path: detected ? `/usr/local/bin/${id}` : null,
+  };
 }
 
 // The built-in runtime is the default; the trigger's accessible name carries
