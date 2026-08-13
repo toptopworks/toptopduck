@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import type { ReactElement } from "react";
 import { DeleteSessionDialog, SessionSidebar } from "../SessionSidebar";
@@ -722,6 +722,89 @@ describe("SessionSidebar pending-approval coloring (ADR-0083, issue #297)", () =
     const { container } = renderShell(<SessionSidebar {...baseProps()} />);
     expect(container.querySelector("[data-pending-approval]")).toBeNull();
     expect(container.querySelector(".bg-warning")).toBeNull();
+  });
+});
+
+describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
+  // Radix HoverCard opens on pointerEnter / focus after openDelay (300 ms). The
+  // content renders inside a Radix Portal (document.body); React context
+  // (IntlProvider) is preserved, so FormattedMessage + useIntl resolve to the
+  // English defaultMessage (the test's IntlProvider carries an empty catalog).
+  // Fake timers advance the 300 ms openDelay deterministically.
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function sidebarProps(overrides: Partial<React.ComponentProps<typeof SessionSidebar>> = {}) {
+    return {
+      collapsed: false,
+      sessions: [] as SessionMetadata[],
+      openSessions: [] as OpenSession[],
+      activeSessionId: null,
+      disabled: false,
+      loadError: null,
+      onNew: () => {},
+      onOpenDuck: () => {},
+      onActivate: () => {},
+      onExport: () => {},
+      onOpenPersisted: () => {},
+      onClose: () => {},
+      onDelete: () => {},
+      onRename: () => {},
+      grouping: "flat" as const,
+      onSwitchGrouping: () => {},
+      onOpenSearch: () => {},
+      provider: null,
+      onOpenSettings: () => {},
+      ...overrides,
+    };
+  }
+
+  it("shows source summary + turn count when sourceCount > 0", async () => {
+    const persisted: SessionMetadata = {
+      duck_path: "/x/sourced.duck",
+      display_name: "With Sources",
+      last_modified_at: Date.now() - 3 * 3600_000,
+      source_summary: { first_source_name: "data.csv", source_count: 3, turn_count: 5 },
+      format_version: 1,
+    };
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
+    fireEvent.pointerEnter(container.querySelector(".session-entry-main")!);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+
+    // Data source label + the pluralized summary (defaultMessage fallback).
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+    expect(screen.getByText(/data\.csv/)).toBeInTheDocument();
+    expect(screen.getByText(/3 sources/)).toBeInTheDocument();
+    // Turns label + count (defaultMessage: "{count, plural, =0 {no turns} ...}").
+    expect(screen.getByText("Turns")).toBeInTheDocument();
+    expect(screen.getByText("5 turns")).toBeInTheDocument();
+  });
+
+  it("shows em-dash fallback for data source when sourceCount === 0", async () => {
+    const persisted: SessionMetadata = {
+      duck_path: "/x/empty.duck",
+      display_name: "No Sources",
+      last_modified_at: Date.now(),
+      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+      format_version: 1,
+    };
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
+    fireEvent.pointerEnter(container.querySelector(".session-entry-main")!);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+
+    // Data source value falls back to em-dash (the false arm of the ternary).
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+    expect(screen.getByText("—")).toBeInTheDocument();
+    // Turn count with 0 renders "no turns" (defaultMessage =0 arm).
+    expect(screen.getByText("no turns")).toBeInTheDocument();
   });
 });
 

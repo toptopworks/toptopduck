@@ -74,7 +74,7 @@ export interface SidebarEntry {
   path: string;
   /** Whether this entry is the currently active session. */
   active: boolean;
-  /** First source display name for the sub-line (null = no sources yet). */
+  /** First source display name for the hover card (null = no sources yet). */
   firstSourceName: string | null;
   /** Total loaded source count (ADR-0093, issue #513: hover-card metadata). */
   sourceCount: number;

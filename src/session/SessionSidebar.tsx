@@ -425,11 +425,11 @@ function GroupingToggle({
   );
 }
 
-// One sidebar row: pure navigation (ADR-0093, issue #511). The row carries
-// only the session title + a conditional status dot. Management actions
-// (rename / export / close / delete) moved to .session-header (slice 2);
-// the persistent sub-line (first source + turn count) is retired in favor of
-// a future HoverCard (slice 3).
+// One sidebar row: navigation + inline metadata (ADR-0093, issue #511/#513).
+// The row carries the session title, a conditional status dot, and a compact
+// relative-time span. Management actions (rename / export / close / delete)
+// moved to .session-header (slice 2); the persistent sub-line (first source +
+// turn count) is retired in favor of a HoverCard (slice 3, this change).
 function SidebarRow({
   entry,
   displayName,
@@ -458,8 +458,8 @@ function SidebarRow({
   // selector / test stability.
   //
   // ADR-0093 slice 3 (issue #513): the row is wrapped in a HoverCard so hover
-  // or keyboard focus surfaces the full metadata (title + sources + turns +
-  // last-modified) in a fixed-width card positioned to the right. The
+  // or keyboard focus surfaces the full metadata (title + source summary +
+  // turn count) in a fixed-width card positioned to the right. The
   // openDelay prevents flicker when the pointer sweeps across the list.
   return (
     <li
@@ -527,7 +527,8 @@ function SidebarRow({
 }
 
 // Hover-card metadata body (ADR-0093, issue #513). Key-value pairs: full title
-// (wrapping, no truncation) + source summary + turn count + last-modified.
+// (wrapping, no truncation) + source summary + turn count. Last-modified is
+// shown inline on the row (formatRelativeTime), not in the card.
 // Rendered inside a Radix Portal, but the React context tree (IntlProvider) is
 // preserved across portals, so useIntl works here.
 function SidebarRowHoverContent({

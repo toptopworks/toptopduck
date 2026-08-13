@@ -5,8 +5,9 @@ import { cn } from "@/lib/utils";
 
 // shadcn/ui v4 new-york copy-in (ADR-0049/0050, issue #513). The HoverCard is
 // the sidebar row metadata layer (ADR-0093): hovering or focusing a session row
-// surfaces the full title + source/turn/mtime key-value pairs in a fixed-width
-// card positioned to the right. Token consumption is via var utilities
+// surfaces the full title + source summary + turn count in a fixed-width card
+// positioned to the right (last-modified is shown inline on the row, not in
+// the card). Token consumption is via var utilities
 // (bg-popover / text-popover-foreground), so the card rides the surface tokens
 // and flips with the .dark class; enter/exit animations use tw-animate-css
 // utilities (loaded in app.css). Exports only components (no cva variant map),

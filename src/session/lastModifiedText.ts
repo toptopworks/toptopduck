@@ -1,16 +1,13 @@
 import type { IntlShape } from "react-intl";
 import type { LastModifiedLabel } from "./sidebarModel";
 
-// Resolve the last-modified text from a LastModifiedLabel (ADR-0072, issue
-// #513). Today / Yesterday reuse the sidebar-group locale message ids
-// (sidebar.group.today / yesterday) so the relative-day word agrees with the
-// sidebar's group heading; older dates format via Intl.DateTimeFormat with the
-// year omitted when it matches `now`'s year (a session from this year needs no
-// year suffix; a prior-year one does).
-//
-// Shared by the search dialog sub-line + the sidebar hover card. The pure
-// classification stays in sidebarModel.ts (`formatLastModified`); this helper
-// is the React-layer string resolution (needs `intl.formatMessage`).
+// This file holds two independent time-formatting helpers:
+//   • formatLastModifiedText — calendar-day label for the search dialog sub-line
+//     (Today / Yesterday / date). The pure classification stays in
+//     sidebarModel.ts (`formatLastModified`); this helper is the React-layer
+//     string resolution (needs `intl.formatMessage`).
+//   • formatRelativeTime — compact duration for the sidebar row inline display
+//     (e.g. "8h", "3w"). Issue #513: shown after the status dot.
 
 /** Format a {@link LastModifiedLabel} into a localized display string. */
 export function formatLastModifiedText(
@@ -60,7 +57,8 @@ export function formatRelativeTime(
   // Clamp to 0 — `now` is captured at sidebar mount, so a session modified
   // after that moment would otherwise produce a negative duration.
   const diffSec = Math.max(0, Math.round((now - lastModifiedAt) / 1000));
-  const nf = (unit: string, value: number) =>
+  type RelativeUnit = "second" | "minute" | "hour" | "day" | "week" | "month" | "year";
+  const nf = (unit: RelativeUnit, value: number) =>
     new Intl.NumberFormat(locale, {
       style: "unit",
       unit,
