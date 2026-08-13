@@ -74,8 +74,10 @@ export interface SidebarEntry {
   path: string;
   /** Whether this entry is the currently active session. */
   active: boolean;
-  /** First source display name for the sub-line (null = no sources yet). */
+  /** First source display name for the hover card (null = no sources yet). */
   firstSourceName: string | null;
+  /** Total loaded source count (ADR-0093, issue #513: hover-card metadata). */
+  sourceCount: number;
   /** Productive turn count for the sub-line. */
   turnCount: number;
   /** last_modified_at, ms since epoch. A never-saved session has no mtime, so
@@ -168,6 +170,7 @@ function persistedEntry(
     path: m.duck_path,
     active: bound !== null && bound.sid === activeSessionId,
     firstSourceName: m.source_summary.first_source_name,
+    sourceCount: m.source_summary.source_count,
     turnCount: m.source_summary.turn_count,
     lastModifiedAt: m.last_modified_at,
   };
@@ -268,6 +271,7 @@ export function buildSidebarGroups(
       path: o.path,
       active: o.sid === activeSessionId,
       firstSourceName: null,
+      sourceCount: 0,
       turnCount: 0,
       lastModifiedAt: now,
     });

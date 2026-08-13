@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { Check, FolderOpen, Pencil, Search, Settings } from "lucide-react";
 import {
@@ -7,6 +7,7 @@ import {
   type SidebarEntry,
   type SidebarGroupKind,
 } from "./sidebarModel";
+import { formatRelativeTime } from "./lastModifiedText";
 import { resolveDisplayName } from "./displayName";
 import type { SessionMetadata } from "../types/session";
 import type { SidebarGrouping } from "../types/app-config";
@@ -37,6 +38,11 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "@/components/ui/hover-card";
 import { bareButtonReset } from "@/lib/buttonReset";
 import { cn } from "@/lib/utils";
 
@@ -137,10 +143,15 @@ export function SessionSidebar({
   collapsed,
 }: SessionSidebarProps) {
   const intl = useIntl();
-  // Capture "now" once per mount via a lazy useState initializer (Date.now is
-  // impure in render). The calendar-day buckets are stable within a session for
-  // our purposes; a cross-midnight drift refreshes on the next mount.
-  const [now] = useState(() => Date.now());
+  // Capture "now" and refresh every 60 s so the sidebar row relative-time
+  // display (issue #513) stays current without calling Date.now in render
+  // (react-hooks/purity). The calendar-day buckets are also stable enough at
+  // this granularity; a cross-midnight drift refreshes on the next tick.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
 
   const groups = buildSidebarGroups(
     sessions,
@@ -244,6 +255,7 @@ export function SessionSidebar({
                   key={entry.key}
                   entry={entry}
                   displayName={resolveDisplayName(entry.name, intl)}
+                  now={now}
                   hasPendingApproval={
                     entry.sid !== null && pendingApprovalSids.has(entry.sid)
                   }
@@ -413,20 +425,23 @@ function GroupingToggle({
   );
 }
 
-// One sidebar row: pure navigation (ADR-0093, issue #511). The row carries
-// only the session title + a conditional status dot. Management actions
-// (rename / export / close / delete) moved to .session-header (slice 2);
-// the persistent sub-line (first source + turn count) is retired in favor of
-// a future HoverCard (slice 3).
+// One sidebar row: navigation + inline metadata (ADR-0093, issue #511/#513).
+// The row carries the session title, a conditional status dot, and a compact
+// relative-time span. Management actions (rename / export / close / delete)
+// moved to .session-header (slice 2); the persistent sub-line (first source +
+// turn count) is retired in favor of a HoverCard (slice 3, this change).
 function SidebarRow({
   entry,
   displayName,
+  now,
   hasPendingApproval,
   disabled,
   onActivate,
 }: {
   entry: SidebarEntry;
   displayName: string;
+  /** Refreshed every 60 s by SessionSidebar for the relative-time display. */
+  now: number;
   /** The session holds an unanswered approval (ADR-0083, issue #297): the
    *  status dot flips to warning color + an sr-only label so a suspended turn
    *  stays visible while the user works in another session. */
@@ -434,12 +449,18 @@ function SidebarRow({
   disabled: boolean;
   onActivate: () => void;
 }) {
+  const intl = useIntl();
   // ADR-0093 (issue #511): the MessageSquare leading icon + the inset shadow
   // left bar are retired. Active = accent background only; open = status dot
   // (primary green / warning when pending approval); not-open = equal-width
   // placeholder so titles stay left-aligned across all rows. The active/open
   // booleans also stay as classes on the parent .session-entry hook for
   // selector / test stability.
+  //
+  // ADR-0093 slice 3 (issue #513): the row is wrapped in a HoverCard so hover
+  // or keyboard focus surfaces the full metadata (title + source summary +
+  // turn count) in a fixed-width card positioned to the right. The
+  // openDelay prevents flicker when the pointer sweeps across the list.
   return (
     <li
       className={cn(
@@ -450,44 +471,115 @@ function SidebarRow({
       )}
       data-pending-approval={hasPendingApproval ? "true" : undefined}
     >
-      <button
-        type="button"
-        className={cn(
-          `session-entry-main ${bareButtonReset} cursor-pointer flex-1 flex flex-row items-center gap-1.5 min-w-0 py-1.5 px-2 rounded-md text-foreground`,
-          "hover:bg-accent disabled:opacity-50 disabled:cursor-progress",
-          entry.active && "bg-accent text-accent-foreground",
-        )}
-        aria-current={entry.active ? "true" : undefined}
-        disabled={disabled}
-        onClick={onActivate}
-      >
-        {/* Equal-width status-dot slot (size-4 matches the retired MessageSquare
-            icon footprint). Open = primary dot, pending approval = warning dot
-            (overrides open), not-open = empty slot for alignment. */}
-        <span className="flex size-4 shrink-0 items-center justify-center">
-          {entry.sid && (
-            <span
-              className={cn(
-                "sidebar-status-dot inline-block h-2 w-2 rounded-full",
-                hasPendingApproval ? "bg-warning" : "bg-primary",
+      <HoverCard openDelay={300} closeDelay={200}>
+        <HoverCardTrigger asChild>
+          <button
+            type="button"
+            className={cn(
+              `session-entry-main ${bareButtonReset} cursor-pointer flex-1 flex flex-row items-center gap-1.5 min-w-0 py-1.5 px-2 rounded-md text-foreground`,
+              "hover:bg-accent disabled:opacity-50 disabled:cursor-progress",
+              entry.active && "bg-accent text-accent-foreground",
+            )}
+            aria-current={entry.active ? "true" : undefined}
+            disabled={disabled}
+            onClick={(e) => {
+              e.currentTarget.blur();
+              onActivate();
+            }}
+          >
+            <span className="session-name flex-1 min-w-0 text-left text-sm truncate">
+              {displayName}
+              {hasPendingApproval && (
+                <span className="sr-only">
+                  <FormattedMessage
+                    id="sidebar.pendingApproval"
+                    defaultMessage="(awaiting approval)"
+                  />
+                </span>
               )}
-              aria-hidden="true"
-            />
-          )}
-        </span>
-        <span className="session-name flex-1 min-w-0 text-sm truncate">
-          {displayName}
-          {hasPendingApproval && (
-            <span className="sr-only">
-              <FormattedMessage
-                id="sidebar.pendingApproval"
-                defaultMessage="(awaiting approval)"
-              />
             </span>
-          )}
-        </span>
-      </button>
+            {/* Status dot on the right edge (ADR-0093): open = primary dot,
+                pending approval = warning dot (overrides open), not-open = no
+                dot. shrink-0 prevents truncation from consuming the dot. */}
+            {entry.sid && (
+              <span
+                className={cn(
+                  "sidebar-status-dot inline-block h-2 w-2 shrink-0 rounded-full",
+                  hasPendingApproval ? "bg-warning" : "bg-primary",
+                )}
+                aria-hidden="true"
+              />
+            )}
+            <span className="text-xs text-muted-foreground shrink-0 tabular-nums">
+              {formatRelativeTime(entry.lastModifiedAt, now, intl.locale)}
+            </span>
+          </button>
+        </HoverCardTrigger>
+        <HoverCardContent side="right" align="start">
+          <SidebarRowHoverContent
+            entry={entry}
+            displayName={displayName}
+          />
+        </HoverCardContent>
+      </HoverCard>
     </li>
+  );
+}
+
+// Hover-card metadata body (ADR-0093, issue #513). Key-value pairs: full title
+// (wrapping, no truncation) + source summary + turn count. Last-modified is
+// shown inline on the row (formatRelativeTime), not in the card.
+// Rendered inside a Radix Portal, but the React context tree (IntlProvider) is
+// preserved across portals, so useIntl works here.
+function SidebarRowHoverContent({
+  entry,
+  displayName,
+}: {
+  entry: SidebarEntry;
+  displayName: string;
+}) {
+  const intl = useIntl();
+
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-sm font-medium text-foreground break-words">
+        {displayName}
+      </p>
+      <dl className="m-0 flex flex-col gap-1.5 text-xs">
+        <div className="flex justify-between gap-3">
+          <dt className="text-muted-foreground">
+            <FormattedMessage
+              id="sidebar.hover.dataSource"
+              defaultMessage="Data source"
+            />
+          </dt>
+          <dd className="text-foreground text-right">
+            {entry.sourceCount > 0
+              ? intl.formatMessage(
+                  {
+                    id: "sidebar.hover.sourceSummary",
+                    defaultMessage:
+                      "{first} · {count, plural, one {# source} other {# sources}}",
+                  },
+                  { first: entry.firstSourceName ?? "—", count: entry.sourceCount },
+                )
+              : "—"}
+          </dd>
+        </div>
+        <div className="flex justify-between gap-3">
+          <dt className="text-muted-foreground">
+            <FormattedMessage id="sidebar.hover.turns" defaultMessage="Turns" />
+          </dt>
+          <dd className="text-foreground">
+            <FormattedMessage
+              id="sidebar.turns"
+              defaultMessage="{count, plural, =0 {no turns} one {# turn} other {# turns}}"
+              values={{ count: entry.turnCount }}
+            />
+          </dd>
+        </div>
+      </dl>
+    </div>
   );
 }
 
