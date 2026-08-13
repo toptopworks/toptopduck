@@ -62,8 +62,9 @@ function GroupTitle({ kind }: { kind: SidebarGroupKind }) {
 // The Chat-style session sidebar (ADR-0060, issue #81). Col 1 of the shell:
 // lists every persisted .duck (ADR-0061 cold start) merged with the open
 // keep-alive sessions, Chat-style time-grouped and last-modified descending.
-// Each entry's context menu is the SINGLE entry point for rename / close /
-// delete (ADR-0060 DRY); the top-bar name is read-only.
+// ADR-0093 (issue #511): each row is pure navigation (title + conditional
+// status dot). Management actions (rename / close / delete) moved to
+// .session-header (slice 2, #512).
 
 // A frozen empty set so the optional prop's default keeps a stable identity
 // (no every-render fresh Set -> SidebarRow prop churn).
@@ -91,6 +92,9 @@ interface SessionSidebarProps {
   onNew: () => void;
   onOpenDuck: () => void;
   onActivate: (sid: string) => void;
+  // ADR-0093 slice 2 (#512): the following four management callbacks are
+  // accepted on SessionSidebarProps for contract stability but are NOT
+  // consumed by the sidebar — slice 2 wires them to .session-header.
   /** Export a copy of the session directory (ADR-0089 Decision 5, issue #449).
    *  Receives the .duck path + display name (for the save dialog default). */
   onExport: (path: string, name: string) => void;

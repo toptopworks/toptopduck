@@ -569,6 +569,9 @@ export default function App() {
                   onActivate={activateSession}
                   onExport={(path, name) => void handleExportSession(path, name)}
                   onOpenPersisted={(path, name) => void openPersisted(path, name)}
+                  // TODO(#512): when close lands on .session-header, re-wire
+                  // this cleanup bundle (clearSession + dropDraft) — the
+                  // sidebar trigger was removed by ADR-0093 slice 1.
                   onClose={(sid) => {
                     void closeOpen(sid);
                     // A closed session's cards can never be answered (close
