@@ -767,6 +767,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
     onIngestConsumed: ReturnType<typeof vi.fn>;
     onQuestionConsumed: ReturnType<typeof vi.fn>;
     onSeedDraft: ReturnType<typeof vi.fn>;
+    rerender: (payload: PendingPayload) => void;
   } {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const onIngestConsumed = vi.fn();
@@ -800,8 +801,33 @@ describe("SessionPane pending-payload consumption (#500)", () => {
         </IntlProvider>
       </QueryClientProvider>
     );
-    render(payload.strictMode ? <StrictMode>{tree}</StrictMode> : tree);
-    return { onIngestConsumed, onQuestionConsumed, onSeedDraft };
+    const view = render(payload.strictMode ? <StrictMode>{tree}</StrictMode> : tree);
+    const rerender = (next: PendingPayload) => {
+      const nextPane = (
+        <SessionPane
+          sessionId="sess-1"
+          pendingIngestPaths={next.pendingIngestPaths ?? []}
+          onIngestConsumed={onIngestConsumed}
+          pendingQuestion={next.pendingQuestion ?? null}
+          onQuestionConsumed={onQuestionConsumed}
+          onSeedDraft={onSeedDraft}
+          onComposerFields={() => {}}
+          sessionName="pending"
+          onFirstTurnSettled={() => {}}
+          approvalEvents={approvalEvents}
+          onRailResizeStart={() => {}}
+        />
+      );
+      const nextTree = (
+        <QueryClientProvider client={queryClient}>
+          <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")} defaultLocale="en-US">
+            <TooltipProvider>{nextPane}</TooltipProvider>
+          </IntlProvider>
+        </QueryClientProvider>
+      );
+      view.rerender(next.strictMode ? <StrictMode>{nextTree}</StrictMode> : nextTree);
+    };
+    return { onIngestConsumed, onQuestionConsumed, onSeedDraft, rerender };
   }
 
   beforeEach(() => {
@@ -900,5 +926,29 @@ describe("SessionPane pending-payload consumption (#500)", () => {
 
     await waitFor(() => expect(askQuestion).toHaveBeenCalledTimes(1));
     expect(ingestFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-arms for a different pending payload on an already-mounted pane (#500)", async () => {
+    // consumedPendingRef dedups by payload KEY (JSON.stringify of the
+    // paths+question pair). A DIFFERENT payload on the same mounted pane must
+    // produce a different key and consume again — a second drop onto an active
+    // session must not be silently dropped by stale dedup.
+    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: loadedDataset });
+    const { rerender, onIngestConsumed } = renderPaneWithPending({
+      pendingIngestPaths: ["/x/a.csv"],
+    });
+
+    // First payload consumed.
+    await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-1", "/x/a.csv"));
+    expect(onIngestConsumed).toHaveBeenCalledTimes(1);
+
+    // Simulate the shell clearing the prop then a new drop landing.
+    rerender({ pendingIngestPaths: [] });
+    rerender({ pendingIngestPaths: ["/x/b.csv"] });
+
+    // Second distinct payload consumed again — not blocked by stale dedup.
+    await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-1", "/x/b.csv"));
+    expect(onIngestConsumed).toHaveBeenCalledTimes(2);
+    expect(ingestFile).toHaveBeenCalledTimes(2);
   });
 });

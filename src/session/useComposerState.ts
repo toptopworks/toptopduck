@@ -126,10 +126,17 @@ export function useComposerState(
   );
 
   // Seed a session's draft by explicit sid (#500 held-back question path).
+  // Only writes when the slot is empty so a user who typed into the bar
+  // during the ingest window (pane mounted, files loading) does not lose
+  // their edits when the batch halts and the held-back question is seeded.
   // Identity-stable (no deps): SessionPane receives it as a prop and calls it
   // from the pending-payload consumption effect.
   const seedDraft = useCallback((sid: string, value: string) => {
-    setSessionDrafts((prev) => ({ ...prev, [sid]: value }));
+    setSessionDrafts((prev) => {
+      const existing = prev[sid];
+      if (existing != null && existing !== "") return prev;
+      return { ...prev, [sid]: value };
+    });
   }, []);
 
   // Drop a closed/deleted session's draft slot. Identity-stable (no deps):

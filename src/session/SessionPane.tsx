@@ -187,8 +187,10 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
   // shows the banner) suppresses the auto-ask -- the dialog or banner owns the
   // user's attention -- and hands the question back to the bar draft via
   // onSeedDraft so it is never silently lost.
-  // No .catch on handleAsk: it catches its own failures internally (sets the
-  // session error state) and never rejects.
+  // handleAsk catches its own failures internally (sets the session error
+  // state) and never intentionally rejects; the `.catch` below is a defensive
+  // log so an unexpected throw surfaces instead of becoming an unhandled
+  // rejection.
   const consumedPendingRef = useRef<string | null>(null);
   useEffect(() => {
     const paths = pendingIngestPaths;

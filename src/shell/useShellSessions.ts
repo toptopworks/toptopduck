@@ -294,7 +294,7 @@ export function useShellSessions({
   // surfaces via setShellError so the user is informed their picker selection
   // was not applied.
   //
-  // Reentry guard (review H-1): mintingRef blocks a second creation while the
+  // Reentry guard: mintingRef blocks a second creation while the
   // createSession IPC is in flight — a fast double-submit on the cold-start
   // bar would otherwise mint two sessions before activeSessionId flips.
   // Mirrors the droppingRef pattern in dropFile below.
@@ -616,9 +616,10 @@ export function useShellSessions({
   // shape read `next` out of an updater closure and ran a second setState for
   // the active id, nesting a setter inside another's updater (a React purity
   // violation: updaters may double-fire in StrictMode / concurrent mode).
-  // Setting activeId to null when the removed sid was active lets `apply`'s
-  // reconciler pick the first remaining entry (then null), matching the old
-  // next[0]?.sid ?? null fallback.
+  // Keeping the stale sid as activeId when the removed sid was active lets
+  // `apply`'s reconciler pick the fallback (first remaining session, then
+  // null). Explicitly setting null would now be respected as ADR-0092
+  // empty-state navigation instead of triggering the fallback.
   const unmountOpen = useCallback(
     (sid: string): void => {
       queryClient.removeQueries({ queryKey: ["session", sid] });
