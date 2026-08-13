@@ -12,16 +12,10 @@ export interface BarRect {
   bottom: number;
 }
 
-/** The DOMRect mock body shared by both stubs (jsdom's DOMRect shape). */
+/** Build a DOMRect from border coordinates. Uses the native constructor so
+ *  toJSON and all derived fields (x/y/width/height) are correct. */
 function domRect(rect: BarRect): DOMRect {
-  return {
-    x: rect.left,
-    y: rect.top,
-    width: rect.right - rect.left,
-    height: rect.bottom - rect.top,
-    toJSON: () => ({}),
-    ...rect,
-  } as DOMRect;
+  return new DOMRect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
 }
 
 /** Mount a `.question-bar` element with a stubbed rect for tests that render

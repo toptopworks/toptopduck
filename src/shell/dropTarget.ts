@@ -1,3 +1,5 @@
+import { log } from "../lib/log";
+
 // Drop-target hit test for the single webview-level file drop router (#501).
 // Tauri's onDragDropEvent is a window-level signal with no hit test (#81), so
 // the shell's ONE drop listener owns per-target routing. ADR-0092 Decision 2:
@@ -25,7 +27,10 @@ const COMPOSER_BAR_SELECTOR = ".question-bar";
  *  fail-open default keeps the ADR-0061 drop-to-create path alive. */
 export function isPointOverComposerBar(position: DropPoint): boolean {
   const bar = document.querySelector(COMPOSER_BAR_SELECTOR);
-  if (!(bar instanceof HTMLElement)) return false;
+  if (!(bar instanceof HTMLElement)) {
+    log.debug("dropTarget", "composer bar not mounted; guard skipped (fail-open)");
+    return false;
+  }
   const rect = bar.getBoundingClientRect();
   const scale = window.devicePixelRatio || 1;
   const x = position.x / scale;

@@ -780,7 +780,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
   // ADR-0061 drop-to-create (#81 A1), carrier moved to the ADR-0092 empty
   // state (#501): a file dropped on the empty-state main area around the
   // centered bar mints a session and the new SessionPane ingests the path via
-  // handleIngest (the only path that can surface an xlsx NeedsGuidance
+  // handleIngestMany (the only path that can surface an xlsx NeedsGuidance
   // result). Asserts the createSession + ingestFile wiring at the shell
   // boundary.
   it("drop on the cold-start empty area mints a session and ingests the file (ADR-0061/0092, #81 A1, #501)", async () => {
@@ -793,7 +793,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
     // corner -- the empty-state area, clear of the centered bar.
     dropEvent.handler!({ payload: { type: "drop", paths: ["/x/foo.csv"], position: { x: 5, y: 5 } } });
     await waitFor(() => expect(createSession).toHaveBeenCalled());
-    // The minted session's SessionPane consumes the path via handleIngest.
+    // The minted session's SessionPane consumes the path via handleIngestMany.
     await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-drop", "/x/foo.csv"));
   });
 

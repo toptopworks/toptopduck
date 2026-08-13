@@ -444,7 +444,10 @@ export function useShellSessions({
         // drop-to-create. The guard is cold-start only: an active-session drop
         // routes to that session's ingest wherever it lands (AC: the
         // per-session drop path is unchanged).
-        if (position !== undefined && isPointOverComposerBar(position)) return;
+        if (position !== undefined && isPointOverComposerBar(position)) {
+          log.debug("useShellSessions", "drop swallowed: landed on composer bar");
+          return;
+        }
         void dropFile(path);
         return;
       }
