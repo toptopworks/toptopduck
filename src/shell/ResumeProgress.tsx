@@ -1,5 +1,5 @@
 import { useIntl } from "react-intl";
-import { Alert } from "../components/ui/alert";
+import { Alert, AlertTitle } from "../components/ui/alert";
 import type { ResumeStatus } from "./useShellSessions";
 
 // Resume progress status (ADR-0034). ResumeStatus is a structured discriminated
@@ -54,17 +54,21 @@ export function ResumeProgress({
   // on Alert default retires it onto the same info surface other disclosures
   // use, eliminating the cross-surface drift ADR-0067 Decision 1 targets. The
   // transient info-line weight is preserved (single short status line, polite
-  // aria-live + role=status override the Alert's assertive default). The
+  // aria-live + role=status override the Alert's assertive default). The text
+  // rides an AlertTitle because the Alert base grid reserves col 1 (width 0)
+  // for an icon and places content slots at col-start-2 -- a bare text child
+  // lands in the 0-width column and wraps one character per line. The
   // .resume-progress class hook stays on the Alert for selector stability and
-  // for the .shell > .resume-progress grid placement (still in styles.css as
-  // layout-only, grid-column/grid-row).
+  // for the .main-area > .resume-progress overlay placement (still in
+  // styles.css as layout-only, an absolute overlay inside .main-area so its
+  // mount/unmount never shifts the grid rows).
   return (
     <Alert
       className="resume-progress my-1.5"
       role="status"
       aria-live="polite"
     >
-      {text}
+      <AlertTitle>{text}</AlertTitle>
     </Alert>
   );
 }

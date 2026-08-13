@@ -283,6 +283,15 @@ export default function App() {
     activeSessionId,
     activeSessionFields ?? IDLE_SESSION_FIELDS,
   );
+  // The active pane's fold mirrored onto the shell-level layout (.main-area
+  // class + the bar slot's ws-collapsed). Defaults to COLLAPSED while the
+  // pane has not reported its fields yet (the activation -> mount-report
+  // window): every SessionPane mount path starts folded (useWorkspaceCollapse
+  // initial state), so the mirrors render the folded geometry from the entry
+  // frame instead of one frame at rail-width geometry followed by a 280ms
+  // slide into the collapsed track.
+  const activeWsCollapsed =
+    activeSessionId !== null && (activeSessionFields?.workspaceCollapsed ?? true);
 
   // ADR-0092 Decision 6 (#500): shell-level pending composer posture for the
   // cold-start bar. Every composer control renders on the centered bar with
@@ -654,12 +663,6 @@ export default function App() {
                   {platform !== "macos" && <WindowControls />}
                 </header>
 
-                {/* Resume progress strip (ADR-0034). Absent unless an open/resume
-                  runs -- `idle` is the ADT's resting state (issue #205), so the
-                  gate discriminates on `kind` instead of truthiness-coercing a
-                  nullable. */}
-                {resumeStatus.kind !== "idle" && <ResumeProgress status={resumeStatus} />}
-
                 {/* Row 3 (cols 2+): main area = session panes + shell-level bar.
                     ADR-0092: the main area is a flex column. The session pane
                     host fills the available space; the shell bar sits at the
@@ -667,7 +670,7 @@ export default function App() {
                     centered and the pane host collapses. flex-grow interpolates
                     between the two postures (CSS transition), so the bar glides
                     centered <-> bottom on first submit / "+" navigation. */}
-                <main className={`main-area${activeSessionFields?.workspaceCollapsed ? " workspace-collapsed" : ""}`}>
+                <main className={`main-area${activeWsCollapsed ? " workspace-collapsed" : ""}`}>
                   <div className="session-pane-host">
                     {openSessions.map((s) => (
                       <div
@@ -712,7 +715,7 @@ export default function App() {
                       hook mirrors the active pane's workspace fold so the bar
                       width tracks the conversation column in both postures. */}
                   <div
-                    className={`shell-bar-slot${activeSessionId === null ? " centered" : " bottom"}${activeSessionFields?.workspaceCollapsed ? " ws-collapsed" : ""}`}
+                    className={`shell-bar-slot${activeSessionId === null ? " centered" : " bottom"}${activeWsCollapsed ? " ws-collapsed" : ""}`}
                   >
                     {activeSessionId === null && (
                       <label htmlFor="question-bar-input" className="cold-start-greeting m-0 text-center text-[1.4rem] font-semibold text-foreground">
@@ -788,6 +791,16 @@ export default function App() {
                       the pane host — matching the sidebar handle's reach. Hidden
                       via CSS when cold-start, settings mode, or workspace folded. */}
                   <div className="rail-resize-handle" onPointerDown={onRailResizeStart} />
+
+                  {/* Resume progress strip (ADR-0034). Absent unless an open/
+                      resume runs -- `idle` is the ADT's resting state (issue
+                      #205), so the gate discriminates on `kind` instead of
+                      truthiness-coercing a nullable. Rendered INSIDE main-area
+                      as an absolutely-positioned overlay (see styles.css): the
+                      former in-flow shell-grid row-2 placement shifted the whole
+                      main area down on mount + back up on unmount, bouncing the
+                      visible session header on every open/resume. */}
+                  {resumeStatus.kind !== "idle" && <ResumeProgress status={resumeStatus} />}
                 </main>
 
                 {shellError && (

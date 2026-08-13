@@ -195,15 +195,11 @@
   display: flex; align-items: center;
   height: 40px; min-height: 40px;
 }
-/* --- Row 2: resume progress strip (ADR-0034; absent unless resume runs) --
- * ADR-0067 (issue #182): the .resume-progress bespoke tint retired onto a
- * shadcn Alert default variant on App.tsx; this rule is layout-only now
- * (grid-column / grid-row), placing the strip in the shell grid's row 2 / col
- * 2. The Alert chrome (border + rounded-lg + bg-card) renders natively -- the
- * retired margin:0 / border-radius:0 overrides existed only to defeat the
- * legacy bespoke strip's own radius/padding, no longer needed. The
- * .resume-progress class hook stays on the <Alert> for selector stability. */
-.shell > .resume-progress { grid-column: 2; grid-row: 2; }
+/* --- Row 2: shell error banner (absent unless a shell error is set) ------
+ * Row 2 formerly also hosted the resume progress strip; that moved to an
+ * overlay inside .main-area (see the .main-area > .resume-progress rule in
+ * the main-area section below) so its mount/unmount no longer shifts the
+ * grid rows. The shell error banner keeps the in-flow row-2 placement. */
 .shell > .shell-error { grid-column: 2; grid-row: 2; margin: 0.4rem 1rem; }
 
 /* --- Settings in-app overlay view (ADR-0065, issue #151) -----------------
@@ -330,6 +326,27 @@
 .cold-start-mode .session-pane-host { flex: 0; }
 .session-pane-layer { position: absolute; inset: 0; }
 .session-pane-layer.hidden { display: none; }
+/* Resume progress strip (ADR-0034; absent unless a resume runs). An overlay
+ * inside .main-area instead of an in-flow shell-grid row: the former row-2
+ * placement shifted the whole main area down on mount and back up on unmount,
+ * so the visible session header bounced on every open / resume (the title
+ * position flicker). Absolutely positioned, the strip mounts and unmounts
+ * with ZERO layout shift; it covers the session-header strip while a resume
+ * runs, and the incoming session's header lands at the exact same position.
+ * z-index above the rail resize handle (10) so the status line reads clean.
+ * pointer-events:none -- the strip is a transient status line, never an
+ * interaction target, so it must not block the header controls underneath
+ * while it lingers. ADR-0067 (issue #182): the Alert chrome (border +
+ * rounded-lg + bg-card) rides the shadcn Alert default variant; this rule is
+ * layout-only. The .resume-progress class hook stays for selector stability. */
+.main-area > .resume-progress {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 11;
+  pointer-events: none;
+}
 
 /* --- Shell-level bar slot (ADR-0092) -------------------------------------
  * The QuestionBar lives at the shell level as a single instance. Two
