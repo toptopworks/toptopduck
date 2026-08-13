@@ -12,11 +12,15 @@ import type { ThreadEntry, TurnOutcome } from "../types/thread";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 const dropEvent = vi.hoisted(() => ({
-  handler: null as null | ((e: { payload: { type: string; paths: string[] } }) => void),
+  handler: null as
+  | null
+  | ((e: { payload: { type: string; paths: string[]; position?: { x: number; y: number } } }) => void),
 }));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({
-    onDragDropEvent: (cb: (e: { payload: { type: string; paths: string[] } }) => void) => {
+    onDragDropEvent: (
+      cb: (e: { payload: { type: string; paths: string[]; position?: { x: number; y: number } } }) => void,
+    ) => {
       dropEvent.handler = cb;
       return Promise.resolve(() => {});
     },
@@ -28,6 +32,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 // runtime (which reads window.__TAURI metadata and crashes the shell-level
 // boundary).
 import { buildTauriWindowMock } from "./setup/tauriWindowMock";
+import { stubRenderedComposerBar } from "./setup/barRectStub";
 
 vi.mock("@tauri-apps/api/window", () => buildTauriWindowMock().module);
 
@@ -772,21 +777,70 @@ describe("App multi-session shell (issue #81 ACs)", () => {
     await waitFor(() => expect(renameSession).toHaveBeenCalledWith("sess-1", "季报"));
   });
 
-  // ADR-0061 drop-to-create (#81 A1): a file dropped on the cold-start hero
-  // mints a session and the new SessionPane ingests the path via handleIngest
-  // (the only path that can surface an xlsx NeedsGuidance result). Asserts the
-  // createSession + ingestFile wiring at the shell boundary.
-  it("drop on the cold hero mints a session and ingests the file (ADR-0061, #81 A1)", async () => {
+  // ADR-0061 drop-to-create (#81 A1), carrier moved to the ADR-0092 empty
+  // state (#501): a file dropped on the empty-state main area around the
+  // centered bar mints a session and the new SessionPane ingests the path via
+  // handleIngestMany (the only path that can surface an xlsx NeedsGuidance
+  // result). Asserts the createSession + ingestFile wiring at the shell
+  // boundary.
+  it("drop on the cold-start empty area mints a session and ingests the file (ADR-0061/0092, #81 A1, #501)", async () => {
     vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-drop", duck_path: "/sessions/sess-drop/session.duck" });
     vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("dropped") });
     render(<App />);
-    // Cold start: the hero is showing, no session yet.
+    // Cold start: the centered bar + greeting are showing, no session yet.
     await waitFor(() => expect(dropEvent.handler).not.toBeNull());
-    // Simulate a webview drop of one data file.
-    dropEvent.handler!({ payload: { type: "drop", paths: ["/x/foo.csv"] } });
+    // Simulate a webview drop of one data file in the window's top-left
+    // corner -- the empty-state area, clear of the centered bar.
+    dropEvent.handler!({ payload: { type: "drop", paths: ["/x/foo.csv"], position: { x: 5, y: 5 } } });
     await waitFor(() => expect(createSession).toHaveBeenCalled());
-    // The minted session's SessionPane consumes the path via handleIngest.
+    // The minted session's SessionPane consumes the path via handleIngestMany.
     await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-drop", "/x/foo.csv"));
+  });
+
+  // ADR-0092 Decision 2 (#501): the centered composer bar itself is inert to
+  // drops. The webview drop router hit-tests the drop position against the
+  // bar's rect; a drop ON the bar must not mint a session (accidental-drop
+  // guard), and the shell stays on the centered empty state.
+  it("drop ON the centered composer bar is inert on cold start (ADR-0092 Decision 2, #501)", async () => {
+    // No createSession return is staged on purpose: the contract is that the
+    // IPC is never called. A queued mockResolvedValueOnce a test never
+    // consumes survives clearAllMocks and would leak into a later test.
+    render(<App />);
+    await waitFor(() => expect(dropEvent.handler).not.toBeNull());
+    // jsdom has no layout; pin the rendered bar's geometry so the router's
+    // hit test reads a real rect (shared barRectStub).
+    stubRenderedComposerBar({ left: 100, top: 200, right: 820, bottom: 400 });
+    // Drop in the middle of the bar.
+    dropEvent.handler!({ payload: { type: "drop", paths: ["/x/foo.csv"], position: { x: 400, y: 300 } } });
+    // The guard runs synchronously ahead of dropFile; flush a microtask tick
+    // anyway so an accidental async path would land before the negative
+    // assertion.
+    await act(async () => {});
+    expect(createSession).not.toHaveBeenCalled();
+    // Still on the centered empty state (no mint -> activeSessionId null).
+    expect(document.querySelector(".shell")?.classList.contains("cold-start-mode")).toBe(true);
+    expect(document.querySelector(".shell-bar-slot")?.classList.contains("centered")).toBe(true);
+  });
+
+  // #501 AC: the drop-minted session appears in the sidebar list, and the bar
+  // slot glides centered -> bottom once activeSessionId flips.
+  it("a drop-minted session appears in the sidebar + the bar moves to the bottom (#501)", async () => {
+    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-drop", duck_path: "/sessions/sess-drop/session.duck" });
+    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("dropped") });
+    render(<App />);
+    await waitFor(() => expect(dropEvent.handler).not.toBeNull());
+    expect(document.querySelector(".session-list [aria-current='true']")).toBeNull();
+    // Drop in the empty-state area (top-left corner, clear of the bar).
+    dropEvent.handler!({ payload: { type: "drop", paths: ["/x/foo.csv"], position: { x: 5, y: 5 } } });
+    // The minted session joins the sidebar as the ACTIVE entry at once
+    // (sidebarModel renders open sessions absent from the persisted scan).
+    await waitFor(() => {
+      expect(document.querySelector(".session-list [aria-current='true']")).not.toBeNull();
+    });
+    // ...and the bar slot left the centered posture.
+    await waitFor(() => {
+      expect(document.querySelector(".shell-bar-slot")?.classList.contains("bottom")).toBe(true);
+    });
   });
 });
 
@@ -1781,8 +1835,10 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("dropped") });
     render(<App />);
     await openSession();
-    // Simulate a webview drop while sess-1 is active.
-    dropEvent.handler!({ payload: { type: "drop", paths: ["/x/new.csv"] } });
+    // Simulate a webview drop while sess-1 is active. The position rides the
+    // payload as Tauri always sends it (#501); the active-session route
+    // ignores it (the bar-inert guard is cold-start only).
+    dropEvent.handler!({ payload: { type: "drop", paths: ["/x/new.csv"], position: { x: 5, y: 5 } } });
     await waitFor(() =>
       expect(ingestFile).toHaveBeenCalledWith("sess-1", "/x/new.csv"),
     );
