@@ -68,21 +68,22 @@
  * ADR-0067 (issue #171): the shell-skeleton VISUAL rules -- .session-sidebar
  * bg/border/padding, .sidebar-new-button, .sidebar-error, .session-empty,
  * .session-group* typography, .session-entry* three-state bg/color/accent,
- * .session-entry-menu hover, .session-menu popover chrome + shadow + items,
  * .topbar bg/border-bottom, .sidebar-toggle, .topbar-session-
  * name typography + truncation, and the whole .profile-switcher* block
  * (trigger + hover, name, chevron opacity, menu popover + shadow, item three-
  * state + aria-checked typography, error padding) -- were retired into
  * SessionSidebar.tsx + App.tsx as Tailwind utility + ADR-0050 token +
  * conditional className (the .profile-switcher* rules rode ProfileSwitcher.tsx,
- * later deleted wholesale in issue #240 / ADR-0071). The GRID + FLEX LAYOUT
+ * later deleted wholesale in issue #240 / ADR-0071; the .session-entry-menu
+ * hover + .session-menu popover chrome were retired in issue #511 / ADR-0093
+ * when the sidebar row became pure navigation). The GRID + FLEX LAYOUT
  * shells below -- .shell (three-column grid + the sidebar-collapsed grid
  * overlays), .session-sidebar (col 1 grid + flex column + overflow-y scroll),
  * .session-list (flex:1 scroll container), and .topbar (row 1 grid + flex row
  * + fixed height) -- remain as semantic layout-only CSS; cramming them into
  * utility long-strings would obscure the three-column shell structure
  * (ADR-0067 Decision 1). The semantic class hooks (.session-sidebar /
- * .session-entry / .session-entry-main / .session-menu / .topbar /
+ * .session-entry / .session-entry-main / .topbar /
  * .sidebar-toggle / .topbar-session-name
  * etc.) are kept on the components for selector / test stability.
  * ========================================================================= */

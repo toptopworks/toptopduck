@@ -33,7 +33,7 @@ function twoOpenSessions(): OpenSession[] {
 }
 
 describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
-  it("session-entry.active lifts bg-accent + text-accent-foreground + left inset bar + aria-current (ADR-0072, issue #249)", () => {
+  it("session-entry.active lifts bg-accent + text-accent-foreground + aria-current (ADR-0093, issue #511)", () => {
     const { container } = renderShell(
       <SessionSidebar
         collapsed={false}
@@ -62,15 +62,15 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     const classes = active?.className.split(/\s+/);
     expect(classes).toContain("bg-accent");
     expect(classes).toContain("text-accent-foreground");
-    expect(classes).toContain("shadow-[inset_2px_0_var(--primary)]");
+    // ADR-0093 (issue #511): the inset shadow left bar is retired — active
+    // state is expressed solely via the accent background.
+    expect(classes).not.toContain("shadow-[inset_2px_0_var(--primary)]");
     expect(classes).not.toContain("bg-primary");
-    expect(classes).not.toContain("text-primary-foreground");
-    expect(classes).not.toContain("font-semibold");
     // The tint is decorative; aria-current is the active row's AT signal.
     expect(active).toHaveAttribute("aria-current", "true");
   });
 
-  it("session-entry.open:not(.active) lifts the left accent shadow with no tint (ADR-0072, issue #249)", () => {
+  it("session-entry.open:not(.active) carries no inset bar and no accent tint (ADR-0093, issue #511)", () => {
     const { container } = renderShell(
       <SessionSidebar
         collapsed={false}
@@ -97,15 +97,15 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     const bg = container.querySelector(".session-entry.open:not(.active) .session-entry-main");
     expect(bg).not.toBeNull();
     const classes = bg?.className.split(/\s+/);
-    expect(classes).toContain("shadow-[inset_2px_0_var(--primary)]");
-    // The tint is active-only: an open-but-background row carries just the bar.
+    // ADR-0093 (issue #511): no inset shadow on any row — active-only tint.
+    expect(classes).not.toContain("shadow-[inset_2px_0_var(--primary)]");
     expect(classes).not.toContain("bg-accent");
     expect(classes).not.toContain("text-accent-foreground");
     // Only the active row carries aria-current.
     expect(bg).not.toHaveAttribute("aria-current");
   });
 
-  it("session-entry-main renders a leading MessageSquare icon on every row (ADR-0072, issue #249)", () => {
+  it("session-entry-main renders a primary status dot for open sessions (ADR-0093, issue #511)", () => {
     const { container } = renderShell(
       <SessionSidebar
         collapsed={false}
@@ -131,17 +131,60 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     );
     const rows = container.querySelectorAll(".session-entry-main");
     expect(rows.length).toBe(2);
+    // Both open sessions carry a primary-colored status dot nested inside the
+    // equal-width slot; no MessageSquare icon anymore.
     rows.forEach((row) => {
-      const first = row.firstElementChild;
-      expect(first).not.toBeNull();
-      // Verifying the FIRST child is the svg proves the "leading" claim --
-      // a count alone would miss a reordering. Decorative (aria-hidden) since
-      // the session name is the accessible label.
-      if (!first) return;
-      expect(first.tagName).toBe("svg");
-      expect(first).toHaveClass("lucide-message-square");
-      expect(first).toHaveAttribute("aria-hidden", "true");
+      const slot = row.firstElementChild;
+      expect(slot).not.toBeNull();
+      if (!slot) return;
+      expect(slot.tagName).toBe("SPAN");
+      expect(slot.className.split(/\s+/)).toContain("size-4");
+      const dot = slot.querySelector(".sidebar-status-dot");
+      expect(dot).not.toBeNull();
+      expect(dot?.className.split(/\s+/)).toContain("bg-primary");
+      expect(dot).toHaveAttribute("aria-hidden", "true");
+      // No lucide icon remains.
+      expect(row.querySelector("svg.lucide-message-square")).toBeNull();
     });
+  });
+
+  it("session-entry-main has no status dot for a not-open persisted entry (ADR-0093, issue #511)", () => {
+    const persisted: SessionMetadata = {
+      duck_path: "/x/closed.duck",
+      display_name: "Closed",
+      last_modified_at: Date.now(),
+      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+      format_version: 1,
+    };
+    const { container } = renderShell(
+      <SessionSidebar
+        collapsed={false}
+        sessions={[persisted]}
+        openSessions={[]}
+        activeSessionId={null}
+        disabled={false}
+        loadError={null}
+        onNew={() => {}}
+        onOpenDuck={() => {}}
+        onActivate={() => {}}
+        onExport={() => {}}
+        onOpenPersisted={() => {}}
+        onClose={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        grouping="flat"
+        onSwitchGrouping={() => {}}
+        onOpenSearch={() => {}}
+        provider={null}
+        onOpenSettings={() => {}}
+      />,
+    );
+    // The equal-width slot (size-4 span) is always rendered so titles align,
+    // but a not-open row has no dot inside it.
+    const slot = container.querySelector(".session-entry-main > span:first-child");
+    expect(slot).not.toBeNull();
+    expect(slot?.className.split(/\s+/)).toContain("size-4");
+    expect(slot?.querySelector(".sidebar-status-dot")).toBeNull();
   });
 
   it("session-entry-main keeps appearance-none reset + hover:bg-accent + rounded-md on the default row", () => {
@@ -183,84 +226,17 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     expect(classes).toContain("rounded-md");
     expect(classes).toContain("disabled:opacity-50");
     expect(classes).toContain("disabled:cursor-progress");
-    // Default row is not open and not active, so it carries neither the tint
-    // (bg-accent, active-only since ADR-0072) nor the left bar (entry.sid-only).
+    // Default row is not open and not active — no accent tint, no inset bar
+    // (ADR-0093 retired inset bars entirely).
     expect(classes).not.toContain("bg-primary");
     expect(classes).not.toContain("bg-accent");
     expect(classes).not.toContain("shadow-[inset_2px_0_var(--primary)]");
+    // No title attribute (ADR-0093 retired the native tooltip).
+    expect(main).not.toHaveAttribute("title");
   });
 
-  it("session-menu popover carries absolute + bg-card + shadow + border", () => {
-    const { container } = renderShell(
-      <SessionSidebar
-        collapsed={false}
-        sessions={[]}
-        openSessions={twoOpenSessions()}
-        activeSessionId="sess-active"
-        disabled={false}
-        loadError={null}
-        onNew={() => {}}
-        onOpenDuck={() => {}}
-        onActivate={() => {}}
-        onExport={() => {}}
-        onOpenPersisted={() => {}}
-        onClose={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
-        grouping="flat"
-        onSwitchGrouping={() => {}}
-        onOpenSearch={() => {}}
-        provider={null}
-        onOpenSettings={() => {}}
-      />,
-    );
-    fireEvent.click(container.querySelector(".session-entry-menu") as HTMLButtonElement);
-    const menu = container.querySelector(".session-menu");
-    expect(menu).not.toBeNull();
-    const classes = menu?.className.split(/\s+/);
-    expect(classes).toContain("absolute");
-    expect(classes).toContain("bg-card");
-    expect(classes).toContain("border");
-    expect(classes).toContain("border-border");
-    expect(classes).toContain("shadow-md");
-  });
-
-  it("session-menu danger item lifts text-destructive (retires .session-menu button.danger)", () => {
-    const persisted: SessionMetadata = {
-      duck_path: "/x/persisted.duck",
-      display_name: "Persisted",
-      last_modified_at: Date.now(),
-      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
-      format_version: 1,
-    };
-    const { container } = renderShell(
-      <SessionSidebar
-        collapsed={false}
-        sessions={[persisted]}
-        openSessions={[]}
-        activeSessionId={null}
-        disabled={false}
-        loadError={null}
-        onNew={() => {}}
-        onOpenDuck={() => {}}
-        onActivate={() => {}}
-        onExport={() => {}}
-        onOpenPersisted={() => {}}
-        onClose={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
-        grouping="flat"
-        onSwitchGrouping={() => {}}
-        onOpenSearch={() => {}}
-        provider={null}
-        onOpenSettings={() => {}}
-      />,
-    );
-    fireEvent.click(container.querySelector(".session-entry-menu") as HTMLButtonElement);
-    const danger = container.querySelector(".session-menu button.danger");
-    expect(danger).not.toBeNull();
-    expect(danger?.className.split(/\s+/)).toContain("text-destructive");
-  });
+  // ADR-0093 (issue #511): the session-menu popover + danger item tests are
+  // retired — the ⋯ context menu moved to .session-header (slice 2, #512).
 
   // ADR-0072 (issue #250): brand title row (product name left + circular
   // search magnifier right) + fused bg-secondary New icon button replace the
@@ -621,72 +597,9 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
     expect(screen.queryByRole("radio", { name: /In a list/i })).toBeNull();
   });
 
-  it("closes the entry context menu on click-away (issue #258)", () => {
-    // The context menu is a hand-positioned div (not a Radix Popover); without
-    // the click-away effect a pointer-down outside the row left it stuck open,
-    // forcing the user to click a menu item or re-toggle the ⋯ button.
-    const { container } = renderShell(
-      <SessionSidebar
-        collapsed={false}
-        sessions={[onePersisted()]}
-        openSessions={[]}
-        activeSessionId={null}
-        disabled={false}
-        loadError={null}
-        grouping="flat"
-        onNew={() => {}}
-        onOpenDuck={() => {}}
-        onActivate={() => {}}
-        onExport={() => {}}
-        onOpenPersisted={() => {}}
-        onClose={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
-        onSwitchGrouping={() => {}}
-        onOpenSearch={() => {}}
-        provider={null}
-        onOpenSettings={() => {}}
-      />,
-    );
-    const trigger = screen.getByRole("button", { name: /Session actions/i });
-    fireEvent.click(trigger);
-    expect(screen.getByRole("menu")).toBeInTheDocument();
-
-    fireEvent.mouseDown(container.querySelector(".session-sidebar")!);
-    expect(screen.queryByRole("menu")).toBeNull();
-  });
-
-  it("closes the entry context menu on Escape (issue #258)", () => {
-    const { container } = renderShell(
-      <SessionSidebar
-        collapsed={false}
-        sessions={[onePersisted()]}
-        openSessions={[]}
-        activeSessionId={null}
-        disabled={false}
-        loadError={null}
-        grouping="flat"
-        onNew={() => {}}
-        onOpenDuck={() => {}}
-        onActivate={() => {}}
-        onExport={() => {}}
-        onOpenPersisted={() => {}}
-        onClose={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
-        onSwitchGrouping={() => {}}
-        onOpenSearch={() => {}}
-        provider={null}
-        onOpenSettings={() => {}}
-      />,
-    );
-    const trigger = screen.getByRole("button", { name: /Session actions/i });
-    fireEvent.click(trigger);
-    expect(screen.getByRole("menu")).toBeInTheDocument();
-
-    fireEvent.keyDown(container.querySelector(".session-sidebar")!, { key: "Escape" });
-    expect(screen.queryByRole("menu")).toBeNull();
-  });
+  // ADR-0093 (issue #511): the context-menu click-away + Escape tests are
+  // retired — the ⋯ context menu + its hand-positioned dismissal logic moved
+  // to .session-header (slice 2, #512).
 });
 
 describe("SessionSidebar settings footer (issue #282)", () => {
@@ -788,7 +701,7 @@ describe("SessionSidebar pending-approval coloring (ADR-0083, issue #297)", () =
     };
   }
 
-  it("tints the entry of a session with an unanswered approval (dot + warning bar + data hook)", () => {
+  it("tints the entry of a session with an unanswered approval (warning dot + sr-only + data hook)", () => {
     const { container } = renderShell(
       <SessionSidebar
         {...baseProps()}
@@ -800,9 +713,16 @@ describe("SessionSidebar pending-approval coloring (ADR-0083, issue #297)", () =
     expect(entry?.className.split(/\s+/)).toContain("pending-approval");
     // The background session's row -- not the active one -- carries the mark.
     expect(entry?.querySelector(".session-name")?.textContent).toContain("Background");
-    expect(entry?.querySelector(".sidebar-pending-dot")).not.toBeNull();
+    // ADR-0093 (issue #511): the status dot flips to warning color (was a
+    // separate inline dot + inset bar; both replaced by the status dot).
+    const dot = entry?.querySelector(".sidebar-status-dot");
+    expect(dot).not.toBeNull();
+    expect(dot?.className.split(/\s+/)).toContain("bg-warning");
+    // The sr-only pending-approval text stays for assistive tech.
+    expect(entry?.querySelector(".sr-only")?.textContent).toContain("awaiting approval");
+    // No inset shadow on any row (ADR-0093 retired bars).
     const main = entry?.querySelector(".session-entry-main");
-    expect(main?.className.split(/\s+/)).toContain("shadow-[inset_2px_0_var(--warning)]");
+    expect(main?.className.split(/\s+/)).not.toContain("shadow-[inset_2px_0_var(--warning)]");
     // The active session has no pending approval: no mark on its row.
     expect(container.querySelector(".session-entry.active[data-pending-approval]")).toBeNull();
   });
@@ -810,7 +730,7 @@ describe("SessionSidebar pending-approval coloring (ADR-0083, issue #297)", () =
   it("leaves every row unmarked when no session has a pending approval (default)", () => {
     const { container } = renderShell(<SessionSidebar {...baseProps()} />);
     expect(container.querySelector("[data-pending-approval]")).toBeNull();
-    expect(container.querySelector(".sidebar-pending-dot")).toBeNull();
+    expect(container.querySelector(".bg-warning")).toBeNull();
   });
 });
 

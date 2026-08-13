@@ -146,10 +146,8 @@ import {
   askQuestion,
   cancelQuery,
   closeSession,
-  closeSessionAndWaitRelease,
   conversation,
   createSession,
-  deleteSession,
   getAppConfig,
   getAuthorizationMode,
   getSessionRuntime,
@@ -163,7 +161,6 @@ import {
   mountSkill,
   openDuck,
   readRows,
-  renameSession,
   rescanAdapters,
   setAppConfig,
   setAuthorizationMode,
@@ -743,39 +740,8 @@ describe("App multi-session shell (issue #81 ACs)", () => {
     expect(conversation).toHaveBeenCalledTimes(2); // unchanged -- no refetch
   });
 
-  it("closes the active session: closeSession + drops it from the open set (ADR-0055)", async () => {
-    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
-    render(<App />);
-    await openSession();
-
-    // Open the context menu on the one open entry, then Close.
-    fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
-    fireEvent.click(screen.getByRole("menuitem", { name: "关闭" }));
-
-    await waitFor(() => expect(closeSession).toHaveBeenCalledWith("sess-1"));
-    // ADR-0092: the shell-level bar persists (it is always rendered). The
-    // session chrome (rail) is gone — that proves the session was closed.
-    await waitFor(() =>
-      expect(document.querySelector(".session-rail")).not.toBeInTheDocument(),
-    );
-  });
-
-  it("renames the open session via the sidebar context menu (ADR-0060 single entry)", async () => {
-    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
-    vi.mocked(renameSession).mockResolvedValue("季报");
-    render(<App />);
-    await openSession();
-
-    fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
-    fireEvent.click(screen.getByRole("menuitem", { name: "重命名" }));
-    // Rename dialog: the input is labelled "会话名" (Radix Label htmlFor),
-    // disambiguating it from the active session's question-bar textbox ("提问").
-    const input = screen.getByRole("textbox", { name: "会话名" });
-    fireEvent.change(input, { target: { value: "季报" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
-
-    await waitFor(() => expect(renameSession).toHaveBeenCalledWith("sess-1", "季报"));
-  });
+  // ADR-0093 (issue #511): close + rename via sidebar context menu tests
+  // retired — management moved to .session-header (slice 2, #512).
 
   // ADR-0061 drop-to-create (#81 A1), carrier moved to the ADR-0092 empty
   // state (#501): a file dropped on the empty-state main area around the
@@ -1263,248 +1229,13 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
     );
   });
 
-  it("closing an in-flight session unmounts the pane at once + fires closeSession (ADR-0055)", async () => {
-    const { resolve } = pendingAsk();
-    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
-    // closeSession NEVER resolves in this test -- proves the UI does NOT wait.
-    vi.mocked(closeSession).mockImplementation(() => new Promise<boolean>(() => {}));
-
-    render(<App />);
-    await openSession();
-    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "x" } });
-    fireEvent.click(screen.getByRole("button", { name: "提问" }));
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "停止" })).toBeInTheDocument(),
-    );
-
-    // Close via the sidebar context menu WHILE the ask is in-flight.
-    fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
-    fireEvent.click(screen.getByRole("menuitem", { name: "关闭" }));
-
-    // ADR-0055: the pane unmounts IMMEDIATELY -- closeSession is still pending,
-    // yet the session chrome is already gone (no await on the IPC). ADR-0092:
-    // the shell-level bar persists (always rendered); the session rail is the
-    // signal that the pane unmounted.
-    await waitFor(() =>
-      expect(document.querySelector(".session-rail")).not.toBeInTheDocument(),
-    );
-    expect(closeSession).toHaveBeenCalledWith("sess-1");
-
-    // The orphan ask resolves after the pane is gone; the cold-start centered
-    // bar shows — no ghost turn renders. This test asserts only the FRONTEND
-    // contract: the session cache was removed before the orphan resolved, so
-    // its optimistic setQueryData cannot surface a turn.
-    resolve({
-      kind: "Materialized",
-      data: {
-        promotions: [{ dataset: { ...src("result_1"), row_count: 1 }, sql: "SELECT 1" }],
-        viz: null,
-        assumption: null,
-      },
-    });
-    await waitFor(() => expect(screen.getByText(/你想分析什么/)).toBeInTheDocument());
-  });
-
-  it("close still unmounts at once when closeSession rejects (ADR-0055 .catch seam, #83)", async () => {
-    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
-    // closeSession REJECTS -- closeOpen's .catch must swallow it so it does
-    // NOT surface as an unhandled rejection. If someone drops the .catch (or
-    // re-adds an await on closeSession), this test fails on the reject path.
-    vi.mocked(closeSession).mockRejectedValueOnce(new Error("backend gone"));
-
-    render(<App />);
-    await openSession();
-    fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
-    fireEvent.click(screen.getByRole("menuitem", { name: "关闭" }));
-
-    // The pane unmounts synchronously even though closeSession rejects.
-    // ADR-0092: the shell-level bar persists (always rendered), so the session
-    // rail — not the bar's textbox — is the pane-unmounted signal.
-    await waitFor(() =>
-      expect(document.querySelector(".session-rail")).not.toBeInTheDocument(),
-    );
-    // Drain the microtask queue so the rejected closeSession promise settles
-    // through closeOpen's .catch -- the seam this test exists to guard.
-    await waitFor(() => expect(closeSession).toHaveBeenCalledWith("sess-1"));
-  });
+  // ADR-0093 (issue #511): close-in-flight + close-reject tests retired —
+  // the sidebar context menu trigger moved to .session-header (slice 2, #512).
 });
 
-describe("App delete wait-release variant (issue #93 / ADR-0063)", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    state.workingSet = [];
-    state.thread = [];
-    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
-    // Defaults: each test overrides the IPC it needs. Reset implementations
-    // so a prior test's mockImplementation (e.g. a never-resolving wait) does
-    // not leak across describe boundaries.
-    vi.mocked(listSessions).mockResolvedValue([]);
-    vi.mocked(activeDataset).mockResolvedValue(null);
-    vi.mocked(listWorkingSet).mockResolvedValue([]);
-    vi.mocked(conversation).mockResolvedValue([]);
-    vi.mocked(closeSession).mockResolvedValue(false);
-    vi.mocked(closeSessionAndWaitRelease).mockResolvedValue(undefined);
-    vi.mocked(deleteSession).mockResolvedValue(undefined);
-    vi.mocked(openDuck).mockResolvedValue(undefined);
-    vi.stubGlobal("navigator", { language: "zh-CN" });
-  });
-
-  it("delete of an open session calls closeSessionAndWaitRelease (not closeSession) then deleteSession (ADR-0063)", async () => {
-    // The delete path's close variant: the canonical single-writer key must be
-    // released (closeSessionAndWaitRelease blocks until Session::Drop) BEFORE
-    // delete_session's try_acquire gate fires. Pure closeSession is NOT used
-    // here -- it resolves before the key is free, the #93 race.
-    const path = "/x/persisted.duck";
-    vi.mocked(listSessions).mockResolvedValue([
-      {
-        duck_path: path,
-        display_name: "季报",
-        last_modified_at: Date.now(),
-        source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
-        format_version: 1,
-      },
-    ]);
-    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-del", duck_path: "/sessions/sess-del/session.duck" });
-
-    render(<App />);
-    // Open the persisted session (createSession + openDuck).
-    await waitFor(() => expect(screen.getByText("季报")).toBeInTheDocument());
-    fireEvent.click(screen.getByText("季报"));
-    // ADR-0092: the shell-level bar (textbox) is always rendered, so the session
-    // rail — mounted only with the pane — is the "pane is mounted" signal.
-    await waitFor(() =>
-      expect(document.querySelector(".session-rail")).toBeInTheDocument(),
-    );
-
-    // Trigger delete via the sidebar menu: open the menu, click 删除, confirm.
-    fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
-    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
-    fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
-
-    // ADR-0063: the wait-release variant fires first; closeSession (pure) is
-    // NOT called on the delete path. deleteSession runs after the wait resolves.
-    await waitFor(() =>
-      expect(closeSessionAndWaitRelease).toHaveBeenCalledWith("sess-del"),
-    );
-    expect(closeSession).not.toHaveBeenCalled();
-    await waitFor(() => expect(deleteSession).toHaveBeenCalledWith(path));
-  });
-
-  it("delete keeps the pane mounted until closeSessionAndWaitRelease resolves (ADR-0063 Decision 2)", async () => {
-    // Delete is an explicit user intent -- it does NOT get pure close's
-    // zero-wait UI contract (ADR-0055). The pane stays mounted during the
-    // wait and only unmounts AFTER the canonical key is released. This keeps
-    // the timeout-retry UX self-consistent (entry survives, in-place retry).
-    const path = "/x/persisted.duck";
-    vi.mocked(listSessions).mockResolvedValue([
-      {
-        duck_path: path,
-        display_name: "季报",
-        last_modified_at: Date.now(),
-        source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
-        format_version: 1,
-      },
-    ]);
-    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-del", duck_path: "/sessions/sess-del/session.duck" });
-    // Hold the wait-release pending so we can observe the pane STAYS mounted.
-    let resolveWait: () => void = () => {};
-    vi.mocked(closeSessionAndWaitRelease).mockImplementation(
-      () =>
-        new Promise<void>((resolve) => {
-          resolveWait = resolve;
-        }),
-    );
-
-    render(<App />);
-    await waitFor(() => expect(screen.getByText("季报")).toBeInTheDocument());
-    fireEvent.click(screen.getByText("季报"));
-    // ADR-0092: the shell-level bar (textbox) is always rendered, so the session
-    // rail — mounted only with the pane — is the "pane is mounted" signal.
-    await waitFor(() =>
-      expect(document.querySelector(".session-rail")).toBeInTheDocument(),
-    );
-
-    fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
-    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
-    fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
-
-    // The wait was called (delete started), but the pane is STILL mounted --
-    // UI teardown happens AFTER the wait resolves, not synchronously.
-    await waitFor(() =>
-      expect(closeSessionAndWaitRelease).toHaveBeenCalledWith("sess-del"),
-    );
-    // The session rail stays mounted with the pane during the wait.
-    expect(document.querySelector(".session-rail")).toBeInTheDocument();
-    // deleteSession has NOT fired yet -- it waits on the close-wait variant.
-    expect(deleteSession).not.toHaveBeenCalled();
-
-    // Resolve the wait -> the pane unmounts -> deleteSession fires.
-    resolveWait();
-    await waitFor(() =>
-      expect(document.querySelector(".session-rail")).not.toBeInTheDocument(),
-    );
-    await waitFor(() => expect(deleteSession).toHaveBeenCalledWith(path));
-  });
-
-  it("delete unmounts the pane when closeSessionAndWaitRelease fails (ADR-0063 retry path, issue #93)", async () => {
-    // Close-wait failure (timeout, or the backend already detached): the pane
-    // MUST unmount so the entry falls back to the cold sidebar (sid=null). A
-    // retry then takes the pure deleteSession(path) path instead of re-calling
-    // closeSessionAndWaitRelease on a sid the backend no longer knows (which
-    // would NotFound-loop). Without the unmount, the pane is stuck on a dead
-    // sid with no recovery short of restarting the app.
-    const path = "/x/persisted.duck";
-    vi.mocked(listSessions).mockResolvedValue([
-      {
-        duck_path: path,
-        display_name: "季报",
-        last_modified_at: Date.now(),
-        source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
-        format_version: 1,
-      },
-    ]);
-    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-del", duck_path: "/sessions/sess-del/session.duck" });
-    // Real IPC shape (issue #119): a typed SessionError reject, not a JS Error.
-    // The close-wait timeout detail rides Engine.data; the shell must surface
-    // it in the collapsed fold (review H1), not drop it for "Internal error".
-    vi.mocked(closeSessionAndWaitRelease).mockRejectedValue({
-      kind: "Engine",
-      data: "close-wait timed out (in-flight ask unfinished after 120s); retry shortly",
-    });
-
-    render(<App />);
-    await waitFor(() => expect(screen.getByText("季报")).toBeInTheDocument());
-    fireEvent.click(screen.getByText("季报"));
-    // ADR-0092: the shell-level bar (textbox) is always rendered, so the session
-    // rail — mounted only with the pane — is the "pane is mounted" signal.
-    await waitFor(() =>
-      expect(document.querySelector(".session-rail")).toBeInTheDocument(),
-    );
-
-    fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
-    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
-    fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
-
-    // The wait-release variant fired and rejected -> the pane UNMOUNTS (the
-    // fix for the NotFound dead-loop) and deleteSession is NOT called (the
-    // delete aborted on the close-wait failure).
-    await waitFor(() =>
-      expect(closeSessionAndWaitRelease).toHaveBeenCalledWith("sess-del"),
-    );
-    await waitFor(() =>
-      expect(document.querySelector(".session-rail")).not.toBeInTheDocument(),
-    );
-    expect(deleteSession).not.toHaveBeenCalled();
-
-    // Review H1: the shell surfaces the Engine detail in a collapsed fold
-    // (mirroring the session pane), so the actionable "retry shortly" hint is
-    // not lost when a close-wait reject lands at the shell layer. Previously
-    // the shell rendered only the bare locale message and the detail vanished.
-    const shellFold = document.querySelector(".shell-error .error-details");
-    expect(shellFold).not.toBeNull();
-    expect(shellFold?.textContent).toContain("close-wait timed out");
-  });
-});
+// ADR-0093 (issue #511): the "App delete wait-release variant" describe block
+// (3 tests, all triggered via .session-entry-menu) is retired — management
+// moved to .session-header (slice 2, #512).
 
 // A minimal valid AppConfig for the #84 persistence tests (the shell prefs are
 // the only field under test; the rest are just-shape defaults). The helper fills
@@ -2277,29 +2008,9 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     ).toBeInTheDocument();
   });
 
-  it("close drops the auth-mode cache slice with the session prefix (ADR-0080, issue #352)", async () => {
-    // The auth-mode cache lives under ["session", sid, "authMode"]; a close's
-    // removeQueries(["session", sid]) must drop it so a stale no_confirmation
-    // never silently re-arms on a reopened session. The contract holds by
-    // prefix-sharing today; this spy pins it so a future key-shape drift
-    // (authMode escaping the ["session", sid, ...] prefix) would fail.
-    const removeSpy = vi.spyOn(QueryClient.prototype, "removeQueries");
-    render(<App />);
-    await openSession();
-    // The Select populated the authMode cache for sess-1.
-    await screen.findByRole("combobox", { name: "授权模式：请求批准" });
-    removeSpy.mockClear(); // isolate close's own removeQueries call
-    // Open the context menu on the one open entry, then Close.
-    fireEvent.click(document.querySelector(".session-entry-menu") as HTMLButtonElement);
-    fireEvent.click(screen.getByRole("menuitem", { name: "关闭" }));
-    // ADR-0080 / ADR-0055: close called removeQueries with the session prefix,
-    // which drops authMode with the rest of the slice.
-    await waitFor(() =>
-      expect(removeSpy).toHaveBeenCalledWith(
-        expect.objectContaining({ queryKey: ["session", "sess-1"] }),
-      ),
-    );
-  });
+  // ADR-0093 (issue #511): "close drops the auth-mode cache slice" test
+  // retired — triggered via .session-entry-menu; management moved to
+  // .session-header (slice 2, #512).
 
   it("degraded [+] opens the multi-select dialog and ingests every picked file", async () => {
     vi.mocked(open).mockResolvedValue(["/a.csv", "/b.csv"]);
