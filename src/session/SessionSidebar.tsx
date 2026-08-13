@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { Check, FolderOpen, MessageSquare, Pencil, Search, Settings } from "lucide-react";
+import { Check, FolderOpen, Pencil, Search, Settings } from "lucide-react";
 import {
   buildSidebarGroups,
   type OpenSession,
@@ -62,8 +62,9 @@ function GroupTitle({ kind }: { kind: SidebarGroupKind }) {
 // The Chat-style session sidebar (ADR-0060, issue #81). Col 1 of the shell:
 // lists every persisted .duck (ADR-0061 cold start) merged with the open
 // keep-alive sessions, Chat-style time-grouped and last-modified descending.
-// Each entry's context menu is the SINGLE entry point for rename / close /
-// delete (ADR-0060 DRY); the top-bar name is read-only.
+// ADR-0093 (issue #511): each row is pure navigation (title + conditional
+// status dot). Management actions (rename / close / delete) moved to
+// .session-header (slice 2, #512).
 
 // A frozen empty set so the optional prop's default keeps a stable identity
 // (no every-render fresh Set -> SidebarRow prop churn).
@@ -91,6 +92,9 @@ interface SessionSidebarProps {
   onNew: () => void;
   onOpenDuck: () => void;
   onActivate: (sid: string) => void;
+  // ADR-0093 slice 2 (#512): the following four management callbacks are
+  // accepted on SessionSidebarProps for contract stability but are NOT
+  // consumed by the sidebar — slice 2 wires them to .session-header.
   /** Export a copy of the session directory (ADR-0089 Decision 5, issue #449).
    *  Receives the .duck path + display name (for the save dialog default). */
   onExport: (path: string, name: string) => void;
@@ -114,11 +118,6 @@ interface SessionSidebarProps {
   onOpenSettings: () => void;
 }
 
-// The context-menu action the user picked, driving which dialog opens.
-type MenuAction =
-  | { kind: "rename"; entry: SidebarEntry }
-  | { kind: "delete"; entry: SidebarEntry };
-
 export function SessionSidebar({
   sessions,
   openSessions,
@@ -130,11 +129,7 @@ export function SessionSidebar({
   onNew,
   onOpenDuck,
   onActivate,
-  onExport,
   onOpenPersisted,
-  onClose,
-  onDelete,
-  onRename,
   onSwitchGrouping,
   onOpenSearch,
   provider,
@@ -142,10 +137,6 @@ export function SessionSidebar({
   collapsed,
 }: SessionSidebarProps) {
   const intl = useIntl();
-  // Which entry's context menu is open (entry key); null = none. Only one menu
-  // is open at a time.
-  const [openMenuKey, setOpenMenuKey] = useState<string | null>(null);
-  const [pendingAction, setPendingAction] = useState<MenuAction | null>(null);
   // Capture "now" once per mount via a lazy useState initializer (Date.now is
   // impure in render). The calendar-day buckets are stable within a session for
   // our purposes; a cross-midnight drift refreshes on the next mount.
@@ -256,30 +247,10 @@ export function SessionSidebar({
                   hasPendingApproval={
                     entry.sid !== null && pendingApprovalSids.has(entry.sid)
                   }
-                  menuOpen={openMenuKey === entry.key}
                   disabled={disabled}
-                  onToggleMenu={() =>
-                    setOpenMenuKey((cur) => (cur === entry.key ? null : entry.key))}
                   onActivate={() => {
-                    setOpenMenuKey(null);
                     if (entry.sid) onActivate(entry.sid);
                     else onOpenPersisted(entry.path, entry.name);
-                  }}
-                  onRename={() => {
-                    setOpenMenuKey(null);
-                    setPendingAction({ kind: "rename", entry });
-                  }}
-                  onExport={() => {
-                    setOpenMenuKey(null);
-                    onExport(entry.path, resolveDisplayName(entry.name, intl));
-                  }}
-                  onClose={() => {
-                    setOpenMenuKey(null);
-                    if (entry.sid) onClose(entry.sid);
-                  }}
-                  onDelete={() => {
-                    setOpenMenuKey(null);
-                    setPendingAction({ kind: "delete", entry });
                   }}
                 />
               ))}
@@ -323,36 +294,9 @@ export function SessionSidebar({
           </Tooltip>
         </div>
       )}
-
-      {pendingAction?.kind === "rename" && (
-        <RenameSessionDialog
-          initialName={pendingAction.entry.name}
-          onCancel={() => setPendingAction(null)}
-          onSubmit={(newName) => {
-            onRename(pendingAction.entry.sid, pendingAction.entry.path, newName);
-            setPendingAction(null);
-          }}
-        />
-      )}
-      {pendingAction?.kind === "delete" && (
-        <DeleteSessionDialog
-          name={resolveDisplayName(pendingAction.entry.name, intl)}
-          onCancel={() => setPendingAction(null)}
-          onConfirm={() => {
-            onDelete(pendingAction.entry.path, pendingAction.entry.sid);
-            setPendingAction(null);
-          }}
-        />
-      )}
     </aside>
   );
 }
-
-// The session-menu item base: composed per item via cn() so the danger variant
-// swaps text-foreground -> text-destructive without copy-paste drift across
-// the three items.
-const sessionMenuItemBase =
-  `${bareButtonReset} cursor-pointer block w-full py-1 px-2 rounded-md text-sm hover:bg-accent`;
 
 // The flat/time grouping toggle (ADR-0072, issue #251). Triggered by a weakly-
 // visible `⋯` on the first group-title row (one entry point regardless of
@@ -469,71 +413,35 @@ function GroupingToggle({
   );
 }
 
-// One sidebar row: the session name (click to activate/open) + a sub-line
-// (first source + turn count) + a context-menu toggle. The menu is the single
-// entry point for rename / close / delete (ADR-0060 DRY).
+// One sidebar row: pure navigation (ADR-0093, issue #511). The row carries
+// only the session title + a conditional status dot. Management actions
+// (rename / export / close / delete) moved to .session-header (slice 2);
+// the persistent sub-line (first source + turn count) is retired in favor of
+// a future HoverCard (slice 3).
 function SidebarRow({
   entry,
   displayName,
   hasPendingApproval,
-  menuOpen,
   disabled,
-  onToggleMenu,
   onActivate,
-  onRename,
-  onExport,
-  onClose,
-  onDelete,
 }: {
   entry: SidebarEntry;
   displayName: string;
-  /** The session holds an unanswered approval (ADR-0083, issue #297): the row
-   *  carries the warning tint + dot so a suspended turn stays visible while
-   *  the user works in another session. */
+  /** The session holds an unanswered approval (ADR-0083, issue #297): the
+   *  status dot flips to warning color + an sr-only label so a suspended turn
+   *  stays visible while the user works in another session. */
   hasPendingApproval: boolean;
-  menuOpen: boolean;
   disabled: boolean;
-  onToggleMenu: () => void;
   onActivate: () => void;
-  onRename: () => void;
-  /** Export a copy of the session (ADR-0089 Decision 5, issue #449). */
-  onExport: () => void;
-  onClose: () => void;
-  onDelete: () => void;
 }) {
-  const intl = useIntl();
-  // Click-away + ESC dismissal for the hand-positioned context menu (issue
-  // #258): the menu is a plain div (not a Radix Popover), so without this a
-  // pointer-down outside the row or an Escape keypress left it stuck open --
-  // the user had to click a menu item or toggle the ⋯ button again. Runs only
-  // while menuOpen; onToggleMenu is a toggle and menuOpen implies openMenuKey
-  // === entry.key, so the call resolves to "close".
-  const rowRef = useRef<HTMLLIElement>(null);
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onPointerDown = (e: MouseEvent) => {
-      if (rowRef.current && !rowRef.current.contains(e.target as Node)) {
-        onToggleMenu();
-      }
-    };
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onToggleMenu();
-    };
-    document.addEventListener("mousedown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [menuOpen, onToggleMenu]);
-  // Entry states ride inline utilities over the ADR-0050 token (ADR-0060,
-  // refined by ADR-0072 issue #249): active = accent tint + the 2px left bar;
-  // open-but-not-active = the bar only; default = no signal. ADR-0072 retires
-  // the ADR-0060 full-row teal fill. The active/open booleans also stay as
-  // classes on the parent .session-entry hook for selector / test stability.
+  // ADR-0093 (issue #511): the MessageSquare leading icon + the inset shadow
+  // left bar are retired. Active = accent background only; open = status dot
+  // (primary green / warning when pending approval); not-open = equal-width
+  // placeholder so titles stay left-aligned across all rows. The active/open
+  // booleans also stay as classes on the parent .session-entry hook for
+  // selector / test stability.
   return (
     <li
-      ref={rowRef}
       className={cn(
         "session-entry relative my-0.5 flex items-stretch",
         entry.active && "active",
@@ -547,104 +455,38 @@ function SidebarRow({
         className={cn(
           `session-entry-main ${bareButtonReset} cursor-pointer flex-1 flex flex-row items-center gap-1.5 min-w-0 py-1.5 px-2 rounded-md text-foreground`,
           "hover:bg-accent disabled:opacity-50 disabled:cursor-progress",
-          entry.sid && "shadow-[inset_2px_0_var(--primary)]",
           entry.active && "bg-accent text-accent-foreground",
-          // ADR-0083 (issue #297) entry coloring: the warning-tinted left bar
-          // overrides the open-session primary bar -- an unanswered approval
-          // outranks "this session is open" as the row's signal.
-          hasPendingApproval && "shadow-[inset_2px_0_var(--warning)]",
         )}
         aria-current={entry.active ? "true" : undefined}
         disabled={disabled}
         onClick={onActivate}
-        title={entry.path}
       >
-        {/* ADR-0072 (issue #249): unified leading chat-bubble glyph on every
-            row, replacing the persisted/not Database/CircleDot split. */}
-        <MessageSquare className="size-4 shrink-0" aria-hidden />
-        <span className="flex-1 min-w-0 flex flex-col">
-          <span className="session-name text-sm truncate">
-            {displayName}
-            {hasPendingApproval && (
-              <>
-                {/* The attention dot beside the name mirrors the rail toggle's
-                    badge; the sr-only text names why for assistive tech (the
-                    dot itself is decorative). */}
-                <span
-                  className="sidebar-pending-dot ml-1 inline-block h-1.5 w-1.5 rounded-full bg-warning align-middle"
-                  aria-hidden="true"
-                />
-                <span className="sr-only">
-                  <FormattedMessage
-                    id="sidebar.pendingApproval"
-                    defaultMessage="(awaiting approval)"
-                  />
-                </span>
-              </>
-            )}
-          </span>
-          <span className="session-subline text-muted-foreground text-xs font-normal opacity-85">
-            {entry.firstSourceName ?? "—"}
-            {" · "}
-            <FormattedMessage
-              id="sidebar.turns"
-              defaultMessage="{count, plural, =0 {no turns} one {# turn} other {# turns}}"
-              values={{ count: entry.turnCount }}
+        {/* Equal-width status-dot slot (size-4 matches the retired MessageSquare
+            icon footprint). Open = primary dot, pending approval = warning dot
+            (overrides open), not-open = empty slot for alignment. */}
+        <span className="flex size-4 shrink-0 items-center justify-center">
+          {entry.sid && (
+            <span
+              className={cn(
+                "sidebar-status-dot inline-block h-2 w-2 rounded-full",
+                hasPendingApproval ? "bg-warning" : "bg-primary",
+              )}
+              aria-hidden="true"
             />
-          </span>
+          )}
+        </span>
+        <span className="session-name flex-1 min-w-0 text-sm truncate">
+          {displayName}
+          {hasPendingApproval && (
+            <span className="sr-only">
+              <FormattedMessage
+                id="sidebar.pendingApproval"
+                defaultMessage="(awaiting approval)"
+              />
+            </span>
+          )}
         </span>
       </button>
-      <button
-        type="button"
-        className={`session-entry-menu ${bareButtonReset} cursor-pointer px-1.5 text-base leading-none rounded-md text-muted-foreground hover:bg-accent hover:text-foreground`}
-        aria-label={intl.formatMessage({ id: "sidebar.menu.ariaLabel", defaultMessage: "Session actions" })}
-        aria-expanded={menuOpen}
-        disabled={disabled}
-        onClick={onToggleMenu}
-      >
-        ⋯
-      </button>
-      {menuOpen && (
-        <div
-          className="session-menu absolute z-[5] right-1 top-full min-w-32 p-1 bg-card border border-border rounded-md shadow-md"
-          role="menu"
-        >
-          <button
-            type="button"
-            role="menuitem"
-            className={cn(sessionMenuItemBase, "text-foreground")}
-            onClick={onRename}
-          >
-            <FormattedMessage id="sidebar.menu.rename" defaultMessage="Rename" />
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            className={cn(sessionMenuItemBase, "text-foreground")}
-            onClick={onExport}
-          >
-            <FormattedMessage id="sidebar.menu.export" defaultMessage="Save a copy…" />
-          </button>
-          {entry.sid && (
-            <button
-              type="button"
-              role="menuitem"
-              className={cn(sessionMenuItemBase, "text-foreground")}
-              onClick={onClose}
-            >
-              <FormattedMessage id="common.close" defaultMessage="Close" />
-            </button>
-          )}
-          <button
-            type="button"
-            role="menuitem"
-            className={cn("danger", sessionMenuItemBase, "text-destructive")}
-            onClick={onDelete}
-          >
-            <FormattedMessage id="common.delete" defaultMessage="Delete" />
-          </button>
-        </div>
-      )}
     </li>
   );
 }
