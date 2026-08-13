@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { IntlProvider } from "react-intl";
+import { StrictMode } from "react";
 import type { ReactNode } from "react";
 import type { DatasetDescriptor } from "../types/dataset";
 import type { TurnOutcome } from "../types/thread";
@@ -121,10 +122,11 @@ function renderPane(locale: EffectiveLocale = "zh-CN", sessionName = "Test sessi
     wrap(
       <SessionPane
         sessionId="sess-1"
-        pendingIngestPath={null}
+        pendingIngestPaths={[]}
         onIngestConsumed={() => {}}
         pendingQuestion={null}
         onQuestionConsumed={() => {}}
+        onSeedDraft={() => {}}
         onComposerFields={(_sid, fields) => { capturedComposerFields = fields; }}
         sessionName={sessionName}
         onFirstTurnSettled={() => {}}
@@ -733,5 +735,220 @@ describe("App session-header name fallback (ADR-0060)", () => {
   it("renders the localized default name when sessionName is empty", async () => {
     renderPane("zh-CN", "");
     await waitFor(() => expect(screen.getByText("新会话")).toBeInTheDocument());
+  });
+});
+
+describe("SessionPane pending-payload consumption (#500)", () => {
+  // The cold-start submit carries BOTH pending payloads onto the minted
+  // session: pendingIngestPaths (the "+" file queue) + pendingQuestion. The
+  // pane consumes them in ONE coordinated effect -- files first, question
+  // second, and a halted batch hands the question back to the bar draft via
+  // onSeedDraft instead of firing it underneath the guidance / error.
+
+  const loadedDataset: DatasetDescriptor = {
+    reference_name: "people",
+    display_name: "people",
+    source_path: "/x/a.csv",
+    row_count: 1,
+    fingerprint: "ff".repeat(32),
+    columns: [{ name: "id", canonical_type: "BIGINT" }],
+    sample: [["1"]],
+    rectify: { kind: "NotApplicable" },
+    privacy: { send_samples: true, type_only_columns: [] },
+  };
+
+  interface PendingPayload {
+    pendingIngestPaths?: string[];
+    pendingQuestion?: string | null;
+    strictMode?: boolean;
+  }
+
+  function renderPaneWithPending(payload: PendingPayload): {
+    onIngestConsumed: ReturnType<typeof vi.fn>;
+    onQuestionConsumed: ReturnType<typeof vi.fn>;
+    onSeedDraft: ReturnType<typeof vi.fn>;
+    rerender: (payload: PendingPayload) => void;
+  } {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const onIngestConsumed = vi.fn();
+    const onQuestionConsumed = vi.fn();
+    const onSeedDraft = vi.fn();
+    const approvalEvents: UseApprovalEvents = {
+      approvalsBySession: new Map(),
+      pendingApprovalSids: new Set(),
+      respond: () => {},
+      clearSession: () => {},
+    };
+    const pane = (
+      <SessionPane
+        sessionId="sess-1"
+        pendingIngestPaths={payload.pendingIngestPaths ?? []}
+        onIngestConsumed={onIngestConsumed}
+        pendingQuestion={payload.pendingQuestion ?? null}
+        onQuestionConsumed={onQuestionConsumed}
+        onSeedDraft={onSeedDraft}
+        onComposerFields={() => {}}
+        sessionName="pending"
+        onFirstTurnSettled={() => {}}
+        approvalEvents={approvalEvents}
+        onRailResizeStart={() => {}}
+      />
+    );
+    const tree = (
+      <QueryClientProvider client={queryClient}>
+        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")} defaultLocale="en-US">
+          <TooltipProvider>{pane}</TooltipProvider>
+        </IntlProvider>
+      </QueryClientProvider>
+    );
+    const view = render(payload.strictMode ? <StrictMode>{tree}</StrictMode> : tree);
+    const rerender = (next: PendingPayload) => {
+      const nextPane = (
+        <SessionPane
+          sessionId="sess-1"
+          pendingIngestPaths={next.pendingIngestPaths ?? []}
+          onIngestConsumed={onIngestConsumed}
+          pendingQuestion={next.pendingQuestion ?? null}
+          onQuestionConsumed={onQuestionConsumed}
+          onSeedDraft={onSeedDraft}
+          onComposerFields={() => {}}
+          sessionName="pending"
+          onFirstTurnSettled={() => {}}
+          approvalEvents={approvalEvents}
+          onRailResizeStart={() => {}}
+        />
+      );
+      const nextTree = (
+        <QueryClientProvider client={queryClient}>
+          <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")} defaultLocale="en-US">
+            <TooltipProvider>{nextPane}</TooltipProvider>
+          </IntlProvider>
+        </QueryClientProvider>
+      );
+      view.rerender(next.strictMode ? <StrictMode>{nextTree}</StrictMode> : nextTree);
+    };
+    return { onIngestConsumed, onQuestionConsumed, onSeedDraft, rerender };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    vi.mocked(listWorkingSet).mockResolvedValue([]);
+    vi.mocked(activeDataset).mockResolvedValue(null);
+    // The question fires through handleAsk; reject the turn so it settles
+    // without appending a thread entry (the assertion targets the call order,
+    // not the outcome).
+    vi.mocked(askQuestion).mockRejectedValue(new Error("settle the turn"));
+  });
+
+  it("ingests the pending file list BEFORE firing the pending question", async () => {
+    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: loadedDataset });
+    const { onIngestConsumed, onQuestionConsumed } = renderPaneWithPending({
+      pendingIngestPaths: ["/x/a.csv", "/x/b.csv"],
+      pendingQuestion: "how many rows?",
+    });
+
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "how many rows?"));
+    expect(ingestFile).toHaveBeenCalledTimes(2);
+    expect(ingestFile).toHaveBeenNthCalledWith(1, "sess-1", "/x/a.csv");
+    expect(ingestFile).toHaveBeenNthCalledWith(2, "sess-1", "/x/b.csv");
+    // Files landed strictly before the question fired.
+    expect(vi.mocked(ingestFile).mock.invocationCallOrder[1]).toBeLessThan(
+      vi.mocked(askQuestion).mock.invocationCallOrder[0],
+    );
+    // Both payloads clear upfront so a remount cannot re-fire either.
+    expect(onIngestConsumed).toHaveBeenCalledTimes(1);
+    expect(onQuestionConsumed).toHaveBeenCalledTimes(1);
+  });
+
+  it("fires the pending question alone when no files are pending", async () => {
+    renderPaneWithPending({ pendingQuestion: "bare question" });
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "bare question"));
+    expect(ingestFile).not.toHaveBeenCalled();
+  });
+
+  it("ingests a drop-to-create file without a question", async () => {
+    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: loadedDataset });
+    const { onIngestConsumed } = renderPaneWithPending({ pendingIngestPaths: ["/x/drop.csv"] });
+    await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-1", "/x/drop.csv"));
+    expect(onIngestConsumed).toHaveBeenCalledTimes(1);
+    expect(askQuestion).not.toHaveBeenCalled();
+  });
+
+  it("holds the question back into the bar draft when the batch halts on guidance (#500)", async () => {
+    // First file loads, second needs guidance -> the batch halts; the
+    // auto-ask is suppressed and the question is seeded back into the
+    // session's draft so it is never silently lost.
+    vi.mocked(ingestFile)
+      .mockResolvedValueOnce({ kind: "Loaded", data: loadedDataset })
+      .mockResolvedValueOnce({
+        kind: "NeedsGuidance",
+        data: {
+          source_path: "/x/m.xlsx",
+          workbook_name: "m.xlsx",
+          sheets: [{ name: "Sheet1", preview: [["a"]] }],
+        },
+      });
+    const { onSeedDraft } = renderPaneWithPending({
+      pendingIngestPaths: ["/x/a.csv", "/x/m.xlsx"],
+      pendingQuestion: "how many rows?",
+    });
+
+    await waitFor(() => expect(onSeedDraft).toHaveBeenCalledWith("sess-1", "how many rows?"));
+    expect(askQuestion).not.toHaveBeenCalled();
+    // The guidance dialog owns the user's attention.
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("holds the question back when the first file errors", async () => {
+    vi.mocked(ingestFile).mockResolvedValue({
+      kind: "Error",
+      data: { kind: "Parse", data: { detail: "bad csv" } },
+    });
+    const { onSeedDraft } = renderPaneWithPending({
+      pendingIngestPaths: ["/x/bad.csv"],
+      pendingQuestion: "how many rows?",
+    });
+
+    await waitFor(() => expect(onSeedDraft).toHaveBeenCalledWith("sess-1", "how many rows?"));
+    expect(askQuestion).not.toHaveBeenCalled();
+  });
+
+  it("consumes each payload exactly once under React.StrictMode (dev remount)", async () => {
+    // StrictMode dev double-invokes effects on mount; the payload-key dedup
+    // must hold so the files ingest + the question fires exactly once.
+    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: loadedDataset });
+    renderPaneWithPending({
+      pendingIngestPaths: ["/x/a.csv"],
+      pendingQuestion: "once only",
+      strictMode: true,
+    });
+
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledTimes(1));
+    expect(ingestFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-arms for a different pending payload on an already-mounted pane (#500)", async () => {
+    // consumedPendingRef dedups by payload KEY (JSON.stringify of the
+    // paths+question pair). A DIFFERENT payload on the same mounted pane must
+    // produce a different key and consume again — a second drop onto an active
+    // session must not be silently dropped by stale dedup.
+    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: loadedDataset });
+    const { rerender, onIngestConsumed } = renderPaneWithPending({
+      pendingIngestPaths: ["/x/a.csv"],
+    });
+
+    // First payload consumed.
+    await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-1", "/x/a.csv"));
+    expect(onIngestConsumed).toHaveBeenCalledTimes(1);
+
+    // Simulate the shell clearing the prop then a new drop landing.
+    rerender({ pendingIngestPaths: [] });
+    rerender({ pendingIngestPaths: ["/x/b.csv"] });
+
+    // Second distinct payload consumed again — not blocked by stale dedup.
+    await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-1", "/x/b.csv"));
+    expect(onIngestConsumed).toHaveBeenCalledTimes(2);
+    expect(ingestFile).toHaveBeenCalledTimes(2);
   });
 });

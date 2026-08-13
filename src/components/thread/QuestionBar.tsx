@@ -18,13 +18,14 @@ type QuestionBarProps = {
    *  sites / tests that don't exercise phase feedback omit it. */
   phase?: TurnPhase | null;
   /** Top-row controls rendered inside the unified container above the
-   *  textarea (the Skills / MCP trigger chips threaded from SessionPane). */
+   *  textarea (the Skills / MCP trigger chips threaded from the shell,
+   *  ADR-0092). */
   header?: ReactNode;
   /** Left-side toolbar controls rendered inside the unified container (the
-   *  composer "+" / auth-mode slots threaded from SessionPane). */
+   *  composer "+" / auth-mode slots threaded from the shell, ADR-0092). */
   children?: ReactNode;
   /** Right-side toolbar controls, seated before the phase + submit/stop
-   *  button (the runtime / model picker from SessionPane). */
+   *  button (the runtime / model picker threaded from the shell, ADR-0092). */
   trailing?: ReactNode;
 } & {
   /** Controlled draft pair (ADR-0092 useComposerState). Both must be provided

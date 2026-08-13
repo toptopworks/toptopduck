@@ -50,10 +50,13 @@ vi.mock("../../api", async (importOriginal) => {
     renamePersistedSession: vi.fn(async () => {}),
     renameSession: vi.fn(async () => ""),
     getSessionName: vi.fn(async () => ""),
-    // ADR-0092 cold-start posture application (runtime + auth mode writes
-    // before registerOpen). Default no-ops; the posture tests assert calls.
+    // ADR-0092 cold-start posture application (runtime + auth mode + skill
+    // mounts + MCP enables, all before registerOpen). Default no-ops; the
+    // posture tests assert calls.
     setSessionRuntime: vi.fn(async () => {}),
     setAuthorizationMode: vi.fn(async () => {}),
+    mountSkill: vi.fn(async () => {}),
+    toggleMcpServer: vi.fn(async () => {}),
   };
 });
 
@@ -75,6 +78,7 @@ import {
   createSession,
   exportSession,
   getSessionName,
+  mountSkill,
   openDuck,
   onResumeProgress,
   prepareImportSession,
@@ -82,6 +86,7 @@ import {
   renameSession,
   setAuthorizationMode,
   setSessionRuntime,
+  toggleMcpServer,
 } from "../../api";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { log } from "../../lib/log";
@@ -97,6 +102,8 @@ const intl = createIntl({ locale: "en-US", messages: catalogFor("en-US") });
 const DEFAULT_POSTURE: PendingComposerPosture = {
   runtime: RUNTIME_CHOICE_DEFAULT,
   authMode: AUTH_MODE_DEFAULT,
+  skills: [],
+  mcpServers: [],
 };
 
 /** Build a CreateSessionReply for mock returns (ADR-0089). */
@@ -137,7 +144,7 @@ describe("useShellSessions", () => {
     const { result } = renderSessions();
     let created = false;
     await act(async () => {
-      created = await result.current.createSessionWithQuestion("how many rows?", DEFAULT_POSTURE);
+      created = await result.current.createSessionWithQuestion("how many rows?", DEFAULT_POSTURE, []);
     });
     expect(created).toBe(true);
     expect(createSession).toHaveBeenCalledTimes(1);
@@ -146,7 +153,7 @@ describe("useShellSessions", () => {
       sid: "s1",
       name: "",
       path: "/sessions/s1/session.duck",
-      pendingIngestPath: null,
+      pendingIngestPaths: [],
       pendingQuestion: "how many rows?",
     });
     expect(result.current.activeSessionId).toBe("s1");
@@ -167,7 +174,9 @@ describe("useShellSessions", () => {
       await result.current.createSessionWithQuestion("q", {
         runtime: { kind: "external", data: "gemini" },
         authMode: "no_confirmation",
-      });
+        skills: [],
+        mcpServers: [],
+      }, []);
     });
     expect(setSessionRuntime).toHaveBeenCalledWith("s1", { kind: "external", data: "gemini" });
     expect(setAuthorizationMode).toHaveBeenCalledWith("s1", "no_confirmation");
@@ -179,10 +188,76 @@ describe("useShellSessions", () => {
     vi.mocked(createSession).mockResolvedValue(reply("s1"));
     const { result } = renderSessions();
     await act(async () => {
-      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE);
+      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
     });
     expect(setSessionRuntime).not.toHaveBeenCalled();
     expect(setAuthorizationMode).not.toHaveBeenCalled();
+    expect(mountSkill).not.toHaveBeenCalled();
+    expect(toggleMcpServer).not.toHaveBeenCalled();
+  });
+
+  it("createSessionWithQuestion mounts pending skills then enables pending MCP servers BEFORE registering (#500)", async () => {
+    // Draft-mode picks land as one IPC per entry, skills BEFORE MCP enables (a
+    // skill-declared server the user also picked lands either way), and all of
+    // it before registerOpen so the pane mounts under the applied posture.
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    const { result } = renderSessions();
+    let sessionsWhenFirstSkillApplied = -1;
+    vi.mocked(mountSkill).mockImplementationOnce(async () => {
+      sessionsWhenFirstSkillApplied = result.current.openSessions.length;
+    });
+    await act(async () => {
+      await result.current.createSessionWithQuestion(
+        "q",
+        {
+          runtime: RUNTIME_CHOICE_DEFAULT,
+          authMode: AUTH_MODE_DEFAULT,
+          skills: ["data-cleaning", "charting"],
+          mcpServers: ["srv-a"],
+        },
+        [],
+      );
+    });
+    expect(mountSkill).toHaveBeenNthCalledWith(1, "s1", "data-cleaning");
+    expect(mountSkill).toHaveBeenNthCalledWith(2, "s1", "charting");
+    expect(toggleMcpServer).toHaveBeenCalledTimes(1);
+    expect(toggleMcpServer).toHaveBeenCalledWith("s1", "srv-a", true);
+    // Skills before MCP enables...
+    expect(
+      vi.mocked(mountSkill).mock.invocationCallOrder[1],
+    ).toBeLessThan(vi.mocked(toggleMcpServer).mock.invocationCallOrder[0]);
+    // ...and everything before the pane can mount.
+    expect(sessionsWhenFirstSkillApplied).toBe(0);
+    expect(result.current.openSessions).toHaveLength(1);
+  });
+
+  it("createSessionWithQuestion opens the session when a pending skill mount rejects (log + setShellError, keep going, #500)", async () => {
+    // A rejected posture write never fails the whole creation: the session
+    // opens on the backend default for that facet, the error is surfaced, and
+    // the remaining picks still apply.
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    vi.mocked(mountSkill).mockRejectedValueOnce(new Error("skill gone"));
+    const { result, setShellError } = renderSessions();
+    let created = false;
+    await act(async () => {
+      created = await result.current.createSessionWithQuestion(
+        "q",
+        {
+          runtime: RUNTIME_CHOICE_DEFAULT,
+          authMode: AUTH_MODE_DEFAULT,
+          skills: ["broken", "charting"],
+          mcpServers: ["srv-a"],
+        },
+        [],
+      );
+    });
+    expect(created).toBe(true);
+    expect(setShellError).toHaveBeenCalledTimes(1);
+    // The second skill + the MCP enable still land.
+    expect(mountSkill).toHaveBeenNthCalledWith(2, "s1", "charting");
+    expect(toggleMcpServer).toHaveBeenCalledWith("s1", "srv-a", true);
+    expect(result.current.openSessions).toHaveLength(1);
+    expect(log.warn).toHaveBeenCalled();
   });
 
   it("createSessionWithQuestion returns false + surfaces setShellError when createSession rejects", async () => {
@@ -190,30 +265,37 @@ describe("useShellSessions", () => {
     const { result, setShellError } = renderSessions();
     let created = true;
     await act(async () => {
-      created = await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE);
+      created = await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
     });
     expect(created).toBe(false);
     expect(setShellError).toHaveBeenCalled();
     expect(result.current.openSessions).toEqual([]);
   });
 
-  it("createSessionWithIngest mints carrying pendingIngestPath (cold-start '+' file pick)", async () => {
+  it("createSessionWithQuestion carries the pending file list as pendingIngestPaths (#500)", async () => {
+    // The cold-start "+" picks accumulate at shell level; the first submit
+    // hands the whole list to the minted session, where the pane ingests it
+    // before firing the question.
     vi.mocked(createSession).mockResolvedValue(reply("s1"));
     const { result } = renderSessions();
     let created = false;
     await act(async () => {
-      created = await result.current.createSessionWithIngest("/x/a.csv", DEFAULT_POSTURE);
+      created = await result.current.createSessionWithQuestion(
+        "q",
+        DEFAULT_POSTURE,
+        ["/x/a.csv", "/x/b.parquet"],
+      );
     });
     expect(created).toBe(true);
     expect(result.current.openSessions[0]).toMatchObject({
       sid: "s1",
-      pendingIngestPath: "/x/a.csv",
-      pendingQuestion: null,
+      pendingIngestPaths: ["/x/a.csv", "/x/b.parquet"],
+      pendingQuestion: "q",
     });
     expect(result.current.activeSessionId).toBe("s1");
   });
 
-  it("onWebviewDrop on cold start (activeSessionId null) mints via dropFile with the path as pendingIngestPath (#81 A1)", async () => {
+  it("onWebviewDrop on cold start (activeSessionId null) mints via dropFile with the path as a one-element pendingIngestPaths (#81 A1)", async () => {
     vi.mocked(createSession).mockResolvedValue(reply("drop-sid"));
     const { result } = renderSessions();
     expect(result.current.activeSessionId).toBeNull();
@@ -222,14 +304,14 @@ describe("useShellSessions", () => {
     });
     await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(result.current.activeSessionId).toBe("drop-sid"));
-    expect(result.current.openSessions[0].pendingIngestPath).toBe("/x/foo.csv");
+    expect(result.current.openSessions[0].pendingIngestPaths).toEqual(["/x/foo.csv"]);
   });
 
-  it("onWebviewDrop on an active session routes to its pendingIngestPath (no new mint, #81)", async () => {
+  it("onWebviewDrop on an active session routes to its pendingIngestPaths (no new mint, #81)", async () => {
     vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
     const { result } = renderSessions();
     await act(async () => {
-      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE);
+      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
     });
     const mintsBefore = vi.mocked(createSession).mock.calls.length;
     // Drop while s1 is active -> the file lands on s1's ingest pipe, no new mint.
@@ -237,30 +319,30 @@ describe("useShellSessions", () => {
       result.current.onWebviewDrop("/x/new.csv");
     });
     expect(vi.mocked(createSession).mock.calls.length).toBe(mintsBefore);
-    expect(result.current.openSessions[0].pendingIngestPath).toBe("/x/new.csv");
+    expect(result.current.openSessions[0].pendingIngestPaths).toEqual(["/x/new.csv"]);
   });
 
   it("clearPendingIngest drops the consumed path so a remount cannot re-ingest (#81 A1)", async () => {
     vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
     const { result } = renderSessions();
     await act(async () => {
-      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE);
+      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
     });
     act(() => {
       result.current.onWebviewDrop("/x/new.csv");
     });
-    expect(result.current.openSessions[0].pendingIngestPath).toBe("/x/new.csv");
+    expect(result.current.openSessions[0].pendingIngestPaths).toEqual(["/x/new.csv"]);
     act(() => {
       result.current.clearPendingIngest("s1");
     });
-    expect(result.current.openSessions[0].pendingIngestPath).toBeNull();
+    expect(result.current.openSessions[0].pendingIngestPaths).toEqual([]);
   });
 
   it("closeOpen unmounts synchronously + fires closeSession in the background (ADR-0055)", async () => {
     vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
     const { result } = renderSessions();
     await act(async () => {
-      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE);
+      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
     });
     await act(async () => {
       await result.current.closeOpen("s1");
@@ -275,7 +357,7 @@ describe("useShellSessions", () => {
     vi.mocked(closeSession).mockResolvedValueOnce(true);
     const { result, refreshSessions } = renderSessions();
     await act(async () => {
-      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE);
+      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
     });
     await act(async () => {
       await result.current.closeOpen("s1");
@@ -290,7 +372,7 @@ describe("useShellSessions", () => {
     vi.mocked(closeSession).mockResolvedValueOnce(false);
     const { result, refreshSessions } = renderSessions();
     await act(async () => {
-      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE);
+      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
     });
     refreshSessions.mockClear();
     await act(async () => {
@@ -307,7 +389,7 @@ describe("useShellSessions", () => {
     vi.mocked(closeSession).mockRejectedValueOnce(new Error("backend gone"));
     const { result } = renderSessions();
     await act(async () => {
-      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE);
+      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
     });
     await act(async () => {
       await result.current.closeOpen("s1");
@@ -326,7 +408,7 @@ describe("useShellSessions", () => {
     vi.mocked(closeSession).mockRejectedValueOnce({ kind: "NotFound" });
     const { result } = renderSessions();
     await act(async () => {
-      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE);
+      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
     });
     await act(async () => {
       await result.current.closeOpen("s1");
@@ -350,7 +432,7 @@ describe("useShellSessions", () => {
     });
     const { result } = renderSessions();
     await act(async () => {
-      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE);
+      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
     });
     await act(async () => {
       await result.current.closeOpen("s1");
@@ -610,13 +692,13 @@ describe("useShellSessions", () => {
       .mockResolvedValueOnce(reply("s3"));
     const { result } = renderSessions();
     await act(async () => {
-      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE);
+      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
     });
     await act(async () => {
-      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE);
+      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
     });
     await act(async () => {
-      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE);
+      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
     });
     expect(result.current.activeSessionId).toBe("s3");
     await act(async () => {
@@ -630,10 +712,10 @@ describe("useShellSessions", () => {
   // These pin the domain decision + the merged-state invariant the refactor
   // introduced, on paths the earlier black-box-style tests do not exercise.
 
-  it("onWebviewDrop routes a drop onto an active PERSISTED session -- path + pendingIngestPath coexist (#205)", async () => {
+  it("onWebviewDrop routes a drop onto an active PERSISTED session -- path + pendingIngestPaths coexist (#205)", async () => {
     // Domain decision (issue #205): a drop onto an ALREADY-active session
     // routes to that session's ingest even when the session is resumed /
-    // .duck-bound (path !== null). `path` and `pendingIngestPath` are
+    // .duck-bound (path !== null). `path` and `pendingIngestPaths` are
     // independent -- the resumed + pending-drop combination is legal, not a
     // type error. This pins the decision so a future "tighten OpenSession into
     // a discriminated union" refactor cannot silently break the active-session
@@ -648,11 +730,11 @@ describe("useShellSessions", () => {
     expect(result.current.openSessions[0]).toMatchObject({
       sid: "p1",
       path: "/x/a.duck",
-      pendingIngestPath: null,
+      pendingIngestPaths: [],
     });
     const mintsBefore = vi.mocked(createSession).mock.calls.length;
     // Drop while the persisted p1 is active -> routes to p1's ingest pipe, no
-    // new mint, and pendingIngestPath now coexists with a bound path.
+    // new mint, and pendingIngestPaths now coexists with a bound path.
     act(() => {
       result.current.onWebviewDrop("/x/drop.csv");
     });
@@ -660,7 +742,7 @@ describe("useShellSessions", () => {
     expect(result.current.openSessions[0]).toMatchObject({
       sid: "p1",
       path: "/x/a.duck",
-      pendingIngestPath: "/x/drop.csv",
+      pendingIngestPaths: ["/x/drop.csv"],
     });
   });
 
@@ -676,10 +758,10 @@ describe("useShellSessions", () => {
       .mockResolvedValueOnce(reply("s2"));
     const { result } = renderSessions();
     await act(async () => {
-      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE);
+      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
     });
     await act(async () => {
-      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE);
+      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
     });
     expect(result.current.activeSessionId).toBe("s2");
     // Close the NON-active s1 -> active id stays on s2.
@@ -702,10 +784,10 @@ describe("useShellSessions", () => {
     vi.mocked(createSession).mockResolvedValueOnce(reply("s1")).mockResolvedValueOnce(reply("s2"));
     const { result } = renderSessions();
     await act(async () => {
-      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE);
+      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
     });
     await act(async () => {
-      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE);
+      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
     });
     expect(result.current.activeSessionId).toBe("s2");
     // Valid sid -> switch.
@@ -734,7 +816,7 @@ describe("useShellSessions", () => {
       vi.mocked(getSessionName).mockResolvedValue("how many people?");
 
       await act(async () => {
-        await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE);
+        await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
       });
       // name starts empty (ADR-0089 placeholder).
       expect(result.current.openSessions[0].name).toBe("");
@@ -754,7 +836,7 @@ describe("useShellSessions", () => {
       vi.mocked(getSessionName).mockRejectedValue(new Error("ipc down"));
 
       await act(async () => {
-        await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE);
+        await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
       });
       const originalName = result.current.openSessions[0].name;
 

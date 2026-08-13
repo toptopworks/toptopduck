@@ -41,6 +41,12 @@ export interface ComposerState extends ComposerSessionFields {
   // `value.trim() === ""` guard.
   draft: string;
   setDraft: (value: string) => void;
+  /** Write a session's draft by explicit sid, independent of which session is
+   *  active (#500): the SessionPane hands a held-back cold-start question back
+   *  to the shell when the pending ingest batch halts (guidance / error owns
+   *  the user's attention), so the question stays visible + submittable in the
+   *  bar instead of being silently discarded. */
+  seedDraft: (sessionId: string, value: string) => void;
   /** Drop a closed/deleted session's draft so the per-session draft map does
    *  not grow unboundedly (the shell calls this from the close/delete paths). */
   dropDraft: (sessionId: string) => void;
@@ -119,6 +125,20 @@ export function useComposerState(
     [sessionId],
   );
 
+  // Seed a session's draft by explicit sid (#500 held-back question path).
+  // Only writes when the slot is empty so a user who typed into the bar
+  // during the ingest window (pane mounted, files loading) does not lose
+  // their edits when the batch halts and the held-back question is seeded.
+  // Identity-stable (no deps): SessionPane receives it as a prop and calls it
+  // from the pending-payload consumption effect.
+  const seedDraft = useCallback((sid: string, value: string) => {
+    setSessionDrafts((prev) => {
+      const existing = prev[sid];
+      if (existing != null && existing !== "") return prev;
+      return { ...prev, [sid]: value };
+    });
+  }, []);
+
   // Drop a closed/deleted session's draft slot. Identity-stable (no deps):
   // the shell wires it into its close/delete handlers.
   const dropDraft = useCallback((sid: string) => {
@@ -131,7 +151,7 @@ export function useComposerState(
   }, []);
 
   if (sessionId === null) {
-    return { ...IDLE_SESSION_FIELDS, draft, setDraft, dropDraft };
+    return { ...IDLE_SESSION_FIELDS, draft, setDraft, seedDraft, dropDraft };
   }
-  return { ...(session ?? IDLE_SESSION_FIELDS), draft, setDraft, dropDraft };
+  return { ...(session ?? IDLE_SESSION_FIELDS), draft, setDraft, seedDraft, dropDraft };
 }

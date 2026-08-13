@@ -7,8 +7,9 @@ import { Input } from "../ui/input";
 import { TruncatingTooltip } from "./TruncatingTooltip";
 import { listMcpServerStatus, toggleMcpServer } from "../../api";
 import { fmtError } from "../../lib/error-presentation";
+import { log } from "../../lib/log";
 import { sessionKeys } from "../../session/queryKeys";
-import type { McpEnabledSource } from "../../types/mcp";
+import type { McpEnabledSource, McpServerRegistry, McpServerStatusEntry } from "../../types/mcp";
 
 // The MCP tools section of the MCP trigger popover (issue #369). Rendered inside
 // ComposerMcpTrigger's PopoverContent -- the trigger chip carries the icon +
@@ -19,6 +20,14 @@ import type { McpEnabledSource } from "../../types/mcp";
 // - on-skill: skill-declared, checkbox checked + DISABLED (v1 read-only, issue
 //   #369 spec), labeled "via skill <name>"
 //
+// Cold start (ADR-0092 Decision 6, #500): sessionId is null on the centered
+// bar before any session exists. The section runs in DRAFT mode: the rows
+// come from the session-agnostic app-config REGISTRY (never the per-session
+// status query, which needs a live session), checked-state mirrors the
+// caller-held pending list (source is always user -- no skills are mounted
+// yet), and a toggle rewrites the list through onPendingMcpServersChange.
+// The shell enables every pick on the session the first submit mints.
+//
 // The section always renders (never returns null) -- when no servers are
 // configured it shows an empty state + the add-server footer. The
 // turn-in-flight `loading` gate disables user-toggle rows.
@@ -27,35 +36,87 @@ const ROW_CLASS =
   "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm outline-none";
 
 export type ComposerMcpSectionProps = {
-  /** The session whose MCP enablement this section reads / writes. */
-  sessionId: string;
+  /** The session whose MCP enablement this section reads / writes. null on
+   *  the cold-start shell-level bar (ADR-0092 / #500): the section reads the
+   *  registry + pendingMcpServers and writes via onPendingMcpServersChange
+   *  instead of the per-session enable IPC. */
+  sessionId: string | null;
   /** The session is mid-turn or mid-mutation: user-toggle rows are gated off
    *  (the toggle is meaningless mid-turn -- the change lands next turn). */
   loading: boolean;
   /** Hop to the settings MCP section (the server CRUD surface). Shell-owned
    *  navigation -- the parent threads the App.openSettings callback through. */
   onOpenSettingsMcp: () => void;
+  /** The user-configured MCP server registry (AppConfig.mcp_servers). The
+   *  draft-mode row source when sessionId is null (#500). */
+  registry?: McpServerRegistry;
+  /** When sessionId is null (cold-start bar), the shell-held pending enable
+   *  list rendered as the section's checked rows. */
+  pendingMcpServers?: string[];
+  /** When sessionId is null (cold-start bar), a toggle hands the NEXT pending
+   *  list (id appended / removed) to the shell via this callback. Undefined
+   *  when sessionId is non-null. */
+  onPendingMcpServersChange?: (next: string[]) => void;
 };
 
-export function ComposerMcpSection({ sessionId, loading, onOpenSettingsMcp }: ComposerMcpSectionProps) {
+export function ComposerMcpSection({
+  sessionId,
+  loading,
+  onOpenSettingsMcp,
+  registry,
+  pendingMcpServers,
+  onPendingMcpServersChange,
+}: ComposerMcpSectionProps) {
   const intl = useIntl();
   const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
 
+  // Null sessionId (cold-start bar, ADR-0092): the query is disabled — the
+  // draft rows below derive from the registry, no IPC round-trip.
   const { data: mcpStatus, error: queryError, isLoading } = useQuery({
-    queryKey: sessionKeys.mcpStatus(sessionId),
-    queryFn: () => listMcpServerStatus(sessionId),
+    // The queryKey uses a stable placeholder when sessionId is null — the key
+    // is inert (enabled:false prevents the queryFn from running, so no IPC).
+    queryKey: sessionKeys.mcpStatus(sessionId ?? ""),
+    queryFn: () => listMcpServerStatus(sessionId as string),
+    enabled: sessionId !== null,
   });
 
+  // Draft-mode rows (#500): one status-shaped entry per configured server,
+  // checked-state mirrored from the pending list. connected / tool_count /
+  // error stay at their not-connected values (nothing has run yet); source is
+  // user-or-null (no skills are mounted before the session exists).
+  const draftRows = useMemo<McpServerStatusEntry[]>(() => {
+    if (sessionId !== null) return [];
+    const pending = new Set(pendingMcpServers ?? []);
+    return (registry?.servers ?? []).map((srv) => {
+      const enabled = pending.has(srv.id);
+      return {
+        id: srv.id,
+        display_name: srv.display_name,
+        enabled,
+        source: enabled ? ({ kind: "user" } as const) : null,
+        connected: false,
+        tool_count: 0,
+        tools: [],
+        error: null,
+      };
+    });
+  }, [sessionId, registry, pendingMcpServers]);
+
   function invalidate() {
+    // Session mode only: the draft rows are registry-derived and invalidate
+    // with app-config, not the session status cache.
+    if (sessionId === null) return;
     void queryClient.invalidateQueries({ queryKey: sessionKeys.mcpStatus(sessionId) });
   }
 
   const toggleMutation = useMutation({
     mutationFn: (args: { id: string; enabled: boolean }) =>
-      toggleMcpServer(sessionId, args.id, args.enabled),
+      // `as string` is safe: handleToggle routes null-sessionId toggles to the
+      // pending-list path and never mutates (draft mode is IPC-free).
+      toggleMcpServer(sessionId as string, args.id, args.enabled),
     onSuccess: () => {
       setError(null);
       setPendingId(null);
@@ -71,11 +132,33 @@ export function ComposerMcpSection({ sessionId, loading, onOpenSettingsMcp }: Co
   function handleToggle(id: string, source: McpEnabledSource | null) {
     if (source?.kind === "skill") return;
     const currentlyEnabled = source !== null;
+    // Null sessionId (cold-start bar, ADR-0092 / #500): rewrite the
+    // caller-held pending list synchronously — no IPC, no per-id pending
+    // gate. When the callback is absent the toggle is logged and discarded so
+    // an unwired cold-start bar is observable instead of silently swallowed.
+    if (sessionId === null) {
+      if (onPendingMcpServersChange) {
+        const current = pendingMcpServers ?? [];
+        const next = currentlyEnabled
+          ? current.filter((serverId) => serverId !== id)
+          : [...current, id];
+        onPendingMcpServersChange(next);
+      } else {
+        log.warn(
+          "ComposerMcpSection",
+          "toggle called with null sessionId but no onPendingMcpServersChange handler — selection discarded",
+        );
+      }
+      return;
+    }
     setPendingId(id);
     toggleMutation.mutate({ id, enabled: !currentlyEnabled });
   }
 
-  const servers = useMemo(() => mcpStatus ?? [], [mcpStatus]);
+  const servers = useMemo(
+    () => (sessionId === null ? draftRows : (mcpStatus ?? [])),
+    [sessionId, draftRows, mcpStatus],
+  );
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const matched =

@@ -1,6 +1,6 @@
 // Runtime open-session state (issue #195). Owns the in-memory OPEN session set
 // + active id (ADR-0060 multi-session) + every action that mutates them:
-// register / createSessionWithQuestion / createSessionWithIngest / openPersisted /
+// register / createSessionWithQuestion / openPersisted /
 // dropFile / onWebviewDrop / clearPendingIngest / clearPendingQuestion /
 // activateSession / goToEmptyState / closeOpen / deletePersisted / renameEntry /
 // handleOpenDuck. The resume + persistence-busy indicators live
@@ -17,7 +17,7 @@
 // Single webview-level drop router (#81): Tauri's onDragDropEvent is a
 // window-level signal with no hit-test, so exactly one listener (here, in the
 // shell) routes each drop -- cold start mints a new session, otherwise the file
-// lands on the ACTIVE session's ingest via the pendingIngestPath pipe (#81 A1).
+// lands on the ACTIVE session's ingest via the pendingIngestPaths pipe (#81 A1).
 // This replaces the per-SessionPane FileDropzone listeners, which stacked 1:1
 // with keep-alive panes and fired N ingests per single drop.
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -33,6 +33,7 @@ import {
   deleteSession,
   exportSession,
   getSessionName,
+  mountSkill,
   onResumeProgress,
   openDuck,
   prepareImportSession,
@@ -40,6 +41,7 @@ import {
   renameSession,
   setAuthorizationMode,
   setSessionRuntime,
+  toggleMcpServer,
 } from "../api";
 import { errorDetail, fmtError, toAppError } from "../lib/error-presentation";
 import { log } from "../lib/log";
@@ -50,14 +52,24 @@ import type { SessionRuntimeChoice } from "../types/runtime";
 import type { OpenSession } from "../session/sidebarModel";
 
 /** Composer posture the user picked on the cold-start bar before a session
- *  existed (ADR-0092 Decision 6). The shell applies it to a freshly minted
- *  session BEFORE registering it open, so the SessionPane's pendingQuestion /
- *  pendingIngest consumption on mount runs under the chosen runtime +
- *  authorization mode. Both fields default to the backend defaults; a field
- *  still at its default skips its IPC (nothing to apply). */
+ *  existed (ADR-0092 Decision 6, issue #500). The shell applies it to a
+ *  freshly minted session BEFORE registering it open, so the SessionPane's
+ *  pendingQuestion / pendingIngestPaths consumption on mount runs under the
+ *  chosen runtime + authorization mode with the picked skills mounted + MCP
+ *  servers enabled. runtime / authMode default to the backend defaults; a
+ *  field still at its default skips its IPC (nothing to apply). The two lists
+ *  are empty by default; each entry lands one mount / enable IPC. */
 export interface PendingComposerPosture {
   runtime: SessionRuntimeChoice;
   authMode: AuthMode;
+  /** Skill spec names picked on the cold-start Skills trigger (draft mode,
+   *  #500): mounted onto the minted session one by one, in pick order. */
+  skills: string[];
+  /** MCP server ids picked on the cold-start MCP trigger (draft mode, #500):
+   *  enabled onto the minted session one by one. Applied AFTER the skills so
+   *  a server both a picked skill declares and the user picked lands in the
+   *  session's enabled set either way. */
+  mcpServers: string[];
 }
 
 /** Resume / open-busy status (ADR-0034). A structured discriminated union, not
@@ -113,22 +125,19 @@ export function useShellSessions({
    *  suspends the webview drop listener while busy. */
   busy: boolean;
   resumeStatus: ResumeStatus;
-  /** ADR-0092: create a session from a cold-start bar submit, carrying the
-   *  question as pendingQuestion for the new SessionPane to fire on mount.
-   *  The posture (pending runtime + auth mode picked on the centered bar) is
-   *  applied before the pane mounts so the FIRST turn runs under it. Resolves
-   *  true when the session was created (the shell resets its pending state);
-   *  false when createSession rejected (the error rode setShellError). */
+  /** ADR-0092 (#500): create a session from a cold-start bar submit, carrying
+   *  the question as pendingQuestion + the picked files as pendingIngestPaths
+   *  for the new SessionPane to consume on mount (files ingest BEFORE the
+   *  question fires). The posture (runtime + auth mode + skills + MCP servers
+   *  picked on the centered bar's draft-mode controls) is applied before the
+   *  pane mounts so the FIRST turn runs under it. `pendingFiles` may be empty
+   *  (a bare question submit). Resolves true when the session was created (the
+   *  shell resets its pending state); false when createSession rejected (the
+   *  error rode setShellError). */
   createSessionWithQuestion: (
     question: string,
     posture: PendingComposerPosture,
-  ) => Promise<boolean>;
-  /** ADR-0092: create a session from a cold-start composer "+" file pick,
-   *  carrying the path as pendingIngestPath (the drop-to-create twin, ADR-0061
-   *  empty-state ingest). Same posture semantics as createSessionWithQuestion. */
-  createSessionWithIngest: (
-    path: string,
-    posture: PendingComposerPosture,
+    pendingFiles: string[],
   ) => Promise<boolean>;
   openPersisted: (path: string, name: string) => Promise<void>;
   dropFile: (path: string) => Promise<void>;
@@ -267,29 +276,32 @@ export function useShellSessions({
   // Shared mint: createSession (backend creates + persists immediately,
   // returning the runtime id + bound .duck path, ADR-0061/0089) -> apply the
   // cold-start composer posture -> registerOpen + activate -> refresh the
-  // sidebar. Every cold-start creation path (bar submit, "+" file pick,
-  // window drop) funnels through here; the three differ only in the pending
-  // payload the new SessionPane consumes on mount. name starts empty; the
-  // display layer renders a localized "New session" placeholder until the
-  // first turn auto-names or the user renames.
+  // sidebar. Every cold-start creation path (bar submit, window drop) funnels
+  // through here; the paths differ only in the pending payload the new
+  // SessionPane consumes on mount. name starts empty; the display layer
+  // renders a localized "New session" placeholder until the first turn
+  // auto-names or the user renames.
   //
-  // Posture ordering (ADR-0092 Decision 6): the runtime + auth-mode writes
-  // land BEFORE registerOpen so the pane mounts (and fires a pendingQuestion)
-  // only after the session carries the user's pick — the first turn runs on
-  // the chosen runtime. A rejected posture write is logged and skipped (the
-  // session opens on the backend default; the picker's keep-server-posture
+  // Posture ordering (ADR-0092 Decision 6): the posture writes land BEFORE
+  // registerOpen so the pane mounts (and consumes pendingIngestPaths /
+  // pendingQuestion) only after the session carries the user's picks — the
+  // first turn runs on the chosen runtime + auth mode with the picked skills
+  // mounted + MCP servers enabled. Skills mount BEFORE the MCP enables so a
+  // server both a picked skill declares and the user picked is enabled either
+  // way. A rejected posture write is logged and skipped (the session opens on
+  // the backend default for that facet; the picker's keep-server-posture
   // semantics) instead of failing the whole creation. A rejected write also
   // surfaces via setShellError so the user is informed their picker selection
   // was not applied.
   //
-  // Reentry guard (review H-1): mintingRef blocks a second creation while the
+  // Reentry guard: mintingRef blocks a second creation while the
   // createSession IPC is in flight — a fast double-submit on the cold-start
   // bar would otherwise mint two sessions before activeSessionId flips.
   // Mirrors the droppingRef pattern in dropFile below.
   const mintingRef = useRef(false);
   const mintAndRegister = useCallback(
     async (opts: {
-      pendingIngestPath?: string | null;
+      pendingIngestPaths?: string[];
       pendingQuestion?: string | null;
       posture?: PendingComposerPosture;
     }): Promise<void> => {
@@ -298,28 +310,58 @@ export function useShellSessions({
       try {
         const { session_id: sid, duck_path: path } = await createSession();
         if (opts.posture) {
-          if (opts.posture.runtime.kind === "external") {
+          const posture = opts.posture;
+          // One write per posture facet, isolated: a rejected write logs +
+          // surfaces via setShellError but never fails the whole creation --
+          // the session opens on the backend default for that facet and the
+          // remaining picks still apply (the picker's keep-server-posture
+          // semantics). The four facets share this helper so the catch
+          // contract lives in one place.
+          const applyPostureWrite = async (
+            write: () => Promise<void>,
+            facet: string,
+            ...labels: unknown[]
+          ): Promise<void> => {
             try {
-              await setSessionRuntime(sid, opts.posture.runtime);
+              await write();
             } catch (e) {
-              log.warn("useShellSessions", "apply pending runtime failed; the session opens on the built-in default", fmtError(e, intl));
+              log.warn(
+                "useShellSessions",
+                `apply pending ${facet} failed; the session opens without it`,
+                ...labels,
+                fmtError(e, intl),
+              );
               setShellError(toAppError(e, intl, "shell"));
             }
+          };
+          if (posture.runtime.kind === "external") {
+            await applyPostureWrite(
+              () => setSessionRuntime(sid, posture.runtime),
+              "runtime",
+            );
           }
-          if (opts.posture.authMode !== AUTH_MODE_DEFAULT) {
-            try {
-              await setAuthorizationMode(sid, opts.posture.authMode);
-            } catch (e) {
-              log.warn("useShellSessions", "apply pending auth mode failed; the session opens on the default posture", fmtError(e, intl));
-              setShellError(toAppError(e, intl, "shell"));
-            }
+          if (posture.authMode !== AUTH_MODE_DEFAULT) {
+            await applyPostureWrite(
+              () => setAuthorizationMode(sid, posture.authMode),
+              "auth mode",
+            );
+          }
+          for (const name of posture.skills) {
+            await applyPostureWrite(() => mountSkill(sid, name), "skill mount", name);
+          }
+          for (const serverId of posture.mcpServers) {
+            await applyPostureWrite(
+              () => toggleMcpServer(sid, serverId, true),
+              "MCP enable",
+              serverId,
+            );
           }
         }
         registerOpen({
           sid,
           name: "",
           path,
-          pendingIngestPath: opts.pendingIngestPath ?? null,
+          pendingIngestPaths: opts.pendingIngestPaths ?? [],
           pendingQuestion: opts.pendingQuestion ?? null,
         });
         refreshSessions();
@@ -330,31 +372,25 @@ export function useShellSessions({
     [intl, registerOpen, refreshSessions, setShellError],
   );
 
-  // ADR-0092 cold-start submit: the centered bar's submit with no active
-  // session mints a session carrying the question as pendingQuestion. The
-  // SessionPane consumes it on mount via handleAsk, then clears it through
-  // clearPendingQuestion. ADR-0089 auto-persist applies (createSession binds
+  // ADR-0092 cold-start submit (#500): the centered bar's submit with no
+  // active session mints a session carrying the question as pendingQuestion +
+  // the pending file list as pendingIngestPaths. The SessionPane consumes
+  // them on mount — files ingest first (handleIngestMany), then the question
+  // fires via handleAsk — and clears each through onIngestConsumed /
+  // onQuestionConsumed. ADR-0089 auto-persist applies (createSession binds
   // the .duck immediately).
   const createSessionWithQuestion = useCallback(
-    async (question: string, posture: PendingComposerPosture): Promise<boolean> => {
+    async (
+      question: string,
+      posture: PendingComposerPosture,
+      pendingFiles: string[],
+    ): Promise<boolean> => {
       try {
-        await mintAndRegister({ pendingQuestion: question, posture });
-        return true;
-      } catch (e) {
-        setShellError(toAppError(e, intl, "shell"));
-        return false;
-      }
-    },
-    [intl, mintAndRegister, setShellError],
-  );
-
-  // ADR-0092 cold-start "+" file pick: mint a session carrying the path as
-  // pendingIngestPath — the drop-to-create twin (below), routed through the
-  // composer's file section instead of a window drop.
-  const createSessionWithIngest = useCallback(
-    async (path: string, posture: PendingComposerPosture): Promise<boolean> => {
-      try {
-        await mintAndRegister({ pendingIngestPath: path, posture });
+        await mintAndRegister({
+          pendingQuestion: question,
+          pendingIngestPaths: pendingFiles,
+          posture,
+        });
         return true;
       } catch (e) {
         setShellError(toAppError(e, intl, "shell"));
@@ -366,18 +402,19 @@ export function useShellSessions({
 
   // Drop-to-create on the empty-state main area (ADR-0061/0089/0092, #81 A1):
   // mint a persisted session and hand the dropped path to the new SessionPane
-  // as pendingIngestPath. The pane consumes it via handleIngest (the only
-  // path that can surface an xlsx NeedsGuidance dialog); the shell never
-  // ingests directly. droppingRef guards a second drop landing while the
-  // first createSession is still in flight. The window-drop path carries no
-  // composer posture (a drop never touches the bar's pending state).
+  // as a one-element pendingIngestPaths list. The pane consumes it via
+  // handleIngestMany (the only path that can surface an xlsx NeedsGuidance
+  // dialog); the shell never ingests directly. droppingRef guards a second
+  // drop landing while the first createSession is still in flight. The
+  // window-drop path carries no composer posture (a drop never touches the
+  // bar's pending state).
   const droppingRef = useRef(false);
   const dropFile = useCallback(
     async (path: string) => {
       if (droppingRef.current) return;
       droppingRef.current = true;
       try {
-        await mintAndRegister({ pendingIngestPath: path });
+        await mintAndRegister({ pendingIngestPaths: [path] });
       } catch (e) {
         setShellError(toAppError(e, intl, "shell"));
       } finally {
@@ -390,7 +427,7 @@ export function useShellSessions({
   // Single webview-level drop router (#81): Tauri's onDragDropEvent is a
   // window-level signal with no hit-test, so exactly one listener (here) routes
   // each drop -- cold start mints a new session, otherwise the file lands on
-  // the ACTIVE session's ingest via the pendingIngestPath pipe (#81 A1).
+  // the ACTIVE session's ingest via the pendingIngestPaths pipe (#81 A1).
   const onWebviewDrop = useCallback(
     (path: string) => {
       if (activeSessionId === null) {
@@ -405,7 +442,7 @@ export function useShellSessions({
       // (issue #205).
       mapSessions((sessions) =>
         sessions.map((o) =>
-          o.sid === activeSessionId ? { ...o, pendingIngestPath: path } : o,
+          o.sid === activeSessionId ? { ...o, pendingIngestPaths: [path] } : o,
         ),
       );
     },
@@ -424,13 +461,19 @@ export function useShellSessions({
     };
   }, [busy, onWebviewDrop]);
 
-  // Clear a consumed drop-on-cold-start path (#81 A1): once the SessionPane has
-  // kicked off ingest, OpenSession.pendingIngestPath is dropped so a remount
-  // cannot re-ingest.
+  // Clear consumed pending ingest paths (#81 A1, #500): once the SessionPane
+  // has kicked off ingest, OpenSession.pendingIngestPaths is emptied so a
+  // remount cannot re-ingest.
   const clearPendingIngest = useCallback(
     (sid: string) => {
       mapSessions((sessions) =>
-        sessions.map((o) => (o.sid === sid ? { ...o, pendingIngestPath: null } : o)),
+        sessions.map((o) =>
+          // The length guard keeps the entry identity-stable when nothing is
+          // pending (a stale clear cannot churn the pane's consumption effect).
+          o.sid === sid && o.pendingIngestPaths.length > 0
+            ? { ...o, pendingIngestPaths: [] }
+            : o,
+        ),
       );
     },
     [mapSessions],
@@ -503,7 +546,7 @@ export function useShellSessions({
         targetSid = sid;
         await openDuck(sid, duck_path);
         await queryClient.invalidateQueries({ queryKey: ["session", sid] });
-        registerOpen({ sid, name, path: duck_path, pendingIngestPath: null, pendingQuestion: null });
+        registerOpen({ sid, name, path: duck_path, pendingIngestPaths: [], pendingQuestion: null });
         setResumeStatus({ kind: "idle" });
       } catch (e) {
         // C2: if the prepare step succeeded but openDuck failed, the just-minted
@@ -573,9 +616,10 @@ export function useShellSessions({
   // shape read `next` out of an updater closure and ran a second setState for
   // the active id, nesting a setter inside another's updater (a React purity
   // violation: updaters may double-fire in StrictMode / concurrent mode).
-  // Setting activeId to null when the removed sid was active lets `apply`'s
-  // reconciler pick the first remaining entry (then null), matching the old
-  // next[0]?.sid ?? null fallback.
+  // Keeping the stale sid as activeId when the removed sid was active lets
+  // `apply`'s reconciler pick the fallback (first remaining session, then
+  // null). Explicitly setting null would now be respected as ADR-0092
+  // empty-state navigation instead of triggering the fallback.
   const unmountOpen = useCallback(
     (sid: string): void => {
       queryClient.removeQueries({ queryKey: ["session", sid] });
@@ -804,7 +848,6 @@ export function useShellSessions({
     busy,
     resumeStatus,
     createSessionWithQuestion,
-    createSessionWithIngest,
     openPersisted,
     dropFile,
     onWebviewDrop,
