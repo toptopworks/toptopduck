@@ -7,6 +7,7 @@ import { Input } from "../ui/input";
 import { TruncatingTooltip } from "./TruncatingTooltip";
 import { listMountedSkills, listSkills, mountSkill, unmountSkill } from "../../api";
 import { fmtError } from "../../lib/error-presentation";
+import { log } from "../../lib/log";
 import { sessionKeys, skillKeys } from "../../session/queryKeys";
 import type { SkillEntry } from "../../types/skills";
 
@@ -18,6 +19,12 @@ import type { SkillEntry } from "../../types/skills";
 // to the timeline + persists the recipe; the mount SET is folded from that
 // sequence (Mount in / Unmount out), never stored as a snapshot.
 //
+// Cold start (ADR-0092 Decision 6, #500): sessionId is null on the centered
+// bar before any session exists. The section runs in DRAFT mode: the mounted
+// query is disabled (no IPC) and the caller-held pending list is the mount
+// set; a toggle rewrites the list through onPendingSkillsChange and the shell
+// mounts every pick onto the session the first submit mints.
+//
 // The turn-in-flight `loading` gate (ADR-0040) disables every toggle: the
 // backend `mount_skill` / `unmount_skill` commands also refuse during resume /
 // an in-flight turn (reject_if_resuming + reject_if_in_flight), so the visual
@@ -28,20 +35,32 @@ const ROW_CLASS =
   "composer-skill-row focus-visible:outline-ring flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm outline-none hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2";
 
 export type ComposerSkillsSectionProps = {
-  /** The session whose mount set this section reads / writes. */
-  sessionId: string;
+  /** The session whose mount set this section reads / writes. null on the
+   *  cold-start shell-level bar (ADR-0092 / #500): the section reads
+   *  pendingSkills and writes via onPendingSkillsChange instead of the
+   *  per-session mount IPC. */
+  sessionId: string | null;
   /** The session is mid-turn or mid-mutation: toggles are gated off (AC #5),
    *  mirroring the file-entry gate the parent already honors. */
   loading: boolean;
   /** Hop to the settings SkillsSection (the registry CRUD surface). Shell-owned
    *  navigation -- the parent threads the App.openSettings callback through. */
   onOpenSettingsSkills: () => void;
+  /** When sessionId is null (cold-start bar), the shell-held pending mount
+   *  list rendered as the section's checked rows. */
+  pendingSkills?: string[];
+  /** When sessionId is null (cold-start bar), a toggle hands the NEXT pending
+   *  list (pick appended / removed) to the shell via this callback. Undefined
+   *  when sessionId is non-null. */
+  onPendingSkillsChange?: (next: string[]) => void;
 };
 
 export function ComposerSkillsSection({
   sessionId,
   loading,
   onOpenSettingsSkills,
+  pendingSkills,
+  onPendingSkillsChange,
 }: ComposerSkillsSectionProps) {
   const intl = useIntl();
   const queryClient = useQueryClient();
@@ -65,50 +84,95 @@ export function ComposerSkillsSection({
     queryKey: skillKeys.all(),
     queryFn: listSkills,
   });
+  // Null sessionId (cold-start bar, ADR-0092): the query is disabled and the
+  // caller-held pending list is the mount set — no IPC round-trip.
   const { data: mounted, error: mountedQueryError } = useQuery({
-    queryKey: sessionKeys.mountedSkills(sessionId),
-    queryFn: () => listMountedSkills(sessionId),
+    // The queryKey uses a stable placeholder when sessionId is null — the key
+    // is inert (enabled:false prevents the queryFn from running, so no IPC).
+    queryKey: sessionKeys.mountedSkills(sessionId ?? ""),
+    queryFn: () => listMountedSkills(sessionId as string),
+    enabled: sessionId !== null,
   });
 
-  const mountedSet = useMemo(() => new Set(mounted ?? []), [mounted]);
+  const mountedSet = useMemo(
+    () =>
+      new Set(
+        sessionId === null ? (pendingSkills ?? []) : (mounted ?? []),
+      ),
+    [sessionId, pendingSkills, mounted],
+  );
 
+  // Session-mode-only mutation machinery below: toggle() routes null-sessionId
+  // rows to the pending-list path, so none of these ever run in draft mode.
+  // The `as string` casts carry that invariant (the same pattern the
+  // disabled-query queryFns above use).
   function applyMountDelta(delta: (prev: string[] | undefined) => string[]) {
     setError(null);
-    queryClient.setQueryData<string[]>(sessionKeys.mountedSkills(sessionId), delta);
-    void queryClient.invalidateQueries({ queryKey: sessionKeys.mountedSkills(sessionId) });
+    queryClient.setQueryData<string[]>(
+      sessionKeys.mountedSkills(sessionId as string),
+      delta,
+    );
+    void queryClient.invalidateQueries({
+      queryKey: sessionKeys.mountedSkills(sessionId as string),
+    });
   }
 
   function invalidateAfterSkillMutation(name: string) {
     clearPending(name);
-    void queryClient.invalidateQueries({ queryKey: sessionKeys.mcpStatus(sessionId) });
+    void queryClient.invalidateQueries({
+      queryKey: sessionKeys.mcpStatus(sessionId as string),
+    });
   }
 
   const mountMutation = useMutation({
-    mutationFn: (name: string) => mountSkill(sessionId, name),
+    mutationFn: (name: string) => mountSkill(sessionId as string, name),
     onMutate: (name) => markPending(name),
     onSuccess: (_data, name) =>
       applyMountDelta((prev) => (prev?.includes(name) ? prev : [...(prev ?? []), name])),
     onError: (e) => {
       setError(fmtError(e, intl));
-      void queryClient.invalidateQueries({ queryKey: sessionKeys.mountedSkills(sessionId) });
+      void queryClient.invalidateQueries({
+        queryKey: sessionKeys.mountedSkills(sessionId as string),
+      });
     },
     onSettled: (_d, _e, name) => invalidateAfterSkillMutation(name),
   });
 
   const unmountMutation = useMutation({
-    mutationFn: (name: string) => unmountSkill(sessionId, name),
+    mutationFn: (name: string) => unmountSkill(sessionId as string, name),
     onMutate: (name) => markPending(name),
     onSuccess: (_data, name) =>
       applyMountDelta((prev) => prev?.filter((n) => n !== name) ?? []),
     onError: (e) => {
       setError(fmtError(e, intl));
-      void queryClient.invalidateQueries({ queryKey: sessionKeys.mountedSkills(sessionId) });
+      void queryClient.invalidateQueries({
+        queryKey: sessionKeys.mountedSkills(sessionId as string),
+      });
     },
     onSettled: (_d, _e, name) => invalidateAfterSkillMutation(name),
   });
 
   function toggle(skill: SkillEntry) {
     if (loading || pendingNames.has(skill.name)) return;
+    // Null sessionId (cold-start bar, ADR-0092 / #500): rewrite the
+    // caller-held pending list synchronously — no IPC, no per-name pending
+    // gate. When the callback is absent the toggle is logged and discarded so
+    // an unwired cold-start bar is observable instead of silently swallowed.
+    if (sessionId === null) {
+      if (onPendingSkillsChange) {
+        const current = pendingSkills ?? [];
+        const next = mountedSet.has(skill.name)
+          ? current.filter((n) => n !== skill.name)
+          : [...current, skill.name];
+        onPendingSkillsChange(next);
+      } else {
+        log.warn(
+          "ComposerSkillsSection",
+          "toggle called with null sessionId but no onPendingSkillsChange handler — selection discarded",
+        );
+      }
+      return;
+    }
     if (mountedSet.has(skill.name)) {
       unmountMutation.mutate(skill.name);
     } else {

@@ -128,6 +128,9 @@ vi.mock("../api", async (importOriginal) => {
     listMountedSkills: vi.fn(async () => []),
     mountSkill: vi.fn(async () => {}),
     unmountSkill: vi.fn(async () => {}),
+    // The cold-start MCP draft applies the pending enable list via per-session
+    // toggles (#500); default no-op write keeps unwired scenarios quiet.
+    toggleMcpServer: vi.fn(async () => {}),
   };
 });
 
@@ -150,7 +153,9 @@ import {
   listMcpServerStatus,
   listProviderProfiles,
   listSessions,
+  listSkills,
   listWorkingSet,
+  mountSkill,
   openDuck,
   readRows,
   renameSession,
@@ -158,9 +163,11 @@ import {
   setAppConfig,
   setAuthorizationMode,
   setSessionRuntime,
+  toggleMcpServer,
 } from "../api";
 import type { AppConfig } from "../types/app-config";
 import type { McpServerConfig, McpServerStatusEntry } from "../types/mcp";
+import type { SkillEntry } from "../types/skills";
 
 // ADR-0092: the sidebar "+" navigates to the centered empty state (no longer
 // creates a session); a session is created by submitting from the shell-level
@@ -585,6 +592,124 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       // Restore factory defaults so later tests see pending app-config.
       vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
       vi.mocked(listAdapters).mockResolvedValue([]);
+    }
+  });
+
+  it("cold-start bar renders the full composer control row — no degraded controls (ADR-0092 D6, #500)", async () => {
+    // The centered bar carries the SAME six controls as the session bar:
+    // Skills + MCP trigger chips, the "+" file button, the auth-mode chip,
+    // and the runtime picker. None of them disappear or degrade on cold
+    // start, and none of them mints a session by rendering.
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false }),
+    );
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      const bar = document.querySelector(".question-bar") as HTMLElement;
+      expect(bar).not.toBeNull();
+      // Skills + MCP trigger chips (draft mode: empty mount set / registry).
+      const skills = await screen.findByRole("button", { name: /技能 \(0\/0\)/ });
+      const mcp = screen.getByRole("button", { name: /MCP \(0\/0\)/ });
+      expect(bar.contains(skills)).toBe(true);
+      expect(bar.contains(mcp)).toBe(true);
+      // The "+" file button + the auth-mode chip.
+      expect(bar.contains(screen.getByRole("button", { name: "添加文件" }))).toBe(true);
+      expect(
+        bar.contains(await screen.findByRole("combobox", { name: /授权模式/ })),
+      ).toBe(true);
+      // The runtime picker trailing slot.
+      expect(
+        bar.contains(await screen.findByRole("button", { name: /运行时/ })),
+      ).toBe(true);
+      // Draft mode fires NO per-session IPC.
+      expect(listMcpServerStatus).not.toHaveBeenCalled();
+      expect(getAuthorizationMode).not.toHaveBeenCalled();
+      expect(createSession).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+    }
+  });
+
+  it("cold-start draft selections all apply to the minted session on first submit (#500)", async () => {
+    // The full draft-mode contract: a skill pick, an MCP pick, a queued file,
+    // and an auth-mode switch made on the centered bar (no session) all land
+    // on the session the first submit mints — skill mount + MCP enable +
+    // auth-mode write via mintAndRegister, the file through the ingest
+    // pipeline BEFORE the first turn fires.
+    vi.mocked(getAppConfig).mockResolvedValue({
+      ...baseAppConfig({ sidebar_collapsed: false }),
+      mcp_servers: { servers: [mcpServer("srv")] },
+    });
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [skillEntry("charting")],
+      ignored: [],
+      root_error: null,
+    });
+    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("people") });
+    // The creation turn rejects so it settles immediately (openSession pattern).
+    vi.mocked(askQuestion).mockRejectedValueOnce(
+      new Error("discard the creation turn"),
+    );
+    vi.mocked(open).mockResolvedValue(["/x/a.csv"]);
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+
+      // Skills draft: pick charting in the popover (draft toggle, no IPC).
+      fireEvent.click(await screen.findByRole("button", { name: /技能/ }));
+      fireEvent.click(
+        await screen.findByRole("checkbox", { name: "挂载技能 charting" }),
+      );
+      expect(mountSkill).not.toHaveBeenCalled();
+
+      // MCP draft: pick srv (the registry row, no per-session status IPC).
+      fireEvent.click(screen.getByRole("button", { name: /MCP/ }));
+      fireEvent.click(
+        await screen.findByRole("checkbox", { name: /切换 MCP 服务器 srv/ }),
+      );
+      expect(toggleMcpServer).not.toHaveBeenCalled();
+
+      // Files draft: the "+" pick queues into the pending list — the chip
+      // shows the queue; nothing ingests yet.
+      fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+      await waitFor(() =>
+        expect(screen.getByLabelText(/1 个文件已排队/)).toBeInTheDocument(),
+      );
+      expect(ingestFile).not.toHaveBeenCalled();
+
+      // Auth-mode draft: switch to no-confirmation (no IPC yet).
+      const authTrigger = screen.getByRole("combobox", { name: "授权模式：请求批准" });
+      fireEvent.pointerDown(authTrigger, { button: 0, pointerType: "mouse" });
+      fireEvent.click(authTrigger);
+      const option = await screen.findByRole("option", { name: /完全访问权限/ });
+      fireEvent.pointerUp(option, { button: 0, pointerType: "mouse" });
+      fireEvent.click(option);
+      await waitFor(() =>
+        expect(
+          screen.getByRole("combobox", { name: "授权模式：完全访问权限" }),
+        ).toBeInTheDocument(),
+      );
+      expect(setAuthorizationMode).not.toHaveBeenCalled();
+
+      // First submit mints the session and applies everything.
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "q" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(mountSkill).toHaveBeenCalledWith("sess-1", "charting"));
+      await waitFor(() => expect(toggleMcpServer).toHaveBeenCalledWith("sess-1", "srv", true));
+      await waitFor(() =>
+        expect(setAuthorizationMode).toHaveBeenCalledWith("sess-1", "no_confirmation"),
+      );
+      await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-1", "/x/a.csv"));
+      await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q"));
+      // The file landed BEFORE the first turn fired.
+      expect(vi.mocked(ingestFile).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(askQuestion).mock.invocationCallOrder[0],
+      );
+    } finally {
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+      vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
     }
   });
 
@@ -1342,6 +1467,22 @@ function baseAppConfig(
     shell: { ...shell, sidebar_grouping: "flat" },
     mcp_servers: { servers: [] },
     sessions_dir: null,
+  };
+}
+
+// A minimal registry skill (#500 cold-start Skills draft tests) -- every
+// required wire field present, only the name varies.
+function skillEntry(name: string): SkillEntry {
+  return {
+    name,
+    description: `${name} skill`,
+    acquired: "local",
+    license: null,
+    compatibility: null,
+    mcp_servers: [],
+    body: "",
+    link_target: null,
+    content_hash: "ab".repeat(32),
   };
 }
 

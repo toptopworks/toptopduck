@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { useIntl, FormattedMessage } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -39,27 +39,40 @@ import { sessionKeys, skillKeys } from "./queryKeys";
 // the bar or its composer controls. It reports its bar-relevant fields
 // (loading / phase / handleAsk / handleCancel / handleIngestFiles) upward via
 // onComposerFields so the shell-level bar can read them for the active session.
-// A pendingQuestion from a cold-start submit is consumed on mount via handleAsk.
+// Pending payloads from a cold-start submit (#500) are consumed on mount in ONE
+// coordinated effect: pendingIngestPaths ingest first (handleIngestMany), then
+// the pendingQuestion fires via handleAsk — but only when the whole batch
+// loaded; a halted batch (guidance dialog / error banner) owns the user's
+// attention, and the question is handed back to the bar draft via onSeedDraft
+// instead of firing underneath the dialog / banner.
 
 interface SessionPaneProps {
   sessionId: string;
-  /** A pending data-file drop routed to this session's ingest (ADR-0061,
-   *  #81 A1; issue #205). Set by a cold-start drop (ingested once on mount) OR
-   *  by a drop onto an already-active session (ingested when the prop changes).
-   *  null once consumed or for sessions opened by a non-drop action. */
-  pendingIngestPath: string | null;
+  /** Pending data-file paths routed to this session's ingest (ADR-0061,
+   *  #81 A1; issue #205; #500). Set by a cold-start drop (one path, ingested
+   *  once on mount), a drop onto an already-active session (ingested when the
+   *  prop changes), or a cold-start "+" file list carried onto the minted
+   *  session by the first submit (#500). Empty once consumed or for sessions
+   *  opened by any other action. */
+  pendingIngestPaths: string[];
   /** Shell callback after the pending ingest is kicked off, so OpenSession is
    *  cleared and a remount cannot re-ingest (#81 A1). */
   onIngestConsumed: () => void;
   /** ADR-0092: a pending question from the shell-level cold-start bar. Set
    *  when the user submits from the centered bar with no active session; the
    *  shell creates a session carrying the question, and SessionPane fires it
-   *  via handleAsk on mount. null once consumed or for sessions opened by any
-   *  other action. */
+   *  via handleAsk once the pending ingest settles. null once consumed or for
+   *  sessions opened by any other action. */
   pendingQuestion: string | null;
   /** ADR-0092: shell callback after the pending question is fired, so the
    *  OpenSession entry is cleared and a remount cannot re-fire. */
   onQuestionConsumed: () => void;
+  /** #500: hand a held-back pending question back into the bar draft. Fires
+   *  when the pending ingest batch halts (NeedsGuidance / Error): the
+   *  auto-ask is suppressed so the question is seeded into THIS session's
+   *  draft and stays visible + submittable once the guidance / error is
+   *  resolved — a failed ingest must never lose the question. */
+  onSeedDraft: (sessionId: string, value: string) => void;
   /** ADR-0092: lifts this session's bar-relevant fields (loading / phase /
    *  handleAsk / handleCancel / handleIngestFiles) to the shell-level bar.
    *  Called via useEffect whenever the fields change. */
@@ -90,7 +103,7 @@ interface SessionPaneProps {
 // stable prop for useSessionState / useTurnFlow (no every-render fresh []).
 const NO_APPROVALS: ApprovalEntry[] = [];
 
-export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pendingQuestion, onQuestionConsumed, onComposerFields, sessionName, onFirstTurnSettled, approvalEvents, onRailResizeStart }: SessionPaneProps) {
+export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, pendingQuestion, onQuestionConsumed, onSeedDraft, onComposerFields, sessionName, onFirstTurnSettled, approvalEvents, onRailResizeStart }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
   // the pane acts on its own session only). The respond / clearSession
@@ -111,8 +124,6 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pe
   );
   const s = useSessionState(
     sessionId,
-    pendingIngestPath,
-    onIngestConsumed,
     sessionApprovals,
     handleApprovalsSettled,
     onFirstTurnSettled,
@@ -163,22 +174,49 @@ export function SessionPane({ sessionId, pendingIngestPath, onIngestConsumed, pe
     // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount-only: sessionId is constant (keyed component) + onComposerFields is useCallback-stable
   }, []);
 
-  // ADR-0092: consume a pending question from the cold-start bar submit.
-  // The shell created this session with pendingQuestion set; fire it via
-  // handleAsk immediately, then clear it so a remount cannot re-fire. The
-  // guard on pendingQuestion !== null ensures this runs once (on mount when
-  // the prop is set, or not at all when null). No .catch here: handleAsk
-  // catches its own failures internally (sets the session error state) and
-  // never rejects.
+  // ADR-0092 (#500): consume the pending payloads from the cold-start bar
+  // submit / window drop. Both props are cleared UPFRONT (onIngestConsumed /
+  // onQuestionConsumed) so a remount cannot re-fire; consumedPendingRef dedups
+  // the payload KEY against a React StrictMode dev double-invoke / a re-render
+  // that lands before the clear does (the same shape as the retired
+  // useIngestFlow consumption effect -- dedup-only, NO cleanup: a cleanup
+  // cancel would fire when the upfront clear flips the props and kill the
+  // in-flight consumption). Ordering is the contract: files ingest FIRST so
+  // the first turn sees the loaded sources; the question fires only when the
+  // whole batch loaded. A halted batch (NeedsGuidance opens the dialog / Error
+  // shows the banner) suppresses the auto-ask -- the dialog or banner owns the
+  // user's attention -- and hands the question back to the bar draft via
+  // onSeedDraft so it is never silently lost.
+  // No .catch on handleAsk: it catches its own failures internally (sets the
+  // session error state) and never rejects.
+  const consumedPendingRef = useRef<string | null>(null);
   useEffect(() => {
-    if (pendingQuestion !== null) {
-      onQuestionConsumed();
-      void s.handleAsk(pendingQuestion).catch((e) =>
-        log.error("SessionPane", "pendingQuestion handleAsk threw unexpectedly", e),
-      );
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot per pendingQuestion value: s.handleAsk is stable inside useSessionState
-  }, [pendingQuestion]);
+    const paths = pendingIngestPaths;
+    const question = pendingQuestion;
+    if (paths.length === 0 && question === null) return;
+    // JSON.stringify makes the (paths, question) pair collision-free without
+    // an ad-hoc separator character.
+    const key = JSON.stringify([paths, question]);
+    if (consumedPendingRef.current === key) return;
+    consumedPendingRef.current = key;
+    if (paths.length > 0) onIngestConsumed();
+    if (question !== null) onQuestionConsumed();
+    void (async () => {
+      if (paths.length > 0) {
+        const allLoaded = await s.handleIngestMany(paths);
+        if (!allLoaded) {
+          if (question !== null) onSeedDraft(sessionId, question);
+          return;
+        }
+      }
+      if (question !== null) {
+        void s.handleAsk(question).catch((e) =>
+          log.error("SessionPane", "pendingQuestion handleAsk threw unexpectedly", e),
+        );
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot per payload key: s.handleIngestMany / s.handleAsk are stable inside useSessionState, the consumed callbacks are useCallback-stable in useShellSessions
+  }, [pendingIngestPaths, pendingQuestion, sessionId, onSeedDraft]);
 
   // Workspace tab (ADR-0045: 工作集 is a workspace tab, not a persistent
   // column). 结果 = the derived chart+table stage; 工作集 = source management.

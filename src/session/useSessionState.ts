@@ -97,8 +97,11 @@ export interface UseSessionState {
   handleCancel: () => Promise<void>;
   handleIngest: (path: string) => void;
   /** Multi-file ingest from the composer "+" file section (ADR-0083, issue
-   *  #351). Sequential with halt-on-guidance/error; see useIngestFlow. */
-  handleIngestMany: (paths: string[]) => void;
+   *  #351). Sequential with halt-on-guidance/error; see useIngestFlow.
+   *  Resolves true when every file loaded (#500): the SessionPane's
+   *  pending-payload consumption gates the cold-start auto-ask on it. The
+   *  bar's handleIngestFiles consumer accepts it via void-return covariance. */
+  handleIngestMany: (paths: string[]) => Promise<boolean>;
   handleGuidedSubmit: (sheetGuidance: SheetGuidance[]) => void;
   handleGuidedCancel: () => void;
   handleRename: (referenceName: string, newDisplay: string) => void;
@@ -118,8 +121,6 @@ export interface UseSessionState {
 
 export function useSessionState(
   sessionId: string,
-  pendingIngestPath: string | null = null,
-  onIngestConsumed: () => void = () => {},
   /** This session's approval entries (the app-level useApprovalEvents slice,
    *  ADR-0083 / issue #297): merged into the live trace by useTurnFlow so a
    *  gated external call renders its in-flow card inside the turn. Undefined
@@ -291,17 +292,17 @@ export function useSessionState(
     [handleAsk, queryClient, sessionId, onFirstTurnSettled],
   );
 
-  // Ingest orchestration (handleIngest + handleGuidedSubmit + handleGuidedCancel
-  // + guidance dialog state + cold-start drop consumption) lives in useIngestFlow
+  // Ingest orchestration (handleIngest + handleIngestMany + handleGuidedSubmit
+  // + handleGuidedCancel + guidance dialog state) lives in useIngestFlow
   // (issue #231) -- the ingest domain goes through the GENERIC refreshServerState
   // on a Loaded outcome (no optimistic thread append, so thread refresh is
   // harmless), the inverse of useTurnFlow above which must leave thread
   // un-invalidated. Driven through injected deps; this hook never reaches for
-  // the raw guidance setter or the viewed setter for ingest work.
+  // the raw guidance setter or the viewed setter for ingest work. Pending-ingest
+  // consumption (#500) lives one level up in SessionPane, which sequences the
+  // files BEFORE the pending question.
   const { guidance, handleIngest, handleIngestMany, handleGuidedSubmit, handleGuidedCancel } = useIngestFlow(
     sessionId,
-    pendingIngestPath,
-    onIngestConsumed,
     {
       intl,
       setLoading,

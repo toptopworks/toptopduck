@@ -1,5 +1,4 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
-import { createElement, StrictMode } from "react";
+import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { IntlShape } from "react-intl";
 import { useIngestFlow } from "../useIngestFlow";
@@ -106,7 +105,7 @@ describe("useIngestFlow", () => {
     it("refreshes server state with 'load' and clears viewed for the new source", async () => {
       const { deps, refreshServerState, viewed } = setup();
       vi.mocked(ingestFile).mockResolvedValue(loaded("result_1"));
-      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
 
       await act(async () => {
         await result.current.handleIngest("/x.csv");
@@ -123,7 +122,7 @@ describe("useIngestFlow", () => {
     it("routes NeedsGuidance into the guidance dialog (sets guidance state)", async () => {
       const { deps, refreshServerState, viewed } = setup();
       vi.mocked(ingestFile).mockResolvedValue(needsGuidance());
-      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
 
       await act(async () => {
         await result.current.handleIngest("/x.xlsx");
@@ -143,7 +142,7 @@ describe("useIngestFlow", () => {
     it("surfaces a LoadError via loadErrorDisplay tagged 'load'", async () => {
       const { deps, setError, refreshServerState, viewed } = setup();
       vi.mocked(ingestFile).mockResolvedValue(loadError);
-      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
 
       await act(async () => {
         await result.current.handleIngest("/bad.csv");
@@ -164,7 +163,7 @@ describe("useIngestFlow", () => {
     it("surfaces a reject via toAppError tagged 'load'", async () => {
       const { deps, setError } = setup();
       vi.mocked(ingestFile).mockRejectedValue(new Error("ipc down"));
-      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
 
       await act(async () => {
         await result.current.handleIngest("/x.csv");
@@ -177,7 +176,7 @@ describe("useIngestFlow", () => {
     it("clears loading in the finally even on reject", async () => {
       const { deps, setLoading } = setup();
       vi.mocked(ingestFile).mockRejectedValue(new Error("ipc down"));
-      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
 
       await act(async () => {
         await result.current.handleIngest("/x.csv");
@@ -187,96 +186,20 @@ describe("useIngestFlow", () => {
     });
   });
 
-  describe("cold-start drop consumption (ADR-0061)", () => {
-    it("ingests a pending path once + calls onIngestConsumed", async () => {
-      const { deps } = setup();
-      vi.mocked(ingestFile).mockResolvedValue(loaded("result_1"));
-      const onIngestConsumed = vi.fn();
-      const { rerender } = renderHook(
-        ({ path }) => useIngestFlow(SID, path, onIngestConsumed, deps),
-        { initialProps: { path: null as string | null } },
-      );
-
-      rerender({ path: "/drop.csv" });
-
-      await waitFor(() => expect(onIngestConsumed).toHaveBeenCalledTimes(1));
-      expect(ingestFile).toHaveBeenCalledWith(SID, "/drop.csv");
-    });
-
-    it("dedups a repeated SAME path (StrictMode double-invoke / remount) -> no-op", async () => {
-      const { deps } = setup();
-      vi.mocked(ingestFile).mockResolvedValue(loaded("result_1"));
-      const onIngestConsumed = vi.fn();
-      const { rerender } = renderHook(
-        ({ path }) => useIngestFlow(SID, path, onIngestConsumed, deps),
-        { initialProps: { path: "/drop.csv" as string | null } },
-      );
-
-      // The mount effect already consumed "/drop.csv"; re-emitting the SAME
-      // path (StrictMode dev double-invoke, or a remount before the shell
-      // clears the prop) must not re-ingest.
-      rerender({ path: "/drop.csv" });
-      rerender({ path: "/drop.csv" });
-
-      await waitFor(() => expect(ingestFile).toHaveBeenCalledTimes(1));
-      expect(onIngestConsumed).toHaveBeenCalledTimes(1);
-    });
-
-    it("ingests each DISTINCT path once when the prop changes", async () => {
-      const { deps } = setup();
-      vi.mocked(ingestFile).mockResolvedValue(loaded("result_1"));
-      const onIngestConsumed = vi.fn();
-      const { rerender } = renderHook(
-        ({ path }) => useIngestFlow(SID, path, onIngestConsumed, deps),
-        { initialProps: { path: "/a.csv" as string | null } },
-      );
-
-      await waitFor(() => expect(ingestFile).toHaveBeenCalledWith(SID, "/a.csv"));
-
-      rerender({ path: "/b.csv" });
-
-      await waitFor(() => expect(ingestFile).toHaveBeenCalledWith(SID, "/b.csv"));
-      expect(ingestFile).toHaveBeenCalledTimes(2);
-      expect(onIngestConsumed).toHaveBeenCalledTimes(2);
-    });
-
-    it("does nothing when pendingIngestPath is null", () => {
-      const { deps } = setup();
-      vi.mocked(ingestFile).mockResolvedValue(loaded("result_1"));
-      const onIngestConsumed = vi.fn();
-      renderHook(() => useIngestFlow(SID, null, onIngestConsumed, deps));
-
-      expect(ingestFile).not.toHaveBeenCalled();
-      expect(onIngestConsumed).not.toHaveBeenCalled();
-    });
-
-    it("ingests a pending path exactly once under React.StrictMode (dev remount)", async () => {
-      const { deps } = setup();
-      vi.mocked(ingestFile).mockResolvedValue(loaded("result_1"));
-      const onIngestConsumed = vi.fn();
-      // StrictMode dev-only double-invokes effects (mount -> cleanup -> re-run
-      // on the same instance, so useRef state survives). The path-based dedup
-      // must hold across the re-run so the dropped file ingests exactly once.
-      renderHook(({ path }) => useIngestFlow(SID, path, onIngestConsumed, deps), {
-        initialProps: { path: "/drop.csv" as string | null },
-        wrapper: ({ children }) => createElement(StrictMode, null, children),
-      });
-
-      await waitFor(() => expect(ingestFile).toHaveBeenCalledTimes(1));
-      expect(onIngestConsumed).toHaveBeenCalledTimes(1);
-    });
-  });
-
   describe("handleIngestMany - multi-file batch (issue #351)", () => {
     it("ingests every file sequentially, refreshing ONCE after the batch", async () => {
       const { deps, refreshServerState, viewed } = setup();
       vi.mocked(ingestFile).mockResolvedValue(loaded("result_1"));
-      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
 
+      let allLoaded = false;
       await act(async () => {
-        await result.current.handleIngestMany(["/a.csv", "/b.csv", "/c.csv"]);
+        allLoaded = await result.current.handleIngestMany(["/a.csv", "/b.csv", "/c.csv"]);
       });
 
+      // #500: a fully-loaded batch reports true (the SessionPane's auto-ask
+      // gate consumes it).
+      expect(allLoaded).toBe(true);
       expect(ingestFile).toHaveBeenCalledTimes(3);
       expect(ingestFile).toHaveBeenNthCalledWith(1, SID, "/a.csv");
       expect(ingestFile).toHaveBeenNthCalledWith(2, SID, "/b.csv");
@@ -293,12 +216,16 @@ describe("useIngestFlow", () => {
       vi.mocked(ingestFile)
         .mockResolvedValueOnce(loaded("result_1"))
         .mockResolvedValueOnce(needsGuidance());
-      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
 
+      let allLoaded = true;
       await act(async () => {
-        await result.current.handleIngestMany(["/a.csv", "/x.xlsx", "/c.csv"]);
+        allLoaded = await result.current.handleIngestMany(["/a.csv", "/x.xlsx", "/c.csv"]);
       });
 
+      // #500: a halted batch reports false so the pending question stays held
+      // back (the guidance dialog owns the user's attention).
+      expect(allLoaded).toBe(false);
       // The third file is never attempted -- the batch halts at the guidance.
       expect(ingestFile).toHaveBeenCalledTimes(2);
       expect(result.current.guidance).toEqual({
@@ -321,12 +248,15 @@ describe("useIngestFlow", () => {
       vi.mocked(ingestFile)
         .mockResolvedValueOnce(loaded("result_1"))
         .mockResolvedValueOnce(loadError);
-      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
 
+      let allLoaded = true;
       await act(async () => {
-        await result.current.handleIngestMany(["/a.csv", "/bad.csv", "/c.csv"]);
+        allLoaded = await result.current.handleIngestMany(["/a.csv", "/bad.csv", "/c.csv"]);
       });
 
+      // #500: an error-halted batch reports false too.
+      expect(allLoaded).toBe(false);
       expect(ingestFile).toHaveBeenCalledTimes(2);
       expect(setError).toHaveBeenLastCalledWith(
         expect.objectContaining({ kind: "load", detail: "bad" }),
@@ -347,12 +277,14 @@ describe("useIngestFlow", () => {
     it("does not refresh when the FIRST file already fails (nothing loaded)", async () => {
       const { deps, refreshServerState, viewed } = setup();
       vi.mocked(ingestFile).mockResolvedValue(loadError);
-      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
 
+      let allLoaded = true;
       await act(async () => {
-        await result.current.handleIngestMany(["/bad.csv", "/b.csv"]);
+        allLoaded = await result.current.handleIngestMany(["/bad.csv", "/b.csv"]);
       });
 
+      expect(allLoaded).toBe(false);
       expect(ingestFile).toHaveBeenCalledTimes(1);
       expect(refreshServerState).not.toHaveBeenCalled();
       expect(viewed.clearForNewSource).not.toHaveBeenCalled();
@@ -365,7 +297,7 @@ describe("useIngestFlow", () => {
       vi.mocked(ingestFile)
         .mockResolvedValueOnce(loaded("result_1"))
         .mockResolvedValueOnce(needsGuidance());
-      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
 
       await act(async () => {
         await result.current.handleIngestMany(["/a.csv", "/x.xlsx"]);
@@ -376,12 +308,16 @@ describe("useIngestFlow", () => {
 
     it("is a no-op for an empty path list", async () => {
       const { deps, setLoading, refreshServerState } = setup();
-      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
 
+      let allLoaded = false;
       await act(async () => {
-        await result.current.handleIngestMany([]);
+        allLoaded = await result.current.handleIngestMany([]);
       });
 
+      // #500: nothing to halt on -- an empty batch is vacuously all-loaded so
+      // a bare-question cold-start submit never gates.
+      expect(allLoaded).toBe(true);
       expect(ingestFile).not.toHaveBeenCalled();
       expect(refreshServerState).not.toHaveBeenCalled();
       // No loading churn for a no-op batch.
@@ -391,12 +327,15 @@ describe("useIngestFlow", () => {
     it("surfaces an IPC reject via toAppError tagged 'load' and clears loading", async () => {
       const { deps, setError, setLoading } = setup();
       vi.mocked(ingestFile).mockRejectedValue(new Error("ipc down"));
-      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
 
+      let allLoaded = true;
       await act(async () => {
-        await result.current.handleIngestMany(["/a.csv"]);
+        allLoaded = await result.current.handleIngestMany(["/a.csv"]);
       });
 
+      // #500: a reject resolves false (the error banner owns the same gate).
+      expect(allLoaded).toBe(false);
       expect(setError).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "load" }));
       expect(setLoading).toHaveBeenLastCalledWith(false);
     });
@@ -405,7 +344,7 @@ describe("useIngestFlow", () => {
   describe("handleGuidedSubmit - Loaded branch", () => {
     it("clears guidance + refreshes with 'load' + clears viewed", async () => {
       const { deps, refreshServerState, viewed } = setup();
-      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
       await primeGuidance(result);
       vi.mocked(ingestFileGuided).mockResolvedValue(loaded("result_2"));
 
@@ -423,7 +362,7 @@ describe("useIngestFlow", () => {
   describe("handleGuidedSubmit - Error branch", () => {
     it("surfaces a LoadError and leaves guidance open for retry", async () => {
       const { deps, setError } = setup();
-      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
       await primeGuidance(result);
       vi.mocked(ingestFileGuided).mockResolvedValue(loadError);
 
@@ -442,7 +381,7 @@ describe("useIngestFlow", () => {
   describe("handleGuidedSubmit - NeedsGuidance-recur", () => {
     it("surfaces the guidedStillNeedsGuidance locale message tagged 'load'", async () => {
       const { deps, setError, intl } = setup();
-      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
       await primeGuidance(result);
       vi.mocked(ingestFileGuided).mockResolvedValue(needsGuidance());
 
@@ -465,7 +404,7 @@ describe("useIngestFlow", () => {
   describe("handleGuidedSubmit - IPC reject", () => {
     it("surfaces a reject via toAppError tagged 'load'", async () => {
       const { deps, setError } = setup();
-      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
       await primeGuidance(result);
       vi.mocked(ingestFileGuided).mockRejectedValue(new Error("ipc down"));
 
@@ -478,7 +417,7 @@ describe("useIngestFlow", () => {
 
     it("is a no-op when guidance is null (no dialog open)", async () => {
       const { deps } = setup();
-      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
       // No prime -> guidance is null. A stray submit (should not happen in
       // practice -- the dialog is conditionally rendered) is a safe no-op.
       await act(async () => {
@@ -491,7 +430,7 @@ describe("useIngestFlow", () => {
   describe("handleGuidedCancel", () => {
     it("clears guidance to null", async () => {
       const { deps } = setup();
-      const { result } = renderHook(() => useIngestFlow(SID, null, () => {}, deps));
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
       await primeGuidance(result);
       expect(result.current.guidance).not.toBeNull();
 

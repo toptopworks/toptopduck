@@ -211,7 +211,6 @@ export default function App() {
     busy,
     resumeStatus,
     createSessionWithQuestion,
-    createSessionWithIngest,
     openPersisted,
     clearPendingIngest,
     clearPendingQuestion,
@@ -297,14 +296,20 @@ export default function App() {
     activeSessionFields ?? IDLE_SESSION_FIELDS,
   );
 
-  // ADR-0092 Decision 6: shell-level pending composer posture for the
-  // cold-start bar. The runtime picker + auth-mode chip render on the
-  // centered bar with NO session; their selections land here and are applied
-  // to the session the first submit mints (consumed = reset to the backend
-  // defaults, so each cold-start visit starts from the default posture).
+  // ADR-0092 Decision 6 (#500): shell-level pending composer posture for the
+  // cold-start bar. Every composer control renders on the centered bar with
+  // NO session in draft mode; the selections land here and are applied to the
+  // session the first submit mints (consumed = reset to the backend defaults
+  // / empty lists, so each cold-start visit starts from the default posture).
+  // runtime / authMode / skills / mcpServers apply via per-session IPC writes
+  // in useShellSessions.mintAndRegister; the file list rides the new session's
+  // pendingIngestPaths.
   const [pendingRuntime, setPendingRuntime] =
     useState<SessionRuntimeChoice>(RUNTIME_CHOICE_DEFAULT);
   const [pendingAuthMode, setPendingAuthMode] = useState<AuthMode>(AUTH_MODE_DEFAULT);
+  const [pendingSkills, setPendingSkills] = useState<string[]>([]);
+  const [pendingMcpServers, setPendingMcpServers] = useState<string[]>([]);
+  const [pendingFiles, setPendingFiles] = useState<string[]>([]);
 
   // ADR-0092 Decision 4 honest gate (submit-time). The centered bar is
   // always typeable; a cold-start submit on the built-in runtime requires a
@@ -345,14 +350,22 @@ export default function App() {
       }
       const runtime = pendingRuntime;
       const authMode = pendingAuthMode;
-      void createSessionWithQuestion(question, { runtime, authMode }).then(
-        (created) => {
-          if (created) {
-            setPendingRuntime(RUNTIME_CHOICE_DEFAULT);
-            setPendingAuthMode(AUTH_MODE_DEFAULT);
-          }
-        },
-      );
+      const skills = pendingSkills;
+      const mcpServers = pendingMcpServers;
+      const files = pendingFiles;
+      void createSessionWithQuestion(
+        question,
+        { runtime, authMode, skills, mcpServers },
+        files,
+      ).then((created) => {
+        if (created) {
+          setPendingRuntime(RUNTIME_CHOICE_DEFAULT);
+          setPendingAuthMode(AUTH_MODE_DEFAULT);
+          setPendingSkills([]);
+          setPendingMcpServers([]);
+          setPendingFiles([]);
+        }
+      });
     },
     [
       activeSessionId,
@@ -360,6 +373,9 @@ export default function App() {
       createSessionWithQuestion,
       pendingRuntime,
       pendingAuthMode,
+      pendingSkills,
+      pendingMcpServers,
+      pendingFiles,
       builtInGateOpen,
       profileKeys.activeProfileId,
       openSettings,
@@ -375,11 +391,13 @@ export default function App() {
     }
   }, [activeSessionId, composerFieldsMap]);
 
-  // ADR-0092: shell-level file ingest. When active, delegate to the session's
-  // handleIngestMany. On cold start a SINGLE picked file mints a session via
-  // the drop-to-create twin (pendingIngestPath, same posture application as a
-  // bar submit); multi-file cold-start picks are a follow-up (the open-set
-  // pending shape carries one path).
+  // ADR-0092 (#500): shell-level file ingest. When active, delegate to the
+  // session's handleIngestMany. On cold start the picked files accumulate in
+  // the shell-level pending file list (draft mode, Decision 6) — the bar's
+  // "+" chip shows the queued count, and the first submit carries the whole
+  // list onto the minted session (pendingIngestPaths), where the pane ingests
+  // it BEFORE firing the pending question. Duplicates (the same path picked
+  // twice) are dropped at accumulation time.
   const handleShellIngestFiles = useCallback(
     (paths: string[]) => {
       if (activeSessionId !== null) {
@@ -387,29 +405,13 @@ export default function App() {
         if (fields) fields.handleIngestFiles(paths);
         return;
       }
-      if (paths.length !== 1) {
-        setShellError({
-          message: intl.formatMessage({
-            id: "coldStart.ingestMultiFileUnsupported",
-            defaultMessage: "Multi-file ingest is not available on the cold-start bar yet — open a session first, or pick one file at a time.",
-          }),
-          kind: "shell",
-          detail: null,
-        });
-        return;
-      }
-      const runtime = pendingRuntime;
-      const authMode = pendingAuthMode;
-      void createSessionWithIngest(paths[0], { runtime, authMode }).then(
-        (created) => {
-          if (created) {
-            setPendingRuntime(RUNTIME_CHOICE_DEFAULT);
-            setPendingAuthMode(AUTH_MODE_DEFAULT);
-          }
-        },
-      );
+      setPendingFiles((prev) => {
+        const known = new Set(prev);
+        const fresh = paths.filter((p) => !known.has(p));
+        return fresh.length === 0 ? prev : [...prev, ...fresh];
+      });
     },
-    [activeSessionId, composerFieldsMap, createSessionWithIngest, pendingRuntime, pendingAuthMode, intl, setShellError],
+    [activeSessionId, composerFieldsMap],
   );
 
   // --- In-app navigation history (issue #288) -----------------------------
@@ -700,10 +702,11 @@ export default function App() {
                           <SessionPane
                             key={s.sid}
                             sessionId={s.sid}
-                            pendingIngestPath={s.pendingIngestPath}
+                            pendingIngestPaths={s.pendingIngestPaths}
                             onIngestConsumed={() => clearPendingIngest(s.sid)}
                             pendingQuestion={s.pendingQuestion}
                             onQuestionConsumed={() => clearPendingQuestion(s.sid)}
+                            onSeedDraft={composer.seedDraft}
                             onComposerFields={handleComposerFields}
                             sessionName={s.name}
                             onFirstTurnSettled={syncSessionName}
@@ -740,26 +743,31 @@ export default function App() {
                         draft={composer.draft}
                         setDraft={composer.setDraft}
                         header={
-                          activeSessionId !== null ? (
+                          // ADR-0092 Decision 6 (#500): the Skills / MCP
+                          // triggers render in BOTH postures — session-active
+                          // (per-session mount set via IPC) and cold start
+                          // (draft mode: empty mount set + shell-level pending
+                          // lists applied when the first submit mints the
+                          // session). Same component pair, no degradation.
+                          (
                             <>
                               <ComposerSkillsTrigger
                                 sessionId={activeSessionId}
                                 loading={composer.loading}
                                 onOpenSettingsSkills={() => openSettings({ section: "skills" })}
+                                pendingSkills={pendingSkills}
+                                onPendingSkillsChange={setPendingSkills}
                               />
                               <ComposerMcpTrigger
                                 sessionId={activeSessionId}
                                 loading={composer.loading}
                                 onOpenSettingsMcp={() => openSettings({ section: "mcp" })}
+                                registry={appConfig?.mcp_servers}
+                                pendingMcpServers={pendingMcpServers}
+                                onPendingMcpServersChange={setPendingMcpServers}
                               />
                             </>
-                          ) : undefined
-                          // Cold-start Skills / MCP pending mode (ADR-0092
-                          // Decision 6 "empty mount set + apply on create") is a
-                          // follow-up slice: both popover sections are session-IPC
-                          // bound and need a pending-state redesign. The runtime
-                          // picker + auth-mode chip + context panel below already
-                          // render cold-start.
+                          )
                         }
                         trailing={
                           providerPicker ? (
@@ -774,6 +782,8 @@ export default function App() {
                         <ComposerContextPanel
                           onIngestFiles={handleShellIngestFiles}
                           loading={composer.loading}
+                          pendingFiles={activeSessionId === null ? pendingFiles : undefined}
+                          onClearPendingFiles={() => setPendingFiles([])}
                         />
                         <ComposerAuthModeChip
                           sessionId={activeSessionId}

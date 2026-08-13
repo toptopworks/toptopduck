@@ -31,14 +31,17 @@ export interface OpenSession {
   /** Bound `.duck` path (SessionMetadata.duck_path shape). Always non-null
    *  since ADR-0089: createSession binds immediately. */
   path: string;
-  /** A pending data-file drop routed to this session's ingest but not yet
-   *  kicked off (ADR-0061, #81 A1; issue #205). Two routes set it: a cold-start
-   *  drop mints a new session carrying the path, and a drop onto an
-   *  ALREADY-active session (new or resumed) routes the file there via the
-   *  shell's single webview-level drop router. The SessionPane consumes it via
-   *  handleIngest, then clears it through onIngestConsumed. null once consumed
-   *  or when the session was opened by a non-drop action. */
-  pendingIngestPath: string | null;
+  /** Pending data-file paths routed to this session's ingest but not yet
+   *  kicked off (ADR-0061, #81 A1; issue #205; #500 draft-mode file list).
+   *  Three routes set it: a cold-start drop mints a new session carrying the
+   *  dropped path, a drop onto an ALREADY-active session (new or resumed)
+   *  routes the file there via the shell's single webview-level drop router,
+   *  and a cold-start composer "+" pick accumulates the shell-level pending
+   *  file list which the first submit carries onto the minted session (#500).
+   *  The SessionPane consumes it via handleIngestMany, then clears it through
+   *  onIngestConsumed. Empty once consumed or when the session was opened by
+   *  a non-drop / non-cold-start action. */
+  pendingIngestPaths: string[];
   /** A pending question from the shell-level cold-start bar (ADR-0092). When
    *  the user submits from the centered bar with no active session, the shell
    *  creates a session carrying the question here; SessionPane consumes it via

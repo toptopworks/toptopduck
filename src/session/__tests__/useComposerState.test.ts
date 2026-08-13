@@ -125,4 +125,23 @@ describe("useComposerState (ADR-0092 per-session drafts)", () => {
     rerender({ sid: "sess-1" });
     expect(result.current.draft).toBe("");
   });
+
+  it("seedDraft writes a session's draft by explicit sid, independent of the active session (#500)", () => {
+    // The held-back cold-start question path: SessionPane seeds the question
+    // into the MINTED session's slot while the bar may be reading it for the
+    // first time. Seeds never touch the cold-start slot or other sessions.
+    const { result, rerender } = renderHook(
+      ({ sid }) => useTestComposerState(sid, SESSION_FIELDS),
+      { initialProps: { sid: "sess-1" as string | null } },
+    );
+    act(() => result.current.seedDraft("sess-2", "held-back question"));
+    // Not visible on the seeded-from session...
+    expect(result.current.draft).toBe("");
+    // ...until the bar switches to the seeded one.
+    rerender({ sid: "sess-2" });
+    expect(result.current.draft).toBe("held-back question");
+    // The cold-start slot is untouched too.
+    rerender({ sid: null });
+    expect(result.current.draft).toBe("");
+  });
 });

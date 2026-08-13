@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import type { IntlShape } from "react-intl";
 import { ingestFile, ingestFileGuided } from "../api";
 import { toAppError } from "../lib/error-presentation";
@@ -10,12 +10,16 @@ import type { GuidanceRequest, LoadOutcome, SheetGuidance } from "../types/datas
 
 // The ingest-orchestration domain (issue #231), extracted from useSessionState
 // (slice 3 of the three-slice deepening). This hook owns the guidance dialog
-// state (NeedsGuidance route), the drop-on-cold-start consumption dedup
-// (ADR-0061), and the three handlers that route a LoadOutcome: handleIngest
-// (Loaded / NeedsGuidance / Error), handleGuidedSubmit (Loaded / Error /
-// NeedsGuidance-recur), and handleGuidedCancel. The parent drives it through
-// injected deps and never reaches for the raw viewed setter / refreshServerState
-// from here.
+// state (NeedsGuidance route) and the three handlers that route a LoadOutcome:
+// handleIngest (Loaded / NeedsGuidance / Error), handleGuidedSubmit
+// (Loaded / Error / NeedsGuidance-recur), and handleGuidedCancel. The parent
+// drives it through injected deps and never reaches for the raw viewed setter
+// / refreshServerState from here.
+//
+// Pending-ingest consumption (#500): the drop-on-cold-start / cold-start file
+// list consumption moved UP to SessionPane, which coordinates the two pending
+// payloads (files ingest BEFORE the pending question fires); this hook stays a
+// pure orchestrator the pane awaits through handleIngestMany's boolean return.
 //
 // Boundary is INGEST ORCHESTRATION, which -- unlike the turn domain (useTurnFlow,
 // issue #230) -- goes through the parent's GENERIC refreshServerState on a Loaded
@@ -26,9 +30,10 @@ import type { GuidanceRequest, LoadOutcome, SheetGuidance } from "../types/datas
 // viewed.clearForNewSource (a fresh source has no result yet -> hero, ADR-0062
 // R2); the hook touches ONLY that semantic method, never the raw viewed state.
 //
-// handleIngest is also the single path that can route a NeedsGuidance (xlsx)
-// result into the guidance dialog this hook owns -- which is why the cold-start
-// drop effect (ADR-0061) calls handleIngest instead of a bare ingestFile.
+// handleIngest / handleIngestMany are the only paths that can route a
+// NeedsGuidance (xlsx) result into the guidance dialog this hook owns --
+// which is why the SessionPane's pending-payload consumption (#500) awaits
+// handleIngestMany instead of calling ingestFile directly.
 
 export interface UseIngestFlowDeps {
   intl: IntlShape;
@@ -63,8 +68,13 @@ export interface UseIngestFlow {
    *  banner shows), leaving the remaining files un-attempted -- a dialog or
    *  banner already owns the user's attention, and continuing underneath it
    *  would race the shared loading / error state. Loaded files before the halt
-   *  stay: the refresh + viewed clear run once for the whole batch. */
-  handleIngestMany: (paths: string[]) => Promise<void>;
+   *  stay: the refresh + viewed clear run once for the whole batch. Resolves
+   *  true when EVERY file loaded (#500): the SessionPane's pending-payload
+   *  consumption gates the cold-start auto-ask on it -- a halted batch owns
+   *  the user's attention, so the pending question must not fire underneath
+   *  it. An IPC reject resolves false too (the error banner owns the same
+   *  gate). An empty list resolves true (nothing to halt on). */
+  handleIngestMany: (paths: string[]) => Promise<boolean>;
   handleGuidedSubmit: (sheetGuidance: SheetGuidance[]) => Promise<void>;
   handleGuidedCancel: () => void;
 }
@@ -75,8 +85,6 @@ type IngestRoute = LoadOutcome["kind"];
 
 export function useIngestFlow(
   sessionId: string,
-  pendingIngestPath: string | null,
-  onIngestConsumed: () => void,
   deps: UseIngestFlowDeps,
 ): UseIngestFlow {
   const { intl, setLoading, setError, refreshServerState, pollPersistError, viewed } = deps;
@@ -145,11 +153,12 @@ export function useIngestFlow(
   // for the halt semantics. One refresh + one viewed clear for the whole
   // batch (not per file), and only when at least one file actually loaded.
   const handleIngestMany = useCallback(
-    async (paths: string[]) => {
-      if (paths.length === 0) return;
+    async (paths: string[]): Promise<boolean> => {
+      if (paths.length === 0) return true;
       setLoading(true);
       setError(null);
       let loadedAny = false;
+      let allLoaded = true;
       try {
         for (let i = 0; i < paths.length; i++) {
           const path = paths[i];
@@ -168,6 +177,7 @@ export function useIngestFlow(
                 remaining,
               });
             }
+            allLoaded = false;
             break;
           }
           loadedAny = true;
@@ -178,30 +188,15 @@ export function useIngestFlow(
         }
       } catch (e) {
         setError(toAppError(e, intl, "load"));
+        allLoaded = false;
       } finally {
         setLoading(false);
         void pollPersistError();
       }
+      return allLoaded;
     },
     [sessionId, routeIngestOutcome, refreshServerState, pollPersistError, intl, setLoading, setError, clearForNewSource],
   );
-
-  // Consume a drop-on-cold-start file (ADR-0061, #81 A1). The shell mints the
-  // session on drop but defers the actual ingest to here -- handleIngest is the
-  // only path that can route a NeedsGuidance (xlsx) result into the guidance
-  // dialog this hook owns. Dedup by path so each distinct dropped file ingests
-  // exactly once while a repeat of the SAME path (a React StrictMode dev
-  // double-invoke, or a remount before the shell clears the prop) is a no-op.
-  // The shell clears the prop via onIngestConsumed once ingest kicks off.
-  const consumedRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!pendingIngestPath) return;
-    if (consumedRef.current === pendingIngestPath) return;
-    consumedRef.current = pendingIngestPath;
-    const path = pendingIngestPath;
-    onIngestConsumed();
-    void handleIngest(path);
-  }, [pendingIngestPath, handleIngest, onIngestConsumed]);
 
   // Submit explicit header/skip picks from the guidance dialog. Loaded clears
   // the dialog + refreshes; Error keeps it open for retry; a NeedsGuidance recur
