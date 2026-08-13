@@ -21,7 +21,9 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 // captures the registered callback + clears it on unlisten so a test can assert
 // listener (un)registration and fire a synthetic drop payload. Other tests
 // exercise routing via onWebviewDrop directly and ignore the slot.
-type DragDropEvent = { payload: { type: string; paths: string[] } };
+type DragDropEvent = {
+  payload: { type: string; paths: string[]; position?: { x: number; y: number } };
+};
 const dropListener = vi.hoisted(() => ({
   current: null as ((event: DragDropEvent) => void) | null,
 }));
@@ -90,6 +92,7 @@ import {
 } from "../../api";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { log } from "../../lib/log";
+import { mountComposerBarStub } from "../../__tests__/setup/barRectStub";
 import { useShellSessions } from "../useShellSessions";
 import type { PendingComposerPosture } from "../useShellSessions";
 import { AUTH_MODE_DEFAULT } from "../../types/approval";
@@ -111,6 +114,11 @@ function reply(sid: string) {
   return { session_id: sid, duck_path: `/sessions/${sid}/session.duck` };
 }
 
+// The #501 drop tests pin the composer bar's geometry via the shared
+// barRectStub (jsdom has no layout); jsdom's devicePixelRatio is 1, so CSS
+// px == the physical drop positions the tests fire.
+const BAR_RECT = { left: 100, top: 200, right: 400, bottom: 300 };
+
 function renderSessions() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -129,6 +137,8 @@ describe("useShellSessions", () => {
     // RTL auto-cleanup unmounts the prior hook (clearing the slot via the
     // listener's unlisten), but reset defensively so a test starts from null.
     dropListener.current = null;
+    // Drop any prior test's `.question-bar` hit-test stub (#501).
+    document.body.innerHTML = "";
   });
 
   it("starts cold: empty open set, null active id, not busy", () => {
@@ -850,5 +860,82 @@ describe("useShellSessions", () => {
       expect(refreshSessions).toHaveBeenCalled();
       expect(log.warn).toHaveBeenCalled();
     });
+  });
+
+  // --- Issue #501: cold-start empty-state drop zone -------------------------
+  // ADR-0092 Decision 2: on cold start the empty-state main area around the
+  // centered bar keeps the ADR-0061 drop-to-create, but the bar itself is
+  // inert -- a drop ON the composer must not mint a session by accident.
+  // Active-session drops route to the session's ingest regardless of where
+  // the drop landed (AC #4: the per-session path is unchanged).
+
+  it("onWebviewDrop on cold start ignores a drop landing on the composer bar (#501)", async () => {
+    mountComposerBarStub(BAR_RECT);
+    vi.mocked(createSession).mockResolvedValue(reply("drop-sid"));
+    const { result } = renderSessions();
+    expect(result.current.activeSessionId).toBeNull();
+    act(() => {
+      result.current.onWebviewDrop("/x/foo.csv", { x: 250, y: 250 });
+    });
+    // The guard runs synchronously before dropFile; no mint fires and the
+    // shell stays on the centered empty state.
+    expect(createSession).not.toHaveBeenCalled();
+    expect(result.current.openSessions).toEqual([]);
+    expect(result.current.activeSessionId).toBeNull();
+  });
+
+  it("onWebviewDrop on cold start mints when the drop lands outside the composer bar (#501)", async () => {
+    mountComposerBarStub(BAR_RECT);
+    vi.mocked(createSession).mockResolvedValue(reply("drop-sid"));
+    const { result } = renderSessions();
+    act(() => {
+      // Clear of the bar rect -> the ADR-0061 drop-to-create path.
+      result.current.onWebviewDrop("/x/foo.csv", { x: 20, y: 20 });
+    });
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(result.current.activeSessionId).toBe("drop-sid"));
+    expect(result.current.openSessions[0].pendingIngestPaths).toEqual(["/x/foo.csv"]);
+  });
+
+  it("onWebviewDrop routes an active-session drop even when it lands over the bar (#501)", async () => {
+    mountComposerBarStub(BAR_RECT);
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
+    });
+    const mintsBefore = vi.mocked(createSession).mock.calls.length;
+    act(() => {
+      // Same position the cold-start guard swallows -- with a session active
+      // it routes to that session's ingest (the guard is cold-start only).
+      result.current.onWebviewDrop("/x/new.csv", { x: 250, y: 250 });
+    });
+    expect(vi.mocked(createSession).mock.calls.length).toBe(mintsBefore);
+    expect(result.current.openSessions[0].pendingIngestPaths).toEqual(["/x/new.csv"]);
+  });
+
+  it("the drop listener threads the payload position through the bar guard (#501)", async () => {
+    // Drive the real Tauri event seam (not onWebviewDrop directly): the
+    // listener must hand the drop position to the router so the guard can
+    // hit-test it.
+    mountComposerBarStub(BAR_RECT);
+    vi.mocked(createSession).mockResolvedValue(reply("drop-sid"));
+    const { result } = renderSessions();
+    await waitFor(() => expect(dropListener.current).not.toBeNull());
+    // Over the bar: inert.
+    act(() => {
+      dropListener.current!({
+        payload: { type: "drop", paths: ["/x/a.csv"], position: { x: 250, y: 250 } },
+      });
+    });
+    expect(createSession).not.toHaveBeenCalled();
+    // Off the bar: mints.
+    act(() => {
+      dropListener.current!({
+        payload: { type: "drop", paths: ["/x/a.csv"], position: { x: 20, y: 20 } },
+      });
+    });
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(result.current.activeSessionId).toBe("drop-sid"));
   });
 });

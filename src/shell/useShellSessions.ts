@@ -16,10 +16,12 @@
 //
 // Single webview-level drop router (#81): Tauri's onDragDropEvent is a
 // window-level signal with no hit-test, so exactly one listener (here, in the
-// shell) routes each drop -- cold start mints a new session, otherwise the file
-// lands on the ACTIVE session's ingest via the pendingIngestPaths pipe (#81 A1).
-// This replaces the per-SessionPane FileDropzone listeners, which stacked 1:1
-// with keep-alive panes and fired N ingests per single drop.
+// shell) routes each drop -- cold start mints a new session UNLESS the drop
+// lands on the centered composer bar itself (ADR-0092 Decision 2, #501),
+// otherwise the file lands on the ACTIVE session's ingest via the
+// pendingIngestPaths pipe (#81 A1). This replaces the per-SessionPane
+// FileDropzone listeners, which stacked 1:1 with keep-alive panes and fired N
+// ingests per single drop.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { IntlShape } from "react-intl";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -50,6 +52,7 @@ import type { AuthMode } from "../types/approval";
 import { AUTH_MODE_DEFAULT } from "../types/approval";
 import type { SessionRuntimeChoice } from "../types/runtime";
 import type { OpenSession } from "../session/sidebarModel";
+import { isPointOverComposerBar, type DropPoint } from "./dropTarget";
 
 /** Composer posture the user picked on the cold-start bar before a session
  *  existed (ADR-0092 Decision 6, issue #500). The shell applies it to a
@@ -141,7 +144,11 @@ export function useShellSessions({
   ) => Promise<boolean>;
   openPersisted: (path: string, name: string) => Promise<void>;
   dropFile: (path: string) => Promise<void>;
-  onWebviewDrop: (path: string) => void;
+  /** Route one webview file drop (#81). `position` is the Tauri drop-event
+   *  physical position; on cold start the router hit-tests it against the
+   *  centered composer bar, which is inert to drops (#501). Absent position
+   *  (legacy / test payloads) skips the guard and keeps the pre-#501 route. */
+  onWebviewDrop: (path: string, position?: DropPoint) => void;
   clearPendingIngest: (sid: string) => void;
   /** ADR-0092: clear a consumed pending question after SessionPane fires it. */
   clearPendingQuestion: (sid: string) => void;
@@ -429,8 +436,15 @@ export function useShellSessions({
   // each drop -- cold start mints a new session, otherwise the file lands on
   // the ACTIVE session's ingest via the pendingIngestPaths pipe (#81 A1).
   const onWebviewDrop = useCallback(
-    (path: string) => {
+    (path: string, position?: DropPoint) => {
       if (activeSessionId === null) {
+        // ADR-0092 Decision 2 (#501): the centered composer bar itself is
+        // inert to file drops -- a drop ON the bar must not mint a session by
+        // accident. The surrounding empty-state main area keeps the ADR-0061
+        // drop-to-create. The guard is cold-start only: an active-session drop
+        // routes to that session's ingest wherever it lands (AC: the
+        // per-session drop path is unchanged).
+        if (position !== undefined && isPointOverComposerBar(position)) return;
         void dropFile(path);
         return;
       }
@@ -453,7 +467,9 @@ export function useShellSessions({
     const app = getCurrentWebviewWindow();
     const unlisten = app.onDragDropEvent((event) => {
       if (event.payload.type === "drop" && event.payload.paths.length > 0) {
-        onWebviewDrop(event.payload.paths[0]);
+        // The drop position rides along so the cold-start router can hit-test
+        // the centered composer bar (#501).
+        onWebviewDrop(event.payload.paths[0], event.payload.position);
       }
     });
     return () => {
