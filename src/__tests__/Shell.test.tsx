@@ -544,6 +544,50 @@ describe("App multi-session shell (issue #81 ACs)", () => {
     }
   });
 
+  it("cold-start submit with external runtime creates session + applies external via setSessionRuntime (#499 AC3)", async () => {
+    // The cold-start bar's runtime picker writes to pendingRuntime (no IPC).
+    // On submit, the handler bypasses the built-in key gate (external pick)
+    // and mints a session; mintAndRegister then applies the posture via
+    // setSessionRuntime. This verifies the full external cold-start path.
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false }),
+    );
+    vi.mocked(listAdapters).mockResolvedValue([
+      { id: "claude-code", display_name: "claude-code", detected: true, binary_path: "/usr/local/bin/claude" },
+    ]);
+    // The creation turn rejects so it settles immediately (openSession pattern).
+    vi.mocked(askQuestion).mockRejectedValueOnce(
+      new Error("discard the creation turn"),
+    );
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      // Wait for app-config to resolve so the picker trigger renders.
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: /运行时/ })).toBeInTheDocument(),
+      );
+      // Open the picker popover and select the external adapter.
+      fireEvent.click(screen.getByRole("button", { name: /运行时/ }));
+      const adapterBtn = await screen.findByRole("button", { name: "claude-code" });
+      fireEvent.click(adapterBtn);
+      // Type and submit from the centered bar.
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      // createSession fires and setSessionRuntime applies the external choice.
+      await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
+          kind: "external",
+          data: "claude-code",
+        }),
+      );
+    } finally {
+      // Restore factory defaults so later tests see pending app-config.
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+      vi.mocked(listAdapters).mockResolvedValue([]);
+    }
+  });
+
   it("keep-alive switch does not refetch an inactive session (ADR-0051)", async () => {
     // Two sessions opened; each SessionPane fetches its thread once on mount.
     // Switching active never remounts them (CSS hidden keep-alive), so the
