@@ -128,6 +128,7 @@ function renderPane(locale: EffectiveLocale = "zh-CN", sessionName = "Test sessi
         onQuestionConsumed={() => {}}
         onSeedDraft={() => {}}
         onComposerFields={(_sid, fields) => { capturedComposerFields = fields; }}
+        onComposerFieldsUnmount={() => {}}
         sessionName={sessionName}
         onFirstTurnSettled={() => {}}
         approvalEvents={approvalEvents}
@@ -788,6 +789,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
         onQuestionConsumed={onQuestionConsumed}
         onSeedDraft={onSeedDraft}
         onComposerFields={() => {}}
+        onComposerFieldsUnmount={() => {}}
         sessionName="pending"
         onFirstTurnSettled={() => {}}
         approvalEvents={approvalEvents}
@@ -812,6 +814,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
           onQuestionConsumed={onQuestionConsumed}
           onSeedDraft={onSeedDraft}
           onComposerFields={() => {}}
+          onComposerFieldsUnmount={() => {}}
           sessionName="pending"
           onFirstTurnSettled={() => {}}
           approvalEvents={approvalEvents}

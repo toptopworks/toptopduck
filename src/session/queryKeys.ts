@@ -38,6 +38,12 @@ export const sessionKeys = {
    *  invalidate this key so the badge re-reads without a remount. Lives under
    *  the session prefix so a close's removeQueries drops it with the rest. */
   mountedSkills: (sessionId: string) => ["session", sessionId, "mountedSkills"] as const,
+  /** Cold-start placeholder (ADR-0092): the shell-level bar has no session id
+   *  before the first submit. The query is always enabled:false so the queryFn
+   *  never runs -- the key exists only to satisfy useQuery's queryKey
+   *  requirement. The sentinel segment cannot collide with a real UUID session
+   *  id and is inert (never fetched, never cleaned up). */
+  coldStartAuthMode: () => ["session", "__cold_start__", "authMode"] as const,
 } as const;
 
 /** Session-AGNOSTIC adapter table (issue #353) -- the composer runtime picker's
