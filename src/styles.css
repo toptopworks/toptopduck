@@ -93,6 +93,14 @@
   grid-template-columns: var(--sidebar-width, 238px) 1fr;
   grid-template-rows: auto auto 1fr;
   overflow: hidden;
+  /* Shared 4-track conversation grid (ADR-0083/0090). Both .session-body and
+   * .shell-bar-track reference these so the bar sits exactly under the
+   * conversation column. Default: rail open. Collapsed: workspace folded,
+   * conversation centered. The narrow-viewport + sidebar-collapsed variants
+   * handle the two centering thresholds. */
+  --track-grid: 0fr minmax(0, var(--rail-width, 350px)) 1fr 0fr;
+  --track-grid-collapsed: 0fr minmax(0, 800px) 0fr 0fr;
+  --track-grid-collapsed-wide: 1fr minmax(0, 800px) 0fr 1fr;
   /* Codex-style collapse: animate the first column var(--sidebar-width) <-> 0
    * so the main region slides instead of snapping. grid-template-columns
    * interpolation needs the column to actually shrink, which in turn needs
@@ -367,24 +375,23 @@
 .shell-bar-slot.bottom .shell-bar-track {
   width: 100%;
   display: grid;
-  grid-template-columns: 0fr minmax(0, var(--rail-width, 350px)) 1fr 0fr;
+  grid-template-columns: var(--track-grid);
   transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 /* Workspace folded (ADR-0083): mirror the pane's fold tracks so the bar
- * follows the conversation column's 800px geometry. The two media queries
- * copy .session-pane.workspace-collapsed's wide-viewport centering
- * thresholds (kept in sync by hand; both read the same design intent). */
+ * follows the conversation column's 800px geometry. Both selectors reference
+ * the shared custom properties on .shell so the two surfaces never drift. */
 .shell-bar-slot.bottom.ws-collapsed .shell-bar-track {
-  grid-template-columns: 0fr minmax(0, 800px) 0fr 0fr;
+  grid-template-columns: var(--track-grid-collapsed);
 }
 @media (min-width: 1280px) {
   .shell-bar-slot.bottom.ws-collapsed .shell-bar-track {
-    grid-template-columns: 1fr minmax(0, 800px) 0fr 1fr;
+    grid-template-columns: var(--track-grid-collapsed-wide);
   }
 }
 @media (min-width: 900px) {
   .shell.sidebar-collapsed .shell-bar-slot.bottom.ws-collapsed .shell-bar-track {
-    grid-template-columns: 1fr minmax(0, 800px) 0fr 1fr;
+    grid-template-columns: var(--track-grid-collapsed-wide);
   }
 }
 .shell-bar-slot.bottom .question-bar {
@@ -426,18 +433,18 @@
 /* Default (narrow container): spacers stay 0fr -- conversation fills width,
  * no centering, no jitter. */
 .shell .session-pane.workspace-collapsed .session-body {
-  grid-template-columns: 0fr minmax(0, 800px) 0fr 0fr;
+  grid-template-columns: var(--track-grid-collapsed);
 }
 /* Wide viewport: spacers grow 1fr to center the conversation. */
 @media (min-width: 1280px) {
   .shell .session-pane.workspace-collapsed .session-body {
-    grid-template-columns: 1fr minmax(0, 800px) 0fr 1fr;
+    grid-template-columns: var(--track-grid-collapsed-wide);
   }
 }
 /* Sidebar collapsed: container = full viewport, so lower threshold suffices. */
 @media (min-width: 900px) {
   .shell.sidebar-collapsed .session-pane.workspace-collapsed .session-body {
-    grid-template-columns: 1fr minmax(0, 800px) 0fr 1fr;
+    grid-template-columns: var(--track-grid-collapsed-wide);
   }
 }
 .shell .session-pane.workspace-collapsed .session-rail { border-right-color: transparent; }
@@ -472,7 +479,7 @@
   grid-column: 1; grid-row: 2;
   position: relative;
   display: grid;
-  grid-template-columns: 0fr minmax(0, var(--rail-width, 350px)) 1fr 0fr;
+  grid-template-columns: var(--track-grid);
   overflow: hidden;
   min-height: 0;
   background: var(--background);

@@ -258,34 +258,22 @@ export default function App() {
   >({});
   const handleComposerFields = useCallback(
     (sid: string, fields: ComposerSessionFields) => {
-      setComposerFieldsMap((prev) => {
-        // SessionPane reports the IDLE_SESSION_FIELDS reference on unmount
-        // (close / delete / error-boundary replacement): drop the entry so
-        // the registry stays bounded by the open set.
-        if (fields === IDLE_SESSION_FIELDS) {
-          if (!(sid in prev)) return prev;
-          const next = { ...prev };
-          delete next[sid];
-          return next;
-        }
-        // Skip if nothing changed (referential equality of all fields).
-        const prevFields = prev[sid];
-        if (
-          prevFields &&
-          prevFields.loading === fields.loading &&
-          prevFields.phase === fields.phase &&
-          prevFields.handleAsk === fields.handleAsk &&
-          prevFields.handleCancel === fields.handleCancel &&
-          prevFields.handleIngestFiles === fields.handleIngestFiles &&
-          prevFields.workspaceCollapsed === fields.workspaceCollapsed
-        ) {
-          return prev;
-        }
-        return { ...prev, [sid]: fields };
-      });
+      setComposerFieldsMap((prev) => ({ ...prev, [sid]: fields }));
     },
     [],
   );
+
+  // ADR-0092: drop a session's entry on pane unmount (close / delete / error-
+  // boundary replacement). A dedicated callback makes the removal intent
+  // explicit at the type level instead of relying on a sentinel reference.
+  const handleComposerFieldsUnmount = useCallback((sid: string) => {
+    setComposerFieldsMap((prev) => {
+      if (!(sid in prev)) return prev;
+      const next = { ...prev };
+      delete next[sid];
+      return next;
+    });
+  }, []);
 
   // The active session's bar fields (or idle when null). The useComposerState
   // hook merges these with per-session drafts.
@@ -708,6 +696,7 @@ export default function App() {
                             onQuestionConsumed={() => clearPendingQuestion(s.sid)}
                             onSeedDraft={composer.seedDraft}
                             onComposerFields={handleComposerFields}
+                            onComposerFieldsUnmount={handleComposerFieldsUnmount}
                             sessionName={s.name}
                             onFirstTurnSettled={syncSessionName}
                             approvalEvents={approvalEvents}
@@ -727,12 +716,12 @@ export default function App() {
                     className={`shell-bar-slot${activeSessionId === null ? " centered" : " bottom"}${activeSessionFields?.workspaceCollapsed ? " ws-collapsed" : ""}`}
                   >
                     {activeSessionId === null && (
-                      <h2 className="cold-start-greeting m-0 text-center text-[1.4rem] font-semibold text-foreground">
+                      <label htmlFor="question-bar-input" className="cold-start-greeting m-0 text-center text-[1.4rem] font-semibold text-foreground">
                         <FormattedMessage
                           id="coldStart.greeting"
                           defaultMessage="What would you like to analyze?"
                         />
-                      </h2>
+                      </label>
                     )}
                     <div className="shell-bar-track">
                       <QuestionBar

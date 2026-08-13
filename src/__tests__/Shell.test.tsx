@@ -2360,3 +2360,138 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     expect(screen.queryByRole("button", { name: /运行时/ })).not.toBeInTheDocument();
   });
 });
+
+describe("App composer refactor follow-ups (issue #504)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("pending question is consumed and not re-fired on re-render (#504)", async () => {
+    // ADR-0092: a cold-start submit creates a session carrying pendingQuestion.
+    // SessionPane fires it via handleAsk, then calls onQuestionConsumed so
+    // OpenSession.pendingQuestion is cleared. After consumption, any re-render
+    // (React reconciliation, keep-alive switch, or error-boundary retry) sees
+    // pendingQuestion=null and skips the consumption effect.
+    const { rerender } = render(<App />);
+    await openSession();
+    // The creation turn fired exactly once (the openSession rejection).
+    expect(vi.mocked(askQuestion)).toHaveBeenCalledTimes(1);
+    // Settle async: onQuestionConsumed fires after the turn starts.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 100));
+    });
+    // Still exactly one call — no spurious re-fire from effect re-runs.
+    expect(vi.mocked(askQuestion)).toHaveBeenCalledTimes(1);
+    // Force a full re-render of the App tree. If clearPendingQuestion worked,
+    // the session's pendingQuestion is null and the consumption effect does
+    // not re-fire.
+    rerender(<App />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(vi.mocked(askQuestion)).toHaveBeenCalledTimes(1);
+  });
+
+  it("honest gate triggers on keychain_fault (not just missing key, ADR-0092 D4 / issue #275, #504)", async () => {
+    // The submit-time gate fires not only when has_key is false but also when
+    // the keychain read itself faulted (locked / service down). The gate's
+    // condition is `!activeHasKey || activeKeychainFault !== null`; a profile
+    // with has_key:true + a keychain_fault must still redirect to Settings
+    // instead of minting a session whose first turn would fail on the broken
+    // keychain read path.
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false }),
+    );
+    vi.mocked(listProviderProfiles).mockResolvedValue([
+      { profile_id: "default", has_key: true, keychain_fault: "OS keychain locked" },
+    ]);
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      await waitFor(() => expect(listProviderProfiles).toHaveBeenCalled());
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      // The gate fires: settings overlay opens, no session created.
+      await waitFor(() =>
+        expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
+      );
+      expect(createSession).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+      vi.mocked(listProviderProfiles).mockResolvedValue([
+        { profile_id: "default", has_key: true, keychain_fault: null },
+      ]);
+    }
+  });
+
+  it("external runtime bypasses the built-in key gate (#499 / #504)", async () => {
+    // The gate only fires for the built-in runtime kind. An external runtime
+    // pick (ACP adapter) bypasses the key gate entirely: even with has_key
+    // false + no keychain fault, the submit mints a session and applies the
+    // external choice via setSessionRuntime. This is the black-box contract
+    // the gate's `pendingRuntime.kind === "built_in"` condition guards.
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false }),
+    );
+    // No key — the gate would fire for built_in.
+    vi.mocked(listProviderProfiles).mockResolvedValue([
+      { profile_id: "default", has_key: false, keychain_fault: null },
+    ]);
+    vi.mocked(listAdapters).mockResolvedValue([
+      { id: "claude-code", display_name: "claude-code", detected: true, binary_path: "/usr/local/bin/claude" },
+    ]);
+    vi.mocked(askQuestion).mockRejectedValueOnce(
+      new Error("discard the creation turn"),
+    );
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: /运行时/ })).toBeInTheDocument(),
+      );
+      // Pick the external adapter.
+      fireEvent.click(screen.getByRole("button", { name: /运行时/ }));
+      const adapterBtn = await screen.findByRole("button", { name: "claude-code" });
+      fireEvent.click(adapterBtn);
+      // Type and submit — the gate is bypassed (external kind).
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      // createSession fires despite has_key:false (external runtime bypass).
+      await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
+          kind: "external",
+          data: "claude-code",
+        }),
+      );
+    } finally {
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+      vi.mocked(listProviderProfiles).mockResolvedValue([
+        { profile_id: "default", has_key: true, keychain_fault: null },
+      ]);
+      vi.mocked(listAdapters).mockResolvedValue([]);
+    }
+  });
+
+  it("cold-start greeting is a label for the textarea (no heading skip, #504 a11y)", async () => {
+    // The cold-start greeting is a <label htmlFor="question-bar-input">, not an
+    // <h2>, so screen-reader heading navigation does not skip from the page
+    // root to h2. The textarea's accessible name still comes from aria-label
+    // (consistent across cold-start and session modes); the visible <label>
+    // adds click-to-focus association.
+    render(<App />);
+    // No h1 or h2 greeting — the cold-start text is a <label>, not a heading.
+    expect(document.querySelector("h1")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /你想分析什么/ })).not.toBeInTheDocument();
+    // The greeting renders as a visible <label> associated with the textarea.
+    expect(screen.getByLabelText("提问")).toBeInTheDocument();
+    expect(screen.getByText(/你想分析什么/)).toBeInTheDocument();
+  });
+});

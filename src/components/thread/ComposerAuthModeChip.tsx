@@ -82,15 +82,14 @@ export function ComposerAuthModeChip({ sessionId, pendingMode, onPendingModeChan
   // The session's posture (backend truth). Under the session prefix so a
   // close's removeQueries drops it with the rest; a resume lands the reset
   // value via the fresh SessionPane mount (see file header). Null sessionId
-  // (cold-start bar, ADR-0092): the query is disabled and the caller-held
-  // pending posture drives the chip -- no IPC round-trip.
+  // (cold-start bar, ADR-0092): the query is disabled (enabled:false) and
+  // the caller-held pending posture drives the chip with no IPC. The
+  // cold-start key uses a dedicated sentinel that never matches a real UUID
+  // session id — it is never fetched and never cleaned up.
   const { data, isError, error } = useQuery({
-    // The queryKey uses a stable placeholder when sessionId is null — the key
-    // is inert (enabled:false prevents the queryFn from running, so no IPC).
-    queryKey: sessionKeys.authMode(sessionId ?? ""),
-    // `as string` is safe: enabled:false guarantees sessionId is non-null
-    // when the queryFn executes, so no fake empty-string session ID reaches
-    // the backend.
+    queryKey: sessionId !== null
+      ? sessionKeys.authMode(sessionId)
+      : sessionKeys.coldStartAuthMode(),
     queryFn: () => getAuthorizationMode(sessionId as string),
     enabled: sessionId !== null,
   });

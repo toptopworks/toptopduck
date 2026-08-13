@@ -67,11 +67,10 @@ const idleHandleAsk = async (question: string): Promise<void> => {
 };
 const idleHandleCancel = async (): Promise<void> => {};
 const idleHandleIngestFiles = (): void => {};
-/** Idle bar fields. Exported so SessionPane can reset the shell-level bar's
- *  per-session entry on unmount (a pane replaced by an error boundary or
- *  closed would otherwise leave a stale `loading: true` stuck on the bar).
- *  The shell's fields registry treats this exact reference as a removal
- *  signal (unmount = drop the entry, not a state to render). */
+/** Idle bar fields. The default bar state when no session is active (cold
+ *  start). All handlers are no-ops; loading is false, phase is null. The shell
+ *  uses this as the fallback when activeSessionId is null or the active
+ *  session has not reported its fields yet. */
 export const IDLE_SESSION_FIELDS: ComposerSessionFields = {
   loading: false,
   phase: null,

@@ -7,7 +7,6 @@ import { log } from "../lib/log";
 import { listSkills } from "../api";
 import { WorkspaceToggle } from "../shell/WorkspaceToggle";
 import { useSessionState } from "./useSessionState";
-import { IDLE_SESSION_FIELDS } from "./useComposerState";
 import type { ComposerSessionFields } from "./useComposerState";
 import type { ApprovalEntry, UseApprovalEvents } from "./useApprovalEvents";
 import type { ApprovalResponse } from "../types/approval";
@@ -77,6 +76,10 @@ interface SessionPaneProps {
    *  handleAsk / handleCancel / handleIngestFiles) to the shell-level bar.
    *  Called via useEffect whenever the fields change. */
   onComposerFields: (sessionId: string, fields: ComposerSessionFields) => void;
+  /** ADR-0092: drop this session's bar-fields entry on unmount (close / delete
+   *  / error-boundary replacement). A dedicated callback replaces the prior
+   *  sentinel-reference dispatch so the removal intent is explicit. */
+  onComposerFieldsUnmount: (sessionId: string) => void;
   /** Display name for THIS session's header. The shell owns the open-session
    *  set; each SessionPane receives its own name rather than reaching into
    *  global active-session state (ADR-0060). */
@@ -103,7 +106,7 @@ interface SessionPaneProps {
 // stable prop for useSessionState / useTurnFlow (no every-render fresh []).
 const NO_APPROVALS: ApprovalEntry[] = [];
 
-export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, pendingQuestion, onQuestionConsumed, onSeedDraft, onComposerFields, sessionName, onFirstTurnSettled, approvalEvents, onRailResizeStart }: SessionPaneProps) {
+export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, pendingQuestion, onQuestionConsumed, onSeedDraft, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, onRailResizeStart }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
   // the pane acts on its own session only). The respond / clearSession
@@ -159,7 +162,7 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
     onComposerFields,
   ]);
 
-  // ADR-0092: reset this session's bar fields to idle when the pane unmounts.
+  // ADR-0092: drop this session's bar-fields entry when the pane unmounts.
   // If the pane is replaced by the session-level error boundary (a render crash)
   // or removed on close/delete while a turn is mid-flight, the last-reported
   // `loading: true` would otherwise linger in the shell's composer-fields map —
@@ -169,9 +172,9 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
   // deps): the reporting effect above owns every in-life update.
   useEffect(() => {
     return () => {
-      onComposerFields(sessionId, IDLE_SESSION_FIELDS);
+      onComposerFieldsUnmount(sessionId);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount-only: sessionId is constant (keyed component) + onComposerFields is useCallback-stable
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount-only: sessionId is constant (keyed component) + onComposerFieldsUnmount is useCallback-stable
   }, []);
 
   // ADR-0092 (#500): consume the pending payloads from the cold-start bar

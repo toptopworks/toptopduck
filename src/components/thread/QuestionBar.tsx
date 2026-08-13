@@ -90,6 +90,7 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
         </div>
       )}
       <textarea
+        id="question-bar-input"
         value={value}
         onChange={(e) => setValue(e.target.value)}
         placeholder={intl.formatMessage({ id: "questionBar.placeholder", defaultMessage: "Ask in natural language…" })}
