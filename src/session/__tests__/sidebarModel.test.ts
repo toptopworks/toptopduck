@@ -76,6 +76,28 @@ describe("buildSidebarGroups", () => {
     expect(entry.path).toBe("/a.duck");
   });
 
+  it("maps sourceCount from source_summary.source_count (ADR-0093, issue #513)", () => {
+    // The hover card needs the total source count alongside the first source
+    // name. persistedEntry must carry it through from source_summary.
+    const persisted = [
+      meta("/a.duck", "alpha", 0, {
+        source_summary: { first_source_name: "alpha.csv", source_count: 3, turn_count: 5 },
+      }),
+      meta("/b.duck", "beta", 0, {
+        source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+      }),
+    ];
+
+    const groups = buildSidebarGroups(persisted, [], null, NOW, "time");
+
+    const alpha = groups[0].entries.find((e) => e.name === "alpha")!;
+    expect(alpha.sourceCount).toBe(3);
+    expect(alpha.firstSourceName).toBe("alpha.csv");
+
+    const beta = groups[0].entries.find((e) => e.name === "beta")!;
+    expect(beta.sourceCount).toBe(0);
+  });
+
   it("renders an open session not yet in the persisted list as its own row under Today (ADR-0089)", () => {
     // A just-created session (ADR-0089) carries a real path but may not yet be
     // in the list_sessions result (async refetch). It becomes a standalone
@@ -93,6 +115,7 @@ describe("buildSidebarGroups", () => {
     expect(entry.path).toBe("/sessions/uuid-new/session.duck");
     expect(entry.active).toBe(true);
     expect(entry.firstSourceName).toBeNull();
+    expect(entry.sourceCount).toBe(0);
     expect(entry.turnCount).toBe(0);
   });
 

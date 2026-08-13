@@ -11,10 +11,10 @@ import { cn } from "@/lib/utils";
 import {
   buildSearchEntries,
   formatLastModified,
-  type LastModifiedLabel,
   type OpenSession,
   type SearchEntry,
 } from "./sidebarModel";
+import { formatLastModifiedText } from "./lastModifiedText";
 import { resolveDisplayName } from "./displayName";
 import type { SessionMetadata } from "../types/session";
 
@@ -241,7 +241,7 @@ function SearchRow({
 }) {
   const intl = useIntl();
   const label = formatLastModified(entry.lastModifiedAt, now);
-  const lastModifiedText = sublineDateText(label, now, intl);
+  const lastModifiedText = formatLastModifiedText(label, now, intl);
 
   return (
     <li
@@ -280,44 +280,4 @@ function SearchRow({
       </span>
     </li>
   );
-}
-
-// Resolve the sub-line last-modified text from a LastModifiedLabel. Today /
-// Yesterday reuse the sidebar-group locale message ids (sidebar.group.today /
-// yesterday) so the relative-day word agrees with the sidebar's group heading;
-// older dates format via Intl.DateTimeFormat with the year omitted when it
-// matches `now`'s year (a session from this year needs no year suffix; a
-// prior-year one does).
-//
-// Lives here (not in sidebarModel.ts) because the today / yesterday arms need
-// the localized heading text via `intl.formatMessage`, which is a React-layer
-// concern; `formatLastModified` stays pure (returns the classification) so the
-// label logic itself is unit-tested without intl.
-function sublineDateText(
-  label: LastModifiedLabel,
-  now: number,
-  intl: ReturnType<typeof useIntl>,
-): string {
-  switch (label.kind) {
-    case "today":
-      return intl.formatMessage({ id: "sidebar.group.today", defaultMessage: "Today" });
-    case "yesterday":
-      return intl.formatMessage({ id: "sidebar.group.yesterday", defaultMessage: "Yesterday" });
-    case "date": {
-      const sameYear = new Date(now).getFullYear() === label.date.getFullYear();
-      return new Intl.DateTimeFormat(intl.locale, {
-        ...(sameYear ? {} : { year: "numeric" }),
-        month: "short",
-        day: "numeric",
-      }).format(label.date);
-    }
-    default: {
-      // Exhaustive guard: a new LastModifiedLabel variant must add a case
-      // above. tsconfig strict lacks noImplicitReturns, so without this the
-      // implicit return undefined would slip (mirrors sidebarModel.ts
-      // buildSidebarGroups + loadErrorDisplay/api.ts).
-      const _exhaustive: never = label;
-      return _exhaustive;
-    }
-  }
 }

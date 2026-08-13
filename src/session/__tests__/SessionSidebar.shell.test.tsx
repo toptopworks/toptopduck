@@ -131,15 +131,10 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     );
     const rows = container.querySelectorAll(".session-entry-main");
     expect(rows.length).toBe(2);
-    // Both open sessions carry a primary-colored status dot nested inside the
-    // equal-width slot; no MessageSquare icon anymore.
+    // Both open sessions carry a primary-colored status dot on the right edge;
+    // no MessageSquare icon anymore.
     rows.forEach((row) => {
-      const slot = row.firstElementChild;
-      expect(slot).not.toBeNull();
-      if (!slot) return;
-      expect(slot.tagName).toBe("SPAN");
-      expect(slot.className.split(/\s+/)).toContain("size-4");
-      const dot = slot.querySelector(".sidebar-status-dot");
+      const dot = row.querySelector(".sidebar-status-dot");
       expect(dot).not.toBeNull();
       expect(dot?.className.split(/\s+/)).toContain("bg-primary");
       expect(dot).toHaveAttribute("aria-hidden", "true");
@@ -179,12 +174,8 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onOpenSettings={() => {}}
       />,
     );
-    // The equal-width slot (size-4 span) is always rendered so titles align,
-    // but a not-open row has no dot inside it.
-    const slot = container.querySelector(".session-entry-main > span:first-child");
-    expect(slot).not.toBeNull();
-    expect(slot?.className.split(/\s+/)).toContain("size-4");
-    expect(slot?.querySelector(".sidebar-status-dot")).toBeNull();
+    // A not-open row has no status dot (ADR-0093: dot only when open).
+    expect(container.querySelector(".sidebar-status-dot")).toBeNull();
   });
 
   it("session-entry-main keeps appearance-none reset + hover:bg-accent + rounded-md on the default row", () => {
