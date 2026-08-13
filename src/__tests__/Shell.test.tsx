@@ -1239,6 +1239,21 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
     expect(resumeAlert.getAttribute("aria-live")).toBe("polite");
     expect(resumeAlert.getAttribute("data-slot")).toBe("alert");
 
+    // Layout regression guard: the strip must render as an absolutely-
+    // positioned overlay INSIDE .main-area, NOT as an in-flow child of the
+    // .shell grid. An in-flow grid row shifted the whole main area down on
+    // mount and back up on unmount, so the visible session header bounced on
+    // every open/resume (the title position flicker). Pin the overlay parent
+    // so a revert to the grid-flow placement fails here.
+    expect(resumeAlert.parentElement?.classList.contains("main-area")).toBe(true);
+    expect(resumeAlert.parentElement?.classList.contains("shell")).toBe(false);
+    // The status text must ride a col-start-2 slot (AlertTitle): the Alert
+    // base grid reserves col 1 (width 0) for an icon, and a bare text child
+    // wraps one character per line there, turning the strip into a tall box.
+    expect(
+      resumeAlert.querySelector("[data-slot=alert-title]")?.textContent,
+    ).toMatch(/校验源/);
+
     // Cleanup: let openDuck resolve and AWAIT openPersisted finishing (invalidate
     // + registerOpen + setResumeStatus(null) + finally unlisten) so no orphan
     // resume-progress listener leaks into the next test.

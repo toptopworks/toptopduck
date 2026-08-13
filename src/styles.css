@@ -195,15 +195,11 @@
   display: flex; align-items: center;
   height: 40px; min-height: 40px;
 }
-/* --- Row 2: resume progress strip (ADR-0034; absent unless resume runs) --
- * ADR-0067 (issue #182): the .resume-progress bespoke tint retired onto a
- * shadcn Alert default variant on App.tsx; this rule is layout-only now
- * (grid-column / grid-row), placing the strip in the shell grid's row 2 / col
- * 2. The Alert chrome (border + rounded-lg + bg-card) renders natively -- the
- * retired margin:0 / border-radius:0 overrides existed only to defeat the
- * legacy bespoke strip's own radius/padding, no longer needed. The
- * .resume-progress class hook stays on the <Alert> for selector stability. */
-.shell > .resume-progress { grid-column: 2; grid-row: 2; }
+/* --- Row 2: shell error banner (absent unless a shell error is set) ------
+ * Row 2 formerly also hosted the resume progress strip; that moved to an
+ * overlay inside .main-area (see the .main-area > .resume-progress rule in
+ * the main-area section below) so its mount/unmount no longer shifts the
+ * grid rows. The shell error banner keeps the in-flow row-2 placement. */
 .shell > .shell-error { grid-column: 2; grid-row: 2; margin: 0.4rem 1rem; }
 
 /* --- Settings in-app overlay view (ADR-0065, issue #151) -----------------
@@ -330,6 +326,27 @@
 .cold-start-mode .session-pane-host { flex: 0; }
 .session-pane-layer { position: absolute; inset: 0; }
 .session-pane-layer.hidden { display: none; }
+/* Resume progress strip (ADR-0034; absent unless a resume runs). An overlay
+ * inside .main-area instead of an in-flow shell-grid row: the former row-2
+ * placement shifted the whole main area down on mount and back up on unmount,
+ * so the visible session header bounced on every open / resume (the title
+ * position flicker). Absolutely positioned, the strip mounts and unmounts
+ * with ZERO layout shift; it covers the session-header strip while a resume
+ * runs, and the incoming session's header lands at the exact same position.
+ * z-index above the rail resize handle (10) so the status line reads clean.
+ * pointer-events:none -- the strip is a transient status line, never an
+ * interaction target, so it must not block the header controls underneath
+ * while it lingers. ADR-0067 (issue #182): the Alert chrome (border +
+ * rounded-lg + bg-card) rides the shadcn Alert default variant; this rule is
+ * layout-only. The .resume-progress class hook stays for selector stability. */
+.main-area > .resume-progress {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 11;
+  pointer-events: none;
+}
 
 /* --- Shell-level bar slot (ADR-0092) -------------------------------------
  * The QuestionBar lives at the shell level as a single instance. Two
@@ -377,6 +394,18 @@
   display: grid;
   grid-template-columns: var(--track-grid);
   transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+/* Extend the workspace card background through the shell-bar area so the
+   workspace column visually reaches the viewport bottom (ADR-0092: the bar
+   sits at the shell level below the pane host — without this the card
+   background stops at the pane-host boundary). The ::before fills the
+   workspace grid track (col 3) with the same --card token; it collapses to
+   0fr when the workspace is folded, so no rule is needed for ws-collapsed. */
+.shell-bar-slot.bottom .shell-bar-track::before {
+  content: "";
+  grid-row: 1;
+  grid-column: 3;
+  background: var(--card);
 }
 /* Workspace folded (ADR-0083): mirror the pane's fold tracks so the bar
  * follows the conversation column's 800px geometry. Both selectors reference
@@ -449,8 +478,32 @@
 }
 .shell .session-pane.workspace-collapsed .session-rail { border-right-color: transparent; }
 .shell .session-pane.workspace-collapsed .session-workspace {
-  pointer-events: none;
-  visibility: hidden;
+  opacity: 0;
+}
+/* Clip the workspace AND every descendant scroll container while folded.
+   The shrinking column reflows the rich content (tables / charts / wrapping
+   text), which summons transient scrollbars on every overflow:auto
+   descendant (.workspace-body first of all) -- opacity does not hide
+   scrollbars, so they flicker during the fade. Specificity (0,4,0) beats the
+   utility overflow classes without !important. The class applies the instant
+   the fold begins, so the clip precedes the first reflow frame. */
+.shell .session-pane.workspace-collapsed .session-workspace,
+.shell .session-pane.workspace-collapsed .session-workspace * {
+  overflow: hidden;
+}
+/* Expand direction: the workspace BODY waits for the grid slide (280ms) to
+   settle before fading in -- at intermediate widths the content wraps taller
+   than its final layout and its scrollbar would flicker in with the fade.
+   The workspace card surface itself keeps the normal 200ms fade so the panel
+   still glides with the column (the sidebar fold parity); only the inner
+   body is staged. The collapsed rule overrides the delay so the fold fades
+   out immediately. */
+.workspace-body {
+  transition: opacity 150ms ease 280ms;
+}
+.shell .session-pane.workspace-collapsed .workspace-body {
+  opacity: 0;
+  transition: opacity 200ms ease;
 }
 /* Session header (row 1): the session name + the workspace toggle. Moved out
    of the global topbar so session-scoped chrome
@@ -490,12 +543,14 @@
 .shell.rail-dragging .session-body,
 .shell.sidebar-dragging .session-body { transition: none; }
 /* Draggable rail resize handle (conversation/workspace boundary). A thin
-   strip straddling the col-2/col-3 boundary; absolutely positioned so it
-   does not perturb the grid flow. The --rail-width variable (set inline on
-   .shell by useRailResize) drives left placement. Hidden when the workspace
-   is folded (.workspace-collapsed) -- the 4-track grid reflows for centering
-   and the boundary no longer maps to --rail-width. touch-action:none prevents
-   the browser from interpreting the drag as a pan/zoom. */
+   strip straddling the conversation/workspace column boundary; absolutely
+   positioned within .main-area so it spans the full height including the
+   shell-level QuestionBar (ADR-0092). The --rail-width variable (set inline
+   on .shell by useRailResize) drives left placement. Hidden when cold-start,
+   settings mode, or the workspace is folded (.workspace-collapsed) -- the
+   4-track grid reflows for centering and the boundary no longer maps to
+   --rail-width. touch-action:none prevents the browser from interpreting the
+   drag as a pan/zoom. */
 .rail-resize-handle {
   position: absolute;
   top: 0;
@@ -525,11 +580,15 @@
 }
 /* Suppress the .session-rail permanent border-right under the handle so
    hover/drag shows a single 1px line instead of a doubled 2px. */
-.session-body:has(.rail-resize-handle:hover) .session-rail,
+.main-area:has(.rail-resize-handle:hover) .session-rail,
 .shell.rail-dragging .session-rail {
   border-right-color: transparent;
 }
-.session-pane.workspace-collapsed .rail-resize-handle {
+/* Hide the rail handle when there is no active session (cold start), in
+   settings mode, or when the active session's workspace is folded. */
+.shell.cold-start-mode .rail-resize-handle,
+.shell.settings-mode .rail-resize-handle,
+.main-area.workspace-collapsed .rail-resize-handle {
   display: none;
 }
 /* Conversation column: the thread rail (ADR-0092: the QuestionBar moved to
@@ -570,6 +629,7 @@
   overflow: hidden auto;
   display: flex; flex-direction: column;
   background: var(--card);
+  transition: opacity 200ms ease;
 }
 /* ADR-0067 (issue #173): the workspace + textual-card VISUAL rules retired
  * into SessionPane.tsx + App.tsx as Tailwind utility + ADR-0050 token. The
