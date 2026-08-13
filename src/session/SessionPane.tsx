@@ -5,6 +5,7 @@ import { fmtError, errorDetail, formatTurnFailure, turnFailureDetail } from "../
 import { log } from "../lib/log";
 import { listSkills } from "../api";
 import { WorkspaceToggle } from "../shell/WorkspaceToggle";
+import { SessionHeaderMenu } from "./SessionHeaderMenu";
 import { useSessionState } from "./useSessionState";
 import type { ComposerSessionFields } from "./useComposerState";
 import type { ApprovalEntry, UseApprovalEvents } from "./useApprovalEvents";
@@ -95,13 +96,32 @@ interface SessionPaneProps {
    *  its own session's entries (merged into the live trace by useTurnFlow)
    *  and binds the respond + settled-clear callbacks to its sessionId. */
   approvalEvents: UseApprovalEvents;
+  /** ADR-0093 (issue #512): the bound `.duck` path for session-level
+   *  management actions (export / rename / delete). Always non-null since
+   *  ADR-0089: createSession binds immediately. */
+  duckPath: string;
+  /** ADR-0093 (issue #512): shell callback to rename this session's entry. */
+  onRename: (sessionId: string, duckPath: string, newName: string) => void;
+  /** ADR-0093 (issue #512): shell callback to export a copy of the session
+   *  directory. Receives the .duck path + display name (save-dialog default). */
+  onExport: (duckPath: string, displayName: string) => void;
+  /** ADR-0093 (issue #512): shell callback to close this session (fires
+   *  cancel + approval cleanup + draft drop). */
+  onClose: (sessionId: string) => void;
+  /** ADR-0093 (issue #512): shell callback to permanently delete this
+   *  session. Receives the .duck path + runtime sid. */
+  onDelete: (duckPath: string, sessionId: string) => void;
+  /** Shell-wide busy gate: disables the header menu trigger during
+   *  persistence / resume operations (ADR-0093, matching the sidebar's
+   *  disabled={busy} contract). */
+  disabled?: boolean;
 }
 
 // A frozen empty slice so a session with no approvals keeps a referentially
 // stable prop for useSessionState / useTurnFlow (no every-render fresh []).
 const NO_APPROVALS: ApprovalEntry[] = [];
 
-export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, pendingQuestion, onQuestionConsumed, onSeedDraft, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents }: SessionPaneProps) {
+export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, pendingQuestion, onQuestionConsumed, onSeedDraft, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, duckPath, onRename, onExport, onClose, onDelete, disabled }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
   // the pane acts on its own session only). The respond / clearSession
@@ -276,16 +296,29 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
 
   return (
     <div className={cn("session-pane", s.workspaceCollapsed && "workspace-collapsed")}>
-      {/* Session header (row 1): session name + workspace toggle.
-          Moved here from the global topbar so session-scoped chrome lives with
-          the pane. The workspace toggle (ADR-0083, issue #298) sits at the
-          header's right edge: the panel defaults to collapsed and this is its
-          manual open/close path. */}
+      {/* Session header (row 1): session name + management menu + workspace
+          toggle. Moved here from the global topbar so session-scoped chrome
+          lives with the pane. ADR-0093 (issue #512): the `⋯` management menu
+          (Rename / Save a copy / Close / Delete) sits between the name and the
+          workspace toggle. The workspace toggle (ADR-0083, issue #298) stays at
+          the header's right edge: the panel defaults to collapsed and this is
+          its manual open/close path. */}
       <div className="session-header" data-tauri-drag-region>
-        <span className="flex-1 min-w-0 font-semibold text-base truncate" data-tauri-drag-region>
+        <span className="min-w-0 font-semibold text-base truncate" data-tauri-drag-region>
           {sessionName ||
             intl.formatMessage({ id: "session.defaultName", defaultMessage: "New session" })}
         </span>
+        <SessionHeaderMenu
+          sessionName={sessionName}
+          duckPath={duckPath}
+          sessionId={sessionId}
+          onRename={onRename}
+          onExport={onExport}
+          onClose={onClose}
+          onDelete={onDelete}
+          disabled={disabled}
+        />
+        <div className="flex-1" data-tauri-drag-region />
         <WorkspaceToggle collapsed={s.workspaceCollapsed} onToggle={s.handleToggleWorkspace} />
       </div>
       {/* ADR-0058 L2 partition boundaries: Thread rail and ResultView each get

@@ -87,6 +87,18 @@ import {
   setDatasetPrivacy,
 } from "../api";
 
+// ADR-0093 (#512): the session-header management callback props are no-ops in
+// every SessionPane render in this file (these tests exercise session-INTERNAL
+// flows, not the shell management actions). Collected here so the three render
+// sites share one source instead of repeating five identical lines each.
+const HEADER_MGMT_PROPS = {
+  duckPath: "/test/session.duck",
+  onRename: () => {},
+  onExport: () => {},
+  onClose: () => {},
+  onDelete: () => {},
+} as const;
+
 // Issue #81 cold start (ADR-0061): <App/> no longer auto-creates a session on
 // mount, so these session-INTERNAL flows (guided load / rename / privacy / ask /
 // delete-source) are driven through <SessionPane> directly -- the unit that owns
@@ -132,6 +144,7 @@ function renderPane(locale: EffectiveLocale = "zh-CN", sessionName = "Test sessi
         sessionName={sessionName}
         onFirstTurnSettled={() => {}}
         approvalEvents={approvalEvents}
+        {...HEADER_MGMT_PROPS}
       />,
     ),
   );
@@ -792,6 +805,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
         sessionName="pending"
         onFirstTurnSettled={() => {}}
         approvalEvents={approvalEvents}
+        {...HEADER_MGMT_PROPS}
       />
     );
     const tree = (
@@ -816,6 +830,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
           sessionName="pending"
           onFirstTurnSettled={() => {}}
           approvalEvents={approvalEvents}
+          {...HEADER_MGMT_PROPS}
         />
       );
       const nextTree = (
