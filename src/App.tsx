@@ -569,24 +569,14 @@ export default function App() {
                   onActivate={activateSession}
                   onExport={(path, name) => void handleExportSession(path, name)}
                   onOpenPersisted={(path, name) => void openPersisted(path, name)}
-                  // TODO(#512): when close lands on .session-header, re-wire
-                  // this cleanup bundle (clearSession + dropDraft) — the
-                  // sidebar trigger was removed by ADR-0093 slice 1.
-                  onClose={(sid) => {
-                    void closeOpen(sid);
-                    // A closed session's cards can never be answered (close
-                    // fires cancel, the gate resolves to deny); drop them so
-                    // the coloring + a later reopen start clean.
-                    approvalEvents.clearSession(sid);
-                    // A closed session's draft is unreachable (the pane is
-                    // gone); drop the slot so the draft map tracks the open set.
-                    composer.dropDraft(sid);
-                  }}
-                  onDelete={(path, sid) => {
-                    void deletePersisted(path, sid);
-                    if (sid !== null) composer.dropDraft(sid);
-                  }}
-                  onRename={(sid, path, newName) => void renameEntry(sid, path, newName)}
+                  // ADR-0093 slice 2 (#512): these management callbacks are
+                  // accepted on SessionSidebarProps for contract stability but
+                  // NOT consumed by the sidebar. The live wiring lives in the
+                  // SessionPane's session-header menu (onClose / onDelete /
+                  // onRename / onExport below the SessionPane render).
+                  onClose={() => {}}
+                  onDelete={() => {}}
+                  onRename={() => {}}
                   onSwitchGrouping={switchSidebarGrouping}
                   onOpenSearch={openSearch}
                   provider={appConfig?.provider ?? null}
@@ -706,6 +696,27 @@ export default function App() {
                             sessionName={s.name}
                             onFirstTurnSettled={syncSessionName}
                             approvalEvents={approvalEvents}
+                            duckPath={s.path}
+                            onRename={renameEntry}
+                            onExport={handleExportSession}
+                            disabled={busy}
+                            onClose={(sid) => {
+                              void closeOpen(sid);
+                              // A closed session's cards can never be answered
+                              // (close fires cancel, the gate resolves to deny);
+                              // drop them so the coloring + a later reopen start
+                              // clean (re-wired from the retired sidebar trigger
+                              // by ADR-0093 slice 2, #512).
+                              approvalEvents.clearSession(sid);
+                              // A closed session's draft is unreachable (the
+                              // pane is gone); drop the slot so the draft map
+                              // tracks the open set.
+                              composer.dropDraft(sid);
+                            }}
+                            onDelete={(path, sid) => {
+                              void deletePersisted(path, sid);
+                              composer.dropDraft(sid);
+                            }}
                           />
                         </ErrorBoundary>
                       </div>
