@@ -132,7 +132,6 @@ function renderPane(locale: EffectiveLocale = "zh-CN", sessionName = "Test sessi
         sessionName={sessionName}
         onFirstTurnSettled={() => {}}
         approvalEvents={approvalEvents}
-        onRailResizeStart={() => {}}
       />,
     ),
   );
@@ -793,7 +792,6 @@ describe("SessionPane pending-payload consumption (#500)", () => {
         sessionName="pending"
         onFirstTurnSettled={() => {}}
         approvalEvents={approvalEvents}
-        onRailResizeStart={() => {}}
       />
     );
     const tree = (
@@ -818,7 +816,6 @@ describe("SessionPane pending-payload consumption (#500)", () => {
           sessionName="pending"
           onFirstTurnSettled={() => {}}
           approvalEvents={approvalEvents}
-          onRailResizeStart={() => {}}
         />
       );
       const nextTree = (

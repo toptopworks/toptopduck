@@ -667,7 +667,7 @@ export default function App() {
                     centered and the pane host collapses. flex-grow interpolates
                     between the two postures (CSS transition), so the bar glides
                     centered <-> bottom on first submit / "+" navigation. */}
-                <main className="main-area">
+                <main className={`main-area${activeSessionFields?.workspaceCollapsed ? " workspace-collapsed" : ""}`}>
                   <div className="session-pane-host">
                     {openSessions.map((s) => (
                       <div
@@ -700,7 +700,6 @@ export default function App() {
                             sessionName={s.name}
                             onFirstTurnSettled={syncSessionName}
                             approvalEvents={approvalEvents}
-                            onRailResizeStart={onRailResizeStart}
                           />
                         </ErrorBoundary>
                       </div>
@@ -782,6 +781,13 @@ export default function App() {
                       </QuestionBar>
                     </div>
                   </div>
+
+                  {/* Draggable rail resize handle at the conversation/workspace
+                      boundary. Hoisted to .main-area (ADR-0092) so it spans the
+                      full height — including the shell-level QuestionBar below
+                      the pane host — matching the sidebar handle's reach. Hidden
+                      via CSS when cold-start, settings mode, or workspace folded. */}
+                  <div className="rail-resize-handle" onPointerDown={onRailResizeStart} />
                 </main>
 
                 {shellError && (

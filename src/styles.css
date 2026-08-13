@@ -378,6 +378,18 @@
   grid-template-columns: var(--track-grid);
   transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
 }
+/* Extend the workspace card background through the shell-bar area so the
+   workspace column visually reaches the viewport bottom (ADR-0092: the bar
+   sits at the shell level below the pane host — without this the card
+   background stops at the pane-host boundary). The ::before fills the
+   workspace grid track (col 3) with the same --card token; it collapses to
+   0fr when the workspace is folded, so no rule is needed for ws-collapsed. */
+.shell-bar-slot.bottom .shell-bar-track::before {
+  content: "";
+  grid-row: 1;
+  grid-column: 3;
+  background: var(--card);
+}
 /* Workspace folded (ADR-0083): mirror the pane's fold tracks so the bar
  * follows the conversation column's 800px geometry. Both selectors reference
  * the shared custom properties on .shell so the two surfaces never drift. */
@@ -449,8 +461,32 @@
 }
 .shell .session-pane.workspace-collapsed .session-rail { border-right-color: transparent; }
 .shell .session-pane.workspace-collapsed .session-workspace {
-  pointer-events: none;
-  visibility: hidden;
+  opacity: 0;
+}
+/* Clip the workspace AND every descendant scroll container while folded.
+   The shrinking column reflows the rich content (tables / charts / wrapping
+   text), which summons transient scrollbars on every overflow:auto
+   descendant (.workspace-body first of all) -- opacity does not hide
+   scrollbars, so they flicker during the fade. Specificity (0,4,0) beats the
+   utility overflow classes without !important. The class applies the instant
+   the fold begins, so the clip precedes the first reflow frame. */
+.shell .session-pane.workspace-collapsed .session-workspace,
+.shell .session-pane.workspace-collapsed .session-workspace * {
+  overflow: hidden;
+}
+/* Expand direction: the workspace BODY waits for the grid slide (280ms) to
+   settle before fading in -- at intermediate widths the content wraps taller
+   than its final layout and its scrollbar would flicker in with the fade.
+   The workspace card surface itself keeps the normal 200ms fade so the panel
+   still glides with the column (the sidebar fold parity); only the inner
+   body is staged. The collapsed rule overrides the delay so the fold fades
+   out immediately. */
+.workspace-body {
+  transition: opacity 150ms ease 280ms;
+}
+.shell .session-pane.workspace-collapsed .workspace-body {
+  opacity: 0;
+  transition: opacity 200ms ease;
 }
 /* Session header (row 1): the session name + the workspace toggle. Moved out
    of the global topbar so session-scoped chrome
@@ -490,12 +526,14 @@
 .shell.rail-dragging .session-body,
 .shell.sidebar-dragging .session-body { transition: none; }
 /* Draggable rail resize handle (conversation/workspace boundary). A thin
-   strip straddling the col-2/col-3 boundary; absolutely positioned so it
-   does not perturb the grid flow. The --rail-width variable (set inline on
-   .shell by useRailResize) drives left placement. Hidden when the workspace
-   is folded (.workspace-collapsed) -- the 4-track grid reflows for centering
-   and the boundary no longer maps to --rail-width. touch-action:none prevents
-   the browser from interpreting the drag as a pan/zoom. */
+   strip straddling the conversation/workspace column boundary; absolutely
+   positioned within .main-area so it spans the full height including the
+   shell-level QuestionBar (ADR-0092). The --rail-width variable (set inline
+   on .shell by useRailResize) drives left placement. Hidden when cold-start,
+   settings mode, or the workspace is folded (.workspace-collapsed) -- the
+   4-track grid reflows for centering and the boundary no longer maps to
+   --rail-width. touch-action:none prevents the browser from interpreting the
+   drag as a pan/zoom. */
 .rail-resize-handle {
   position: absolute;
   top: 0;
@@ -525,11 +563,15 @@
 }
 /* Suppress the .session-rail permanent border-right under the handle so
    hover/drag shows a single 1px line instead of a doubled 2px. */
-.session-body:has(.rail-resize-handle:hover) .session-rail,
+.main-area:has(.rail-resize-handle:hover) .session-rail,
 .shell.rail-dragging .session-rail {
   border-right-color: transparent;
 }
-.session-pane.workspace-collapsed .rail-resize-handle {
+/* Hide the rail handle when there is no active session (cold start), in
+   settings mode, or when the active session's workspace is folded. */
+.shell.cold-start-mode .rail-resize-handle,
+.shell.settings-mode .rail-resize-handle,
+.main-area.workspace-collapsed .rail-resize-handle {
   display: none;
 }
 /* Conversation column: the thread rail (ADR-0092: the QuestionBar moved to
@@ -570,6 +612,7 @@
   overflow: hidden auto;
   display: flex; flex-direction: column;
   background: var(--card);
+  transition: opacity 200ms ease;
 }
 /* ADR-0067 (issue #173): the workspace + textual-card VISUAL rules retired
  * into SessionPane.tsx + App.tsx as Tailwind utility + ADR-0050 token. The
