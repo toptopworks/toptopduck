@@ -69,7 +69,7 @@ function GroupTitle({ kind }: { kind: SidebarGroupKind }) {
 // lists every persisted .duck (ADR-0061 cold start) merged with the open
 // keep-alive sessions, Chat-style time-grouped and last-modified descending.
 // ADR-0093 (issue #511): each row is pure navigation (title + conditional
-// status dot). Management actions (rename / close / delete) moved to
+// status dot). Management actions (rename / export / close / delete) moved to
 // .session-header (slice 2, #512).
 
 // A frozen empty set so the optional prop's default keeps a stable identity
@@ -589,7 +589,7 @@ function SidebarRowHoverContent({
 // (in cn) lets it override AlertDialogAction's built-in default variant, reusing
 // the destructive look without forking the copy-in component.
 // Exported for component-level testing (issue #111); the dialog is rendered only
-// by SessionSidebar in production, but the destructive-semantics + ESC routing
+// by SessionHeaderMenu in production, but the destructive-semantics + ESC routing
 // contract is verified in isolation.
 export function DeleteSessionDialog({
   name,
@@ -642,7 +642,7 @@ export function DeleteSessionDialog({
 // opts out of a Description (the visible Label already names the field), which
 // also silences Radix's missing-description warning.
 // Exported for component-level testing (issue #111); rendered only by
-// SessionSidebar in production, but the onOpenChange-to-onCancel bridge + blank
+// SessionHeaderMenu in production, but the onOpenChange-to-onCancel bridge + blank
 // guard are verified in isolation.
 export function RenameSessionDialog({
   initialName,
