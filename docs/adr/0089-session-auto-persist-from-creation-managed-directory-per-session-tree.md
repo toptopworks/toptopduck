@@ -58,3 +58,4 @@ ADR-0034 Decision 5 定「每轮终态自动追加 + 原子写」，但未覆盖
 - **single-writer registry（ADR-0035 Decision 3）不变**：canonical key 仍是 per-session 目录的 canonical path。createSession 时 `try_acquire` + `bind`；close 时 `release_key` + `Session::Drop`。
 - **前端「已保存 / 未保存」两态 UI 消失**：session 恒在绑定态，无需区分。`persistenceBusy` 状态简化——只在「另存为」导出时短暂 busy。
 - **留实现期**：默认目录的平台 API 获取（Tauri path resolver）、UUID 生成（`uuid` crate）、close-time 空会话检测的具体 IPC 返回值、首次截断的字符上限对齐 ADR-0039、「另存为」导出时派生源缺失的提示文案。
+- **被 ADR-0095 校准**：session 持久化结构新增 `model` / `thought_level` / `cached_discovered` 三个可选字段，随会话一并持久化与恢复；旧会话文件缺字段按 `None` 反序列化（向后兼容）。
