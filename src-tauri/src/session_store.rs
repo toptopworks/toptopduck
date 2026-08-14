@@ -302,16 +302,16 @@ pub struct SessionHandle {
     /// (the ADR-0080 reset lineage: a session-level assembly posture, not in
     /// the recipe / app-config).
     runtime: Mutex<Option<AdapterSpec>>,
-    /// ADR-0095: the session-level model choice for the external runtime.
-    /// Lock-light like `runtime` (the picker's get/set never block on an
+    /// ADR-0095: the session-level model + thought-level selections for the
+    /// external runtime, held in ONE mutex slot (issue #530) so a torn write
+    /// between the two choices is not a representable intermediate state --
+    /// a lock-light reader sees either the old pair or the new pair, never a
+    /// mix. Lock-light like `runtime` (the picker's get/set never block on an
     /// in-flight turn); mirrored into the Session at turn top beside the
     /// runtime choice, so a switch lands at the turn boundary. PERSISTED to
     /// the recipe (unlike the runtime choice) -- a resume restores the
     /// selection via open_duck's restore call.
-    external_model: Mutex<Option<String>>,
-    /// ADR-0095: the session-level thought-level choice. Same lock-light +
-    /// turn-boundary + persisted semantics as [`Self::external_model`].
-    external_thought_level: Mutex<Option<String>>,
+    external_model_config: Mutex<(Option<String>, Option<String>)>,
     /// ADR-0095: the cached discovered model / thought-level catalog from the
     /// last ACP turn. Lets the frontend render the selector immediately on
     /// session open / resume cold-start (before any turn re-discovers). None
@@ -589,19 +589,23 @@ impl SessionHandle {
         *self.runtime.lock().expect("runtime lock poisoned") = None;
     }
 
-    /// The session-level model choice (ADR-0095). Lock-light read.
+    /// The session-level model choice (ADR-0095). Lock-light read; sees a
+    /// complete (model, thought_level) pair, never a torn mix (issue #530).
     pub fn external_model(&self) -> Option<String> {
-        self.external_model
+        self.external_model_config
             .lock()
-            .expect("external_model lock poisoned")
+            .expect("external_model_config lock poisoned")
+            .0
             .clone()
     }
 
-    /// The session-level thought-level choice (ADR-0095). Lock-light read.
+    /// The session-level thought-level choice (ADR-0095). Lock-light read;
+    /// paired with [`Self::external_model`] under one slot (issue #530).
     pub fn external_thought_level(&self) -> Option<String> {
-        self.external_thought_level
+        self.external_model_config
             .lock()
-            .expect("external_thought_level lock poisoned")
+            .expect("external_model_config lock poisoned")
+            .1
             .clone()
     }
 
@@ -614,37 +618,33 @@ impl SessionHandle {
     }
 
     /// Set the model + thought-level choices together (ADR-0095): they are
-    /// one assembly posture, written by the same picker surface, so a torn
-    /// write between them is not a representable intermediate state. `None`
-    /// clears (revert to the CLI's own defaults). Lock-light.
+    /// one assembly posture, written by the same picker surface, so they
+    /// share ONE mutex slot -- a torn write between them is not a
+    /// representable intermediate state (issue #530). `None` clears (revert
+    /// to the CLI's own defaults). Lock-light.
     pub fn set_external_model_config(&self, model: Option<String>, thought_level: Option<String>) {
         *self
-            .external_model
+            .external_model_config
             .lock()
-            .expect("external_model lock poisoned") = model;
-        *self
-            .external_thought_level
-            .lock()
-            .expect("external_thought_level lock poisoned") = thought_level;
+            .expect("external_model_config lock poisoned") = (model, thought_level);
     }
 
     /// Snapshot the turn's discovered catalog onto the handle (ADR-0095).
-    /// Called by the `ask` command after each turn (the Session recorded the
-    /// engine's `LoopOutcome.discovered_runtime`); `Some` replaces the cache,
-    /// and the ACP engine always reports (an empty catalog is a real state --
-    /// the CLI offered no models), while built-in / JsonEventStream turns
-    /// leave the previous cache untouched (their `None` means "no discovery",
-    /// not "discovered nothing").
+    /// Called by the `ask` command after each ACP turn (the Session recorded
+    /// the engine's `LoopOutcome.discovered_runtime`); replaces the cache
+    /// unconditionally -- the ACP engine always reports (an empty catalog is
+    /// a real state: the CLI offered no models). Built-in / JsonEventStream
+    /// turns never reach this setter (their `None` means "no discovery", not
+    /// "discovered nothing" -- the caller skips the call, preserving the
+    /// previous ACP cache; issue #530 removed the unreachable no-op arm).
     pub fn set_cached_discovered(
         &self,
-        discovered: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
+        discovered: crate::runtime::acp::adapter::DiscoveredRuntime,
     ) {
-        if let Some(d) = discovered {
-            *self
-                .cached_discovered
-                .lock()
-                .expect("cached_discovered lock poisoned") = Some(d);
-        }
+        *self
+            .cached_discovered
+            .lock()
+            .expect("cached_discovered lock poisoned") = Some(discovered);
     }
 
     /// Restore the persisted ADR-0095 trio from the resumed recipe
@@ -653,7 +653,8 @@ impl SessionHandle {
     /// thought-level selections + the discovery cache SURVIVE a resume --
     /// ADR-0095 Decision 6: losing the model selection is an unexpected
     /// degradation of the resume promise. Called right after the reset batch
-    /// so the restored values win.
+    /// so the restored values win. The ONLY writer that can clear a
+    /// previously-set selection (the None arms live here).
     pub fn restore_runtime_model_config(
         &self,
         model: Option<String>,
@@ -661,13 +662,9 @@ impl SessionHandle {
         cached_discovered: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
     ) {
         *self
-            .external_model
+            .external_model_config
             .lock()
-            .expect("external_model lock poisoned") = model;
-        *self
-            .external_thought_level
-            .lock()
-            .expect("external_thought_level lock poisoned") = thought_level;
+            .expect("external_model_config lock poisoned") = (model, thought_level);
         *self
             .cached_discovered
             .lock()
@@ -734,8 +731,7 @@ impl SessionStore {
             // Issue #353: the built-in runtime is the honest default (ADR-0081);
             // an external CLI is an explicit per-session pick, reset on resume.
             runtime: Mutex::new(None),
-            external_model: Mutex::new(None),
-            external_thought_level: Mutex::new(None),
+            external_model_config: Mutex::new((None, None)),
             cached_discovered: Mutex::new(None),
             mounted_skills_snapshot: Mutex::new(Vec::new()),
         });
@@ -1213,12 +1209,12 @@ mod tests {
     }
 
     /// ADR-0095: the session-level model config trio round-trips through the
-    /// lock-light accessors; `set_cached_discovered` only replaces on `Some`
-    /// (a built-in / JsonEventStream turn's `None` means "no discovery", not
-    /// "discovered nothing" -- the previous ACP cache must survive); and
-    /// `restore_runtime_model_config` (the resume path) overwrites all three.
+    /// lock-light accessors; the model + thought-level pair share ONE mutex
+    /// slot (issue #530), so a reader always sees a complete pair; and
+    /// `restore_runtime_model_config` (the resume path) overwrites all three
+    /// in one shot -- it is the only writer that can clear them.
     #[test]
-    fn external_model_config_round_trips_and_cache_only_replaces_on_some() {
+    fn external_model_config_round_trips_pair_slot_survives_restore() {
         let store = crate::session_store::SessionStore::new();
         let id = store
             .create(
@@ -1245,11 +1241,13 @@ mod tests {
             thought_level_config_id: Some("reasoning_effort".into()),
             adapter_id: Some("claude-code".into()),
         };
-        handle.set_cached_discovered(Some(catalog.clone()));
+        handle.set_cached_discovered(catalog.clone());
         assert_eq!(handle.cached_discovered(), Some(catalog.clone()));
-        // None (a built-in turn) leaves the cache intact.
-        handle.set_cached_discovered(None);
-        assert_eq!(handle.cached_discovered(), Some(catalog));
+        // A built-in / JsonEventStream turn never calls the setter (its None
+        // means "no discovery"); a second ACP catalog replaces the first.
+        let empty_catalog = crate::runtime::acp::adapter::DiscoveredRuntime::empty();
+        handle.set_cached_discovered(empty_catalog.clone());
+        assert_eq!(handle.cached_discovered(), Some(empty_catalog));
 
         // The resume restore overwrites all three in one shot.
         handle.restore_runtime_model_config(None, None, None);

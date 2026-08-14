@@ -713,10 +713,14 @@ pub async fn ask(
         // session-lock re-entry.
         handle.set_last_mcp_connect(s.last_mcp_connect().to_vec());
         // ADR-0095: mirror the turn's discovered runtime catalog onto the
-        // handle (lock-light reads for the selector). `Some` replaces the
-        // cache; the built-in / JsonEventStream `None` leaves the previous
-        // ACP cache intact (see SessionHandle::set_cached_discovered).
-        handle.set_cached_discovered(s.last_discovered_runtime());
+        // handle (lock-light reads for the selector). Only an ACP turn
+        // reports a catalog; the built-in / JsonEventStream `None` means
+        // "no discovery", so the mirror is skipped and the previous ACP
+        // cache survives (issue #530 made the None arm unrepresentable at
+        // the setter).
+        if let Some(discovered) = s.last_discovered_runtime() {
+            handle.set_cached_discovered(discovered);
+        }
         Ok::<TurnOutcome, SessionError>(outcome)
     })
     .await
