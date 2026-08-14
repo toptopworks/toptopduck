@@ -717,7 +717,11 @@ impl Session {
     /// [`Self::run_external_turn`] so the command layer can mirror it onto
     /// the SessionHandle (lock-light reads) without re-running a turn.
     /// `None` until the first ACP turn (and after a resume -- the recipe's
-    /// cached copy is restored onto the handle by open_duck).
+    /// cached copy is restored onto the handle by open_duck). A
+    /// pre-handshake ACP failure yields no discovery and RETAINS the
+    /// previous turn's catalog (issue #530); the `ask` mirror -- today's
+    /// only reader -- re-writes the same value, so the retention is
+    /// idempotent.
     pub fn last_discovered_runtime(
         &self,
     ) -> Option<crate::runtime::acp::adapter::DiscoveredRuntime> {
@@ -727,8 +731,10 @@ impl Session {
     /// Record the turn's discovered runtime catalog (see
     /// [`Self::last_discovered_runtime`]). Called by
     /// [`Self::run_external_turn`] before the outcome mapping; takes a bare
-    /// value -- the ACP engine always reports (an empty catalog is a real
-    /// state), so there is no "no discovery" arm here (issue #530).
+    /// value -- a post-handshake ACP exit always carries a catalog (an empty
+    /// one is a real state: the CLI offered no models), so there is no "no
+    /// discovery" arm here; pre-handshake failures yield `None` and the
+    /// caller skips the call (issue #530).
     pub fn set_last_discovered_runtime(
         &mut self,
         discovered: crate::runtime::acp::adapter::DiscoveredRuntime,

@@ -305,8 +305,10 @@ pub struct SessionHandle {
     /// ADR-0095: the session-level model + thought-level selections for the
     /// external runtime, held in ONE mutex slot (issue #530) so a torn write
     /// between the two choices is not a representable intermediate state --
-    /// a lock-light reader sees either the old pair or the new pair, never a
-    /// mix. Lock-light like `runtime` (the picker's get/set never block on an
+    /// and every pair-consuming reader goes through
+    /// [`Self::external_model_config`], which reads both under the one lock,
+    /// so it too sees either the old pair or the new pair, never a mix.
+    /// Lock-light like `runtime` (the picker's get/set never block on an
     /// in-flight turn); mirrored into the Session at turn top beside the
     /// runtime choice, so a switch lands at the turn boundary. PERSISTED to
     /// the recipe (unlike the runtime choice) -- a resume restores the
@@ -589,24 +591,30 @@ impl SessionHandle {
         *self.runtime.lock().expect("runtime lock poisoned") = None;
     }
 
-    /// The session-level model choice (ADR-0095). Lock-light read; sees a
-    /// complete (model, thought_level) pair, never a torn mix (issue #530).
-    pub fn external_model(&self) -> Option<String> {
+    /// The session-level model + thought-level pair (ADR-0095), read under
+    /// the ONE pair-slot lock (issue #530) -- a consumer sees either the old
+    /// pair or the new pair, never a torn mix. Prefer this over composing
+    /// [`Self::external_model`] + [`Self::external_thought_level`] whenever
+    /// both values are needed: the two single-field reads take the lock
+    /// separately, and a set landing between them yields a mix.
+    pub fn external_model_config(&self) -> (Option<String>, Option<String>) {
         self.external_model_config
             .lock()
             .expect("external_model_config lock poisoned")
-            .0
             .clone()
     }
 
-    /// The session-level thought-level choice (ADR-0095). Lock-light read;
-    /// paired with [`Self::external_model`] under one slot (issue #530).
+    /// The session-level model choice (ADR-0095). Lock-light, single-field
+    /// read -- see [`Self::external_model_config`] for the pair read.
+    pub fn external_model(&self) -> Option<String> {
+        self.external_model_config().0
+    }
+
+    /// The session-level thought-level choice (ADR-0095). Lock-light,
+    /// single-field read -- see [`Self::external_model_config`] for the pair
+    /// read.
     pub fn external_thought_level(&self) -> Option<String> {
-        self.external_model_config
-            .lock()
-            .expect("external_model_config lock poisoned")
-            .1
-            .clone()
+        self.external_model_config().1
     }
 
     /// The cached discovered catalog (ADR-0095). Lock-light read.
@@ -632,11 +640,12 @@ impl SessionHandle {
     /// Snapshot the turn's discovered catalog onto the handle (ADR-0095).
     /// Called by the `ask` command after each ACP turn (the Session recorded
     /// the engine's `LoopOutcome.discovered_runtime`); replaces the cache
-    /// unconditionally -- the ACP engine always reports (an empty catalog is
-    /// a real state: the CLI offered no models). Built-in / JsonEventStream
-    /// turns never reach this setter (their `None` means "no discovery", not
-    /// "discovered nothing" -- the caller skips the call, preserving the
-    /// previous ACP cache; issue #530 removed the unreachable no-op arm).
+    /// unconditionally -- a post-handshake ACP exit always carries a catalog
+    /// (an empty one is a real state: the CLI offered no models). Built-in /
+    /// JsonEventStream turns and pre-handshake ACP failures yield `None`
+    /// ("no discovery", not "discovered nothing") -- the caller skips the
+    /// call, preserving the previous ACP cache (issue #530 removed the
+    /// unreachable no-op arm from the setter).
     pub fn set_cached_discovered(
         &self,
         discovered: crate::runtime::acp::adapter::DiscoveredRuntime,
@@ -653,8 +662,10 @@ impl SessionHandle {
     /// thought-level selections + the discovery cache SURVIVE a resume --
     /// ADR-0095 Decision 6: losing the model selection is an unexpected
     /// degradation of the resume promise. Called right after the reset batch
-    /// so the restored values win. The ONLY writer that can clear a
-    /// previously-set selection (the None arms live here).
+    /// so the restored values win. The only writer that overwrites all three
+    /// slots in one shot (the user-driven clear -- `set_session_model(None)`
+    /// / `set_session_thought_level(None)` -- goes through
+    /// [`Self::set_external_model_config`] and never touches the catalog).
     pub fn restore_runtime_model_config(
         &self,
         model: Option<String>,
@@ -1210,9 +1221,10 @@ mod tests {
 
     /// ADR-0095: the session-level model config trio round-trips through the
     /// lock-light accessors; the model + thought-level pair share ONE mutex
-    /// slot (issue #530), so a reader always sees a complete pair; and
-    /// `restore_runtime_model_config` (the resume path) overwrites all three
-    /// in one shot -- it is the only writer that can clear them.
+    /// slot (issue #530), so the pair reader returns both values from the
+    /// same slot state; and `restore_runtime_model_config` (the resume path)
+    /// overwrites all three in one shot -- it is the only writer that
+    /// overwrites the catalog slot.
     #[test]
     fn external_model_config_round_trips_pair_slot_survives_restore() {
         let store = crate::session_store::SessionStore::new();
@@ -1231,6 +1243,11 @@ mod tests {
         handle.set_external_model_config(Some("fake-opus".into()), Some("high".into()));
         assert_eq!(handle.external_model().as_deref(), Some("fake-opus"));
         assert_eq!(handle.external_thought_level().as_deref(), Some("high"));
+        // The pair reader returns both fields of the same slot state.
+        assert_eq!(
+            handle.external_model_config(),
+            (Some("fake-opus".into()), Some("high".into()))
+        );
 
         let catalog = crate::runtime::acp::adapter::DiscoveredRuntime {
             models: vec!["fake-opus".into(), "fake-sonnet".into()],

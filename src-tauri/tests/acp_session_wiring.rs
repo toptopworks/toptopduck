@@ -204,3 +204,56 @@ fn external_turn_with_skill_records_provenance() {
         "external path provenance must snapshot skill name + hash"
     );
 }
+
+/// Issue #530: a pre-handshake ACP failure ("no discovery") must NOT wipe
+/// the previous turn's catalog -- the None-skip at `run_external_turn`'s
+/// snapshot is the only thing standing between the selector's cold-start
+/// cache and a silent clear. Drive a discovering turn on the fake CLI, then
+/// a turn whose adapter points at a nonexistent binary (spawn fails before
+/// the handshake, so the engine reports `None`), and assert the Session's
+/// cached catalog (and the recipe-header source) still holds the first
+/// turn's discovery.
+#[test]
+fn external_prehandshake_failure_preserves_cached_discovery() {
+    let (mut session, old_path, _guard) = external_session("text_reply");
+    let first = session.ask("what is the answer?");
+    assert!(
+        matches!(first, TurnOutcome::Textual { .. }),
+        "got {first:?}"
+    );
+    let catalog = session
+        .last_discovered_runtime()
+        .expect("a post-handshake turn reports a catalog");
+
+    // Second turn: same session, an adapter whose binary does not exist --
+    // the engine exits pre-handshake with `discovered_runtime: None`.
+    session.set_external_runtime(Some(AdapterSpec {
+        id: AdapterId::new("missing-cli"),
+        display_name: "missing-cli",
+        binary_names: &["definitely-not-on-path-530"],
+        argv: &[],
+        stream_format: toptopduck_lib::runtime::acp::adapter::StreamFormat::Acp,
+        model_arg: None,
+        effort_config_key: None,
+    }));
+    let second = session.ask("this one cannot even spawn");
+    std::env::set_var("PATH", old_path);
+    assert!(
+        matches!(second, TurnOutcome::Failed(_)),
+        "the missing-binary turn must fail, got {second:?}"
+    );
+
+    // The no-discovery turn preserved both the session-side snapshot and the
+    // recipe-header cache (one storage, issue #530).
+    assert_eq!(
+        session.last_discovered_runtime().as_ref(),
+        Some(&catalog),
+        "a pre-handshake failure must retain the previous catalog"
+    );
+    let config = session.runtime_model_config();
+    assert_eq!(
+        config.cached_discovered.as_ref(),
+        Some(&catalog),
+        "the recipe-header cache must survive the no-discovery turn"
+    );
+}
