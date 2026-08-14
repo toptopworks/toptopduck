@@ -98,16 +98,7 @@ interface SessionSidebarProps {
   onNew: () => void;
   onOpenDuck: () => void;
   onActivate: (sid: string) => void;
-  // ADR-0093 slice 2 (#512): the following four management callbacks are
-  // accepted on SessionSidebarProps for contract stability but are NOT
-  // consumed by the sidebar — slice 2 wires them to .session-header.
-  /** Export a copy of the session directory (ADR-0089 Decision 5, issue #449).
-   *  Receives the .duck path + display name (for the save dialog default). */
-  onExport: (path: string, name: string) => void;
   onOpenPersisted: (path: string, name: string) => void;
-  onClose: (sid: string) => void;
-  onDelete: (path: string, sid: string | null) => void;
-  onRename: (sid: string | null, path: string, newName: string) => void;
   onSwitchGrouping: (mode: SidebarGrouping) => void;
   // Open the Ctrl/⌘+K search modal (ADR-0072, issue #252). The
   // shell owns the open state so the global keydown + this button share one
