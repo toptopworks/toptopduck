@@ -145,30 +145,34 @@ pub const fn gemini_cli() -> AdapterSpec {
     }
 }
 
-/// The codex adapter (ADR-0081 v1 validation set, issue #300). Unlike
-/// claude-code + gemini-cli, codex has NO native `--acp` flag: ACP support is
-/// the dedicated `codex-acp` binary (npm `@agentclientprotocol/codex-acp`,
-/// installed as `codex-acp`), which starts in ACP stdio mode by default and
-/// wraps the Codex App Server internally. So the launch shape differs from the
-/// other two -- empty argv, a dedicated server binary -- yet it is STILL pure
-/// data: the engine spawns `<binary> <argv...>` and the difference lives here,
-/// not in a code branch (ADR-0081 zero per-CLI code).
+/// The codex adapter (ADR-0081 v1 validation set, issue #300). ADR-0094:
+/// codex uses native `exec --json` direct-connect (not the retired `codex-acp`
+/// bridge package). The detection binary is the official `codex` CLI; the argv
+/// puts it into structured-NDJSON mode with a read-only sandbox (native shell /
+/// file-write tools blocked platform-uniformly). The prompt is written to stdin
+/// as flattened text; MCP tool calls route through the gateway bridge injected
+/// via `-c` config override (ADR-0085/0094). The stream format is
+/// `JsonEventStream`, so the engine dispatches to the JSON event stream path,
+/// not the ACP JSON-RPC path.
 ///
-/// The id / display name stay `codex` (the user-facing concept the composer
-/// picker + per-turn provenance carry); only the detection binary name is
-/// `codex-acp`.
-///
-/// NOTE: the binary name + the "dedicated server, no flag" shape are pinned by
-/// the `codex-acp` package; live E2E verifies them against a real install. If
-/// codex later gains a native `--acp` flag, ONLY this constant changes -- the
-/// engine is untouched.
+/// NOTE: the argv shape is pinned by the codex CLI's `exec` subcommand; live
+/// E2E verifies it against a real install. If codex changes the flags, ONLY
+/// this constant changes -- the engine is untouched (ADR-0081 zero per-CLI
+/// code).
 pub const fn codex() -> AdapterSpec {
     AdapterSpec {
         id: AdapterId::new("codex"),
         display_name: "codex",
-        binary_names: &["codex-acp"],
-        argv: &[],
-        stream_format: StreamFormat::Acp,
+        binary_names: &["codex"],
+        argv: &[
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--sandbox",
+            "read-only",
+        ],
+        stream_format: StreamFormat::JsonEventStream,
     }
 }
 
@@ -306,11 +310,10 @@ mod tests {
     }
 
     /// v1_adapters is internally consistent: non-empty, unique ids, every entry
-    /// has a non-empty display name + binary names, and every entry is `Acp`
-    /// (the prefactor pins all existing adapters to ACP; ADR-0094's codex native
-    /// exec migration changes the codex entry in a later slice). Count-agnostic
-    /// -- adding a CLI (one `const fn` constructor + one V1_ADAPTERS entry)
-    /// never touches this test.
+    /// has a non-empty display name + binary names. ADR-0094: codex carries
+    /// `JsonEventStream`; the remaining adapters carry `Acp`. Count-agnostic --
+    /// adding a CLI (one `const fn` constructor + one V1_ADAPTERS entry) never
+    /// touches this test.
     #[test]
     fn v1_adapters_is_internally_consistent() {
         let adapters = v1_adapters();
@@ -329,12 +332,9 @@ mod tests {
                 "{:?}: empty binary name in binary_names",
                 a.id
             );
-            assert_eq!(
-                a.stream_format,
-                StreamFormat::Acp,
-                "{:?}: all v1 adapters are ACP in this prefactor slice",
-                a.id
-            );
+            // Each adapter's stream_format is a valid known variant (Acp or
+            // JsonEventStream). The specific per-adapter assignment is pinned
+            // in the per-adapter tests above, not here.
         }
     }
 
@@ -351,20 +351,29 @@ mod tests {
         assert_eq!(spec.stream_format, StreamFormat::Acp);
     }
 
-    /// codex is the dedicated-ACP-server shape: the `codex-acp` binary with an
-    /// empty argv (no native `--acp` flag). The id/display stay `codex` (the
-    /// user-facing concept); only the detection binary name is `codex-acp`.
-    /// This is the structural proof that per-CLI variation lives in data, not
-    /// code: the engine spawns `<binary> <argv...>` and this differs from the
-    /// other two without a per-CLI branch.
+    /// ADR-0094: codex uses the native `codex` binary (not the retired
+    /// `codex-acp` bridge package) with the `exec --json` argv that puts it
+    /// into structured-NDJSON mode + a read-only sandbox. The stream format is
+    /// `JsonEventStream`, not `Acp`. This is the structural proof that
+    /// per-CLI variation lives in data, not code.
     #[test]
-    fn codex_spec_targets_dedicated_acp_server_with_empty_argv() {
+    fn codex_spec_targets_native_exec_json() {
         let spec = codex();
         assert_eq!(spec.id.as_str(), "codex");
         assert_eq!(spec.display_name, "codex");
-        assert_eq!(spec.binary_names, &["codex-acp"]);
-        assert!(spec.argv.is_empty(), "codex-acp needs no ACP flag");
-        assert_eq!(spec.stream_format, StreamFormat::Acp);
+        assert_eq!(spec.binary_names, &["codex"]);
+        assert_eq!(
+            spec.argv,
+            &[
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "--ephemeral",
+                "--sandbox",
+                "read-only",
+            ]
+        );
+        assert_eq!(spec.stream_format, StreamFormat::JsonEventStream);
     }
 
     /// qwen-code uses the `qwen` binary plus the stable `["--acp"]` flag

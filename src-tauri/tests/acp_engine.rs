@@ -375,16 +375,19 @@ fn engine_runs_against_the_claude_code_spec() {
 
 /// #300 structural coverage of AC "the engine gains no per-CLI branch": drive
 /// the same text-reply (success path) and the same step-cap overflow (the
-/// step-cap cancel fallback path) through each of the five v1 specs
-/// (claude-code, gemini-cli, codex, qwen-code, opencode) and assert identical
+/// step-cap cancel fallback path) through each of the four ACP-format specs
+/// (claude-code, gemini-cli, qwen-code, opencode) and assert identical
 /// termination + phase emission. The fixture ignores argv, so the per-spec
-/// launch shapes (claude-code `--acp`, gemini-cli `--experimental-acp`, codex
-/// empty argv, qwen-code `--acp`, opencode `acp` subcommand) all spawn + pump
+/// launch shapes (claude-code `--acp`, gemini-cli `--experimental-acp`,
+/// qwen-code `--acp`, opencode `acp` subcommand) all spawn + pump
 /// through the SAME engine entry point. Combined with the
 /// engine's spec-consumption surface being only `argv` (spawn) + `id` (error
 /// message + ToolKey) -- audited, never a dispatch -- this pins ONE uniform
-/// outcome + phase stream per scenario across all v1 specs, so a future
+/// outcome + phase stream per scenario across all ACP specs, so a future
 /// per-CLI branch that changes outcomes or phases would trip it.
+///
+/// Codex is excluded: ADR-0094 migrated it to `JsonEventStream` (native
+/// `exec --json`), so the ACP fake-CLI fixture does not apply.
 ///
 /// What this does NOT prove: behavioral isomorphism of the REAL CLIs (cancel /
 /// step-cap / wall-clock fallback, the rest of AC #3). The fixture erases the
@@ -395,13 +398,7 @@ fn engine_runs_against_the_claude_code_spec() {
 /// AC #1-3 is tracked by #342.
 #[test]
 fn engine_outcome_is_identical_across_all_v1_specs() {
-    let specs = [
-        claude_code(),
-        gemini_cli(),
-        codex(),
-        qwen_code(),
-        opencode(),
-    ];
+    let specs = [claude_code(), gemini_cli(), qwen_code(), opencode()];
     for spec in &specs {
         // Success path: a clean text reply -> Text for every spec, and the
         // Thinking phase fires before the prompt for every spec (the phase
@@ -442,25 +439,42 @@ fn engine_outcome_is_identical_across_all_v1_specs() {
     }
 }
 
-/// ADR-0094 prefactor: all five v1 adapters carry `StreamFormat::Acp`. The
-/// codex entry migrates to `JsonEventStream` in a later slice; this test pins
-/// the prefactor state so the migration is an intentional change.
+/// ADR-0094: the four ACP-format adapters carry `StreamFormat::Acp`. Codex
+/// migrated to `JsonEventStream` (native `exec --json`); the codex spec is
+/// asserted separately below.
 #[test]
-fn all_v1_adapters_are_acp_format() {
+fn acp_adapters_are_acp_format() {
     use toptopduck_lib::runtime::acp::adapter::StreamFormat;
-    let specs = [
-        claude_code(),
-        gemini_cli(),
-        codex(),
-        qwen_code(),
-        opencode(),
-    ];
+    let specs = [claude_code(), gemini_cli(), qwen_code(), opencode()];
     for spec in &specs {
         assert_eq!(
             spec.stream_format,
             StreamFormat::Acp,
-            "{}: all v1 adapters are ACP in this prefactor slice",
+            "{}: ACP-format adapters must carry StreamFormat::Acp",
             spec.id
         );
     }
+}
+
+/// ADR-0094: the codex adapter uses native `exec --json` direct-connect. Pin
+/// the detection binary (`codex`, not the retired `codex-acp`), the exec argv
+/// shape, and the `JsonEventStream` format so a regression is caught at the
+/// spec level.
+#[test]
+fn codex_adapter_is_native_exec_json_event_stream() {
+    use toptopduck_lib::runtime::acp::adapter::StreamFormat;
+    let spec = codex();
+    assert_eq!(spec.stream_format, StreamFormat::JsonEventStream);
+    assert_eq!(spec.binary_names, &["codex"]);
+    assert_eq!(
+        spec.argv,
+        &[
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--sandbox",
+            "read-only",
+        ]
+    );
 }

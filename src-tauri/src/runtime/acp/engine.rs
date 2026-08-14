@@ -58,35 +58,11 @@ use crate::session::agent_loop::{
     DEFAULT_WALL_CLOCK, TRACE_EXCERPT_MAX,
 };
 
-/// Pump poll interval: how long the pump blocks on the stdout-reader channel
-/// between cancel / step-cap checks. Short enough that a cancel surfaces in
-/// well under a second; long enough that an idle turn costs near-zero CPU.
-const PUMP_POLL_INTERVAL: Duration = Duration::from_millis(50);
-
 /// Grace period after the engine sends `session/cancel` for the agent to return
 /// the prompt response before the engine kills the process. Generous for a
 /// cooperative agent (it should respond near-instantly); bounded so a stuck
 /// agent cannot hang the turn past the watchdog.
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
-
-/// Upper bound on reaping the ACP agent after `Child::kill`. `Child::wait`
-/// blocks until the child is reaped; on Linux the stdio bridge (spawned by the
-/// agent as its MCP server) inherits the agent's stdout write-end, so the
-/// engine's reader pipe does not EOF and the inherited-stderr chain can keep
-/// the process tree alive long enough to wedge `wait` past the wall-clock
-/// watchdog. Poll `try_wait` under this grace instead: on POSIX the kill is
-/// delivered immediately (SIGKILL) so the agent is normally reaped on the first
-/// poll, and a wedged reap cannot hang the turn -- on POSIX the resulting
-/// transient zombie is reaped by init at parent exit; on Windows there is no
-/// zombie concept and the handle is closed on `Child` drop. Either way the
-/// bounded poll keeps the turn moving. This bounded reaping is what lets the
-/// engine thread rejoin + serve's `engine_done` flag fire under the watchdog
-/// on Linux (issue #357).
-const KILL_REAP_DEADLINE: Duration = Duration::from_secs(2);
-
-/// Poll interval for the bounded reap. Short enough that the turn reclaims the
-/// agent promptly when SIGKILL lands; [`KILL_REAP_DEADLINE`] is the real cap.
-const KILL_REAP_POLL: Duration = Duration::from_millis(10);
 
 /// One ACP turn input. The wiring seam (slice 9c) assembles `prompt_blocks`
 /// from the same window the built-in loop reads; `mcp_servers` is the bridge
@@ -138,10 +114,11 @@ impl AcpEngine {
 
     /// Drive one turn against the adapter's CLI. Dispatches on
     /// [`StreamFormat`] (ADR-0094): the ACP path drives the full JSON-RPC
-    /// turn; the JSON event stream path is a stub (ADR-0094 prefactor -- it
-    /// compiles but does not drive a real turn yet). `binary` is the resolved
-    /// CLI path (`detect_adapter` in production, the fake-fixture path in
-    /// tests). Returns the SAME [`LoopOutcome`] shape the built-in loop returns.
+    /// turn; the JSON event stream path delegates to
+    /// [`json_event_stream::run_json_event_stream`] (codex native `exec --json`).
+    /// `binary` is the resolved CLI path (`detect_adapter` in production, the
+    /// fake-fixture path in tests). Returns the SAME [`LoopOutcome`] shape the
+    /// built-in loop returns.
     pub fn run(
         &self,
         input: &AcpTurnInput,
@@ -152,7 +129,17 @@ impl AcpEngine {
     ) -> LoopOutcome {
         match self.adapter.stream_format {
             StreamFormat::Acp => self.run_acp(input, binary, approval, sink, on_phase),
-            StreamFormat::JsonEventStream => self.run_json_event_stream_stub(),
+            StreamFormat::JsonEventStream => super::json_event_stream::run_json_event_stream(
+                &self.adapter,
+                Arc::clone(&self.cancel),
+                self.step_cap,
+                self.wall_clock,
+                input,
+                binary,
+                approval,
+                sink,
+                on_phase,
+            ),
         }
     }
 
@@ -283,21 +270,6 @@ impl AcpEngine {
         outcome
     }
 
-    /// The JSON event stream driving path (ADR-0094). Stub: compiles but does
-    /// not drive a real turn yet. Returns a typed Transient outcome so callers
-    /// get an honest "not implemented" signal rather than a silent no-op. The
-    /// real implementation lands in the codex native exec slice.
-    fn run_json_event_stream_stub(&self) -> LoopOutcome {
-        self.outcome(
-            Termination::Transient(format!(
-                "JSON event stream format is not yet implemented for adapter `{}`",
-                self.adapter.id
-            )),
-            Vec::new(),
-            0,
-        )
-    }
-
     fn outcome(
         &self,
         termination: Termination,
@@ -371,31 +343,16 @@ fn handshake(
 // Child process wrapper
 // ---------------------------------------------------------------------------
 
-/// The spawned CLI child + its stdio. [`Self::kill_and_wait`] kills the child
-/// (`SIGKILL` on POSIX, `TerminateProcess` on Windows) and reaps it under a
-/// bounded poll. The reap is best-effort: if the child is not reaped within
-/// [`KILL_REAP_DEADLINE`] -- the Linux wedged-reap path the bounded poll exists
-/// to sidestep -- the engine does NOT block the turn on it; the child becomes
-/// a transient zombie (POSIX, reaped by init at process exit) or an unclosed
-/// handle (Windows, closed on `Child` drop). The turn always moves on.
+/// The spawned CLI child + its stdio. [`Self::kill_and_wait`] delegates to
+/// [`super::process::kill_and_reap`] — the shared kill-reap logic used by both
+/// the ACP and JSON event stream engines (prevents drift, ADR-0094 review I-3).
 struct ChildHandle {
     inner: Child,
 }
 
 impl ChildHandle {
     fn kill_and_wait(&mut self) {
-        // Best-effort: ignore a kill error (the child may have already exited).
-        let _ = self.inner.kill();
-        // Bounded reap (issue #357): poll try_wait (WNOHANG) instead of a
-        // blocking wait so a wedged reap cannot hang the turn. See
-        // KILL_REAP_DEADLINE for the Linux process-tree rationale.
-        let deadline = Instant::now() + KILL_REAP_DEADLINE;
-        while Instant::now() < deadline {
-            match self.inner.try_wait() {
-                Ok(Some(_)) | Err(_) => return,
-                Ok(None) => std::thread::sleep(KILL_REAP_POLL),
-            }
-        }
+        super::process::kill_and_reap(&mut self.inner);
     }
 }
 
@@ -475,7 +432,7 @@ impl AcpIo {
             if cancel.is_requested() {
                 return Err(Termination::Cancelled);
             }
-            match self.rx.recv_timeout(PUMP_POLL_INTERVAL) {
+            match self.rx.recv_timeout(super::process::PUMP_POLL_INTERVAL) {
                 Ok(line) => {
                     let v: Value = match serde_json::from_str(&line) {
                         Ok(v) => v,
@@ -533,7 +490,7 @@ impl AcpIo {
                     return PromptEnd::Cancelled;
                 }
             }
-            match self.rx.recv_timeout(PUMP_POLL_INTERVAL) {
+            match self.rx.recv_timeout(super::process::PUMP_POLL_INTERVAL) {
                 Ok(line) => {
                     let v: Value = match serde_json::from_str(&line) {
                         Ok(v) => v,
@@ -1135,11 +1092,11 @@ mod tests {
     }
 
     /// ADR-0094 dispatch seam: an adapter whose `stream_format` is
-    /// `JsonEventStream` routes to the stub path and returns a typed Transient
-    /// outcome -- it compiles but does not drive a real turn. The message
-    /// names the adapter so the caller sees an honest "not implemented" signal.
+    /// `JsonEventStream` routes to the JSON event stream driver (not the ACP
+    /// path). A nonexistent binary produces a Transient spawn failure naming
+    /// the adapter, proving the dispatch fires through the new module.
     #[test]
-    fn json_event_stream_dispatches_to_stub() {
+    fn json_event_stream_dispatches_to_driver() {
         let spec = AdapterSpec {
             id: crate::runtime::acp::adapter::AdapterId::new("stub-test"),
             display_name: "stub-test",
@@ -1150,7 +1107,7 @@ mod tests {
         let cancel = Arc::new(CancelToken::new());
         let engine = AcpEngine::new(spec, cancel);
         let input = AcpTurnInput {
-            cwd: "/tmp".into(),
+            cwd: std::env::temp_dir().to_string_lossy().to_string(),
             mcp_servers: Vec::new(),
             prompt_blocks: Vec::new(),
         };
@@ -1158,7 +1115,7 @@ mod tests {
         let sink = RecordingAcpSink::new();
         let outcome = engine.run(
             &input,
-            std::path::Path::new("/nonexistent"),
+            std::path::Path::new("/nonexistent-binary-523"),
             &approval,
             &sink,
             |_| {},
@@ -1166,17 +1123,12 @@ mod tests {
         match &outcome.termination {
             Termination::Transient(msg) => {
                 assert!(
-                    msg.contains("JSON event stream"),
-                    "stub message names the format: {msg}"
-                );
-                assert!(
                     msg.contains("stub-test"),
-                    "stub message names the adapter: {msg}"
+                    "spawn failure names the adapter: {msg}"
                 );
             }
-            other => panic!("expected Transient from stub, got {other:?}"),
+            other => panic!("expected Transient from spawn failure, got {other:?}"),
         }
         assert!(outcome.trace.is_empty());
-        assert_eq!(outcome.round_trips, 0, "stub drives zero round-trips");
     }
 }
