@@ -492,6 +492,24 @@ impl RecipePersister {
     pub(super) fn take_pending_conflict(&mut self) -> Option<PendingConflict> {
         self.pending_conflict.take()
     }
+
+    /// NON-consuming snapshot of the persist outcome, for callers that need
+    /// an immediate verdict right after their own `save_if_bound` call (the
+    /// ADR-0095 set commands, issue #529): `Err` carries the typed write
+    /// failure, `Ok` with `true` means a write landed, `Ok` with `false`
+    /// means the write was SUSPENDED on a pending conflict (ADR-0035 -- the
+    /// auto-write refuses to clobber an externally-edited file). Distinct
+    /// from [`Self::take_persist_error`]: reads do NOT consume the shared
+    /// slot, so the banner poll channel is untouched.
+    pub(super) fn persist_outcome(&self) -> Result<bool, SaveError> {
+        if let Some(e) = self.persist_error.as_ref() {
+            return Err(e.clone());
+        }
+        if self.pending_conflict.is_some() {
+            return Ok(false);
+        }
+        Ok(true)
+    }
 }
 
 impl Default for RecipePersister {

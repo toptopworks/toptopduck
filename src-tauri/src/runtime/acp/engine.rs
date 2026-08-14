@@ -26,10 +26,10 @@
 //! Cancel is responsive via a stdout-reader thread + a recv-timeout pump (a
 //! blocking `read_line` would not notice cancel).
 //!
-//! Promotions are empty in this slice: a `materialize` promotion is created
+//! Promotions are always empty here: a `materialize` promotion is created
 //! gateway-side (the bridge → the app's MCP gateway →
-//! [`crate::tools::dispatch`]) and observed separately in slice 9c. The engine
-//! owns only the ACP-driving half of the turn.
+//! [`crate::tools::dispatch`]) and observed there. The engine owns only the
+//! ACP-driving half of the turn.
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
@@ -67,27 +67,26 @@ use crate::session::agent_loop::{
 /// agent cannot hang the turn past the watchdog.
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
 
-/// One ACP turn input. The wiring seam (slice 9c) assembles `prompt_blocks`
-/// from the same window the built-in loop reads; `mcp_servers` is the bridge
-/// descriptor (the real one lands in slice 9b).
+/// One ACP turn input. The wiring seam assembles `prompt_blocks` from the
+/// same window the built-in loop reads; `mcp_servers` is the bridge
+/// descriptor.
 #[derive(Debug, Clone)]
 pub struct AcpTurnInput {
     /// The working directory passed to `session/new` (absolute).
     pub cwd: String,
-    /// The MCP server descriptors injected at `session/new`. Slice 9b fills
-    /// the bridge; slice 9a tests pass a placeholder (the fake fixture ignores
-    /// it).
+    /// The MCP server descriptors injected at `session/new` (the bridge).
     pub mcp_servers: Vec<McpServer>,
     /// The session-level model choice to inject this turn (ADR-0095). `None`
     /// = the CLI's own default. ACP path: one `session/set_config_option`
-    /// (configId `model`) after the handshake -- `NewSessionRequest` carries
-    /// no model field (schema 0.13.8); JsonEventStream path: rides argv
-    /// behind `AdapterSpec.model_arg`.
+    /// after the handshake, keyed by the catalog entry's config id (the
+    /// category constant is only a fallback) -- `NewSessionRequest` carries
+    /// no model field; JsonEventStream path: rides argv behind
+    /// `AdapterSpec.model_arg`.
     pub model: Option<String>,
     /// The session-level thought-level choice to inject this turn (ADR-0095).
-    /// `None` = the CLI's own default. ACP path: one `session/set_config_option`
-    /// (configId `thought_level`) after the handshake; JsonEventStream path:
-    /// argv via `AdapterSpec.effort_config_key`.
+    /// `None` = the CLI's own default. ACP path: one
+    /// `session/set_config_option` after the handshake, keyed like `model`;
+    /// JsonEventStream path: argv via `AdapterSpec.effort_config_key`.
     pub thought_level: Option<String>,
     /// The full windowed context for this turn (the question + history), as
     /// text content blocks. ADR-0076 statelessness: the whole context every
@@ -157,8 +156,8 @@ impl AcpEngine {
         }
     }
 
-    /// The ACP v1 driving path (ADR-0081). This is the existing engine body,
-    /// unchanged -- the per-format dispatch seam routes `Acp` specs here.
+    /// The ACP v1 driving path (ADR-0081). The per-format dispatch seam
+    /// routes `Acp` specs here.
     fn run_acp(
         &self,
         input: &AcpTurnInput,
@@ -195,7 +194,7 @@ impl AcpEngine {
 
         // Handshake: initialize -> session/new. A failure here is a transient
         // turn failure (the CLI is not an ACP agent / crashed).
-        let hs = match handshake(&mut io, &self.cancel, input) {
+        let hs = match handshake(&mut io, &self.cancel, input, &self.adapter) {
             Ok(hs) => hs,
             Err(term) => {
                 let outcome = self.outcome(term, Vec::new(), 1, None);
@@ -362,9 +361,9 @@ impl AcpEngine {
     ) -> LoopOutcome {
         LoopOutcome {
             termination,
-            // Empty in slice 9a: a materialize promotion is gateway-side
-            // (bridge -> MCP gateway -> tools::dispatch), observed separately
-            // in slice 9c. The ACP engine drives only the ACP half.
+            // Always empty: a materialize promotion is gateway-side
+            // (bridge -> MCP gateway -> tools::dispatch), observed there.
+            // The ACP engine drives only the ACP half of the turn.
             promotions: Vec::new(),
             trace,
             round_trips,
@@ -416,6 +415,7 @@ fn handshake(
     io: &mut AcpIo,
     cancel: &CancelToken,
     input: &AcpTurnInput,
+    adapter: &AdapterSpec,
 ) -> Result<HandshakeOutcome, Termination> {
     let init = io.request_roundtrip::<InitializeParams, wire::InitializeResult>(
         cancel,
@@ -450,10 +450,17 @@ fn handshake(
         ),
     )?;
     match (new_resp.result, new_resp.error) {
-        (Some(r), _) => Ok(HandshakeOutcome {
-            session_id: r.session_id,
-            discovered: extract_discovered_runtime(r.config_options.as_ref()),
-        }),
+        (Some(r), _) => {
+            // Issue #529: stamp the producing adapter onto the catalog so the
+            // frontend can detect a cache that predates a runtime switch (the
+            // config_options wire carries no adapter identity).
+            let mut discovered = extract_discovered_runtime(r.config_options.as_ref());
+            discovered.adapter_id = Some(adapter.id.to_string());
+            Ok(HandshakeOutcome {
+                session_id: r.session_id,
+                discovered,
+            })
+        }
         (None, Some(e)) => Err(Termination::Transient(format!(
             "session/new error: {}",
             e.message

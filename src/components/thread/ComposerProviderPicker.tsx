@@ -15,9 +15,11 @@ import {
   setSessionModel,
   setSessionRuntime,
   setSessionThoughtLevel,
+  type SetModelPersistOutcome,
 } from "../../api";
 import { adapterKeys, sessionKeys } from "../../session/queryKeys";
 import type { ProfileKeyStatus, ProviderConfig } from "../../types/provider";
+import type { SaveError } from "../../types/session";
 import type {
   AdapterEntry,
   SessionModelConfig,
@@ -190,32 +192,64 @@ export function ComposerProviderPicker({
   // completion refetches this via the useTurnFlow invalidation of the session
   // prefix, landing the fresh catalog (dedupe is inherent: the backend cache
   // is single-slot).
-  const { data: modelConfigData } = useQuery({
+  const { data: modelConfigData, error: modelConfigError } = useQuery({
     queryKey: sessionKeys.modelConfig(sessionId ?? ""),
     queryFn: () => getSessionModelConfig(sessionId as string),
     enabled: sessionId !== null,
   });
   const modelConfig: SessionModelConfig = modelConfigData ?? MODEL_CONFIG_DEFAULT;
   const discovered = modelConfig.cached_discovered;
+  // Honest read failure (issue #529): a rejected get must NOT fall through to
+  // the pending-discovery hint (that would masquerade an IPC failure as "no
+  // catalog yet"). Rendered as an inline error line instead of the selectors.
+  const modelConfigFault = modelConfigError
+    ? fmtError(modelConfigError, intl)
+    : null;
   // Guards the two set IPCs (one at a time; the second picker is disabled
   // while the first write is in flight).
   const [modelSwitching, setModelSwitching] = useState(false);
+  // Inline failure line for the two set IPCs (issue #529), same slot /
+  // styling as the keysError precedent. Holds the raw reject and formats at
+  // render so a locale switch re-renders the wording. Cleared on the next
+  // attempt.
+  const [modelSetError, setModelSetError] = useState<unknown>(null);
+  // A set that resolved but whose persist-now leg did not land (issue #529):
+  // the verdict rides the set command's return (in-process, read in the same
+  // critical section), so "set means persisted" (ADR-0095 Decision 6) cannot
+  // break silently nor be swallowed by the shared banner error channel.
+  const [modelPersistFault, setModelPersistFault] = useState<SaveError | null>(null);
+  // True when the persist was withheld on a pending ADR-0035 conflict (the
+  // .duck changed externally; the auto-write refuses to clobber it).
+  const [modelPersistSuspended, setModelPersistSuspended] = useState(false);
 
-  async function selectModel(model: string | null) {
+  // Shared write sequence for both selectors (the two bodies differ only in
+  // the IPC, the patched key, and the log verb). On resolve: seed the cache
+  // with the granted posture and project the returned persist verdict onto
+  // the two fault slots. On reject: keep the server posture (refetch off the
+  // reject) + show the failure.
+  async function applyModelConfig(
+    write: () => Promise<SetModelPersistOutcome>,
+    patch: Partial<Pick<SessionModelConfig, "model" | "thought_level">>,
+    logVerb: string,
+  ) {
     if (sessionId === null || modelSwitching) return;
     setModelSwitching(true);
+    setModelSetError(null);
+    setModelPersistFault(null);
+    setModelPersistSuspended(false);
     try {
-      await setSessionModel(sessionId, model);
-      // Seed the cache with the granted posture (no extra IPC round-trip).
+      const outcome = await write();
       queryClient.setQueryData(sessionKeys.modelConfig(sessionId), {
         ...modelConfig,
-        model,
+        ...patch,
       });
+      setModelPersistFault(outcome.persist_error);
+      setModelPersistSuspended(outcome.persist_suspended);
     } catch (e) {
-      // Keep the server posture: refetch off the reject.
+      setModelSetError(e);
       log.warn(
         "ComposerProviderPicker",
-        "set session model failed; resyncing from the session",
+        `set session ${logVerb} failed; resyncing from the session`,
         fmtError(e, intl),
       );
       void queryClient.invalidateQueries({
@@ -226,28 +260,19 @@ export function ComposerProviderPicker({
     }
   }
 
-  async function selectThoughtLevel(thoughtLevel: string | null) {
-    if (sessionId === null || modelSwitching) return;
-    setModelSwitching(true);
-    try {
-      await setSessionThoughtLevel(sessionId, thoughtLevel);
-      queryClient.setQueryData(sessionKeys.modelConfig(sessionId), {
-        ...modelConfig,
-        thought_level: thoughtLevel,
-      });
-    } catch (e) {
-      log.warn(
-        "ComposerProviderPicker",
-        "set session thought level failed; resyncing from the session",
-        fmtError(e, intl),
-      );
-      void queryClient.invalidateQueries({
-        queryKey: sessionKeys.modelConfig(sessionId),
-      });
-    } finally {
-      setModelSwitching(false);
-    }
-  }
+  const selectModel = (model: string | null) =>
+    applyModelConfig(
+      () => setSessionModel(sessionId as string, model),
+      { model },
+      "model",
+    );
+
+  const selectThoughtLevel = (thoughtLevel: string | null) =>
+    applyModelConfig(
+      () => setSessionThoughtLevel(sessionId as string, thoughtLevel),
+      { thought_level: thoughtLevel },
+      "thought level",
+    );
 
   // The v1 adapter table (session-agnostic, ADR-0081/0083). Issue #490 slimmed
   // the external group to a pure selector: only detected rows render (adapter
@@ -276,6 +301,23 @@ export function ComposerProviderPicker({
     isExternal && activeAdapter?.stream_format === "json_event_stream";
 
   const activeAdapterStale = isExternal && activeAdapterId !== null && activeAdapter === null;
+
+  // Discovery-cache provenance (issue #529): the cached catalog records the
+  // adapter that produced it (stamped by the engine at the handshake). After
+  // a runtime switch the cache still holds the OLD adapter's catalog until
+  // the new runtime's first turn replaces it (replace-on-Some) -- flag that
+  // window so the user can judge which residual selection to clear. A cache
+  // with NO provenance (persisted before the field existed) is not a
+  // mismatch -- it renders without the flag. Scoped to discovery-fed (ACP)
+  // adapters: a JsonEventStream runtime never reports a catalog, so its
+  // turns would never replace the cache -- the "refreshes after the next
+  // turn" promise would be a permanent lie there.
+  const catalogProvenanceStale =
+    isExternal &&
+    !isJsonEventStreamAdapter &&
+    discovered != null &&
+    discovered.adapter_id != null &&
+    discovered.adapter_id !== activeAdapterId;
 
   // Guards the write window: a click that lands while the set IPC is in flight
   // is dropped instead of re-firing (the disabled attr is the visual half of
@@ -648,7 +690,27 @@ export function ComposerProviderPicker({
                 first turn's discovery (no cache): a hint line instead of an
                 empty dropdown. The JsonEventStream adapter (codex) has no
                 dynamic discovery: read-only CLI Default labels. */}
+            {isExternal && modelConfigFault != null && (
+              <p className="text-destructive px-2 pb-1 text-xs">
+                <FormattedMessage
+                  id="composer.runtimePicker.loadError"
+                  defaultMessage="Could not load model options: {reason}"
+                  values={{ reason: modelConfigFault }}
+                />
+              </p>
+            )}
             {isExternal &&
+              catalogProvenanceStale &&
+              modelConfigFault == null && (
+              <p className="text-warning px-2 pb-1 text-xs">
+                <FormattedMessage
+                  id="composer.runtimePicker.staleCatalog"
+                  defaultMessage="These options were discovered on a different runtime — they will refresh after this runtime's next turn."
+                />
+              </p>
+            )}
+            {isExternal &&
+              modelConfigFault == null &&
               (isJsonEventStreamAdapter ? (
                 <div className="grid gap-1.5 px-2 pb-1">
                   <span className="text-muted-foreground text-xs font-medium">
@@ -705,6 +767,13 @@ export function ComposerProviderPicker({
                         id: "composer.runtimePicker.cliDefault",
                         defaultMessage: "CLI default",
                       })}
+                      unrepresentedLabel={intl.formatMessage(
+                        {
+                          id: "composer.runtimePicker.unrepresentedModel",
+                          defaultMessage: "{id} (not offered by this runtime)",
+                        },
+                        { id: modelConfig.model ?? discovered.current_model ?? "" },
+                      )}
                     />
                   </select>
                   <span className="text-muted-foreground text-xs font-medium">
@@ -739,8 +808,48 @@ export function ComposerProviderPicker({
                         id: "composer.runtimePicker.cliDefault",
                         defaultMessage: "CLI default",
                       })}
+                      unrepresentedLabel={intl.formatMessage(
+                        {
+                          id: "composer.runtimePicker.unrepresentedThoughtLevel",
+                          defaultMessage: "{id} (not offered by this runtime)",
+                        },
+                        {
+                          id:
+                            modelConfig.thought_level ??
+                            discovered.current_thought_level ??
+                            "",
+                        },
+                      )}
                     />
                   </select>
+                  {/* Set-failure / persist-failure inline lines (issue #529):
+                      same slot as keysError, one surface for both set IPCs. */}
+                  {modelSetError != null && (
+                    <p className="text-destructive text-xs">
+                      <FormattedMessage
+                        id="composer.runtimePicker.applyError"
+                        defaultMessage="Could not apply the selection: {reason}"
+                        values={{ reason: fmtError(modelSetError, intl) }}
+                      />
+                    </p>
+                  )}
+                  {modelPersistFault && (
+                    <p className="text-warning text-xs">
+                      <FormattedMessage
+                        id="composer.runtimePicker.persistFault"
+                        defaultMessage="Selection not saved: {reason}"
+                        values={{ reason: fmtError(modelPersistFault, intl) }}
+                      />
+                    </p>
+                  )}
+                  {modelPersistSuspended && (
+                    <p className="text-warning text-xs">
+                      <FormattedMessage
+                        id="composer.runtimePicker.persistSuspended"
+                        defaultMessage="Selection not saved: the session file was changed outside the app, so autosave is paused until you resolve the conflict."
+                      />
+                    </p>
+                  )}
                 </div>
               ) : (
                 <p className="text-muted-foreground px-2 pb-1 text-xs">
@@ -775,17 +884,33 @@ export function ComposerProviderPicker({
 // CLI's own default rules the next turn). The discovery's reported current
 // value is annotated when it is not already the selected id, so the user can
 // tell "what the CLI would use" apart from "what I picked".
+// Issue #529: when the value the backend actually holds (the session
+// selection, or the CLI's reported current when nothing is selected) is NOT
+// in the catalog, a synthetic fallback row keeps the <select> honest -- a
+// controlled value with no matching option renders blank, hiding an active
+// posture the user cannot see or clear. Selecting the fallback row is just
+// selecting that id; the "CLI default" row still clears the selection.
 function SelectorOptions({
   discoveredValues,
   currentValue,
   selected,
   defaultLabel,
+  unrepresentedLabel,
 }: {
   discoveredValues: string[];
   currentValue: string | null;
   selected: string | null;
   defaultLabel: string;
+  unrepresentedLabel: string;
 }) {
+  // The value the <select> will resolve to (mirrors the callers' controlled
+  // value chains: selection first, CLI current as the effective default).
+  // An empty-string held value is NOT unrepresented -- it would collide
+  // with the clearing row's value="" (the select resolves to the first
+  // match, hiding the posture behind "CLI default").
+  const held = selected ?? currentValue;
+  const unrepresented =
+    held != null && held !== "" && !discoveredValues.includes(held);
   return (
     <>
       <option value="">
@@ -793,6 +918,9 @@ function SelectorOptions({
           ? `${defaultLabel} (${currentValue})`
           : defaultLabel}
       </option>
+      {unrepresented && (
+        <option value={held ?? undefined}>{unrepresentedLabel}</option>
+      )}
       {discoveredValues.map((v) => (
         <option key={v} value={v}>
           {v}

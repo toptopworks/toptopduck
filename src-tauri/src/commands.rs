@@ -2408,6 +2408,41 @@ pub struct SessionModelConfig {
     pub cached_discovered: Option<DiscoveredRuntime>,
 }
 
+/// The persist-now verdict a successful set command carries back (issue
+/// #529): read in-process, in the same critical section as the set, so the
+/// selection's own persist outcome cannot be mis-attributed or swallowed
+/// (no post-hoc shared-slot read racing the session banner poll).
+/// `persist_error` is the typed [`SaveError`] of a failed write;
+/// `persist_suspended` is true when the write was withheld because an
+/// ADR-0035 pending conflict (externally modified .duck) suspends the
+/// auto-write. Both None/false = the write landed (or the session is
+/// unbound, in-memory-only, nothing to persist).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SetModelPersistOutcome {
+    pub persist_error: Option<SaveError>,
+    pub persist_suspended: bool,
+}
+
+/// Project the Session's non-consuming persist snapshot (issue #529) onto
+/// the wire verdict: Err = a typed write failure, Ok(false) = suspended on
+/// a pending ADR-0035 conflict, Ok(true) = landed (or unbound).
+fn persist_outcome(s: &crate::session::Session) -> SetModelPersistOutcome {
+    match s.persist_outcome() {
+        Err(e) => SetModelPersistOutcome {
+            persist_error: Some(e),
+            persist_suspended: false,
+        },
+        Ok(false) => SetModelPersistOutcome {
+            persist_error: None,
+            persist_suspended: true,
+        },
+        Ok(true) => SetModelPersistOutcome {
+            persist_error: None,
+            persist_suspended: false,
+        },
+    }
+}
+
 /// Read the session's external-runtime model config (ADR-0095). Lock-light:
 /// reads the handle's own mutexes, never the session lock an in-flight turn
 /// holds. `cached_discovered` is `None` until the first ACP turn (and is
@@ -2439,12 +2474,16 @@ pub fn get_session_model_config(
 /// or while a turn is in flight (the same `reject_if_*` guards every other
 /// session-mutating command has); on pass, the session lock is taken only
 /// briefly for the small atomic write.
+///
+/// Returns the persist-now verdict (issue #529): the write failure or the
+/// ADR-0035 suspension read in-process right after the persist, so the
+/// picker can warn without a second IPC racing the banner poll.
 #[tauri::command]
 pub fn set_session_model(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     model: Option<String>,
-) -> Result<(), SessionError> {
+) -> Result<SetModelPersistOutcome, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
@@ -2454,11 +2493,15 @@ pub fn set_session_model(
     // Persist now (via the shared auto-write path) so a selection made
     // without a following turn survives a close (ADR-0095 Decision 6).
     s.persist_if_bound();
+    // Snapshot the persist verdict BEFORE releasing the lock (issue #529):
+    // in-process, non-consuming -- the banner's take_persist_error channel
+    // is untouched.
+    let outcome = persist_outcome(&s);
     handle.set_external_model_config(
         s.runtime_model_config().model.clone(),
         s.runtime_model_config().thought_level.clone(),
     );
-    Ok(())
+    Ok(outcome)
 }
 
 /// Set the session's thought-level selection for the next external-runtime
@@ -2470,7 +2513,7 @@ pub fn set_session_thought_level(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     thought_level: Option<String>,
-) -> Result<(), SessionError> {
+) -> Result<SetModelPersistOutcome, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
@@ -2480,11 +2523,13 @@ pub fn set_session_thought_level(
     // Persist now (via the shared auto-write path) so a selection made
     // without a following turn survives a close (ADR-0095 Decision 6).
     s.persist_if_bound();
+    // See set_session_model: the in-process verdict read (issue #529).
+    let outcome = persist_outcome(&s);
     handle.set_external_model_config(
         s.runtime_model_config().model.clone(),
         s.runtime_model_config().thought_level.clone(),
     );
-    Ok(())
+    Ok(outcome)
 }
 
 // --- Skills registry (issue #362, ADR-0086) ---------------------------------

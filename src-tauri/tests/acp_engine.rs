@@ -503,6 +503,10 @@ fn acp_turn_returns_discovered_runtime_catalog() {
         vec!["low".to_string(), "medium".to_string(), "high".to_string()]
     );
     assert_eq!(d.current_thought_level.as_deref(), Some("medium"));
+    // Issue #529: the engine stamps the producing adapter onto the catalog
+    // (provenance for the frontend's stale-cache detection across a runtime
+    // switch). The fake fixture runs under the claude-code spec.
+    assert_eq!(d.adapter_id.as_deref(), Some("claude-code"));
 }
 
 /// A handshake failure exits with `discovered_runtime: None` (discovery only

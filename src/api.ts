@@ -712,14 +712,29 @@ export async function getSessionModelConfig(
   return invoke<SessionModelConfig>("get_session_model_config", { sessionId });
 }
 
+// The persist-now verdict a successful set command carries back (issue
+// #529): read in-process in the same critical section as the set, so the
+// selection's own persist outcome cannot be mis-attributed or swallowed by
+// the shared banner channel. `persist_error` = the typed SaveError of a
+// failed write; `persist_suspended` = true when the write was withheld on a
+// pending ADR-0035 conflict (externally modified .duck). Both null/false =
+// the write landed (or the session is unbound, nothing to persist).
+export interface SetModelPersistOutcome {
+  persist_error: SaveError | null;
+  persist_suspended: boolean;
+}
+
 // Set the session's model selection for the next external-runtime turn
 // (ADR-0095). `null` clears (the CLI's own default). Takes effect at the next
 // turn boundary; rejected while resuming or while a turn is in flight.
 export async function setSessionModel(
   sessionId: string,
   model: string | null,
-): Promise<void> {
-  await invoke<void>("set_session_model", { sessionId, model });
+): Promise<SetModelPersistOutcome> {
+  return invoke<SetModelPersistOutcome>("set_session_model", {
+    sessionId,
+    model,
+  });
 }
 
 // Set the session's thought-level selection for the next external-runtime turn
@@ -728,6 +743,9 @@ export async function setSessionModel(
 export async function setSessionThoughtLevel(
   sessionId: string,
   thoughtLevel: string | null,
-): Promise<void> {
-  await invoke<void>("set_session_thought_level", { sessionId, thoughtLevel });
+): Promise<SetModelPersistOutcome> {
+  return invoke<SetModelPersistOutcome>("set_session_thought_level", {
+    sessionId,
+    thoughtLevel,
+  });
 }
