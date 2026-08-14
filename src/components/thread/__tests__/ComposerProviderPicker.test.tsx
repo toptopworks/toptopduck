@@ -6,10 +6,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { ComposerProviderPicker } from "../ComposerProviderPicker";
 import {
+  getSessionModelConfig,
   getSessionRuntime,
   listAdapters,
   listProviderProfiles,
+  setSessionModel,
   setSessionRuntime,
+  setSessionThoughtLevel,
 } from "../../../api";
 import { TooltipProvider } from "../../ui/tooltip";
 import type { ProviderConfig, ProfileKeyStatus } from "../../../types/provider";
@@ -31,6 +34,9 @@ vi.mock("../../../api", async (importOriginal) => {
     getSessionRuntime: vi.fn(),
     setSessionRuntime: vi.fn(async () => {}),
     listAdapters: vi.fn(),
+    getSessionModelConfig: vi.fn(),
+    setSessionModel: vi.fn(async () => {}),
+    setSessionThoughtLevel: vi.fn(async () => {}),
   };
 });
 
@@ -99,6 +105,7 @@ function adapter(
     display_name,
     detected,
     binary_path: detected ? `/usr/local/bin/${id}` : null,
+    stream_format: "acp",
   };
 }
 
@@ -115,6 +122,12 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
     vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
     vi.mocked(setSessionRuntime).mockResolvedValue(undefined);
     vi.mocked(listAdapters).mockResolvedValue([]);
+    // ADR-0095: the honest model-config default (no selection, no cache).
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: null,
+      thought_level: null,
+      cached_discovered: null,
+    });
   });
 
   it("renders the icon trigger with an accessible name carrying the active provider", () => {
@@ -648,5 +661,176 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
     ).toBeInTheDocument();
     // The undetected adapter does NOT appear as a selectable row.
     expect(screen.queryByText("gemini-cli")).not.toBeInTheDocument();
+  });
+});
+
+// --- ADR-0095 model + thought-level selectors (issue #527) ------------------
+
+describe("ComposerProviderPicker model config selectors (ADR-0095)", () => {
+  beforeEach(() => {
+    // Self-contained seeding: this describe must not rely on implementations
+    // leaking from the sibling describe (vi.clearAllMocks clears calls, not
+    // implementations -- the PR #507 leakage class).
+    vi.clearAllMocks();
+    vi.mocked(listProviderProfiles).mockResolvedValue([]);
+    vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
+    vi.mocked(setSessionRuntime).mockResolvedValue(undefined);
+    vi.mocked(listAdapters).mockResolvedValue([]);
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: null,
+      thought_level: null,
+      cached_discovered: null,
+    });
+  });
+
+  const CATALOG = {
+    models: ["fake-opus", "fake-sonnet"],
+    current_model: "fake-opus",
+    thought_levels: ["low", "medium", "high"],
+    current_thought_level: "medium",
+  };
+
+  async function openExternalPopover() {
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "claude-code",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([adapter("claude-code")]);
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: null,
+      thought_level: null,
+      cached_discovered: CATALOG,
+    });
+    renderPicker(
+      <ComposerProviderPicker
+        sessionId="sess-1"
+        provider={pickerProvider()}
+        onSwitchActive={() => {}}
+        onSwitchModel={() => {}}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    // Wait for the external runtime query to land (the trigger label flips
+    // from the built-in readout to the adapter name), then open the popover.
+    const trigger = await screen.findByRole("button", {
+      name: /Runtime: claude-code/,
+    });
+    fireEvent.click(trigger);
+  }
+
+  it("renders dropdowns from the discovered catalog on an ACP runtime", async () => {
+    await openExternalPopover();
+    const modelSelect = await screen.findByLabelText("Model");
+    expect(modelSelect).toBeInTheDocument();
+    // The discovered ids + the CLI-default row are offered.
+    const options = modelSelect.querySelectorAll("option");
+    expect(Array.from(options).map((o) => o.textContent)).toEqual([
+      "CLI default (fake-opus)",
+      // The CLI's reported current value is annotated as the effective
+      // default while no explicit selection is set.
+      "fake-opus (CLI default)",
+      "fake-sonnet",
+    ]);
+    // The thought-level selector offers its own catalog.
+    const thinkSelect = screen.getByLabelText("Thinking");
+    expect(
+      Array.from(thinkSelect.querySelectorAll("option")).map((o) => o.value),
+    ).toEqual(["", "low", "medium", "high"]);
+  });
+
+  it("writes the selection through setSessionModel", async () => {
+    await openExternalPopover();
+    const modelSelect = await screen.findByLabelText("Model");
+    fireEvent.change(modelSelect, { target: { value: "fake-sonnet" } });
+    await waitFor(() =>
+      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "fake-sonnet"),
+    );
+    expect(setSessionThoughtLevel).not.toHaveBeenCalled();
+  });
+
+  it("writes a thought-level selection through setSessionThoughtLevel", async () => {
+    await openExternalPopover();
+    const thinkSelect = await screen.findByLabelText("Thinking");
+    fireEvent.change(thinkSelect, { target: { value: "high" } });
+    await waitFor(() =>
+      expect(setSessionThoughtLevel).toHaveBeenCalledWith("sess-1", "high"),
+    );
+  });
+
+  it("shows the pending hint when the external runtime has no discovery cache yet", async () => {
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "claude-code",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([adapter("claude-code")]);
+    // No cached_discovered (before the first ACP turn).
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: null,
+      thought_level: null,
+      cached_discovered: null,
+    });
+    renderPicker(
+      <ComposerProviderPicker
+        sessionId="sess-1"
+        provider={pickerProvider()}
+        onSwitchActive={() => {}}
+        onSwitchModel={() => {}}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Runtime: claude-code/ }),
+    );
+    expect(
+      await screen.findByText(/Model options appear after the first turn/),
+    ).toBeInTheDocument();
+    // No dropdowns render in this state.
+    expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
+  });
+
+  it("renders read-only CLI-default labels on the codex (JsonEventStream) runtime", async () => {
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "codex",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([
+      { ...adapter("codex"), stream_format: "json_event_stream" },
+    ]);
+    renderPicker(
+      <ComposerProviderPicker
+        sessionId="sess-1"
+        provider={pickerProvider()}
+        onSwitchActive={() => {}}
+        onSwitchModel={() => {}}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Runtime: codex/ }),
+    );
+    // Two CLI-default labels render (model + thinking), no dropdowns.
+    expect(await screen.findAllByText("CLI default")).toHaveLength(2);
+    expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
+  });
+
+  it("renders no selectors on the built-in runtime", async () => {
+    vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
+    renderPicker(
+      <ComposerProviderPicker
+        sessionId="sess-1"
+        provider={pickerProvider()}
+        onSwitchActive={() => {}}
+        onSwitchModel={() => {}}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
+    // Give the queries a beat to settle, then assert absence.
+    await screen.findByText("Built-in");
+    expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Thinking")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Model options appear after the first turn/),
+    ).not.toBeInTheDocument();
   });
 });

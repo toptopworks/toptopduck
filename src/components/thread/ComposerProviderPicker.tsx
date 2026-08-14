@@ -8,15 +8,31 @@ import { cn } from "@/lib/utils";
 import { fmtError } from "../../lib/error-presentation";
 import { log } from "../../lib/log";
 import {
+  getSessionModelConfig,
   getSessionRuntime,
   listAdapters,
   listProviderProfiles,
+  setSessionModel,
   setSessionRuntime,
+  setSessionThoughtLevel,
 } from "../../api";
 import { adapterKeys, sessionKeys } from "../../session/queryKeys";
 import type { ProfileKeyStatus, ProviderConfig } from "../../types/provider";
-import type { AdapterEntry, SessionRuntimeChoice } from "../../types/runtime";
+import type {
+  AdapterEntry,
+  SessionModelConfig,
+  SessionRuntimeChoice,
+} from "../../types/runtime";
 import { RUNTIME_CHOICE_DEFAULT } from "../../types/runtime";
+
+// The honest default while the model-config read settles (and on the
+// cold-start bar, where there is no session to read): no selection, no
+// discovery cache. The CLI's own defaults rule the next turn.
+const MODEL_CONFIG_DEFAULT: SessionModelConfig = {
+  model: null,
+  thought_level: null,
+  cached_discovered: null,
+};
 import {
   PRESET_CUSTOM,
   derivePresetId,
@@ -167,6 +183,72 @@ export function ComposerProviderPicker({
   const isExternal = runtime.kind === "external";
   const activeAdapterId = isExternal ? runtime.data : null;
 
+  // Per-session external-runtime model config (ADR-0095, issue #527): the
+  // model + thought-level selections + the cached discovery catalog. Same
+  // session-prefix ownership as the runtime choice; null sessionId disables
+  // the query (the cold-start bar has no session to configure). A turn's
+  // completion refetches this via the useTurnFlow invalidation of the session
+  // prefix, landing the fresh catalog (dedupe is inherent: the backend cache
+  // is single-slot).
+  const { data: modelConfigData } = useQuery({
+    queryKey: sessionKeys.modelConfig(sessionId ?? ""),
+    queryFn: () => getSessionModelConfig(sessionId as string),
+    enabled: sessionId !== null,
+  });
+  const modelConfig: SessionModelConfig = modelConfigData ?? MODEL_CONFIG_DEFAULT;
+  const discovered = modelConfig.cached_discovered;
+  // Guards the two set IPCs (one at a time; the second picker is disabled
+  // while the first write is in flight).
+  const [modelSwitching, setModelSwitching] = useState(false);
+
+  async function selectModel(model: string | null) {
+    if (sessionId === null || modelSwitching) return;
+    setModelSwitching(true);
+    try {
+      await setSessionModel(sessionId, model);
+      // Seed the cache with the granted posture (no extra IPC round-trip).
+      queryClient.setQueryData(sessionKeys.modelConfig(sessionId), {
+        ...modelConfig,
+        model,
+      });
+    } catch (e) {
+      // Keep the server posture: refetch off the reject.
+      log.warn(
+        "ComposerProviderPicker",
+        "set session model failed; resyncing from the session",
+        fmtError(e, intl),
+      );
+      void queryClient.invalidateQueries({
+        queryKey: sessionKeys.modelConfig(sessionId),
+      });
+    } finally {
+      setModelSwitching(false);
+    }
+  }
+
+  async function selectThoughtLevel(thoughtLevel: string | null) {
+    if (sessionId === null || modelSwitching) return;
+    setModelSwitching(true);
+    try {
+      await setSessionThoughtLevel(sessionId, thoughtLevel);
+      queryClient.setQueryData(sessionKeys.modelConfig(sessionId), {
+        ...modelConfig,
+        thought_level: thoughtLevel,
+      });
+    } catch (e) {
+      log.warn(
+        "ComposerProviderPicker",
+        "set session thought level failed; resyncing from the session",
+        fmtError(e, intl),
+      );
+      void queryClient.invalidateQueries({
+        queryKey: sessionKeys.modelConfig(sessionId),
+      });
+    } finally {
+      setModelSwitching(false);
+    }
+  }
+
   // The v1 adapter table (session-agnostic, ADR-0081/0083). Issue #490 slimmed
   // the external group to a pure selector: only detected rows render (adapter
   // management moved to Settings → Runtime → Local CLI, ADR-0091). The list
@@ -185,6 +267,14 @@ export function ComposerProviderPicker({
   // is no longer detected (CLI uninstalled, PATH changed), it is filtered out
   // of the selector list. Surface this so the user knows their current pick is
   // broken before the next turn fails in the backend.
+  // The active adapter's stream format decides the selector surface
+  // (ADR-0095): ACP adapters render dropdowns fed by handshake discovery;
+  // JsonEventStream adapters render read-only CLI Default labels (no dynamic
+  // discovery). The format rides the adapter table row -- never a hardcoded
+  // CLI id (adding a JES adapter upstream needs zero frontend change).
+  const isJsonEventStreamAdapter =
+    isExternal && activeAdapter?.stream_format === "json_event_stream";
+
   const activeAdapterStale = isExternal && activeAdapterId !== null && activeAdapter === null;
 
   // Guards the write window: a click that lands while the set IPC is in flight
@@ -549,6 +639,117 @@ export function ComposerProviderPicker({
                 </button>
               );
             })}
+            {/* --- Model + thought-level selectors (ADR-0095, issue #527) ----
+                Rendered only when an external adapter is the ACTIVE runtime
+                (a selection is meaningless on the built-in profile picker).
+                ACP adapter + discovery cache present: dropdowns offering the
+                discovered ids (the current selection from the session state;
+                a null selection shows the CLI's current/default). Before the
+                first turn's discovery (no cache): a hint line instead of an
+                empty dropdown. The JsonEventStream adapter (codex) has no
+                dynamic discovery: read-only CLI Default labels. */}
+            {isExternal &&
+              (isJsonEventStreamAdapter ? (
+                <div className="grid gap-1.5 px-2 pb-1">
+                  <span className="text-muted-foreground text-xs font-medium">
+                    <FormattedMessage
+                      id="composer.runtimePicker.modelLabel"
+                      defaultMessage="Model"
+                    />
+                  </span>
+                  <p className="text-muted-foreground text-xs">
+                    <FormattedMessage
+                      id="composer.runtimePicker.cliDefault"
+                      defaultMessage="CLI default"
+                    />
+                  </p>
+                  <span className="text-muted-foreground text-xs font-medium">
+                    <FormattedMessage
+                      id="composer.runtimePicker.thoughtLevelLabel"
+                      defaultMessage="Thinking"
+                    />
+                  </span>
+                  <p className="text-muted-foreground text-xs">
+                    <FormattedMessage
+                      id="composer.runtimePicker.cliDefault"
+                      defaultMessage="CLI default"
+                    />
+                  </p>
+                </div>
+              ) : discovered ? (
+                <div className="grid gap-1.5 px-2 pb-1">
+                  <span className="text-muted-foreground text-xs font-medium">
+                    <FormattedMessage
+                      id="composer.runtimePicker.modelLabel"
+                      defaultMessage="Model"
+                    />
+                  </span>
+                  <select
+                    aria-label={intl.formatMessage({
+                      id: "composer.runtimePicker.modelLabel",
+                      defaultMessage: "Model",
+                    })}
+                    value={modelConfig.model ?? discovered.current_model ?? ""}
+                    disabled={modelSwitching}
+                    onChange={(e) => void selectModel(e.target.value || null)}
+                    className={cn(
+                      "border-input flex h-8 w-full min-w-0 rounded-md border bg-transparent px-2 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none cursor-pointer",
+                      "focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:pointer-events-none disabled:opacity-50",
+                    )}
+                  >
+                    <SelectorOptions
+                      discoveredValues={discovered.models}
+                      currentValue={discovered.current_model}
+                      selected={modelConfig.model}
+                      defaultLabel={intl.formatMessage({
+                        id: "composer.runtimePicker.cliDefault",
+                        defaultMessage: "CLI default",
+                      })}
+                    />
+                  </select>
+                  <span className="text-muted-foreground text-xs font-medium">
+                    <FormattedMessage
+                      id="composer.runtimePicker.thoughtLevelLabel"
+                      defaultMessage="Thinking"
+                    />
+                  </span>
+                  <select
+                    aria-label={intl.formatMessage({
+                      id: "composer.runtimePicker.thoughtLevelLabel",
+                      defaultMessage: "Thinking",
+                    })}
+                    value={
+                      modelConfig.thought_level ??
+                      discovered.current_thought_level ??
+                      ""
+                    }
+                    disabled={modelSwitching}
+                    onChange={(e) =>
+                      void selectThoughtLevel(e.target.value || null)}
+                    className={cn(
+                      "border-input flex h-8 w-full min-w-0 rounded-md border bg-transparent px-2 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none cursor-pointer",
+                      "focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:pointer-events-none disabled:opacity-50",
+                    )}
+                  >
+                    <SelectorOptions
+                      discoveredValues={discovered.thought_levels}
+                      currentValue={discovered.current_thought_level}
+                      selected={modelConfig.thought_level}
+                      defaultLabel={intl.formatMessage({
+                        id: "composer.runtimePicker.cliDefault",
+                        defaultMessage: "CLI default",
+                      })}
+                    />
+                  </select>
+                </div>
+              ) : (
+                <p className="text-muted-foreground px-2 pb-1 text-xs">
+                  <FormattedMessage
+                    id="composer.runtimePicker.discoveryPending"
+                    defaultMessage="Model options appear after the first turn on this runtime."
+                  />
+                </p>
+              ))}
             {/* Manage external runtimes -- opens Settings → Runtime → Local CLI
                 (ADR-0091, issue #490). A button styled as a text link, to read
                 as a secondary navigation affordance beneath the selector list. */}
@@ -566,6 +767,39 @@ export function ComposerProviderPicker({
         </div>
       </PopoverContent>
     </Popover>
+  );
+}
+
+// The <option> rows for a discovered selector (ADR-0095): the discovered ids
+// in order, plus a leading "CLI default" row meaning "no selection" (the
+// CLI's own default rules the next turn). The discovery's reported current
+// value is annotated when it is not already the selected id, so the user can
+// tell "what the CLI would use" apart from "what I picked".
+function SelectorOptions({
+  discoveredValues,
+  currentValue,
+  selected,
+  defaultLabel,
+}: {
+  discoveredValues: string[];
+  currentValue: string | null;
+  selected: string | null;
+  defaultLabel: string;
+}) {
+  return (
+    <>
+      <option value="">
+        {currentValue && !selected
+          ? `${defaultLabel} (${currentValue})`
+          : defaultLabel}
+      </option>
+      {discoveredValues.map((v) => (
+        <option key={v} value={v}>
+          {v}
+          {currentValue === v && !selected ? ` (${defaultLabel})` : ""}
+        </option>
+      ))}
+    </>
   );
 }
 

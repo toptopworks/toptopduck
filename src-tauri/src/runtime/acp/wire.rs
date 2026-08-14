@@ -185,7 +185,10 @@ impl Implementation {
 /// engine injects the bridge as the single stdio MCP server (`mcp_servers`) and
 /// the working directory (`cwd`). The full windowed context is carried by the
 /// subsequent `session/prompt`, NOT here (ACP keeps session setup separate from
-/// the user message).
+/// the user message). The model / thought-level selections do NOT ride here
+/// either (ADR-0095: `NewSessionRequest` carries no model field, schema 0.13.8)
+/// -- the engine injects them via `session/set_config_option` after the
+/// handshake.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSessionParams {
@@ -193,12 +196,17 @@ pub struct NewSessionParams {
     pub mcp_servers: Vec<McpServer>,
 }
 
-/// `session/new` result. Only `session_id` is consumed; config_options and
-/// mode state are ignored (the engine does not drive session modes).
+/// `session/new` result. `session_id` drives the turn; `config_options` is
+/// the raw ACP config catalog (ADR-0095: transparent `Value` passthrough --
+/// the engine extracts model / thought_level entries at the handshake
+/// boundary, the full ConfigOption type hierarchy stays unmodeled). Mode
+/// state is ignored (the engine does not drive session modes).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSessionResult {
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_options: Option<Value>,
 }
 
 // ---------------------------------------------------------------------------

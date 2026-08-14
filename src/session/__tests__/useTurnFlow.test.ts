@@ -521,7 +521,11 @@ describe("useTurnFlow", () => {
       expect(invalidatedKeys).not.toContainEqual(sessionKeys.thread(SID));
     });
 
-    it("invalidates NOTHING on a non-Materialized outcome (Textual)", async () => {
+    it("invalidates ONLY the model config on a non-Materialized outcome (Textual)", async () => {
+      // ADR-0051 rule (no workingSet/active/thread invalidation) still holds;
+      // ADR-0095 adds ONE exception: the model-config read refreshes on every
+      // outcome kind, because an external-runtime turn's discovered catalog
+      // lands on the backend handle cache regardless of how the turn ended.
       const { invalidateSpy, deps } = setup();
       const { result } = renderHook(() => useTurnFlow(SID, deps));
       vi.mocked(askQuestion).mockResolvedValue(textualOutcome("answer"));
@@ -530,7 +534,10 @@ describe("useTurnFlow", () => {
         await result.current.handleAsk("q");
       });
 
-      expect(invalidateSpy).not.toHaveBeenCalled();
+      expect(invalidateSpy).toHaveBeenCalledTimes(1);
+      expect(invalidateSpy).toHaveBeenCalledWith({
+        queryKey: sessionKeys.modelConfig(SID),
+      });
     });
 
     it("surfaces a refresh failure via setError without skipping setLoading(false)", async () => {

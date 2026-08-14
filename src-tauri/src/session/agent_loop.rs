@@ -343,6 +343,9 @@ fn outcome(termination: Termination, outputs: CallOutputs, round_trips: u32) -> 
         promotions: outputs.promotions,
         trace: outputs.trace,
         round_trips,
+        // ADR-0095: the built-in runtime's model comes from the provider
+        // profile -- there is no handshake catalog to discover.
+        discovered_runtime: None,
     }
 }
 
@@ -830,6 +833,12 @@ pub struct LoopOutcome {
     /// the trace entries already tell the trajectory (ADR-0078, issue #319).
     #[allow(dead_code)]
     pub round_trips: u32,
+    /// The external runtime's discovered model / thought-level catalog
+    /// (ADR-0095). `Some` only on the ACP path (handshake config_options
+    /// extraction); the built-in loop and the JsonEventStream path have no
+    /// discovery and carry `None` -- the Option distinguishes "this runtime
+    /// does not support discovery" from "discovery found nothing".
+    pub discovered_runtime: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
 }
 
 #[cfg(test)]

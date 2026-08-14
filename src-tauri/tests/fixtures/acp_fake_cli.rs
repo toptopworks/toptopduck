@@ -34,6 +34,25 @@ use toptopduck_lib::runtime::acp::wire::{
 /// arrives.
 const OVERFLOW_COUNT: u32 = 50;
 
+/// Append one trace line to the file named by `ACP_FAKE_TRACE_FILE` (when
+/// set). The integration test passes a temp file so it can assert on what the
+/// CLI received (stdout belongs to the engine's protocol channel; stderr
+/// inherits to the CI console where no test can read it). A no-op when the
+/// var is absent, so ad-hoc manual runs keep working.
+fn trace_line(line: &str) {
+    let Some(path) = std::env::var_os("ACP_FAKE_TRACE_FILE") else {
+        return;
+    };
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 fn main() {
     let scenario = std::env::var("ACP_FAKE_SCENARIO").unwrap_or_else(|_| "text_reply".into());
     let mut out = std::io::stdout();
@@ -100,6 +119,37 @@ fn main() {
                         id: parse_id(&id),
                         result: Some(NewSessionResult {
                             session_id: "fake-session".into(),
+                            // ADR-0095 (AC: fake fixture returns
+                            // config_options): the real SessionConfigOption
+                            // wire shape (id / category / currentValue /
+                            // options[], camelCase -- schema crate 0.13.8)
+                            // with one model entry (two offered, one current)
+                            // + one thought_level entry (three offered, one
+                            // current) drives the engine's discovery path in
+                            // CI.
+                            config_options: Some(serde_json::json!([
+                                {
+                                    "id": "model",
+                                    "name": "Model",
+                                    "category": "model",
+                                    "currentValue": "fake-opus",
+                                    "options": [
+                                        { "value": "fake-opus", "name": "Opus" },
+                                        { "value": "fake-sonnet", "name": "Sonnet" },
+                                    ],
+                                },
+                                {
+                                    "id": "thought",
+                                    "name": "Thinking",
+                                    "category": "thought_level",
+                                    "currentValue": "medium",
+                                    "options": [
+                                        { "value": "low", "name": "Low" },
+                                        { "value": "medium", "name": "Medium" },
+                                        { "value": "high", "name": "High" },
+                                    ],
+                                },
+                            ])),
                         }),
                         error: None,
                     },
@@ -107,6 +157,60 @@ fn main() {
             }
             Some("session/prompt") => {
                 play_scenario(&scenario, &mut out, &id, &mut reader, &mut cancel_seen);
+            }
+            Some("session/set_config_option") => {
+                // ADR-0095: acknowledge the model / thought-level injection.
+                // The received (configId, value) traces to the file named by
+                // `ACP_FAKE_TRACE_FILE` (set by the integration test; stdout
+                // is the engine's, stderr goes to the CI console where a test
+                // cannot assert on it). Only the ids the catalog above
+                // declared are accepted -- a hardcoded id that does not match
+                // the fixture's agent-chosen ids is an RPC error, not an ack
+                // (the engine keys injection on the catalog entry's id, D4;
+                // this makes the mapping a tested contract instead of a
+                // masked mismatch).
+                let config_id = v
+                    .get("params")
+                    .and_then(|p| p.get("configId"))
+                    .and_then(|o| o.as_str())
+                    .unwrap_or("");
+                let value = v
+                    .get("params")
+                    .and_then(|p| p.get("value"))
+                    .and_then(|o| o.as_str())
+                    .unwrap_or("");
+                trace_line(&format!("ACP_FAKE_RECEIVED_SETOPTION={config_id}={value}"));
+                let (ack, error) = if scenario == "set_config_option_reject" {
+                    (
+                        None,
+                        Some(RpcError {
+                            code: -32602,
+                            message: format!("invalid params: unknown config id `{config_id}`"),
+                            data: None,
+                        }),
+                    )
+                } else {
+                    match config_id {
+                        "model" | "thought" => (Some(serde_json::json!({})), None),
+                        other => (
+                            None,
+                            Some(RpcError {
+                                code: -32602,
+                                message: format!("invalid params: unknown config id `{other}`"),
+                                data: None,
+                            }),
+                        ),
+                    }
+                };
+                respond(
+                    &mut out,
+                    &Response::<serde_json::Value> {
+                        jsonrpc: "2.0".into(),
+                        id: parse_id(&id),
+                        result: ack,
+                        error,
+                    },
+                );
             }
             Some("session/cancel") => {
                 // Notification (no id) -- record + acknowledge cooperatively.

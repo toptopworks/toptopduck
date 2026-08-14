@@ -36,6 +36,8 @@ fn fake_cli_adapter() -> AdapterSpec {
         binary_names: &["acp-fake-cli"],
         argv: &[],
         stream_format: toptopduck_lib::runtime::acp::adapter::StreamFormat::Acp,
+        model_arg: None,
+        effort_config_key: None,
     }
 }
 

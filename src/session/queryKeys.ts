@@ -32,6 +32,12 @@ export const sessionKeys = {
    *  with the rest; a resume lands the reset (built-in) value via the fresh
    *  SessionPane mount, mirroring authMode. */
   runtime: (sessionId: string) => ["session", sessionId, "runtime"] as const,
+  /** Per-session external-runtime model config (ADR-0095, issue #527) -- the
+   *  model / thought-level selectors' read (selections + the cached discovery
+   *  catalog). Session-prefixed like `runtime`; a resume restores the persisted
+   *  trio so the fresh mount's refetch lands the recipe values. */
+  modelConfig: (sessionId: string) =>
+    ["session", sessionId, "modelConfig"] as const,
   /** Per-session mounted-skill names (issue #365, ADR-0086) -- the composer "+"
    *  panel's mount-set read + the trigger badge count source. Folded from the
    *  SkillLifecycleEvent timeline (Mount in / Unmount out); mount / unmount
