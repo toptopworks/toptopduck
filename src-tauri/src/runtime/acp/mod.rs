@@ -8,8 +8,13 @@
 //! - [`engine`]: the generic driver. Spawns the CLI, speaks the [`wire`] subset,
 //!   maps `session/update` to the execution trace (ADR-0078), enforces the
 //!   execution-level caps (ADR-0081 step + wall-clock), and cancels via
-//!   `session/cancel` + SIGTERM fallback.
+//!   `session/cancel` + SIGTERM fallback. Dispatches to [`json_event_stream`]
+//!   for adapters whose [`adapter::StreamFormat`] is `JsonEventStream`.
+//! - [`json_event_stream`]: the codex native `exec --json` driving path
+//!   (ADR-0094). Pure event parser + prompt flattener + config-override
+//!   builder + the turn driver.
 
 pub mod adapter;
 pub mod engine;
+pub mod json_event_stream;
 pub mod wire;

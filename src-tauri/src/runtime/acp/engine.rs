@@ -138,10 +138,11 @@ impl AcpEngine {
 
     /// Drive one turn against the adapter's CLI. Dispatches on
     /// [`StreamFormat`] (ADR-0094): the ACP path drives the full JSON-RPC
-    /// turn; the JSON event stream path is a stub (ADR-0094 prefactor -- it
-    /// compiles but does not drive a real turn yet). `binary` is the resolved
-    /// CLI path (`detect_adapter` in production, the fake-fixture path in
-    /// tests). Returns the SAME [`LoopOutcome`] shape the built-in loop returns.
+    /// turn; the JSON event stream path delegates to
+    /// [`json_event_stream::run_json_event_stream`] (codex native `exec --json`).
+    /// `binary` is the resolved CLI path (`detect_adapter` in production, the
+    /// fake-fixture path in tests). Returns the SAME [`LoopOutcome`] shape the
+    /// built-in loop returns.
     pub fn run(
         &self,
         input: &AcpTurnInput,
@@ -152,7 +153,17 @@ impl AcpEngine {
     ) -> LoopOutcome {
         match self.adapter.stream_format {
             StreamFormat::Acp => self.run_acp(input, binary, approval, sink, on_phase),
-            StreamFormat::JsonEventStream => self.run_json_event_stream_stub(),
+            StreamFormat::JsonEventStream => super::json_event_stream::run_json_event_stream(
+                &self.adapter,
+                Arc::clone(&self.cancel),
+                self.step_cap,
+                self.wall_clock,
+                input,
+                binary,
+                approval,
+                sink,
+                on_phase,
+            ),
         }
     }
 
@@ -281,21 +292,6 @@ impl AcpEngine {
         let outcome = self.outcome(termination, pump.trace, 1);
         child.kill_and_wait();
         outcome
-    }
-
-    /// The JSON event stream driving path (ADR-0094). Stub: compiles but does
-    /// not drive a real turn yet. Returns a typed Transient outcome so callers
-    /// get an honest "not implemented" signal rather than a silent no-op. The
-    /// real implementation lands in the codex native exec slice.
-    fn run_json_event_stream_stub(&self) -> LoopOutcome {
-        self.outcome(
-            Termination::Transient(format!(
-                "JSON event stream format is not yet implemented for adapter `{}`",
-                self.adapter.id
-            )),
-            Vec::new(),
-            0,
-        )
     }
 
     fn outcome(
@@ -1135,11 +1131,11 @@ mod tests {
     }
 
     /// ADR-0094 dispatch seam: an adapter whose `stream_format` is
-    /// `JsonEventStream` routes to the stub path and returns a typed Transient
-    /// outcome -- it compiles but does not drive a real turn. The message
-    /// names the adapter so the caller sees an honest "not implemented" signal.
+    /// `JsonEventStream` routes to the JSON event stream driver (not the ACP
+    /// path). A nonexistent binary produces a Transient spawn failure naming
+    /// the adapter, proving the dispatch fires through the new module.
     #[test]
-    fn json_event_stream_dispatches_to_stub() {
+    fn json_event_stream_dispatches_to_driver() {
         let spec = AdapterSpec {
             id: crate::runtime::acp::adapter::AdapterId::new("stub-test"),
             display_name: "stub-test",
@@ -1150,7 +1146,7 @@ mod tests {
         let cancel = Arc::new(CancelToken::new());
         let engine = AcpEngine::new(spec, cancel);
         let input = AcpTurnInput {
-            cwd: "/tmp".into(),
+            cwd: std::env::temp_dir().to_string_lossy().to_string(),
             mcp_servers: Vec::new(),
             prompt_blocks: Vec::new(),
         };
@@ -1158,7 +1154,7 @@ mod tests {
         let sink = RecordingAcpSink::new();
         let outcome = engine.run(
             &input,
-            std::path::Path::new("/nonexistent"),
+            std::path::Path::new("/nonexistent-binary-523"),
             &approval,
             &sink,
             |_| {},
@@ -1166,17 +1162,12 @@ mod tests {
         match &outcome.termination {
             Termination::Transient(msg) => {
                 assert!(
-                    msg.contains("JSON event stream"),
-                    "stub message names the format: {msg}"
-                );
-                assert!(
                     msg.contains("stub-test"),
-                    "stub message names the adapter: {msg}"
+                    "spawn failure names the adapter: {msg}"
                 );
             }
-            other => panic!("expected Transient from stub, got {other:?}"),
+            other => panic!("expected Transient from spawn failure, got {other:?}"),
         }
         assert!(outcome.trace.is_empty());
-        assert_eq!(outcome.round_trips, 0, "stub drives zero round-trips");
     }
 }
