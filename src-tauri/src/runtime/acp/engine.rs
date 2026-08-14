@@ -47,7 +47,7 @@ use crate::approval::{
 };
 use crate::cancel::CancelToken;
 use crate::model::{TraceEntryView, TurnPhase};
-use crate::runtime::acp::adapter::AdapterSpec;
+use crate::runtime::acp::adapter::{AdapterSpec, StreamFormat};
 use crate::runtime::acp::wire::{
     self, CancelParams, ContentBlock, InitializeParams, McpServer, NewSessionParams, PromptParams,
     Request, RequestId, RequestPermissionOutcome, RequestPermissionParams, RequestPermissionResult,
@@ -136,13 +136,29 @@ impl AcpEngine {
         self
     }
 
-    /// Drive one ACP turn. `binary` is the resolved CLI path (`detect_adapter`
-    /// in production, the fake-fixture path in tests) -- separating detection
-    /// from driving keeps the engine free of PATH-scan branches. Returns the
-    /// SAME [`LoopOutcome`] shape the built-in loop returns; `promotions` is
-    /// empty here (gateway-side in slice 9c) and `round_trips` is 1 (one
-    /// `session/prompt`).
+    /// Drive one turn against the adapter's CLI. Dispatches on
+    /// [`StreamFormat`] (ADR-0094): the ACP path drives the full JSON-RPC
+    /// turn; the JSON event stream path is a stub (ADR-0094 prefactor -- it
+    /// compiles but does not drive a real turn yet). `binary` is the resolved
+    /// CLI path (`detect_adapter` in production, the fake-fixture path in
+    /// tests). Returns the SAME [`LoopOutcome`] shape the built-in loop returns.
     pub fn run(
+        &self,
+        input: &AcpTurnInput,
+        binary: &Path,
+        approval: &crate::approval::ApprovalState,
+        sink: &dyn ApprovalSink,
+        on_phase: impl FnMut(TurnPhase),
+    ) -> LoopOutcome {
+        match self.adapter.stream_format {
+            StreamFormat::Acp => self.run_acp(input, binary, approval, sink, on_phase),
+            StreamFormat::JsonEventStream => self.run_json_event_stream_stub(),
+        }
+    }
+
+    /// The ACP v1 driving path (ADR-0081). This is the existing engine body,
+    /// unchanged -- the per-format dispatch seam routes `Acp` specs here.
+    fn run_acp(
         &self,
         input: &AcpTurnInput,
         binary: &Path,
@@ -265,6 +281,21 @@ impl AcpEngine {
         let outcome = self.outcome(termination, pump.trace, 1);
         child.kill_and_wait();
         outcome
+    }
+
+    /// The JSON event stream driving path (ADR-0094). Stub: compiles but does
+    /// not drive a real turn yet. Returns a typed Transient outcome so callers
+    /// get an honest "not implemented" signal rather than a silent no-op. The
+    /// real implementation lands in the codex native exec slice.
+    fn run_json_event_stream_stub(&self) -> LoopOutcome {
+        self.outcome(
+            Termination::Transient(format!(
+                "JSON event stream format is not yet implemented for adapter `{}`",
+                self.adapter.id
+            )),
+            Vec::new(),
+            0,
+        )
     }
 
     fn outcome(
@@ -1101,5 +1132,51 @@ mod tests {
             crate::approval::SUMMARY_MAX_CHARS
         );
         assert!(body.summary.ends_with("..."));
+    }
+
+    /// ADR-0094 dispatch seam: an adapter whose `stream_format` is
+    /// `JsonEventStream` routes to the stub path and returns a typed Transient
+    /// outcome -- it compiles but does not drive a real turn. The message
+    /// names the adapter so the caller sees an honest "not implemented" signal.
+    #[test]
+    fn json_event_stream_dispatches_to_stub() {
+        let spec = AdapterSpec {
+            id: crate::runtime::acp::adapter::AdapterId::new("stub-test"),
+            display_name: "stub-test",
+            binary_names: &["nonexistent"],
+            argv: &["--json"],
+            stream_format: StreamFormat::JsonEventStream,
+        };
+        let cancel = Arc::new(CancelToken::new());
+        let engine = AcpEngine::new(spec, cancel);
+        let input = AcpTurnInput {
+            cwd: "/tmp".into(),
+            mcp_servers: Vec::new(),
+            prompt_blocks: Vec::new(),
+        };
+        let approval = crate::approval::ApprovalState::new();
+        let sink = RecordingAcpSink::new();
+        let outcome = engine.run(
+            &input,
+            std::path::Path::new("/nonexistent"),
+            &approval,
+            &sink,
+            |_| {},
+        );
+        match &outcome.termination {
+            Termination::Transient(msg) => {
+                assert!(
+                    msg.contains("JSON event stream"),
+                    "stub message names the format: {msg}"
+                );
+                assert!(
+                    msg.contains("stub-test"),
+                    "stub message names the adapter: {msg}"
+                );
+            }
+            other => panic!("expected Transient from stub, got {other:?}"),
+        }
+        assert!(outcome.trace.is_empty());
+        assert_eq!(outcome.round_trips, 0, "stub drives zero round-trips");
     }
 }

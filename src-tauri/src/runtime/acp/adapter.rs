@@ -24,6 +24,22 @@
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
+// Stream format (ADR-0094)
+// ---------------------------------------------------------------------------
+
+/// The wire protocol an adapter's CLI speaks over stdio (ADR-0094). The engine
+/// dispatches on this field -- per-format, NOT per-CLI: multiple CLIs share a
+/// format, adding a CLI never touches the engine, and adding a format adds one
+/// parser path (ADR-0081 zero per-CLI code invariant preserved).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamFormat {
+    /// ACP v1 JSON-RPC over stdio (initialize + session/new + session/prompt).
+    Acp,
+    /// A native JSONL event stream over stdio (codex `exec --json`, ADR-0094).
+    JsonEventStream,
+}
+
+// ---------------------------------------------------------------------------
 // Adapter spec
 // ---------------------------------------------------------------------------
 
@@ -54,8 +70,10 @@ impl std::fmt::Display for AdapterId {
     }
 }
 
-/// A pure-data CLI adapter definition (ADR-0081). The engine consumes this and
-/// nothing else per CLI; all per-CLI variation lives in fields here.
+/// A pure-data CLI adapter definition (ADR-0081 / ADR-0094). The engine
+/// consumes this and nothing else per CLI; all per-CLI variation lives in
+/// fields here. The [`StreamFormat`] field selects the engine's per-format
+/// dispatch path (ADR-0094: per-format, not per-CLI).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdapterSpec {
     /// Stable id (provenance + IPC key).
@@ -66,10 +84,14 @@ pub struct AdapterSpec {
     /// that resolves wins. Multiple names cover installer variation (npm vs the
     /// native installer ship different binary names).
     pub binary_names: &'static [&'static str],
-    /// The argv prefix that puts the CLI into ACP stdio mode. The engine spawns
-    /// `<resolved-binary> <argv-prefix...>` and speaks ACP v1 over stdio. The
-    /// prefix is the full ACP-mode invocation; the engine appends nothing.
+    /// The argv prefix that puts the CLI into its stdio protocol mode. The
+    /// engine spawns `<resolved-binary> <argv-prefix...>` and speaks the
+    /// protocol selected by [`StreamFormat`] over stdio. The prefix is the full
+    /// invocation; the engine appends nothing.
     pub argv: &'static [&'static str],
+    /// The wire protocol the CLI speaks over stdio (ADR-0094). Selects the
+    /// engine's per-format dispatch path.
+    pub stream_format: StreamFormat,
 }
 
 impl AdapterSpec {
@@ -98,6 +120,7 @@ pub const fn claude_code() -> AdapterSpec {
         display_name: "claude-code",
         binary_names: &["claude", "claude-code"],
         argv: &["--acp"],
+        stream_format: StreamFormat::Acp,
     }
 }
 
@@ -118,6 +141,7 @@ pub const fn gemini_cli() -> AdapterSpec {
         display_name: "gemini-cli",
         binary_names: &["gemini"],
         argv: &["--experimental-acp"],
+        stream_format: StreamFormat::Acp,
     }
 }
 
@@ -144,6 +168,7 @@ pub const fn codex() -> AdapterSpec {
         display_name: "codex",
         binary_names: &["codex-acp"],
         argv: &[],
+        stream_format: StreamFormat::Acp,
     }
 }
 
@@ -162,6 +187,7 @@ pub const fn qwen_code() -> AdapterSpec {
         display_name: "qwen-code",
         binary_names: &["qwen"],
         argv: &["--acp"],
+        stream_format: StreamFormat::Acp,
     }
 }
 
@@ -182,6 +208,7 @@ pub const fn opencode() -> AdapterSpec {
         display_name: "opencode",
         binary_names: &["opencode"],
         argv: &["acp"],
+        stream_format: StreamFormat::Acp,
     }
 }
 
@@ -275,12 +302,15 @@ mod tests {
         assert_eq!(spec.display_name, "claude-code");
         assert_eq!(spec.binary_names, &["claude", "claude-code"]);
         assert_eq!(spec.argv, &["--acp"]);
+        assert_eq!(spec.stream_format, StreamFormat::Acp);
     }
 
     /// v1_adapters is internally consistent: non-empty, unique ids, every entry
-    /// has a non-empty display name + binary names. Count-agnostic -- adding a
-    /// CLI (one `const fn` constructor + one V1_ADAPTERS entry) never touches
-    /// this test.
+    /// has a non-empty display name + binary names, and every entry is `Acp`
+    /// (the prefactor pins all existing adapters to ACP; ADR-0094's codex native
+    /// exec migration changes the codex entry in a later slice). Count-agnostic
+    /// -- adding a CLI (one `const fn` constructor + one V1_ADAPTERS entry)
+    /// never touches this test.
     #[test]
     fn v1_adapters_is_internally_consistent() {
         let adapters = v1_adapters();
@@ -299,6 +329,12 @@ mod tests {
                 "{:?}: empty binary name in binary_names",
                 a.id
             );
+            assert_eq!(
+                a.stream_format,
+                StreamFormat::Acp,
+                "{:?}: all v1 adapters are ACP in this prefactor slice",
+                a.id
+            );
         }
     }
 
@@ -312,6 +348,7 @@ mod tests {
         assert_eq!(spec.display_name, "gemini-cli");
         assert_eq!(spec.binary_names, &["gemini"]);
         assert_eq!(spec.argv, &["--experimental-acp"]);
+        assert_eq!(spec.stream_format, StreamFormat::Acp);
     }
 
     /// codex is the dedicated-ACP-server shape: the `codex-acp` binary with an
@@ -327,6 +364,7 @@ mod tests {
         assert_eq!(spec.display_name, "codex");
         assert_eq!(spec.binary_names, &["codex-acp"]);
         assert!(spec.argv.is_empty(), "codex-acp needs no ACP flag");
+        assert_eq!(spec.stream_format, StreamFormat::Acp);
     }
 
     /// qwen-code uses the `qwen` binary plus the stable `["--acp"]` flag
@@ -339,6 +377,7 @@ mod tests {
         assert_eq!(spec.display_name, "qwen-code");
         assert_eq!(spec.binary_names, &["qwen"]);
         assert_eq!(spec.argv, &["--acp"]);
+        assert_eq!(spec.stream_format, StreamFormat::Acp);
     }
 
     /// opencode uses the `opencode` binary plus an `["acp"]` SUBCOMMAND, not a
@@ -352,6 +391,7 @@ mod tests {
         assert_eq!(spec.display_name, "opencode");
         assert_eq!(spec.binary_names, &["opencode"]);
         assert_eq!(spec.argv, &["acp"]);
+        assert_eq!(spec.stream_format, StreamFormat::Acp);
     }
 
     /// detect_adapter returns Option regardless of install state -- the
