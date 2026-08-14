@@ -567,16 +567,7 @@ export default function App() {
                   onNew={goToEmptyState}
                   onOpenDuck={() => void handleOpenDuck()}
                   onActivate={activateSession}
-                  onExport={(path, name) => void handleExportSession(path, name)}
                   onOpenPersisted={(path, name) => void openPersisted(path, name)}
-                  // ADR-0093 slice 2 (#512): these management callbacks are
-                  // accepted on SessionSidebarProps for contract stability but
-                  // NOT consumed by the sidebar. The live wiring lives in the
-                  // SessionPane's session-header menu (onClose / onDelete /
-                  // onRename / onExport below the SessionPane render).
-                  onClose={() => {}}
-                  onDelete={() => {}}
-                  onRename={() => {}}
                   onSwitchGrouping={switchSidebarGrouping}
                   onOpenSearch={openSearch}
                   provider={appConfig?.provider ?? null}

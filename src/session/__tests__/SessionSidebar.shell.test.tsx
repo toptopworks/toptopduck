@@ -45,11 +45,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onNew={() => {}}
         onOpenDuck={() => {}}
         onActivate={() => {}}
-        onExport={() => {}}
         onOpenPersisted={() => {}}
-        onClose={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
@@ -82,11 +78,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onNew={() => {}}
         onOpenDuck={() => {}}
         onActivate={() => {}}
-        onExport={() => {}}
         onOpenPersisted={() => {}}
-        onClose={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
@@ -117,11 +109,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onNew={() => {}}
         onOpenDuck={() => {}}
         onActivate={() => {}}
-        onExport={() => {}}
         onOpenPersisted={() => {}}
-        onClose={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
@@ -162,11 +150,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onNew={() => {}}
         onOpenDuck={() => {}}
         onActivate={() => {}}
-        onExport={() => {}}
         onOpenPersisted={() => {}}
-        onClose={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
@@ -197,11 +181,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onNew={() => {}}
         onOpenDuck={() => {}}
         onActivate={() => {}}
-        onExport={() => {}}
         onOpenPersisted={() => {}}
-        onClose={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
@@ -246,11 +226,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onNew={() => {}}
         onOpenDuck={() => {}}
         onActivate={() => {}}
-        onExport={() => {}}
         onOpenPersisted={() => {}}
-        onClose={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
         onOpenSearch={onOpenSearch}
@@ -296,11 +272,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onNew={() => {}}
         onOpenDuck={() => {}}
         onActivate={() => {}}
-        onExport={() => {}}
         onOpenPersisted={() => {}}
-        onClose={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
         onOpenSearch={onOpenSearch}
@@ -326,11 +298,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onNew={() => {}}
         onOpenDuck={() => {}}
         onActivate={() => {}}
-        onExport={() => {}}
         onOpenPersisted={() => {}}
-        onClose={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
@@ -385,11 +353,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onNew={() => {}}
         onOpenDuck={() => {}}
         onActivate={() => {}}
-        onExport={() => {}}
         onOpenPersisted={() => {}}
-        onClose={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
         provider={null}
@@ -413,11 +377,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onNew={() => {}}
         onOpenDuck={() => {}}
         onActivate={() => {}}
-        onExport={() => {}}
         onOpenPersisted={() => {}}
-        onClose={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
         onSwitchGrouping={onSwitchGrouping}
         onOpenSearch={() => {}}
         provider={null}
@@ -461,11 +421,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onNew={() => {}}
         onOpenDuck={() => {}}
         onActivate={() => {}}
-        onExport={() => {}}
         onOpenPersisted={() => {}}
-        onClose={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
         provider={null}
@@ -497,11 +453,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onNew={() => {}}
         onOpenDuck={() => {}}
         onActivate={() => {}}
-        onExport={() => {}}
         onOpenPersisted={() => {}}
-        onClose={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
         provider={null}
@@ -534,11 +486,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onNew={() => {}}
         onOpenDuck={() => {}}
         onActivate={() => {}}
-        onExport={() => {}}
         onOpenPersisted={() => {}}
-        onClose={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
         onSwitchGrouping={onSwitchGrouping}
         onOpenSearch={() => {}}
         provider={null}
@@ -568,11 +516,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onNew={() => {}}
         onOpenDuck={() => {}}
         onActivate={() => {}}
-        onExport={() => {}}
         onOpenPersisted={() => {}}
-        onClose={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
         provider={null}
@@ -627,11 +571,7 @@ describe("SessionSidebar settings footer (issue #282)", () => {
         onNew={() => {}}
         onOpenDuck={() => {}}
         onActivate={() => {}}
-        onExport={() => {}}
         onOpenPersisted={() => {}}
-        onClose={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
         onOpenSearch={() => {}}
@@ -679,11 +619,7 @@ describe("SessionSidebar pending-approval coloring (ADR-0083, issue #297)", () =
       onNew: () => {},
       onOpenDuck: () => {},
       onActivate: () => {},
-      onExport: () => {},
       onOpenPersisted: () => {},
-      onClose: () => {},
-      onDelete: () => {},
-      onRename: () => {},
       grouping: "flat" as const,
       onSwitchGrouping: () => {},
       onOpenSearch: () => {},
@@ -747,11 +683,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       onNew: () => {},
       onOpenDuck: () => {},
       onActivate: () => {},
-      onExport: () => {},
       onOpenPersisted: () => {},
-      onClose: () => {},
-      onDelete: () => {},
-      onRename: () => {},
       grouping: "flat" as const,
       onSwitchGrouping: () => {},
       onOpenSearch: () => {},
