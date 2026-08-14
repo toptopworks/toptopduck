@@ -441,3 +441,26 @@ fn engine_outcome_is_identical_across_all_v1_specs() {
         assert_not_via_watchdog(&format!("{} step_cap_overflow", spec.id), start);
     }
 }
+
+/// ADR-0094 prefactor: all five v1 adapters carry `StreamFormat::Acp`. The
+/// codex entry migrates to `JsonEventStream` in a later slice; this test pins
+/// the prefactor state so the migration is an intentional change.
+#[test]
+fn all_v1_adapters_are_acp_format() {
+    use toptopduck_lib::runtime::acp::adapter::StreamFormat;
+    let specs = [
+        claude_code(),
+        gemini_cli(),
+        codex(),
+        qwen_code(),
+        opencode(),
+    ];
+    for spec in &specs {
+        assert_eq!(
+            spec.stream_format,
+            StreamFormat::Acp,
+            "{}: all v1 adapters are ACP in this prefactor slice",
+            spec.id
+        );
+    }
+}
