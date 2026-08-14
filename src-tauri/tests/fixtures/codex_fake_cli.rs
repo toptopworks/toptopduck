@@ -17,6 +17,12 @@ use std::io::{Read, Write};
 fn main() {
     let scenario = std::env::var("CODEX_FAKE_SCENARIO").unwrap_or_else(|_| "text_reply".into());
 
+    // ADR-0095: trace the spawn argv to stderr so the integration test can
+    // assert the engine's model / thought-level injection (stdout carries the
+    // event stream the engine owns).
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    eprintln!("CODEX_FAKE_ARGV={}", argv.join(" "));
+
     // Drain stdin (the flattened prompt) to EOF — codex reads the prompt from
     // stdin when no positional arg is given.
     let mut stdin = std::io::stdin();

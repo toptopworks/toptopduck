@@ -1209,14 +1209,16 @@ fn session_runtime_choice_wire_shape() {
 fn adapter_entry_wire_shape() {
     use std::path::PathBuf;
     use toptopduck_lib::commands::AdapterEntry;
+    use toptopduck_lib::runtime::acp::adapter::StreamFormat;
     assert_wire(
         &AdapterEntry {
             id: "claude-code".into(),
             display_name: "claude-code".into(),
             detected: true,
             binary_path: Some(PathBuf::from("/usr/local/bin/claude")),
+            stream_format: StreamFormat::Acp,
         },
-        r#"{"id":"claude-code","display_name":"claude-code","detected":true,"binary_path":"/usr/local/bin/claude"}"#,
+        r#"{"id":"claude-code","display_name":"claude-code","detected":true,"binary_path":"/usr/local/bin/claude","stream_format":"acp"}"#,
     );
     assert_wire(
         &AdapterEntry {
@@ -1224,7 +1226,40 @@ fn adapter_entry_wire_shape() {
             display_name: "codex".into(),
             detected: false,
             binary_path: None,
+            stream_format: StreamFormat::JsonEventStream,
         },
-        r#"{"id":"codex","display_name":"codex","detected":false,"binary_path":null}"#,
+        r#"{"id":"codex","display_name":"codex","detected":false,"binary_path":null,"stream_format":"json_event_stream"}"#,
+    );
+}
+
+/// SessionModelConfig (ADR-0095, issue #527) crosses IPC as a flat snake_case
+/// struct -- the shape `src/types/runtime.ts` mirrors. The None forms pin the
+/// "no selection / no discovery yet" honest defaults; the Some form pins the
+/// nested DiscoveredRuntime shape (snake_case fields, also the persisted
+/// recipe header shape).
+#[test]
+fn session_model_config_wire_shape() {
+    use toptopduck_lib::commands::SessionModelConfig;
+    use toptopduck_lib::runtime::acp::adapter::DiscoveredRuntime;
+    assert_wire(
+        &SessionModelConfig {
+            model: None,
+            thought_level: None,
+            cached_discovered: None,
+        },
+        r#"{"model":null,"thought_level":null,"cached_discovered":null}"#,
+    );
+    assert_wire(
+        &SessionModelConfig {
+            model: Some("fake-opus".into()),
+            thought_level: Some("high".into()),
+            cached_discovered: Some(DiscoveredRuntime {
+                models: vec!["fake-opus".into(), "fake-sonnet".into()],
+                current_model: Some("fake-opus".into()),
+                thought_levels: vec!["low".into()],
+                current_thought_level: None,
+            }),
+        },
+        r#"{"model":"fake-opus","thought_level":"high","cached_discovered":{"models":["fake-opus","fake-sonnet"],"current_model":"fake-opus","thought_levels":["low"],"current_thought_level":null}}"#,
     );
 }

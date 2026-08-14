@@ -474,6 +474,23 @@ pub struct Recipe {
     /// removed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<String>,
+    /// The session-level external-runtime model choice (ADR-0095 Decision 6).
+    /// NOT a replay input -- the model shapes HOW a turn is answered, not the
+    /// deterministic data chain, so it lives in the header beside the other
+    /// session-level assembly facts, never in a turn entry. Optional: an old
+    /// recipe without the field deserializes as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The session-level external-runtime thought-level choice (ADR-0095
+    /// Decision 6). Same header-level + optional semantics as `model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_level: Option<String>,
+    /// The last ACP turn's discovered model / thought-level catalog
+    /// (ADR-0095 Decision 6): a small snapshot so a resumed session renders
+    /// the selector immediately instead of waiting for the next turn's
+    /// handshake re-discovery. Optional for old-recipe compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_discovered: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
 }
 
 /// Why [`Recipe::build`] rejected a proposed recipe.
@@ -618,7 +635,30 @@ impl Recipe {
             sources,
             history,
             active,
+            // ADR-0095 header facts: Recipe::build constructs the replay
+            // projection; the caller (RecipePersister::build_recipe) layers
+            // the session-level model config on top via
+            // [`Recipe::with_runtime_model_config`].
+            model: None,
+            thought_level: None,
+            cached_discovered: None,
         })
+    }
+
+    /// Layer the session-level external-runtime model config onto the
+    /// recipe header (ADR-0095 Decision 6). Builder-style: `Recipe::build`
+    /// produces the replay projection, then the persister layers the
+    /// session-level facts so the persisted file carries them.
+    pub fn with_runtime_model_config(
+        mut self,
+        model: Option<String>,
+        thought_level: Option<String>,
+        cached_discovered: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
+    ) -> Recipe {
+        self.model = model;
+        self.thought_level = thought_level;
+        self.cached_discovered = cached_discovered;
+        self
     }
 
     /// The format version this recipe carries (ADR-0036). Always
@@ -763,6 +803,9 @@ mod tests {
             ],
             // active points at a SOURCE name (ADR-0035), never a result_N.
             active: Some("people".into()),
+            model: None,
+            thought_level: None,
+            cached_discovered: None,
         }
     }
 
@@ -834,6 +877,9 @@ mod tests {
                 )),
             ],
             active: Some("people".into()),
+            model: None,
+            thought_level: None,
+            cached_discovered: None,
         };
         let chain = recipe.productive_chain();
         assert_eq!(
@@ -878,6 +924,9 @@ mod tests {
             sources: Vec::new(),
             history: Vec::new(),
             active: None,
+            model: None,
+            thought_level: None,
+            cached_discovered: None,
         };
         let json = serde_json::to_string(&recipe).expect("serialize");
         let back: Recipe = serde_json::from_str(&json).expect("deserialize");
@@ -940,6 +989,9 @@ mod tests {
                 )),
             ],
             active: Some("people".into()),
+            model: None,
+            thought_level: None,
+            cached_discovered: None,
         };
         let chain = recipe.productive_chain();
         assert_eq!(
@@ -1051,6 +1103,9 @@ mod tests {
                 )),
             ],
             active: Some("people".into()),
+            model: None,
+            thought_level: None,
+            cached_discovered: None,
         };
         let chain = recipe.productive_chain();
         assert_eq!(
@@ -1401,6 +1456,9 @@ mod tests {
                 }),
             ],
             active: None,
+            model: None,
+            thought_level: None,
+            cached_discovered: None,
         };
         let json = serde_json::to_string(&recipe).expect("serialize");
         let back: Recipe = serde_json::from_str(&json).expect("deserialize");
@@ -1431,6 +1489,9 @@ mod tests {
                 }),
             ],
             active: None,
+            model: None,
+            thought_level: None,
+            cached_discovered: None,
         };
         assert_eq!(
             recipe.mounted_skills(),
@@ -1462,6 +1523,9 @@ mod tests {
                 }),
             ],
             active: None,
+            model: None,
+            thought_level: None,
+            cached_discovered: None,
         };
         assert_eq!(recipe.mounted_skills(), vec!["b".to_string()]);
     }
@@ -1476,6 +1540,9 @@ mod tests {
             sources: Vec::new(),
             history: Vec::new(),
             active: None,
+            model: None,
+            thought_level: None,
+            cached_discovered: None,
         };
         assert!(recipe.mounted_skills().is_empty());
     }
@@ -1536,9 +1603,51 @@ mod tests {
                 )),
             ],
             active: Some("people".into()),
+            model: None,
+            thought_level: None,
+            cached_discovered: None,
         };
         let chain = recipe.productive_chain();
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].reference_name, "result_1");
+    }
+
+    /// ADR-0095 (AC): an old recipe file without the model / thought_level /
+    /// cached_discovered header fields deserializes with all three as `None`
+    /// (serde default), and the fields round-trip through serialization when
+    /// set.
+    #[test]
+    fn recipe_model_config_defaults_none_and_round_trips() {
+        let old = serde_json::json!({
+            "format_version": 1,
+            "session_name": "s",
+            "sources": [],
+            "history": [],
+        });
+        let recipe: Recipe = serde_json::from_value(old).expect("old recipe parses");
+        assert_eq!(recipe.model, None);
+        assert_eq!(recipe.thought_level, None);
+        assert_eq!(recipe.cached_discovered, None);
+
+        let layered = recipe.with_runtime_model_config(
+            Some("fake-opus".into()),
+            Some("high".into()),
+            Some(crate::runtime::acp::adapter::DiscoveredRuntime {
+                models: vec!["fake-opus".into()],
+                current_model: Some("fake-opus".into()),
+                thought_levels: vec!["low".into(), "high".into()],
+                current_thought_level: Some("high".into()),
+            }),
+        );
+        let v = serde_json::to_value(&layered).expect("serialize");
+        assert_eq!(v["model"], "fake-opus");
+        assert_eq!(v["thought_level"], "high");
+        assert_eq!(
+            v["cached_discovered"]["models"],
+            serde_json::json!(["fake-opus"])
+        );
+        let back: Recipe = serde_json::from_value(v).expect("round-trip");
+        assert_eq!(back.model.as_deref(), Some("fake-opus"));
+        assert_eq!(back.cached_discovered, layered.cached_discovered);
     }
 }

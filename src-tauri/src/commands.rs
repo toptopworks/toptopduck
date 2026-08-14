@@ -43,7 +43,9 @@ use crate::persistence::{
     SessionsRoot,
 };
 use crate::provider::live_config::LiveProviderConfig;
-use crate::runtime::acp::adapter::{detect_adapter, v1_adapters, AdapterSpec};
+use crate::runtime::acp::adapter::{
+    detect_adapter, v1_adapters, AdapterSpec, DiscoveredRuntime, StreamFormat,
+};
 use crate::session::{RenameSessionError, ResumeEvent, ResumeProgress, Session, TurnInputs};
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
 use crate::skills::{
@@ -644,6 +646,9 @@ pub async fn ask(
         // mid-turn, and a resumed Session (fresh, built-in default) reads
         // the reset choice.
         s.set_external_runtime(handle.runtime_choice());
+        // ADR-0095: mirror the session-level model + thought-level choices
+        // into the turn at the same boundary as the runtime choice.
+        s.set_external_model_config(handle.external_model(), handle.external_thought_level());
         // Issue #364 (ADR-0086): resolve the session's mounted skills into
         // prompt fragments (name + verbatim body + whole-file SHA-256) here
         // at the command boundary, where the registry root lives, so the
@@ -707,6 +712,11 @@ pub async fn ask(
         // locked -- the write touches only the handle's own Mutex, no
         // session-lock re-entry.
         handle.set_last_mcp_connect(s.last_mcp_connect().to_vec());
+        // ADR-0095: mirror the turn's discovered runtime catalog onto the
+        // handle (lock-light reads for the selector). `Some` replaces the
+        // cache; the built-in / JsonEventStream `None` leaves the previous
+        // ACP cache intact (see SessionHandle::set_cached_discovered).
+        handle.set_cached_discovered(s.last_discovered_runtime());
         Ok::<TurnOutcome, SessionError>(outcome)
     })
     .await
@@ -1942,6 +1952,12 @@ pub async fn open_duck(
         let (drop_tx, drop_rx) = std::sync::mpsc::channel();
         new_session.set_drop_signal(drop_tx);
         handle_for_task.set_drop_signal_rx(drop_rx);
+        // ADR-0095 Decision 6: capture the resumed Session's recipe-header
+        // model config BEFORE the swap consumes new_session (the Session's
+        // accessor borrows it). Restored onto the handle after the reset
+        // batch below so the model / thought-level selections + the discovery
+        // cache survive the resume (unlike the reset-to-default postures).
+        let model_config = new_session.runtime_model_config().clone();
         let mut s = handle_for_task.session_lock()?;
         // Capture the pre-resume binding before the rebind. create_session
         // bound a fresh empty session.duck in a new per-session directory;
@@ -1972,6 +1988,13 @@ pub async fn open_duck(
         // session starts on the built-in default -- the user re-picks an
         // external runtime explicitly (the ADR-0080 reset lineage).
         handle_for_task.reset_runtime_choice();
+        // ADR-0095 Decision 6: restore the model config AFTER the reset batch
+        // (the restored values win over any stale pre-resume state).
+        handle_for_task.restore_runtime_model_config(
+            model_config.model,
+            model_config.thought_level,
+            model_config.cached_discovered,
+        );
         // Remove the orphaned empty per-session directory create_session made
         // when open_duck rebinds to a different resume target path. The old
         // Session::Drop (fired by the `*s = new_session` assignment above)
@@ -2252,6 +2275,13 @@ pub struct AdapterEntry {
     /// binary was found (issue #489).
     #[serde(default)]
     pub binary_path: Option<PathBuf>,
+    /// The adapter's stream format (ADR-0095): the composer's model /
+    /// thought-level selectors render per format -- ACP adapters get
+    /// dropdowns fed by handshake discovery; JsonEventStream adapters get
+    /// read-only CLI-default labels (no dynamic discovery). `#[serde(default)]`
+    /// so an older payload omitting the field degrades to the ACP surface.
+    #[serde(default)]
+    pub stream_format: StreamFormat,
 }
 
 /// Project every v1 adapter to a picker entry with a FRESH PATH-scan
@@ -2268,6 +2298,7 @@ fn scan_adapters() -> Vec<AdapterEntry> {
                 display_name: spec.display_name.to_string(),
                 detected: binary.is_some(),
                 binary_path: binary,
+                stream_format: spec.stream_format,
             }
         })
         .collect()
@@ -2361,6 +2392,95 @@ pub fn set_session_runtime(
     reject_if_resuming(&handle)?;
     let spec = resolve_runtime_choice(runtime)?;
     handle.set_runtime_choice(spec);
+    Ok(())
+}
+
+// --- External-runtime model + thought level (ADR-0095, issue #527) ---------
+
+/// The wire read shape for the session's external-runtime model config: the
+/// two selections plus the cached discovered catalog. Mirrors the
+/// handle-held trio; serialized camelCase-free (plain snake_case field names
+/// via serde default) so the frontend type is a direct mirror.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionModelConfig {
+    pub model: Option<String>,
+    pub thought_level: Option<String>,
+    pub cached_discovered: Option<DiscoveredRuntime>,
+}
+
+/// Read the session's external-runtime model config (ADR-0095). Lock-light:
+/// reads the handle's own mutexes, never the session lock an in-flight turn
+/// holds. `cached_discovered` is `None` until the first ACP turn (and is
+/// restored from the recipe on resume).
+#[tauri::command]
+pub fn get_session_model_config(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+) -> Result<SessionModelConfig, SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    Ok(SessionModelConfig {
+        model: handle.external_model(),
+        thought_level: handle.external_thought_level(),
+        cached_discovered: handle.cached_discovered(),
+    })
+}
+
+/// Set the session's model selection for the next external-runtime turn
+/// (ADR-0095). `None` clears (the CLI's own default). Takes effect at the
+/// turn boundary; rejected while resuming. NOT validated against the
+/// discovered catalog at this boundary (ADR-0095 Decision 7): the picker only
+/// offers discovered ids, so an unknown id means a stale cache or a manual
+/// call -- the CLI deals with it at spawn.
+///
+/// Persistence: the selection is mirrored into the Session's recipe-header
+/// facts + persisted immediately, so a close-without-another-turn keeps the
+/// resume promise (Decision 6). The session lock is taken briefly (the write
+/// is a small atomic file write); `ask` holds the lock for a whole turn, so
+/// an in-flight turn makes this block until the turn ends -- the same
+/// serialization every other session-mutating command already has via
+/// `reject_if_in_flight`-guarded paths, applied here for the write window.
+#[tauri::command]
+pub fn set_session_model(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+    model: Option<String>,
+) -> Result<(), SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    reject_if_resuming(&handle)?;
+    reject_if_in_flight(&handle)?;
+    let mut s = handle.session_lock()?;
+    s.set_external_model_config(model, handle.external_thought_level());
+    s.persist_model_config_now();
+    handle.set_external_model_config(
+        s.runtime_model_config().model.clone(),
+        s.runtime_model_config().thought_level.clone(),
+    );
+    Ok(())
+}
+
+/// Set the session's thought-level selection for the next external-runtime
+/// turn (ADR-0095). `None` clears. Same turn-boundary / resume-reject /
+/// persist-now semantics as [`set_session_model`]; a no-op posture on the
+/// built-in runtime (BYOK thought levels are a separate future ADR).
+#[tauri::command]
+pub fn set_session_thought_level(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+    thought_level: Option<String>,
+) -> Result<(), SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    reject_if_resuming(&handle)?;
+    reject_if_in_flight(&handle)?;
+    let mut s = handle.session_lock()?;
+    s.set_external_model_config(handle.external_model(), thought_level);
+    s.persist_model_config_now();
+    handle.set_external_model_config(
+        s.runtime_model_config().model.clone(),
+        s.runtime_model_config().thought_level.clone(),
+    );
     Ok(())
 }
 

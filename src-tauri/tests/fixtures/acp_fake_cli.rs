@@ -80,6 +80,13 @@ fn main() {
                 );
             }
             Some("session/new") => {
+                // ADR-0095: record the model the engine injected into
+                // session/new params so the discovery-path integration test
+                // can assert the wire carried it (the fake CLI's stdout is
+                // consumed by the engine, so the trace goes to stderr).
+                if let Some(model) = v.get("params").and_then(|p| p.get("model")) {
+                    eprintln!("ACP_FAKE_RECEIVED_MODEL={model}");
+                }
                 // When the descriptor names a real bridge binary (the
                 // gateway_tool_call scenario), spawn it now so it connects
                 // back to the gateway before session/prompt fires MCP at it.
@@ -100,6 +107,30 @@ fn main() {
                         id: parse_id(&id),
                         result: Some(NewSessionResult {
                             session_id: "fake-session".into(),
+                            // ADR-0095 (AC: fake fixture returns
+                            // config_options): a catalog with one model entry
+                            // (two offered, one current) + one thought_level
+                            // entry (three offered, one current) drives the
+                            // engine's discovery path in CI.
+                            config_options: Some(serde_json::json!([
+                                {
+                                    "option_id": "model",
+                                    "value": "fake-opus",
+                                    "schema": { "options": [
+                                        { "value": "fake-opus" },
+                                        { "value": "fake-sonnet" },
+                                    ]},
+                                },
+                                {
+                                    "option_id": "thought_level",
+                                    "value": "medium",
+                                    "schema": { "options": [
+                                        { "value": "low" },
+                                        { "value": "medium" },
+                                        { "value": "high" },
+                                    ]},
+                                },
+                            ])),
                         }),
                         error: None,
                     },
@@ -107,6 +138,31 @@ fn main() {
             }
             Some("session/prompt") => {
                 play_scenario(&scenario, &mut out, &id, &mut reader, &mut cancel_seen);
+            }
+            Some("session/setConfigOption") => {
+                // ADR-0095: acknowledge the thought-level injection. The
+                // received (option_id, value) traces to stderr for the
+                // integration test's assertion.
+                let option_id = v
+                    .get("params")
+                    .and_then(|p| p.get("optionId"))
+                    .and_then(|o| o.as_str())
+                    .unwrap_or("");
+                let value = v
+                    .get("params")
+                    .and_then(|p| p.get("value"))
+                    .and_then(|o| o.as_str())
+                    .unwrap_or("");
+                eprintln!("ACP_FAKE_RECEIVED_SETOPTION={option_id}={value}");
+                respond(
+                    &mut out,
+                    &Response::<serde_json::Value> {
+                        jsonrpc: "2.0".into(),
+                        id: parse_id(&id),
+                        result: Some(serde_json::json!({})),
+                        error: None,
+                    },
+                );
             }
             Some("session/cancel") => {
                 // Notification (no id) -- record + acknowledge cooperatively.

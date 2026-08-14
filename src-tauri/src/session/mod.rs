@@ -364,6 +364,16 @@ pub struct ResumeProgress {
     pub event: ResumeEvent,
 }
 
+/// The recipe-header ADR-0095 facts the persister layers onto every built
+/// recipe: the model + thought-level selections and the discovered-catalog
+/// cache. Plain data; mirrors the handle-held user choices at turn top.
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeModelConfig {
+    pub model: Option<String>,
+    pub thought_level: Option<String>,
+    pub cached_discovered: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
+}
+
 pub struct Session {
     conn: Connection,
     working_set: WorkingSet,
@@ -468,6 +478,27 @@ pub struct Session {
     /// user picked, and a switch lands at the turn boundary. Integration
     /// tests still toggle it directly via [`Self::set_external_runtime`].
     external_runtime: Option<AdapterSpec>,
+    /// The session-level model choice for the external runtime (ADR-0095).
+    /// Mirrored from the handle-held user choice at each turn top (the same
+    /// pattern as [`Self::external_runtime`]); consumed by
+    /// [`Self::run_external_turn`] to build the engine's turn input. `None`
+    /// leaves the CLI's own default model. No-op on the built-in runtime
+    /// (its model comes from the provider profile).
+    external_model: Option<String>,
+    /// The session-level thought-level choice (ADR-0095). Mirrored from the
+    /// handle at turn top alongside the model; no-op on the built-in runtime
+    /// (ADR-0095 Discovery: BYOK thought levels are a separate future ADR).
+    external_thought_level: Option<String>,
+    /// The last external turn's discovered model / thought-level catalog
+    /// (ADR-0095). See [`Self::last_discovered_runtime`].
+    last_discovered_runtime: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
+    /// The recipe-header ADR-0095 facts (model / thought_level selections +
+    /// the discovery cache) the persister layers onto every built recipe.
+    /// Mirrored from the handle at turn top beside the two selections; the
+    /// `set_session_model_config` command also updates them so the next
+    /// auto-write persists a selection made WITHOUT a following turn (the
+    /// resume promise, ADR-0095 Decision 6).
+    runtime_model_config: RuntimeModelConfig,
     /// The last turn's per-server MCP connect outcomes (issue #301 slice D).
     /// Updated at the top of each turn (the aggregator's `connect_all` result)
     /// so the command layer can snapshot it into the SessionHandle for
@@ -662,6 +693,55 @@ impl Session {
         self.external_runtime = spec;
     }
 
+    /// Mirror the handle-held session-level model + thought-level choices
+    /// into the Session at turn top (ADR-0095, the `set_external_runtime`
+    /// pattern): the command layer calls this right after the runtime choice
+    /// mirror, so both take effect at the same turn boundary. `pub` so the
+    /// IPC test seam can toggle without the command layer.
+    pub fn set_external_model_config(
+        &mut self,
+        model: Option<String>,
+        thought_level: Option<String>,
+    ) {
+        self.external_model = model.clone();
+        self.external_thought_level = thought_level.clone();
+        self.runtime_model_config.model = model;
+        self.runtime_model_config.thought_level = thought_level;
+    }
+
+    /// Read the recipe-header ADR-0095 facts (the persister layers them onto
+    /// every built recipe). Exposed so the `set_session_model` /
+    /// `set_session_thought_level` commands can persist a selection made
+    /// without a following turn.
+    pub fn runtime_model_config(&self) -> &RuntimeModelConfig {
+        &self.runtime_model_config
+    }
+
+    /// The last turn's discovered runtime catalog (ADR-0095): snapshotted
+    /// from the ACP engine's `LoopOutcome.discovered_runtime` at
+    /// [`Self::run_external_turn`] so the command layer can mirror it onto
+    /// the SessionHandle (lock-light reads) without re-running a turn.
+    /// `None` until the first ACP turn (and after a resume -- the recipe's
+    /// cached copy is restored onto the handle by open_duck).
+    pub fn last_discovered_runtime(
+        &self,
+    ) -> Option<crate::runtime::acp::adapter::DiscoveredRuntime> {
+        self.last_discovered_runtime.clone()
+    }
+
+    /// Record the turn's discovered runtime catalog (see
+    /// [`Self::last_discovered_runtime`]). Called by
+    /// [`Self::run_external_turn`] before the outcome mapping.
+    pub fn set_last_discovered_runtime(
+        &mut self,
+        discovered: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
+    ) {
+        if let Some(d) = &discovered {
+            self.runtime_model_config.cached_discovered = Some(d.clone());
+        }
+        self.last_discovered_runtime = discovered;
+    }
+
     /// Build a session with an explicit provider (tests inject a scripted fake;
     /// the real LLM client wires in #29). The default [`Self::new`] uses
     /// [`UnwiredProvider`] -- every turn is refused until a provider is set.
@@ -721,6 +801,10 @@ impl Session {
             persister: recipe_persister::RecipePersister::new(),
             drop_signal: None,
             external_runtime: None,
+            external_model: None,
+            external_thought_level: None,
+            last_discovered_runtime: None,
+            runtime_model_config: RuntimeModelConfig::default(),
             last_mcp_connect: Vec::new(),
             mounted_skills: Vec::new(),
         })
@@ -819,8 +903,13 @@ impl Session {
         // derived source's source_path is updated so SourceRef carries the
         // portable (relative-to-.duck) location.
         self.migrate_derived_sources(&path);
-        self.persister
-            .bind(path, session_name, &self.working_set, &self.timeline)
+        self.persister.bind(
+            path,
+            session_name,
+            &self.working_set,
+            &self.timeline,
+            &self.runtime_model_config,
+        )
     }
 
     /// The bound `.duck` path, if any (ADR-0034/0089). Since ADR-0089 every
@@ -974,8 +1063,11 @@ impl Session {
         }
         let name = trimmed.to_string();
         self.persister.set_session_name(name.clone());
-        self.persister
-            .save_if_bound(&self.working_set, &self.timeline);
+        self.persister.save_if_bound(
+            &self.working_set,
+            &self.timeline,
+            &self.runtime_model_config,
+        );
         Ok(name)
     }
 
@@ -1266,6 +1358,12 @@ impl Session {
         let input = AcpTurnInput {
             cwd: self.temp_path.to_string_lossy().to_string(),
             mcp_servers: vec![mcp_server],
+            // ADR-0095: the session-level model / thought-level choices ride
+            // the turn input (injected per-format inside the engine: ACP wire
+            // params / setConfigOption, JsonEventStream argv). `None` leaves
+            // the CLI's own defaults in place.
+            model: self.external_model.clone(),
+            thought_level: self.external_thought_level.clone(),
             prompt_blocks,
         };
         // 5. Drive the gateway serve + the ACP engine on two scoped threads.
@@ -1362,7 +1460,11 @@ impl Session {
             }
         };
         // 7. Merge + map onto TurnOutcome (same mapper + trace-extraction
-        //    pattern as the built-in branch).
+        //    pattern as the built-in branch). ADR-0095: the ACP engine's
+        //    discovered catalog snapshots onto the Session first so the
+        //    command layer can mirror it onto the handle (lock-light reads)
+        //    even when the turn itself fails.
+        self.set_last_discovered_runtime(acp_outcome.discovered_runtime.clone());
         let mut merged = merge_outcomes(gateway_outcome, acp_outcome);
         let trace = std::mem::take(&mut merged.trace);
         (turn_outcome_from_loop(merged), trace)
@@ -1440,8 +1542,21 @@ impl Session {
     /// Build the recipe (ADR-0034). Facade delegate to
     /// [`RecipePersister::build_recipe`](recipe_persister::RecipePersister::build_recipe).
     pub fn build_recipe(&self) -> Recipe {
-        self.persister
-            .build_recipe(&self.working_set, &self.timeline)
+        self.persister.build_recipe(
+            &self.working_set,
+            &self.timeline,
+            &self.runtime_model_config,
+        )
+    }
+
+    /// Persist the recipe NOW with the current header facts (ADR-0095): the
+    /// `set_session_model` / `set_session_thought_level` commands call this
+    /// so a selection survives a close-without-another-turn (the resume
+    /// promise, Decision 6). Best-effort like the per-turn auto-write -- a
+    /// failure lands in the persister's error slot and surfaces via the
+    /// existing unsaved-banner channel.
+    pub fn persist_model_config_now(&mut self) {
+        self.persist_if_bound();
     }
 
     /// Rewrite the recipe at the bound path (ADR-0034 atomic write). Facade
@@ -1455,8 +1570,11 @@ impl Session {
         if let Some(duck_path) = self.persister.duck_path().map(PathBuf::from) {
             self.migrate_derived_sources(&duck_path);
         }
-        self.persister
-            .save_if_bound(&self.working_set, &self.timeline);
+        self.persister.save_if_bound(
+            &self.working_set,
+            &self.timeline,
+            &self.runtime_model_config,
+        );
     }
 
     /// Take (read + clear) the most recent per-turn persistence failure, if
@@ -1473,14 +1591,21 @@ impl Session {
 
     /// Resolve a pending conflict with "Keep Mine" (ADR-0035 Decision 3).
     pub fn conflict_keep_mine(&mut self) -> Result<(), SaveError> {
-        self.persister
-            .conflict_keep_mine(&self.working_set, &self.timeline)
+        self.persister.conflict_keep_mine(
+            &self.working_set,
+            &self.timeline,
+            &self.runtime_model_config,
+        )
     }
 
     /// Resolve a pending conflict with "Save As New" (ADR-0035 Decision 3).
     pub fn conflict_save_as_new(&mut self, new_path: PathBuf) -> Result<(), SaveError> {
-        self.persister
-            .conflict_save_as_new(new_path, &self.working_set, &self.timeline)
+        self.persister.conflict_save_as_new(
+            new_path,
+            &self.working_set,
+            &self.timeline,
+            &self.runtime_model_config,
+        )
     }
 
     /// The turn-only view of the timeline, cloned out for the window assembler
@@ -1866,6 +1991,7 @@ mod tests {
             promotions: Vec::new(),
             trace,
             round_trips: 1,
+            discovered_runtime: None,
         }
     }
 
@@ -1915,6 +2041,7 @@ mod tests {
     fn merge_outcomes_termination_and_round_trips_from_acp() {
         let gateway = gateway_outcome(Vec::new());
         let acp = LoopOutcome {
+            discovered_runtime: None,
             termination: Termination::Text("done".into()),
             promotions: Vec::new(),
             trace: Vec::new(),

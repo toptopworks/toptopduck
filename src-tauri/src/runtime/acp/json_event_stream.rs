@@ -302,9 +302,17 @@ pub(super) fn run_json_event_stream(
         });
     }
 
-    // Spawn codex exec --json with the bridge injected via -c overrides.
+    // Spawn codex exec --json with the bridge injected via -c overrides +
+    // the ADR-0095 model / thought-level selections: the model rides
+    // `[model_arg, id]` right after the argv prefix, the thought level rides
+    // a `-c {key}={value}` override (the same `-c` mechanism as the bridge).
     let config_flags = build_config_overrides(&input.mcp_servers);
-    let mut child = match spawn_codex(binary, adapter, &config_flags, &input.cwd) {
+    let model_flags = build_model_flags(
+        adapter,
+        input.model.as_deref(),
+        input.thought_level.as_deref(),
+    );
+    let mut child = match spawn_codex(binary, adapter, &config_flags, &model_flags, &input.cwd) {
         Ok(c) => c,
         Err(detail) => return outcome(Termination::Transient(detail), Vec::new(), 0),
     };
@@ -486,6 +494,26 @@ struct JsonPump {
     step_cap: u32,
 }
 
+/// Build the argv segments carrying the ADR-0095 selections: the model as
+/// `[model_arg, id]` and the thought level as `["-c", "{key}={value}"]`.
+/// Pure -- adapters without the matching spec field contribute nothing.
+pub(crate) fn build_model_flags(
+    adapter: &AdapterSpec,
+    model: Option<&str>,
+    thought_level: Option<&str>,
+) -> Vec<String> {
+    let mut flags = Vec::new();
+    if let (Some(flag), Some(id)) = (adapter.model_arg, model) {
+        flags.push(flag.to_string());
+        flags.push(id.to_string());
+    }
+    if let (Some(key), Some(level)) = (adapter.effort_config_key, thought_level) {
+        flags.push("-c".to_string());
+        flags.push(format!("{key}={level}"));
+    }
+    flags
+}
+
 /// Spawn `codex exec --json …` with the gateway bridge injected via `-c`
 /// overrides. The working directory is set to `cwd` so codex's file operations
 /// (if any survive the read-only sandbox) stay within the session's temp.
@@ -493,10 +521,12 @@ fn spawn_codex(
     binary: &Path,
     adapter: &AdapterSpec,
     config_flags: &[String],
+    model_flags: &[String],
     cwd: &str,
 ) -> Result<Child, String> {
     let mut cmd = Command::new(binary);
     cmd.args(adapter.argv);
+    cmd.args(model_flags);
     cmd.args(config_flags);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
@@ -518,6 +548,8 @@ fn outcome(termination: Termination, trace: Vec<TraceEntry>, round_trips: u32) -
         promotions: Vec::new(),
         trace,
         round_trips,
+        // ADR-0095: `exec --json` exposes no config catalog -- no discovery.
+        discovered_runtime: None,
     }
 }
 
@@ -696,6 +728,49 @@ mod tests {
     #[test]
     fn flatten_prompt_empty_blocks_produces_empty() {
         assert_eq!(flatten_prompt(&[]), "");
+    }
+
+    // --- build_model_flags (ADR-0095) ----------------------------------------
+
+    fn stub_spec(model_arg: Option<&'static str>, key: Option<&'static str>) -> AdapterSpec {
+        AdapterSpec {
+            id: crate::runtime::acp::adapter::AdapterId::new("stub"),
+            display_name: "stub",
+            binary_names: &["nonexistent"],
+            argv: &["--json"],
+            stream_format: crate::runtime::acp::adapter::StreamFormat::JsonEventStream,
+            model_arg,
+            effort_config_key: key,
+        }
+    }
+
+    /// Both selections land: `--model <id>` + `-c key=value`.
+    #[test]
+    fn model_flags_carry_model_and_effort() {
+        let s = stub_spec(Some("--model"), Some("model_reasoning_effort"));
+        assert_eq!(
+            build_model_flags(&s, Some("gpt-5.1"), Some("high")),
+            vec![
+                "--model".to_string(),
+                "gpt-5.1".to_string(),
+                "-c".to_string(),
+                "model_reasoning_effort=high".to_string(),
+            ]
+        );
+    }
+
+    /// No selection / no spec field -> nothing appended (CLI defaults rule).
+    #[test]
+    fn model_flags_empty_without_selection_or_spec_fields() {
+        let s = stub_spec(Some("--model"), Some("model_reasoning_effort"));
+        assert!(build_model_flags(&s, None, None).is_empty());
+        let acp_like = stub_spec(None, None);
+        assert!(build_model_flags(&acp_like, Some("m"), Some("high")).is_empty());
+        // Half-selected: each selection independently contributes.
+        assert_eq!(
+            build_model_flags(&s, None, Some("low")),
+            vec!["-c".to_string(), "model_reasoning_effort=low".to_string()]
+        );
     }
 
     // --- build_config_overrides ---------------------------------------------

@@ -562,7 +562,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       baseAppConfig({ sidebar_collapsed: false }),
     );
     vi.mocked(listAdapters).mockResolvedValue([
-      { id: "claude-code", display_name: "claude-code", detected: true, binary_path: "/usr/local/bin/claude" },
+      { id: "claude-code", display_name: "claude-code", detected: true, binary_path: "/usr/local/bin/claude", stream_format: "acp" },
     ]);
     // The creation turn rejects so it settles immediately (openSession pattern).
     vi.mocked(askQuestion).mockRejectedValueOnce(
@@ -2171,7 +2171,7 @@ describe("App composer refactor follow-ups (issue #504)", () => {
       { profile_id: "default", has_key: false, keychain_fault: null },
     ]);
     vi.mocked(listAdapters).mockResolvedValue([
-      { id: "claude-code", display_name: "claude-code", detected: true, binary_path: "/usr/local/bin/claude" },
+      { id: "claude-code", display_name: "claude-code", detected: true, binary_path: "/usr/local/bin/claude", stream_format: "acp" },
     ]);
     vi.mocked(askQuestion).mockRejectedValueOnce(
       new Error("discard the creation turn"),

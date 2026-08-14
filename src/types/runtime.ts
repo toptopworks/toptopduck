@@ -27,6 +27,11 @@ export interface AdapterEntry {
   detected: boolean;
   /** Absolute path of the resolved binary (null when not detected). */
   binary_path: string | null;
+  /** The adapter's stream format (ADR-0095). "acp" renders the model /
+   * thought-level dropdowns fed by handshake discovery; "json_event_stream"
+   * renders read-only CLI-default labels (no dynamic discovery). Mirrors the
+   * Rust StreamFormat (snake_case serde). */
+  stream_format: "acp" | "json_event_stream";
 }
 
 // The honest default while the read settles (and after a resume, before the
@@ -36,3 +41,25 @@ export interface AdapterEntry {
 export const RUNTIME_CHOICE_DEFAULT = {
   kind: "built_in",
 } as const satisfies SessionRuntimeChoice;
+
+// The discovered model + thought-level catalog an ACP handshake reported
+// (ADR-0095). Mirrors the Rust `DiscoveredRuntime` (snake_case serde), pinned
+// in tests/ipc_contract.rs; also the persisted recipe-header shape, so the
+// resume path returns the same object.
+export interface DiscoveredRuntime {
+  models: string[];
+  current_model: string | null;
+  thought_levels: string[];
+  current_thought_level: string | null;
+}
+
+// The session's external-runtime model config (ADR-0095, issue #527): the two
+// selections plus the cached discovery catalog. `model` / `thought_level` are
+// `null` until the user picks (the CLI defaults then rule); the cache is
+// `null` until the first ACP turn (restored from the recipe on resume).
+// Mirrors `commands::SessionModelConfig`, pinned in tests/ipc_contract.rs.
+export interface SessionModelConfig {
+  model: string | null;
+  thought_level: string | null;
+  cached_discovered: DiscoveredRuntime | null;
+}

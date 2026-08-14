@@ -47,7 +47,9 @@ use crate::approval::{
 };
 use crate::cancel::CancelToken;
 use crate::model::{TraceEntryView, TurnPhase};
-use crate::runtime::acp::adapter::{AdapterSpec, StreamFormat};
+use crate::runtime::acp::adapter::{
+    extract_discovered_runtime, AdapterSpec, DiscoveredRuntime, StreamFormat,
+};
 use crate::runtime::acp::wire::{
     self, CancelParams, ContentBlock, InitializeParams, McpServer, NewSessionParams, PromptParams,
     Request, RequestId, RequestPermissionOutcome, RequestPermissionParams, RequestPermissionResult,
@@ -75,6 +77,15 @@ pub struct AcpTurnInput {
     /// the bridge; slice 9a tests pass a placeholder (the fake fixture ignores
     /// it).
     pub mcp_servers: Vec<McpServer>,
+    /// The session-level model choice to inject this turn (ADR-0095). `None`
+    /// = the CLI's own default. ACP path: rides `NewSessionParams.model`;
+    /// JsonEventStream path: rides argv behind `AdapterSpec.model_arg`.
+    pub model: Option<String>,
+    /// The session-level thought-level choice to inject this turn (ADR-0095).
+    /// `None` = the CLI's own default. ACP path: one `session/setConfigOption`
+    /// after the handshake; JsonEventStream path: argv via
+    /// `AdapterSpec.effort_config_key`.
+    pub thought_level: Option<String>,
     /// The full windowed context for this turn (the question + history), as
     /// text content blocks. ADR-0076 statelessness: the whole context every
     /// turn.
@@ -171,7 +182,9 @@ impl AcpEngine {
         // (the engine never panics into the host).
         let mut child = match spawn(binary, &self.adapter) {
             Ok(c) => c,
-            Err(detail) => return self.outcome(Termination::Transient(detail), Vec::new(), 1),
+            Err(detail) => {
+                return self.outcome(Termination::Transient(detail), Vec::new(), 1, None)
+            }
         };
         let stdout = child.inner.stdout.take().expect("piped stdout");
         let stdin = child.inner.stdin.take().expect("piped stdin");
@@ -179,18 +192,44 @@ impl AcpEngine {
 
         // Handshake: initialize -> session/new. A failure here is a transient
         // turn failure (the CLI is not an ACP agent / crashed).
-        let session_id = match handshake(&mut io, &self.cancel, input) {
-            Ok(id) => id,
+        let hs = match handshake(&mut io, &self.cancel, input) {
+            Ok(hs) => hs,
             Err(term) => {
-                let outcome = self.outcome(term, Vec::new(), 1);
+                let outcome = self.outcome(term, Vec::new(), 1, None);
                 child.kill_and_wait();
                 return outcome;
             }
         };
+        let session_id = hs.session_id;
+        let discovered = Some(hs.discovered);
+        // ADR-0095: inject the selected thought level with ONE
+        // session/setConfigOption between the handshake and the prompt. The
+        // request is a best-effort preference -- a CLI that rejects the option
+        // id fails the roundtrip as a transient turn failure (the user asked
+        // for a setting the CLI does not accept; surfacing the turn error is
+        // the honest outcome, and clearing the selection restores the turn).
+        if let Some(level) = &input.thought_level {
+            let req = Request::new(
+                RequestId::Num(4),
+                "session/setConfigOption",
+                SetConfigOptionParams {
+                    session_id: session_id.clone(),
+                    option_id: crate::runtime::acp::adapter::THOUGHT_LEVEL_OPTION_ID.to_string(),
+                    value: level.clone(),
+                },
+            );
+            if let Err(term) =
+                io.request_roundtrip::<SetConfigOptionParams, Value>(&self.cancel, req)
+            {
+                let outcome = self.outcome(term, Vec::new(), 1, discovered);
+                child.kill_and_wait();
+                return outcome;
+            }
+        }
 
         // Loop-top cancel check (mirrors the built-in loop's pre-step check).
         if self.cancel.is_requested() {
-            let outcome = self.outcome(Termination::Cancelled, Vec::new(), 1);
+            let outcome = self.outcome(Termination::Cancelled, Vec::new(), 1, discovered);
             child.kill_and_wait();
             return outcome;
         }
@@ -211,6 +250,7 @@ impl AcpEngine {
                 Termination::Transient("session/prompt: broken pipe before send".into()),
                 Vec::new(),
                 1,
+                discovered,
             );
             child.kill_and_wait();
             return outcome;
@@ -265,7 +305,7 @@ impl AcpEngine {
             // result -- surface the real diagnostic, NOT "closed stdout".
             PromptEnd::Failed(reason) => Termination::Transient(reason),
         };
-        let outcome = self.outcome(termination, pump.trace, 1);
+        let outcome = self.outcome(termination, pump.trace, 1, discovered);
         child.kill_and_wait();
         outcome
     }
@@ -275,6 +315,7 @@ impl AcpEngine {
         termination: Termination,
         trace: Vec<TraceEntry>,
         round_trips: u32,
+        discovered: Option<DiscoveredRuntime>,
     ) -> LoopOutcome {
         LoopOutcome {
             termination,
@@ -284,6 +325,9 @@ impl AcpEngine {
             promotions: Vec::new(),
             trace,
             round_trips,
+            // ADR-0095: the handshake's extracted catalog rides every
+            // post-handshake exit (None before / on handshake failure).
+            discovered_runtime: discovered,
         }
     }
 }
@@ -292,11 +336,33 @@ impl AcpEngine {
 // Handshake: initialize + session/new
 // ---------------------------------------------------------------------------
 
+/// The handshake's session facts: the minted session id + the runtime config
+/// discovered from the `session/new` response's `config_options` (ADR-0095).
+/// Discovery is best-effort data -- a catalog with no model / thought_level
+/// entries yields the empty shape, never an error.
+pub(crate) struct HandshakeOutcome {
+    pub session_id: String,
+    pub discovered: DiscoveredRuntime,
+}
+
+/// One `session/setConfigOption` request body (ADR-0095): sets `option_id` to
+/// `value` on the freshly minted session. Sent once after the handshake when
+/// the user selected a thought level; a settable option also reports the
+/// effective value back (the response result is ignored -- the next turn's
+/// handshake re-discovers the truth).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetConfigOptionParams {
+    session_id: String,
+    option_id: String,
+    value: String,
+}
+
 fn handshake(
     io: &mut AcpIo,
     cancel: &CancelToken,
     input: &AcpTurnInput,
-) -> Result<String, Termination> {
+) -> Result<HandshakeOutcome, Termination> {
     let init = io.request_roundtrip::<InitializeParams, wire::InitializeResult>(
         cancel,
         Request::new(
@@ -326,11 +392,15 @@ fn handshake(
             NewSessionParams {
                 cwd: input.cwd.clone(),
                 mcp_servers: input.mcp_servers.clone(),
+                model: input.model.clone(),
             },
         ),
     )?;
     match (new_resp.result, new_resp.error) {
-        (Some(r), _) => Ok(r.session_id),
+        (Some(r), _) => Ok(HandshakeOutcome {
+            session_id: r.session_id,
+            discovered: extract_discovered_runtime(r.config_options.as_ref()),
+        }),
         (None, Some(e)) => Err(Termination::Transient(format!(
             "session/new error: {}",
             e.message
@@ -1103,12 +1173,16 @@ mod tests {
             binary_names: &["nonexistent"],
             argv: &["--json"],
             stream_format: StreamFormat::JsonEventStream,
+            model_arg: None,
+            effort_config_key: None,
         };
         let cancel = Arc::new(CancelToken::new());
         let engine = AcpEngine::new(spec, cancel);
         let input = AcpTurnInput {
             cwd: std::env::temp_dir().to_string_lossy().to_string(),
             mcp_servers: Vec::new(),
+            model: None,
+            thought_level: None,
             prompt_blocks: Vec::new(),
         };
         let approval = crate::approval::ApprovalState::new();

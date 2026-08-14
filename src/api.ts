@@ -46,7 +46,11 @@ import type {
   AuthMode,
   ToolKey,
 } from "./types/approval";
-import type { AdapterEntry, SessionRuntimeChoice } from "./types/runtime";
+import type {
+  AdapterEntry,
+  SessionModelConfig,
+  SessionRuntimeChoice,
+} from "./types/runtime";
 
 // Multi-session addressing (ADR-0056): every session-scoped function takes
 // `sessionId` as its first parameter -- the backend looks up the target
@@ -697,4 +701,33 @@ export async function setSessionRuntime(
   runtime: SessionRuntimeChoice,
 ): Promise<void> {
   await invoke<void>("set_session_runtime", { sessionId, runtime });
+}
+
+// Read the session's external-runtime model config (ADR-0095, issue #527): the
+// model + thought-level selections and the cached discovery catalog. Lock-light
+// server-side -- safe to call while a turn is in flight.
+export async function getSessionModelConfig(
+  sessionId: string,
+): Promise<SessionModelConfig> {
+  return invoke<SessionModelConfig>("get_session_model_config", { sessionId });
+}
+
+// Set the session's model selection for the next external-runtime turn
+// (ADR-0095). `null` clears (the CLI's own default). Takes effect at the next
+// turn boundary; rejected while resuming or while a turn is in flight.
+export async function setSessionModel(
+  sessionId: string,
+  model: string | null,
+): Promise<void> {
+  await invoke<void>("set_session_model", { sessionId, model });
+}
+
+// Set the session's thought-level selection for the next external-runtime turn
+// (ADR-0095). Same semantics as setSessionModel; a no-op posture on the
+// built-in runtime.
+export async function setSessionThoughtLevel(
+  sessionId: string,
+  thoughtLevel: string | null,
+): Promise<void> {
+  await invoke<void>("set_session_thought_level", { sessionId, thoughtLevel });
 }

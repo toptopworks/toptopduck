@@ -481,6 +481,14 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       }
       // Textual / Failed / Cancelled: no working-set change; the optimistic
       // append is the thread state, nothing to invalidate.
+      // ADR-0095: refresh the model config on EVERY outcome kind -- an
+      // external-runtime turn's LoopOutcome.discovered_runtime lands on the
+      // handle cache regardless of how the turn terminated, and the selector
+      // must re-read it (dedupe is inherent: the backend cache is
+      // single-slot). Fire-and-forget like pollPersistError.
+      void queryClient.invalidateQueries({
+        queryKey: sessionKeys.modelConfig(sessionId),
+      });
       setLoading(false);
       void pollPersistError();
     },

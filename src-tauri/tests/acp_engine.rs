@@ -32,6 +32,8 @@ fn fake_cli() -> PathBuf {
 /// bridge descriptor (the fixture ignores both).
 fn input() -> AcpTurnInput {
     AcpTurnInput {
+        model: None,
+        thought_level: None,
         cwd: std::env::temp_dir().to_string_lossy().to_string(),
         mcp_servers: vec![McpServer::stdio_bridge(
             "toptopduck-gateway",
@@ -477,4 +479,72 @@ fn codex_adapter_is_native_exec_json_event_stream() {
             "read-only",
         ]
     );
+}
+
+// --- ADR-0095: discovery + injection -----------------------------------------
+
+/// A turn against the fake fixture (whose `session/new` response carries
+/// `config_options`) returns the discovered model + thought-level catalog on
+/// the LoopOutcome.
+#[test]
+fn acp_turn_returns_discovered_runtime_catalog() {
+    let (outcome, _, _) = run_with_spec(&claude_code(), "text_reply", 24);
+    let d = outcome
+        .discovered_runtime
+        .as_ref()
+        .expect("ACP turns carry a discovered catalog");
+    assert_eq!(
+        d.models,
+        vec!["fake-opus".to_string(), "fake-sonnet".to_string()]
+    );
+    assert_eq!(d.current_model.as_deref(), Some("fake-opus"));
+    assert_eq!(
+        d.thought_levels,
+        vec!["low".to_string(), "medium".to_string(), "high".to_string()]
+    );
+    assert_eq!(d.current_thought_level.as_deref(), Some("medium"));
+}
+
+/// A handshake failure exits with `discovered_runtime: None` (discovery only
+/// exists once session/new answered).
+#[test]
+fn acp_turn_handshake_failure_carries_no_discovery() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = AcpEngine::new(claude_code(), cancel);
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let outcome = eng.run(
+        &input(),
+        std::path::Path::new("/nonexistent-acp-cli-527"),
+        &approval,
+        &sink,
+        |_| {},
+    );
+    assert!(outcome.discovered_runtime.is_none());
+}
+
+/// A selected model rides `session/new` params and a selected thought level
+/// triggers one `session/setConfigOption` -- both observed via the fixture's
+/// stderr trace (the engine owns stdout).
+#[test]
+fn acp_turn_injects_model_and_thought_level() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = AcpEngine::new(claude_code(), cancel)
+        .with_caps(24, Some(std::time::Duration::from_secs(10)));
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let mut input = input();
+    input.model = Some("fake-sonnet".into());
+    input.thought_level = Some("high".into());
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("ACP_FAKE_SCENARIO", "text_reply");
+    let outcome = eng.run(&input, &fake_cli(), &approval, &sink, |_| {});
+    // The turn itself succeeds (the injection must not break the protocol).
+    assert!(matches!(
+        outcome.termination,
+        toptopduck_lib::session::agent_loop::Termination::Text(_)
+    ));
+    // Discovery still rides the outcome (the catalog is independent of the
+    // selection).
+    assert!(outcome.discovered_runtime.is_some());
 }

@@ -27,11 +27,11 @@ vi.mock("../../../api", async (importOriginal) => {
 });
 
 const mockAdapters: AdapterEntry[] = [
-  { id: "claude-code", display_name: "claude-code", detected: true, binary_path: "/usr/local/bin/claude" },
-  { id: "gemini-cli", display_name: "gemini-cli", detected: true, binary_path: "/usr/bin/gemini" },
-  { id: "codex", display_name: "codex", detected: false, binary_path: null },
-  { id: "qwen-code", display_name: "qwen-code", detected: false, binary_path: null },
-  { id: "opencode", display_name: "opencode", detected: true, binary_path: "/opt/homebrew/bin/opencode" },
+  { id: "claude-code", display_name: "claude-code", detected: true, binary_path: "/usr/local/bin/claude", stream_format: "acp" },
+  { id: "gemini-cli", display_name: "gemini-cli", detected: true, binary_path: "/usr/bin/gemini", stream_format: "acp" },
+  { id: "codex", display_name: "codex", detected: false, binary_path: null, stream_format: "acp" },
+  { id: "qwen-code", display_name: "qwen-code", detected: false, binary_path: null, stream_format: "acp" },
+  { id: "opencode", display_name: "opencode", detected: true, binary_path: "/opt/homebrew/bin/opencode", stream_format: "acp" },
 ];
 
 const provider: ProviderConfig = {
@@ -208,7 +208,7 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
   it("rescan button calls rescanAdapters and refreshes the list", async () => {
     const freshAdapters: AdapterEntry[] = [
       ...mockAdapters.slice(0, 2), // still detected
-      { id: "codex", display_name: "codex", detected: true, binary_path: "/usr/bin/codex" }, // now detected
+      { id: "codex", display_name: "codex", detected: true, binary_path: "/usr/bin/codex", stream_format: "json_event_stream" }, // now detected
       ...mockAdapters.slice(3),
     ];
     vi.mocked(rescanAdapters).mockResolvedValue(freshAdapters);

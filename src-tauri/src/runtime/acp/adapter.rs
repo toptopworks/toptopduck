@@ -31,9 +31,13 @@ use std::path::PathBuf;
 /// dispatches on this field -- per-format, NOT per-CLI: multiple CLIs share a
 /// format, adding a CLI never touches the engine, and adding a format adds one
 /// parser path (ADR-0081 zero per-CLI code invariant preserved).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum StreamFormat {
     /// ACP v1 JSON-RPC over stdio (initialize + session/new + session/prompt).
+    /// The serde/default form -- an older payload omitting the field degrades
+    /// to the ACP surface.
+    #[default]
     Acp,
     /// A native JSONL event stream over stdio (codex `exec --json`, ADR-0094).
     JsonEventStream,
@@ -92,6 +96,17 @@ pub struct AdapterSpec {
     /// The wire protocol the CLI speaks over stdio (ADR-0094). Selects the
     /// engine's per-format dispatch path.
     pub stream_format: StreamFormat,
+    /// The argv flag that carries the model id at spawn (ADR-0095). Consumed
+    /// ONLY by the JsonEventStream path (the engine appends `[flag, value]`
+    /// after the argv prefix). `None` on ACP adapters -- the ACP path injects
+    /// the model via `NewSessionParams.model` instead.
+    pub model_arg: Option<&'static str>,
+    /// The runtime-config key for the reasoning-effort setting (ADR-0095).
+    /// Consumed ONLY by the JsonEventStream path (the engine appends
+    /// `["-c", "{key}={value}"]` to argv when a thought level is selected).
+    /// `None` on ACP adapters -- the ACP path sends one
+    /// `session/setConfigOption` request after the handshake instead.
+    pub effort_config_key: Option<&'static str>,
 }
 
 impl AdapterSpec {
@@ -121,6 +136,8 @@ pub const fn claude_code() -> AdapterSpec {
         binary_names: &["claude", "claude-code"],
         argv: &["--acp"],
         stream_format: StreamFormat::Acp,
+        model_arg: None,
+        effort_config_key: None,
     }
 }
 
@@ -142,6 +159,8 @@ pub const fn gemini_cli() -> AdapterSpec {
         binary_names: &["gemini"],
         argv: &["--experimental-acp"],
         stream_format: StreamFormat::Acp,
+        model_arg: None,
+        effort_config_key: None,
     }
 }
 
@@ -173,6 +192,12 @@ pub const fn codex() -> AdapterSpec {
             "read-only",
         ],
         stream_format: StreamFormat::JsonEventStream,
+        // ADR-0095: codex's native `exec` takes the model as `--model <id>`
+        // and the reasoning effort via the config override
+        // `-c model_reasoning_effort=<value>` (same `-c` mechanism the bridge
+        // injection uses, ADR-0094).
+        model_arg: Some("--model"),
+        effort_config_key: Some("model_reasoning_effort"),
     }
 }
 
@@ -192,6 +217,8 @@ pub const fn qwen_code() -> AdapterSpec {
         binary_names: &["qwen"],
         argv: &["--acp"],
         stream_format: StreamFormat::Acp,
+        model_arg: None,
+        effort_config_key: None,
     }
 }
 
@@ -213,6 +240,8 @@ pub const fn opencode() -> AdapterSpec {
         binary_names: &["opencode"],
         argv: &["acp"],
         stream_format: StreamFormat::Acp,
+        model_arg: None,
+        effort_config_key: None,
     }
 }
 
@@ -261,6 +290,96 @@ pub fn detect_adapter(spec: &AdapterSpec) -> Option<PathBuf> {
     None
 }
 
+// ---------------------------------------------------------------------------
+// Runtime discovery (ADR-0095)
+// ---------------------------------------------------------------------------
+
+/// The model + thought-level catalog extracted from an ACP handshake's
+/// `config_options` (ADR-0095 Discovery Decision). Produced by the engine at
+/// the handshake boundary (per format: ACP extracts, JsonEventStream has none),
+/// returned to the frontend via `LoopOutcome.discovered_runtime`, and cached
+/// on the session for resume cold-start rendering.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DiscoveredRuntime {
+    /// The model ids the CLI offered (empty when the CLI reports none).
+    pub models: Vec<String>,
+    /// The model the CLI reported as current / default, if any.
+    pub current_model: Option<String>,
+    /// The thought-level ids the CLI offered (empty when none).
+    pub thought_levels: Vec<String>,
+    /// The thought level the CLI reported as current / default, if any.
+    pub current_thought_level: Option<String>,
+}
+
+impl DiscoveredRuntime {
+    /// Nothing discovered (the honest empty shape for a config_options value
+    /// that carried no model / thought_level entries).
+    pub fn empty() -> Self {
+        Self {
+            models: Vec::new(),
+            current_model: None,
+            thought_levels: Vec::new(),
+            current_thought_level: None,
+        }
+    }
+}
+
+/// The stable option ids the ACP discovery path keys on (ADR-0095): the
+/// standard ACP option ids whose values carry a model id and a thought-level
+/// id. A CLI naming either differently simply contributes nothing to
+/// [`DiscoveredRuntime`] -- discovery degrades to the empty shape, it never
+/// fails the turn.
+pub(crate) const MODEL_OPTION_ID: &str = "model";
+pub(crate) const THOUGHT_LEVEL_OPTION_ID: &str = "thought_level";
+
+/// Extract the [`DiscoveredRuntime`] from a raw `config_options` value
+/// (ADR-0095): the ACP config catalog is an array of
+/// `{ option_id, value, schema }` entries; the `model` and `thought_level`
+/// entries carry the current values while their `schema.options[].value`
+/// list the offered choices. Pure + total: any malformed shape (missing
+/// fields, wrong types, a non-array catalog) contributes nothing -- the
+/// result degrades to empty lists / `None` currents, never an error (a
+/// turn must not fail because a CLI's config shape drifted).
+pub fn extract_discovered_runtime(config_options: Option<&serde_json::Value>) -> DiscoveredRuntime {
+    let mut out = DiscoveredRuntime::empty();
+    let Some(entries) = config_options.and_then(|v| v.as_array()) else {
+        return out;
+    };
+    for entry in entries {
+        let option_id = entry.get("option_id").and_then(|v| v.as_str());
+        let value = entry.get("value");
+        let options = entry
+            .get("schema")
+            .and_then(|s| s.get("options"))
+            .and_then(|o| o.as_array());
+        match option_id {
+            Some(id) if id == MODEL_OPTION_ID => {
+                out.current_model = value.and_then(|v| v.as_str()).map(str::to_string);
+                if let Some(options) = options {
+                    out.models = options
+                        .iter()
+                        .filter_map(|o| o.get("value").and_then(|v| v.as_str()))
+                        .map(str::to_string)
+                        .collect();
+                }
+            }
+            Some(id) if id == THOUGHT_LEVEL_OPTION_ID => {
+                out.current_thought_level = value.and_then(|v| v.as_str()).map(str::to_string);
+                if let Some(options) = options {
+                    out.thought_levels = options
+                        .iter()
+                        .filter_map(|o| o.get("value").and_then(|v| v.as_str()))
+                        .map(str::to_string)
+                        .collect();
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// `which`-style PATH lookup for a single binary name. Returns the first
 /// `PATH` entry that holds the binary as an executable. Windows appends the
 /// standard executable suffixes (`.exe` first; `.bat` / `.cmd` cover npm
@@ -296,6 +415,122 @@ fn which(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    // --- extract_discovered_runtime (ADR-0095) ------------------------------
+
+    /// The full happy path: a catalog with model + thought_level entries, each
+    /// carrying a current value and an offered-choices list.
+    #[test]
+    fn extract_finds_model_and_thought_level_entries() {
+        let catalog = json!([
+            {
+                "option_id": "model",
+                "value": "claude-sonnet-4",
+                "schema": { "options": [
+                    { "value": "claude-sonnet-4", "label": "Sonnet" },
+                    { "value": "claude-opus-4", "label": "Opus" },
+                ]},
+            },
+            {
+                "option_id": "thought_level",
+                "value": "medium",
+                "schema": { "options": [
+                    { "value": "low" }, { "value": "medium" }, { "value": "high" },
+                ]},
+            },
+            { "option_id": "other", "value": "ignored" },
+        ]);
+        let d = extract_discovered_runtime(Some(&catalog));
+        assert_eq!(
+            d.models,
+            vec!["claude-sonnet-4".to_string(), "claude-opus-4".to_string()]
+        );
+        assert_eq!(d.current_model.as_deref(), Some("claude-sonnet-4"));
+        assert_eq!(
+            d.thought_levels,
+            vec!["low".to_string(), "medium".to_string(), "high".to_string()]
+        );
+        assert_eq!(d.current_thought_level.as_deref(), Some("medium"));
+    }
+
+    /// None config_options / an empty array / unknown option ids all degrade
+    /// to the empty shape (discovery is optional data, never a failure).
+    #[test]
+    fn extract_missing_or_empty_catalog_degrades_to_empty() {
+        assert_eq!(extract_discovered_runtime(None), DiscoveredRuntime::empty());
+        assert_eq!(
+            extract_discovered_runtime(Some(&json!([]))),
+            DiscoveredRuntime::empty()
+        );
+        assert_eq!(
+            extract_discovered_runtime(Some(&json!([{"option_id": "mode"}]))),
+            DiscoveredRuntime::empty()
+        );
+    }
+
+    /// Malformed shapes (non-array catalog, non-string values, a missing
+    /// schema) contribute nothing -- the matching fields stay empty / None
+    /// and the rest of the entry is ignored, never an error.
+    #[test]
+    fn extract_malformed_shapes_contribute_nothing() {
+        // A non-array catalog is not a catalog.
+        assert_eq!(
+            extract_discovered_runtime(Some(&json!({"option_id": "model"}))),
+            DiscoveredRuntime::empty()
+        );
+        // A model entry whose value is not a string: no current, but the
+        // offered list still extracts.
+        let d = extract_discovered_runtime(Some(&json!([
+            {
+                "option_id": "model",
+                "value": 42,
+                "schema": { "options": [{ "value": "m1" }] },
+            }
+        ])));
+        assert_eq!(d.models, vec!["m1".to_string()]);
+        assert_eq!(d.current_model, None);
+        // A thought_level entry with no schema: the current value still
+        // extracts (an offered list is optional information).
+        let d = extract_discovered_runtime(Some(&json!([
+            { "option_id": "thought_level", "value": "high" }
+        ])));
+        assert!(d.thought_levels.is_empty());
+        assert_eq!(d.current_thought_level.as_deref(), Some("high"));
+    }
+
+    /// The serde round-trip: snake_case field names survive persistence (the
+    /// shape is cached on the session and persisted to the recipe, ADR-0095).
+    #[test]
+    fn discovered_runtime_round_trips_snake_case() {
+        let d = DiscoveredRuntime {
+            models: vec!["m1".into()],
+            current_model: Some("m1".into()),
+            thought_levels: vec!["low".into()],
+            current_thought_level: None,
+        };
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(v["models"], json!(["m1"]));
+        assert_eq!(v["current_model"], "m1");
+        assert_eq!(v["current_thought_level"], serde_json::Value::Null);
+        let back: DiscoveredRuntime = serde_json::from_value(v).unwrap();
+        assert_eq!(back, d);
+    }
+
+    /// ADR-0095 injection fields: ACP adapters carry `None` (protocol
+    /// injection), the JsonEventStream adapter (codex) carries `--model` +
+    /// the reasoning-effort config key.
+    #[test]
+    fn adapters_declare_per_format_injection_fields() {
+        for spec in [claude_code(), gemini_cli(), qwen_code(), opencode()] {
+            assert_eq!(spec.stream_format, StreamFormat::Acp);
+            assert!(spec.model_arg.is_none(), "{}", spec.id);
+            assert!(spec.effort_config_key.is_none(), "{}", spec.id);
+        }
+        let codex = codex();
+        assert_eq!(codex.model_arg, Some("--model"));
+        assert_eq!(codex.effort_config_key, Some("model_reasoning_effort"));
+    }
 
     /// The claude-code adapter carries both installer binary names + the ACP
     /// argv prefix. The engine reads these as data, never naming the CLI.

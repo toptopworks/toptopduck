@@ -760,6 +760,18 @@ impl super::Session {
             session.mounted_skills = recipe.mounted_skills();
         }
 
+        // ADR-0095 Decision 6: restore the session-level model config from
+        // the recipe header. The selections + discovery cache seed BOTH the
+        // Session's recipe-header facts (so the post-resume persist below
+        // rewrites them unchanged) and the caller-visible read
+        // (open_duck at the command layer restores them onto the handle via
+        // `Session::runtime_model_config`).
+        session.runtime_model_config = super::RuntimeModelConfig {
+            model: recipe.model.clone(),
+            thought_level: recipe.thought_level.clone(),
+            cached_discovered: recipe.cached_discovered.clone(),
+        };
+
         // Phase 5: persist the post-resume state. adopt_resumed already set
         // duck_path + the baseline, so only the write remains. build_recipe
         // reads the live working set, so relinked paths, dropped (rebuilt)

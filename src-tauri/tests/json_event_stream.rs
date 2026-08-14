@@ -31,6 +31,8 @@ fn fake_cli() -> PathBuf {
 /// (the fixture ignores both).
 fn input() -> AcpTurnInput {
     AcpTurnInput {
+        model: None,
+        thought_level: None,
         cwd: std::env::temp_dir().to_string_lossy().to_string(),
         mcp_servers: vec![McpServer::stdio_bridge(
             "toptopduck-gateway",
