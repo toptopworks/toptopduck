@@ -56,6 +56,12 @@ export interface DiscoveredRuntime {
   // category id). Not user-facing; consumed by the injection path.
   model_config_id?: string;
   thought_level_config_id?: string;
+  // The adapter that produced this catalog (issue #529): stamped by the
+  // engine after the handshake extract. The picker compares it against the
+  // active runtime to detect a catalog cached under a different adapter
+  // (stale across a runtime switch). Absent on recipes persisted before the
+  // field existed (old-recipe compatibility) -- treated as no provenance.
+  adapter_id?: string;
 }
 
 // The session's external-runtime model config (ADR-0095, issue #527): the two

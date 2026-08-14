@@ -1260,8 +1260,9 @@ fn session_model_config_wire_shape() {
                 current_thought_level: None,
                 model_config_id: Some("model".into()),
                 thought_level_config_id: Some("reasoning_effort".into()),
+                adapter_id: Some("claude-code".into()),
             }),
         },
-        r#"{"model":"fake-opus","thought_level":"high","cached_discovered":{"models":["fake-opus","fake-sonnet"],"current_model":"fake-opus","thought_levels":["low"],"current_thought_level":null,"model_config_id":"model","thought_level_config_id":"reasoning_effort"}}"#,
+        r#"{"model":"fake-opus","thought_level":"high","cached_discovered":{"models":["fake-opus","fake-sonnet"],"current_model":"fake-opus","thought_levels":["low"],"current_thought_level":null,"model_config_id":"model","thought_level_config_id":"reasoning_effort","adapter_id":"claude-code"}}"#,
     );
 }

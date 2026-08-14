@@ -320,6 +320,14 @@ pub struct DiscoveredRuntime {
     /// Same as [`Self::model_config_id`] for the thought-level entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thought_level_config_id: Option<String>,
+    /// The adapter that produced this catalog (issue #529): stamped by the
+    /// engine after the handshake extract, NOT read from the CLI wire (the
+    /// config_options shape carries no adapter identity). The frontend
+    /// compares it against the active runtime to detect a catalog cached
+    /// under a different adapter (stale across a runtime switch). Absent on
+    /// recipes persisted before the field existed (old-recipe compatibility).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_id: Option<String>,
 }
 
 impl DiscoveredRuntime {
@@ -333,6 +341,7 @@ impl DiscoveredRuntime {
             current_thought_level: None,
             model_config_id: None,
             thought_level_config_id: None,
+            adapter_id: None,
         }
     }
 }
@@ -514,6 +523,10 @@ mod tests {
         // constant -- a hardcoded injection would miss it).
         assert_eq!(d.model_config_id.as_deref(), Some("model"));
         assert_eq!(d.thought_level_config_id.as_deref(), Some("thought"));
+        // The engine stamps the producing adapter AFTER the extract (issue
+        // #529) -- the raw wire shape carries no adapter identity, so the
+        // extract itself leaves the slot None (empty() sets it None too).
+        assert_eq!(d.adapter_id, None);
     }
 
     /// The grouped-options shape (SessionConfigSelectOptions::Grouped, serde

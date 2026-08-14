@@ -13,10 +13,11 @@ import {
   setSessionModel,
   setSessionRuntime,
   setSessionThoughtLevel,
+  takePersistError,
 } from "../../../api";
 import { TooltipProvider } from "../../ui/tooltip";
 import type { ProviderConfig, ProfileKeyStatus } from "../../../types/provider";
-import type { AdapterEntry, SessionRuntimeChoice } from "../../../types/runtime";
+import type { AdapterEntry, DiscoveredRuntime, SessionRuntimeChoice } from "../../../types/runtime";
 
 // ComposerProviderPicker routes its chrome through react-intl (ADR-0052) +
 // needs a Radix TooltipProvider ancestor for the hover Tooltip + a
@@ -37,6 +38,7 @@ vi.mock("../../../api", async (importOriginal) => {
     getSessionModelConfig: vi.fn(),
     setSessionModel: vi.fn(async () => {}),
     setSessionThoughtLevel: vi.fn(async () => {}),
+    takePersistError: vi.fn(async () => null),
   };
 });
 
@@ -832,5 +834,264 @@ describe("ComposerProviderPicker model config selectors (ADR-0095)", () => {
     expect(
       screen.queryByText(/Model options appear after the first turn/),
     ).not.toBeInTheDocument();
+  });
+});
+
+// --- #529: honest rendering of unrepresentable values + failure feedback ----
+
+describe("ComposerProviderPicker honest selector states (issue #529)", () => {
+  beforeEach(() => {
+    // Self-contained seeding (same isolation contract as the ADR-0095
+    // describe above).
+    vi.clearAllMocks();
+    vi.mocked(listProviderProfiles).mockResolvedValue([]);
+    vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
+    vi.mocked(setSessionRuntime).mockResolvedValue(undefined);
+    vi.mocked(listAdapters).mockResolvedValue([]);
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: null,
+      thought_level: null,
+      cached_discovered: null,
+    });
+    vi.mocked(setSessionModel).mockResolvedValue(undefined);
+    vi.mocked(setSessionThoughtLevel).mockResolvedValue(undefined);
+    vi.mocked(takePersistError).mockResolvedValue(null);
+  });
+
+  const CATALOG = {
+    models: ["fake-opus", "fake-sonnet"],
+    current_model: "fake-opus",
+    thought_levels: ["low", "medium", "high"],
+    current_thought_level: "medium",
+    adapter_id: "claude-code",
+  } satisfies DiscoveredRuntime;
+
+  // Seed an external ACP runtime + open the popover. `config` overrides the
+  // model-config read; `adapterId` defaults to the catalog's adapter so the
+  // cache reads as fresh.
+  async function openExternal(
+    config: Parameters<typeof getSessionModelConfig>[0] extends never ? never : {
+      model: string | null;
+      thought_level: string | null;
+      cached_discovered: DiscoveredRuntime | null;
+    },
+    adapterId = "claude-code",
+  ) {
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: adapterId,
+    });
+    vi.mocked(listAdapters).mockResolvedValue([adapter(adapterId)]);
+    vi.mocked(getSessionModelConfig).mockResolvedValue(config);
+    renderPicker(
+      <ComposerProviderPicker
+        sessionId="sess-1"
+        provider={pickerProvider()}
+        onSwitchActive={() => {}}
+        onSwitchModel={() => {}}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    const trigger = await screen.findByRole("button", {
+      name: new RegExp(`Runtime: ${adapterId}`),
+    });
+    fireEvent.click(trigger);
+  }
+
+  it("renders a fallback option for a selected model not in the catalog", async () => {
+    // Catalog drift: the session holds "fake-o3" but the refreshed catalog no
+    // longer offers it. The select must still SHOW it (never blank).
+    await openExternal({
+      model: "fake-o3",
+      thought_level: null,
+      cached_discovered: CATALOG,
+    });
+    const modelSelect = await screen.findByLabelText("Model");
+    const fallback = modelSelect.querySelector(
+      "option[value=\"fake-o3\"]",
+    ) as HTMLOptionElement;
+    expect(fallback).toBeInTheDocument();
+    expect(fallback.textContent).toContain("fake-o3");
+    expect(fallback.textContent).toContain("not offered");
+    // The controlled value resolves -- the select shows the backend posture.
+    expect((modelSelect as HTMLSelectElement).value).toBe("fake-o3");
+  });
+
+  it("renders a fallback option for a CLI current value not in the catalog", async () => {
+    await openExternal({
+      model: null,
+      thought_level: null,
+      cached_discovered: {
+        ...CATALOG,
+        current_model: "ghost-model",
+      },
+    });
+    const modelSelect = await screen.findByLabelText("Model");
+    expect(
+      modelSelect.querySelector("option[value=\"ghost-model\"]"),
+    ).toBeInTheDocument();
+    expect((modelSelect as HTMLSelectElement).value).toBe("ghost-model");
+  });
+
+  it("flags a catalog cached under a different adapter and lets the user clear the model", async () => {
+    // The runtime switched to gemini-cli but the cache still holds the
+    // claude-code catalog (replace-on-Some only updates after gemini's first
+    // turn). A stale marker renders + the residual selection stays visible.
+    await openExternal(
+      {
+        model: "fake-opus",
+        thought_level: null,
+        cached_discovered: CATALOG,
+      },
+      "gemini-cli",
+    );
+    expect(
+      await screen.findByText(/discovered on a different runtime/),
+    ).toBeInTheDocument();
+    // The residual selection renders (via the catalog options) and clearing
+    // it writes null (the "" -> null boundary).
+    const modelSelect = await screen.findByLabelText("Model");
+    expect((modelSelect as HTMLSelectElement).value).toBe("fake-opus");
+    fireEvent.change(modelSelect, { target: { value: "" } });
+    await waitFor(() => expect(setSessionModel).toHaveBeenCalledWith("sess-1", null));
+  });
+
+  it("treats a pre-stamp catalog (no adapter_id) as usable without a stale flag", async () => {
+    // Old recipes carry no adapter_id -- the catalog still renders, no stale
+    // marker (no provenance is not a mismatch).
+    const preStamp = { ...CATALOG, adapter_id: undefined };
+    await openExternal({
+      model: null,
+      thought_level: null,
+      cached_discovered: preStamp,
+    });
+    const modelSelect = await screen.findByLabelText("Model");
+    expect(modelSelect).toBeInTheDocument();
+    expect(
+      screen.queryByText(/discovered on a different runtime/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not flag the stale catalog on a JsonEventStream runtime (never refreshed)", async () => {
+    // A JES runtime (codex) never reports a catalog, so its turns would
+    // never replace an ACP-produced cache -- the "refreshes after the next
+    // turn" promise would be a permanent lie. The read-only CLI-default
+    // surface renders with no stale marker.
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "codex",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([
+      { ...adapter("codex"), stream_format: "json_event_stream" },
+    ]);
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: null,
+      thought_level: null,
+      cached_discovered: CATALOG,
+    });
+    renderPicker(
+      <ComposerProviderPicker
+        sessionId="sess-1"
+        provider={pickerProvider()}
+        onSwitchActive={() => {}}
+        onSwitchModel={() => {}}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Runtime: codex/ }),
+    );
+    expect(await screen.findAllByText("CLI default")).toHaveLength(2);
+    expect(
+      screen.queryByText(/discovered on a different runtime/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders an inline error when the model-config read fails (not the pending hint)", async () => {
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "claude-code",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([adapter("claude-code")]);
+    vi.mocked(getSessionModelConfig).mockRejectedValue(new Error("ipc down"));
+    renderPicker(
+      <ComposerProviderPicker
+        sessionId="sess-1"
+        provider={pickerProvider()}
+        onSwitchActive={() => {}}
+        onSwitchModel={() => {}}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Runtime: claude-code/ }),
+    );
+    // The honest error line, NOT the discovery-pending hint masquerading as
+    // "no catalog yet".
+    expect(
+      await screen.findByText(/Could not load model options/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Model options appear after the first turn/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
+  });
+
+  it("renders an inline error and resyncs when the set-model IPC rejects", async () => {
+    await openExternal({
+      model: null,
+      thought_level: null,
+      cached_discovered: CATALOG,
+    });
+    vi.mocked(setSessionModel).mockRejectedValue(new Error("write refused"));
+    const modelSelect = await screen.findByLabelText("Model");
+    fireEvent.change(modelSelect, { target: { value: "fake-sonnet" } });
+    expect(
+      await screen.findByText(/Could not apply the selection/),
+    ).toBeInTheDocument();
+    // The refetch-on-reject bounces the select back to the backend posture:
+    // no selection held -> the CLI's current default (not the rejected
+    // "fake-sonnet" the optimistic write never granted).
+    await waitFor(() =>
+      expect((screen.getByLabelText("Model") as HTMLSelectElement).value).toBe(
+        "fake-opus",
+      ),
+    );
+  });
+
+  it("renders an inline error when the set-thought-level IPC rejects", async () => {
+    await openExternal({
+      model: null,
+      thought_level: null,
+      cached_discovered: CATALOG,
+    });
+    vi.mocked(setSessionThoughtLevel).mockRejectedValue(
+      new Error("write refused"),
+    );
+    const thinkSelect = await screen.findByLabelText("Thinking");
+    fireEvent.change(thinkSelect, { target: { value: "high" } });
+    expect(
+      await screen.findByText(/Could not apply the selection/),
+    ).toBeInTheDocument();
+  });
+
+  it("surfaces a persistence failure read after a successful set", async () => {
+    // The set IPC resolves, but the backend's persist-now path failed -- the
+    // selector says the selection was NOT saved to disk.
+    vi.mocked(takePersistError).mockResolvedValue({
+      kind: "Io",
+      data: "disk full",
+    });
+    await openExternal({
+      model: null,
+      thought_level: null,
+      cached_discovered: CATALOG,
+    });
+    const modelSelect = await screen.findByLabelText("Model");
+    fireEvent.change(modelSelect, { target: { value: "fake-sonnet" } });
+    expect(
+      await screen.findByText(/Selection not saved/),
+    ).toBeInTheDocument();
+    expect(takePersistError).toHaveBeenCalledWith("sess-1");
   });
 });

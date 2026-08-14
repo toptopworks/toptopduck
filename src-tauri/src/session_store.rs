@@ -1243,6 +1243,7 @@ mod tests {
             current_thought_level: None,
             model_config_id: Some("model".into()),
             thought_level_config_id: Some("reasoning_effort".into()),
+            adapter_id: Some("claude-code".into()),
         };
         handle.set_cached_discovered(Some(catalog.clone()));
         assert_eq!(handle.cached_discovered(), Some(catalog.clone()));

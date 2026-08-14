@@ -1639,6 +1639,7 @@ mod tests {
                 current_thought_level: Some("high".into()),
                 model_config_id: Some("model".into()),
                 thought_level_config_id: Some("thought".into()),
+                adapter_id: Some("claude-code".into()),
             }),
         );
         let v = serde_json::to_value(&layered).expect("serialize");
@@ -1651,5 +1652,33 @@ mod tests {
         let back: Recipe = serde_json::from_value(v).expect("round-trip");
         assert_eq!(back.model.as_deref(), Some("fake-opus"));
         assert_eq!(back.cached_discovered, layered.cached_discovered);
+        assert_eq!(
+            back.cached_discovered.and_then(|d| d.adapter_id),
+            Some("claude-code".to_string())
+        );
+    }
+
+    /// Issue #529: a recipe persisted before the adapter-id stamp carries no
+    /// `adapter_id` inside `cached_discovered` -- it must deserialize as
+    /// `None` (old-recipe compatibility), and the stamp round-trips when set.
+    #[test]
+    fn recipe_cached_discovered_adapter_id_defaults_none() {
+        let old_catalog = serde_json::json!({
+            "format_version": 1,
+            "session_name": "s",
+            "sources": [],
+            "history": [],
+            "model": "fake-opus",
+            "cached_discovered": {
+                "models": ["fake-opus"],
+                "current_model": "fake-opus",
+                "thought_levels": ["low"],
+                "current_thought_level": null
+            }
+        });
+        let recipe: Recipe = serde_json::from_value(old_catalog).expect("pre-stamp recipe parses");
+        let cached = recipe.cached_discovered.expect("catalog present");
+        assert_eq!(cached.models, vec!["fake-opus".to_string()]);
+        assert_eq!(cached.adapter_id, None);
     }
 }

@@ -195,7 +195,7 @@ impl AcpEngine {
 
         // Handshake: initialize -> session/new. A failure here is a transient
         // turn failure (the CLI is not an ACP agent / crashed).
-        let hs = match handshake(&mut io, &self.cancel, input) {
+        let hs = match handshake(&mut io, &self.cancel, input, &self.adapter) {
             Ok(hs) => hs,
             Err(term) => {
                 let outcome = self.outcome(term, Vec::new(), 1, None);
@@ -416,6 +416,7 @@ fn handshake(
     io: &mut AcpIo,
     cancel: &CancelToken,
     input: &AcpTurnInput,
+    adapter: &AdapterSpec,
 ) -> Result<HandshakeOutcome, Termination> {
     let init = io.request_roundtrip::<InitializeParams, wire::InitializeResult>(
         cancel,
@@ -450,10 +451,17 @@ fn handshake(
         ),
     )?;
     match (new_resp.result, new_resp.error) {
-        (Some(r), _) => Ok(HandshakeOutcome {
-            session_id: r.session_id,
-            discovered: extract_discovered_runtime(r.config_options.as_ref()),
-        }),
+        (Some(r), _) => {
+            // Issue #529: stamp the producing adapter onto the catalog so the
+            // frontend can detect a cache that predates a runtime switch (the
+            // config_options wire carries no adapter identity).
+            let mut discovered = extract_discovered_runtime(r.config_options.as_ref());
+            discovered.adapter_id = Some(adapter.id.to_string());
+            Ok(HandshakeOutcome {
+                session_id: r.session_id,
+                discovered,
+            })
+        }
         (None, Some(e)) => Err(Termination::Transient(format!(
             "session/new error: {}",
             e.message
