@@ -1266,3 +1266,33 @@ fn session_model_config_wire_shape() {
         r#"{"model":"fake-opus","thought_level":"high","cached_discovered":{"models":["fake-opus","fake-sonnet"],"current_model":"fake-opus","thought_levels":["low"],"current_thought_level":null,"model_config_id":"model","thought_level_config_id":"reasoning_effort","adapter_id":"claude-code"}}"#,
     );
 }
+
+/// Issue #529: the set commands' persist-now verdict rides the command
+/// RETURN (in-process, read before the session lock drops) instead of a
+/// post-hoc shared-slot read -- pin the wire shape.
+#[test]
+fn set_model_persist_outcome_wire_shape() {
+    use toptopduck_lib::commands::SetModelPersistOutcome;
+    use toptopduck_lib::persistence::SaveError;
+    assert_wire(
+        &SetModelPersistOutcome {
+            persist_error: None,
+            persist_suspended: false,
+        },
+        r#"{"persist_error":null,"persist_suspended":false}"#,
+    );
+    assert_wire(
+        &SetModelPersistOutcome {
+            persist_error: Some(SaveError::Io("disk full".into())),
+            persist_suspended: false,
+        },
+        r#"{"persist_error":{"kind":"Io","data":"disk full"},"persist_suspended":false}"#,
+    );
+    assert_wire(
+        &SetModelPersistOutcome {
+            persist_error: None,
+            persist_suspended: true,
+        },
+        r#"{"persist_error":null,"persist_suspended":true}"#,
+    );
+}

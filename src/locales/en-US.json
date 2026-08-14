@@ -58,6 +58,7 @@
   "composer.runtimePicker.loadError": "Could not load model options: {reason}",
   "composer.runtimePicker.applyError": "Could not apply the selection: {reason}",
   "composer.runtimePicker.persistFault": "Selection not saved: {reason}",
+  "composer.runtimePicker.persistSuspended": "Selection not saved: the session file was changed outside the app, so autosave is paused until you resolve the conflict.",
   "composer.runtimePicker.staleCatalog": "These options were discovered on a different runtime — they will refresh after this runtime's next turn.",
   "composer.runtimePicker.unrepresentedModel": "{id} (not offered by this runtime)",
   "composer.runtimePicker.unrepresentedThoughtLevel": "{id} (not offered by this runtime)",

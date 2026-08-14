@@ -13,7 +13,7 @@ import {
   setSessionModel,
   setSessionRuntime,
   setSessionThoughtLevel,
-  takePersistError,
+  type SetModelPersistOutcome,
 } from "../../../api";
 import { TooltipProvider } from "../../ui/tooltip";
 import type { ProviderConfig, ProfileKeyStatus } from "../../../types/provider";
@@ -36,11 +36,16 @@ vi.mock("../../../api", async (importOriginal) => {
     setSessionRuntime: vi.fn(async () => {}),
     listAdapters: vi.fn(),
     getSessionModelConfig: vi.fn(),
-    setSessionModel: vi.fn(async () => {}),
-    setSessionThoughtLevel: vi.fn(async () => {}),
-    takePersistError: vi.fn(async () => null),
+    setSessionModel: vi.fn(async () => PERSIST_OK),
+    setSessionThoughtLevel: vi.fn(async () => PERSIST_OK),
   };
 });
+
+// The set commands' clean persist verdict (issue #529): the write landed.
+const PERSIST_OK: SetModelPersistOutcome = {
+  persist_error: null,
+  persist_suspended: false,
+};
 
 // Build the provider tree around `ui` with a fresh QueryClient (retry off so
 // a rejected query does not retry under waitFor). Exposed so a rerender
@@ -853,9 +858,8 @@ describe("ComposerProviderPicker honest selector states (issue #529)", () => {
       thought_level: null,
       cached_discovered: null,
     });
-    vi.mocked(setSessionModel).mockResolvedValue(undefined);
-    vi.mocked(setSessionThoughtLevel).mockResolvedValue(undefined);
-    vi.mocked(takePersistError).mockResolvedValue(null);
+    vi.mocked(setSessionModel).mockResolvedValue(PERSIST_OK);
+    vi.mocked(setSessionThoughtLevel).mockResolvedValue(PERSIST_OK);
   });
 
   const CATALOG = {
@@ -870,11 +874,7 @@ describe("ComposerProviderPicker honest selector states (issue #529)", () => {
   // model-config read; `adapterId` defaults to the catalog's adapter so the
   // cache reads as fresh.
   async function openExternal(
-    config: Parameters<typeof getSessionModelConfig>[0] extends never ? never : {
-      model: string | null;
-      thought_level: string | null;
-      cached_discovered: DiscoveredRuntime | null;
-    },
+    config: Awaited<ReturnType<typeof getSessionModelConfig>>,
     adapterId = "claude-code",
   ) {
     vi.mocked(getSessionRuntime).mockResolvedValue({
@@ -931,6 +931,40 @@ describe("ComposerProviderPicker honest selector states (issue #529)", () => {
       modelSelect.querySelector("option[value=\"ghost-model\"]"),
     ).toBeInTheDocument();
     expect((modelSelect as HTMLSelectElement).value).toBe("ghost-model");
+  });
+
+  it("renders a fallback option for a selected thought level not in the catalog", async () => {
+    // Thought-level mirror of the model fallback: the session holds "ultra"
+    // but the catalog does not offer it -- the select must still SHOW it.
+    await openExternal({
+      model: null,
+      thought_level: "ultra",
+      cached_discovered: CATALOG,
+    });
+    const thinkSelect = await screen.findByLabelText("Thinking");
+    const fallback = thinkSelect.querySelector(
+      "option[value=\"ultra\"]",
+    ) as HTMLOptionElement;
+    expect(fallback).toBeInTheDocument();
+    expect(fallback.textContent).toContain("ultra");
+    expect(fallback.textContent).toContain("not offered");
+    expect((thinkSelect as HTMLSelectElement).value).toBe("ultra");
+  });
+
+  it("renders a fallback option for a CLI current thought level not in the catalog", async () => {
+    await openExternal({
+      model: null,
+      thought_level: null,
+      cached_discovered: {
+        ...CATALOG,
+        current_thought_level: "ghost-level",
+      },
+    });
+    const thinkSelect = await screen.findByLabelText("Thinking");
+    expect(
+      thinkSelect.querySelector("option[value=\"ghost-level\"]"),
+    ).toBeInTheDocument();
+    expect((thinkSelect as HTMLSelectElement).value).toBe("ghost-level");
   });
 
   it("flags a catalog cached under a different adapter and lets the user clear the model", async () => {
@@ -1073,15 +1107,62 @@ describe("ComposerProviderPicker honest selector states (issue #529)", () => {
     expect(
       await screen.findByText(/Could not apply the selection/),
     ).toBeInTheDocument();
+    // The refetch-on-reject bounces the select back to the backend posture:
+    // no selection held -> the CLI's current default (not the rejected
+    // "high" the optimistic write never granted).
+    await waitFor(() =>
+      expect((screen.getByLabelText("Thinking") as HTMLSelectElement).value).toBe(
+        "medium",
+      ),
+    );
   });
 
-  it("surfaces a persistence failure read after a successful set", async () => {
-    // The set IPC resolves, but the backend's persist-now path failed -- the
-    // selector says the selection was NOT saved to disk.
-    vi.mocked(takePersistError).mockResolvedValue({
-      kind: "Io",
-      data: "disk full",
+  it("surfaces a persistence failure returned by a successful set", async () => {
+    // The set IPC resolves, but the returned persist verdict carries a typed
+    // write failure -- the selector says the selection was NOT saved to disk.
+    vi.mocked(setSessionModel).mockResolvedValue({
+      persist_error: { kind: "Io", data: "disk full" },
+      persist_suspended: false,
     });
+    await openExternal({
+      model: null,
+      thought_level: null,
+      cached_discovered: CATALOG,
+    });
+    const modelSelect = await screen.findByLabelText("Model");
+    fireEvent.change(modelSelect, { target: { value: "fake-sonnet" } });
+    expect(
+      await screen.findByText(/Selection not saved: Failed to write/),
+    ).toBeInTheDocument();
+  });
+
+  it("surfaces a persist suspension (ADR-0035 conflict) returned by a successful set", async () => {
+    // The set IPC resolves, but the persist was WITHHELD: the .duck changed
+    // externally, so the auto-write is suspended. The old shared-slot read
+    // could not see this path at all (no persist_error is set on it).
+    vi.mocked(setSessionModel).mockResolvedValue({
+      persist_error: null,
+      persist_suspended: true,
+    });
+    await openExternal({
+      model: null,
+      thought_level: null,
+      cached_discovered: CATALOG,
+    });
+    const modelSelect = await screen.findByLabelText("Model");
+    fireEvent.change(modelSelect, { target: { value: "fake-sonnet" } });
+    expect(
+      await screen.findByText(/changed outside the app/),
+    ).toBeInTheDocument();
+  });
+
+  it("clears the failure lines on the next successful selection", async () => {
+    vi.mocked(setSessionModel)
+      .mockResolvedValueOnce({
+        persist_error: { kind: "Io", data: "disk full" },
+        persist_suspended: false,
+      })
+      .mockResolvedValue(PERSIST_OK);
     await openExternal({
       model: null,
       thought_level: null,
@@ -1092,6 +1173,12 @@ describe("ComposerProviderPicker honest selector states (issue #529)", () => {
     expect(
       await screen.findByText(/Selection not saved/),
     ).toBeInTheDocument();
-    expect(takePersistError).toHaveBeenCalledWith("sess-1");
+    // The next attempt succeeds -- both fault lines must clear.
+    fireEvent.change(modelSelect, { target: { value: "fake-opus" } });
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/Selection not saved/),
+      ).not.toBeInTheDocument(),
+    );
   });
 });

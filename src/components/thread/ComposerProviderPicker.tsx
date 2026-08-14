@@ -15,7 +15,7 @@ import {
   setSessionModel,
   setSessionRuntime,
   setSessionThoughtLevel,
-  takePersistError,
+  type SetModelPersistOutcome,
 } from "../../api";
 import { adapterKeys, sessionKeys } from "../../session/queryKeys";
 import type { ProfileKeyStatus, ProviderConfig } from "../../types/provider";
@@ -209,47 +209,47 @@ export function ComposerProviderPicker({
   // while the first write is in flight).
   const [modelSwitching, setModelSwitching] = useState(false);
   // Inline failure line for the two set IPCs (issue #529), same slot /
-  // styling as the keysError precedent. Cleared on the next attempt.
-  const [modelSetError, setModelSetError] = useState<string | null>(null);
-  // A set that resolved but whose persist-now leg failed (issue #529): read
-  // back through the existing take_persist_error channel so "set means
-  // persisted" (ADR-0095 Decision 6) cannot break silently.
+  // styling as the keysError precedent. Holds the raw reject and formats at
+  // render so a locale switch re-renders the wording. Cleared on the next
+  // attempt.
+  const [modelSetError, setModelSetError] = useState<unknown>(null);
+  // A set that resolved but whose persist-now leg did not land (issue #529):
+  // the verdict rides the set command's return (in-process, read in the same
+  // critical section), so "set means persisted" (ADR-0095 Decision 6) cannot
+  // break silently nor be swallowed by the shared banner error channel.
   const [modelPersistFault, setModelPersistFault] = useState<SaveError | null>(null);
+  // True when the persist was withheld on a pending ADR-0035 conflict (the
+  // .duck changed externally; the auto-write refuses to clobber it).
+  const [modelPersistSuspended, setModelPersistSuspended] = useState(false);
 
-  async function selectModel(model: string | null) {
+  // Shared write sequence for both selectors (the two bodies differ only in
+  // the IPC, the patched key, and the log verb). On resolve: seed the cache
+  // with the granted posture and project the returned persist verdict onto
+  // the two fault slots. On reject: keep the server posture (refetch off the
+  // reject) + show the failure.
+  async function applyModelConfig(
+    write: () => Promise<SetModelPersistOutcome>,
+    patch: Partial<Pick<SessionModelConfig, "model" | "thought_level">>,
+    logVerb: string,
+  ) {
     if (sessionId === null || modelSwitching) return;
     setModelSwitching(true);
     setModelSetError(null);
     setModelPersistFault(null);
+    setModelPersistSuspended(false);
     try {
-      await setSessionModel(sessionId, model);
-      // Seed the cache with the granted posture (no extra IPC round-trip).
+      const outcome = await write();
       queryClient.setQueryData(sessionKeys.modelConfig(sessionId), {
         ...modelConfig,
-        model,
+        ...patch,
       });
-      // Best-effort persist-status read: the set's persist-now leg may have
-      // failed without failing the IPC (ADR-0095 Decision 6). The channel is
-      // a single read-and-clear slot shared with the session-level banner
-      // poll, so two honest attributions exist: this read may consume a
-      // banner-bound error (the banner's next poll re-reads empty -- the
-      // in-memory state is still intact, so only the duplicate notice is
-      // lost), or land an error that predates this selection (a turn's
-      // persist failure that fell into the slot in the window before the
-      // read). The line therefore reads as "unsaved work exists", not a
-      // strict per-selection verdict.
-      try {
-        setModelPersistFault(await takePersistError(sessionId));
-      } catch {
-        // The selection itself landed; a failed status read is not worth a
-        // failure line of its own.
-      }
+      setModelPersistFault(outcome.persist_error);
+      setModelPersistSuspended(outcome.persist_suspended);
     } catch (e) {
-      // Keep the server posture: refetch off the reject + show the failure.
-      setModelSetError(fmtError(e, intl));
+      setModelSetError(e);
       log.warn(
         "ComposerProviderPicker",
-        "set session model failed; resyncing from the session",
+        `set session ${logVerb} failed; resyncing from the session`,
         fmtError(e, intl),
       );
       void queryClient.invalidateQueries({
@@ -260,38 +260,19 @@ export function ComposerProviderPicker({
     }
   }
 
-  async function selectThoughtLevel(thoughtLevel: string | null) {
-    if (sessionId === null || modelSwitching) return;
-    setModelSwitching(true);
-    setModelSetError(null);
-    setModelPersistFault(null);
-    try {
-      await setSessionThoughtLevel(sessionId, thoughtLevel);
-      queryClient.setQueryData(sessionKeys.modelConfig(sessionId), {
-        ...modelConfig,
-        thought_level: thoughtLevel,
-      });
-      // See selectModel for the shared read-and-clear slot's honest
-      // attributions.
-      try {
-        setModelPersistFault(await takePersistError(sessionId));
-      } catch {
-        // See selectModel: the selection landed; the status read is optional.
-      }
-    } catch (e) {
-      setModelSetError(fmtError(e, intl));
-      log.warn(
-        "ComposerProviderPicker",
-        "set session thought level failed; resyncing from the session",
-        fmtError(e, intl),
-      );
-      void queryClient.invalidateQueries({
-        queryKey: sessionKeys.modelConfig(sessionId),
-      });
-    } finally {
-      setModelSwitching(false);
-    }
-  }
+  const selectModel = (model: string | null) =>
+    applyModelConfig(
+      () => setSessionModel(sessionId as string, model),
+      { model },
+      "model",
+    );
+
+  const selectThoughtLevel = (thoughtLevel: string | null) =>
+    applyModelConfig(
+      () => setSessionThoughtLevel(sessionId as string, thoughtLevel),
+      { thought_level: thoughtLevel },
+      "thought level",
+    );
 
   // The v1 adapter table (session-agnostic, ADR-0081/0083). Issue #490 slimmed
   // the external group to a pure selector: only detected rows render (adapter
@@ -843,12 +824,12 @@ export function ComposerProviderPicker({
                   </select>
                   {/* Set-failure / persist-failure inline lines (issue #529):
                       same slot as keysError, one surface for both set IPCs. */}
-                  {modelSetError && (
+                  {modelSetError != null && (
                     <p className="text-destructive text-xs">
                       <FormattedMessage
                         id="composer.runtimePicker.applyError"
                         defaultMessage="Could not apply the selection: {reason}"
-                        values={{ reason: modelSetError }}
+                        values={{ reason: fmtError(modelSetError, intl) }}
                       />
                     </p>
                   )}
@@ -858,6 +839,14 @@ export function ComposerProviderPicker({
                         id="composer.runtimePicker.persistFault"
                         defaultMessage="Selection not saved: {reason}"
                         values={{ reason: fmtError(modelPersistFault, intl) }}
+                      />
+                    </p>
+                  )}
+                  {modelPersistSuspended && (
+                    <p className="text-warning text-xs">
+                      <FormattedMessage
+                        id="composer.runtimePicker.persistSuspended"
+                        defaultMessage="Selection not saved: the session file was changed outside the app, so autosave is paused until you resolve the conflict."
                       />
                     </p>
                   )}
@@ -916,8 +905,12 @@ function SelectorOptions({
 }) {
   // The value the <select> will resolve to (mirrors the callers' controlled
   // value chains: selection first, CLI current as the effective default).
+  // An empty-string held value is NOT unrepresented -- it would collide
+  // with the clearing row's value="" (the select resolves to the first
+  // match, hiding the posture behind "CLI default").
   const held = selected ?? currentValue;
-  const unrepresented = held != null && !discoveredValues.includes(held);
+  const unrepresented =
+    held != null && held !== "" && !discoveredValues.includes(held);
   return (
     <>
       <option value="">

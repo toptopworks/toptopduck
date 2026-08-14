@@ -1576,6 +1576,17 @@ impl Session {
         self.persister.take_persist_error()
     }
 
+    /// Non-consuming snapshot of the persist outcome right after the
+    /// caller's own [`Self::persist_if_bound`] (the ADR-0095 set commands,
+    /// issue #529): `Err` = the write failed (typed), `Ok(false)` = the
+    /// write was suspended on a pending ADR-0035 conflict, `Ok(true)` = a
+    /// write landed (or the session is unbound -- in-memory-only, nothing
+    /// to persist). Unlike [`Self::take_persist_error`], this does not
+    /// consume the shared banner channel.
+    pub fn persist_outcome(&self) -> Result<bool, SaveError> {
+        self.persister.persist_outcome()
+    }
+
     /// Take (read + clear) the pending external-change conflict, if any
     /// (ADR-0035 Decision 3, issue #50).
     pub fn take_pending_conflict(&mut self) -> Option<PendingConflict> {
