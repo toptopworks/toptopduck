@@ -647,8 +647,10 @@ pub async fn ask(
         // the reset choice.
         s.set_external_runtime(handle.runtime_choice());
         // ADR-0095: mirror the session-level model + thought-level choices
-        // into the turn at the same boundary as the runtime choice.
-        s.set_external_model_config(handle.external_model(), handle.external_thought_level());
+        // into the turn at the same boundary as the runtime choice (the pair
+        // read takes the slot lock once -- no torn mix).
+        let (external_model, external_thought_level) = handle.external_model_config();
+        s.set_external_model_config(external_model, external_thought_level);
         // Issue #364 (ADR-0086): resolve the session's mounted skills into
         // prompt fragments (name + verbatim body + whole-file SHA-256) here
         // at the command boundary, where the registry root lives, so the
@@ -713,10 +715,14 @@ pub async fn ask(
         // session-lock re-entry.
         handle.set_last_mcp_connect(s.last_mcp_connect().to_vec());
         // ADR-0095: mirror the turn's discovered runtime catalog onto the
-        // handle (lock-light reads for the selector). `Some` replaces the
-        // cache; the built-in / JsonEventStream `None` leaves the previous
-        // ACP cache intact (see SessionHandle::set_cached_discovered).
-        handle.set_cached_discovered(s.last_discovered_runtime());
+        // handle (lock-light reads for the selector). Only an ACP turn
+        // reports a catalog; the built-in / JsonEventStream `None` means
+        // "no discovery", so the mirror is skipped and the previous ACP
+        // cache survives (issue #530 made the None arm unrepresentable at
+        // the setter).
+        if let Some(discovered) = s.last_discovered_runtime() {
+            handle.set_cached_discovered(discovered);
+        }
         Ok::<TurnOutcome, SessionError>(outcome)
     })
     .await
@@ -2454,9 +2460,12 @@ pub fn get_session_model_config(
 ) -> Result<SessionModelConfig, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
+    // The pair read takes the slot lock once: a concurrent set lands entirely
+    // before or after this read, never as a torn (old, new) mix.
+    let (model, thought_level) = handle.external_model_config();
     Ok(SessionModelConfig {
-        model: handle.external_model(),
-        thought_level: handle.external_thought_level(),
+        model,
+        thought_level,
         cached_discovered: handle.cached_discovered(),
     })
 }
@@ -2489,7 +2498,11 @@ pub fn set_session_model(
     reject_if_resuming(&handle)?;
     reject_if_in_flight(&handle)?;
     let mut s = handle.session_lock()?;
-    s.set_external_model_config(model, handle.external_thought_level());
+    // The pair read takes the slot lock once -- the untouched field cannot
+    // interleave with a concurrent write of the other. `model` passes
+    // through as-is: `None` is the explicit user clear.
+    let (_, thought_level) = handle.external_model_config();
+    s.set_external_model_config(model, thought_level);
     // Persist now (via the shared auto-write path) so a selection made
     // without a following turn survives a close (ADR-0095 Decision 6).
     s.persist_if_bound();
@@ -2519,7 +2532,11 @@ pub fn set_session_thought_level(
     reject_if_resuming(&handle)?;
     reject_if_in_flight(&handle)?;
     let mut s = handle.session_lock()?;
-    s.set_external_model_config(handle.external_model(), thought_level);
+    // The pair read takes the slot lock once -- the untouched field cannot
+    // interleave with a concurrent write of the other. `thought_level`
+    // passes through as-is: `None` is the explicit user clear.
+    let (model, _) = handle.external_model_config();
+    s.set_external_model_config(model, thought_level);
     // Persist now (via the shared auto-write path) so a selection made
     // without a following turn survives a close (ADR-0095 Decision 6).
     s.persist_if_bound();

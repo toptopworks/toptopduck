@@ -478,26 +478,21 @@ pub struct Session {
     /// user picked, and a switch lands at the turn boundary. Integration
     /// tests still toggle it directly via [`Self::set_external_runtime`].
     external_runtime: Option<AdapterSpec>,
-    /// The session-level model choice for the external runtime (ADR-0095).
-    /// Mirrored from the handle-held user choice at each turn top (the same
-    /// pattern as [`Self::external_runtime`]); consumed by
-    /// [`Self::run_external_turn`] to build the engine's turn input. `None`
-    /// leaves the CLI's own default model. No-op on the built-in runtime
-    /// (its model comes from the provider profile).
-    external_model: Option<String>,
-    /// The session-level thought-level choice (ADR-0095). Mirrored from the
-    /// handle at turn top alongside the model; no-op on the built-in runtime
-    /// (ADR-0095 Discovery: BYOK thought levels are a separate future ADR).
-    external_thought_level: Option<String>,
     /// The last external turn's discovered model / thought-level catalog
     /// (ADR-0095). See [`Self::last_discovered_runtime`].
     last_discovered_runtime: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
-    /// The recipe-header ADR-0095 facts (model / thought_level selections +
-    /// the discovery cache) the persister layers onto every built recipe.
-    /// Mirrored from the handle at turn top beside the two selections; the
-    /// `set_session_model` / `set_session_thought_level` commands also update
-    /// them so the next auto-write persists a selection made WITHOUT a
-    /// following turn (the resume promise, ADR-0095 Decision 6).
+    /// The single source of truth for the session-level model / thought-level
+    /// selections + the discovery cache (ADR-0095). Mirrored from the handle
+    /// at each turn top (the same pattern as [`Self::external_runtime`]) and
+    /// consumed by BOTH [`Self::run_external_turn`] (the turn input's model /
+    /// thought_level ride `.model` / `.thought_level`) and the persister
+    /// (the recipe header) -- one storage, so the turn's input and the
+    /// persisted recipe can never diverge (issue #530). `None` selections
+    /// leave the CLI's own defaults; no-op on the built-in runtime (its model
+    /// comes from the provider profile; BYOK thought levels are a separate
+    /// future ADR). The `set_session_model` / `set_session_thought_level`
+    /// commands also write it so the next auto-write persists a selection
+    /// made WITHOUT a following turn (the resume promise, ADR-0095 D6).
     runtime_model_config: RuntimeModelConfig,
     /// The last turn's per-server MCP connect outcomes (issue #301 slice D).
     /// Updated at the top of each turn (the aggregator's `connect_all` result)
@@ -696,15 +691,15 @@ impl Session {
     /// Mirror the handle-held session-level model + thought-level choices
     /// into the Session at turn top (ADR-0095, the `set_external_runtime`
     /// pattern): the command layer calls this right after the runtime choice
-    /// mirror, so both take effect at the same turn boundary. `pub` so the
-    /// IPC test seam can toggle without the command layer.
+    /// mirror, so both take effect at the same turn boundary. Writes
+    /// `runtime_model_config` only -- the single storage both the turn input
+    /// and the persister read (issue #530). `pub` so the IPC test seam can
+    /// toggle without the command layer.
     pub fn set_external_model_config(
         &mut self,
         model: Option<String>,
         thought_level: Option<String>,
     ) {
-        self.external_model = model.clone();
-        self.external_thought_level = thought_level.clone();
         self.runtime_model_config.model = model;
         self.runtime_model_config.thought_level = thought_level;
     }
@@ -722,7 +717,11 @@ impl Session {
     /// [`Self::run_external_turn`] so the command layer can mirror it onto
     /// the SessionHandle (lock-light reads) without re-running a turn.
     /// `None` until the first ACP turn (and after a resume -- the recipe's
-    /// cached copy is restored onto the handle by open_duck).
+    /// cached copy is restored onto the handle by open_duck). A
+    /// pre-handshake ACP failure yields no discovery and RETAINS the
+    /// previous turn's catalog (issue #530); the `ask` mirror -- today's
+    /// only reader -- re-writes the same value, so the retention is
+    /// idempotent.
     pub fn last_discovered_runtime(
         &self,
     ) -> Option<crate::runtime::acp::adapter::DiscoveredRuntime> {
@@ -731,15 +730,17 @@ impl Session {
 
     /// Record the turn's discovered runtime catalog (see
     /// [`Self::last_discovered_runtime`]). Called by
-    /// [`Self::run_external_turn`] before the outcome mapping.
+    /// [`Self::run_external_turn`] before the outcome mapping; takes a bare
+    /// value -- a post-handshake ACP exit always carries a catalog (an empty
+    /// one is a real state: the CLI offered no models), so there is no "no
+    /// discovery" arm here; pre-handshake failures yield `None` and the
+    /// caller skips the call (issue #530).
     pub fn set_last_discovered_runtime(
         &mut self,
-        discovered: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
+        discovered: crate::runtime::acp::adapter::DiscoveredRuntime,
     ) {
-        if let Some(d) = &discovered {
-            self.runtime_model_config.cached_discovered = Some(d.clone());
-        }
-        self.last_discovered_runtime = discovered;
+        self.runtime_model_config.cached_discovered = Some(discovered.clone());
+        self.last_discovered_runtime = Some(discovered);
     }
 
     /// Build a session with an explicit provider (tests inject a scripted fake;
@@ -801,8 +802,6 @@ impl Session {
             persister: recipe_persister::RecipePersister::new(),
             drop_signal: None,
             external_runtime: None,
-            external_model: None,
-            external_thought_level: None,
             last_discovered_runtime: None,
             runtime_model_config: RuntimeModelConfig::default(),
             last_mcp_connect: Vec::new(),
@@ -1360,10 +1359,12 @@ impl Session {
             mcp_servers: vec![mcp_server],
             // ADR-0095: the session-level model / thought-level choices ride
             // the turn input (injected per-format inside the engine: ACP wire
-            // params / setConfigOption, JsonEventStream argv). `None` leaves
-            // the CLI's own defaults in place.
-            model: self.external_model.clone(),
-            thought_level: self.external_thought_level.clone(),
+            // params / setConfigOption, JsonEventStream argv). Read from the
+            // SAME `runtime_model_config` the persister layers onto the recipe
+            // header -- one storage, no mirror to drift (issue #530). `None`
+            // leaves the CLI's own defaults in place.
+            model: self.runtime_model_config.model.clone(),
+            thought_level: self.runtime_model_config.thought_level.clone(),
             prompt_blocks,
         };
         // 5. Drive the gateway serve + the ACP engine on two scoped threads.
@@ -1463,8 +1464,13 @@ impl Session {
         //    pattern as the built-in branch). ADR-0095: the ACP engine's
         //    discovered catalog snapshots onto the Session first so the
         //    command layer can mirror it onto the handle (lock-light reads)
-        //    even when the turn itself fails.
-        self.set_last_discovered_runtime(acp_outcome.discovered_runtime.clone());
+        //    even when the turn itself fails. `None` (handshake failed /
+        //    pre-handshake exit) means "no discovery" -- the previous
+        //    catalog survives (issue #530 removed the unreachable no-op arm
+        //    from the setter).
+        if let Some(discovered) = acp_outcome.discovered_runtime.clone() {
+            self.set_last_discovered_runtime(discovered);
+        }
         let mut merged = merge_outcomes(gateway_outcome, acp_outcome);
         let trace = std::mem::take(&mut merged.trace);
         (turn_outcome_from_loop(merged), trace)
