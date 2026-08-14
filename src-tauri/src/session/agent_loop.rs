@@ -838,7 +838,6 @@ pub struct LoopOutcome {
     /// extraction); the built-in loop and the JsonEventStream path have no
     /// discovery and carry `None` -- the Option distinguishes "this runtime
     /// does not support discovery" from "discovery found nothing".
-    #[allow(dead_code)]
     pub discovered_runtime: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
 }
 

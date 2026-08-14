@@ -523,9 +523,49 @@ fn acp_turn_handshake_failure_carries_no_discovery() {
     assert!(outcome.discovered_runtime.is_none());
 }
 
-/// A selected model rides `session/new` params and a selected thought level
-/// triggers one `session/setConfigOption` -- both observed via the fixture's
-/// stderr trace (the engine owns stdout).
+/// A temp-file trace channel for the fake CLI: the fixture appends every
+/// received `session/set_config_option` to the file named by
+/// `ACP_FAKE_TRACE_FILE` (the engine owns stdout; stderr inherits to the CI
+/// console where a test cannot assert on it). Dropping the guard unsets the
+/// var so later tests never trace into a stale file.
+struct TraceFile {
+    path: std::path::PathBuf,
+}
+
+impl TraceFile {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "acp-fake-trace-{}.log",
+            std::process::id() as u64
+                ^ (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .subsec_nanos() as u64)
+        ));
+        Self { path }
+    }
+
+    fn read_all(&self) -> String {
+        std::fs::read_to_string(&self.path).unwrap_or_default()
+    }
+}
+
+impl Drop for TraceFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        // Only clear when another test has not installed its own trace file
+        // (ENV_LOCK serializes the tests, so the check is exact).
+        if std::env::var_os("ACP_FAKE_TRACE_FILE") == Some(self.path.clone().into_os_string()) {
+            std::env::remove_var("ACP_FAKE_TRACE_FILE");
+        }
+    }
+}
+
+/// A selected model + thought level each ride their own
+/// `session/set_config_option` between the handshake and the prompt, keyed
+/// on the catalog entry's agent-chosen id (D4 -- the fixture's thought_level
+/// entry declares id `thought`, NOT `thought_level`, so a hardcoded category
+/// id fails). Observed via the fixture's trace file (the engine owns stdout).
 #[test]
 fn acp_turn_injects_model_and_thought_level() {
     let cancel = Arc::new(CancelToken::new());
@@ -536,15 +576,67 @@ fn acp_turn_injects_model_and_thought_level() {
     let mut input = input();
     input.model = Some("fake-sonnet".into());
     input.thought_level = Some("high".into());
+    let trace = TraceFile::new();
     let _g = ENV_LOCK.lock().unwrap();
     std::env::set_var("ACP_FAKE_SCENARIO", "text_reply");
+    std::env::set_var("ACP_FAKE_TRACE_FILE", &trace.path);
     let outcome = eng.run(&input, &fake_cli(), &approval, &sink, |_| {});
     // The turn itself succeeds (the injection must not break the protocol).
-    assert!(matches!(
-        outcome.termination,
-        toptopduck_lib::session::agent_loop::Termination::Text(_)
-    ));
+    assert!(matches!(outcome.termination, Termination::Text(_)));
     // Discovery still rides the outcome (the catalog is independent of the
     // selection).
     assert!(outcome.discovered_runtime.is_some());
+    // The CLI received BOTH selections under the catalog's own ids, in order
+    // (model first, thought level second -- both after the handshake).
+    let got = trace.read_all();
+    assert!(
+        got.contains("ACP_FAKE_RECEIVED_SETOPTION=model=fake-sonnet"),
+        "model selection must reach the CLI under the catalog id `model`; trace: {got}"
+    );
+    assert!(
+        got.contains("ACP_FAKE_RECEIVED_SETOPTION=thought=high"),
+        "thought level must reach the CLI under the catalog's agent-chosen id `thought` (not the category constant); trace: {got}"
+    );
+}
+
+/// A CLI that rejects the config injection (RPC error on
+/// `session/set_config_option`) fails the turn honestly as a Transient
+/// naming the config id -- the acknowledged posture, now behaviorally pinned
+/// (the fixture acks only its catalog-declared ids, so an off-catalog id
+/// lands here too).
+#[test]
+fn acp_turn_set_config_option_rejection_fails_the_turn() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = AcpEngine::new(claude_code(), cancel)
+        .with_caps(24, Some(std::time::Duration::from_secs(10)));
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let mut input = input();
+    input.model = Some("fake-sonnet".into());
+    let trace = TraceFile::new();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("ACP_FAKE_SCENARIO", "set_config_option_reject");
+    std::env::set_var("ACP_FAKE_TRACE_FILE", &trace.path);
+    let outcome = eng.run(&input, &fake_cli(), &approval, &sink, |_| {});
+    match outcome.termination {
+        Termination::Transient(msg) => {
+            assert!(
+                msg.contains("session/set_config_option"),
+                "the failure must name the injection call: {msg}"
+            );
+            assert!(
+                msg.contains("model"),
+                "the failure must name the config id: {msg}"
+            );
+        }
+        other => panic!("expected Transient, got {other:?}"),
+    }
+    // The rejected request still reached the CLI (the fixture's reject is a
+    // response, not a dropped request).
+    assert!(
+        trace
+            .read_all()
+            .contains("ACP_FAKE_RECEIVED_SETOPTION=model=fake-sonnet"),
+        "the fixture must have seen the injection before rejecting it"
+    );
 }

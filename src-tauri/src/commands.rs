@@ -2435,11 +2435,10 @@ pub fn get_session_model_config(
 ///
 /// Persistence: the selection is mirrored into the Session's recipe-header
 /// facts + persisted immediately, so a close-without-another-turn keeps the
-/// resume promise (Decision 6). The session lock is taken briefly (the write
-/// is a small atomic file write); `ask` holds the lock for a whole turn, so
-/// an in-flight turn makes this block until the turn ends -- the same
-/// serialization every other session-mutating command already has via
-/// `reject_if_in_flight`-guarded paths, applied here for the write window.
+/// resume promise (Decision 6). Rejected with a typed error while resuming
+/// or while a turn is in flight (the same `reject_if_*` guards every other
+/// session-mutating command has); on pass, the session lock is taken only
+/// briefly for the small atomic write.
 #[tauri::command]
 pub fn set_session_model(
     store: State<'_, Arc<SessionStore>>,

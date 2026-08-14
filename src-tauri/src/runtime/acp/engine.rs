@@ -48,7 +48,8 @@ use crate::approval::{
 use crate::cancel::CancelToken;
 use crate::model::{TraceEntryView, TurnPhase};
 use crate::runtime::acp::adapter::{
-    extract_discovered_runtime, AdapterSpec, DiscoveredRuntime, StreamFormat,
+    extract_discovered_runtime, AdapterSpec, DiscoveredRuntime, StreamFormat, MODEL_CATEGORY,
+    THOUGHT_LEVEL_CATEGORY,
 };
 use crate::runtime::acp::wire::{
     self, CancelParams, ContentBlock, InitializeParams, McpServer, NewSessionParams, PromptParams,
@@ -203,17 +204,32 @@ impl AcpEngine {
             }
         };
         let session_id = hs.session_id;
-        let discovered = Some(hs.discovered);
+        let discovered = Some(hs.discovered.clone());
         // ADR-0095: inject the user's selections via `session/set_config_option`
         // between the handshake and the prompt -- the model and the thought
-        // level each ride their own request when selected (config ids come
-        // from the handshake's catalog; the standard ids cover every
-        // categorized CLI). A CLI that rejects the setting fails the turn
-        // honestly (the user asked for a setting the CLI does not accept;
-        // clearing the selection restores the turn).
+        // level each ride their own request when selected. The config id keys
+        // on the catalog entry's agent-chosen `id` (D4: the ACP schema
+        // standardizes the category tag, NOT the id), falling back to the
+        // standard category id when discovery saw no usable one. A CLI that
+        // rejects the setting fails the turn honestly (the user asked for a
+        // setting the CLI does not accept; clearing the selection restores
+        // the turn).
         let selections: Vec<(&str, &String)> = [
-            input.model.as_ref().map(|m| ("model", m)),
-            input.thought_level.as_ref().map(|l| ("thought_level", l)),
+            input.model.as_ref().map(|m| {
+                (
+                    discovered_config_id(&hs.discovered.model_config_id, MODEL_CATEGORY),
+                    m,
+                )
+            }),
+            input.thought_level.as_ref().map(|l| {
+                (
+                    discovered_config_id(
+                        &hs.discovered.thought_level_config_id,
+                        THOUGHT_LEVEL_CATEGORY,
+                    ),
+                    l,
+                )
+            }),
         ]
         .into_iter()
         .flatten()
@@ -375,17 +391,25 @@ pub(crate) struct HandshakeOutcome {
 /// One `session/set_config_option` request body (ADR-0095): sets the option
 /// with the given config id to `value` on the freshly minted session. The
 /// protocol-standard injection channel for BOTH the model and the thought
-/// level (`NewSessionRequest` carries no model field, schema 0.13.8 -- the
-/// handshake's config catalog supplies the ids). Sent after the handshake
-/// when the user selected either; the response result is ignored (the next
-/// turn's handshake re-discovers the truth) but an RPC error fails the turn
-/// honestly.
+/// level (`NewSessionRequest` carries no model field, schema 0.13.8). Sent
+/// after the handshake when the user selected either; the response result is
+/// ignored (the next turn's handshake re-discovers the truth) but an RPC
+/// error fails the turn honestly.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SetConfigOptionParams {
     session_id: String,
     config_id: String,
     value: String,
+}
+
+/// The config id to inject for a selection (ADR-0095 D4): the catalog entry's
+/// agent-chosen id when discovery saw the category, otherwise the standard
+/// category id -- a selection without a matching catalog entry is exactly the
+/// stale / manual-call case Decision 7 tolerates (the CLI deals with it at
+/// the request).
+fn discovered_config_id<'a>(catalog_id: &'a Option<String>, standard: &'static str) -> &'a str {
+    catalog_id.as_deref().unwrap_or(standard)
 }
 
 fn handshake(

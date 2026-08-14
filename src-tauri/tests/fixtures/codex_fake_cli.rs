@@ -14,14 +14,33 @@
 
 use std::io::{Read, Write};
 
+/// Append the spawn-argv trace line to the file named by
+/// `CODEX_FAKE_TRACE_FILE` (when set). The integration test passes a temp
+/// file so it can assert on the engine's argv injection (stdout carries the
+/// event stream the engine owns; stderr inherits to the CI console where no
+/// test can read it). A no-op when the var is absent, so ad-hoc manual runs
+/// keep working.
+fn trace_argv(argv: &[String]) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("CODEX_FAKE_TRACE_FILE") else {
+        return;
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "CODEX_FAKE_ARGV={}", argv.join(" "));
+    }
+}
+
 fn main() {
     let scenario = std::env::var("CODEX_FAKE_SCENARIO").unwrap_or_else(|_| "text_reply".into());
 
-    // ADR-0095: trace the spawn argv to stderr so the integration test can
-    // assert the engine's model / thought-level injection (stdout carries the
-    // event stream the engine owns).
+    // ADR-0095: trace the spawn argv so the integration test can assert the
+    // engine's model / thought-level injection.
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    eprintln!("CODEX_FAKE_ARGV={}", argv.join(" "));
+    trace_argv(&argv);
 
     // Drain stdin (the flattened prompt) to EOF — codex reads the prompt from
     // stdin when no positional arg is given.

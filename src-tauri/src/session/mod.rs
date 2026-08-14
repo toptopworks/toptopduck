@@ -495,9 +495,9 @@ pub struct Session {
     /// The recipe-header ADR-0095 facts (model / thought_level selections +
     /// the discovery cache) the persister layers onto every built recipe.
     /// Mirrored from the handle at turn top beside the two selections; the
-    /// `set_session_model_config` command also updates them so the next
-    /// auto-write persists a selection made WITHOUT a following turn (the
-    /// resume promise, ADR-0095 Decision 6).
+    /// `set_session_model` / `set_session_thought_level` commands also update
+    /// them so the next auto-write persists a selection made WITHOUT a
+    /// following turn (the resume promise, ADR-0095 Decision 6).
     runtime_model_config: RuntimeModelConfig,
     /// The last turn's per-server MCP connect outcomes (issue #301 slice D).
     /// Updated at the top of each turn (the aggregator's `connect_all` result)

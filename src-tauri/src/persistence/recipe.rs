@@ -1637,6 +1637,8 @@ mod tests {
                 current_model: Some("fake-opus".into()),
                 thought_levels: vec!["low".into(), "high".into()],
                 current_thought_level: Some("high".into()),
+                model_config_id: Some("model".into()),
+                thought_level_config_id: Some("thought".into()),
             }),
         );
         let v = serde_json::to_value(&layered).expect("serialize");

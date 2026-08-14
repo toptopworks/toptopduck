@@ -667,6 +667,22 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
 // --- ADR-0095 model + thought-level selectors (issue #527) ------------------
 
 describe("ComposerProviderPicker model config selectors (ADR-0095)", () => {
+  beforeEach(() => {
+    // Self-contained seeding: this describe must not rely on implementations
+    // leaking from the sibling describe (vi.clearAllMocks clears calls, not
+    // implementations -- the PR #507 leakage class).
+    vi.clearAllMocks();
+    vi.mocked(listProviderProfiles).mockResolvedValue([]);
+    vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
+    vi.mocked(setSessionRuntime).mockResolvedValue(undefined);
+    vi.mocked(listAdapters).mockResolvedValue([]);
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: null,
+      thought_level: null,
+      cached_discovered: null,
+    });
+  });
+
   const CATALOG = {
     models: ["fake-opus", "fake-sonnet"],
     current_model: "fake-opus",

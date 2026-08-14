@@ -310,6 +310,16 @@ pub struct DiscoveredRuntime {
     pub thought_levels: Vec<String>,
     /// The thought level the CLI reported as current / default, if any.
     pub current_thought_level: Option<String>,
+    /// The config id of the catalog entry the CLI used for the model setting,
+    /// when a model entry was seen (ADR-0095 D4). The ACP schema makes the
+    /// option `id` agent-chosen -- only `category` is the semi-standardized
+    /// tag -- so the engine keys injection on this id, falling back to the
+    /// category constant when the entry carried no usable id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_config_id: Option<String>,
+    /// Same as [`Self::model_config_id`] for the thought-level entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_level_config_id: Option<String>,
 }
 
 impl DiscoveredRuntime {
@@ -321,6 +331,8 @@ impl DiscoveredRuntime {
             current_model: None,
             thought_levels: Vec::new(),
             current_thought_level: None,
+            model_config_id: None,
+            thought_level_config_id: None,
         }
     }
 }
@@ -353,22 +365,41 @@ pub fn extract_discovered_runtime(config_options: Option<&serde_json::Value>) ->
     };
     for entry in entries {
         let category = entry.get("category").and_then(|v| v.as_str());
-        let target = match category {
-            Some(c) if c == MODEL_CATEGORY => &mut out.models,
-            Some(c) if c == THOUGHT_LEVEL_CATEGORY => &mut out.thought_levels,
-            _ => continue,
-        };
-        let current = entry.get("currentValue").and_then(|v| v.as_str());
+        // One dispatch over the category binds every slot this entry owns, so
+        // adding a category is one arm (no second match to keep in sync).
         match category {
-            Some(c) if c == MODEL_CATEGORY => out.current_model = current.map(str::to_string),
-            Some(c) if c == THOUGHT_LEVEL_CATEGORY => {
-                out.current_thought_level = current.map(str::to_string)
+            Some(c) if c == MODEL_CATEGORY => {
+                out.current_model = entry
+                    .get("currentValue")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                out.model_config_id = entry_config_id(entry);
+                out.models = flatten_option_values(entry.get("options"));
             }
-            _ => unreachable!("guarded by the target match above"),
+            Some(c) if c == THOUGHT_LEVEL_CATEGORY => {
+                out.current_thought_level = entry
+                    .get("currentValue")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                out.thought_level_config_id = entry_config_id(entry);
+                out.thought_levels = flatten_option_values(entry.get("options"));
+            }
+            _ => {}
         }
-        *target = flatten_option_values(entry.get("options"));
     }
     out
+}
+
+/// The entry's `id`, when it is a non-empty string. The ACP schema makes the
+/// option id agent-chosen (ADR-0095 D4): the engine keys injection on it and
+/// falls back to the category constant when absent, so an empty / non-string
+/// id is treated as missing.
+fn entry_config_id(entry: &serde_json::Value) -> Option<String> {
+    entry
+        .get("id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// Flatten an ACP select `options` payload into its value ids: a flat array
@@ -478,6 +509,11 @@ mod tests {
             vec!["low".to_string(), "medium".to_string(), "high".to_string()]
         );
         assert_eq!(d.current_thought_level.as_deref(), Some("medium"));
+        // ADR-0095 D4: the agent-chosen ids are extracted for the injection
+        // path (the thought entry names its id `thought`, NOT the category
+        // constant -- a hardcoded injection would miss it).
+        assert_eq!(d.model_config_id.as_deref(), Some("model"));
+        assert_eq!(d.thought_level_config_id.as_deref(), Some("thought"));
     }
 
     /// The grouped-options shape (SessionConfigSelectOptions::Grouped, serde

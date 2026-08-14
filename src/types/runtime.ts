@@ -51,6 +51,11 @@ export interface DiscoveredRuntime {
   current_model: string | null;
   thought_levels: string[];
   current_thought_level: string | null;
+  // The catalog entry's agent-chosen config id (ADR-0095 D4), absent when the
+  // entry carried no usable id (the engine then falls back to the standard
+  // category id). Not user-facing; consumed by the injection path.
+  model_config_id?: string;
+  thought_level_config_id?: string;
 }
 
 // The session's external-runtime model config (ADR-0095, issue #527): the two

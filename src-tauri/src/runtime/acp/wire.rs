@@ -185,10 +185,10 @@ impl Implementation {
 /// engine injects the bridge as the single stdio MCP server (`mcp_servers`) and
 /// the working directory (`cwd`). The full windowed context is carried by the
 /// subsequent `session/prompt`, NOT here (ACP keeps session setup separate from
-/// the user message). `model` (ADR-0095) carries the user's session-level model
-/// choice onto the CLI's `session/new` call -- the ACP-standard injection
-/// point. Optional + skipped when absent so the fake fixture and every
-/// pre-0095 peer see an unchanged wire shape.
+/// the user message). The model / thought-level selections do NOT ride here
+/// either (ADR-0095: `NewSessionRequest` carries no model field, schema 0.13.8)
+/// -- the engine injects them via `session/set_config_option` after the
+/// handshake.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSessionParams {

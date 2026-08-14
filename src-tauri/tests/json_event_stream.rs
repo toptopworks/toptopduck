@@ -189,3 +189,39 @@ fn empty_stdout_lands_as_transient() {
         other => panic!("expected Transient, got {other:?}"),
     }
 }
+
+/// ADR-0095: a selected model + thought level ride the spawn argv as
+/// `--model <id>` + `-c model_reasoning_effort=<level>` (asserted via the
+/// fixture's argv trace -- the spawn shape, not just the pure flag builder).
+#[test]
+fn selected_model_and_effort_ride_the_spawn_argv() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng =
+        AcpEngine::new(codex(), cancel).with_caps(24, Some(std::time::Duration::from_secs(5)));
+    let approval = ApprovalState::new();
+    let mut input = input();
+    input.model = Some("gpt-5.1".into());
+    input.thought_level = Some("high".into());
+    // The fixture traces its argv to this file (stdout carries the NDJSON
+    // event stream the engine owns).
+    let trace = std::env::temp_dir().join(format!(
+        "codex-fake-trace-{}.log",
+        std::process::id() as u64
+            ^ (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos() as u64)
+    ));
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("CODEX_FAKE_SCENARIO", "text_reply");
+    std::env::set_var("CODEX_FAKE_TRACE_FILE", &trace);
+    let outcome = eng.run(&input, &fake_cli(), &approval, &NoopSink, |_| {});
+    std::env::remove_var("CODEX_FAKE_TRACE_FILE");
+    assert!(matches!(outcome.termination, Termination::Text(_)));
+    let argv = std::fs::read_to_string(&trace).unwrap_or_default();
+    let _ = std::fs::remove_file(&trace);
+    assert!(
+        argv.contains("CODEX_FAKE_ARGV=exec --json --skip-git-repo-check --ephemeral --sandbox read-only --model gpt-5.1 -c model_reasoning_effort=high"),
+        "model + effort must ride the spawn argv in the documented order; got: {argv}"
+    );
+}

@@ -34,6 +34,25 @@ use toptopduck_lib::runtime::acp::wire::{
 /// arrives.
 const OVERFLOW_COUNT: u32 = 50;
 
+/// Append one trace line to the file named by `ACP_FAKE_TRACE_FILE` (when
+/// set). The integration test passes a temp file so it can assert on what the
+/// CLI received (stdout belongs to the engine's protocol channel; stderr
+/// inherits to the CI console where no test can read it). A no-op when the
+/// var is absent, so ad-hoc manual runs keep working.
+fn trace_line(line: &str) {
+    let Some(path) = std::env::var_os("ACP_FAKE_TRACE_FILE") else {
+        return;
+    };
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 fn main() {
     let scenario = std::env::var("ACP_FAKE_SCENARIO").unwrap_or_else(|_| "text_reply".into());
     let mut out = std::io::stdout();
@@ -141,8 +160,15 @@ fn main() {
             }
             Some("session/set_config_option") => {
                 // ADR-0095: acknowledge the model / thought-level injection.
-                // The received (configId, value) traces to stderr for the
-                // integration test's assertion (stdout is the engine's).
+                // The received (configId, value) traces to the file named by
+                // `ACP_FAKE_TRACE_FILE` (set by the integration test; stdout
+                // is the engine's, stderr goes to the CI console where a test
+                // cannot assert on it). Only the ids the catalog above
+                // declared are accepted -- a hardcoded id that does not match
+                // the fixture's agent-chosen ids is an RPC error, not an ack
+                // (the engine keys injection on the catalog entry's id, D4;
+                // this makes the mapping a tested contract instead of a
+                // masked mismatch).
                 let config_id = v
                     .get("params")
                     .and_then(|p| p.get("configId"))
@@ -153,14 +179,36 @@ fn main() {
                     .and_then(|p| p.get("value"))
                     .and_then(|o| o.as_str())
                     .unwrap_or("");
-                eprintln!("ACP_FAKE_RECEIVED_SETOPTION={config_id}={value}");
+                trace_line(&format!("ACP_FAKE_RECEIVED_SETOPTION={config_id}={value}"));
+                let (ack, error) = if scenario == "set_config_option_reject" {
+                    (
+                        None,
+                        Some(RpcError {
+                            code: -32602,
+                            message: format!("invalid params: unknown config id `{config_id}`"),
+                            data: None,
+                        }),
+                    )
+                } else {
+                    match config_id {
+                        "model" | "thought" => (Some(serde_json::json!({})), None),
+                        other => (
+                            None,
+                            Some(RpcError {
+                                code: -32602,
+                                message: format!("invalid params: unknown config id `{other}`"),
+                                data: None,
+                            }),
+                        ),
+                    }
+                };
                 respond(
                     &mut out,
                     &Response::<serde_json::Value> {
                         jsonrpc: "2.0".into(),
                         id: parse_id(&id),
-                        result: Some(serde_json::json!({})),
-                        error: None,
+                        result: ack,
+                        error,
                     },
                 );
             }
