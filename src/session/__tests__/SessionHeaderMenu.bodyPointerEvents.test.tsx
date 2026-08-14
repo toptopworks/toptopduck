@@ -17,33 +17,32 @@ import { catalogFor } from "../../i18n";
 // Root cause was a DUPLICATED @radix-ui/react-dismissable-layer in the
 // dependency graph: react-menu (under the dropdown) pinned a different exact
 // version than react-dialog, so each had its own module-level
-// `originalBodyPointerEvents` bookkeeping. While the menu layer was still
-// registered, the dialog's copy captured the menu-poisoned "none" as the
-// "original" value and restored it after both layers had closed. The fix
-// aligned the radix packages on a single dismissable-layer version (one module
-// instance, one bookkeeping set).
+// `originalBodyPointerEvents` bookkeeping AND its own `DismissableLayerContext`.
+// The context split is equally essential: the dialog's
+// `layersWithOutsidePointerEventsDisabled` Set was empty at mount time (menu
+// registered in a separate context), so `if (size === 0)` triggered the capture
+// of the menu-poisoned "none" as the "original" value. If context were shared,
+// size would be 1 and the bug wouldn't fire. The fix aligned the radix packages
+// on a single dismissable-layer version (one module instance, one bookkeeping
+// set, one context).
 //
 // The sequence is driven with CONTROLLED `open` + rerenders instead of real
 // menu events: Radix menu pointer/keyboard handling recurses under jsdom
 // (known limitation — SessionHeaderMenu.test.tsx mocks the dropdown for the
 // same reason). Only the layer mount/unmount ORDER matters for this bug, so
-// rerenders reproduce it deterministically. The harness mirrors the
+// rerenders reproduce it deterministically. The test mirrors the
 // SessionHeaderMenu flow: menu open -> dialog mounts while the menu layer is
 // still registered -> menu exits -> dialog closes.
 
 type DialogKind = "rename" | "delete";
 
-function Harness({
-  menuOpen,
-  dialogOpen,
-  kind,
-}: {
-  menuOpen: boolean;
-  dialogOpen: boolean;
-  kind: DialogKind;
-}) {
+const noop = () => {};
+
+// Renders the dropdown-menu + dialog pair with controlled `open` state so
+// rerenders drive the exact mount/unmount order of #518 (see header).
+function view(kind: DialogKind, menuOpen: boolean, dialogOpen: boolean) {
   return (
-    <>
+    <IntlProvider locale="en-US" messages={catalogFor("en-US")} defaultLocale="en-US">
       <DropdownMenu open={menuOpen}>
         <DropdownMenuTrigger>Actions</DropdownMenuTrigger>
         <DropdownMenuContent>
@@ -52,26 +51,10 @@ function Harness({
       </DropdownMenu>
       {dialogOpen &&
         (kind === "rename" ? (
-          <RenameSessionDialog
-            initialName="My Session"
-            onCancel={() => {}}
-            onSubmit={() => {}}
-          />
+          <RenameSessionDialog initialName="My Session" onCancel={noop} onSubmit={noop} />
         ) : (
-          <DeleteSessionDialog
-            name="My Session"
-            onCancel={() => {}}
-            onConfirm={() => {}}
-          />
+          <DeleteSessionDialog name="My Session" onCancel={noop} onConfirm={noop} />
         ))}
-    </>
-  );
-}
-
-function view(kind: DialogKind, menuOpen: boolean, dialogOpen: boolean) {
-  return (
-    <IntlProvider locale="en-US" messages={catalogFor("en-US")} defaultLocale="en-US">
-      <Harness kind={kind} menuOpen={menuOpen} dialogOpen={dialogOpen} />
     </IntlProvider>
   );
 }
