@@ -78,13 +78,15 @@ pub struct AcpTurnInput {
     /// it).
     pub mcp_servers: Vec<McpServer>,
     /// The session-level model choice to inject this turn (ADR-0095). `None`
-    /// = the CLI's own default. ACP path: rides `NewSessionParams.model`;
-    /// JsonEventStream path: rides argv behind `AdapterSpec.model_arg`.
+    /// = the CLI's own default. ACP path: one `session/set_config_option`
+    /// (configId `model`) after the handshake -- `NewSessionRequest` carries
+    /// no model field (schema 0.13.8); JsonEventStream path: rides argv
+    /// behind `AdapterSpec.model_arg`.
     pub model: Option<String>,
     /// The session-level thought-level choice to inject this turn (ADR-0095).
-    /// `None` = the CLI's own default. ACP path: one `session/setConfigOption`
-    /// after the handshake; JsonEventStream path: argv via
-    /// `AdapterSpec.effort_config_key`.
+    /// `None` = the CLI's own default. ACP path: one `session/set_config_option`
+    /// (configId `thought_level`) after the handshake; JsonEventStream path:
+    /// argv via `AdapterSpec.effort_config_key`.
     pub thought_level: Option<String>,
     /// The full windowed context for this turn (the question + history), as
     /// text content blocks. ADR-0076 statelessness: the whole context every
@@ -202,28 +204,53 @@ impl AcpEngine {
         };
         let session_id = hs.session_id;
         let discovered = Some(hs.discovered);
-        // ADR-0095: inject the selected thought level with ONE
-        // session/setConfigOption between the handshake and the prompt. The
-        // request is a best-effort preference -- a CLI that rejects the option
-        // id fails the roundtrip as a transient turn failure (the user asked
-        // for a setting the CLI does not accept; surfacing the turn error is
-        // the honest outcome, and clearing the selection restores the turn).
-        if let Some(level) = &input.thought_level {
+        // ADR-0095: inject the user's selections via `session/set_config_option`
+        // between the handshake and the prompt -- the model and the thought
+        // level each ride their own request when selected (config ids come
+        // from the handshake's catalog; the standard ids cover every
+        // categorized CLI). A CLI that rejects the setting fails the turn
+        // honestly (the user asked for a setting the CLI does not accept;
+        // clearing the selection restores the turn).
+        let selections: Vec<(&str, &String)> = [
+            input.model.as_ref().map(|m| ("model", m)),
+            input.thought_level.as_ref().map(|l| ("thought_level", l)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        for (config_id, value) in selections {
             let req = Request::new(
                 RequestId::Num(4),
-                "session/setConfigOption",
+                "session/set_config_option",
                 SetConfigOptionParams {
                     session_id: session_id.clone(),
-                    option_id: crate::runtime::acp::adapter::THOUGHT_LEVEL_OPTION_ID.to_string(),
-                    value: level.clone(),
+                    config_id: config_id.to_string(),
+                    value: value.clone(),
                 },
             );
-            if let Err(term) =
-                io.request_roundtrip::<SetConfigOptionParams, Value>(&self.cancel, req)
-            {
-                let outcome = self.outcome(term, Vec::new(), 1, discovered);
-                child.kill_and_wait();
-                return outcome;
+            match io.request_roundtrip::<SetConfigOptionParams, Value>(&self.cancel, req) {
+                Err(term) => {
+                    let outcome = self.outcome(term, Vec::new(), 1, discovered);
+                    child.kill_and_wait();
+                    return outcome;
+                }
+                // An RPC error is a real rejection, not a transport gap --
+                // surface it (e.g. the CLI does not accept the config id).
+                Ok(resp) => {
+                    if let Some(e) = resp.error {
+                        let outcome = self.outcome(
+                            Termination::Transient(format!(
+                                "session/set_config_option `{config_id}` error: {}",
+                                e.message
+                            )),
+                            Vec::new(),
+                            1,
+                            discovered,
+                        );
+                        child.kill_and_wait();
+                        return outcome;
+                    }
+                }
             }
         }
 
@@ -345,16 +372,19 @@ pub(crate) struct HandshakeOutcome {
     pub discovered: DiscoveredRuntime,
 }
 
-/// One `session/setConfigOption` request body (ADR-0095): sets `option_id` to
-/// `value` on the freshly minted session. Sent once after the handshake when
-/// the user selected a thought level; a settable option also reports the
-/// effective value back (the response result is ignored -- the next turn's
-/// handshake re-discovers the truth).
+/// One `session/set_config_option` request body (ADR-0095): sets the option
+/// with the given config id to `value` on the freshly minted session. The
+/// protocol-standard injection channel for BOTH the model and the thought
+/// level (`NewSessionRequest` carries no model field, schema 0.13.8 -- the
+/// handshake's config catalog supplies the ids). Sent after the handshake
+/// when the user selected either; the response result is ignored (the next
+/// turn's handshake re-discovers the truth) but an RPC error fails the turn
+/// honestly.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SetConfigOptionParams {
     session_id: String,
-    option_id: String,
+    config_id: String,
     value: String,
 }
 
@@ -392,7 +422,6 @@ fn handshake(
             NewSessionParams {
                 cwd: input.cwd.clone(),
                 mcp_servers: input.mcp_servers.clone(),
-                model: input.model.clone(),
             },
         ),
     )?;

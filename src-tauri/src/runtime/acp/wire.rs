@@ -194,8 +194,6 @@ impl Implementation {
 pub struct NewSessionParams {
     pub cwd: String,
     pub mcp_servers: Vec<McpServer>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
 }
 
 /// `session/new` result. `session_id` drives the turn; `config_options` is
@@ -709,7 +707,6 @@ mod tests {
             NewSessionParams {
                 cwd: "/tmp".into(),
                 mcp_servers: Vec::new(),
-                model: None,
             },
         );
         let v: Value = serde_json::to_value(&req).unwrap();

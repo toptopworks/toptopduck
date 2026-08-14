@@ -2452,7 +2452,9 @@ pub fn set_session_model(
     reject_if_in_flight(&handle)?;
     let mut s = handle.session_lock()?;
     s.set_external_model_config(model, handle.external_thought_level());
-    s.persist_model_config_now();
+    // Persist now (via the shared auto-write path) so a selection made
+    // without a following turn survives a close (ADR-0095 Decision 6).
+    s.persist_if_bound();
     handle.set_external_model_config(
         s.runtime_model_config().model.clone(),
         s.runtime_model_config().thought_level.clone(),
@@ -2476,7 +2478,9 @@ pub fn set_session_thought_level(
     reject_if_in_flight(&handle)?;
     let mut s = handle.session_lock()?;
     s.set_external_model_config(handle.external_model(), thought_level);
-    s.persist_model_config_now();
+    // Persist now (via the shared auto-write path) so a selection made
+    // without a following turn survives a close (ADR-0095 Decision 6).
+    s.persist_if_bound();
     handle.set_external_model_config(
         s.runtime_model_config().model.clone(),
         s.runtime_model_config().thought_level.clone(),

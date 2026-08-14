@@ -1549,19 +1549,12 @@ impl Session {
         )
     }
 
-    /// Persist the recipe NOW with the current header facts (ADR-0095): the
-    /// `set_session_model` / `set_session_thought_level` commands call this
-    /// so a selection survives a close-without-another-turn (the resume
-    /// promise, Decision 6). Best-effort like the per-turn auto-write -- a
-    /// failure lands in the persister's error slot and surfaces via the
-    /// existing unsaved-banner channel.
-    pub fn persist_model_config_now(&mut self) {
-        self.persist_if_bound();
-    }
-
     /// Rewrite the recipe at the bound path (ADR-0034 atomic write). Facade
     /// delegate to [`RecipePersister::save_if_bound`](recipe_persister::RecipePersister::save_if_bound).
-    fn persist_if_bound(&mut self) {
+    /// Persist the recipe now (shared auto-write path). In addition to the
+    /// per-turn write, the ADR-0095 set-commands call this so a selection
+    /// made without a following turn survives a close (Decision 6).
+    pub fn persist_if_bound(&mut self) {
         // Migrate derived sources before building the recipe so their
         // source_path carries the portable (.duck-adjacent) location instead
         // of the temp staging path (issue #433, ADR-0087 D2). Without this,
