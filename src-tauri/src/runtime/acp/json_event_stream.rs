@@ -19,7 +19,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -32,14 +32,6 @@ use crate::session::agent_loop::{
     truncate_trace_excerpt, LoopOutcome, Termination, TraceEntry, TRACE_EXCERPT_MAX,
 };
 
-/// Pump poll interval — mirrors the ACP engine's interval so the cancel /
-/// step-cap check latency is identical across formats.
-const PUMP_POLL_INTERVAL: Duration = Duration::from_millis(50);
-
-/// Bounded reap after kill (same rationale as the ACP engine).
-const KILL_REAP_DEADLINE: Duration = Duration::from_secs(2);
-const KILL_REAP_POLL: Duration = Duration::from_millis(10);
-
 // ---------------------------------------------------------------------------
 // Event parser (pure)
 // ---------------------------------------------------------------------------
@@ -47,7 +39,7 @@ const KILL_REAP_POLL: Duration = Duration::from_millis(10);
 /// One parsed codex `exec --json` event (ADR-0094). The variant set covers the
 /// event types that drive the turn; unknown types map to [`Self::Other`] and
 /// are ignored by the engine.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum CodexEvent {
     /// The agent started its turn (`turn.started`).
     TurnStarted,
@@ -55,7 +47,8 @@ pub(crate) enum CodexEvent {
     TurnCompleted,
     /// The turn failed with an error message (`turn.failed` + `error`).
     TurnFailed { error: String },
-    /// Terminal agent text (`item.completed` with `agent_message`).
+    /// Agent text fragment — accumulated across the turn (`agent_message`
+    /// or `item` with `subtype: agent_message`).
     AgentMessage { text: String },
     /// A tool / command was executed (`command_execution`).
     CommandExecution {
@@ -172,8 +165,7 @@ fn extract_message_text(value: &Value) -> String {
                     .and_then(|t| t.as_str())
                     .or_else(|| block.get("output_text").and_then(|t| t.as_str()))
             })
-            .collect::<Vec<_>>()
-            .join("");
+            .collect();
         if !text.is_empty() {
             return text;
         }
@@ -329,7 +321,7 @@ pub(super) fn run_json_event_stream(
                 Vec::new(),
                 0,
             );
-            kill_child(&mut child);
+            super::process::kill_and_reap(&mut child);
             return result;
         }
         if let Err(e) = stdin.write_all(b"\n") {
@@ -338,7 +330,7 @@ pub(super) fn run_json_event_stream(
                 Vec::new(),
                 0,
             );
-            kill_child(&mut child);
+            super::process::kill_and_reap(&mut child);
             return result;
         }
         // Drop stdin explicitly to signal EOF.
@@ -400,7 +392,7 @@ pub(super) fn run_json_event_stream(
             break;
         }
 
-        match rx.recv_timeout(PUMP_POLL_INTERVAL) {
+        match rx.recv_timeout(super::process::PUMP_POLL_INTERVAL) {
             Ok(line) => {
                 let value: Value = match serde_json::from_str(&line) {
                     Ok(v) => v,
@@ -428,6 +420,8 @@ pub(super) fn run_json_event_stream(
                     }
                     CodexEvent::CommandExecution { call_id, command } => {
                         pump.tool_call_count += 1;
+                        // codex command_execution events carry no success/failure
+                        // status (unlike ACP ToolCall); success defaults to true.
                         let entry = TraceEntry {
                             tool_use_id: call_id,
                             name: command.clone(),
@@ -468,7 +462,7 @@ pub(super) fn run_json_event_stream(
         termination = Some(Termination::StepCap(step_cap));
     }
 
-    kill_child(&mut child);
+    super::process::kill_and_reap(&mut child);
 
     let term = termination.unwrap_or_else(|| {
         // No terminal event and no error — the pump exited without resolution.
@@ -512,18 +506,6 @@ fn spawn_codex(
     }
     cmd.spawn()
         .map_err(|e| format!("failed to spawn codex exec `{}`: {e}", adapter.id))
-}
-
-/// Kill + bounded reap (same rationale as the ACP engine's ChildHandle).
-fn kill_child(child: &mut Child) {
-    let _ = child.kill();
-    let deadline = Instant::now() + KILL_REAP_DEADLINE;
-    while Instant::now() < deadline {
-        match child.try_wait() {
-            Ok(Some(_)) | Err(_) => return,
-            Ok(None) => thread::sleep(KILL_REAP_POLL),
-        }
-    }
 }
 
 /// Build the [`LoopOutcome`] (same shape as the ACP engine's `outcome`).

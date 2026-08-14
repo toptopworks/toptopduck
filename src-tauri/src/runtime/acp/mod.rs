@@ -17,4 +17,5 @@
 pub mod adapter;
 pub mod engine;
 pub mod json_event_stream;
+mod process;
 pub mod wire;

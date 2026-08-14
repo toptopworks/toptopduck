@@ -145,21 +145,15 @@ pub const fn gemini_cli() -> AdapterSpec {
     }
 }
 
-/// The codex adapter (ADR-0081 v1 validation set, issue #300). Unlike
-/// claude-code + gemini-cli, codex has NO native `--acp` flag: ACP support is
-/// the dedicated `codex-acp` binary (npm `@agentclientprotocol/codex-acp`,
-/// installed as `codex-acp`), which starts in ACP stdio mode by default and
-/// wraps the Codex App Server internally. So the launch shape differs from the
-/// other two -- empty argv, a dedicated server binary -- yet it is STILL pure
-/// data: the engine spawns `<binary> <argv...>` and the difference lives here,
-/// not in a code branch (ADR-0081 zero per-CLI code).
-///
-/// ADR-0094: codex uses native `exec --json` direct-connect, not the
-/// `codex-acp` bridge package. The detection binary is the official `codex`
-/// CLI; the argv puts it into structured-NDJSON mode with a read-only sandbox
-/// (native shell / file-write tools blocked platform-uniformly). The prompt
-/// is written to stdin as flattened text; MCP tool calls route through the
-/// gateway bridge injected via `-c` config override (ADR-0085/0094).
+/// The codex adapter (ADR-0081 v1 validation set, issue #300). ADR-0094:
+/// codex uses native `exec --json` direct-connect (not the retired `codex-acp`
+/// bridge package). The detection binary is the official `codex` CLI; the argv
+/// puts it into structured-NDJSON mode with a read-only sandbox (native shell /
+/// file-write tools blocked platform-uniformly). The prompt is written to stdin
+/// as flattened text; MCP tool calls route through the gateway bridge injected
+/// via `-c` config override (ADR-0085/0094). The stream format is
+/// `JsonEventStream`, so the engine dispatches to the JSON event stream path,
+/// not the ACP JSON-RPC path.
 ///
 /// NOTE: the argv shape is pinned by the codex CLI's `exec` subcommand; live
 /// E2E verifies it against a real install. If codex changes the flags, ONLY
