@@ -129,7 +129,9 @@ fn query_timeout_returns_structured_failure() {
 // --- Mid-query crash --------------------------------------------------------
 
 /// A server that exits right after receiving `model/list` hits stdout EOF: a
-/// structured HandshakeFailure naming the disconnection, never a hang.
+/// structured HandshakeFailure naming the disconnection, never a hang. The
+/// `who` prefix distinguishes this site from the ACP probe's identical
+/// mapping (issue #540).
 #[test]
 fn query_crash_is_handshake_failure() {
     let err = query_fixture("catalog_crash", Duration::from_secs(5))
@@ -140,9 +142,48 @@ fn query_crash_is_handshake_failure() {
                 detail.contains("closed stdout"),
                 "the EOF names the disconnection: {detail}"
             );
+            assert!(
+                detail.contains("codex app-server"),
+                "the who prefix names the app-server (not the ACP agent): {detail}"
+            );
         }
         other => panic!("expected HandshakeFailure, got {other:?}"),
     }
+}
+
+/// A `model/list` response with the right id but a result of the wrong type
+/// fails the round-trip's response parse (the frozen "response parse:"
+/// prefix), never a hang (issue #540).
+#[test]
+fn query_malformed_response_is_parse_failure() {
+    let err = query_fixture("catalog_malformed", Duration::from_secs(5))
+        .expect_err("a malformed response must fail the query");
+    match err {
+        ProbeError::HandshakeFailure(detail) => {
+            assert!(
+                detail.contains("response parse:"),
+                "carries the parse prefix: {detail}"
+            );
+            assert!(
+                !detail.contains("closed stdout"),
+                "must not misreport as EOF: {detail}"
+            );
+        }
+        other => panic!("expected HandshakeFailure, got {other:?}"),
+    }
+}
+
+/// Stray lines ahead of the catalog response (a notification + a response
+/// with an unrelated id) are dropped, not errors: the query still completes
+/// (issue #540 pins the shared loop's stray-drop policy on the bare-envelope
+/// site too).
+#[test]
+fn query_stray_lines_are_dropped_not_fatal() {
+    let models = expect_available(query_fixture("catalog_chatty", Duration::from_secs(5)).unwrap());
+    assert!(
+        models.is_empty(),
+        "the chatty page folds an empty catalog: {models:?}"
+    );
 }
 
 // --- Spawn failure ----------------------------------------------------------

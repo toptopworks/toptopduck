@@ -32,9 +32,8 @@
 //! ACP-driving half of the turn.
 
 use std::collections::HashSet;
-use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -487,12 +486,7 @@ impl ChildHandle {
 }
 
 fn spawn(binary: &Path, adapter: &AdapterSpec) -> Result<ChildHandle, String> {
-    Command::new(binary)
-        .args(adapter.argv)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
+    super::process::spawn_piped(binary, adapter.argv)
         .map(|inner| ChildHandle { inner })
         .map_err(|e| format!("failed to spawn ACP agent `{}`: {e}", adapter.id))
 }
@@ -501,84 +495,47 @@ fn spawn(binary: &Path, adapter: &AdapterSpec) -> Result<ChildHandle, String> {
 // NDJSON stdio I/O
 // ---------------------------------------------------------------------------
 
-/// A line-delimited JSON-RPC channel over the child's stdio. The stdout reader
-/// runs on its own thread (a blocking `read_line` would not notice cancel); the
-/// pump drains it via a `recv_timeout` channel.
+/// The turn engine's thin wrapper over the shared
+/// [`super::ndjson::NdjsonIo`]: cancel-driven (a round-trip aborts on the
+/// shared token; the wall-clock watchdog fires it) and mapped onto
+/// [`Termination`]. The multiplexing prompt pump below keeps its own line
+/// loop -- it folds `session/update` and services `session/request_permission`
+/// -- and shares the reader channel via [`Self::recv_timeout`] and the writer
+/// via [`Self::write_json`].
 struct AcpIo {
-    stdin: ChildStdin,
-    rx: mpsc::Receiver<String>,
+    inner: super::ndjson::NdjsonIo,
 }
 
 impl AcpIo {
     fn new(stdin: ChildStdin, stdout: ChildStdout) -> Self {
-        let (tx, rx) = mpsc::channel::<String>();
-        // The reader thread owns stdout, reads line-by-line, and sends each raw
-        // line. EOF closes the channel (tx dropped) so the pump's recv returns
-        // Disconnected -> the engine treats it as agent EOF.
-        thread::spawn(move || {
-            let mut reader = BufReader::new(stdout);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line) {
-                    Ok(0) => break, // EOF
-                    Ok(_) => {
-                        let trimmed = line.trim_end_matches(['\n', '\r']);
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        if tx.send(trimmed.to_string()).is_err() {
-                            break; // pump gone
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        Self { stdin, rx }
+        Self {
+            inner: super::ndjson::NdjsonIo::new(stdin, stdout),
+        }
     }
 
-    /// Serialize + write one JSON-RPC message as a single NDJSON line. Flushes
-    /// so the agent receives it immediately (NDJSON is line-buffered).
+    /// Delegates to [`super::ndjson::NdjsonIo::write_json`] (one NDJSON line +
+    /// flush).
     fn write_json<T: serde::Serialize>(&mut self, msg: &T) -> Result<(), std::io::Error> {
-        let mut s = serde_json::to_string(msg)?;
-        s.push('\n');
-        self.stdin.write_all(s.as_bytes())?;
-        self.stdin.flush()
+        self.inner.write_json(msg)
     }
 
-    /// Send a request and pump incoming lines until its response arrives. A
-    /// stray notification / unrelated message during the handshake is dropped
-    /// (not an error) so a chatty agent cannot break it.
+    /// One receive step for the prompt pump below.
+    fn recv_timeout(&self, timeout: std::time::Duration) -> Result<String, mpsc::RecvTimeoutError> {
+        self.inner.recv_timeout(timeout)
+    }
+
+    /// Send a request and pump incoming lines until its response arrives.
+    /// Stray lines are dropped by the shared loop (see
+    /// [`super::ndjson::NdjsonIo::request_roundtrip`]).
     fn request_roundtrip<P: serde::Serialize, R: serde::de::DeserializeOwned>(
         &mut self,
         cancel: &CancelToken,
         req: Request<P>,
     ) -> Result<Response<R>, Termination> {
         let target = serde_json::to_value(&req.id).unwrap_or(Value::Null);
-        self.write_json(&req)
-            .map_err(|e| Termination::Transient(format!("write: {e}")))?;
-        loop {
-            if cancel.is_requested() {
-                return Err(Termination::Cancelled);
-            }
-            match self.rx.recv_timeout(super::process::PUMP_POLL_INTERVAL) {
-                Ok(line) => {
-                    let v: Value = match serde_json::from_str(&line) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-                    if v.get("id") == Some(&target) && v.get("method").is_none() {
-                        return serde_json::from_value(v)
-                            .map_err(|e| Termination::Transient(format!("response parse: {e}")));
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(Termination::Transient("ACP agent closed stdout".into()));
-                }
-            }
-        }
+        self.inner
+            .request_roundtrip(&req, &target, super::ndjson::Abort::Cancel(cancel))
+            .map_err(map_roundtrip_termination)
     }
 
     /// Pump incoming lines from the moment `session/prompt` is sent until its
@@ -620,7 +577,7 @@ impl AcpIo {
                     return PromptEnd::Cancelled;
                 }
             }
-            match self.rx.recv_timeout(super::process::PUMP_POLL_INTERVAL) {
+            match self.recv_timeout(super::process::PUMP_POLL_INTERVAL) {
                 Ok(line) => {
                     let v: Value = match serde_json::from_str(&line) {
                         Ok(v) => v,
@@ -714,6 +671,27 @@ impl AcpIo {
                     };
                 }
             }
+        }
+    }
+}
+
+/// Map the shared round-trip failure onto the turn's termination. The EOF
+/// detail is frozen by the integration tests' locale-free diagnostic fold.
+fn map_roundtrip_termination(e: super::ndjson::RoundtripError) -> Termination {
+    match e {
+        super::ndjson::RoundtripError::Cancelled => Termination::Cancelled,
+        super::ndjson::RoundtripError::Timeout => {
+            unreachable!("cancel-driven round-trips never report Timeout")
+        }
+        super::ndjson::RoundtripError::Serialize(detail)
+        | super::ndjson::RoundtripError::Write(detail) => {
+            Termination::Transient(format!("write: {detail}"))
+        }
+        super::ndjson::RoundtripError::Eof => {
+            Termination::Transient("ACP agent closed stdout".into())
+        }
+        super::ndjson::RoundtripError::Parse(detail) => {
+            Termination::Transient(format!("response parse: {detail}"))
         }
     }
 }

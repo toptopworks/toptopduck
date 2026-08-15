@@ -1,11 +1,15 @@
 //! Shared process-management helpers for the ACP + JSON event stream engines.
 //!
-//! Both [`super::engine`] (ACP path) and [`super::json_event_stream`] (codex
-//! native exec path) kill + reap the spawned CLI child under the same bounded
-//! deadline. Extracting the constants + the kill-reap logic here prevents drift:
-//! a change to the reap strategy lands in one place, not two.
+//! [`super::engine`] (ACP path), [`super::probe`], and
+//! [`super::app_server`] spawn their CLI child through [`spawn_piped`] here,
+//! while [`super::json_event_stream`] (codex native exec path) keeps its own
+//! cwd-aware spawn. Both paths then kill + reap the child under the same
+//! bounded deadline: extracting the spawn shape, the constants, and the
+//! kill-reap logic here prevents drift -- a change to either lands in one
+//! place, not several.
 
-use std::process::Child;
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// Pump poll interval: how long the pump blocks on the stdout-reader channel
@@ -29,6 +33,24 @@ pub(super) const KILL_REAP_DEADLINE: Duration = Duration::from_secs(2);
 /// Poll interval for the bounded reap. Short enough that the turn reclaims the
 /// agent promptly when SIGKILL lands; [`KILL_REAP_DEADLINE`] is the real cap.
 const KILL_REAP_POLL: Duration = Duration::from_millis(10);
+
+/// The single spawn shape every ACP-family CLI lifecycle goes through:
+/// `binary` with `argv`, piped stdin/stdout, inherited stderr (so the CLI's
+/// own chatter goes to the parent's terminal). The turn engine and both probe
+/// paths spawn through here (issue #540) -- a change to the spawn shape (env,
+/// cwd, stdio wiring) lands in one place, not three. The codex native exec
+/// spawn ([`super::json_event_stream`]) is deliberately excluded: its surface
+/// differs (extra argv flags + `current_dir`). The caller keeps the error
+/// wording (the turn path and the probe path name the failing adapter / CLI
+/// differently).
+pub(super) fn spawn_piped(binary: &Path, argv: &[&str]) -> std::io::Result<Child> {
+    Command::new(binary)
+        .args(argv)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+}
 
 /// Kill the child (`SIGKILL` on POSIX, `TerminateProcess` on Windows) and reap
 /// it under a bounded poll. Best-effort: if the child is not reaped within

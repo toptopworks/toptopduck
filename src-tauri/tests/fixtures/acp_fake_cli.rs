@@ -166,6 +166,43 @@ fn main() {
                 );
             }
             Some("session/new") => {
+                // `chatty_handshake` (issue #540): two stray lines ahead of
+                // the response -- a notification (carries a method field) and
+                // a response with an unrelated id. The round-trip must drop
+                // both (not an error) and still complete the handshake.
+                if scenario == "chatty_handshake" {
+                    write_line(
+                        &mut out,
+                        &serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {},
+                        }),
+                    );
+                    write_line(
+                        &mut out,
+                        &serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 999,
+                            "result": {},
+                        }),
+                    );
+                }
+                // `session_new_malformed` (issue #540): a response with the
+                // right id but a result of the wrong type -- the round-trip
+                // surfaces the parse failure, never a hang. Early-continue
+                // so the normal response block below stays untouched.
+                if scenario == "session_new_malformed" {
+                    write_line(
+                        &mut out,
+                        &serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": "not-a-session",
+                        }),
+                    );
+                    continue;
+                }
                 // When the descriptor names a real bridge binary (the
                 // gateway_tool_call scenario), spawn it now so it connects
                 // back to the gateway before session/prompt fires MCP at it.

@@ -8,7 +8,9 @@
 //! -> terminate the process. The probe never drives a turn, holds no session
 //! lock, and produces no upstream session state.
 //!
-//! This module owns the spawn shape and the blocking handshake: [`spawn_child`]
+//! This module owns the blocking handshake and the probe's spawn surface
+//! (argv selection + error wording; the stdio spawn shape itself lives in
+//! [`super::process::spawn_piped`]): [`spawn_child`]
 //! hands the spawned child + its stdio to the caller (the Child handle must
 //! stay OUT of any `spawn_blocking` closure -- blocking tasks are not
 //! cancellable, so this is the only way to guarantee a hung CLI is reaped
@@ -22,11 +24,8 @@
 //! adapters (codex) dispatch to [`super::app_server`]'s `model/list` query
 //! -- the same spawn -> query -> kill lifecycle, a different wire surface.
 
-use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::mpsc;
-use std::thread;
+use std::process::{Child, ChildStdin, ChildStdout};
 use std::time::{Duration, Instant};
 
 use crate::runtime::acp::adapter::{AdapterSpec, DiscoveredRuntime};
@@ -123,12 +122,7 @@ pub enum ProbeError {
 /// child's stdio.
 pub fn spawn_child(spec: &AdapterSpec, binary: Option<&Path>) -> Result<ChildHandle, ProbeError> {
     let binary = binary.ok_or_else(|| ProbeError::NotDetected(spec.id.to_string()))?;
-    Command::new(binary)
-        .args(spec.probe_argv.unwrap_or(spec.argv))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
+    super::process::spawn_piped(binary, spec.probe_argv.unwrap_or(spec.argv))
         .map(|inner| ChildHandle { inner })
         .map_err(|e| ProbeError::SpawnFailure(format!("failed to spawn CLI `{}`: {e}", spec.id)))
 }
@@ -237,85 +231,57 @@ fn handshake(
 // NDJSON stdio I/O
 // ---------------------------------------------------------------------------
 
-/// A line-delimited JSON-RPC channel over the child's stdio, deadline-driven
-/// (the kernel's minimal counterpart of the engine's cancel-driven pump:
-/// here the only abort condition is the wall clock).
+/// The probe's thin wrapper over the shared [`super::ndjson::NdjsonIo`]:
+/// deadline-driven (the kernel's minimal counterpart of the engine's
+/// cancel-driven pump -- here the only abort condition is the wall clock)
+/// and mapped onto [`ProbeError`].
 struct ProbeIo {
-    stdin: ChildStdin,
-    rx: mpsc::Receiver<String>,
+    inner: super::ndjson::NdjsonIo,
 }
 
 impl ProbeIo {
     fn new(stdin: ChildStdin, stdout: ChildStdout) -> Self {
-        let (tx, rx) = mpsc::channel::<String>();
-        // The reader thread owns stdout; EOF drops tx, which the round-trip
-        // treats as the CLI dying mid-handshake.
-        thread::spawn(move || {
-            let mut reader = BufReader::new(stdout);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line) {
-                    Ok(0) => break, // EOF
-                    Ok(_) => {
-                        let trimmed = line.trim_end_matches(['\n', '\r']);
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        if tx.send(trimmed.to_string()).is_err() {
-                            break; // round-trip gone
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        Self { stdin, rx }
+        Self {
+            inner: super::ndjson::NdjsonIo::new(stdin, stdout),
+        }
     }
 
     /// Send a request and pump incoming lines until its response arrives or
-    /// the deadline passes. A stray notification / unrelated message is
-    /// dropped (not an error) so a chatty agent cannot break the handshake.
+    /// the deadline passes. Stray lines are dropped by the shared loop (see
+    /// [`super::ndjson::NdjsonIo::request_roundtrip`]).
     fn request_roundtrip<P: serde::Serialize, R: serde::de::DeserializeOwned>(
         &mut self,
         req: Request<P>,
         deadline: Instant,
     ) -> Result<Response<R>, ProbeError> {
         let target = serde_json::to_value(&req.id).unwrap_or(serde_json::Value::Null);
-        let mut msg = serde_json::to_string(&req)
-            .map_err(|e| ProbeError::HandshakeFailure(format!("serialize: {e}")))?;
-        msg.push('\n');
-        self.stdin
-            .write_all(msg.as_bytes())
-            .and_then(|_| self.stdin.flush())
-            .map_err(|e| ProbeError::HandshakeFailure(format!("write: {e}")))?;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(ProbeError::Timeout);
-            }
-            match self.rx.recv_timeout(remaining) {
-                Ok(line) => {
-                    let v: serde_json::Value = match serde_json::from_str(&line) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-                    if v.get("id") == Some(&target) && v.get("method").is_none() {
-                        return serde_json::from_value(v).map_err(|e| {
-                            ProbeError::HandshakeFailure(format!("response parse: {e}"))
-                        });
-                    }
-                }
-                // The next loop iteration re-derives the remaining time; a
-                // partial-wait Timeout only ends the probe when the deadline
-                // has actually passed.
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(ProbeError::HandshakeFailure(
-                        "ACP agent closed stdout".into(),
-                    ))
-                }
-            }
+        self.inner
+            .request_roundtrip(&req, &target, super::ndjson::Abort::Deadline(deadline))
+            .map_err(|e| map_roundtrip_error(e, "ACP agent"))
+    }
+}
+
+/// Map the shared round-trip failure onto the probe's error type. `who` names
+/// the child in the EOF detail (the ACP handshake and the app-server query
+/// word it differently). Shared with [`super::app_server`]'s deadline-driven
+/// query.
+pub(super) fn map_roundtrip_error(e: super::ndjson::RoundtripError, who: &str) -> ProbeError {
+    match e {
+        super::ndjson::RoundtripError::Cancelled => {
+            unreachable!("deadline-driven round-trips never report Cancelled")
+        }
+        super::ndjson::RoundtripError::Timeout => ProbeError::Timeout,
+        super::ndjson::RoundtripError::Serialize(detail) => {
+            ProbeError::HandshakeFailure(format!("serialize: {detail}"))
+        }
+        super::ndjson::RoundtripError::Write(detail) => {
+            ProbeError::HandshakeFailure(format!("write: {detail}"))
+        }
+        super::ndjson::RoundtripError::Eof => {
+            ProbeError::HandshakeFailure(format!("{who} closed stdout"))
+        }
+        super::ndjson::RoundtripError::Parse(detail) => {
+            ProbeError::HandshakeFailure(format!("response parse: {detail}"))
         }
     }
 }

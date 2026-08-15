@@ -23,6 +23,7 @@ pub mod adapter;
 pub mod app_server;
 pub mod engine;
 pub mod json_event_stream;
+mod ndjson;
 pub mod probe;
 mod process;
 pub mod wire;
