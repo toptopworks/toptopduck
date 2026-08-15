@@ -136,8 +136,11 @@ fn main() {
             }
             // A CLI that starts but never answers -> the probe's wall clock.
             ("catalog_silent", Some("model/list")) => {}
-            // A CLI that exits immediately on model/list -> stdout EOF.
+            // A CLI that exits immediately on model/list -> stdout EOF. Prints
+            // a stderr diagnosis first (issue #542): the EOF detail carries
+            // the tail.
             ("catalog_crash", Some("model/list")) => {
+                eprintln!("codex-fake: auth flow failed: run `codex login`");
                 let _ = out.flush();
                 std::process::exit(0);
             }

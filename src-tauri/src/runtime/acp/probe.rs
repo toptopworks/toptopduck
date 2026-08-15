@@ -25,7 +25,9 @@
 //! -- the same spawn -> query -> kill lifecycle, a different wire surface.
 
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::runtime::acp::adapter::{AdapterSpec, DiscoveredRuntime};
@@ -119,12 +121,25 @@ pub enum ProbeError {
 /// spec so the kernel names no CLI) and piped stdio. A fresh PATH scan
 /// returning `None` refuses with [`ProbeError::NotDetected`] before any spawn
 /// is attempted. The caller dispatches the per-format query on the returned
-/// child's stdio.
+/// child's stdio. Contract (issue #542): stderr is spawned PIPED and is
+/// drained ONLY by [`ChildHandle::take_stderr_tail`]'s reader thread -- every
+/// caller must take the tail (alongside [`ChildHandle::take_stdio`]) for every
+/// child it spawned, including early-failure paths after a successful spawn;
+/// an untaken piped stderr is never read, so a chatty child can block on a
+/// full OS pipe buffer and wedge until killed.
 pub fn spawn_child(spec: &AdapterSpec, binary: Option<&Path>) -> Result<ChildHandle, ProbeError> {
     let binary = binary.ok_or_else(|| ProbeError::NotDetected(spec.id.to_string()))?;
-    super::process::spawn_piped(binary, spec.probe_argv.unwrap_or(spec.argv))
-        .map(|inner| ChildHandle { inner })
-        .map_err(|e| ProbeError::SpawnFailure(format!("failed to spawn CLI `{}`: {e}", spec.id)))
+    // Piped stderr (issue #542): the CLI's diagnostics (auth failure, startup
+    // panic, version skew) land in the probe's failure detail instead of
+    // vanishing into the packaged app's absent console. The turn engine's
+    // spawn keeps stderr inherited.
+    super::process::spawn_piped(
+        binary,
+        spec.probe_argv.unwrap_or(spec.argv),
+        std::process::Stdio::piped(),
+    )
+    .map(|inner| ChildHandle { inner })
+    .map_err(|e| ProbeError::SpawnFailure(format!("failed to spawn CLI `{}`: {e}", spec.id)))
 }
 
 /// The spawned CLI child. [`Self::kill_and_wait`] delegates to
@@ -144,6 +159,15 @@ impl ChildHandle {
         (stdin, stdout)
     }
 
+    /// Take the piped stderr and start the tail capture (issue #542). The
+    /// returned [`StderrTail`] drains the pipe on its own thread into a
+    /// bounded ring, so a chatty CLI cannot fill the OS pipe buffer (which
+    /// would block the child) or grow unbounded memory.
+    pub fn take_stderr_tail(&mut self) -> StderrTail {
+        let stderr = self.inner.stderr.take().expect("piped stderr");
+        StderrTail::spawn(stderr)
+    }
+
     pub fn kill_and_wait(&mut self) {
         super::process::kill_and_reap(&mut self.inner);
     }
@@ -159,12 +183,13 @@ impl ChildHandle {
 pub fn handshake_with(
     stdin: ChildStdin,
     stdout: ChildStdout,
+    stderr_tail: StderrTail,
     spec: &AdapterSpec,
     timeout: Duration,
 ) -> Result<DiscoveredRuntime, ProbeError> {
     let mut io = ProbeIo::new(stdin, stdout);
     let deadline = Instant::now() + timeout;
-    handshake(&mut io, spec, deadline)
+    handshake(&mut io, spec, deadline).map_err(|e| attach_stderr_tail(e, &stderr_tail))
 }
 
 /// Unwrap a round-trip response: Some(result) passes through; a JSON-RPC
@@ -283,5 +308,241 @@ pub(super) fn map_roundtrip_error(e: super::ndjson::RoundtripError, who: &str) -
         super::ndjson::RoundtripError::Parse(detail) => {
             ProbeError::HandshakeFailure(format!("response parse: {detail}"))
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stderr tail capture (issue #542)
+// ---------------------------------------------------------------------------
+
+/// Tail capacity: the last 4 KiB of stderr is ample for a CLI's final
+/// diagnosis (auth failure, panic, version-skew error) while bounding both
+/// the ring's memory and the failure detail's length.
+const STDERR_TAIL_CAP: usize = 4 * 1024;
+
+/// Upper bound on waiting for the reader thread to finish before a failure
+/// snapshot. After the child's stderr EOF, draining the pipe is a scheduling
+/// delay (microseconds to milliseconds), not a data-volume problem -- 250ms
+/// covers a loaded CI machine. A still-alive child (the RPC-error-that-does-
+/// not-exit case) burns the full window and the snapshot degrades to what has
+/// landed so far; strictly no worse than not waiting.
+const STDERR_TAIL_JOIN_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// A bounded ring holding the tail of a byte stream: pushes append, and once
+/// [`STDERR_TAIL_CAP`] is exceeded the OLDEST bytes are dropped (a chatty CLI
+/// keeps only its final words, never unbounded memory). The capture is
+/// line-oriented on top: [`Self::snapshot`] trims trailing whitespace, and a
+/// torn head (a ring drop splitting a line) is cut forward to the next line
+/// boundary. One exception: when the retained window contains no line break
+/// at all (a single line longer than the cap), the cut has nowhere to land
+/// and the snapshot starts mid-line, possibly with a leading lossy-replacement
+/// rune -- a degraded but non-empty diagnosis beats an empty one.
+#[derive(Debug, Default)]
+struct TailBuf {
+    buf: Vec<u8>,
+    /// Whether a ring drop has torn the buffer's head line (the snapshot then
+    /// cuts to the next line boundary instead of starting mid-word).
+    torn: bool,
+}
+
+impl TailBuf {
+    /// Append raw bytes, dropping the oldest past [`STDERR_TAIL_CAP`]. The
+    /// bytes need not be valid UTF-8: the ring is byte-oriented and only the
+    /// [`Self::snapshot`] side applies lossy conversion -- a CLI emitting a
+    /// legacy codepage (or binary noise) degrades per-rune, never truncating
+    /// the whole capture.
+    fn push_bytes(&mut self, chunk: &[u8]) {
+        self.buf.extend_from_slice(chunk);
+        let excess = self.buf.len().saturating_sub(STDERR_TAIL_CAP);
+        if excess > 0 {
+            self.buf.drain(..excess);
+            // The drop makes the buffer's head a torn line remainder; the
+            // snapshot must know to cut at the next line boundary.
+            self.torn = true;
+        }
+    }
+
+    /// The retained tail, trimmed to line boundaries. Empty when nothing was
+    /// captured (the failure detail then appends nothing).
+    fn snapshot(&self) -> String {
+        let s = String::from_utf8_lossy(&self.buf);
+        let s = s.trim_end();
+        if !self.torn {
+            return s.to_string();
+        }
+        // A torn head is a dropped-line remainder -- cut at the first line
+        // break so the snapshot starts at a real line.
+        match s.find('\n') {
+            Some(i) => s[i + 1..].trim_start().to_string(),
+            None => s.to_string(),
+        }
+    }
+}
+
+/// The probe's stderr capture: a reader thread continuously draining the
+/// child's stderr pipe into a shared [`TailBuf`]. Draining is itself a
+/// correctness requirement, not just capture: an unread piped stderr fills
+/// the OS pipe buffer and blocks the child. The thread ends when the pipe
+/// EOFs (the child exited / was killed) or errors; dropping the handle does
+/// NOT stop it -- the process is killed on every probe exit path, whose EOF
+/// reaps the thread.
+#[derive(Debug, Clone)]
+pub struct StderrTail {
+    tail: Arc<Mutex<TailBuf>>,
+    /// Fires (tx dropped or a unit sent) when the reader thread exits; the
+    /// snapshot waits on it under [`STDERR_TAIL_JOIN_TIMEOUT`].
+    done_rx: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
+}
+
+impl StderrTail {
+    /// Start the reader thread on the child's piped stderr.
+    fn spawn(mut stderr: ChildStderr) -> Self {
+        let tail = Arc::new(Mutex::new(TailBuf::default()));
+        let sink = Arc::clone(&tail);
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            // Fixed-size chunks bound the intermediate buffer as well: a
+            // newline-free runaway stream cannot grow any single read past
+            // the cap (the ring bounds memory only after a read returns).
+            let mut chunk = [0u8; STDERR_TAIL_CAP];
+            loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) => break, // EOF
+                    Ok(n) => {
+                        if let Ok(mut t) = sink.lock() {
+                            t.push_bytes(&chunk[..n]);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            drop(done_tx);
+        });
+        Self {
+            tail,
+            done_rx: Arc::new(Mutex::new(Some(done_rx))),
+        }
+    }
+
+    /// The captured tail (empty when the CLI printed nothing). Waits for the
+    /// reader thread to finish (bounded by [`STDERR_TAIL_JOIN_TIMEOUT`]) so a
+    /// dead child's final bytes have landed before the snapshot -- without
+    /// the wait, the error and the last stderr write race, and a detail can
+    /// miss the diagnosis it exists to carry. A second call (or a timeout)
+    /// degrades to whatever has landed so far.
+    fn snapshot(&self) -> String {
+        if let Ok(mut slot) = self.done_rx.lock() {
+            if let Some(rx) = slot.take() {
+                let _ = rx.recv_timeout(STDERR_TAIL_JOIN_TIMEOUT);
+            }
+        }
+        self.tail.lock().map(|t| t.snapshot()).unwrap_or_default()
+    }
+
+    /// Log the captured tail at warn level (empty tails log nothing). The
+    /// outer-timeout exit path uses this: the blocking task's own
+    /// `attach_stderr_tail` never runs there (its join result is dropped),
+    /// so the probe-timeout diagnosis -- often the most valuable one -- would
+    /// otherwise be lost. Call after the child is killed: the kill's EOF lets
+    /// the reader thread drain the pipe's final bytes before the snapshot.
+    pub(crate) fn log_tail(&self) {
+        let tail = self.snapshot();
+        if !tail.is_empty() {
+            log::warn!(target: "toptopduck::probe", "probe timed out; stderr tail: {tail}");
+        }
+    }
+}
+
+/// Attach the captured stderr tail to a probe failure (issue #542): a
+/// `HandshakeFailure` gains the CLI's own diagnosis in its detail (when the
+/// CLI printed one); a `Timeout` cannot change shape (its IPC form is pinned)
+/// so its tail goes to the log instead. `SpawnFailure` / `NotDetected` precede
+/// any child existing -- nothing to attach.
+pub(super) fn attach_stderr_tail(err: ProbeError, stderr: &StderrTail) -> ProbeError {
+    let tail = stderr.snapshot();
+    if tail.is_empty() {
+        return err;
+    }
+    match err {
+        ProbeError::HandshakeFailure(detail) => {
+            ProbeError::HandshakeFailure(format!("{detail}; stderr tail: {tail}"))
+        }
+        ProbeError::Timeout => {
+            log::warn!(target: "toptopduck::probe", "probe timed out; stderr tail: {tail}");
+            ProbeError::Timeout
+        }
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ring keeps the TAIL under churn: an over-capacity stream retains
+    /// only its final bytes, and a torn head is cut forward to the next line
+    /// boundary -- the dropped line's fill must not survive the snapshot
+    /// (issue #542 AC).
+    #[test]
+    fn tail_buf_keeps_bounded_tail_not_head() {
+        let mut t = TailBuf::default();
+        // Two lines of 2 KiB each + one final line -- total exceeds the 4 KiB
+        // cap, so the first line's head bytes are dropped and its torn
+        // remainder must be cut away. Distinct fills ('y' vs 'x') make the
+        // cut observable.
+        let dropped = "y".repeat(STDERR_TAIL_CAP / 2);
+        let kept = "x".repeat(STDERR_TAIL_CAP / 2);
+        t.push_bytes(format!("{dropped}\n").as_bytes());
+        t.push_bytes(format!("{kept}\n").as_bytes());
+        t.push_bytes(b"auth failed\n");
+        let snap = t.snapshot();
+        assert!(
+            snap.ends_with("auth failed"),
+            "the tail keeps the final line: {snap}"
+        );
+        assert!(
+            snap.starts_with('x'),
+            "the snapshot starts at a line boundary: {snap}"
+        );
+        assert!(
+            !snap.contains('y'),
+            "the torn head line's remainder is cut forward: {snap}"
+        );
+        assert!(snap.len() <= STDERR_TAIL_CAP);
+    }
+
+    /// A single line longer than the cap leaves the cut nowhere to land: the
+    /// snapshot degrades to a mid-line start rather than an empty diagnosis.
+    #[test]
+    fn tail_buf_over_cap_single_line_starts_mid_line() {
+        let mut t = TailBuf::default();
+        t.push_bytes(b"HEAD ");
+        t.push_bytes("z".repeat(STDERR_TAIL_CAP).as_bytes());
+        let snap = t.snapshot();
+        assert!(
+            !snap.contains("HEAD"),
+            "the oldest bytes are dropped: {snap}"
+        );
+        assert!(
+            snap.starts_with('z'),
+            "no line break survives, so the window starts mid-line: {snap}"
+        );
+        assert!(!snap.is_empty());
+    }
+
+    /// An empty capture snapshots to the empty string (the failure detail
+    /// appends nothing).
+    #[test]
+    fn tail_buf_empty_snapshots_empty() {
+        assert_eq!(TailBuf::default().snapshot(), "");
+    }
+
+    /// A within-capacity capture passes through whole.
+    #[test]
+    fn tail_buf_small_capture_passes_through() {
+        let mut t = TailBuf::default();
+        t.push_bytes(b"one\ntwo\n");
+        assert_eq!(t.snapshot(), "one\ntwo");
     }
 }

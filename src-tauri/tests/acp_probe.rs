@@ -71,7 +71,8 @@ fn probe_with_locked(
     let spec = claude_code();
     let mut child = probe::spawn_child(&spec, Some(binary))?;
     let (stdin, stdout) = child.take_stdio();
-    let result = probe::handshake_with(stdin, stdout, &spec, timeout);
+    let stderr_tail = child.take_stderr_tail();
+    let result = probe::handshake_with(stdin, stdout, stderr_tail, &spec, timeout);
     child.kill_and_wait();
     result
 }
@@ -123,6 +124,11 @@ fn probe_rpc_error_is_handshake_failure() {
                 detail.contains("not logged in"),
                 "the failure carries the CLI's message: {detail}"
             );
+            // The CLI's own stderr diagnosis rides in the detail (issue #542).
+            assert!(
+                detail.contains("stderr tail: acp-fake-cli: auth required"),
+                "the failure carries the CLI's stderr tail: {detail}"
+            );
         }
         other => panic!("expected HandshakeFailure, got {other:?}"),
     }
@@ -143,6 +149,28 @@ fn probe_stdout_eof_is_handshake_failure() {
             assert!(
                 detail.contains("ACP agent"),
                 "the who prefix names the ACP agent (not the app-server): {detail}"
+            );
+            // The crash's stderr panic rides in the detail (issue #542).
+            assert!(
+                detail.contains("stderr tail: acp-fake-cli: panicked"),
+                "the EOF failure carries the CLI's stderr tail: {detail}"
+            );
+        }
+        other => panic!("expected HandshakeFailure, got {other:?}"),
+    }
+}
+
+/// A CLI that prints NO stderr fails without any tail marker: the detail
+/// carries no empty `stderr tail:` noise (issue #542).
+#[test]
+fn probe_empty_stderr_appends_nothing() {
+    let err = probe_fixture("session_new_malformed", Duration::from_secs(5))
+        .expect_err("a malformed response must fail the probe");
+    match &err {
+        ProbeError::HandshakeFailure(detail) => {
+            assert!(
+                !detail.contains("stderr tail"),
+                "an empty stderr must not append a tail marker: {detail}"
             );
         }
         other => panic!("expected HandshakeFailure, got {other:?}"),

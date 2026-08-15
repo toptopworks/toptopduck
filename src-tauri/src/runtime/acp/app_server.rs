@@ -30,7 +30,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::runtime::acp::probe::{CodexCatalogOutcome, CodexModel, ProbeError};
+use crate::runtime::acp::probe::{
+    attach_stderr_tail, CodexCatalogOutcome, CodexModel, ProbeError, StderrTail,
+};
 
 // ---------------------------------------------------------------------------
 // Wire types (the app-server carries no `jsonrpc` field)
@@ -112,6 +114,7 @@ struct ReasoningEffortWire {
 pub fn query_catalog(
     stdin: ChildStdin,
     stdout: ChildStdout,
+    stderr_tail: StderrTail,
     timeout: Duration,
 ) -> Result<CodexCatalogOutcome, ProbeError> {
     let mut io = AppServerIo::new(stdin, stdout);
@@ -121,7 +124,9 @@ pub fn query_catalog(
     let mut cursor: Option<String> = None;
     loop {
         let params = cursor.as_ref().map(|c| serde_json::json!({ "cursor": c }));
-        let resp = io.request_roundtrip("model/list", params, deadline)?;
+        let resp = io
+            .request_roundtrip("model/list", params, deadline)
+            .map_err(|e| attach_stderr_tail(e, &stderr_tail))?;
         let page = match fold_page(resp) {
             Ok(page) => page,
             Err(unavailable) => return Ok(unavailable),

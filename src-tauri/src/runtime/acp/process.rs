@@ -35,20 +35,22 @@ pub(super) const KILL_REAP_DEADLINE: Duration = Duration::from_secs(2);
 const KILL_REAP_POLL: Duration = Duration::from_millis(10);
 
 /// The single spawn shape every ACP-family CLI lifecycle goes through:
-/// `binary` with `argv`, piped stdin/stdout, inherited stderr (so the CLI's
-/// own chatter goes to the parent's terminal). The turn engine and both probe
-/// paths spawn through here (issue #540) -- a change to the spawn shape (env,
-/// cwd, stdio wiring) lands in one place, not three. The codex native exec
-/// spawn ([`super::json_event_stream`]) is deliberately excluded: its surface
-/// differs (extra argv flags + `current_dir`). The caller keeps the error
-/// wording (the turn path and the probe path name the failing adapter / CLI
-/// differently).
-pub(super) fn spawn_piped(binary: &Path, argv: &[&str]) -> std::io::Result<Child> {
+/// `binary` with `argv`, piped stdin/stdout, and the caller-chosen stderr
+/// wiring (issue #542): the turn engine keeps stderr inherited (the CLI's own
+/// chatter goes to the parent's terminal), while the probe paths pipe it so
+/// the diagnostic tail can be captured into the failure detail. The turn
+/// engine and both probe paths spawn through here (issue #540) -- a change to
+/// the spawn shape (env, cwd, stdio wiring) lands in one place, not three.
+/// The codex native exec spawn ([`super::json_event_stream`]) is deliberately
+/// excluded: its surface differs (extra argv flags + `current_dir`). The
+/// caller keeps the error wording (the turn path and the probe path name the
+/// failing adapter / CLI differently).
+pub(super) fn spawn_piped(binary: &Path, argv: &[&str], stderr: Stdio) -> std::io::Result<Child> {
     Command::new(binary)
         .args(argv)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(stderr)
         .spawn()
 }
 

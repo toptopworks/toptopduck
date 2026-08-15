@@ -84,12 +84,21 @@ fn main() {
     // Tracks whether session/cancel was received (the cooperative-cancel
     // scenario waits on it before responding Cancelled).
     let mut cancel_seen = false;
+    // `handshake_crash` exits on the request AFTER initialize (see the
+    // branch below).
+    let mut crash_on_next = false;
     loop {
         line.clear();
         match reader.read_line(&mut line) {
             Ok(0) => break,
             Ok(_) => {}
             Err(_) => break,
+        }
+        // Exit WITHOUT answering the pending request: the caller's write has
+        // landed (no EPIPE race with an early exit) and its read hits stdout
+        // EOF deterministically -- what the crash tests pin.
+        if crash_on_next {
+            std::process::exit(0);
         }
         let trimmed = line.trim_end_matches(['\n', '\r']);
         if trimmed.is_empty() {
@@ -108,8 +117,11 @@ fn main() {
             Some("initialize") if scenario == "handshake_silent" => {}
             // `handshake_error` (issue #534): answer initialize with a
             // JSON-RPC error -- the diagnostic probe must surface a
-            // HandshakeFailure naming the step, not a timeout.
+            // HandshakeFailure naming the step, not a timeout. Also prints a
+            // stderr diagnosis first (issue #542): the probe's failure detail
+            // must carry the CLI's own words.
             Some("initialize") if scenario == "handshake_error" => {
+                eprintln!("acp-fake-cli: auth required: run `claude login`");
                 respond(
                     &mut out,
                     &Response::<InitializeResult> {
@@ -125,9 +137,13 @@ fn main() {
                 );
             }
             // `handshake_crash` (issue #534): acknowledge initialize, then
-            // exit right away -- the probe's session/new hits stdout EOF and
-            // must report a HandshakeFailure, never a hang.
+            // exit on the NEXT request without answering it -- the caller's
+            // next write lands and its read hits stdout EOF (never a hang),
+            // deterministically (no write-EPIPE race with an early exit).
+            // Prints a stderr panic first (issue #542): the EOF detail
+            // carries the tail.
             Some("initialize") if scenario == "handshake_crash" => {
+                eprintln!("acp-fake-cli: panicked at 'node runtime too old'");
                 respond(
                     &mut out,
                     &Response::<InitializeResult> {
@@ -145,7 +161,7 @@ fn main() {
                     },
                 );
                 let _ = out.flush();
-                std::process::exit(0);
+                crash_on_next = true;
             }
             Some("initialize") => {
                 respond(

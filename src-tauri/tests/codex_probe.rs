@@ -46,7 +46,8 @@ fn query_fixture(scenario: &str, timeout: Duration) -> Result<CodexCatalogOutcom
     let spec = codex();
     let mut child = probe::spawn_child(&spec, Some(&fake_cli()))?;
     let (stdin, stdout) = child.take_stdio();
-    let result = app_server::query_catalog(stdin, stdout, timeout);
+    let stderr_tail = child.take_stderr_tail();
+    let result = app_server::query_catalog(stdin, stdout, stderr_tail, timeout);
     child.kill_and_wait();
     result
 }
@@ -146,6 +147,28 @@ fn query_crash_is_handshake_failure() {
                 detail.contains("codex app-server"),
                 "the who prefix names the app-server (not the ACP agent): {detail}"
             );
+            // The crash's stderr diagnosis rides in the detail (issue #542).
+            assert!(
+                detail.contains("stderr tail: codex-fake: auth flow failed"),
+                "the EOF failure carries the server's stderr tail: {detail}"
+            );
+        }
+        other => panic!("expected HandshakeFailure, got {other:?}"),
+    }
+}
+
+/// A server that prints NO stderr fails without any tail marker: no empty
+/// `stderr tail:` noise (issue #542).
+#[test]
+fn query_empty_stderr_appends_nothing() {
+    let err = query_fixture("catalog_malformed", Duration::from_secs(5))
+        .expect_err("a malformed response must fail the query");
+    match err {
+        ProbeError::HandshakeFailure(detail) => {
+            assert!(
+                !detail.contains("stderr tail"),
+                "an empty stderr must not append a tail marker: {detail}"
+            );
         }
         other => panic!("expected HandshakeFailure, got {other:?}"),
     }
@@ -220,7 +243,8 @@ fn query_kills_the_child_no_orphan() {
     let spec = codex();
     let mut child = probe::spawn_child(&spec, Some(&fake_cli())).expect("spawn must succeed");
     let (stdin, stdout) = child.take_stdio();
-    let result = app_server::query_catalog(stdin, stdout, Duration::from_secs(2));
+    let stderr_tail = child.take_stderr_tail();
+    let result = app_server::query_catalog(stdin, stdout, stderr_tail, Duration::from_secs(2));
     child.kill_and_wait();
     std::env::remove_var("CODEX_APP_SERVER_TRACE_FILE");
     // The query itself fails (timeout) -- cleanup is asserted regardless.
