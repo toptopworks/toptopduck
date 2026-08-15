@@ -158,6 +158,11 @@ impl Catalog {
         for m in page.data {
             if self.seen.insert(m.id.clone()) {
                 self.models.push(model_from_wire(m));
+            } else {
+                // The drop is invisible on every other surface (the catalog
+                // stays green); log it so "why is model X stale" has an
+                // answer (issue #543).
+                log::debug!(target: "toptopduck::probe", "catalog duplicate id dropped (first sight wins): {}", m.id);
             }
         }
         page.next_cursor
@@ -239,7 +244,7 @@ impl AppServerIo {
 
     /// Send a request and pump incoming lines until its response arrives or
     /// the deadline passes. Stray lines are dropped by the shared loop (see
-    /// [`super::ndjson::NdjsonIo::request_roundtrip`]).
+    /// [`super::ndjson::NdjsonIo::request_roundtrip_deadline`]).
     fn request_roundtrip(
         &mut self,
         method: &'static str,

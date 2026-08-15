@@ -80,9 +80,11 @@ impl NdjsonIo {
                     }
                     // The error is unrecoverable (the channel closes either
                     // way); log it so "why is the snapshot empty / why EOF"
-                    // has an answer (issue #543).
+                    // has an answer (issue #543). Warn, not debug: release
+                    // builds filter at Info, and the packaged app's absent
+                    // console is exactly where this diagnosis matters.
                     Err(e) => {
-                        log::debug!(target: "toptopduck::ndjson", "stdout reader failed: {e}");
+                        log::warn!(target: "toptopduck::ndjson", "stdout reader failed: {e}");
                         break;
                     }
                 }

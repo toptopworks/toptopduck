@@ -414,9 +414,11 @@ impl StderrTail {
                     }
                     // The error is unrecoverable (the capture ends either
                     // way); log it so "why is the tail empty" has an answer
-                    // (issue #543).
+                    // (issue #543). Warn, not debug: release builds filter
+                    // at Info, and the packaged app's absent console is
+                    // exactly where this diagnosis matters.
                     Err(e) => {
-                        log::debug!(target: "toptopduck::probe", "stderr reader failed: {e}");
+                        log::warn!(target: "toptopduck::probe", "stderr reader failed: {e}");
                         break;
                     }
                 }
@@ -484,10 +486,7 @@ pub(super) fn attach_stderr_tail(err: ProbeError, stderr: &StderrTail) -> ProbeE
             ProbeError::HandshakeFailure(with_stderr_tail(detail, stderr))
         }
         ProbeError::Timeout => {
-            let tail = stderr.snapshot();
-            if !tail.is_empty() {
-                log::warn!(target: "toptopduck::probe", "probe timed out; stderr tail: {tail}");
-            }
+            stderr.log_tail();
             ProbeError::Timeout
         }
         other => other,

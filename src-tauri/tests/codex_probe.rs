@@ -136,6 +136,14 @@ fn query_rpc_error_degrades_to_unavailable() {
                 detail.contains("method not found"),
                 "the degraded detail names the RPC error: {detail}"
             );
+            // A silent stderr must not append the marker: the empty-tail
+            // branch of the same-shape append is pinned here (issue #543 --
+            // a degraded detail growing a bare `stderr tail: ` artifact would
+            // stay green otherwise).
+            assert!(
+                !detail.contains("stderr tail"),
+                "a silent stderr appends nothing: {detail}"
+            );
         }
         other => panic!("expected Unavailable, got {other:?}"),
     }

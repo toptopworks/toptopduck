@@ -526,7 +526,7 @@ impl AcpIo {
 
     /// Send a request and pump incoming lines until its response arrives.
     /// Stray lines are dropped by the shared loop (see
-    /// [`super::ndjson::NdjsonIo::request_roundtrip`]).
+    /// [`super::ndjson::NdjsonIo::request_roundtrip_cancel`]).
     fn request_roundtrip<P: serde::Serialize, R: serde::de::DeserializeOwned>(
         &mut self,
         cancel: &CancelToken,
