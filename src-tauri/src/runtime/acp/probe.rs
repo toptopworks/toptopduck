@@ -8,7 +8,9 @@
 //! -> terminate the process. The probe never drives a turn, holds no session
 //! lock, and produces no upstream session state.
 //!
-//! This module owns the spawn shape and the blocking handshake: [`spawn_child`]
+//! This module owns the blocking handshake and the probe's spawn surface
+//! (argv selection + error wording; the stdio spawn shape itself lives in
+//! [`super::process::spawn_piped`]): [`spawn_child`]
 //! hands the spawned child + its stdio to the caller (the Child handle must
 //! stay OUT of any `spawn_blocking` closure -- blocking tasks are not
 //! cancellable, so this is the only way to guarantee a hung CLI is reaped
@@ -245,8 +247,8 @@ impl ProbeIo {
     }
 
     /// Send a request and pump incoming lines until its response arrives or
-    /// the deadline passes. A stray notification / unrelated message is
-    /// dropped (not an error) so a chatty agent cannot break the handshake.
+    /// the deadline passes. Stray lines are dropped by the shared loop (see
+    /// [`super::ndjson::NdjsonIo::request_roundtrip`]).
     fn request_roundtrip<P: serde::Serialize, R: serde::de::DeserializeOwned>(
         &mut self,
         req: Request<P>,

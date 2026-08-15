@@ -280,6 +280,59 @@ fn crash_mid_turn_lands_as_transient() {
     }
 }
 
+/// A crash between initialize and session/new exercises the round-trip's own
+/// EOF path (distinct from the prompt pump's): the shared loop's Disconnected
+/// maps onto the frozen "ACP agent closed stdout" transient (issue #540 pins
+/// the engine-site round-trip mapping, previously untested).
+#[test]
+fn crash_during_handshake_lands_as_transient_via_roundtrip_eof() {
+    let (outcome, _) = run("handshake_crash", 24);
+    match outcome.termination {
+        Termination::Transient(msg) => {
+            assert!(
+                msg.contains("ACP agent closed stdout"),
+                "the round-trip EOF carries the frozen wording: {msg}"
+            );
+        }
+        other => panic!("expected Transient, got {other:?}"),
+    }
+}
+
+/// A session/new response whose result has the wrong type fails the
+/// round-trip's response parse (the shared loop's Parse arm -> the frozen
+/// "response parse:" transient), never a hang (issue #540).
+#[test]
+fn malformed_session_new_response_is_transient_parse_failure() {
+    let (outcome, _) = run("session_new_malformed", 24);
+    match outcome.termination {
+        Termination::Transient(msg) => {
+            assert!(
+                msg.contains("response parse:"),
+                "carries the parse prefix: {msg}"
+            );
+            assert!(
+                !msg.contains("closed stdout"),
+                "must not misreport as EOF: {msg}"
+            );
+        }
+        other => panic!("expected Transient, got {other:?}"),
+    }
+}
+
+/// Stray lines ahead of a handshake response (a notification + a response
+/// with an unrelated id) are dropped, not errors: the handshake still
+/// completes and the turn proceeds (issue #540 pins the shared loop's
+/// stray-drop policy, previously untested).
+#[test]
+fn stray_lines_during_handshake_are_dropped_not_fatal() {
+    let (outcome, _) = run("chatty_handshake", 24);
+    assert!(
+        matches!(outcome.termination, Termination::Text(_)),
+        "stray lines must not break the handshake: {:?}",
+        outcome.termination
+    );
+}
+
 /// A permission handshake under no-confirmation: the engine selects the allow
 /// option + emits the approval card pair. The turn then succeeds.
 #[test]

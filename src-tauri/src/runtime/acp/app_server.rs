@@ -196,8 +196,8 @@ impl AppServerIo {
     }
 
     /// Send a request and pump incoming lines until its response arrives or
-    /// the deadline passes. A stray notification / unrelated response is
-    /// dropped (not an error) so a chatty server cannot break the query.
+    /// the deadline passes. Stray lines are dropped by the shared loop (see
+    /// [`super::ndjson::NdjsonIo::request_roundtrip`]).
     fn request_roundtrip(
         &mut self,
         method: &'static str,

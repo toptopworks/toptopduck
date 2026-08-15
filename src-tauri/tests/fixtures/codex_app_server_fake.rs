@@ -141,6 +141,31 @@ fn main() {
                 let _ = out.flush();
                 std::process::exit(0);
             }
+            // `catalog_malformed` + `catalog_chatty` (issue #540): the
+            // former answers with the right id but an envelope that fails
+            // to deserialize (`error.message` of the wrong type -- `result`
+            // is an untyped `Value`, so the envelope is the only place a
+            // parse can fail); the latter precedes the real response with
+            // two stray lines -- a notification (carries a method field)
+            // and a response with an unrelated id -- which the round-trip
+            // must drop (not an error) before completing.
+            ("catalog_malformed", Some("model/list")) => {
+                respond(
+                    &mut out,
+                    &serde_json::json!({ "id": id, "error": { "code": -1, "message": 42 } }),
+                );
+            }
+            ("catalog_chatty", Some("model/list")) => {
+                respond(
+                    &mut out,
+                    &serde_json::json!({ "method": "progress", "params": {} }),
+                );
+                respond(&mut out, &serde_json::json!({ "id": 999, "result": {} }));
+                respond(
+                    &mut out,
+                    &json_result(id, serde_json::json!({ "data": [], "nextCursor": null })),
+                );
+            }
             // Paginated: page 1 carries nextCursor, page 2 ends the list. The
             // probe must follow the cursor and fold both pages.
             ("catalog_paginated", Some("model/list")) => {

@@ -500,7 +500,8 @@ fn spawn(binary: &Path, adapter: &AdapterSpec) -> Result<ChildHandle, String> {
 /// shared token; the wall-clock watchdog fires it) and mapped onto
 /// [`Termination`]. The multiplexing prompt pump below keeps its own line
 /// loop -- it folds `session/update` and services `session/request_permission`
-/// -- and only shares the channel + reader thread via [`Self::recv_timeout`].
+/// -- and shares the reader channel via [`Self::recv_timeout`] and the writer
+/// via [`Self::write_json`].
 struct AcpIo {
     inner: super::ndjson::NdjsonIo,
 }
@@ -512,8 +513,8 @@ impl AcpIo {
         }
     }
 
-    /// Serialize + write one JSON-RPC message as a single NDJSON line. Flushes
-    /// so the agent receives it immediately (NDJSON is line-buffered).
+    /// Delegates to [`super::ndjson::NdjsonIo::write_json`] (one NDJSON line +
+    /// flush).
     fn write_json<T: serde::Serialize>(&mut self, msg: &T) -> Result<(), std::io::Error> {
         self.inner.write_json(msg)
     }
@@ -523,9 +524,9 @@ impl AcpIo {
         self.inner.recv_timeout(timeout)
     }
 
-    /// Send a request and pump incoming lines until its response arrives. A
-    /// stray notification / unrelated message during the handshake is dropped
-    /// (not an error) so a chatty agent cannot break it.
+    /// Send a request and pump incoming lines until its response arrives.
+    /// Stray lines are dropped by the shared loop (see
+    /// [`super::ndjson::NdjsonIo::request_roundtrip`]).
     fn request_roundtrip<P: serde::Serialize, R: serde::de::DeserializeOwned>(
         &mut self,
         cancel: &CancelToken,
@@ -675,7 +676,7 @@ impl AcpIo {
 }
 
 /// Map the shared round-trip failure onto the turn's termination. The EOF
-/// detail is frozen by the wiring seam's diagnostic fold.
+/// detail is frozen by the integration tests' locale-free diagnostic fold.
 fn map_roundtrip_termination(e: super::ndjson::RoundtripError) -> Termination {
     match e {
         super::ndjson::RoundtripError::Cancelled => Termination::Cancelled,

@@ -62,8 +62,8 @@ pub(super) struct NdjsonIo {
 impl NdjsonIo {
     pub(super) fn new(stdin: ChildStdin, stdout: ChildStdout) -> Self {
         let (tx, rx) = mpsc::channel::<String>();
-        // The reader thread owns stdout, reads line-by-line, and sends each
-        // raw line. EOF drops tx so the pump's recv returns Disconnected.
+        // The reader thread owns stdout; EOF drops tx so the pump's recv
+        // returns Disconnected.
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             let mut line = String::new();
@@ -100,7 +100,8 @@ impl NdjsonIo {
     }
 
     /// One receive step for multiplexing loops (the turn pump), which own
-    /// their own line loop and only share the channel + reader thread.
+    /// their own line loop and share the reader channel (+ reader thread)
+    /// via this and the writer via `write_json`.
     pub(super) fn recv_timeout(&self, timeout: Duration) -> Result<String, mpsc::RecvTimeoutError> {
         self.rx.recv_timeout(timeout)
     }

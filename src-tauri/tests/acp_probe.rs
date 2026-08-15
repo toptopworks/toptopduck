@@ -140,6 +140,10 @@ fn probe_stdout_eof_is_handshake_failure() {
                 detail.contains("closed stdout"),
                 "the EOF names the disconnection: {detail}"
             );
+            assert!(
+                detail.contains("ACP agent"),
+                "the who prefix names the ACP agent (not the app-server): {detail}"
+            );
         }
         other => panic!("expected HandshakeFailure, got {other:?}"),
     }
