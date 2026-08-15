@@ -2408,12 +2408,11 @@ pub async fn probe_adapter(
     // the Child handle staying in the async scope (blocking tasks are not
     // cancellable, so the handle must stay outside them for the kill-on-timeout).
     let mut child = probe::spawn_child(&spec, Some(&binary))?;
-    let (stdin, stdout) = child.take_stdio();
+    let (stdin, stdout, stderr_tail) = child.take_pipes();
     // The stderr tail travels with the blocking query (issue #542): the CLI's
     // own diagnosis lands in the failure detail, not the packaged app's
     // absent console. A clone stays in the async scope for the outer-timeout
     // path (see below).
-    let stderr_tail = child.take_stderr_tail();
     let timeout_tail = stderr_tail.clone();
     // ADR-0096 D2: dispatch the per-format query on the spec's stream format,
     // never the CLI's identity (zero per-CLI code).

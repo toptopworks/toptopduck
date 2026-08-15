@@ -6,8 +6,9 @@
 //! write, and response matching by id. The three call sites --
 //! [`super::engine`]'s cancel-driven turn handshake, [`super::probe`]'s
 //! deadline-driven handshake, and [`super::app_server`]'s deadline-driven
-//! catalog query -- differ only in their abort condition ([`Abort`]) and
-//! their error type; both live at the thin per-site wrapper.
+//! catalog query -- differ only in their abort condition and their error
+//! type; both live at the thin per-site wrapper (a per-driver entry point
+//! here plus a per-site mapping, issue #543).
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{ChildStdin, ChildStdout};
@@ -18,28 +19,25 @@ use serde_json::Value;
 
 use crate::cancel::CancelToken;
 
-/// Why a round-trip pump stops waiting between receives. The two abort
-/// conditions the drivers need: the turn engine polls a shared cancel token
-/// (responsive user cancel; the wall-clock watchdog fires the same token),
-/// while the probes are bounded by a wall-clock deadline.
-pub(super) enum Abort<'a> {
-    /// Abort as soon as the token fires; checked every
-    /// [`super::process::PUMP_POLL_INTERVAL`].
-    Cancel(&'a CancelToken),
-    /// Abort once the wall-clock deadline passes; each receive waits only the
-    /// remaining time.
-    Deadline(Instant),
-}
+/// The abort marker a cancel-driven round-trip reports (the cancel-driven
+/// entry point below). The type parameter of [`RoundtripError`] makes the
+/// illegal abort-kind combinations unrepresentable, so the per-site mappings
+/// match exhaustively with no `unreachable!` placeholders (issue #543).
+pub(super) struct Cancelled;
+
+/// The abort marker a deadline-driven round-trip reports (the deadline-driven
+/// entry point below). See [`Cancelled`] for why it exists.
+pub(super) struct TimedOut;
 
 /// A round-trip failure, before the per-site wrapper maps it onto its own
 /// error type. Each variant carries the technical detail verbatim; the
 /// wrapper owns the message wording (the strings are frozen by the tests'
-/// locale-free diagnostic fold).
-pub(super) enum RoundtripError {
-    /// The cancel token fired (cancel-driven round-trips only).
-    Cancelled,
-    /// The wall-clock deadline passed (deadline-driven round-trips only).
-    Timeout,
+/// locale-free diagnostic fold). The `A` parameter is the driver's abort
+/// marker ([`Cancelled`] or [`TimedOut`]) -- fixed by which round-trip entry
+/// point was used, never both.
+pub(super) enum RoundtripError<A> {
+    /// The driver's abort condition fired (which kind is fixed by `A`).
+    Abort(A),
     /// Serializing the request failed. Carries the serde detail.
     Serialize(String),
     /// Writing / flushing the request failed. Carries the io detail.
@@ -80,7 +78,15 @@ impl NdjsonIo {
                             break; // pump gone
                         }
                     }
-                    Err(_) => break,
+                    // The error is unrecoverable (the channel closes either
+                    // way); log it so "why is the snapshot empty / why EOF"
+                    // has an answer (issue #543). Warn, not debug: release
+                    // builds filter at Info, and the packaged app's absent
+                    // console is exactly where this diagnosis matters.
+                    Err(e) => {
+                        log::warn!(target: "toptopduck::ndjson", "stdout reader failed: {e}");
+                        break;
+                    }
                 }
             }
         });
@@ -106,57 +112,91 @@ impl NdjsonIo {
         self.rx.recv_timeout(timeout)
     }
 
-    /// Send a serialized request and pump incoming lines until its response
-    /// arrives or the abort condition fires. `target` is the request id the
-    /// response must carry (and no `method` field); a stray notification /
-    /// unrelated message is dropped (not an error) so a chatty child cannot
-    /// break the exchange.
-    pub(super) fn request_roundtrip<R: serde::de::DeserializeOwned>(
+    /// Serialize + write the request, then pump incoming lines until its
+    /// response arrives or the cancel token fires (the cancel-driven
+    /// round-trip). `target` is the request id the response must carry (and
+    /// no `method` field); a stray notification / unrelated message is
+    /// dropped (not an error) so a chatty child cannot break the exchange.
+    pub(super) fn request_roundtrip_cancel<R: serde::de::DeserializeOwned>(
         &mut self,
         req: &impl serde::Serialize,
         target: &Value,
-        abort: Abort<'_>,
-    ) -> Result<R, RoundtripError> {
+        cancel: &CancelToken,
+    ) -> Result<R, RoundtripError<Cancelled>> {
+        self.write_request(req)?;
+        loop {
+            if cancel.is_requested() {
+                return Err(RoundtripError::Abort(Cancelled));
+            }
+            match self.rx.recv_timeout(super::process::PUMP_POLL_INTERVAL) {
+                Ok(line) => {
+                    if let Some(v) = self.match_response::<R>(line, target) {
+                        return v.map_err(RoundtripError::Parse);
+                    }
+                }
+                // A partial-wait Timeout re-derives the wait: the next
+                // iteration re-checks the token.
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Err(RoundtripError::Eof),
+            }
+        }
+    }
+
+    /// Serialize + write the request, then pump incoming lines until its
+    /// response arrives or the deadline passes (the deadline-driven
+    /// round-trip). Stray lines are dropped like the cancel-driven pump.
+    pub(super) fn request_roundtrip_deadline<R: serde::de::DeserializeOwned>(
+        &mut self,
+        req: &impl serde::Serialize,
+        target: &Value,
+        deadline: Instant,
+    ) -> Result<R, RoundtripError<TimedOut>> {
+        self.write_request(req)?;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(RoundtripError::Abort(TimedOut));
+            }
+            match self.rx.recv_timeout(remaining) {
+                Ok(line) => {
+                    if let Some(v) = self.match_response::<R>(line, target) {
+                        return v.map_err(RoundtripError::Parse);
+                    }
+                }
+                // A partial-wait Timeout re-derives the wait: the next
+                // iteration re-checks the remaining time.
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Err(RoundtripError::Eof),
+            }
+        }
+    }
+
+    /// Serialize + write one request as a single NDJSON line + flush. Generic
+    /// over the abort marker so both drivers lift the write failure into
+    /// their own error type.
+    fn write_request<A>(&mut self, req: &impl serde::Serialize) -> Result<(), RoundtripError<A>> {
         let mut msg =
             serde_json::to_string(req).map_err(|e| RoundtripError::Serialize(e.to_string()))?;
         msg.push('\n');
         self.stdin
             .write_all(msg.as_bytes())
             .and_then(|_| self.stdin.flush())
-            .map_err(|e| RoundtripError::Write(e.to_string()))?;
-        loop {
-            let timeout = match abort {
-                Abort::Cancel(cancel) => {
-                    if cancel.is_requested() {
-                        return Err(RoundtripError::Cancelled);
-                    }
-                    super::process::PUMP_POLL_INTERVAL
-                }
-                Abort::Deadline(deadline) => {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        return Err(RoundtripError::Timeout);
-                    }
-                    remaining
-                }
-            };
-            match self.rx.recv_timeout(timeout) {
-                Ok(line) => {
-                    let v: Value = match serde_json::from_str(&line) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-                    if v.get("id") == Some(target) && v.get("method").is_none() {
-                        return serde_json::from_value(v)
-                            .map_err(|e| RoundtripError::Parse(e.to_string()));
-                    }
-                }
-                // A partial-wait Timeout re-derives the wait on the next
-                // iteration: a cancel-driven pump re-checks the token, a
-                // deadline-driven one re-checks the remaining time.
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => return Err(RoundtripError::Eof),
-            }
+            .map_err(|e| RoundtripError::Write(e.to_string()))
+    }
+
+    /// One incoming line against the awaited response: `Some(deserialize)` when
+    /// the line carries the target id (and no `method` field), `None` when it
+    /// is a stray to drop.
+    fn match_response<R: serde::de::DeserializeOwned>(
+        &mut self,
+        line: String,
+        target: &Value,
+    ) -> Option<Result<R, String>> {
+        let v: Value = serde_json::from_str(&line).ok()?;
+        if v.get("id") == Some(target) && v.get("method").is_none() {
+            Some(serde_json::from_value(v).map_err(|e| e.to_string()))
+        } else {
+            None
         }
     }
 }

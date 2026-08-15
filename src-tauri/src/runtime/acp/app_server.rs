@@ -120,45 +120,87 @@ pub fn query_catalog(
     let mut io = AppServerIo::new(stdin, stdout);
     let deadline = Instant::now() + timeout;
 
-    let mut models: Vec<CodexModel> = Vec::new();
+    let mut catalog = Catalog::default();
     let mut cursor: Option<String> = None;
     loop {
         let params = cursor.as_ref().map(|c| serde_json::json!({ "cursor": c }));
         let resp = io
             .request_roundtrip("model/list", params, deadline)
             .map_err(|e| attach_stderr_tail(e, &stderr_tail))?;
-        let page = match fold_page(resp) {
+        let page = match fold_page(resp, &stderr_tail) {
             Ok(page) => page,
             Err(unavailable) => return Ok(unavailable),
         };
-        models.extend(page.data.into_iter().map(model_from_wire));
-        match page.next_cursor {
+        match catalog.fold_page(page) {
             Some(next) => cursor = Some(next),
             None => break,
         }
     }
-    Ok(CodexCatalogOutcome::Available { models })
+    Ok(CodexCatalogOutcome::Available {
+        models: catalog.models,
+    })
+}
+
+/// The accumulating catalog: folds pages deduplicating by model id, first
+/// sight winning (issue #543 -- the frontend keys catalog entries by id, so a
+/// cross-page repeat would silently collide; a server re-listing a model on a
+/// later page must not shadow its first-seen entry).
+#[derive(Default)]
+struct Catalog {
+    models: Vec<CodexModel>,
+    seen: std::collections::HashSet<String>,
+}
+
+impl Catalog {
+    /// Fold one page's models in (dedup by id, first sight winning) and
+    /// return the page's continuation cursor (`None` ends the traversal).
+    fn fold_page(&mut self, page: ModelListResponse) -> Option<String> {
+        for m in page.data {
+            if self.seen.insert(m.id.clone()) {
+                self.models.push(model_from_wire(m));
+            } else {
+                // The drop is invisible on every other surface (the catalog
+                // stays green); log it so "why is model X stale" has an
+                // answer (issue #543).
+                log::debug!(target: "toptopduck::probe", "catalog duplicate id dropped (first sight wins): {}", m.id);
+            }
+        }
+        page.next_cursor
+    }
 }
 
 /// Fold one `model/list` response into its catalog page, degrading to
 /// `Unavailable` on an RPC error / empty response / unparseable result
 /// (ADR-0096 D2 -- the process is alive, the catalog just is not available).
 /// The `Err` arm is the degraded SUCCESS value the caller short-circuits on,
-/// never a hard failure.
-fn fold_page(resp: AppServerResponse) -> Result<ModelListResponse, CodexCatalogOutcome> {
+/// never a hard failure. The degraded detail carries the CLI's stderr
+/// diagnosis when it printed one (same-shape append as the failure path's
+/// [`attach_stderr_tail`] -- the detail is the only diagnostic surface a
+/// degraded outcome has, issue #543).
+fn fold_page(
+    resp: AppServerResponse,
+    stderr_tail: &StderrTail,
+) -> Result<ModelListResponse, CodexCatalogOutcome> {
     let Some(result) = resp.result else {
         let detail = resp
             .error
             .map(|e| e.message)
             .filter(|m| !m.is_empty())
             .unwrap_or_else(|| "empty response".to_string());
-        return Err(CodexCatalogOutcome::Unavailable { detail });
+        return Err(degraded(detail, stderr_tail));
     };
     // A result that is not a catalog (protocol skew) degrades the same way --
     // never a false success.
-    serde_json::from_value(result).map_err(|e| CodexCatalogOutcome::Unavailable {
-        detail: format!("catalog parse: {e}"),
-    })
+    serde_json::from_value(result).map_err(|e| degraded(format!("catalog parse: {e}"), stderr_tail))
+}
+
+/// Build the degraded `Unavailable` outcome, appending the stderr tail to its
+/// detail when non-empty (the same `; stderr tail: ` shape the failure path
+/// attaches).
+fn degraded(detail: String, stderr_tail: &StderrTail) -> CodexCatalogOutcome {
+    CodexCatalogOutcome::Unavailable {
+        detail: crate::runtime::acp::probe::with_stderr_tail(detail, stderr_tail),
+    }
 }
 
 /// Project one wire model onto the public catalog entry, preserving the
@@ -202,7 +244,7 @@ impl AppServerIo {
 
     /// Send a request and pump incoming lines until its response arrives or
     /// the deadline passes. Stray lines are dropped by the shared loop (see
-    /// [`super::ndjson::NdjsonIo::request_roundtrip`]).
+    /// [`super::ndjson::NdjsonIo::request_roundtrip_deadline`]).
     fn request_roundtrip(
         &mut self,
         method: &'static str,
@@ -214,7 +256,7 @@ impl AppServerIo {
         let req = AppServerRequest { id, method, params };
         let target = Value::from(id);
         self.inner
-            .request_roundtrip(&req, &target, super::ndjson::Abort::Deadline(deadline))
+            .request_roundtrip_deadline(&req, &target, deadline)
             .map_err(|e| super::probe::map_roundtrip_error(e, "codex app-server"))
     }
 }

@@ -70,8 +70,7 @@ fn probe_with_locked(
     std::env::set_var("ACP_FAKE_SCENARIO", scenario);
     let spec = claude_code();
     let mut child = probe::spawn_child(&spec, Some(binary))?;
-    let (stdin, stdout) = child.take_stdio();
-    let stderr_tail = child.take_stderr_tail();
+    let (stdin, stdout, stderr_tail) = child.take_pipes();
     let result = probe::handshake_with(stdin, stdout, stderr_tail, &spec, timeout);
     child.kill_and_wait();
     result

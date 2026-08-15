@@ -122,8 +122,8 @@ pub enum ProbeError {
 /// returning `None` refuses with [`ProbeError::NotDetected`] before any spawn
 /// is attempted. The caller dispatches the per-format query on the returned
 /// child's stdio. Contract (issue #542): stderr is spawned PIPED and is
-/// drained ONLY by [`ChildHandle::take_stderr_tail`]'s reader thread -- every
-/// caller must take the tail (alongside [`ChildHandle::take_stdio`]) for every
+/// drained ONLY by [`ChildHandle::take_pipes`]'s stderr tail reader thread --
+/// every caller must take the pipes (all three streams, one call) for every
 /// child it spawned, including early-failure paths after a successful spawn;
 /// an untaken piped stderr is never read, so a chatty child can block on a
 /// full OS pipe buffer and wedge until killed.
@@ -151,21 +151,21 @@ pub struct ChildHandle {
 }
 
 impl ChildHandle {
-    /// Take the piped stdio for the handshake. The spawn pipes both ends,
-    /// so a single take is the only valid lifetime.
-    pub fn take_stdio(&mut self) -> (ChildStdin, ChildStdout) {
-        let stdout = self.inner.stdout.take().expect("piped stdout");
-        let stdin = self.inner.stdin.take().expect("piped stdin");
-        (stdin, stdout)
-    }
-
-    /// Take the piped stderr and start the tail capture (issue #542). The
-    /// returned [`StderrTail`] drains the pipe on its own thread into a
-    /// bounded ring, so a chatty CLI cannot fill the OS pipe buffer (which
-    /// would block the child) or grow unbounded memory.
-    pub fn take_stderr_tail(&mut self) -> StderrTail {
-        let stderr = self.inner.stderr.take().expect("piped stderr");
-        StderrTail::spawn(stderr)
+    /// Take ALL piped streams in one call: the stdio pair for the handshake
+    /// plus the stderr tail capture (issue #542). The spawn pipes all three
+    /// ends, so a single take is the only valid lifetime. A single tuple
+    /// return makes a missing tail compiler-visible (issue #543): an untaken
+    /// element is an unused binding / dead code, not the silent doc-contract
+    /// it was when stdio and stderr were taken by separate methods.
+    pub fn take_pipes(&mut self) -> (ChildStdin, ChildStdout, StderrTail) {
+        // Infallible by construction (issue #543): the handle is created only
+        // by [`spawn_child`], whose `spawn_piped` pipes stdin/stdout/stderr,
+        // and no other site can take them -- stderr is spawned piped solely
+        // for the tail reader, the only consumer of this method.
+        let stdout = self.inner.stdout.take().expect("spawn_piped pipes stdout");
+        let stdin = self.inner.stdin.take().expect("spawn_piped pipes stdin");
+        let stderr = self.inner.stderr.take().expect("spawn_piped pipes stderr");
+        (stdin, stdout, StderrTail::spawn(stderr))
     }
 
     pub fn kill_and_wait(&mut self) {
@@ -273,7 +273,7 @@ impl ProbeIo {
 
     /// Send a request and pump incoming lines until its response arrives or
     /// the deadline passes. Stray lines are dropped by the shared loop (see
-    /// [`super::ndjson::NdjsonIo::request_roundtrip`]).
+    /// [`super::ndjson::NdjsonIo::request_roundtrip_deadline`]).
     fn request_roundtrip<P: serde::Serialize, R: serde::de::DeserializeOwned>(
         &mut self,
         req: Request<P>,
@@ -281,7 +281,7 @@ impl ProbeIo {
     ) -> Result<Response<R>, ProbeError> {
         let target = serde_json::to_value(&req.id).unwrap_or(serde_json::Value::Null);
         self.inner
-            .request_roundtrip(&req, &target, super::ndjson::Abort::Deadline(deadline))
+            .request_roundtrip_deadline(&req, &target, deadline)
             .map_err(|e| map_roundtrip_error(e, "ACP agent"))
     }
 }
@@ -289,23 +289,21 @@ impl ProbeIo {
 /// Map the shared round-trip failure onto the probe's error type. `who` names
 /// the child in the EOF detail (the ACP handshake and the app-server query
 /// word it differently). Shared with [`super::app_server`]'s deadline-driven
-/// query.
-pub(super) fn map_roundtrip_error(e: super::ndjson::RoundtripError, who: &str) -> ProbeError {
+/// query. Exhaustive over the deadline-driven error type -- the cancel-driven
+/// abort kind is not representable here (issue #543).
+pub(super) fn map_roundtrip_error(
+    e: super::ndjson::RoundtripError<super::ndjson::TimedOut>,
+    who: &str,
+) -> ProbeError {
+    use super::ndjson::RoundtripError;
     match e {
-        super::ndjson::RoundtripError::Cancelled => {
-            unreachable!("deadline-driven round-trips never report Cancelled")
-        }
-        super::ndjson::RoundtripError::Timeout => ProbeError::Timeout,
-        super::ndjson::RoundtripError::Serialize(detail) => {
+        RoundtripError::Abort(_) => ProbeError::Timeout,
+        RoundtripError::Serialize(detail) => {
             ProbeError::HandshakeFailure(format!("serialize: {detail}"))
         }
-        super::ndjson::RoundtripError::Write(detail) => {
-            ProbeError::HandshakeFailure(format!("write: {detail}"))
-        }
-        super::ndjson::RoundtripError::Eof => {
-            ProbeError::HandshakeFailure(format!("{who} closed stdout"))
-        }
-        super::ndjson::RoundtripError::Parse(detail) => {
+        RoundtripError::Write(detail) => ProbeError::HandshakeFailure(format!("write: {detail}")),
+        RoundtripError::Eof => ProbeError::HandshakeFailure(format!("{who} closed stdout")),
+        RoundtripError::Parse(detail) => {
             ProbeError::HandshakeFailure(format!("response parse: {detail}"))
         }
     }
@@ -389,7 +387,7 @@ impl TailBuf {
 #[derive(Debug, Clone)]
 pub struct StderrTail {
     tail: Arc<Mutex<TailBuf>>,
-    /// Fires (tx dropped or a unit sent) when the reader thread exits; the
+    /// Fires (tx dropped) when the reader thread exits; the
     /// snapshot waits on it under [`STDERR_TAIL_JOIN_TIMEOUT`].
     done_rx: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
 }
@@ -414,7 +412,15 @@ impl StderrTail {
                             t.push_bytes(&chunk[..n]);
                         }
                     }
-                    Err(_) => break,
+                    // The error is unrecoverable (the capture ends either
+                    // way); log it so "why is the tail empty" has an answer
+                    // (issue #543). Warn, not debug: release builds filter
+                    // at Info, and the packaged app's absent console is
+                    // exactly where this diagnosis matters.
+                    Err(e) => {
+                        log::warn!(target: "toptopduck::probe", "stderr reader failed: {e}");
+                        break;
+                    }
                 }
             }
             drop(done_tx);
@@ -454,22 +460,33 @@ impl StderrTail {
     }
 }
 
+/// Append the captured stderr tail to a detail string: `"; stderr tail:
+/// <tail>"` when the CLI printed one, the detail unchanged otherwise. The
+/// single owner of the append shape -- every detail-carrying surface goes
+/// through it: the failure path ([`attach_stderr_tail`]) and the codex
+/// degraded outcome (issue #543 -- the `Unavailable` detail is the only
+/// diagnostic surface a degraded outcome has), so the two paths cannot drift
+/// apart.
+pub(super) fn with_stderr_tail(detail: String, stderr_tail: &StderrTail) -> String {
+    let tail = stderr_tail.snapshot();
+    if tail.is_empty() {
+        return detail;
+    }
+    format!("{detail}; stderr tail: {tail}")
+}
+
 /// Attach the captured stderr tail to a probe failure (issue #542): a
 /// `HandshakeFailure` gains the CLI's own diagnosis in its detail (when the
 /// CLI printed one); a `Timeout` cannot change shape (its IPC form is pinned)
 /// so its tail goes to the log instead. `SpawnFailure` / `NotDetected` precede
 /// any child existing -- nothing to attach.
 pub(super) fn attach_stderr_tail(err: ProbeError, stderr: &StderrTail) -> ProbeError {
-    let tail = stderr.snapshot();
-    if tail.is_empty() {
-        return err;
-    }
     match err {
         ProbeError::HandshakeFailure(detail) => {
-            ProbeError::HandshakeFailure(format!("{detail}; stderr tail: {tail}"))
+            ProbeError::HandshakeFailure(with_stderr_tail(detail, stderr))
         }
         ProbeError::Timeout => {
-            log::warn!(target: "toptopduck::probe", "probe timed out; stderr tail: {tail}");
+            stderr.log_tail();
             ProbeError::Timeout
         }
         other => other,
