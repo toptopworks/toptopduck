@@ -486,7 +486,7 @@ impl ChildHandle {
 }
 
 fn spawn(binary: &Path, adapter: &AdapterSpec) -> Result<ChildHandle, String> {
-    super::process::spawn_piped(binary, adapter.argv)
+    super::process::spawn_piped(binary, adapter.argv, std::process::Stdio::inherit())
         .map(|inner| ChildHandle { inner })
         .map_err(|e| format!("failed to spawn ACP agent `{}`: {e}", adapter.id))
 }
