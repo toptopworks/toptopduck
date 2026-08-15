@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use toptopduck_lib::runtime::acp::adapter::DiscoveredRuntime;
 use toptopduck_lib::runtime::acp::catalog_store::{
-    AdapterCatalogEntry, AdapterCatalogStore, CachedOutcome, CATALOGS_FILE_NAME, ProbeKind,
+    AdapterCatalogEntry, AdapterCatalogStore, CachedOutcome, ProbeKind, CATALOGS_FILE_NAME,
 };
 use toptopduck_lib::runtime::acp::probe::CodexModel;
 
@@ -52,7 +52,9 @@ fn a_fresh_store_over_the_same_path_reads_the_prior_entries() {
 #[test]
 fn concurrent_multi_adapter_writes_land_independently() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let store = Arc::new(AdapterCatalogStore::new(dir.path().join(CATALOGS_FILE_NAME)));
+    let store = Arc::new(AdapterCatalogStore::new(
+        dir.path().join(CATALOGS_FILE_NAME),
+    ));
 
     let a = std::thread::spawn({
         let store = store.clone();

@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { LocalCliTab } from "../LocalCliTab";
 import { listAdapters, rescanAdapters, probeAdapter, getAdapterCatalogs } from "../../../api";
-import type { AdapterEntry, DiscoveredRuntime, ProbeOk } from "../../../types/runtime";
+import type { AdapterEntry, AdapterCatalogs, DiscoveredRuntime, ProbeOk } from "../../../types/runtime";
+import { adapterKeys } from "../../../session/queryKeys";
 import { renderSettings } from "./helpers";
 
 // Local CLI tab tests (issue #534/#535, ADR-0096): the diagnostic probe
@@ -64,6 +65,8 @@ const codexEmpty: ProbeOk = {
 };
 
 function renderTab(onIpcBusy = vi.fn()) {
+  // The returned queryClient lets the catalog-cache tests assert actual
+  // setQueryData writes (the probe mirror), not just their render absence.
   return renderSettings(<LocalCliTab onIpcBusy={onIpcBusy} />);
 }
 
@@ -361,17 +364,19 @@ describe("LocalCliTab catalog cache (issue #536)", () => {
 
   // A successful probe mirrors its entry into the query cache immediately:
   // the timestamped cached rendering shows after the fresh result row, with
-  // no extra IPC round-trip.
+  // no extra IPC round-trip. Asserted directly against the query cache -- a
+  // call-count assertion alone cannot detect the mirror write being deleted.
   it("shows the cached entry immediately after a successful ACP probe", async () => {
     vi.mocked(probeAdapter).mockResolvedValue(acpOk);
-    renderTab();
+    const { queryClient } = renderTab();
 
     await clickTestButton();
     await screen.findByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)"));
-    // The query cache now holds the entry (the mirror write); the next
-    // render pass would show "Last tested" were the row idle again. The
-    // mirror is observable through getAdapterCatalogs NOT being re-called
-    // (setQueryData, not invalidateQueries).
+    const cached = queryClient.getQueryData<AdapterCatalogs>(adapterKeys.catalogs());
+    expect(cached?.["claude-code"]).toBeDefined();
+    expect(cached?.["claude-code"].probe_kind).toBe("acp");
+    // The mirror is a setQueryData write, not an invalidation: the sidecar
+    // read is not re-fetched.
     expect(getAdapterCatalogs).toHaveBeenCalledTimes(1);
   });
 
@@ -379,13 +384,17 @@ describe("LocalCliTab catalog cache (issue #536)", () => {
   // cache point, ADR-0096 D5) -- the query cache must stay untouched.
   it("does not mirror a degraded codex outcome into the cache", async () => {
     vi.mocked(probeAdapter).mockResolvedValue(codexUnavailable);
-    renderTab();
+    const { queryClient } = renderTab();
 
     const buttons = await screen.findAllByRole("button", { name: "Test" });
     fireEvent.click(buttons[1]);
     await screen.findByText(
       byFoldedText("Started, but the model catalog is unavailable. (method not found)"),
     );
+    // No codex entry landed in the query cache (the mirror skipped the
+    // degraded outcome), and the display never shows a cached row.
+    const cached = queryClient.getQueryData<AdapterCatalogs>(adapterKeys.catalogs());
+    expect(cached?.codex).toBeUndefined();
     expect(screen.queryByText(byFoldedText("Last tested"))).toBeNull();
   });
 });

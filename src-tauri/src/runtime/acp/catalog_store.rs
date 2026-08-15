@@ -56,15 +56,28 @@ pub enum CachedOutcome {
     Codex { models: Vec<CodexModel> },
 }
 
+impl AdapterCatalogEntry {
+    /// Whether the tagged channel matches the outcome payload's variant.
+    /// serde parses each field independently, so a hand-edited file can pair
+    /// `probe_kind: "acp"` with a codex outcome; the load path drops such an
+    /// entry on the same per-entry honest-degrade footing as an unparsable
+    /// one (the file is a human-inspectable artifact).
+    fn is_consistent(&self) -> bool {
+        matches!(
+            (self.probe_kind, &self.outcome),
+            (ProbeKind::Acp, CachedOutcome::Acp { .. })
+                | (ProbeKind::Codex, CachedOutcome::Codex { .. })
+        )
+    }
+}
+
 impl CachedOutcome {
     /// Build the cacheable outcome from a probe success, or `None` for the
     /// degraded state (not cached -- see the type comment). Returns the
     /// producing channel alongside so the caller stamps the entry's
     /// `probe_kind` from the SAME dispatch (one match, no drift between the
     /// tag and the payload).
-    pub fn from_probe(
-        probe: &crate::runtime::acp::probe::ProbeOk,
-    ) -> Option<(ProbeKind, Self)> {
+    pub fn from_probe(probe: &crate::runtime::acp::probe::ProbeOk) -> Option<(ProbeKind, Self)> {
         use crate::runtime::acp::probe::ProbeOk;
         match probe {
             ProbeOk::Acp { discovered } => Some((
@@ -198,15 +211,14 @@ impl AdapterCatalogStore {
 /// tests exercise). Per-entry tolerance: the raw map is walked as untyped
 /// JSON so one unparsable entry drops without discarding the rest.
 fn load_from_str(raw: &str) -> Result<AdapterCatalogs, String> {
-    let value: serde_json::Value =
-        serde_json::from_str(raw).map_err(|e| format!("parse: {e}"))?;
+    let value: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("parse: {e}"))?;
     let Some(obj) = value.as_object() else {
         return Err("top-level value is not an object".to_string());
     };
     let mut out = HashMap::new();
     for (id, entry_value) in obj {
         match serde_json::from_value::<AdapterCatalogEntry>(entry_value.clone()) {
-            Ok(entry) => {
+            Ok(entry) if entry.is_consistent() => {
                 out.insert(id.clone(), entry);
             }
             Err(e) => {
@@ -215,6 +227,12 @@ fn load_from_str(raw: &str) -> Result<AdapterCatalogs, String> {
                 log::warn!(
                     target: "toptopduck::catalog_cache",
                     "adapter catalog entry `{id}` unparsable, dropped: {e}"
+                );
+            }
+            Ok(_) => {
+                log::warn!(
+                    target: "toptopduck::catalog_cache",
+                    "adapter catalog entry `{id}` has a mismatched probe_kind/outcome pair, dropped"
                 );
             }
         }
@@ -235,8 +253,7 @@ fn write_atomic(target: &Path, json: &str) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
     }
     {
-        let mut file =
-            std::fs::File::create(&tmp).map_err(|e| format!("create temp: {e}"))?;
+        let mut file = std::fs::File::create(&tmp).map_err(|e| format!("create temp: {e}"))?;
         file.write_all(json.as_bytes())
             .map_err(|e| format!("write temp: {e}"))?;
         file.sync_all().map_err(|e| format!("sync temp: {e}"))?;
@@ -404,10 +421,49 @@ mod tests {
     #[test]
     fn from_probe_tags_the_channel_with_the_payload() {
         use crate::runtime::acp::probe::ProbeOk;
-        let (kind, outcome) =
-            CachedOutcome::from_probe(&ProbeOk::Acp { discovered: DiscoveredRuntime::empty() })
-                .expect("acp caches");
+        let (kind, outcome) = CachedOutcome::from_probe(&ProbeOk::Acp {
+            discovered: DiscoveredRuntime::empty(),
+        })
+        .expect("acp caches");
         assert_eq!(kind, ProbeKind::Acp);
         assert!(matches!(outcome, CachedOutcome::Acp { .. }));
+    }
+
+    // The branch a real successful codex probe takes: an available catalog
+    // caches as the codex-tagged outcome (the integration fixtures hand-build
+    // entries, so this is the only pin on the clone + tag).
+    #[test]
+    fn from_probe_caches_an_available_codex_catalog() {
+        use crate::runtime::acp::probe::{CodexCatalogOutcome, ProbeOk};
+        let models = match codex_entry(0).outcome {
+            CachedOutcome::Codex { models } => models,
+            other => panic!("fixture is not a codex outcome: {other:?}"),
+        };
+        let probe = ProbeOk::Codex {
+            outcome: CodexCatalogOutcome::Available { models },
+        };
+        let (kind, outcome) = CachedOutcome::from_probe(&probe).expect("available codex caches");
+        assert_eq!(kind, ProbeKind::Codex);
+        assert_eq!(outcome, codex_entry(0).outcome);
+    }
+
+    // A hand-edited file can pair an acp tag with a codex payload (serde
+    // parses the fields independently); the load drops the entry instead of
+    // surfacing an inconsistent one to the consumer's per-format dispatch.
+    #[test]
+    fn mismatched_kind_outcome_pair_drops() {
+        let (_dir, store) = temp_store();
+        store.store_entry("claude-code", acp_entry("opus", 1_000));
+        let raw = std::fs::read_to_string(store.path()).expect("read");
+        let mut doc: serde_json::Value = serde_json::from_str(&raw).expect("valid json doc");
+        doc["codex"] = serde_json::json!({
+            "probe_kind": "acp",
+            "outcome": { "codex": { "models": [] } },
+            "probed_at_millis": 2_000
+        });
+        std::fs::write(store.path(), serde_json::to_string(&doc).unwrap()).expect("write");
+        let loaded = store.load();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded.get("claude-code"), Some(&acp_entry("opus", 1_000)));
     }
 }

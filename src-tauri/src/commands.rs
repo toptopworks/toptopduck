@@ -47,7 +47,7 @@ use crate::runtime::acp::adapter::{
     detect_adapter, v1_adapters, AdapterSpec, DiscoveredRuntime, StreamFormat,
 };
 use crate::runtime::acp::catalog_store::{
-    now_millis, AdapterCatalogEntry, AdapterCatalogs, AdapterCatalogStore, CachedOutcome,
+    now_millis, AdapterCatalogEntry, AdapterCatalogStore, AdapterCatalogs, CachedOutcome,
 };
 use crate::session::{RenameSessionError, ResumeEvent, ResumeProgress, Session, TurnInputs};
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
@@ -2485,9 +2485,7 @@ pub async fn probe_adapter(
 /// corrupt file reads as empty (the consumer renders its empty state);
 /// never refuses.
 #[tauri::command]
-pub fn get_adapter_catalogs(
-    catalog_store: State<'_, AdapterCatalogStore>,
-) -> AdapterCatalogs {
+pub fn get_adapter_catalogs(catalog_store: State<'_, AdapterCatalogStore>) -> AdapterCatalogs {
     catalog_store.load()
 }
 
