@@ -143,11 +143,6 @@ pub fn handshake_with(
     handshake(&mut io, spec, deadline).map(|discovered| ProbeOk { discovered })
 }
 
-/// The handshake: initialize -> session/new, deadline-bounded at the line
-/// level (each read waits only until the wall-clock deadline; a silent CLI
-/// surfaces as [`ProbeError::Timeout`], never a hang). The minimal shape of
-/// the engine's handshake: no bridge descriptor, no selection injection --
-/// the probe reads, it never configures.
 /// Unwrap a round-trip response: Some(result) passes through; a JSON-RPC
 /// error or an empty response names the failing step in the handshake
 /// failure detail.
@@ -164,6 +159,11 @@ fn require_result<T>(step: &str, resp: Response<T>) -> Result<T, ProbeError> {
     }
 }
 
+/// The handshake: initialize -> session/new, deadline-bounded at the line
+/// level (each read waits only until the wall-clock deadline; a silent CLI
+/// surfaces as [`ProbeError::Timeout`], never a hang). The minimal shape of
+/// the engine's handshake: no bridge descriptor, no selection injection --
+/// the probe reads, it never configures.
 fn handshake(
     io: &mut ProbeIo,
     adapter: &AdapterSpec,

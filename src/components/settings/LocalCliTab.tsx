@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, RefreshCw } from "lucide-react";
@@ -43,6 +43,35 @@ type ProbeState =
   | { status: "ok"; catalog: DiscoveredRuntime }
   | { status: "failed"; error: ProbeError };
 
+/** The kinds the backend can reject with -- the runtime kind allowlist for
+ *  the reject-shape check in `handleProbe` (a `kind` field alone proves
+ *  nothing: an unknown value would otherwise flow into `ProbeErrorText`
+ *  and surface as a render-time contract-break throw instead of a
+ *  degraded error row). */
+const PROBE_ERROR_KINDS: ReadonlySet<string> = new Set([
+  "NotDetected",
+  "Unsupported",
+  "SpawnFailure",
+  "HandshakeFailure",
+  "Timeout",
+]);
+
+/** Narrow an IPC reject to a `ProbeError`: a reject shaped like one (a known
+ *  kind) passes through; anything else -- a non-shaped reject or an unknown
+ *  kind (frontend/backend skew) -- degrades to the frontend-only
+ *  `ProbeUnreachable`, never a false handshake failure or a render throw. */
+function toProbeError(e: unknown): ProbeError {
+  if (
+    typeof e === "object" &&
+    e !== null &&
+    "kind" in e &&
+    PROBE_ERROR_KINDS.has(e.kind as string)
+  ) {
+    return e as ProbeError;
+  }
+  return { kind: "ProbeUnreachable", data: String(e) };
+}
+
 /** The probe success block: the catalog's model list, thought-level options,
  *  and current values, read straight off the DiscoveredRuntime fields. */
 function ProbeResult({ catalog }: { catalog: DiscoveredRuntime }) {
@@ -73,8 +102,11 @@ function ProbeResult({ catalog }: { catalog: DiscoveredRuntime }) {
 /** The probe-failure wording for one kind. Each case is a STATIC
  *  <FormattedMessage id="..." defaultMessage="..." /> literal so @formatjs/cli
  *  extract resolves every probe.error.* id (ADR-0052); the kind dispatch
- *  mirrors the backend's typed refusal set (an unexpected kind is a contract
- *  break, rendered as its raw string rather than a wrong-kind guess). */
+ *  mirrors the backend's typed refusal set. An unknown kind never reaches
+ *  here (the reject-shape check in `toProbeError` degrades it to
+ *  `ProbeUnreachable`); the default branch is the compile-time
+ *  exhaustiveness guard, and a runtime breach of that contract throws
+ *  rather than guessing a wrong kind. */
 function ProbeErrorText({ kind }: { kind: ProbeError["kind"] }) {
   switch (kind) {
     case "NotDetected":
@@ -151,6 +183,12 @@ export function LocalCliTab({
   const [rescanning, setRescanning] = useState(false);
   // Per-adapter probe state; one entry per probed row, keyed by adapter id.
   const [probeStates, setProbeStates] = useState<Record<string, ProbeState>>({});
+  // In-flight probe count (probe is the only multi-instance IPC channel --
+  // multiple rows can probe concurrently). The busy report mirrors the
+  // count, not any single row's status: the first probe to settle must not
+  // clear the channel while another is still in flight (the close guard
+  // would open early, ADR-0075 "any in-flight IPC blocks close").
+  const activeProbesRef = useRef(0);
 
   // Session-agnostic adapter table (same key the composer picker uses). The
   // cache may already be warm from the composer; this read is near-instant in
@@ -181,6 +219,7 @@ export function LocalCliTab({
   async function handleProbe(id: string) {
     if (probeStates[id]?.status === "probing") return;
     setProbeStates((prev) => ({ ...prev, [id]: { status: "probing" } }));
+    activeProbesRef.current += 1;
     onIpcBusy("probe", true);
     try {
       const { discovered } = await probeAdapter(id);
@@ -188,15 +227,18 @@ export function LocalCliTab({
     } catch (e) {
       log.warn("LocalCliTab", "adapter probe failed", e);
       // The IPC rejects with the structured ProbeError; a non-shaped reject
-      // (harness / transport fault) keeps its own kind -- it never reached
-      // the CLI, so it must not display as a handshake failure.
-      const probeError: ProbeError =
-        typeof e === "object" && e !== null && "kind" in e
-          ? (e as ProbeError)
-          : { kind: "ProbeUnreachable", data: String(e) };
-      setProbeStates((prev) => ({ ...prev, [id]: { status: "failed", error: probeError } }));
+      // or an unknown kind (harness / transport fault / skew) keeps its own
+      // kind -- it never reached the CLI, so it must not display as a
+      // handshake failure.
+      setProbeStates((prev) => ({
+        ...prev,
+        [id]: { status: "failed", error: toProbeError(e) },
+      }));
     } finally {
-      onIpcBusy("probe", false);
+      activeProbesRef.current -= 1;
+      if (activeProbesRef.current === 0) {
+        onIpcBusy("probe", false);
+      }
     }
   }
 

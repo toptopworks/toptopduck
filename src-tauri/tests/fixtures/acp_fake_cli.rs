@@ -106,6 +106,47 @@ fn main() {
             // answering and keep the process alive -- the diagnostic probe's
             // wall-clock timeout is the only way out.
             Some("initialize") if scenario == "handshake_silent" => {}
+            // `handshake_error` (issue #534): answer initialize with a
+            // JSON-RPC error -- the diagnostic probe must surface a
+            // HandshakeFailure naming the step, not a timeout.
+            Some("initialize") if scenario == "handshake_error" => {
+                respond(
+                    &mut out,
+                    &Response::<InitializeResult> {
+                        jsonrpc: "2.0".into(),
+                        id: parse_id(&id),
+                        result: None,
+                        error: Some(RpcError {
+                            code: -32000,
+                            message: "not logged in".into(),
+                            data: None,
+                        }),
+                    },
+                );
+            }
+            // `handshake_crash` (issue #534): acknowledge initialize, then
+            // exit right away -- the probe's session/new hits stdout EOF and
+            // must report a HandshakeFailure, never a hang.
+            Some("initialize") if scenario == "handshake_crash" => {
+                respond(
+                    &mut out,
+                    &Response::<InitializeResult> {
+                        jsonrpc: "2.0".into(),
+                        id: parse_id(&id),
+                        result: Some(InitializeResult {
+                            protocol_version: wire::PROTOCOL_VERSION,
+                            agent_info: Some(wire::Implementation {
+                                name: "acp-fake-cli".into(),
+                                version: "0.0.0".into(),
+                                title: None,
+                            }),
+                        }),
+                        error: None,
+                    },
+                );
+                let _ = out.flush();
+                std::process::exit(0);
+            }
             Some("initialize") => {
                 respond(
                     &mut out,

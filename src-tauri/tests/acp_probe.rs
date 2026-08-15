@@ -2,11 +2,13 @@
 //!
 //! Drives the probe kernel against the fake-CLI fixture across every
 //! observable branch: the success path (handshake + config_options extract),
-//! the timeout path (a CLI that never answers the handshake), the spawn
-//! failure path (a vanished binary), and process cleanup (the heartbeat in
-//! the fixture's trace file stops appending after the probe kills the
-//! child). The probe shares the wire types with the engine's fixture, so the
-//! round-trip is faithful to what the real claude-code drive will take.
+//! the handshake-failure family (an initialize RPC error + a CLI that exits
+//! mid-handshake), the timeout path (a CLI that never answers the
+//! handshake), the spawn failure path (a vanished binary), and process
+//! cleanup (the heartbeat in the fixture's trace file stops appending after
+//! the probe kills the child). The probe shares the wire types with the
+//! engine's fixture, so the round-trip is faithful to what the real
+//! claude-code drive will take.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -102,6 +104,48 @@ fn probe_timeout_returns_structured_failure() {
     let err = probe_fixture("handshake_silent", Duration::from_secs(2))
         .expect_err("a silent CLI must fail the probe");
     assert_eq!(err, ProbeError::Timeout);
+}
+
+// --- Handshake failure -----------------------------------------------------
+
+/// A CLI that answers initialize with a JSON-RPC error surfaces a
+/// HandshakeFailure naming the failing step and the CLI's message, not a
+/// timeout: this is the most probable real-world failure (a CLI that is
+/// installed but not logged in / misconfigured).
+#[test]
+fn probe_rpc_error_is_handshake_failure() {
+    let err = probe_fixture("handshake_error", Duration::from_secs(5))
+        .expect_err("an erroring CLI must fail the probe");
+    match &err {
+        ProbeError::HandshakeFailure(detail) => {
+            assert!(
+                detail.contains("initialize"),
+                "the failure names the failing step: {detail}"
+            );
+            assert!(
+                detail.contains("not logged in"),
+                "the failure carries the CLI's message: {detail}"
+            );
+        }
+        other => panic!("expected HandshakeFailure, got {other:?}"),
+    }
+}
+
+/// A CLI that exits right after initialize (crash / insta-quit) hits stdout
+/// EOF on session/new: a structured HandshakeFailure, never a hang.
+#[test]
+fn probe_stdout_eof_is_handshake_failure() {
+    let err = probe_fixture("handshake_crash", Duration::from_secs(5))
+        .expect_err("a crashing CLI must fail the probe");
+    match &err {
+        ProbeError::HandshakeFailure(detail) => {
+            assert!(
+                detail.contains("closed stdout"),
+                "the EOF names the disconnection: {detail}"
+            );
+        }
+        other => panic!("expected HandshakeFailure, got {other:?}"),
+    }
 }
 
 // --- Spawn failure ---------------------------------------------------------

@@ -90,6 +90,38 @@ describe("LocalCliTab probe (issue #534, ADR-0096)", () => {
     expect(screen.getByRole("button", { name: "Test" })).toBeEnabled();
   });
 
+  // The busy report is a count mirror, not a boolean mirror: the first probe
+  // to settle must NOT clear the channel while the second is still in flight
+  // (the close guard would open early, ADR-0075).
+  it("keeps busy=true while any of two concurrent probes is in flight", async () => {
+    const released: Array<(v: ProbeOk) => void> = [];
+    vi.mocked(probeAdapter).mockImplementation(
+      () => new Promise((resolve) => { released.push(resolve); }),
+    );
+    vi.mocked(listAdapters).mockResolvedValue([
+      mockAdapters[0],
+      { ...mockAdapters[0], id: "opencode", display_name: "opencode", binary_path: "/usr/local/bin/opencode" },
+    ]);
+    const onIpcBusy = vi.fn();
+    renderTab(onIpcBusy);
+
+    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    expect(buttons).toHaveLength(2);
+    fireEvent.click(buttons[0]);
+    fireEvent.click(buttons[1]);
+    expect(onIpcBusy).toHaveBeenCalledWith("probe", true);
+    expect(onIpcBusy).not.toHaveBeenCalledWith("probe", false);
+
+    // First probe settles: the channel must stay busy (the second is alive).
+    released[0]({ discovered: okCatalog });
+    await screen.findAllByRole("button", { name: "Test" });
+    expect(onIpcBusy).not.toHaveBeenCalledWith("probe", false);
+
+    // Second settles: now the channel goes quiet.
+    released[1]({ discovered: okCatalog });
+    await waitFor(() => expect(onIpcBusy).toHaveBeenCalledWith("probe", false));
+  });
+
   // --- Success rendering ---------------------------------------------------
 
   // A function matcher over full <p> text: getByText's default matcher only
@@ -158,5 +190,40 @@ describe("LocalCliTab probe (issue #534, ADR-0096)", () => {
         ),
       ),
     ).toBeInTheDocument();
+  });
+
+  // A reject carrying a `kind` outside the backend's refusal set (frontend /
+  // backend skew) must degrade the same way -- never reach ProbeErrorText's
+  // contract-break throw, which would take down the whole shell.
+  it("renders an unknown kind as unreachable instead of throwing", async () => {
+    vi.mocked(probeAdapter).mockRejectedValue({ kind: "SomeFutureKind" });
+    renderTab();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Test" }));
+    expect(
+      await screen.findByText(
+        byFoldedText("The probe request could not reach the CLI (internal error)."),
+      ),
+    ).toBeInTheDocument();
+  });
+
+  // Re-probing after a failure replaces the error row with the catalog (the
+  // per-id state overwrite -- old results never linger under a new one).
+  it("replaces a failed result with the catalog on a successful re-probe", async () => {
+    vi.mocked(probeAdapter)
+      .mockRejectedValueOnce({ kind: "HandshakeFailure", data: "initialize: empty response" })
+      .mockResolvedValueOnce({ discovered: okCatalog });
+    renderTab();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Test" }));
+    expect(
+      await screen.findByText(byFoldedText("Handshake with the CLI failed.")),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Test" }));
+    expect(
+      await screen.findByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)")),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(byFoldedText("Handshake with the CLI failed."))).toBeNull();
   });
 });
