@@ -25,10 +25,7 @@
 //! `CodexCatalogOutcome::Unavailable`, NOT a [`ProbeError`] -- only a spawn
 //! failure, a timeout, or the process dying mid-query fail outright.
 
-use std::io::{BufRead, BufReader, Write};
 use std::process::{ChildStdin, ChildStdout};
-use std::sync::mpsc;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -179,43 +176,21 @@ fn model_from_wire(m: ModelWire) -> CodexModel {
 // NDJSON stdio I/O
 // ---------------------------------------------------------------------------
 
-/// A line-delimited request/response channel over the app-server's stdio,
+/// The query's thin wrapper over the shared [`super::ndjson::NdjsonIo`]:
 /// deadline-driven (the kernel's minimal counterpart of the ACP
-/// [`super::probe::ProbeIo`]: the only abort condition is the wall clock).
+/// [`super::probe::ProbeIo`]) and mapped onto [`ProbeError`] via
+/// [`super::probe`]'s shared mapping (the `who` in the EOF detail names the
+/// codex app-server). Owns the request-id counter the bare envelope needs
+/// (no `jsonrpc` field, so the generic `Request` serializer is not used).
 struct AppServerIo {
-    stdin: ChildStdin,
-    rx: mpsc::Receiver<String>,
+    inner: super::ndjson::NdjsonIo,
     next_id: u64,
 }
 
 impl AppServerIo {
     fn new(stdin: ChildStdin, stdout: ChildStdout) -> Self {
-        let (tx, rx) = mpsc::channel::<String>();
-        // The reader thread owns stdout; EOF drops tx, which the round-trip
-        // treats as the process dying mid-query.
-        thread::spawn(move || {
-            let mut reader = BufReader::new(stdout);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line) {
-                    Ok(0) => break, // EOF
-                    Ok(_) => {
-                        let trimmed = line.trim_end_matches(['\n', '\r']);
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        if tx.send(trimmed.to_string()).is_err() {
-                            break; // round-trip gone
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
         Self {
-            stdin,
-            rx,
+            inner: super::ndjson::NdjsonIo::new(stdin, stdout),
             next_id: 1,
         }
     }
@@ -233,41 +208,9 @@ impl AppServerIo {
         self.next_id += 1;
         let req = AppServerRequest { id, method, params };
         let target = Value::from(id);
-        let mut msg = serde_json::to_string(&req)
-            .map_err(|e| ProbeError::HandshakeFailure(format!("serialize: {e}")))?;
-        msg.push('\n');
-        self.stdin
-            .write_all(msg.as_bytes())
-            .and_then(|_| self.stdin.flush())
-            .map_err(|e| ProbeError::HandshakeFailure(format!("write: {e}")))?;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(ProbeError::Timeout);
-            }
-            match self.rx.recv_timeout(remaining) {
-                Ok(line) => {
-                    let v: Value = match serde_json::from_str(&line) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-                    if v.get("id") == Some(&target) && v.get("method").is_none() {
-                        return serde_json::from_value(v).map_err(|e| {
-                            ProbeError::HandshakeFailure(format!("response parse: {e}"))
-                        });
-                    }
-                }
-                // The next loop iteration re-derives the remaining time; a
-                // partial-wait Timeout only ends the query when the deadline
-                // has actually passed.
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(ProbeError::HandshakeFailure(
-                        "codex app-server closed stdout".into(),
-                    ))
-                }
-            }
-        }
+        self.inner
+            .request_roundtrip(&req, &target, super::ndjson::Abort::Deadline(deadline))
+            .map_err(|e| super::probe::map_roundtrip_error(e, "codex app-server"))
     }
 }
 

@@ -5,7 +5,8 @@
 //! deadline. Extracting the constants + the kill-reap logic here prevents drift:
 //! a change to the reap strategy lands in one place, not two.
 
-use std::process::Child;
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// Pump poll interval: how long the pump blocks on the stdout-reader channel
@@ -29,6 +30,22 @@ pub(super) const KILL_REAP_DEADLINE: Duration = Duration::from_secs(2);
 /// Poll interval for the bounded reap. Short enough that the turn reclaims the
 /// agent promptly when SIGKILL lands; [`KILL_REAP_DEADLINE`] is the real cap.
 const KILL_REAP_POLL: Duration = Duration::from_millis(10);
+
+/// The single spawn shape every CLI lifecycle goes through: `binary` with
+/// `argv`, piped stdin/stdout, inherited stderr (the caller decides whether
+/// the CLI's own chatter is terminal-visible). The turn engine and both probe
+/// paths spawn through here (issue #540) -- a change to the spawn shape
+/// (env, cwd, stdio wiring) lands in one place, not three. The caller keeps
+/// the error wording (the turn path and the probe path name the failing
+/// adapter / CLI differently).
+pub(super) fn spawn_piped(binary: &Path, argv: &[&str]) -> std::io::Result<Child> {
+    Command::new(binary)
+        .args(argv)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+}
 
 /// Kill the child (`SIGKILL` on POSIX, `TerminateProcess` on Windows) and reap
 /// it under a bounded poll. Best-effort: if the child is not reaped within
