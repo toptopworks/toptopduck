@@ -2367,24 +2367,26 @@ pub fn rescan_adapters() -> Vec<AdapterEntry> {
     scan_adapters()
 }
 
-/// Run the adapter diagnostic probe (ADR-0096, issue #534): a session-
-/// agnostic, one-shot spawn of the detected CLI in protocol mode ->
-/// initialize + `session/new` handshake -> catalog extract -> terminate.
-/// The result is display-only in this slice (no catalog cache; a later
-/// slice persists to app-data).
+/// Run the adapter diagnostic probe (ADR-0096, issues #534/#535): a session-
+/// agnostic, one-shot spawn of the detected CLI in its probe mode -> a
+/// per-format catalog query -> terminate. ACP adapters run the initialize +
+/// `session/new` handshake; JsonEventStream adapters (codex) run the
+/// `app-server` `model/list` query. The result is display-only in this slice
+/// (no catalog cache; a later slice persists to app-data).
 ///
 /// Async + deadline-bounded, the `probe_mcp_server` layering (issue #392):
 /// the child is spawned in the async scope so the `Child` handle stays OUT
 /// of the `spawn_blocking` closure (blocking tasks are not cancellable --
 /// this is the only way to guarantee a hung CLI is reaped after the
-/// timeout), the blocking handshake runs under `spawn_blocking`, and the
-/// wall clock is [`PROBE_TIMEOUT`] (45s: generous for node-CLI cold starts,
-/// still bounded for a hung one). Every exit path kills + reaps the child.
+/// timeout), the blocking query runs under `spawn_blocking`, and the wall
+/// clock is [`PROBE_TIMEOUT`] (45s: generous for node-CLI cold starts, still
+/// bounded for a hung one). Every exit path kills + reaps the child.
 ///
 /// Refusals are typed ([`ProbeError`], a `kind`-tagged enum disjoint from
-/// every other typed IPC error): unknown id / not currently detected /
-/// non-ACP format (this slice) reject before any spawn; spawn + handshake
-/// failures carry the English technical detail for the fold.
+/// every other typed IPC error): unknown id / not currently detected reject
+/// before any spawn; spawn + query failures carry the English technical
+/// detail for the fold. A codex `model/list` RPC error is NOT a refusal -- it
+/// degrades to a [`ProbeOk::Codex`] carrying `Unavailable` (ADR-0096 D2).
 #[tauri::command]
 pub async fn probe_adapter(
     adapter_id: String,
@@ -2402,14 +2404,20 @@ pub async fn probe_adapter(
         (Some(spec), None) => return Err(ProbeError::NotDetected(spec.id.to_string())),
         (None, _) => return Err(ProbeError::NotDetected(adapter_id)),
     };
-    // The one shared spawn point: the same format guard + argv + piped-stdio
-    // shape as the kernel's blocking entry, with the Child handle staying in
-    // the async scope (blocking tasks are not cancellable, so the handle
-    // must stay outside them for the kill-on-timeout).
+    // The one shared spawn point (the per-format probe argv on the spec), with
+    // the Child handle staying in the async scope (blocking tasks are not
+    // cancellable, so the handle must stay outside them for the kill-on-timeout).
     let mut child = probe::spawn_child(&spec, Some(&binary))?;
     let (stdin, stdout) = child.take_stdio();
-    let join = tauri::async_runtime::spawn_blocking(move || {
-        probe::handshake_with(stdin, stdout, &spec, PROBE_TIMEOUT)
+    // ADR-0096 D2: dispatch the per-format query on the spec's stream format,
+    // never the CLI's identity (zero per-CLI code).
+    let join = tauri::async_runtime::spawn_blocking(move || match spec.stream_format {
+        StreamFormat::Acp => probe::handshake_with(stdin, stdout, &spec, PROBE_TIMEOUT)
+            .map(|discovered| probe::ProbeOk::Acp { discovered }),
+        StreamFormat::JsonEventStream => {
+            crate::runtime::acp::app_server::query_catalog(stdin, stdout, PROBE_TIMEOUT)
+                .map(|outcome| probe::ProbeOk::Codex { outcome })
+        }
     });
     let outcome = tokio::time::timeout(PROBE_TIMEOUT, join).await;
     // A tokio timeout surfaces as ProbeError::Timeout; the blocking task

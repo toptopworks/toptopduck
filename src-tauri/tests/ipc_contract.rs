@@ -1296,3 +1296,64 @@ fn set_model_persist_outcome_wire_shape() {
         r#"{"persist_error":null,"persist_suspended":true}"#,
     );
 }
+
+/// Serialize-only counterpart of [`assert_wire`]: pin the outbound IPC shape
+/// of a type that never deserializes back (the probe success payload flows
+/// Rust -> frontend only, so `ProbeOk` derives Serialize alone).
+fn assert_wire_out<T>(value: &T, expected: &str)
+where
+    T: serde::Serialize + std::fmt::Debug,
+{
+    let json = serde_json::to_string(value).expect("serialize");
+    assert_eq!(json, expected, "wire format drifted from pinned contract");
+}
+
+/// ProbeOk (ADR-0096, issues #534/#535) crosses IPC adjacently-tagged
+/// (`tag="kind", content="data"`, `rename_all="snake_case"`): the ACP variant
+/// carries the flat `DiscoveredRuntime` under `data.discovered`, the codex
+/// variant carries the per-model `CodexCatalogOutcome` under `data.outcome`
+/// (whose own inner tag is `status`). `src/types/runtime.ts` hand-mirrors
+/// these shapes; pin them so a serde attribute change fails here before the
+/// hand-mirror can drift (the ProbeError side is pinned by the frontend's
+/// kind allowlist, but the success shape has no other guard).
+#[test]
+fn probe_ok_wire_shape() {
+    use toptopduck_lib::runtime::acp::adapter::DiscoveredRuntime;
+    use toptopduck_lib::runtime::acp::probe::{CodexCatalogOutcome, CodexModel, ProbeOk};
+    assert_wire_out(
+        &ProbeOk::Acp {
+            discovered: DiscoveredRuntime {
+                models: vec!["fake-opus".into()],
+                current_model: Some("fake-opus".into()),
+                thought_levels: vec!["low".into(), "high".into()],
+                current_thought_level: None,
+                model_config_id: Some("model".into()),
+                thought_level_config_id: None,
+                adapter_id: Some("claude-code".into()),
+            },
+        },
+        r#"{"kind":"acp","data":{"discovered":{"models":["fake-opus"],"current_model":"fake-opus","thought_levels":["low","high"],"current_thought_level":null,"model_config_id":"model","adapter_id":"claude-code"}}}"#,
+    );
+    assert_wire_out(
+        &ProbeOk::Codex {
+            outcome: CodexCatalogOutcome::Available {
+                models: vec![CodexModel {
+                    id: "gpt-5.2-codex".into(),
+                    display_name: "GPT-5.2 Codex".into(),
+                    is_default: true,
+                    default_reasoning_effort: "medium".into(),
+                    supported_reasoning_efforts: vec!["low".into(), "medium".into()],
+                }],
+            },
+        },
+        r#"{"kind":"codex","data":{"outcome":{"status":"available","models":[{"id":"gpt-5.2-codex","display_name":"GPT-5.2 Codex","is_default":true,"default_reasoning_effort":"medium","supported_reasoning_efforts":["low","medium"]}]}}}"#,
+    );
+    assert_wire_out(
+        &ProbeOk::Codex {
+            outcome: CodexCatalogOutcome::Unavailable {
+                detail: "model/list error: not logged in".into(),
+            },
+        },
+        r#"{"kind":"codex","data":{"outcome":{"status":"unavailable","detail":"model/list error: not logged in"}}}"#,
+    );
+}

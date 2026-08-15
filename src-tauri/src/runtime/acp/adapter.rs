@@ -96,6 +96,14 @@ pub struct AdapterSpec {
     /// turn input (JsonEventStream model/effort flags, bridge config
     /// overrides) -- never CLI-specific arguments.
     pub argv: &'static [&'static str],
+    /// The argv prefix the diagnostic probe uses to spawn this CLI (ADR-0096).
+    /// `None` on ACP adapters -- the probe reuses [`Self::argv`] (the same
+    /// protocol mode the turn drives). JsonEventStream adapters (codex) probe
+    /// via the `app-server` subcommand, a different surface from the turn's
+    /// `exec --json` mode, so the probe argv cannot be the turn argv. Like
+    /// [`Self::argv`], pure CLI-specific data: the probe kernel reads it and
+    /// names no CLI.
+    pub probe_argv: Option<&'static [&'static str]>,
     /// The wire protocol the CLI speaks over stdio (ADR-0094). Selects the
     /// engine's per-format dispatch path.
     pub stream_format: StreamFormat,
@@ -139,6 +147,7 @@ pub const fn claude_code() -> AdapterSpec {
         binary_names: &["claude", "claude-code"],
         argv: &["--acp"],
         stream_format: StreamFormat::Acp,
+        probe_argv: None,
         model_arg: None,
         effort_config_key: None,
     }
@@ -162,6 +171,7 @@ pub const fn gemini_cli() -> AdapterSpec {
         binary_names: &["gemini"],
         argv: &["--experimental-acp"],
         stream_format: StreamFormat::Acp,
+        probe_argv: None,
         model_arg: None,
         effort_config_key: None,
     }
@@ -195,6 +205,10 @@ pub const fn codex() -> AdapterSpec {
             "read-only",
         ],
         stream_format: StreamFormat::JsonEventStream,
+        // The probe surface is the `app-server` subcommand, NOT the turn's
+        // `exec --json` (ADR-0096 D2) -- a different communication channel
+        // whose `model/list` RPC returns the per-model catalog.
+        probe_argv: Some(&["app-server"]),
         // ADR-0095: codex's native `exec` takes the model as `--model <id>`
         // and the reasoning effort via the config override
         // `-c model_reasoning_effort=<value>` (same `-c` mechanism the bridge
@@ -220,6 +234,7 @@ pub const fn qwen_code() -> AdapterSpec {
         binary_names: &["qwen"],
         argv: &["--acp"],
         stream_format: StreamFormat::Acp,
+        probe_argv: None,
         model_arg: None,
         effort_config_key: None,
     }
@@ -243,6 +258,7 @@ pub const fn opencode() -> AdapterSpec {
         binary_names: &["opencode"],
         argv: &["acp"],
         stream_format: StreamFormat::Acp,
+        probe_argv: None,
         model_arg: None,
         effort_config_key: None,
     }
@@ -621,6 +637,17 @@ mod tests {
         let codex = codex();
         assert_eq!(codex.model_arg, Some("--model"));
         assert_eq!(codex.effort_config_key, Some("model_reasoning_effort"));
+    }
+
+    /// ADR-0096 D2: the probe argv is `None` on ACP adapters (the probe reuses
+    /// the turn argv) and the `app-server` subcommand on codex -- the probe
+    /// surface, not the turn's `exec --json` mode.
+    #[test]
+    fn adapters_declare_probe_argv_per_format() {
+        for spec in [claude_code(), gemini_cli(), qwen_code(), opencode()] {
+            assert!(spec.probe_argv.is_none(), "{}", spec.id);
+        }
+        assert_eq!(codex().probe_argv, Some(&["app-server"][..]));
     }
 
     /// The claude-code adapter carries both installer binary names + the ACP

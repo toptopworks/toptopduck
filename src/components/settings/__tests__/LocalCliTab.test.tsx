@@ -5,11 +5,12 @@ import { listAdapters, rescanAdapters, probeAdapter } from "../../../api";
 import type { AdapterEntry, DiscoveredRuntime, ProbeOk } from "../../../types/runtime";
 import { renderSettings } from "./helpers";
 
-// Local CLI tab tests (issue #534, ADR-0096): the diagnostic probe surface --
-// the per-adapter Test button (rendered only for detected ACP adapters), the
-// in-flight disable + close-guard busy report, and the result rendering
-// (catalog on success, kind-dispatched error on failure). The tab's list /
-// rescan surface is covered by RuntimeSection.test.
+// Local CLI tab tests (issue #534/#535, ADR-0096): the diagnostic probe
+// surface -- the per-adapter Test button (rendered for every detected
+// adapter, both formats), the in-flight disable + close-guard busy report,
+// and the result rendering (per-format catalog on success, kind-dispatched
+// error on failure). The tab's list / rescan surface is covered by
+// RuntimeSection.test.
 
 vi.mock("../../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../api")>();
@@ -35,11 +36,45 @@ const okCatalog: DiscoveredRuntime = {
   adapter_id: "claude-code",
 };
 
+// The per-format tagged success shapes (mirror the Rust ProbeOk wire form).
+const acpOk: ProbeOk = { kind: "acp", data: { discovered: okCatalog } };
+
+const codexAvailable: ProbeOk = {
+  kind: "codex",
+  data: {
+    outcome: {
+      status: "available",
+      models: [
+        { id: "gpt-5.2-codex", display_name: "GPT-5.2 Codex", is_default: true, default_reasoning_effort: "medium", supported_reasoning_efforts: ["low", "medium", "high"] },
+        { id: "gpt-5.1-codex-mini", display_name: "GPT-5.1 Codex Mini", is_default: false, default_reasoning_effort: "low", supported_reasoning_efforts: ["low"] },
+      ],
+    },
+  },
+};
+
+const codexUnavailable: ProbeOk = {
+  kind: "codex",
+  data: { outcome: { status: "unavailable", detail: "method not found" } },
+};
+
+const codexEmpty: ProbeOk = {
+  kind: "codex",
+  data: { outcome: { status: "available", models: [] } },
+};
+
 function renderTab(onIpcBusy = vi.fn()) {
   return renderSettings(<LocalCliTab onIpcBusy={onIpcBusy} />);
 }
 
-describe("LocalCliTab probe (issue #534, ADR-0096)", () => {
+/** Click the first Test button (claude-code's row -- the first detected
+ *  adapter). Every detected adapter now offers the button, so a singular
+ *  findByRole would be ambiguous. */
+async function clickTestButton() {
+  const buttons = await screen.findAllByRole("button", { name: "Test" });
+  fireEvent.click(buttons[0]);
+}
+
+describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(listAdapters).mockResolvedValue(mockAdapters);
@@ -48,15 +83,12 @@ describe("LocalCliTab probe (issue #534, ADR-0096)", () => {
 
   // --- Button rendering ----------------------------------------------------
 
-  it("renders the Test button only for detected ACP adapters", async () => {
+  it("renders the Test button for detected adapters of either format", async () => {
     renderTab();
-    // claude-code (detected + acp) gets exactly one button.
-    const row = (await screen.findByText("claude-code")).closest("div");
-    expect(row).not.toBeNull();
+    // claude-code (acp) + codex (json_event_stream) each get one button; the
+    // undetected gemini-cli gets none.
     const buttons = await screen.findAllByRole("button", { name: "Test" });
-    expect(buttons).toHaveLength(1);
-    // codex (json_event_stream) + gemini-cli (undetected) get none.
-    expect(screen.getByText("codex")).toBeInTheDocument();
+    expect(buttons).toHaveLength(2);
     expect(screen.getByText("gemini-cli")).toBeInTheDocument();
   });
 
@@ -70,14 +102,14 @@ describe("LocalCliTab probe (issue #534, ADR-0096)", () => {
     const onIpcBusy = vi.fn();
     renderTab(onIpcBusy);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Test" }));
-    const busy = screen.getByRole("button", { name: "Test" });
+    await clickTestButton();
+    const busy = (await screen.findAllByRole("button", { name: "Test" }))[0];
     expect(busy).toBeDisabled();
     expect(onIpcBusy).toHaveBeenCalledWith("probe", true);
 
-    release({ discovered: okCatalog });
+    release(acpOk);
     await waitFor(() => expect(onIpcBusy).toHaveBeenCalledWith("probe", false));
-    expect(screen.getByRole("button", { name: "Test" })).toBeEnabled();
+    expect((await screen.findAllByRole("button", { name: "Test" }))[0]).toBeEnabled();
   });
 
   it("reports busy=false even when the probe rejects", async () => {
@@ -85,9 +117,9 @@ describe("LocalCliTab probe (issue #534, ADR-0096)", () => {
     const onIpcBusy = vi.fn();
     renderTab(onIpcBusy);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Test" }));
+    await clickTestButton();
     await waitFor(() => expect(onIpcBusy).toHaveBeenCalledWith("probe", false));
-    expect(screen.getByRole("button", { name: "Test" })).toBeEnabled();
+    expect((await screen.findAllByRole("button", { name: "Test" }))[0]).toBeEnabled();
   });
 
   // The busy report is a count mirror, not a boolean mirror: the first probe
@@ -113,12 +145,12 @@ describe("LocalCliTab probe (issue #534, ADR-0096)", () => {
     expect(onIpcBusy).not.toHaveBeenCalledWith("probe", false);
 
     // First probe settles: the channel must stay busy (the second is alive).
-    released[0]({ discovered: okCatalog });
+    released[0](acpOk);
     await screen.findAllByRole("button", { name: "Test" });
     expect(onIpcBusy).not.toHaveBeenCalledWith("probe", false);
 
     // Second settles: now the channel goes quiet.
-    released[1]({ discovered: okCatalog });
+    released[1](acpOk);
     await waitFor(() => expect(onIpcBusy).toHaveBeenCalledWith("probe", false));
   });
 
@@ -132,16 +164,55 @@ describe("LocalCliTab probe (issue #534, ADR-0096)", () => {
     (_: unknown, element: Element | null) =>
       element?.tagName === "P" && element.textContent?.includes(fragment) === true;
 
-  it("renders the discovered catalog under the row on success", async () => {
-    vi.mocked(probeAdapter).mockResolvedValue({ discovered: okCatalog });
+  it("renders the ACP catalog under the row on success", async () => {
+    vi.mocked(probeAdapter).mockResolvedValue(acpOk);
     renderTab();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Test" }));
+    await clickTestButton();
     expect(
       await screen.findByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)")),
     ).toBeInTheDocument();
     expect(
       screen.getByText(byFoldedText("low, medium, high (medium)")),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the codex per-model catalog under the row on success", async () => {
+    vi.mocked(probeAdapter).mockResolvedValue(codexAvailable);
+    renderTab();
+
+    // The codex row is the second adapter -- click its button specifically.
+    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    fireEvent.click(buttons[1]);
+    expect(
+      await screen.findByText(byFoldedText("GPT-5.2 Codex (default): low, medium, high")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(byFoldedText("GPT-5.1 Codex Mini: low")),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the degraded codex state under the row", async () => {
+    vi.mocked(probeAdapter).mockResolvedValue(codexUnavailable);
+    renderTab();
+
+    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    fireEvent.click(buttons[1]);
+    expect(
+      await screen.findByText(
+        byFoldedText("Started, but the model catalog is unavailable. (method not found)"),
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("renders an honest line for an empty available codex catalog", async () => {
+    vi.mocked(probeAdapter).mockResolvedValue(codexEmpty);
+    renderTab();
+
+    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    fireEvent.click(buttons[1]);
+    expect(
+      await screen.findByText(byFoldedText("Started, but no models were reported.")),
     ).toBeInTheDocument();
   });
 
@@ -152,12 +223,11 @@ describe("LocalCliTab probe (issue #534, ADR-0096)", () => {
     [{ kind: "SpawnFailure", data: "failed to spawn ACP agent" }, "Failed to start the CLI."],
     [{ kind: "HandshakeFailure", data: "initialize: empty response" }, "Handshake with the CLI failed."],
     [{ kind: "NotDetected", data: "claude-code" }, "Adapter is not detected."],
-    [{ kind: "Unsupported", data: "codex" }, "Probing this adapter is not supported yet."],
   ])("renders the %s failure as an error line", async (rejection, expected) => {
     vi.mocked(probeAdapter).mockRejectedValue(rejection);
     renderTab();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Test" }));
+    await clickTestButton();
     expect(await screen.findByText(byFoldedText(expected))).toBeInTheDocument();
   });
 
@@ -168,7 +238,7 @@ describe("LocalCliTab probe (issue #534, ADR-0096)", () => {
     });
     renderTab();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Test" }));
+    await clickTestButton();
     expect(
       await screen.findByText(
         byFoldedText("Handshake with the CLI failed. (session/new error: boom)"),
@@ -182,7 +252,7 @@ describe("LocalCliTab probe (issue #534, ADR-0096)", () => {
     vi.mocked(probeAdapter).mockRejectedValue(new Error("transport exploded"));
     renderTab();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Test" }));
+    await clickTestButton();
     expect(
       await screen.findByText(
         byFoldedText(
@@ -199,7 +269,7 @@ describe("LocalCliTab probe (issue #534, ADR-0096)", () => {
     vi.mocked(probeAdapter).mockRejectedValue({ kind: "SomeFutureKind" });
     renderTab();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Test" }));
+    await clickTestButton();
     expect(
       await screen.findByText(
         byFoldedText("The probe request could not reach the CLI (internal error)."),
@@ -212,15 +282,15 @@ describe("LocalCliTab probe (issue #534, ADR-0096)", () => {
   it("replaces a failed result with the catalog on a successful re-probe", async () => {
     vi.mocked(probeAdapter)
       .mockRejectedValueOnce({ kind: "HandshakeFailure", data: "initialize: empty response" })
-      .mockResolvedValueOnce({ discovered: okCatalog });
+      .mockResolvedValueOnce(acpOk);
     renderTab();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Test" }));
+    await clickTestButton();
     expect(
       await screen.findByText(byFoldedText("Handshake with the CLI failed.")),
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Test" }));
+    fireEvent.click((await screen.findAllByRole("button", { name: "Test" }))[0]);
     expect(
       await screen.findByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)")),
     ).toBeInTheDocument();

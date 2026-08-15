@@ -75,12 +75,36 @@ export interface SessionModelConfig {
   cached_discovered: DiscoveredRuntime | null;
 }
 
-// The adapter diagnostic probe's success shape (ADR-0096, issue #534): the
-// catalog extracted from the probe handshake's config_options, stamped with
-// the producing adapter. Mirrors `runtime::acp::probe::ProbeOk` (snake_case
-// serde).
-export interface ProbeOk {
-  discovered: DiscoveredRuntime;
+// The adapter diagnostic probe's success shape (ADR-0096, issues #534/#535).
+// Per-format tagged (`kind`), mirroring the Rust `ProbeOk` adjacently-tagged
+// enum: `acp` carries the flat handshake catalog, `codex` carries the
+// app-server per-model catalog (or the degraded "unavailable" state). The
+// codex catalog is NOT flattened into `DiscoveredRuntime` -- a union of
+// per-model efforts would let the user select an effort the current model
+// does not support (ADR-0096 D3).
+export type ProbeOk =
+  | { kind: "acp"; data: { discovered: DiscoveredRuntime } }
+  | { kind: "codex"; data: { outcome: CodexCatalogOutcome } };
+
+// The codex app-server `model/list` outcome (ADR-0096 D2/D3). `available`
+// carries the ordered per-model catalog; `unavailable` is the degraded
+// "started but catalog unavailable" state (the process is alive, so this is a
+// success, not a ProbeError). Mirrors the Rust `CodexCatalogOutcome`
+// (status-tagged, snake_case serde).
+export type CodexCatalogOutcome =
+  | { status: "available"; models: CodexModel[] }
+  | { status: "unavailable"; detail: string };
+
+// One codex model from the `model/list` catalog (ADR-0096 D3). The reasoning
+// efforts are the per-model `supportedReasoningEfforts` in the CLI's declared
+// order (never a union across models). Mirrors the Rust `CodexModel`
+// (snake_case serde).
+export interface CodexModel {
+  id: string;
+  display_name: string;
+  is_default: boolean;
+  default_reasoning_effort: string;
+  supported_reasoning_efforts: string[];
 }
 
 // The probe's structured refusal/failure (ADR-0096, issue #534). Mirrors the
@@ -92,7 +116,6 @@ export interface ProbeOk {
 // transport fault) that never reached the CLI.
 export type ProbeError =
   | { kind: "NotDetected"; data: string }
-  | { kind: "Unsupported"; data: string }
   | { kind: "SpawnFailure"; data: string }
   | { kind: "HandshakeFailure"; data: string }
   | { kind: "ProbeUnreachable"; data: string }

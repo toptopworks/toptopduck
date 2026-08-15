@@ -36,6 +36,7 @@ fn fake_cli_adapter() -> AdapterSpec {
         binary_names: &["acp-fake-cli"],
         argv: &[],
         stream_format: toptopduck_lib::runtime::acp::adapter::StreamFormat::Acp,
+        probe_argv: None,
         model_arg: None,
         effort_config_key: None,
     }
@@ -233,6 +234,7 @@ fn external_prehandshake_failure_preserves_cached_discovery() {
         binary_names: &["definitely-not-on-path-530"],
         argv: &[],
         stream_format: toptopduck_lib::runtime::acp::adapter::StreamFormat::Acp,
+        probe_argv: None,
         model_arg: None,
         effort_config_key: None,
     }));

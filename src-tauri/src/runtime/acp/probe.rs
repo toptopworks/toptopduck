@@ -1,4 +1,4 @@
-//! The adapter diagnostic probe kernel (ADR-0096, issue #534).
+//! The adapter diagnostic probe kernel (ADR-0096, issues #534/#535).
 //!
 //! A session-agnostic, read-only verification channel, deliberately decoupled
 //! from the turn path ([`super::engine`]): one-shot spawn of the detected
@@ -17,9 +17,10 @@
 //! caller -- the IPC shell and the tests alike -- composes the same three
 //! steps: spawn -> handshake -> kill.
 //!
-//! Only [`StreamFormat::Acp`] adapters are probeable in this slice; the
-//! app-server (`model/list`) path for `JsonEventStream` adapters is a later
-//! slice (ADR-0096 D2).
+//! Both stream formats are probeable (ADR-0096 D2): ACP adapters run the
+//! initialize + `session/new` handshake here, while `JsonEventStream`
+//! adapters (codex) dispatch to [`super::app_server`]'s `model/list` query
+//! -- the same spawn -> query -> kill lifecycle, a different wire surface.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -28,7 +29,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::runtime::acp::adapter::{AdapterSpec, DiscoveredRuntime, StreamFormat};
+use crate::runtime::acp::adapter::{AdapterSpec, DiscoveredRuntime};
 use crate::runtime::acp::wire::{
     self, InitializeParams, NewSessionParams, NewSessionResult, Request, RequestId, Response,
 };
@@ -39,13 +40,50 @@ use crate::runtime::acp::wire::{
 /// deadline instead -- this constant is the production default only.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// A successful probe: the extracted catalog, stamped with the producing
-/// adapter (issue #529 semantics -- the config_options wire carries no
-/// adapter identity). The session id is not carried: the probe mints no
+/// A successful probe (ADR-0096 D2/D3). Per-format tagged: the ACP handshake
+/// produces the flat [`DiscoveredRuntime`] (issue #534); the codex app-server
+/// `model/list` produces a per-model [`CodexCatalogOutcome`] (issue #535) --
+/// the latter never flattened into `DiscoveredRuntime` (a union of per-model
+/// efforts would let the user select an effort the current model does not
+/// support, ADR-0096 D3). The session id is not carried: the probe mints no
 /// usable session (the process is killed right after the handshake).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct ProbeOk {
-    pub discovered: DiscoveredRuntime,
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum ProbeOk {
+    /// The ACP handshake catalog, stamped with the producing adapter (issue
+    /// #529 semantics -- the config_options wire carries no adapter identity).
+    Acp { discovered: DiscoveredRuntime },
+    /// The codex app-server model catalog, or the honest degraded "started
+    /// but catalog unavailable" state (ADR-0096 D2 -- an old codex / not
+    /// logged in / RPC error degrades; only a spawn failure, a timeout, or
+    /// the process dying mid-query fails outright).
+    Codex { outcome: CodexCatalogOutcome },
+}
+
+/// The codex app-server `model/list` outcome (ADR-0096 D2/D3). `Available`
+/// carries the ordered per-model catalog; `Unavailable` is the degraded state
+/// (the process started but the catalog was not obtainable -- RPC error /
+/// empty response / unparseable result; the process being alive is itself
+/// diagnostic signal, so this is a success variant, not an error).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CodexCatalogOutcome {
+    Available { models: Vec<CodexModel> },
+    Unavailable { detail: String },
+}
+
+/// One codex model from the `model/list` catalog (ADR-0096 D3). The reasoning
+/// efforts are the per-model `supportedReasoningEfforts` in the CLI's declared
+/// order (never a union across models); `default_reasoning_effort` marks the
+/// model's own default; `is_default` marks the catalog's default model.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CodexModel {
+    pub id: String,
+    pub display_name: String,
+    pub is_default: bool,
+    pub default_reasoning_effort: String,
+    pub supported_reasoning_efforts: Vec<String>,
 }
 
 /// A probe refusal or failure (issue #534). Adjacently-tagged
@@ -61,17 +99,14 @@ pub enum ProbeError {
     /// unknown. Carries the adapter id.
     #[error("adapter not detected: {0}")]
     NotDetected(String),
-    /// The adapter's stream format has no probe path in this slice (the
-    /// JsonEventStream / app-server probe is a later slice, ADR-0096 D2).
-    /// Carries the adapter id.
-    #[error("probe not supported for adapter: {0}")]
-    Unsupported(String),
     /// Spawning the CLI binary failed (vanished binary, permission, ...).
     /// Carries the English technical detail.
     #[error("{0}")]
     SpawnFailure(String),
-    /// The ACP handshake failed (the CLI is not an ACP agent / crashed /
-    /// spoke a foreign protocol). Carries the English technical detail.
+    /// The probe's protocol exchange failed -- an ACP handshake error, an
+    /// app-server query error (the CLI crashed mid-query / spoke a foreign
+    /// protocol), or the probe task itself failed (write error / task
+    /// panic). Carries the English technical detail.
     #[error("{0}")]
     HandshakeFailure(String),
     /// The wall-clock deadline elapsed before the handshake completed.
@@ -79,28 +114,23 @@ pub enum ProbeError {
     Timeout,
 }
 
-/// The single spawn point every probe lifecycle goes through: guards the
-/// format (ADR-0096 D2: Acp only in this slice -- the backend half of the
-/// double guard; the UI simply does not offer the button), then spawns
-/// `binary` with the adapter's argv prefix and piped stdio. A fresh PATH
-/// scan returning `None` refuses with [`ProbeError::NotDetected`] before
-/// any spawn is attempted.
+/// The single spawn point every probe lifecycle goes through: spawns `binary`
+/// with the adapter's probe argv prefix (ADR-0096 D2 -- the turn argv on ACP,
+/// the `app-server` subcommand on JsonEventStream, both carried as data on the
+/// spec so the kernel names no CLI) and piped stdio. A fresh PATH scan
+/// returning `None` refuses with [`ProbeError::NotDetected`] before any spawn
+/// is attempted. The caller dispatches the per-format query on the returned
+/// child's stdio.
 pub fn spawn_child(spec: &AdapterSpec, binary: Option<&Path>) -> Result<ChildHandle, ProbeError> {
-    match spec.stream_format {
-        StreamFormat::Acp => {}
-        StreamFormat::JsonEventStream => return Err(ProbeError::Unsupported(spec.id.to_string())),
-    }
     let binary = binary.ok_or_else(|| ProbeError::NotDetected(spec.id.to_string()))?;
     Command::new(binary)
-        .args(spec.argv)
+        .args(spec.probe_argv.unwrap_or(spec.argv))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .map(|inner| ChildHandle { inner })
-        .map_err(|e| {
-            ProbeError::SpawnFailure(format!("failed to spawn ACP agent `{}`: {e}", spec.id))
-        })
+        .map_err(|e| ProbeError::SpawnFailure(format!("failed to spawn CLI `{}`: {e}", spec.id)))
 }
 
 /// The spawned CLI child. [`Self::kill_and_wait`] delegates to
@@ -137,10 +167,10 @@ pub fn handshake_with(
     stdout: ChildStdout,
     spec: &AdapterSpec,
     timeout: Duration,
-) -> Result<ProbeOk, ProbeError> {
+) -> Result<DiscoveredRuntime, ProbeError> {
     let mut io = ProbeIo::new(stdin, stdout);
     let deadline = Instant::now() + timeout;
-    handshake(&mut io, spec, deadline).map(|discovered| ProbeOk { discovered })
+    handshake(&mut io, spec, deadline)
 }
 
 /// Unwrap a round-trip response: Some(result) passes through; a JSON-RPC

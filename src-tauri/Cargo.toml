@@ -40,6 +40,18 @@ path = "tests/fixtures/acp_fake_cli.rs"
 name = "codex-fake-cli"
 path = "tests/fixtures/codex_fake_cli.rs"
 
+# Codex app-server fake fixture (ADR-0096, issue #535): a minimal binary that
+# emulates the `codex app-server` JSON-RPC-over-stdio protocol (no `jsonrpc`
+# field) so the diagnostic probe's `model/list` catalog read can be exercised
+# end-to-end in CI without the real codex install. Lives under `tests/fixtures/`
+# (subdir, no auto-discovery); pure serde_json (no lib import) so the fixture
+# stays self-contained. Integration tests resolve its path via
+# `env!("CARGO_BIN_EXE_codex-app-server-fake")`. The Tauri bundler ships only
+# `main.rs`, so this fixture never reaches end users.
+[[bin]]
+name = "codex-app-server-fake"
+path = "tests/fixtures/codex_app_server_fake.rs"
+
 # MCP fake server fixture (issue #301 slice C-gw): a minimal stdio MCP server
 # the gateway aggregation / routing integration tests spawn via
 # `env!("CARGO_BIN_EXE_mcp-fake-server")`. Speaks the MCP stdio newline-delimited
