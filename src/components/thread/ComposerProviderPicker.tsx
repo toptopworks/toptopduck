@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
+import type { IntlShape } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Zap } from "lucide-react";
 
@@ -8,6 +9,7 @@ import { cn } from "@/lib/utils";
 import { fmtError } from "../../lib/error-presentation";
 import { log } from "../../lib/log";
 import {
+  getAdapterCatalogs,
   getSessionModelConfig,
   getSessionRuntime,
   listAdapters,
@@ -22,6 +24,7 @@ import type { ProfileKeyStatus, ProviderConfig } from "../../types/provider";
 import type { SaveError } from "../../types/session";
 import type {
   AdapterEntry,
+  CodexModel,
   SessionModelConfig,
   SessionRuntimeChoice,
 } from "../../types/runtime";
@@ -205,75 +208,6 @@ export function ComposerProviderPicker({
   const modelConfigFault = modelConfigError
     ? fmtError(modelConfigError, intl)
     : null;
-  // Guards the two set IPCs (one at a time; the second picker is disabled
-  // while the first write is in flight).
-  const [modelSwitching, setModelSwitching] = useState(false);
-  // Inline failure line for the two set IPCs (issue #529), same slot /
-  // styling as the keysError precedent. Holds the raw reject and formats at
-  // render so a locale switch re-renders the wording. Cleared on the next
-  // attempt.
-  const [modelSetError, setModelSetError] = useState<unknown>(null);
-  // A set that resolved but whose persist-now leg did not land (issue #529):
-  // the verdict rides the set command's return (in-process, read in the same
-  // critical section), so "set means persisted" (ADR-0095 Decision 6) cannot
-  // break silently nor be swallowed by the shared banner error channel.
-  const [modelPersistFault, setModelPersistFault] = useState<SaveError | null>(null);
-  // True when the persist was withheld on a pending ADR-0035 conflict (the
-  // .duck changed externally; the auto-write refuses to clobber it).
-  const [modelPersistSuspended, setModelPersistSuspended] = useState(false);
-
-  // Shared write sequence for both selectors (the two bodies differ only in
-  // the IPC, the patched key, and the log verb). On resolve: seed the cache
-  // with the granted posture and project the returned persist verdict onto
-  // the two fault slots. On reject: keep the server posture (refetch off the
-  // reject) + show the failure.
-  async function applyModelConfig(
-    write: () => Promise<SetModelPersistOutcome>,
-    patch: Partial<Pick<SessionModelConfig, "model" | "thought_level">>,
-    logVerb: string,
-  ) {
-    if (sessionId === null || modelSwitching) return;
-    setModelSwitching(true);
-    setModelSetError(null);
-    setModelPersistFault(null);
-    setModelPersistSuspended(false);
-    try {
-      const outcome = await write();
-      queryClient.setQueryData(sessionKeys.modelConfig(sessionId), {
-        ...modelConfig,
-        ...patch,
-      });
-      setModelPersistFault(outcome.persist_error);
-      setModelPersistSuspended(outcome.persist_suspended);
-    } catch (e) {
-      setModelSetError(e);
-      log.warn(
-        "ComposerProviderPicker",
-        `set session ${logVerb} failed; resyncing from the session`,
-        fmtError(e, intl),
-      );
-      void queryClient.invalidateQueries({
-        queryKey: sessionKeys.modelConfig(sessionId),
-      });
-    } finally {
-      setModelSwitching(false);
-    }
-  }
-
-  const selectModel = (model: string | null) =>
-    applyModelConfig(
-      () => setSessionModel(sessionId as string, model),
-      { model },
-      "model",
-    );
-
-  const selectThoughtLevel = (thoughtLevel: string | null) =>
-    applyModelConfig(
-      () => setSessionThoughtLevel(sessionId as string, thoughtLevel),
-      { thought_level: thoughtLevel },
-      "thought level",
-    );
-
   // The v1 adapter table (session-agnostic, ADR-0081/0083). Issue #490 slimmed
   // the external group to a pure selector: only detected rows render (adapter
   // management moved to Settings → Runtime → Local CLI, ADR-0091). The list
@@ -318,6 +252,160 @@ export function ComposerProviderPicker({
     discovered != null &&
     discovered.adapter_id != null &&
     discovered.adapter_id !== activeAdapterId;
+
+  // Catalog priority chain (ADR-0096 D6, issue #537): where the selector
+  // directory comes from, per the active runtime's stream format.
+  //   ACP:  session cached_discovered (this CLI's live handshake truth)
+  //         -> the global probe cache entry for THIS adapter (an explicit
+  //         user test in Settings; keyed by adapter id so it can never hold
+  //         another runtime's catalog) -> empty + guidance.
+  //   codex: the probe cache's codex entry only (a JES runtime reports no
+  //         session catalog; without a cache it stays the read-only CLI
+  //         Default labels -- honest rendering, no invented directory).
+  const { data: cachedCatalogsData } = useQuery({
+    queryKey: adapterKeys.catalogs(),
+    queryFn: getAdapterCatalogs,
+  });
+  const cachedCatalogs = cachedCatalogsData ?? {};
+  const probeEntry =
+    isExternal && activeAdapterId !== null
+      ? (cachedCatalogs[activeAdapterId] ?? null)
+      : null;
+
+  // The catalog feeding the ACP selectors after the fallback resolves.
+  // (`"acp" in outcome` narrows the keyed union; probe_kind alone does not.)
+  const acpCatalog =
+    isExternal && !isJsonEventStreamAdapter
+      ? (discovered ??
+        (probeEntry && "acp" in probeEntry.outcome
+          ? probeEntry.outcome.acp.discovered
+          : null))
+      : null;
+  // True when the ACP selectors are fed by the probe cache rather than the
+  // session's own discovery (drives the provenance note: the session cache
+  // replaces it after this runtime's next turn).
+  const acpCatalogFromProbe =
+    acpCatalog != null && discovered == null && probeEntry != null;
+
+  // The codex per-model catalog when the probe cache holds one (null keeps
+  // the read-only CLI Default labels).
+  const codexCatalog =
+    isJsonEventStreamAdapter &&
+    probeEntry != null &&
+    "codex" in probeEntry.outcome
+      ? probeEntry.outcome.codex.models
+      : null;
+
+  // Guards the two set IPCs (one at a time; the second picker is disabled
+  // while the first write is in flight).
+  const [modelSwitching, setModelSwitching] = useState(false);
+  // Inline failure line for the two set IPCs (issue #529), same slot /
+  // styling as the keysError precedent. Holds the raw reject and formats at
+  // render so a locale switch re-renders the wording. Cleared on the next
+  // attempt.
+  const [modelSetError, setModelSetError] = useState<unknown>(null);
+  // A set that resolved but whose persist-now leg did not land (issue #529):
+  // the verdict rides the set command's return (in-process, read in the same
+  // critical section), so "set means persisted" (ADR-0095 Decision 6) cannot
+  // break silently nor be swallowed by the shared banner error channel.
+  const [modelPersistFault, setModelPersistFault] = useState<SaveError | null>(null);
+  // True when the persist was withheld on a pending ADR-0035 conflict (the
+  // .duck changed externally; the auto-write refuses to clobber it).
+  const [modelPersistSuspended, setModelPersistSuspended] = useState(false);
+
+  // Shared write sequence for both selectors (the two bodies differ only in
+  // the IPC, the patched key, and the log verb). On resolve: seed the cache
+  // with the granted posture and project the returned persist verdict onto
+  // the two fault slots. On reject: keep the server posture (refetch off the
+  // reject) + show the failure. Returns whether the write was GRANTED (a
+  // dropped click or a reject yields false) -- the codex model->effort
+  // linkage gates its clearing write on it.
+  async function applyModelConfig(
+    write: () => Promise<SetModelPersistOutcome>,
+    patch: Partial<Pick<SessionModelConfig, "model" | "thought_level">>,
+    logVerb: string,
+  ): Promise<boolean> {
+    if (sessionId === null || modelSwitching) return false;
+    setModelSwitching(true);
+    setModelSetError(null);
+    setModelPersistFault(null);
+    setModelPersistSuspended(false);
+    try {
+      const outcome = await write();
+      // Functional update: a later selection in the same popover session
+      // must patch the CURRENT cache, not the snapshot this closure captured
+      // at render -- two rapid selections (e.g. a model pick that auto-clears
+      // an unsupported thought level) would otherwise clobber each other.
+      queryClient.setQueryData(
+        sessionKeys.modelConfig(sessionId),
+        (prev: SessionModelConfig | undefined): SessionModelConfig => ({
+          ...(prev ?? modelConfig),
+          ...patch,
+        }),
+      );
+      setModelPersistFault(outcome.persist_error);
+      setModelPersistSuspended(outcome.persist_suspended);
+      return true;
+    } catch (e) {
+      setModelSetError(e);
+      log.warn(
+        "ComposerProviderPicker",
+        `set session ${logVerb} failed; resyncing from the session`,
+        fmtError(e, intl),
+      );
+      void queryClient.invalidateQueries({
+        queryKey: sessionKeys.modelConfig(sessionId),
+      });
+      return false;
+    } finally {
+      setModelSwitching(false);
+    }
+  }
+
+  const selectModel = async (model: string | null) => {
+    const granted = await applyModelConfig(
+      () => setSessionModel(sessionId as string, model),
+      { model },
+      "model",
+    );
+    if (!granted) return;
+    // codex per-model linkage (issue #537): the thought level must sit in
+    // the newly selected model's supported set. A held level outside that
+    // set (including every held level once the model pick is cleared -- no
+    // model means no supported set at all) is cleared via the existing set
+    // IPC, in the SAME user gesture -- awaiting the model write first means
+    // applyModelConfig's switching gate has re-opened and the clear cannot
+    // be swallowed. A rejected model write returns early: the held level
+    // stays against the still-held model.
+    if (codexCatalog) {
+      const supported = supportedEffortsFor(codexCatalog, model);
+      if (
+        modelConfig.thought_level != null &&
+        !supported.includes(modelConfig.thought_level)
+      ) {
+        await selectThoughtLevel(null);
+      }
+    }
+  };
+
+  const selectThoughtLevel = (thoughtLevel: string | null) =>
+    applyModelConfig(
+      () => setSessionThoughtLevel(sessionId as string, thoughtLevel),
+      { thought_level: thoughtLevel },
+      "thought level",
+    );
+
+  // codex helper (issue #537): the thought-level list for the given model
+  // id -- that model's supportedReasoningEfforts in the CLI's declared
+  // order (never a union across models). Null / unknown model: no entries
+  // (the level selector disables with a "pick a model first" hint).
+  function supportedEffortsFor(
+    models: CodexModel[],
+    modelId: string | null,
+  ): string[] {
+    if (modelId == null) return [];
+    return models.find((m) => m.id === modelId)?.supported_reasoning_efforts ?? [];
+  }
 
   // Guards the write window: a click that lands while the set IPC is in flight
   // is dropped instead of re-firing (the disabled attr is the visual half of
@@ -712,34 +800,58 @@ export function ComposerProviderPicker({
             {isExternal &&
               modelConfigFault == null &&
               (isJsonEventStreamAdapter ? (
+                codexCatalog ? (
+                  <CodexSelectors
+                    models={codexCatalog}
+                    model={modelConfig.model}
+                    thoughtLevel={modelConfig.thought_level}
+                    switching={modelSwitching}
+                    onSelectModel={selectModel}
+                    onSelectThoughtLevel={selectThoughtLevel}
+                    setError={modelSetError}
+                    persistFault={modelPersistFault}
+                    persistSuspended={modelPersistSuspended}
+                    intl={intl}
+                  />
+                ) : (
+                  <div className="grid gap-1.5 px-2 pb-1">
+                    <span className="text-muted-foreground text-xs font-medium">
+                      <FormattedMessage
+                        id="composer.runtimePicker.modelLabel"
+                        defaultMessage="Model"
+                      />
+                    </span>
+                    <p className="text-muted-foreground text-xs">
+                      <FormattedMessage
+                        id="composer.runtimePicker.cliDefault"
+                        defaultMessage="CLI default"
+                      />
+                    </p>
+                    <span className="text-muted-foreground text-xs font-medium">
+                      <FormattedMessage
+                        id="composer.runtimePicker.thoughtLevelLabel"
+                        defaultMessage="Thinking"
+                      />
+                    </span>
+                    <p className="text-muted-foreground text-xs">
+                      <FormattedMessage
+                        id="composer.runtimePicker.cliDefault"
+                        defaultMessage="CLI default"
+                      />
+                    </p>
+                    <TestInSettingsHint onOpenSettings={handleOpenSettings} />
+                  </div>
+                )
+              ) : acpCatalog ? (
                 <div className="grid gap-1.5 px-2 pb-1">
-                  <span className="text-muted-foreground text-xs font-medium">
-                    <FormattedMessage
-                      id="composer.runtimePicker.modelLabel"
-                      defaultMessage="Model"
-                    />
-                  </span>
-                  <p className="text-muted-foreground text-xs">
-                    <FormattedMessage
-                      id="composer.runtimePicker.cliDefault"
-                      defaultMessage="CLI default"
-                    />
-                  </p>
-                  <span className="text-muted-foreground text-xs font-medium">
-                    <FormattedMessage
-                      id="composer.runtimePicker.thoughtLevelLabel"
-                      defaultMessage="Thinking"
-                    />
-                  </span>
-                  <p className="text-muted-foreground text-xs">
-                    <FormattedMessage
-                      id="composer.runtimePicker.cliDefault"
-                      defaultMessage="CLI default"
-                    />
-                  </p>
-                </div>
-              ) : discovered ? (
-                <div className="grid gap-1.5 px-2 pb-1">
+                  {acpCatalogFromProbe && (
+                    <p className="text-muted-foreground text-xs">
+                      <FormattedMessage
+                        id="composer.runtimePicker.catalogFromProbe"
+                        defaultMessage="Options from your last settings test — this runtime's live list appears after its next turn."
+                      />
+                    </p>
+                  )}
                   <span className="text-muted-foreground text-xs font-medium">
                     <FormattedMessage
                       id="composer.runtimePicker.modelLabel"
@@ -751,7 +863,7 @@ export function ComposerProviderPicker({
                       id: "composer.runtimePicker.modelLabel",
                       defaultMessage: "Model",
                     })}
-                    value={modelConfig.model ?? discovered.current_model ?? ""}
+                    value={modelConfig.model ?? acpCatalog.current_model ?? ""}
                     disabled={modelSwitching}
                     onChange={(e) => void selectModel(e.target.value || null)}
                     className={cn(
@@ -760,8 +872,8 @@ export function ComposerProviderPicker({
                     )}
                   >
                     <SelectorOptions
-                      discoveredValues={discovered.models}
-                      currentValue={discovered.current_model}
+                      discoveredValues={acpCatalog.models}
+                      currentValue={acpCatalog.current_model}
                       selected={modelConfig.model}
                       defaultLabel={intl.formatMessage({
                         id: "composer.runtimePicker.cliDefault",
@@ -772,7 +884,7 @@ export function ComposerProviderPicker({
                           id: "composer.runtimePicker.unrepresentedModel",
                           defaultMessage: "{id} (not offered by this runtime)",
                         },
-                        { id: modelConfig.model ?? discovered.current_model ?? "" },
+                        { id: modelConfig.model ?? acpCatalog.current_model ?? "" },
                       )}
                     />
                   </select>
@@ -789,7 +901,7 @@ export function ComposerProviderPicker({
                     })}
                     value={
                       modelConfig.thought_level ??
-                      discovered.current_thought_level ??
+                      acpCatalog.current_thought_level ??
                       ""
                     }
                     disabled={modelSwitching}
@@ -801,8 +913,8 @@ export function ComposerProviderPicker({
                     )}
                   >
                     <SelectorOptions
-                      discoveredValues={discovered.thought_levels}
-                      currentValue={discovered.current_thought_level}
+                      discoveredValues={acpCatalog.thought_levels}
+                      currentValue={acpCatalog.current_thought_level}
                       selected={modelConfig.thought_level}
                       defaultLabel={intl.formatMessage({
                         id: "composer.runtimePicker.cliDefault",
@@ -816,48 +928,29 @@ export function ComposerProviderPicker({
                         {
                           id:
                             modelConfig.thought_level ??
-                            discovered.current_thought_level ??
+                            acpCatalog.current_thought_level ??
                             "",
                         },
                       )}
                     />
                   </select>
-                  {/* Set-failure / persist-failure inline lines (issue #529):
-                      same slot as keysError, one surface for both set IPCs. */}
-                  {modelSetError != null && (
-                    <p className="text-destructive text-xs">
-                      <FormattedMessage
-                        id="composer.runtimePicker.applyError"
-                        defaultMessage="Could not apply the selection: {reason}"
-                        values={{ reason: fmtError(modelSetError, intl) }}
-                      />
-                    </p>
-                  )}
-                  {modelPersistFault && (
-                    <p className="text-warning text-xs">
-                      <FormattedMessage
-                        id="composer.runtimePicker.persistFault"
-                        defaultMessage="Selection not saved: {reason}"
-                        values={{ reason: fmtError(modelPersistFault, intl) }}
-                      />
-                    </p>
-                  )}
-                  {modelPersistSuspended && (
-                    <p className="text-warning text-xs">
-                      <FormattedMessage
-                        id="composer.runtimePicker.persistSuspended"
-                        defaultMessage="Selection not saved: the session file was changed outside the app, so autosave is paused until you resolve the conflict."
-                      />
-                    </p>
-                  )}
+                  <SelectorFaultLines
+                    setError={modelSetError}
+                    persistFault={modelPersistFault}
+                    persistSuspended={modelPersistSuspended}
+                    intl={intl}
+                  />
                 </div>
               ) : (
-                <p className="text-muted-foreground px-2 pb-1 text-xs">
-                  <FormattedMessage
-                    id="composer.runtimePicker.discoveryPending"
-                    defaultMessage="Model options appear after the first turn on this runtime."
-                  />
-                </p>
+                <div className="grid gap-1.5 px-2 pb-1">
+                  <p className="text-muted-foreground text-xs">
+                    <FormattedMessage
+                      id="composer.runtimePicker.discoveryPending"
+                      defaultMessage="Model options appear after the first turn on this runtime."
+                    />
+                  </p>
+                  <TestInSettingsHint onOpenSettings={handleOpenSettings} />
+                </div>
               ))}
             {/* Manage external runtimes -- opens Settings → Runtime → Local CLI
                 (ADR-0091, issue #490). A button styled as a text link, to read
@@ -876,6 +969,207 @@ export function ComposerProviderPicker({
         </div>
       </PopoverContent>
     </Popover>
+  );
+}
+
+// The empty-directory guidance entry (ADR-0096 D6, issue #537): when neither
+// the session catalog nor the probe cache offers options, a link-style
+// button routes to Settings → Runtime → Local CLI where the explicit test
+// populates the cache. Closes the popover first (same contract as the other
+// open-settings entries).
+function TestInSettingsHint({
+  onOpenSettings,
+}: {
+  onOpenSettings: (tab: RuntimeTab) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onOpenSettings("local-cli")}
+      className="justify-self-start text-left text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+    >
+      <FormattedMessage
+        id="composer.runtimePicker.testInSettings"
+        defaultMessage="Test the runtime in settings to get its model list →"
+      />
+    </button>
+  );
+}
+
+// The codex (JsonEventStream) selector surface (ADR-0096 D6, issue #537):
+// real dropdowns fed by the probe cache's per-model catalog. The model list
+// comes from the cache; the thought-level list is the SELECTED model's
+// supportedReasoningEfforts in the CLI's declared order (a union across
+// models would offer "model A + an effort model A does not support"). With
+// no model picked the level selector disables with a "pick a model first"
+// hint -- there is no honest level list to offer. Selecting the "CLI
+// default" row (value "") clears the selection via the existing set IPCs.
+function CodexSelectors({
+  models,
+  model,
+  thoughtLevel,
+  switching,
+  onSelectModel,
+  onSelectThoughtLevel,
+  setError,
+  persistFault,
+  persistSuspended,
+  intl,
+}: {
+  models: CodexModel[];
+  model: string | null;
+  thoughtLevel: string | null;
+  switching: boolean;
+  onSelectModel: (model: string | null) => void;
+  onSelectThoughtLevel: (thoughtLevel: string | null) => void;
+  setError: unknown;
+  persistFault: SaveError | null;
+  persistSuspended: boolean;
+  intl: IntlShape;
+}) {
+  const selectedModel = model != null ? (models.find((m) => m.id === model) ?? null) : null;
+  // The effective model the CLI would use: the explicit pick, else the
+  // catalog's flagged default. Annotates the clearing row so the user can
+  // tell "what the CLI would use" apart from "what I picked".
+  const effectiveModel = selectedModel ?? (models.find((m) => m.is_default) ?? null);
+  const supportedEfforts = selectedModel?.supported_reasoning_efforts ?? [];
+
+  return (
+    <div className="grid gap-1.5 px-2 pb-1">
+      <span className="text-muted-foreground text-xs font-medium">
+        <FormattedMessage
+          id="composer.runtimePicker.modelLabel"
+          defaultMessage="Model"
+        />
+      </span>
+      <select
+        aria-label={intl.formatMessage({
+          id: "composer.runtimePicker.modelLabel",
+          defaultMessage: "Model",
+        })}
+        value={model ?? ""}
+        disabled={switching}
+        onChange={(e) => onSelectModel(e.target.value || null)}
+        className={cn(
+          "border-input flex h-8 w-full min-w-0 rounded-md border bg-transparent px-2 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none cursor-pointer",
+          "focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:pointer-events-none disabled:opacity-50",
+        )}
+      >
+        <SelectorOptions
+          discoveredValues={models.map((m) => m.id)}
+          currentValue={effectiveModel?.id ?? null}
+          selected={model}
+          defaultLabel={intl.formatMessage({
+            id: "composer.runtimePicker.cliDefault",
+            defaultMessage: "CLI default",
+          })}
+          unrepresentedLabel={intl.formatMessage(
+            {
+              id: "composer.runtimePicker.unrepresentedModel",
+              defaultMessage: "{id} (not offered by this runtime)",
+            },
+            { id: model ?? "" },
+          )}
+        />
+      </select>
+      <span className="text-muted-foreground text-xs font-medium">
+        <FormattedMessage
+          id="composer.runtimePicker.thoughtLevelLabel"
+          defaultMessage="Thinking"
+        />
+      </span>
+      {model == null ? (
+        <p className="text-muted-foreground text-xs">
+          <FormattedMessage
+            id="composer.runtimePicker.pickModelFirst"
+            defaultMessage="Pick a model to choose a thinking level."
+          />
+        </p>
+      ) : (
+        <select
+          aria-label={intl.formatMessage({
+            id: "composer.runtimePicker.thoughtLevelLabel",
+            defaultMessage: "Thinking",
+          })}
+          value={thoughtLevel ?? ""}
+          disabled={switching}
+          onChange={(e) => onSelectThoughtLevel(e.target.value || null)}
+          className={cn(
+            "border-input flex h-8 w-full min-w-0 rounded-md border bg-transparent px-2 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none cursor-pointer",
+            "focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:pointer-events-none disabled:opacity-50",
+          )}
+        >
+          <SelectorOptions
+            discoveredValues={supportedEfforts}
+            currentValue={selectedModel?.default_reasoning_effort ?? null}
+            selected={thoughtLevel}
+            defaultLabel={intl.formatMessage({
+              id: "composer.runtimePicker.cliDefault",
+              defaultMessage: "CLI default",
+            })}
+            unrepresentedLabel={intl.formatMessage(
+              {
+                id: "composer.runtimePicker.unrepresentedThoughtLevel",
+                defaultMessage: "{id} (not offered by this runtime)",
+              },
+              { id: thoughtLevel ?? "" },
+            )}
+          />
+        </select>
+      )}
+      <SelectorFaultLines
+        setError={setError}
+        persistFault={persistFault}
+        persistSuspended={persistSuspended}
+        intl={intl}
+      />
+    </div>
+  );
+}
+
+// The set-IPC fault lines (issue #529), shared by every selector surface
+// that can write (the ACP dropdowns and the codex dropdowns): one surface
+// for both set IPCs, same slot / styling as the keysError precedent.
+function SelectorFaultLines({
+  setError,
+  persistFault,
+  persistSuspended,
+  intl,
+}: {
+  setError: unknown;
+  persistFault: SaveError | null;
+  persistSuspended: boolean;
+  intl: IntlShape;
+}) {
+  return (
+    <>
+      {setError != null && (
+        <p className="text-destructive text-xs">
+          <FormattedMessage
+            id="composer.runtimePicker.applyError"
+            defaultMessage="Could not apply the selection: {reason}"
+            values={{ reason: fmtError(setError, intl) }}
+          />
+        </p>
+      )}
+      {persistFault && (
+        <p className="text-warning text-xs">
+          <FormattedMessage
+            id="composer.runtimePicker.persistFault"
+            defaultMessage="Selection not saved: {reason}"
+            values={{ reason: fmtError(persistFault, intl) }}
+          />
+        </p>
+      )}
+      {persistSuspended && (
+        <p className="text-warning text-xs">
+          <FormattedMessage
+            id="composer.runtimePicker.persistSuspended"
+            defaultMessage="Selection not saved: the session file was changed outside the app, so autosave is paused until you resolve the conflict."
+          />
+        </p>
+      )}
+    </>
   );
 }
 
