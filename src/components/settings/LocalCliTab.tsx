@@ -73,7 +73,8 @@ function ProbeResult({ catalog }: { catalog: DiscoveredRuntime }) {
 /** The probe-failure wording for one kind. Each case is a STATIC
  *  <FormattedMessage id="..." defaultMessage="..." /> literal so @formatjs/cli
  *  extract resolves every probe.error.* id (ADR-0052); the kind dispatch
- *  mirrors the backend's typed refusal set. */
+ *  mirrors the backend's typed refusal set (an unexpected kind is a contract
+ *  break, rendered as its raw string rather than a wrong-kind guess). */
 function ProbeErrorText({ kind }: { kind: ProbeError["kind"] }) {
   switch (kind) {
     case "NotDetected":
@@ -88,6 +89,13 @@ function ProbeErrorText({ kind }: { kind: ProbeError["kind"] }) {
         <FormattedMessage
           id="settings.runtime.localCli.probe.error.unsupported"
           defaultMessage="Probing this adapter is not supported yet."
+        />
+      );
+    case "ProbeUnreachable":
+      return (
+        <FormattedMessage
+          id="settings.runtime.localCli.probe.error.unreachable"
+          defaultMessage="The probe request could not reach the CLI (internal error)."
         />
       );
     case "SpawnFailure":
@@ -134,6 +142,7 @@ function ProbeErrorLine({ error }: { error: ProbeError }) {
 export function LocalCliTab({
   onIpcBusy,
 }: {
+  /** Narrowed pass-through: the local CLI tab fires only the probe channel. */
   onIpcBusy: (channel: "probe", busy: boolean) => void;
 }) {
   const intl = useIntl();
@@ -179,11 +188,12 @@ export function LocalCliTab({
     } catch (e) {
       log.warn("LocalCliTab", "adapter probe failed", e);
       // The IPC rejects with the structured ProbeError; a non-shaped reject
-      // (harness / transport fault) degrades to the same display contract.
+      // (harness / transport fault) keeps its own kind -- it never reached
+      // the CLI, so it must not display as a handshake failure.
       const probeError: ProbeError =
         typeof e === "object" && e !== null && "kind" in e
           ? (e as ProbeError)
-          : { kind: "HandshakeFailure", data: String(e) };
+          : { kind: "ProbeUnreachable", data: String(e) };
       setProbeStates((prev) => ({ ...prev, [id]: { status: "failed", error: probeError } }));
     } finally {
       onIpcBusy("probe", false);

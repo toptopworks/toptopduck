@@ -33,6 +33,8 @@ const DEFAULT_TAB: RuntimeTab = "api-access";
 export type RuntimeSectionProps = {
   provider: AppConfig["provider"];
   onCommit: (mutate: (cfg: AppConfig) => AppConfig) => Promise<string | null>;
+  /** Narrowed pass-through: the runtime pane's children fire key / test /
+   *  probe, never sessionsDir. */
   onIpcBusy: (channel: "key" | "test" | "probe", busy: boolean) => void;
   initialEditProfileId?: string;
   /** Landing sub-tab when the section opens (issue #490). Undefined = default. */

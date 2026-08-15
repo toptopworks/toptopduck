@@ -2389,38 +2389,27 @@ pub fn rescan_adapters() -> Vec<AdapterEntry> {
 pub async fn probe_adapter(
     adapter_id: String,
 ) -> Result<crate::runtime::acp::probe::ProbeOk, crate::runtime::acp::probe::ProbeError> {
-    use crate::runtime::acp::probe::{handshake_on, ProbeError, PROBE_TIMEOUT};
+    use crate::runtime::acp::probe::{self, ProbeError, PROBE_TIMEOUT};
 
     let spec = resolve_adapter(&adapter_id);
-    // Fresh detection, never the frontend's possibly-stale table state.
+    // Fresh detection, never the frontend's possibly-stale table state. An
+    // unknown id (None) is a stale / buggy client (the settings tab only
+    // offers `list_adapters` ids) -- same refusal shape as a vanished
+    // binary, not a separate channel.
     let binary = spec.as_ref().and_then(detect_adapter);
     let (spec, binary) = match (spec, binary) {
         (Some(spec), Some(binary)) => (spec, binary),
         (Some(spec), None) => return Err(ProbeError::NotDetected(spec.id.to_string())),
-        // An unknown id is a stale / buggy client (the settings tab only
-        // offers `list_adapters` ids) -- same refusal shape as a vanished
-        // binary, not a separate channel.
         (None, _) => return Err(ProbeError::NotDetected(adapter_id)),
     };
-    // Spawn here (async scope) so the Child handle is owned outside the
-    // blocking task and kill-on-timeout is guaranteed.
-    let mut child = std::process::Command::new(&binary)
-        .args(spec.argv)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .map_err(|e| {
-            ProbeError::SpawnFailure(format!("failed to spawn ACP agent `{}`: {e}", spec.id))
-        })?;
-    let stdin = child.stdin.take();
-    let stdout = child.stdout.take();
+    // The one shared spawn point: the same format guard + argv + piped-stdio
+    // shape as the kernel's blocking entry, with the Child handle staying in
+    // the async scope (blocking tasks are not cancellable, so the handle
+    // must stay outside them for the kill-on-timeout).
+    let mut child = probe::spawn_child(&spec, Some(&binary))?;
+    let (stdin, stdout) = child.take_stdio();
     let join = tauri::async_runtime::spawn_blocking(move || {
-        let stdin =
-            stdin.ok_or_else(|| ProbeError::SpawnFailure("child stdin not available".into()))?;
-        let stdout =
-            stdout.ok_or_else(|| ProbeError::SpawnFailure("child stdout not available".into()))?;
-        handshake_on((stdin, stdout), &spec, PROBE_TIMEOUT)
+        probe::handshake_with(stdin, stdout, &spec, PROBE_TIMEOUT)
     });
     let outcome = tokio::time::timeout(PROBE_TIMEOUT, join).await;
     // A tokio timeout surfaces as ProbeError::Timeout; the blocking task
@@ -2433,7 +2422,7 @@ pub async fn probe_adapter(
         ))),
         Err(_) => Err(ProbeError::Timeout),
     };
-    kill_and_reap_child(&mut child);
+    child.kill_and_wait();
     result
 }
 

@@ -8,13 +8,14 @@
 //! -> terminate the process. The probe never drives a turn, holds no session
 //! lock, and produces no upstream session state.
 //!
-//! This module is the pure blocking kernel: the caller owns the wall-clock
-//! deadline and the child's lifetime. The IPC shell (`commands::
-//! probe_adapter`) spawns the child in the async scope, runs this kernel
-//! under `spawn_blocking` bounded by `tokio::time::timeout`, and kills +
-//! reaps the child on every exit (the `probe_mcp_server` pattern, issue
-//! #392 -- a blocking task cannot be cancelled, so the Child handle must
-//! stay outside it).
+//! This module owns the spawn shape and the blocking handshake: [`spawn_child`]
+//! hands the spawned child + its stdio to the caller (the Child handle must
+//! stay OUT of any `spawn_blocking` closure -- blocking tasks are not
+//! cancellable, so this is the only way to guarantee a hung CLI is reaped
+//! after the timeout), while [`handshake_with`] runs the deadline-bounded
+//! blocking handshake (the `probe_mcp_server` layering, issue #392). Every
+//! caller -- the IPC shell and the tests alike -- composes the same three
+//! steps: spawn -> handshake -> kill.
 //!
 //! Only [`StreamFormat::Acp`] adapters are probeable in this slice; the
 //! app-server (`model/list`) path for `JsonEventStream` adapters is a later
@@ -78,86 +79,68 @@ pub enum ProbeError {
     Timeout,
 }
 
-/// The blocking probe kernel (self-contained lifetime): spawn `binary` with
-/// the adapter's argv prefix, run the initialize + `session/new` handshake
-/// bounded by `timeout`, extract the catalog, kill + reap the child, and
-/// return. The caller may pass a pre-resolved `binary` (tests: the
-/// fake-CLI fixture); production resolves it via
-/// [`crate::runtime::acp::adapter::detect_adapter`] first.
-pub fn probe(spec: &AdapterSpec, binary: &Path, timeout: Duration) -> Result<ProbeOk, ProbeError> {
+/// The single spawn point every probe lifecycle goes through: guards the
+/// format (ADR-0096 D2: Acp only in this slice -- the backend half of the
+/// double guard; the UI simply does not offer the button), then spawns
+/// `binary` with the adapter's argv prefix and piped stdio. A fresh PATH
+/// scan returning `None` refuses with [`ProbeError::NotDetected`] before
+/// any spawn is attempted.
+pub fn spawn_child(spec: &AdapterSpec, binary: Option<&Path>) -> Result<ChildHandle, ProbeError> {
     match spec.stream_format {
         StreamFormat::Acp => {}
-        // Acp is the only probeable format in this slice (ADR-0096 D2). The
-        // UI does not offer the button for other formats; this is the
-        // backend half of that double guard.
         StreamFormat::JsonEventStream => return Err(ProbeError::Unsupported(spec.id.to_string())),
     }
-    let mut child = spawn(binary, spec)?;
-    let stdout = child.inner.stdout.take().expect("piped stdout");
-    let stdin = child.inner.stdin.take().expect("piped stdin");
-    let mut io = ProbeIo::new(stdin, stdout);
-    let deadline = Instant::now() + timeout;
-    let result = handshake(&mut io, spec, deadline);
-    // Every exit path kills + reaps: a probe child never outlives the probe
-    // (ADR-0096 watchdog alignment).
-    child.kill_and_wait();
-    result.map(|discovered| ProbeOk { discovered })
-}
-
-/// The split-lifecycle probe handshake for the IPC shell (the
-/// `spawn_stdio_child` + `stdio_handshake` layering of `probe_mcp_server`,
-/// issue #392): the caller spawns the child in the async scope -- keeping
-/// the `Child` handle OUTSIDE any `spawn_blocking` closure, the only way to
-/// guarantee a hung CLI is reaped after `tokio::time::timeout` fires --
-/// then hands the taken stdio here for the blocking handshake. This
-/// function performs only the blocking I/O; process management stays with
-/// the caller.
-pub fn handshake_on(
-    io: (ChildStdin, ChildStdout),
-    spec: &AdapterSpec,
-    timeout: Duration,
-) -> Result<ProbeOk, ProbeError> {
-    let mut io = ProbeIo::new(io.0, io.1);
-    let deadline = Instant::now() + timeout;
-    handshake(&mut io, spec, deadline).map(|discovered| ProbeOk { discovered })
-}
-
-/// The detected-adapter entry the IPC shell uses: `None` (the fresh PATH
-/// scan found nothing) refuses with [`ProbeError::NotDetected`] before any
-/// spawn is attempted.
-pub fn probe_detected(
-    spec: &AdapterSpec,
-    binary: Option<std::path::PathBuf>,
-    timeout: Duration,
-) -> Result<ProbeOk, ProbeError> {
     let binary = binary.ok_or_else(|| ProbeError::NotDetected(spec.id.to_string()))?;
-    probe(spec, &binary, timeout)
-}
-
-/// The spawned CLI child + its stdio. [`Self::kill_and_wait`] delegates to
-/// [`super::process::kill_and_reap`] -- the same shared kill-reap logic the
-/// turn engines use (prevents drift).
-struct ChildHandle {
-    inner: Child,
-}
-
-impl ChildHandle {
-    fn kill_and_wait(&mut self) {
-        super::process::kill_and_reap(&mut self.inner);
-    }
-}
-
-fn spawn(binary: &Path, adapter: &AdapterSpec) -> Result<ChildHandle, ProbeError> {
     Command::new(binary)
-        .args(adapter.argv)
+        .args(spec.argv)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .map(|inner| ChildHandle { inner })
         .map_err(|e| {
-            ProbeError::SpawnFailure(format!("failed to spawn ACP agent `{}`: {e}", adapter.id))
+            ProbeError::SpawnFailure(format!("failed to spawn ACP agent `{}`: {e}", spec.id))
         })
+}
+
+/// The spawned CLI child. [`Self::kill_and_wait`] delegates to
+/// [`super::process::kill_and_reap`] -- the same shared kill-reap logic the
+/// turn engines use (prevents drift).
+#[derive(Debug)]
+pub struct ChildHandle {
+    inner: Child,
+}
+
+impl ChildHandle {
+    /// Take the piped stdio for the handshake. The spawn pipes both ends,
+    /// so a single take is the only valid lifetime.
+    pub fn take_stdio(&mut self) -> (ChildStdin, ChildStdout) {
+        let stdout = self.inner.stdout.take().expect("piped stdout");
+        let stdin = self.inner.stdin.take().expect("piped stdin");
+        (stdin, stdout)
+    }
+
+    pub fn kill_and_wait(&mut self) {
+        super::process::kill_and_reap(&mut self.inner);
+    }
+}
+
+/// The deadline-bounded blocking handshake (initialize + `session/new`) on
+/// an already-spawned child's stdio: run it, extract the catalog, return
+/// (the `stdio_handshake` half of the `probe_mcp_server` layering, issue
+/// #392). This function performs only the blocking I/O; process management
+/// stays with the caller, who must [`ChildHandle::kill_and_wait`] on every
+/// exit path (a probe child never outlives the probe, ADR-0096 watchdog
+/// alignment).
+pub fn handshake_with(
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+    spec: &AdapterSpec,
+    timeout: Duration,
+) -> Result<ProbeOk, ProbeError> {
+    let mut io = ProbeIo::new(stdin, stdout);
+    let deadline = Instant::now() + timeout;
+    handshake(&mut io, spec, deadline).map(|discovered| ProbeOk { discovered })
 }
 
 /// The handshake: initialize -> session/new, deadline-bounded at the line
@@ -165,6 +148,22 @@ fn spawn(binary: &Path, adapter: &AdapterSpec) -> Result<ChildHandle, ProbeError
 /// surfaces as [`ProbeError::Timeout`], never a hang). The minimal shape of
 /// the engine's handshake: no bridge descriptor, no selection injection --
 /// the probe reads, it never configures.
+/// Unwrap a round-trip response: Some(result) passes through; a JSON-RPC
+/// error or an empty response names the failing step in the handshake
+/// failure detail.
+fn require_result<T>(step: &str, resp: Response<T>) -> Result<T, ProbeError> {
+    match (resp.result, resp.error) {
+        (Some(r), _) => Ok(r),
+        (None, Some(e)) => Err(ProbeError::HandshakeFailure(format!(
+            "{step} error: {}",
+            e.message
+        ))),
+        (None, None) => Err(ProbeError::HandshakeFailure(format!(
+            "{step}: empty response"
+        ))),
+    }
+}
+
 fn handshake(
     io: &mut ProbeIo,
     adapter: &AdapterSpec,
@@ -181,20 +180,7 @@ fn handshake(
         ),
         deadline,
     )?;
-    match (init.result, init.error) {
-        (Some(_), _) => {}
-        (None, Some(e)) => {
-            return Err(ProbeError::HandshakeFailure(format!(
-                "initialize error: {}",
-                e.message
-            )))
-        }
-        (None, None) => {
-            return Err(ProbeError::HandshakeFailure(
-                "initialize: empty response".into(),
-            ))
-        }
-    }
+    require_result("initialize", init)?;
     let new_resp = io.request_roundtrip::<NewSessionParams, NewSessionResult>(
         Request::new(
             RequestId::Num(2),
@@ -208,23 +194,13 @@ fn handshake(
         ),
         deadline,
     )?;
-    match (new_resp.result, new_resp.error) {
-        (Some(r), _) => {
-            // Issue #529 semantics: stamp the producing adapter onto the
-            // catalog (the config_options wire carries no adapter identity).
-            let mut discovered =
-                crate::runtime::acp::adapter::extract_discovered_runtime(r.config_options.as_ref());
-            discovered.adapter_id = Some(adapter.id.to_string());
-            Ok(discovered)
-        }
-        (None, Some(e)) => Err(ProbeError::HandshakeFailure(format!(
-            "session/new error: {}",
-            e.message
-        ))),
-        (None, None) => Err(ProbeError::HandshakeFailure(
-            "session/new: empty response".into(),
-        )),
-    }
+    let r = require_result("session/new", new_resp)?;
+    // Issue #529 semantics: stamp the producing adapter onto the catalog
+    // (the config_options wire carries no adapter identity).
+    let mut discovered =
+        crate::runtime::acp::adapter::extract_discovered_runtime(r.config_options.as_ref());
+    discovered.adapter_id = Some(adapter.id.to_string());
+    Ok(discovered)
 }
 
 // ---------------------------------------------------------------------------

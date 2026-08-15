@@ -36,14 +36,42 @@ fn heartbeat_file(tag: &str) -> PathBuf {
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Spawn the fixture under `scenario` with the heartbeat trace wired, then
-/// run the probe kernel with a short timeout (the fixture answers in
-/// milliseconds; the timeout only needs to outlast it, not the 45s
+/// run the probe lifecycle (spawn -> handshake -> kill, the same three
+/// steps the IPC shell composes) with a short timeout (the fixture answers
+/// in milliseconds; the timeout only needs to outlast it, not the 45s
 /// production default). Holds ENV_LOCK so the global `ACP_FAKE_SCENARIO`
 /// is not raced by concurrent tests.
 fn probe_fixture(scenario: &str, timeout: Duration) -> Result<probe::ProbeOk, ProbeError> {
+    probe_with(&fake_cli(), scenario, timeout)
+}
+
+/// The blocking probe lifetime on a pre-resolved binary: the three-step
+/// composition every probe caller uses (spawn -> handshake -> kill on every
+/// exit path). Caller must NOT hold `ENV_LOCK` (taken here -- the same
+/// non-reentrant mutex).
+fn probe_with(
+    binary: &std::path::Path,
+    scenario: &str,
+    timeout: Duration,
+) -> Result<probe::ProbeOk, ProbeError> {
     let _g = ENV_LOCK.lock().unwrap();
+    probe_with_locked(binary, scenario, timeout)
+}
+
+/// [`probe_with`] without the lock -- for callers already holding
+/// `ENV_LOCK` (e.g. to also set `ACP_FAKE_TRACE_FILE` under it).
+fn probe_with_locked(
+    binary: &std::path::Path,
+    scenario: &str,
+    timeout: Duration,
+) -> Result<probe::ProbeOk, ProbeError> {
     std::env::set_var("ACP_FAKE_SCENARIO", scenario);
-    probe::probe(&claude_code(), &fake_cli(), timeout)
+    let spec = claude_code();
+    let mut child = probe::spawn_child(&spec, Some(binary))?;
+    let (stdin, stdout) = child.take_stdio();
+    let result = probe::handshake_with(stdin, stdout, &spec, timeout);
+    child.kill_and_wait();
+    result
 }
 
 // --- Success --------------------------------------------------------------
@@ -84,7 +112,7 @@ fn probe_timeout_returns_structured_failure() {
 fn probe_spawn_failure_is_structured() {
     let mut missing = std::env::temp_dir();
     missing.push("definitely-not-a-real-acp-binary-xyz");
-    let err = probe::probe(&claude_code(), &missing, Duration::from_secs(30))
+    let err = probe::spawn_child(&claude_code(), Some(&missing))
         .expect_err("a vanished binary must fail the probe");
     match &err {
         ProbeError::SpawnFailure(detail) => {
@@ -106,8 +134,9 @@ fn probe_kills_the_child_no_orphan() {
     let heartbeat = heartbeat_file("cleanup");
     let _g = ENV_LOCK.lock().unwrap();
     std::env::set_var("ACP_FAKE_TRACE_FILE", &heartbeat);
-    std::env::set_var("ACP_FAKE_SCENARIO", "handshake_silent");
-    let result = probe::probe(&claude_code(), &fake_cli(), Duration::from_secs(2));
+    // `probe_with_locked`: this test already holds ENV_LOCK (the trace-file
+    // var must be set/cleared under it), and the mutex is not reentrant.
+    let result = probe_with_locked(&fake_cli(), "handshake_silent", Duration::from_secs(2));
     std::env::remove_var("ACP_FAKE_TRACE_FILE");
     // The probe itself may fail (timeout) -- cleanup is asserted regardless.
     assert!(result.is_err());
@@ -150,7 +179,7 @@ fn probe_kills_the_child_no_orphan() {
 /// later slice).
 #[test]
 fn probe_rejects_json_event_stream_adapters() {
-    let err = probe::probe(&codex(), &fake_cli(), Duration::from_secs(30))
+    let err = probe::spawn_child(&codex(), Some(&fake_cli()))
         .expect_err("a JsonEventStream adapter must be refused");
     assert_eq!(err, ProbeError::Unsupported("codex".to_string()));
 }
@@ -159,7 +188,7 @@ fn probe_rejects_json_event_stream_adapters() {
 /// any spawn is attempted.
 #[test]
 fn probe_rejects_undetected_adapters() {
-    let err = probe::probe_detected(&claude_code(), None, Duration::from_secs(30))
+    let err = probe::spawn_child(&claude_code(), None)
         .expect_err("an undetected adapter must be refused");
     assert_eq!(err, ProbeError::NotDetected("claude-code".to_string()));
 }

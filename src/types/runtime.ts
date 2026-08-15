@@ -87,10 +87,13 @@ export interface ProbeOk {
 // Rust `ProbeError` (serde adjacently-tagged like SessionError), with a
 // top-level `kind` set disjoint from every other typed IPC error. The three
 // failure variants carry the English technical detail under `data` for the
-// fold; user-facing wording lives in the locale catalog.
+// fold; user-facing wording lives in the locale catalog. `ProbeUnreachable`
+// is frontend-only: the fallback kind for a non-shaped IPC reject (harness /
+// transport fault) that never reached the CLI.
 export type ProbeError =
   | { kind: "NotDetected"; data: string }
   | { kind: "Unsupported"; data: string }
   | { kind: "SpawnFailure"; data: string }
   | { kind: "HandshakeFailure"; data: string }
+  | { kind: "ProbeUnreachable"; data: string }
   | { kind: "Timeout" };

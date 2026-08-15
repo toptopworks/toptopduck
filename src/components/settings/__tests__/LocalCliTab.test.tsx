@@ -120,6 +120,7 @@ describe("LocalCliTab probe (issue #534, ADR-0096)", () => {
     [{ kind: "SpawnFailure", data: "failed to spawn ACP agent" }, "Failed to start the CLI."],
     [{ kind: "HandshakeFailure", data: "initialize: empty response" }, "Handshake with the CLI failed."],
     [{ kind: "NotDetected", data: "claude-code" }, "Adapter is not detected."],
+    [{ kind: "Unsupported", data: "codex" }, "Probing this adapter is not supported yet."],
   ])("renders the %s failure as an error line", async (rejection, expected) => {
     vi.mocked(probeAdapter).mockRejectedValue(rejection);
     renderTab();
@@ -139,6 +140,22 @@ describe("LocalCliTab probe (issue #534, ADR-0096)", () => {
     expect(
       await screen.findByText(
         byFoldedText("Handshake with the CLI failed. (session/new error: boom)"),
+      ),
+    ).toBeInTheDocument();
+  });
+
+  // A non-shaped reject (harness / transport fault) never reached the CLI --
+  // it must not masquerade as a handshake failure.
+  it("renders a non-shaped rejection as unreachable, not a handshake failure", async () => {
+    vi.mocked(probeAdapter).mockRejectedValue(new Error("transport exploded"));
+    renderTab();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Test" }));
+    expect(
+      await screen.findByText(
+        byFoldedText(
+          "The probe request could not reach the CLI (internal error). (Error: transport exploded)",
+        ),
       ),
     ).toBeInTheDocument();
   });
