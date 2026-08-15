@@ -396,21 +396,22 @@ pub struct StderrTail {
 
 impl StderrTail {
     /// Start the reader thread on the child's piped stderr.
-    fn spawn(stderr: ChildStderr) -> Self {
+    fn spawn(mut stderr: ChildStderr) -> Self {
         let tail = Arc::new(Mutex::new(TailBuf::default()));
         let sink = Arc::clone(&tail);
         let (done_tx, done_rx) = mpsc::channel::<()>();
         std::thread::spawn(move || {
-            use std::io::{BufRead, BufReader};
-            let mut reader = BufReader::new(stderr);
-            let mut line = Vec::new();
+            use std::io::Read;
+            // Fixed-size chunks bound the intermediate buffer as well: a
+            // newline-free runaway stream cannot grow any single read past
+            // the cap (the ring bounds memory only after a read returns).
+            let mut chunk = [0u8; STDERR_TAIL_CAP];
             loop {
-                line.clear();
-                match reader.read_until(b'\n', &mut line) {
+                match stderr.read(&mut chunk) {
                     Ok(0) => break, // EOF
-                    Ok(_) => {
+                    Ok(n) => {
                         if let Ok(mut t) = sink.lock() {
-                            t.push_bytes(&line);
+                            t.push_bytes(&chunk[..n]);
                         }
                     }
                     Err(_) => break,
@@ -437,6 +438,19 @@ impl StderrTail {
             }
         }
         self.tail.lock().map(|t| t.snapshot()).unwrap_or_default()
+    }
+
+    /// Log the captured tail at warn level (empty tails log nothing). The
+    /// outer-timeout exit path uses this: the blocking task's own
+    /// `attach_stderr_tail` never runs there (its join result is dropped),
+    /// so the probe-timeout diagnosis -- often the most valuable one -- would
+    /// otherwise be lost. Call after the child is killed: the kill's EOF lets
+    /// the reader thread drain the pipe's final bytes before the snapshot.
+    pub(crate) fn log_tail(&self) {
+        let tail = self.snapshot();
+        if !tail.is_empty() {
+            log::warn!(target: "toptopduck::probe", "probe timed out; stderr tail: {tail}");
+        }
     }
 }
 
@@ -467,15 +481,20 @@ mod tests {
     use super::*;
 
     /// The ring keeps the TAIL under churn: an over-capacity stream retains
-    /// only its final bytes, dropped at a line boundary (issue #542 AC).
+    /// only its final bytes, and a torn head is cut forward to the next line
+    /// boundary -- the dropped line's fill must not survive the snapshot
+    /// (issue #542 AC).
     #[test]
     fn tail_buf_keeps_bounded_tail_not_head() {
         let mut t = TailBuf::default();
-        // Two lines of 3 KiB each + one final line -- total exceeds the 4 KiB
-        // cap, so the first line's head bytes are dropped.
-        let long_line = "x".repeat(STDERR_TAIL_CAP - STDERR_TAIL_CAP / 2);
-        t.push_bytes(format!("{long_line}\n").as_bytes());
-        t.push_bytes(format!("{long_line}\n").as_bytes());
+        // Two lines of 2 KiB each + one final line -- total exceeds the 4 KiB
+        // cap, so the first line's head bytes are dropped and its torn
+        // remainder must be cut away. Distinct fills ('y' vs 'x') make the
+        // cut observable.
+        let dropped = "y".repeat(STDERR_TAIL_CAP / 2);
+        let kept = "x".repeat(STDERR_TAIL_CAP / 2);
+        t.push_bytes(format!("{dropped}\n").as_bytes());
+        t.push_bytes(format!("{kept}\n").as_bytes());
         t.push_bytes(b"auth failed\n");
         let snap = t.snapshot();
         assert!(
@@ -486,7 +505,30 @@ mod tests {
             snap.starts_with('x'),
             "the snapshot starts at a line boundary: {snap}"
         );
+        assert!(
+            !snap.contains('y'),
+            "the torn head line's remainder is cut forward: {snap}"
+        );
         assert!(snap.len() <= STDERR_TAIL_CAP);
+    }
+
+    /// A single line longer than the cap leaves the cut nowhere to land: the
+    /// snapshot degrades to a mid-line start rather than an empty diagnosis.
+    #[test]
+    fn tail_buf_over_cap_single_line_starts_mid_line() {
+        let mut t = TailBuf::default();
+        t.push_bytes(b"HEAD ");
+        t.push_bytes("z".repeat(STDERR_TAIL_CAP).as_bytes());
+        let snap = t.snapshot();
+        assert!(
+            !snap.contains("HEAD"),
+            "the oldest bytes are dropped: {snap}"
+        );
+        assert!(
+            snap.starts_with('z'),
+            "no line break survives, so the window starts mid-line: {snap}"
+        );
+        assert!(!snap.is_empty());
     }
 
     /// An empty capture snapshots to the empty string (the failure detail

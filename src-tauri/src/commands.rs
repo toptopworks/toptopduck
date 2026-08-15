@@ -2411,8 +2411,10 @@ pub async fn probe_adapter(
     let (stdin, stdout) = child.take_stdio();
     // The stderr tail travels with the blocking query (issue #542): the CLI's
     // own diagnosis lands in the failure detail, not the packaged app's
-    // absent console.
+    // absent console. A clone stays in the async scope for the outer-timeout
+    // path (see below).
     let stderr_tail = child.take_stderr_tail();
+    let timeout_tail = stderr_tail.clone();
     // ADR-0096 D2: dispatch the per-format query on the spec's stream format,
     // never the CLI's identity (zero per-CLI code).
     let join = tauri::async_runtime::spawn_blocking(move || match spec.stream_format {
@@ -2432,14 +2434,24 @@ pub async fn probe_adapter(
     // A tokio timeout surfaces as ProbeError::Timeout; the blocking task
     // itself resolves (or lingers on a blocked read until the kill's EOF
     // wakes it) -- either way the child is dead before we return.
-    let result = match outcome {
-        Ok(Ok(r)) => r,
-        Ok(Err(join_err)) => Err(ProbeError::HandshakeFailure(format!(
-            "probe task failed: {join_err}"
-        ))),
-        Err(_) => Err(ProbeError::Timeout),
+    let (result, outer_timeout) = match outcome {
+        Ok(Ok(r)) => (r, false),
+        Ok(Err(join_err)) => (
+            Err(ProbeError::HandshakeFailure(format!(
+                "probe task failed: {join_err}"
+            ))),
+            false,
+        ),
+        Err(_) => (Err(ProbeError::Timeout), true),
     };
     child.kill_and_wait();
+    // The outer timeout drops the join, so the blocking task's
+    // `attach_stderr_tail` never runs -- log the clone's tail here, after the
+    // kill (the kill's EOF drains the pipe's final bytes into the reader).
+    // Inner-timeout races are left to the blocking task's own log.
+    if outer_timeout {
+        timeout_tail.log_tail();
+    }
     result
 }
 
