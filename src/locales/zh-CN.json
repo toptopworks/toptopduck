@@ -347,6 +347,7 @@
   "settings.runtime.localCli.notInstalled": "未安装",
   "settings.runtime.localCli.probe.codex.default": "默认",
   "settings.runtime.localCli.probe.codex.unavailable": "已启动，但模型目录不可用。",
+  "settings.runtime.localCli.probe.codex.noModels": "已启动，但未返回任何模型。",
   "settings.runtime.localCli.probe.error.handshake": "与 CLI 握手失败。",
   "settings.runtime.localCli.probe.error.notDetected": "适配器未检测到。",
   "settings.runtime.localCli.probe.error.spawn": "启动 CLI 失败。",

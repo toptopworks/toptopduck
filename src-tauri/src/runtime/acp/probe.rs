@@ -55,14 +55,16 @@ pub enum ProbeOk {
     Acp { discovered: DiscoveredRuntime },
     /// The codex app-server model catalog, or the honest degraded "started
     /// but catalog unavailable" state (ADR-0096 D2 -- an old codex / not
-    /// logged in / RPC error degrades; only a spawn failure fails outright).
+    /// logged in / RPC error degrades; only a spawn failure, a timeout, or
+    /// the process dying mid-query fails outright).
     Codex { outcome: CodexCatalogOutcome },
 }
 
 /// The codex app-server `model/list` outcome (ADR-0096 D2/D3). `Available`
 /// carries the ordered per-model catalog; `Unavailable` is the degraded state
-/// (the process started but the RPC failed -- the process being alive is
-/// itself diagnostic signal, so this is a success variant, not an error).
+/// (the process started but the catalog was not obtainable -- RPC error /
+/// empty response / unparseable result; the process being alive is itself
+/// diagnostic signal, so this is a success variant, not an error).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CodexCatalogOutcome {
@@ -101,9 +103,10 @@ pub enum ProbeError {
     /// Carries the English technical detail.
     #[error("{0}")]
     SpawnFailure(String),
-    /// The probe's protocol exchange failed -- an ACP handshake error, or an
+    /// The probe's protocol exchange failed -- an ACP handshake error, an
     /// app-server query error (the CLI crashed mid-query / spoke a foreign
-    /// protocol). Carries the English technical detail.
+    /// protocol), or the probe task itself failed (write error / task
+    /// panic). Carries the English technical detail.
     #[error("{0}")]
     HandshakeFailure(String),
     /// The wall-clock deadline elapsed before the handshake completed.

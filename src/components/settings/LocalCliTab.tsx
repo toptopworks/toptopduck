@@ -78,13 +78,21 @@ function toProbeError(e: unknown): ProbeError {
 }
 
 /** The probe success block: dispatch on the per-format `kind` -- the ACP flat
- *  catalog or the codex per-model catalog (ADR-0096 D2/D3). */
+ *  catalog or the codex per-model catalog (ADR-0096 D2/D3). The switch is
+ *  exhaustive with a `never` guard, mirroring `ProbeErrorText`: a new backend
+ *  variant must fail at compile time here, not surface as a wrong-render
+ *  throw at runtime. */
 function ProbeResult({ result }: { result: ProbeOk }) {
-  return result.kind === "acp" ? (
-    <AcpProbeResult catalog={result.data.discovered} />
-  ) : (
-    <CodexProbeResult outcome={result.data.outcome} />
-  );
+  switch (result.kind) {
+    case "acp":
+      return <AcpProbeResult catalog={result.data.discovered} />;
+    case "codex":
+      return <CodexProbeResult outcome={result.data.outcome} />;
+    default: {
+      const _exhaustive: never = result;
+      throw new Error(`Unknown probe ok kind: ${String(_exhaustive)}`);
+    }
+  }
 }
 
 /** The ACP success block: the catalog's model list, thought-level options,
@@ -117,7 +125,10 @@ function AcpProbeResult({ catalog }: { catalog: DiscoveredRuntime }) {
 /** The codex success block (ADR-0096 D3): the per-model list, each model's
  *  reasoning-effort options in the CLI's declared order (never a union across
  *  models). The degraded `unavailable` state (process alive, catalog not)
- *  renders an honest line -- the process being alive is itself the signal. */
+ *  renders an honest line -- the process being alive is itself the signal.
+ *  The status dispatch is exhaustive with a `never` guard (mirrors
+ *  `ProbeResult` / `ProbeErrorText`); an empty catalog renders the honest
+ *  "none" line (the probe succeeded -- that fact must not vanish). */
 function CodexProbeResult({ outcome }: { outcome: CodexCatalogOutcome }) {
   const intl = useIntl();
   const defaultLabel = intl.formatMessage({
@@ -132,6 +143,20 @@ function CodexProbeResult({ outcome }: { outcome: CodexCatalogOutcome }) {
           defaultMessage="Started, but the model catalog is unavailable."
         />
         {outcome.detail ? ` (${outcome.detail})` : null}
+      </p>
+    );
+  }
+  if (outcome.status !== "available") {
+    const _exhaustive: never = outcome;
+    throw new Error(`Unknown catalog status: ${String(_exhaustive)}`);
+  }
+  if (outcome.models.length === 0) {
+    return (
+      <p className="text-muted-foreground text-xs">
+        <FormattedMessage
+          id="settings.runtime.localCli.probe.codex.noModels"
+          defaultMessage="Started, but no models were reported."
+        />
       </p>
     );
   }

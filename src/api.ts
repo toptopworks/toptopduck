@@ -684,12 +684,13 @@ export async function rescanAdapters(): Promise<AdapterEntry[]> {
   return invoke<AdapterEntry[]>("rescan_adapters");
 }
 
-// Run the adapter diagnostic probe (ADR-0096, issue #534): one-shot spawn of
-// the detected CLI in protocol mode, initialize + session/new handshake,
-// catalog extract, process terminated. Display-only in this slice (no cache);
-// the rejection is the structured ProbeError (kind-dispatched by the UI).
-// Long-running (CLI cold start can take tens of seconds; backend wall clock
-// 45s) -- callers own the in-flight UI state.
+// Run the adapter diagnostic probe (ADR-0096, issues #534/#535): one-shot
+// spawn of the detected CLI in protocol mode + per-format catalog query (ACP
+// initialize/session/new handshake, or codex app-server `model/list`) +
+// process terminated. Display-only in this slice (no cache); the rejection
+// is the structured ProbeError (kind-dispatched by the UI). Long-running
+// (CLI cold start can take tens of seconds; backend wall clock 45s) --
+// callers own the in-flight UI state.
 export async function probeAdapter(adapterId: string): Promise<ProbeOk> {
   return invoke<ProbeOk>("probe_adapter", { adapterId });
 }

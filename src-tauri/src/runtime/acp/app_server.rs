@@ -14,7 +14,7 @@
 //! line each.
 //!
 //! The app-server protocol v2 has NO `initialize` handshake step -- the client
-//! sends `model/list` directly once the process starts (the ADR-0096 "未决"
+//! sends `model/list` directly once the process starts (the ADR-0096 open
 //! initialize-shape question resolves to "none": the v2 protocol is
 //! request-driven with no client-capabilities preamble). The probe's only
 //! round-trip is the catalog query itself.
@@ -36,7 +36,7 @@ use serde_json::Value;
 use crate::runtime::acp::probe::{CodexCatalogOutcome, CodexModel, ProbeError};
 
 // ---------------------------------------------------------------------------
-// Wire types (deserialize-only; the app-server carries no `jsonrpc` field)
+// Wire types (the app-server carries no `jsonrpc` field)
 // ---------------------------------------------------------------------------
 
 /// A `model/list` request (serialized without the `jsonrpc` marker).

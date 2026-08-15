@@ -57,6 +57,11 @@ const codexUnavailable: ProbeOk = {
   data: { outcome: { status: "unavailable", detail: "method not found" } },
 };
 
+const codexEmpty: ProbeOk = {
+  kind: "codex",
+  data: { outcome: { status: "available", models: [] } },
+};
+
 function renderTab(onIpcBusy = vi.fn()) {
   return renderSettings(<LocalCliTab onIpcBusy={onIpcBusy} />);
 }
@@ -197,6 +202,17 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
       await screen.findByText(
         byFoldedText("Started, but the model catalog is unavailable. (method not found)"),
       ),
+    ).toBeInTheDocument();
+  });
+
+  it("renders an honest line for an empty available codex catalog", async () => {
+    vi.mocked(probeAdapter).mockResolvedValue(codexEmpty);
+    renderTab();
+
+    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    fireEvent.click(buttons[1]);
+    expect(
+      await screen.findByText(byFoldedText("Started, but no models were reported.")),
     ).toBeInTheDocument();
   });
 
