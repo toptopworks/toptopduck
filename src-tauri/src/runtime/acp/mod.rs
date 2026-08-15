@@ -13,9 +13,13 @@
 //! - [`json_event_stream`]: the codex native `exec --json` driving path
 //!   (ADR-0094). Pure event parser + prompt flattener + config-override
 //!   builder + the turn driver.
+//! - [`probe`]: the session-agnostic diagnostic probe kernel (ADR-0096) --
+//!   one-shot spawn + handshake + catalog extract + kill, decoupled from the
+//!   turn path.
 
 pub mod adapter;
 pub mod engine;
 pub mod json_event_stream;
+pub mod probe;
 mod process;
 pub mod wire;

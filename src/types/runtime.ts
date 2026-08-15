@@ -74,3 +74,26 @@ export interface SessionModelConfig {
   thought_level: string | null;
   cached_discovered: DiscoveredRuntime | null;
 }
+
+// The adapter diagnostic probe's success shape (ADR-0096, issue #534): the
+// catalog extracted from the probe handshake's config_options, stamped with
+// the producing adapter. Mirrors `runtime::acp::probe::ProbeOk` (snake_case
+// serde).
+export interface ProbeOk {
+  discovered: DiscoveredRuntime;
+}
+
+// The probe's structured refusal/failure (ADR-0096, issue #534). Mirrors the
+// Rust `ProbeError` (serde adjacently-tagged like SessionError), with a
+// top-level `kind` set disjoint from every other typed IPC error. The three
+// failure variants carry the English technical detail under `data` for the
+// fold; user-facing wording lives in the locale catalog. `ProbeUnreachable`
+// is frontend-only: the fallback kind for a non-shaped IPC reject (harness /
+// transport fault) that never reached the CLI.
+export type ProbeError =
+  | { kind: "NotDetected"; data: string }
+  | { kind: "Unsupported"; data: string }
+  | { kind: "SpawnFailure"; data: string }
+  | { kind: "HandshakeFailure"; data: string }
+  | { kind: "ProbeUnreachable"; data: string }
+  | { kind: "Timeout" };

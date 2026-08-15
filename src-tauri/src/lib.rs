@@ -399,6 +399,7 @@ pub fn run() {
             commands::revoke_session_trust,
             commands::list_adapters,
             commands::rescan_adapters,
+            commands::probe_adapter,
             commands::get_session_runtime,
             commands::set_session_runtime,
             commands::get_session_model_config,

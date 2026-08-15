@@ -19,6 +19,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::Mutex;
+use std::thread;
 
 use toptopduck_lib::runtime::acp::wire::{
     self, ContentBlock, InitializeResult, NewSessionResult, Notification, PermissionOption,
@@ -53,8 +54,29 @@ fn trace_line(line: &str) {
     }
 }
 
+/// Heartbeat interval for the `handshake_silent` scenario (issue #534): the
+/// diagnostic-probe cleanup test polls the trace file and asserts the beats
+/// stop after the probe kills this process.
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Append a heartbeat line to the `ACP_FAKE_TRACE_FILE` every
+/// [`HEARTBEAT_INTERVAL`] until the process dies. The diagnostic probe (ADR
+/// 0096) proves it reaps its child by asserting these beats stop; a plain
+/// trace-on-write would not show liveness.
+fn spawn_heartbeat() {
+    thread::spawn(|| loop {
+        trace_line("heartbeat");
+        thread::sleep(HEARTBEAT_INTERVAL);
+    });
+}
+
 fn main() {
     let scenario = std::env::var("ACP_FAKE_SCENARIO").unwrap_or_else(|_| "text_reply".into());
+    // The silent-handshake scenario must still be observably alive (its
+    // whole point is to hang past the probe's wall-clock timeout).
+    if scenario == "handshake_silent" {
+        spawn_heartbeat();
+    }
     let mut out = std::io::stdout();
     let stdin = std::io::stdin();
     let mut reader = BufReader::new(stdin.lock());
@@ -80,6 +102,51 @@ fn main() {
         let method = v.get("method").and_then(serde_json::Value::as_str);
         let id = v.get("id").cloned();
         match method {
+            // `handshake_silent` (issue #534): swallow initialize without
+            // answering and keep the process alive -- the diagnostic probe's
+            // wall-clock timeout is the only way out.
+            Some("initialize") if scenario == "handshake_silent" => {}
+            // `handshake_error` (issue #534): answer initialize with a
+            // JSON-RPC error -- the diagnostic probe must surface a
+            // HandshakeFailure naming the step, not a timeout.
+            Some("initialize") if scenario == "handshake_error" => {
+                respond(
+                    &mut out,
+                    &Response::<InitializeResult> {
+                        jsonrpc: "2.0".into(),
+                        id: parse_id(&id),
+                        result: None,
+                        error: Some(RpcError {
+                            code: -32000,
+                            message: "not logged in".into(),
+                            data: None,
+                        }),
+                    },
+                );
+            }
+            // `handshake_crash` (issue #534): acknowledge initialize, then
+            // exit right away -- the probe's session/new hits stdout EOF and
+            // must report a HandshakeFailure, never a hang.
+            Some("initialize") if scenario == "handshake_crash" => {
+                respond(
+                    &mut out,
+                    &Response::<InitializeResult> {
+                        jsonrpc: "2.0".into(),
+                        id: parse_id(&id),
+                        result: Some(InitializeResult {
+                            protocol_version: wire::PROTOCOL_VERSION,
+                            agent_info: Some(wire::Implementation {
+                                name: "acp-fake-cli".into(),
+                                version: "0.0.0".into(),
+                                title: None,
+                            }),
+                        }),
+                        error: None,
+                    },
+                );
+                let _ = out.flush();
+                std::process::exit(0);
+            }
             Some("initialize") => {
                 respond(
                     &mut out,

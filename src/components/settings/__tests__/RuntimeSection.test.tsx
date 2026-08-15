@@ -23,13 +23,14 @@ vi.mock("../../../api", async (importOriginal) => {
     listAdapters: vi.fn(),
     rescanAdapters: vi.fn(),
     listProviderProfiles: vi.fn(),
+    probeAdapter: vi.fn(),
   };
 });
 
 const mockAdapters: AdapterEntry[] = [
   { id: "claude-code", display_name: "claude-code", detected: true, binary_path: "/usr/local/bin/claude", stream_format: "acp" },
   { id: "gemini-cli", display_name: "gemini-cli", detected: true, binary_path: "/usr/bin/gemini", stream_format: "acp" },
-  { id: "codex", display_name: "codex", detected: false, binary_path: null, stream_format: "acp" },
+  { id: "codex", display_name: "codex", detected: false, binary_path: null, stream_format: "json_event_stream" },
   { id: "qwen-code", display_name: "qwen-code", detected: false, binary_path: null, stream_format: "acp" },
   { id: "opencode", display_name: "opencode", detected: true, binary_path: "/opt/homebrew/bin/opencode", stream_format: "acp" },
 ];

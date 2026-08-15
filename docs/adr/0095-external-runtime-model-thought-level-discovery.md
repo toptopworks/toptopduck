@@ -4,7 +4,7 @@
 
 1. **模型与思考强度为会话级可配置项，允许轮间切换**。用户可在会话任意时刻切换模型或思考强度，切换在下一轮 turn boundary 生效（与运行时切换同语义）。每轮无状态架构下切换意味着新 spawn + 扁平化历史喂入，依赖 CLI 自身的上下文消化能力，不做特殊标注。
 
-2. **发现策略绑定 StreamFormat**。`StreamFormat::Acp` 从每轮握手响应的 `config_options` 提取模型列表与思考强度选项；`StreamFormat::JsonEventStream` 无动态发现（`exec --json` 不暴露 config catalog）。零 per-CLI 代码不变量保持：发现逻辑在 per-format 分派路径内，不在适配器定义中。
+2. **发现策略绑定 StreamFormat（turn 路径）**。`StreamFormat::Acp` 从每轮握手响应的 `config_options` 提取模型列表与思考强度选项；`StreamFormat::JsonEventStream` 在 turn 路径无动态发现（`exec --json` 不暴露 config catalog）——诊断探测路径的目录获取（含 JsonEventStream 经 app-server 查询）由 ADR-0096 另行定义。零 per-CLI 代码不变量保持：发现逻辑在 per-format 分派路径内，不在适配器定义中。
 
 3. **Wire 类型以 `serde_json::Value` 透传扩展**。`NewSessionResult` 新增可选 `config_options: Option<serde_json::Value>`（不定义完整 ConfigOption 类型层级）；`NewSessionParams` 新增可选 `model: Option<String>`（ACP 规范的标准字段）。引擎在 handshake 边界从 `Value` 提取 category 为 model / thought_level 的项，转为 `DiscoveredRuntime`。原始 `Value` 保留供未来扩展（mode 等其他 config 维度）。
 
@@ -35,8 +35,8 @@ ADR-0081 定外部运行时为数据定义适配器引擎，每轮 `session/new`
 - **会话级锁定模型（创建时选定，中途不可换）**：运行时选择可换而模型锁定是不一致的用户约束；每轮 spawn 形态下轮间切换只是 argv 变化，无机制障碍。**否决**。
 - **模型选择不持久化（前端-only，每轮 ask 时传入）**：resume 后模型选择丢失，违 resume 承诺。**否决**。
 - **wire 层定义完整 `ConfigOption` 类型层级**：当前只消费 model / thought_level 两项，完整建模是过度设计；未来需要时从 `Value` 提取不影响 wire 兼容。**否决**。
-- **发现结果经独立 IPC 拉取或事件流推送**：无状态架构下发现数据只在 turn 执行期间存在，拉取需要重新 spawn；事件流需要引入持续推送基础设施而 turn 是同步 `ask → LoopOutcome` 模型。**否决**。
-- **per-adapter 全局缓存（app-config 级）**：全局缓存引入跨会话一致性复杂度（过期 / 刷新 / 写入竞争），收益仅限多会话共享同一 CLI 的场景。**否决**——session 级快照冗余可忽略。
+- **发现结果经独立 IPC 拉取或事件流推送**：无状态架构下发现数据只在 turn 执行期间存在，拉取需要重新 spawn；事件流需要引入持续推送基础设施而 turn 是同步 `ask → LoopOutcome` 模型。**否决**——此处否决的是 turn 语境下的自动拉取（无人授权的 re-spawn）；用户显式点击驱动的诊断探测由 ADR-0096 定义，性质不同。
+- **per-adapter 全局缓存（app-config 级）**：全局缓存引入跨会话一致性复杂度（过期 / 刷新 / 写入竞争），收益仅限多会话共享同一 CLI 的场景。**否决**——session 级快照冗余可忽略。此处否决的是自动发现路径每轮回写全局缓存的写入竞争；用户显式测试驱动的探测缓存（app-data 独立文件、单一写入点）由 ADR-0096 定义，不在其列。
 - **模型 ID 在 IPC 边界校验（有缓存时拒绝不在列表的 ID）**：ACP 对无效模型的 `session/new` 响应行为未定义（可能静默回退），app 侧校验只是把失败提前一步但未消除歧义；正常用户路径不会产生无效 ID。**否决**——实测不可接受时向后兼容增量补充。
 - **AdapterSpec 声明 argv builder 函数**：per-CLI 代码，违反 ADR-0081 零 per-CLI 代码不变量。**否决**。
 - **内置运行时思考强度一并实现**：anthropic thinking（token 预算）与 openai reasoning_effort（离散枚举）语义异构，需改 Provider trait + 双实现 + profile UI，改动面与本 ADR 耦合后膨胀。**否决**——独立后续。
@@ -45,6 +45,7 @@ ADR-0081 定外部运行时为数据定义适配器引擎，每轮 `session/new`
 ## Consequences
 
 - **延伸 ADR-0094**：`StreamFormat` 不仅决定解析器分派，也隐含决定模型发现策略——`Acp` 从握手提取，`JsonEventStream` 无动态发现。未来新增带模型枚举能力的流格式时，需同时声明其发现策略。
+- **被 ADR-0096 校准与延伸**：「无动态发现」收窄至 turn 路径——诊断探测路径（设置页测试动作）为 JsonEventStream 适配器经 `codex app-server` 的 `model/list` 获取 per-model 目录，探测结果缓存（app-data 独立文件）作为选择器目录的次级数据源（会话目录优先）。
 - **校准 ADR-0081**：wire 类型扩展与 AdapterSpec 新增字段均为纯数据增量，适配器引擎架构不变；`session/setConfigOption` 是 ACP 路径的握手扩展步骤，不引入 upstream session 状态（每轮新 `session/new` 的无状态语义不变）。
 - **校准 ADR-0089**：session 持久化结构新增 `model` / `thought_level` / `cached_discovered` 三个可选字段，旧会话文件缺字段按 `None` 反序列化（向后兼容）。
 - **CONTEXT.md 不变**：模型/思考强度选择是会话级配置（同 runtime choice、审批姿态），非领域概念；不引入新领域词汇。

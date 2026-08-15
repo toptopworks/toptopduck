@@ -34,7 +34,12 @@ import { type ProfilesControls } from "./ProfilesSection";
 import { PrivacySection } from "./PrivacySection";
 import { RuntimeSection, type RuntimeTab } from "./RuntimeSection";
 import { SkillsSection } from "./SkillsSection";
-import { SETTINGS_SECTIONS, type SettingsSection } from "./sections";
+import {
+  SETTINGS_SECTIONS,
+  type IpcBusyReporter,
+  type IpcChannel,
+  type SettingsSection,
+} from "./sections";
 
 // In-app overlay settings view (ADR-0065 shell + ADR-0075 chrome/persistence,
 // issue #281). While settingsView.open, the shell renders <SettingsView/> over
@@ -127,7 +132,7 @@ function SectionContent({
   appConfig: AppConfig;
   onCommit: (mutate: (cfg: AppConfig) => AppConfig) => Promise<string | null>;
   onSessionsDirChanged: (cfg: AppConfig) => void;
-  onIpcBusy: (channel: "key" | "test" | "sessionsDir", busy: boolean) => void;
+  onIpcBusy: IpcBusyReporter;
   initialEditProfileId?: string;
   initialRuntimeTab?: RuntimeTab;
   profilesControlsRef: React.MutableRefObject<ProfilesControls | null>;
@@ -280,13 +285,15 @@ export function SettingsView({
   // which runs even after a section switch unmounts the pane -- so the close
   // guard still blocks until that IPC settles (ADR-0075: close is blocked while
   // ANY in-flight IPC, not only while the owning pane stays mounted).
-  const paneIpcBusyRef = useRef({ key: false, test: false, sessionsDir: false });
-  const handlePaneIpcBusy = useCallback(
-    (channel: "key" | "test" | "sessionsDir", busy: boolean) => {
-      paneIpcBusyRef.current[channel] = busy;
-    },
-    [],
-  );
+  const paneIpcBusyRef = useRef<Record<IpcChannel, boolean>>({
+    key: false,
+    test: false,
+    sessionsDir: false,
+    probe: false,
+  });
+  const handlePaneIpcBusy = useCallback<IpcBusyReporter>((channel, busy) => {
+    paneIpcBusyRef.current[channel] = busy;
+  }, []);
 
   // Single close path (ADR-0075): block while any IPC is in flight, flush a
   // still-focused profile field (staying open when the flush fails so the
@@ -294,7 +301,7 @@ export function SettingsView({
   async function requestClose() {
     const ctl = profilesControlsRef.current;
     const paneIpc = paneIpcBusyRef.current;
-    if (commitsInFlightRef.current > 0 || paneIpc.key || paneIpc.test || paneIpc.sessionsDir || ctl?.busy) return;
+    if (commitsInFlightRef.current > 0 || Object.values(paneIpc).some(Boolean) || ctl?.busy) return;
     if (ctl && !(await ctl.flush())) return;
     if (ctl?.addDirty) {
       setConfirmDiscardOpen(true);
