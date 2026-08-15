@@ -127,7 +127,7 @@ function SectionContent({
   appConfig: AppConfig;
   onCommit: (mutate: (cfg: AppConfig) => AppConfig) => Promise<string | null>;
   onSessionsDirChanged: (cfg: AppConfig) => void;
-  onIpcBusy: (channel: "key" | "test" | "sessionsDir", busy: boolean) => void;
+  onIpcBusy: (channel: "key" | "test" | "sessionsDir" | "probe", busy: boolean) => void;
   initialEditProfileId?: string;
   initialRuntimeTab?: RuntimeTab;
   profilesControlsRef: React.MutableRefObject<ProfilesControls | null>;
@@ -280,9 +280,9 @@ export function SettingsView({
   // which runs even after a section switch unmounts the pane -- so the close
   // guard still blocks until that IPC settles (ADR-0075: close is blocked while
   // ANY in-flight IPC, not only while the owning pane stays mounted).
-  const paneIpcBusyRef = useRef({ key: false, test: false, sessionsDir: false });
+  const paneIpcBusyRef = useRef({ key: false, test: false, sessionsDir: false, probe: false });
   const handlePaneIpcBusy = useCallback(
-    (channel: "key" | "test" | "sessionsDir", busy: boolean) => {
+    (channel: "key" | "test" | "sessionsDir" | "probe", busy: boolean) => {
       paneIpcBusyRef.current[channel] = busy;
     },
     [],
@@ -294,7 +294,7 @@ export function SettingsView({
   async function requestClose() {
     const ctl = profilesControlsRef.current;
     const paneIpc = paneIpcBusyRef.current;
-    if (commitsInFlightRef.current > 0 || paneIpc.key || paneIpc.test || paneIpc.sessionsDir || ctl?.busy) return;
+    if (commitsInFlightRef.current > 0 || paneIpc.key || paneIpc.test || paneIpc.sessionsDir || paneIpc.probe || ctl?.busy) return;
     if (ctl && !(await ctl.flush())) return;
     if (ctl?.addDirty) {
       setConfirmDiscardOpen(true);

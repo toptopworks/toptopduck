@@ -48,6 +48,7 @@ import type {
 } from "./types/approval";
 import type {
   AdapterEntry,
+  ProbeOk,
   SessionModelConfig,
   SessionRuntimeChoice,
 } from "./types/runtime";
@@ -681,6 +682,16 @@ export async function listAdapters(): Promise<AdapterEntry[]> {
 // so a user-driven re-detect is an explicit wire action.
 export async function rescanAdapters(): Promise<AdapterEntry[]> {
   return invoke<AdapterEntry[]>("rescan_adapters");
+}
+
+// Run the adapter diagnostic probe (ADR-0096, issue #534): one-shot spawn of
+// the detected CLI in protocol mode, initialize + session/new handshake,
+// catalog extract, process terminated. Display-only in this slice (no cache);
+// the rejection is the structured ProbeError (kind-dispatched by the UI).
+// Long-running (CLI cold start can take tens of seconds; backend wall clock
+// 45s) -- callers own the in-flight UI state.
+export async function probeAdapter(adapterId: string): Promise<ProbeOk> {
+  return invoke<ProbeOk>("probe_adapter", { adapterId });
 }
 
 // Read the session's runtime choice. Returns `built_in` for a fresh / resumed

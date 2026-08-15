@@ -33,7 +33,7 @@ const DEFAULT_TAB: RuntimeTab = "api-access";
 export type RuntimeSectionProps = {
   provider: AppConfig["provider"];
   onCommit: (mutate: (cfg: AppConfig) => AppConfig) => Promise<string | null>;
-  onIpcBusy: (channel: "key" | "test", busy: boolean) => void;
+  onIpcBusy: (channel: "key" | "test" | "probe", busy: boolean) => void;
   initialEditProfileId?: string;
   /** Landing sub-tab when the section opens (issue #490). Undefined = default. */
   initialRuntimeTab?: RuntimeTab;
@@ -148,7 +148,7 @@ export function RuntimeSection({
         role="tabpanel"
         aria-labelledby={cliTabId}
       >
-        <LocalCliTab />
+        <LocalCliTab onIpcBusy={onIpcBusy} />
       </div>
     </div>
   );

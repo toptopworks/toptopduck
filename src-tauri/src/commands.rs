@@ -2367,6 +2367,76 @@ pub fn rescan_adapters() -> Vec<AdapterEntry> {
     scan_adapters()
 }
 
+/// Run the adapter diagnostic probe (ADR-0096, issue #534): a session-
+/// agnostic, one-shot spawn of the detected CLI in protocol mode ->
+/// initialize + `session/new` handshake -> catalog extract -> terminate.
+/// The result is display-only in this slice (no catalog cache; a later
+/// slice persists to app-data).
+///
+/// Async + deadline-bounded, the `probe_mcp_server` layering (issue #392):
+/// the child is spawned in the async scope so the `Child` handle stays OUT
+/// of the `spawn_blocking` closure (blocking tasks are not cancellable --
+/// this is the only way to guarantee a hung CLI is reaped after the
+/// timeout), the blocking handshake runs under `spawn_blocking`, and the
+/// wall clock is [`PROBE_TIMEOUT`] (45s: generous for node-CLI cold starts,
+/// still bounded for a hung one). Every exit path kills + reaps the child.
+///
+/// Refusals are typed ([`ProbeError`], a `kind`-tagged enum disjoint from
+/// every other typed IPC error): unknown id / not currently detected /
+/// non-ACP format (this slice) reject before any spawn; spawn + handshake
+/// failures carry the English technical detail for the fold.
+#[tauri::command]
+pub async fn probe_adapter(
+    adapter_id: String,
+) -> Result<crate::runtime::acp::probe::ProbeOk, crate::runtime::acp::probe::ProbeError> {
+    use crate::runtime::acp::probe::{handshake_on, ProbeError, PROBE_TIMEOUT};
+
+    let spec = resolve_adapter(&adapter_id);
+    // Fresh detection, never the frontend's possibly-stale table state.
+    let binary = spec.as_ref().and_then(detect_adapter);
+    let (spec, binary) = match (spec, binary) {
+        (Some(spec), Some(binary)) => (spec, binary),
+        (Some(spec), None) => return Err(ProbeError::NotDetected(spec.id.to_string())),
+        // An unknown id is a stale / buggy client (the settings tab only
+        // offers `list_adapters` ids) -- same refusal shape as a vanished
+        // binary, not a separate channel.
+        (None, _) => return Err(ProbeError::NotDetected(adapter_id)),
+    };
+    // Spawn here (async scope) so the Child handle is owned outside the
+    // blocking task and kill-on-timeout is guaranteed.
+    let mut child = std::process::Command::new(&binary)
+        .args(spec.argv)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|e| {
+            ProbeError::SpawnFailure(format!("failed to spawn ACP agent `{}`: {e}", spec.id))
+        })?;
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take();
+    let join = tauri::async_runtime::spawn_blocking(move || {
+        let stdin =
+            stdin.ok_or_else(|| ProbeError::SpawnFailure("child stdin not available".into()))?;
+        let stdout =
+            stdout.ok_or_else(|| ProbeError::SpawnFailure("child stdout not available".into()))?;
+        handshake_on((stdin, stdout), &spec, PROBE_TIMEOUT)
+    });
+    let outcome = tokio::time::timeout(PROBE_TIMEOUT, join).await;
+    // A tokio timeout surfaces as ProbeError::Timeout; the blocking task
+    // itself resolves (or lingers on a blocked read until the kill's EOF
+    // wakes it) -- either way the child is dead before we return.
+    let result = match outcome {
+        Ok(Ok(r)) => r,
+        Ok(Err(join_err)) => Err(ProbeError::HandshakeFailure(format!(
+            "probe task failed: {join_err}"
+        ))),
+        Err(_) => Err(ProbeError::Timeout),
+    };
+    kill_and_reap_child(&mut child);
+    result
+}
+
 /// Read the session's runtime selection (issue #353). Lock-light: reads the
 /// handle's choice, never the session lock an in-flight turn holds. Returns
 /// the built-in default for a fresh / resumed session.
