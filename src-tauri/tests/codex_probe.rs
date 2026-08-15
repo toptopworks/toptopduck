@@ -45,11 +45,36 @@ fn query_fixture(scenario: &str, timeout: Duration) -> Result<CodexCatalogOutcom
     std::env::set_var("CODEX_APP_SERVER_SCENARIO", scenario);
     let spec = codex();
     let mut child = probe::spawn_child(&spec, Some(&fake_cli()))?;
-    let (stdin, stdout) = child.take_stdio();
-    let stderr_tail = child.take_stderr_tail();
+    let (stdin, stdout, stderr_tail) = child.take_pipes();
     let result = app_server::query_catalog(stdin, stdout, stderr_tail, timeout);
     child.kill_and_wait();
     result
+}
+
+/// A mistyped scenario must fail fast: the fixture exits non-zero before
+/// answering anything, so the query surfaces the child's early stdout EOF,
+/// never a confusing green run of the default success path (issue #543 AC).
+/// The fixture is spawned directly (not via `query_fixture`) because the
+/// dead child has no query answer -- the test asserts the exit, not a catalog.
+#[test]
+fn fixture_unknown_scenario_exits_nonzero() {
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("CODEX_APP_SERVER_SCENARIO", "catalog_tpyo");
+    let out = std::process::Command::new(fake_cli())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("fixture must be spawnable");
+    assert!(
+        !out.status.success(),
+        "unknown scenario must exit non-zero (exit code: {:?})",
+        out.status.code()
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unknown scenario"),
+        "stderr must name the unknown scenario"
+    );
 }
 
 /// Unwrap the `Available` outcome (panics with the full value otherwise).
@@ -199,7 +224,9 @@ fn query_malformed_response_is_parse_failure() {
 /// Stray lines ahead of the catalog response (a notification + a response
 /// with an unrelated id) are dropped, not errors: the query still completes
 /// (issue #540 pins the shared loop's stray-drop policy on the bare-envelope
-/// site too).
+/// site too). The fixture also stays chatty on stderr while answering -- a
+/// healthy success never appends a tail, and the drained pipe proves the
+/// reader keeps up under load.
 #[test]
 fn query_stray_lines_are_dropped_not_fatal() {
     let models = expect_available(query_fixture("catalog_chatty", Duration::from_secs(5)).unwrap());
@@ -207,6 +234,80 @@ fn query_stray_lines_are_dropped_not_fatal() {
         models.is_empty(),
         "the chatty page folds an empty catalog: {models:?}"
     );
+}
+
+/// A raw non-JSON line ahead of the catalog response (a CLI log banner) is
+/// skipped by the shared loop, not an error: the catalog still arrives
+/// (issue #543 -- the parse-failure branch on the skip path, distinct from
+/// `catalog_chatty`'s legal-JSON strays). The fixture is also stderr-chatty
+/// while answering, pinning the pipe-drain side: a healthy success appends
+/// no tail and an undrained stderr would block the child.
+#[test]
+fn query_garbage_line_is_skipped_not_fatal() {
+    let models =
+        expect_available(query_fixture("catalog_garbage", Duration::from_secs(5)).unwrap());
+    assert_eq!(
+        models.len(),
+        1,
+        "the catalog after the garbage line: {models:?}"
+    );
+    assert_eq!(models[0].id, "gpt-5.1-codex-mini");
+}
+
+/// A cursor that always repeats itself wedges the traversal: the wall clock
+/// ends it as a structured Timeout, never a hang or an infinite fold
+/// (issue #543 pins the loop-cursor safety property).
+#[test]
+fn query_cursor_loop_surfaces_timeout() {
+    let err = query_fixture("catalog_cursor_loop", Duration::from_secs(2))
+        .expect_err("a looping cursor must fail the query");
+    assert_eq!(err, ProbeError::Timeout);
+}
+
+/// Cross-page duplicate ids dedupe by id, first sight winning (issue #543):
+/// page 1's entry survives with its own fields; page 2's divergent repeat is
+/// dropped while its new model folds in.
+#[test]
+fn query_duplicate_ids_across_pages_dedupe_first_sight() {
+    let models =
+        expect_available(query_fixture("catalog_dup_ids", Duration::from_secs(30)).unwrap());
+    assert_eq!(
+        models.len(),
+        2,
+        "the repeated id appears once plus the new model: {models:?}"
+    );
+    let codex = models
+        .iter()
+        .find(|m| m.id == "gpt-5.2-codex")
+        .expect("the first-sight entry survives");
+    assert_eq!(
+        codex.display_name, "GPT-5.2 Codex",
+        "first sight wins: the divergent second-sight fields are dropped"
+    );
+    assert!(models.iter().any(|m| m.id == "gpt-5.1-codex-mini"));
+}
+
+/// An RPC error from a chatty-but-alive CLI (the not-logged-in shape)
+/// degrades to `Unavailable` whose detail ALSO carries the stderr diagnosis
+/// (issue #543 -- the degraded success variant appends the tail at its
+/// construction site, same shape as the failure path's `attach_stderr_tail`).
+#[test]
+fn query_rpc_error_unavailable_carries_stderr_tail() {
+    let ok = query_fixture("catalog_error_chatty", Duration::from_secs(5))
+        .expect("an RPC error degrades, it does not fail");
+    match ok {
+        CodexCatalogOutcome::Unavailable { detail } => {
+            assert!(
+                detail.contains("auth required"),
+                "the degraded detail names the RPC error: {detail}"
+            );
+            assert!(
+                detail.contains("stderr tail: codex-fake: please run `codex login`"),
+                "the degraded detail carries the stderr diagnosis: {detail}"
+            );
+        }
+        other => panic!("expected Unavailable, got {other:?}"),
+    }
 }
 
 // --- Spawn failure ----------------------------------------------------------
@@ -242,8 +343,7 @@ fn query_kills_the_child_no_orphan() {
     std::env::set_var("CODEX_APP_SERVER_SCENARIO", "catalog_silent");
     let spec = codex();
     let mut child = probe::spawn_child(&spec, Some(&fake_cli())).expect("spawn must succeed");
-    let (stdin, stdout) = child.take_stdio();
-    let stderr_tail = child.take_stderr_tail();
+    let (stdin, stdout, stderr_tail) = child.take_pipes();
     let result = app_server::query_catalog(stdin, stdout, stderr_tail, Duration::from_secs(2));
     child.kill_and_wait();
     std::env::remove_var("CODEX_APP_SERVER_TRACE_FILE");

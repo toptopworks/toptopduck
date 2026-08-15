@@ -1357,3 +1357,26 @@ fn probe_ok_wire_shape() {
         r#"{"kind":"codex","data":{"outcome":{"status":"unavailable","detail":"model/list error: not logged in"}}}"#,
     );
 }
+
+/// `ProbeError` crosses IPC adjacently-tagged like `ProbeOk` (issue #543):
+/// the three detail-carrying kinds ride `data` as a bare string, `Timeout` is
+/// a unit variant with no `data` key. `src/types/runtime.ts` dispatches on
+/// these kinds -- pin all four so a serde attribute change fails here before
+/// the frontend's kind allowlist can drift. The kinds are PascalCase (no rename_all attribute), matching the four-kind union in the frontend mirror.
+#[test]
+fn probe_error_wire_shape() {
+    use toptopduck_lib::runtime::acp::probe::ProbeError;
+    assert_wire(
+        &ProbeError::NotDetected("codex".into()),
+        r#"{"kind":"NotDetected","data":"codex"}"#,
+    );
+    assert_wire(
+        &ProbeError::SpawnFailure("failed to spawn CLI `codex`".into()),
+        r#"{"kind":"SpawnFailure","data":"failed to spawn CLI `codex`"}"#,
+    );
+    assert_wire(
+        &ProbeError::HandshakeFailure("codex app-server closed stdout".into()),
+        r#"{"kind":"HandshakeFailure","data":"codex app-server closed stdout"}"#,
+    );
+    assert_wire(&ProbeError::Timeout, r#"{"kind":"Timeout"}"#);
+}

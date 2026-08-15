@@ -534,7 +534,7 @@ impl AcpIo {
     ) -> Result<Response<R>, Termination> {
         let target = serde_json::to_value(&req.id).unwrap_or(Value::Null);
         self.inner
-            .request_roundtrip(&req, &target, super::ndjson::Abort::Cancel(cancel))
+            .request_roundtrip_cancel(&req, &target, cancel)
             .map_err(map_roundtrip_termination)
     }
 
@@ -677,20 +677,19 @@ impl AcpIo {
 
 /// Map the shared round-trip failure onto the turn's termination. The EOF
 /// detail is frozen by the integration tests' locale-free diagnostic fold.
-fn map_roundtrip_termination(e: super::ndjson::RoundtripError) -> Termination {
+/// Exhaustive over the cancel-driven error type -- the deadline-driven abort
+/// kind is not representable here (issue #543).
+fn map_roundtrip_termination(
+    e: super::ndjson::RoundtripError<super::ndjson::Cancelled>,
+) -> Termination {
+    use super::ndjson::RoundtripError;
     match e {
-        super::ndjson::RoundtripError::Cancelled => Termination::Cancelled,
-        super::ndjson::RoundtripError::Timeout => {
-            unreachable!("cancel-driven round-trips never report Timeout")
-        }
-        super::ndjson::RoundtripError::Serialize(detail)
-        | super::ndjson::RoundtripError::Write(detail) => {
+        RoundtripError::Abort(_) => Termination::Cancelled,
+        RoundtripError::Serialize(detail) | RoundtripError::Write(detail) => {
             Termination::Transient(format!("write: {detail}"))
         }
-        super::ndjson::RoundtripError::Eof => {
-            Termination::Transient("ACP agent closed stdout".into())
-        }
-        super::ndjson::RoundtripError::Parse(detail) => {
+        RoundtripError::Eof => Termination::Transient("ACP agent closed stdout".into()),
+        RoundtripError::Parse(detail) => {
             Termination::Transient(format!("response parse: {detail}"))
         }
     }

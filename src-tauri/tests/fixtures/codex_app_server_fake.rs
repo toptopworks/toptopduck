@@ -91,9 +91,34 @@ fn model_mini() -> serde_json::Value {
     )
 }
 
+/// Every known scenario name (issue #543): an unknown `CODEX_APP_SERVER_SCENARIO`
+/// fails fast with a non-zero exit instead of silently falling into the
+/// success path (a mistyped failure scenario would otherwise produce
+/// confusing green tests).
+const SCENARIOS: &[&str] = &[
+    "catalog_success",
+    "catalog_silent",
+    "catalog_error",
+    "catalog_crash",
+    "catalog_malformed",
+    "catalog_chatty",
+    "catalog_paginated",
+    "catalog_garbage",
+    "catalog_cursor_loop",
+    "catalog_dup_ids",
+    "catalog_error_chatty",
+];
+
 fn main() {
     let scenario =
         std::env::var("CODEX_APP_SERVER_SCENARIO").unwrap_or_else(|_| "catalog_success".into());
+    if !SCENARIOS.contains(&scenario.as_str()) {
+        eprintln!(
+            "codex-fake: unknown scenario `{scenario}` (known: {})",
+            SCENARIOS.join(", ")
+        );
+        std::process::exit(1);
+    }
     // The silent scenario must still be observably alive (its whole point is
     // to hang past the probe's wall-clock timeout).
     if scenario == "catalog_silent" {
@@ -159,6 +184,7 @@ fn main() {
                 );
             }
             ("catalog_chatty", Some("model/list")) => {
+                eprintln!("codex-fake: chatty but healthy");
                 respond(
                     &mut out,
                     &serde_json::json!({ "method": "progress", "params": {} }),
@@ -167,6 +193,87 @@ fn main() {
                 respond(
                     &mut out,
                     &json_result(id, serde_json::json!({ "data": [], "nextCursor": null })),
+                );
+            }
+            // A raw non-JSON garbage line ahead of the catalog response (issue
+            // #543): unlike `catalog_chatty` (legal-JSON strays), the line is
+            // not even parseable -- the shared loop must skip it and still
+            // deliver the catalog.
+            ("catalog_garbage", Some("model/list")) => {
+                let _ = writeln!(out, "\u{1}[31m DEBUG banner not json \u{1}[0m");
+                let _ = out.flush();
+                respond(
+                    &mut out,
+                    &json_result(
+                        id,
+                        serde_json::json!({ "data": [model_mini()], "nextCursor": null }),
+                    ),
+                );
+                // The handshake's success side never appends a tail (only
+                // failure details do), so the fixture's chatty-but-alive
+                // stderr proves the append stays OFF this path.
+                eprintln!("codex-fake: chatty but healthy");
+            }
+            // A cursor that always repeats itself (issue #543): every page
+            // re-offers the same nextCursor, so only the wall clock ends the
+            // traversal. The query must surface Timeout, never hang.
+            ("catalog_cursor_loop", Some("model/list")) => {
+                respond(
+                    &mut out,
+                    &json_result(
+                        id,
+                        serde_json::json!({ "data": [], "nextCursor": "loop-forever" }),
+                    ),
+                );
+            }
+            // Cross-page duplicate ids (issue #543): page 1 has the codex
+            // model, page 2 repeats it (with a divergent display name) plus a
+            // new model. The catalog dedupes by id, first sight wins.
+            ("catalog_dup_ids", Some("model/list")) => {
+                let has_cursor = v
+                    .get("params")
+                    .and_then(|p| p.get("cursor"))
+                    .and_then(serde_json::Value::as_str)
+                    .is_some();
+                if has_cursor {
+                    respond(
+                        &mut out,
+                        &json_result(
+                            id,
+                            serde_json::json!({
+                                "data": [
+                                    model("gpt-5.2-codex", "DIVERGENT SECOND SIGHT", false, "high", &[("high", "thorough")]),
+                                    model_mini()
+                                ],
+                                "nextCursor": null
+                            }),
+                        ),
+                    );
+                } else {
+                    respond(
+                        &mut out,
+                        &json_result(
+                            id,
+                            serde_json::json!({
+                                "data": [model_codex()],
+                                "nextCursor": "page2"
+                            }),
+                        ),
+                    );
+                }
+            }
+            // An RPC error with a chatty-but-alive process (issue #543): the
+            // degraded `Unavailable` detail must carry the stderr diagnosis
+            // too (the not-logged-in shape: the CLI keeps running and prints
+            // its auth guidance on stderr).
+            ("catalog_error_chatty", Some("model/list")) => {
+                eprintln!("codex-fake: please run `codex login` before listing models");
+                respond(
+                    &mut out,
+                    &serde_json::json!({
+                        "id": id,
+                        "error": { "code": -32000, "message": "auth required" }
+                    }),
                 );
             }
             // Paginated: page 1 carries nextCursor, page 2 ends the list. The
