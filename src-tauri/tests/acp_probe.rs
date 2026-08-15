@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use toptopduck_lib::runtime::acp::adapter::{claude_code, codex};
+use toptopduck_lib::runtime::acp::adapter::{claude_code, DiscoveredRuntime};
 use toptopduck_lib::runtime::acp::probe::{self, ProbeError};
 
 /// Resolve the fake-CLI binary path (cargo sets `CARGO_BIN_EXE_acp-fake-cli`
@@ -43,7 +43,7 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// in milliseconds; the timeout only needs to outlast it, not the 45s
 /// production default). Holds ENV_LOCK so the global `ACP_FAKE_SCENARIO`
 /// is not raced by concurrent tests.
-fn probe_fixture(scenario: &str, timeout: Duration) -> Result<probe::ProbeOk, ProbeError> {
+fn probe_fixture(scenario: &str, timeout: Duration) -> Result<DiscoveredRuntime, ProbeError> {
     probe_with(&fake_cli(), scenario, timeout)
 }
 
@@ -55,7 +55,7 @@ fn probe_with(
     binary: &std::path::Path,
     scenario: &str,
     timeout: Duration,
-) -> Result<probe::ProbeOk, ProbeError> {
+) -> Result<DiscoveredRuntime, ProbeError> {
     let _g = ENV_LOCK.lock().unwrap();
     probe_with_locked(binary, scenario, timeout)
 }
@@ -66,7 +66,7 @@ fn probe_with_locked(
     binary: &std::path::Path,
     scenario: &str,
     timeout: Duration,
-) -> Result<probe::ProbeOk, ProbeError> {
+) -> Result<DiscoveredRuntime, ProbeError> {
     std::env::set_var("ACP_FAKE_SCENARIO", scenario);
     let spec = claude_code();
     let mut child = probe::spawn_child(&spec, Some(binary))?;
@@ -84,14 +84,11 @@ fn probe_with_locked(
 #[test]
 fn probe_success_extracts_catalog() {
     let ok = probe_fixture("text_reply", Duration::from_secs(30)).expect("probe must succeed");
-    assert_eq!(ok.discovered.models, vec!["fake-opus", "fake-sonnet"]);
-    assert_eq!(ok.discovered.current_model.as_deref(), Some("fake-opus"));
-    assert_eq!(ok.discovered.thought_levels, vec!["low", "medium", "high"]);
-    assert_eq!(
-        ok.discovered.current_thought_level.as_deref(),
-        Some("medium")
-    );
-    assert_eq!(ok.discovered.adapter_id.as_deref(), Some("claude-code"));
+    assert_eq!(ok.models, vec!["fake-opus", "fake-sonnet"]);
+    assert_eq!(ok.current_model.as_deref(), Some("fake-opus"));
+    assert_eq!(ok.thought_levels, vec!["low", "medium", "high"]);
+    assert_eq!(ok.current_thought_level.as_deref(), Some("medium"));
+    assert_eq!(ok.adapter_id.as_deref(), Some("claude-code"));
 }
 
 // --- Timeout ---------------------------------------------------------------
@@ -216,17 +213,7 @@ fn probe_kills_the_child_no_orphan() {
     let _ = std::fs::remove_file(&heartbeat);
 }
 
-// --- Per-format dispatch ---------------------------------------------------
-
-/// JsonEventStream adapters (codex) reject with Unsupported: this slice
-/// delivers the ACP probe loop only (ADR-0096 D2; the app-server path is a
-/// later slice).
-#[test]
-fn probe_rejects_json_event_stream_adapters() {
-    let err = probe::spawn_child(&codex(), Some(&fake_cli()))
-        .expect_err("a JsonEventStream adapter must be refused");
-    assert_eq!(err, ProbeError::Unsupported("codex".to_string()));
-}
+// --- Not-detected refusal ---------------------------------------------------
 
 /// An undetected adapter (binary path None) rejects with NotDetected before
 /// any spawn is attempted.

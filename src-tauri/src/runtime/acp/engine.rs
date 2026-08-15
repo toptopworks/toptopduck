@@ -1233,6 +1233,7 @@ mod tests {
             binary_names: &["nonexistent"],
             argv: &["--json"],
             stream_format: StreamFormat::JsonEventStream,
+            probe_argv: None,
             model_arg: None,
             effort_config_key: None,
         };

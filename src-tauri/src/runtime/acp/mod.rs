@@ -5,6 +5,8 @@
 //!   ONLY place the on-the-wire field names live.
 //! - [`adapter`]: the per-CLI pure-data definition ([`AdapterSpec`]) +
 //!   [`detect_adapter`] PATH scan. Adding a CLI = adding one [`AdapterSpec`].
+//! - [`app_server`]: the codex `app-server` diagnostic query (ADR-0096 D2/D3)
+//!   -- the JsonEventStream half of the probe's `model/list` catalog read.
 //! - [`engine`]: the generic driver. Spawns the CLI, speaks the [`wire`] subset,
 //!   maps `session/update` to the execution trace (ADR-0078), enforces the
 //!   execution-level caps (ADR-0081 step + wall-clock), and cancels via
@@ -18,6 +20,7 @@
 //!   turn path.
 
 pub mod adapter;
+pub mod app_server;
 pub mod engine;
 pub mod json_event_stream;
 pub mod probe;

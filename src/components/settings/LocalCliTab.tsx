@@ -7,7 +7,13 @@ import { fmtError } from "../../lib/error-presentation";
 import { log } from "../../lib/log";
 import { listAdapters, probeAdapter, rescanAdapters } from "../../api";
 import { adapterKeys } from "../../session/queryKeys";
-import type { AdapterEntry, DiscoveredRuntime, ProbeError } from "../../types/runtime";
+import type {
+  AdapterEntry,
+  CodexCatalogOutcome,
+  DiscoveredRuntime,
+  ProbeError,
+  ProbeOk,
+} from "../../types/runtime";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -26,10 +32,10 @@ import { SettingsCard, SettingsRow } from "./settings-chrome";
 // The composer's adapter list + rescan still work independently -- both read
 // the same cache key.
 //
-// The per-adapter Test button (ADR-0096, issue #534) runs the diagnostic
-// probe: one-shot spawn + ACP handshake + catalog extract + terminate. Only
-// detected ACP adapters get the button (the JsonEventStream probe path is a
-// later slice); the busy state mirrors up via onIpcBusy("probe", ...) so the
+// The per-adapter Test button (ADR-0096, issues #534/#535) runs the
+// diagnostic probe: one-shot spawn + per-format query (ACP handshake / codex
+// app-server `model/list`) + terminate. Every detected adapter gets the
+// button; the busy state mirrors up via onIpcBusy("probe", ...) so the
 // settings close guard blocks while the IPC is in flight (ADR-0075 pattern).
 // Probe results are display-only in this slice -- component-local state, gone
 // on unmount (the persistent catalog cache is a later slice).
@@ -40,7 +46,7 @@ import { SettingsCard, SettingsRow } from "./settings-chrome";
 type ProbeState =
   | { status: "idle" }
   | { status: "probing" }
-  | { status: "ok"; catalog: DiscoveredRuntime }
+  | { status: "ok"; result: ProbeOk }
   | { status: "failed"; error: ProbeError };
 
 /** The kinds the backend can reject with -- the runtime kind allowlist for
@@ -50,7 +56,6 @@ type ProbeState =
  *  degraded error row). */
 const PROBE_ERROR_KINDS: ReadonlySet<string> = new Set([
   "NotDetected",
-  "Unsupported",
   "SpawnFailure",
   "HandshakeFailure",
   "Timeout",
@@ -72,9 +77,19 @@ function toProbeError(e: unknown): ProbeError {
   return { kind: "ProbeUnreachable", data: String(e) };
 }
 
-/** The probe success block: the catalog's model list, thought-level options,
+/** The probe success block: dispatch on the per-format `kind` -- the ACP flat
+ *  catalog or the codex per-model catalog (ADR-0096 D2/D3). */
+function ProbeResult({ result }: { result: ProbeOk }) {
+  return result.kind === "acp" ? (
+    <AcpProbeResult catalog={result.data.discovered} />
+  ) : (
+    <CodexProbeResult outcome={result.data.outcome} />
+  );
+}
+
+/** The ACP success block: the catalog's model list, thought-level options,
  *  and current values, read straight off the DiscoveredRuntime fields. */
-function ProbeResult({ catalog }: { catalog: DiscoveredRuntime }) {
+function AcpProbeResult({ catalog }: { catalog: DiscoveredRuntime }) {
   return (
     <div className="space-y-1 text-xs">
       <p className="text-muted-foreground">
@@ -99,6 +114,45 @@ function ProbeResult({ catalog }: { catalog: DiscoveredRuntime }) {
   );
 }
 
+/** The codex success block (ADR-0096 D3): the per-model list, each model's
+ *  reasoning-effort options in the CLI's declared order (never a union across
+ *  models). The degraded `unavailable` state (process alive, catalog not)
+ *  renders an honest line -- the process being alive is itself the signal. */
+function CodexProbeResult({ outcome }: { outcome: CodexCatalogOutcome }) {
+  const intl = useIntl();
+  const defaultLabel = intl.formatMessage({
+    id: "settings.runtime.localCli.probe.codex.default",
+    defaultMessage: "default",
+  });
+  if (outcome.status === "unavailable") {
+    return (
+      <p className="text-muted-foreground text-xs">
+        <FormattedMessage
+          id="settings.runtime.localCli.probe.codex.unavailable"
+          defaultMessage="Started, but the model catalog is unavailable."
+        />
+        {outcome.detail ? ` (${outcome.detail})` : null}
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-1 text-xs">
+      {outcome.models.map((model) => (
+        <p key={model.id} className="text-muted-foreground">
+          <span className="font-mono">
+            {model.display_name}
+            {model.is_default ? ` (${defaultLabel})` : ""}
+          </span>
+          {": "}
+          <span className="font-mono">
+            {model.supported_reasoning_efforts.join(", ") || "—"}
+          </span>
+        </p>
+      ))}
+    </div>
+  );
+}
+
 /** The probe-failure wording for one kind. Each case is a STATIC
  *  <FormattedMessage id="..." defaultMessage="..." /> literal so @formatjs/cli
  *  extract resolves every probe.error.* id (ADR-0052); the kind dispatch
@@ -114,13 +168,6 @@ function ProbeErrorText({ kind }: { kind: ProbeError["kind"] }) {
         <FormattedMessage
           id="settings.runtime.localCli.probe.error.notDetected"
           defaultMessage="Adapter is not detected."
-        />
-      );
-    case "Unsupported":
-      return (
-        <FormattedMessage
-          id="settings.runtime.localCli.probe.error.unsupported"
-          defaultMessage="Probing this adapter is not supported yet."
         />
       );
     case "ProbeUnreachable":
@@ -222,8 +269,8 @@ export function LocalCliTab({
     activeProbesRef.current += 1;
     onIpcBusy("probe", true);
     try {
-      const { discovered } = await probeAdapter(id);
-      setProbeStates((prev) => ({ ...prev, [id]: { status: "ok", catalog: discovered } }));
+      const result = await probeAdapter(id);
+      setProbeStates((prev) => ({ ...prev, [id]: { status: "ok", result } }));
     } catch (e) {
       log.warn("LocalCliTab", "adapter probe failed", e);
       // The IPC rejects with the structured ProbeError; a non-shaped reject
@@ -287,7 +334,7 @@ export function LocalCliTab({
         <SettingsCard>
           {adapters.map((a) => {
             const probe = probeStates[a.id] ?? { status: "idle" as const };
-            const probeable = a.detected && a.stream_format === "acp";
+            const probeable = a.detected;
             return (
               <SettingsRow
                 key={a.id}
@@ -335,7 +382,7 @@ export function LocalCliTab({
                 )}
               >
                 {probe.status === "ok" ? (
-                  <ProbeResult catalog={probe.catalog} />
+                  <ProbeResult result={probe.result} />
                 ) : probe.status === "failed" ? (
                   <ProbeErrorLine error={probe.error} />
                 ) : null}

@@ -739,6 +739,7 @@ mod tests {
             binary_names: &["nonexistent"],
             argv: &["--json"],
             stream_format: crate::runtime::acp::adapter::StreamFormat::JsonEventStream,
+            probe_argv: None,
             model_arg,
             effort_config_key: key,
         }
