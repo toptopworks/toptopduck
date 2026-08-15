@@ -355,6 +355,7 @@
   "settings.runtime.localCli.probe.error.unreachable": "The probe request could not reach the CLI (internal error).",
   "settings.runtime.localCli.probe.models": "Models",
   "settings.runtime.localCli.probe.test": "Test",
+  "settings.runtime.localCli.probe.cachedAt": "Last tested",
   "settings.runtime.localCli.probe.thoughtLevels": "Thought levels",
   "settings.runtime.localCli.rescan": "Rescan",
   "settings.runtime.localCli.rescanAria": "Rescan adapters",

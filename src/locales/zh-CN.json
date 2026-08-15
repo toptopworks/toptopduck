@@ -355,6 +355,7 @@
   "settings.runtime.localCli.probe.error.unreachable": "探测请求未能送达 CLI（内部错误）。",
   "settings.runtime.localCli.probe.models": "模型",
   "settings.runtime.localCli.probe.test": "测试",
+  "settings.runtime.localCli.probe.cachedAt": "上次测试",
   "settings.runtime.localCli.probe.thoughtLevels": "思考强度",
   "settings.runtime.localCli.rescan": "重新扫描",
   "settings.runtime.localCli.rescanAria": "重新扫描适配器",
