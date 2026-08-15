@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { LocalCliTab } from "../LocalCliTab";
-import { listAdapters, rescanAdapters, probeAdapter } from "../../../api";
-import type { AdapterEntry, DiscoveredRuntime, ProbeOk } from "../../../types/runtime";
+import { listAdapters, rescanAdapters, probeAdapter, getAdapterCatalogs } from "../../../api";
+import type { AdapterEntry, AdapterCatalogs, DiscoveredRuntime, ProbeOk } from "../../../types/runtime";
+import { adapterKeys } from "../../../session/queryKeys";
 import { renderSettings } from "./helpers";
 
 // Local CLI tab tests (issue #534/#535, ADR-0096): the diagnostic probe
@@ -19,6 +20,7 @@ vi.mock("../../../api", async (importOriginal) => {
     listAdapters: vi.fn(),
     rescanAdapters: vi.fn(),
     probeAdapter: vi.fn(),
+    getAdapterCatalogs: vi.fn(),
   };
 });
 
@@ -63,8 +65,19 @@ const codexEmpty: ProbeOk = {
 };
 
 function renderTab(onIpcBusy = vi.fn()) {
+  // The returned queryClient lets the catalog-cache tests assert actual
+  // setQueryData writes (the probe mirror), not just their render absence.
   return renderSettings(<LocalCliTab onIpcBusy={onIpcBusy} />);
 }
+
+// A function matcher over full <p> text: getByText's default matcher only
+// sees DIRECT text nodes, but the folded lines mix FormattedMessage spans +
+// sibling text (the react-intl span pitfall) -- match on the joined
+// paragraph content instead. Shared by both describes (the probe + the
+// catalog-cache suites render the same folded lines).
+const byFoldedText = (fragment: string) =>
+  (_: unknown, element: Element | null) =>
+    element?.tagName === "P" && element.textContent?.includes(fragment) === true;
 
 /** Click the first Test button (claude-code's row -- the first detected
  *  adapter). Every detected adapter now offers the button, so a singular
@@ -79,6 +92,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     vi.clearAllMocks();
     vi.mocked(listAdapters).mockResolvedValue(mockAdapters);
     vi.mocked(rescanAdapters).mockResolvedValue(mockAdapters);
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
   });
 
   // --- Button rendering ----------------------------------------------------
@@ -155,14 +169,6 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
   });
 
   // --- Success rendering ---------------------------------------------------
-
-  // A function matcher over full <p> text: getByText's default matcher only
-  // sees DIRECT text nodes, but the folded lines mix FormattedMessage spans +
-  // sibling text (the react-intl span pitfall) -- match on the joined
-  // paragraph content instead.
-  const byFoldedText = (fragment: string) =>
-    (_: unknown, element: Element | null) =>
-      element?.tagName === "P" && element.textContent?.includes(fragment) === true;
 
   it("renders the ACP catalog under the row on success", async () => {
     vi.mocked(probeAdapter).mockResolvedValue(acpOk);
@@ -295,5 +301,100 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
       await screen.findByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)")),
     ).toBeInTheDocument();
     expect(screen.queryByText(byFoldedText("Handshake with the CLI failed."))).toBeNull();
+  });
+});
+
+// --- Catalog cache consumption (issue #536, ADR-0096 D5) --------------------
+
+describe("LocalCliTab catalog cache (issue #536)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(listAdapters).mockResolvedValue(mockAdapters);
+    vi.mocked(rescanAdapters).mockResolvedValue(mockAdapters);
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
+  });
+
+  // The restart read: a cache entry (written by a previous app run's probe)
+  // renders on the idle row through the same per-format components, plus the
+  // "Last tested" timestamp line.
+  it("renders a cached ACP entry with its timestamp on the idle row", async () => {
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({
+      "claude-code": {
+        probe_kind: "acp",
+        outcome: { acp: { discovered: okCatalog } },
+        probed_at_millis: Date.UTC(2026, 7, 15, 10, 30),
+      },
+    });
+    renderTab();
+
+    expect(
+      await screen.findByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)")),
+    ).toBeInTheDocument();
+    expect(screen.getByText(byFoldedText("Last tested"))).toBeInTheDocument();
+  });
+
+  it("renders a cached codex entry on the idle row", async () => {
+    const outcome = codexAvailable.data.outcome;
+    if (outcome.status !== "available") throw new Error("fixture shape");
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({
+      codex: {
+        probe_kind: "codex",
+        outcome: { codex: { models: outcome.models } },
+        probed_at_millis: 0,
+      },
+    });
+    renderTab();
+
+    expect(
+      await screen.findByText(byFoldedText("GPT-5.2 Codex (default): low, medium, high")),
+    ).toBeInTheDocument();
+  });
+
+  // An adapter with no cached entry (never tested) renders nothing -- the
+  // cache never fabricates a row state.
+  it("renders nothing for an adapter with no cached entry", async () => {
+    renderTab();
+
+    await screen.findAllByRole("button", { name: "Test" });
+    expect(screen.queryByText(byFoldedText("Last tested"))).toBeNull();
+    expect(
+      screen.queryByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)")),
+    ).toBeNull();
+  });
+
+  // A successful probe mirrors its entry into the query cache immediately:
+  // the timestamped cached rendering shows after the fresh result row, with
+  // no extra IPC round-trip. Asserted directly against the query cache -- a
+  // call-count assertion alone cannot detect the mirror write being deleted.
+  it("shows the cached entry immediately after a successful ACP probe", async () => {
+    vi.mocked(probeAdapter).mockResolvedValue(acpOk);
+    const { queryClient } = renderTab();
+
+    await clickTestButton();
+    await screen.findByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)"));
+    const cached = queryClient.getQueryData<AdapterCatalogs>(adapterKeys.catalogs());
+    expect(cached?.["claude-code"]).toBeDefined();
+    expect(cached?.["claude-code"].probe_kind).toBe("acp");
+    // The mirror is a setQueryData write, not an invalidation: the sidecar
+    // read is not re-fetched.
+    expect(getAdapterCatalogs).toHaveBeenCalledTimes(1);
+  });
+
+  // The degraded codex outcome is NOT cached (only a usable catalog is a
+  // cache point, ADR-0096 D5) -- the query cache must stay untouched.
+  it("does not mirror a degraded codex outcome into the cache", async () => {
+    vi.mocked(probeAdapter).mockResolvedValue(codexUnavailable);
+    const { queryClient } = renderTab();
+
+    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    fireEvent.click(buttons[1]);
+    await screen.findByText(
+      byFoldedText("Started, but the model catalog is unavailable. (method not found)"),
+    );
+    // No codex entry landed in the query cache (the mirror skipped the
+    // degraded outcome), and the display never shows a cached row.
+    const cached = queryClient.getQueryData<AdapterCatalogs>(adapterKeys.catalogs());
+    expect(cached?.codex).toBeUndefined();
+    expect(screen.queryByText(byFoldedText("Last tested"))).toBeNull();
   });
 });

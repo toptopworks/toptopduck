@@ -1,13 +1,16 @@
 import { useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, RefreshCw } from "lucide-react";
 
 import { fmtError } from "../../lib/error-presentation";
 import { log } from "../../lib/log";
-import { listAdapters, probeAdapter, rescanAdapters } from "../../api";
+import { getAdapterCatalogs, listAdapters, probeAdapter, rescanAdapters } from "../../api";
 import { adapterKeys } from "../../session/queryKeys";
 import type {
+  AdapterCatalogEntry,
+  AdapterCatalogs,
   AdapterEntry,
   CodexCatalogOutcome,
   DiscoveredRuntime,
@@ -243,6 +246,55 @@ function ProbeErrorLine({ error }: { error: ProbeError }) {
   );
 }
 
+/** The cached-catalog block (ADR-0096 D5, issue #536): renders the sidecar
+ *  entry through the SAME per-format components as a fresh probe result
+ *  (one rendering path -- no drift between "just tested" and "restored
+ *  from cache"), plus the timestamp line. The shape dispatch is exhaustive
+ *  with a `never` guard like the probe-side switches. */
+function CachedCatalog({ entry }: { entry: AdapterCatalogEntry }) {
+  const intl = useIntl();
+  // The cache entry's dispatch: `probe_kind` and the outcome variant agree
+  // by construction (the backend stamps both from the same probe). The
+  // variant check narrows `outcome` for TS; the never guard makes a future
+  // backend shape change fail at compile time here, mirroring the
+  // probe-side switches.
+  let catalog: ReactNode;
+  if (entry.probe_kind === "acp") {
+    if (!("acp" in entry.outcome)) {
+      throw new Error(`Corrupt cached catalog for acp adapter ${entry.probe_kind}`);
+    }
+    catalog = <AcpProbeResult catalog={entry.outcome.acp.discovered} />;
+  } else if (entry.probe_kind === "codex") {
+    if (!("codex" in entry.outcome)) {
+      throw new Error(`Corrupt cached catalog for codex adapter ${entry.probe_kind}`);
+    }
+    catalog = (
+      <CodexProbeResult outcome={{ status: "available", models: entry.outcome.codex.models }} />
+    );
+  } else {
+    const _exhaustive: never = entry.probe_kind;
+    throw new Error(`Unknown probe kind: ${String(_exhaustive)}`);
+  }
+  return (
+    <div className="space-y-1">
+      {catalog}
+      <p className="text-muted-foreground text-xs">
+        <FormattedMessage
+          id="settings.runtime.localCli.probe.cachedAt"
+          defaultMessage="Last tested"
+        />
+        {": "}
+        <span className="font-mono">
+          {new Intl.DateTimeFormat(intl.locale, {
+            dateStyle: "medium",
+            timeStyle: "short",
+          }).format(entry.probed_at_millis)}
+        </span>
+      </p>
+    </div>
+  );
+}
+
 export function LocalCliTab({
   onIpcBusy,
 }: {
@@ -273,6 +325,15 @@ export function LocalCliTab({
   const adapters: AdapterEntry[] = adapterData ?? [];
   const loadError = isError ? fmtError(error, intl) : null;
 
+  // Probe-catalog cache (ADR-0096 D5, issue #536): the last explicitly
+  // tested catalog per adapter, from the app-data sidecar. Reads settle
+  // near-instantly (a small file read); a corrupt file honest-degrades to
+  // empty server-side, so this query never rejects over data issues.
+  const { data: cachedCatalogs } = useQuery({
+    queryKey: adapterKeys.catalogs(),
+    queryFn: getAdapterCatalogs,
+  });
+
   async function handleRescan() {
     if (rescanning) return;
     setRescanning(true);
@@ -296,6 +357,31 @@ export function LocalCliTab({
     try {
       const result = await probeAdapter(id);
       setProbeStates((prev) => ({ ...prev, [id]: { status: "ok", result } }));
+      // The backend wrote this probe's entry to the sidecar cache; mirror
+      // it into the query cache so the timestamped display is immediately
+      // consistent (issue #536 AC: post-probe display matches the cache).
+      // The degraded codex outcome was not cached server-side -- reflect
+      // that here too (the entry stays whatever it was, absent included).
+      if (result.kind === "acp") {
+        queryClient.setQueryData(adapterKeys.catalogs(), (prev: AdapterCatalogs | undefined) => ({
+          ...(prev ?? {}),
+          [id]: {
+            probe_kind: "acp",
+            outcome: { acp: { discovered: result.data.discovered } },
+            probed_at_millis: Date.now(),
+          },
+        }));
+      } else if (result.data.outcome.status === "available") {
+        const { models } = result.data.outcome;
+        queryClient.setQueryData(adapterKeys.catalogs(), (prev: AdapterCatalogs | undefined) => ({
+          ...(prev ?? {}),
+          [id]: {
+            probe_kind: "codex",
+            outcome: { codex: { models } },
+            probed_at_millis: Date.now(),
+          },
+        }));
+      }
     } catch (e) {
       log.warn("LocalCliTab", "adapter probe failed", e);
       // The IPC rejects with the structured ProbeError; a non-shaped reject
@@ -410,6 +496,12 @@ export function LocalCliTab({
                   <ProbeResult result={probe.result} />
                 ) : probe.status === "failed" ? (
                   <ProbeErrorLine error={probe.error} />
+                ) : cachedCatalogs?.[a.id] ? (
+                  // Idle row with a cached entry: the last explicitly-tested
+                  // catalog persists across restarts (issue #536 AC) -- the
+                  // cache is the idle-state render, and a fresh probe's ok
+                  // state takes precedence over it by branch order.
+                  <CachedCatalog entry={cachedCatalogs[a.id]} />
                 ) : null}
               </SettingsRow>
             );

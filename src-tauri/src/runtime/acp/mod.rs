@@ -18,9 +18,13 @@
 //! - [`probe`]: the session-agnostic diagnostic probe kernel (ADR-0096) --
 //!   one-shot spawn + handshake + catalog extract + kill, decoupled from the
 //!   turn path.
+//! - [`catalog_store`]: the probe-catalog cache sidecar (ADR-0096 D5) --
+//!   `adapter-catalogs.json` under app-data, one overwrite entry per
+//!   adapter, honest-degrade on a corrupt file.
 
 pub mod adapter;
 pub mod app_server;
+pub mod catalog_store;
 pub mod engine;
 pub mod json_event_stream;
 mod ndjson;

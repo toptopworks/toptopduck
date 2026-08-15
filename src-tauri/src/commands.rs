@@ -46,6 +46,9 @@ use crate::provider::live_config::LiveProviderConfig;
 use crate::runtime::acp::adapter::{
     detect_adapter, v1_adapters, AdapterSpec, DiscoveredRuntime, StreamFormat,
 };
+use crate::runtime::acp::catalog_store::{
+    now_millis, AdapterCatalogEntry, AdapterCatalogStore, AdapterCatalogs, CachedOutcome,
+};
 use crate::session::{RenameSessionError, ResumeEvent, ResumeProgress, Session, TurnInputs};
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
 use crate::skills::{
@@ -2389,6 +2392,7 @@ pub fn rescan_adapters() -> Vec<AdapterEntry> {
 /// degrades to a [`ProbeOk::Codex`] carrying `Unavailable` (ADR-0096 D2).
 #[tauri::command]
 pub async fn probe_adapter(
+    catalog_store: State<'_, AdapterCatalogStore>,
     adapter_id: String,
 ) -> Result<crate::runtime::acp::probe::ProbeOk, crate::runtime::acp::probe::ProbeError> {
     use crate::runtime::acp::probe::{self, ProbeError, PROBE_TIMEOUT};
@@ -2451,7 +2455,38 @@ pub async fn probe_adapter(
     if outer_timeout {
         timeout_tail.log_tail();
     }
+    // Cache the catalog on success (ADR-0096 D5, issue #536): the probe
+    // click is the cache's ONLY write point, overwriting just this
+    // adapter's entry. Only a usable catalog caches -- the codex degraded
+    // state (`Unavailable`) keeps the last good entry. Write failures are
+    // swallowed inside `store_entry` (the cache never gates the probe's own
+    // answer); the write happens after the kill so the child is always
+    // dead first, timeout path included.
+    if let Ok(ok) = &result {
+        if let Some((probe_kind, outcome)) = CachedOutcome::from_probe(ok) {
+            catalog_store.store_entry(
+                &adapter_id,
+                AdapterCatalogEntry {
+                    probe_kind,
+                    outcome,
+                    probed_at_millis: now_millis(),
+                },
+            );
+        }
+    }
     result
+}
+
+/// Read the adapter catalog cache (ADR-0096 D5/D6, issue #536): the
+/// settings tab's "last tested" display and the composer picker's
+/// global-cache fallback. Lock-light -- reads the sidecar file with no
+/// process-wide lock held and never touches any session lock, so a call
+/// during an in-flight turn never blocks. Honest-degrade: a missing or
+/// corrupt file reads as empty (the consumer renders its empty state);
+/// never refuses.
+#[tauri::command]
+pub fn get_adapter_catalogs(catalog_store: State<'_, AdapterCatalogStore>) -> AdapterCatalogs {
+    catalog_store.load()
 }
 
 /// Read the session's runtime selection (issue #353). Lock-light: reads the

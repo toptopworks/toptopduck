@@ -58,6 +58,12 @@ export const sessionKeys = {
  *  here for discoverability alongside the session keys. */
 export const adapterKeys = {
   all: () => ["adapters"] as const,
+  /** Probe-catalog cache (ADR-0096 D5, issue #536): the app-data sidecar
+   *  read powering the settings tab's "last tested" display. Under the
+   *  adapters prefix so it groups with the adapter surface; a successful
+   *  probe writes the entry back via setQueryData (the backend cache write
+   *  and this key update are the same event). */
+  catalogs: () => ["adapters", "catalogs"] as const,
 } as const;
 
 /** Session-AGNOSTIC skills registry (issue #362, ADR-0086) -- the settings

@@ -22,11 +22,15 @@ export function renderSettings(ui: ReactElement) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  const result = render(
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <IntlProvider locale="en" messages={{}} onError={() => {}}>{ui}</IntlProvider>
       </TooltipProvider>
     </QueryClientProvider>,
   );
+  // The query client rides along so tests can assert cache writes made by
+  // the component (e.g. the post-probe setQueryData mirror, issue #536) via
+  // getQueryData.
+  return { ...result, queryClient };
 }

@@ -107,6 +107,39 @@ export interface CodexModel {
   supported_reasoning_efforts: string[];
 }
 
+// --- Adapter catalog cache (ADR-0096 D5, issue #536) ------------------------
+//
+// The app-data sidecar `adapter-catalogs.json` read back over IPC: one
+// entry per adapter id, each holding the last explicitly-tested probe
+// catalog plus its wall-clock timestamp. The settings tab renders it as the
+// "last tested" row state; the composer picker consumes it as the
+// global-cache fallback (ADR-0096 D6 -- session catalog first, then this,
+// then empty). Mirrors the Rust `catalog_store::{ProbeKind, CachedOutcome,
+// AdapterCatalogEntry}` (snake_case serde).
+
+// The channel that produced the catalog -- the per-format dispatch
+// dimension (ADR-0096 D2), selecting the consumer's rendering.
+export type ProbeKind = "acp" | "codex";
+
+// The cached outcome, tagged by channel. The codex degraded state is never
+// cached (only a usable catalog is a cache point, ADR-0096 D5) -- the
+// `models` variant is the only codex shape that appears here.
+export type CachedOutcome =
+  | { acp: { discovered: DiscoveredRuntime } }
+  | { codex: { models: CodexModel[] } };
+
+// One adapter's cache entry: the catalog + the probe timestamp
+// (epoch millis, display-only -- it never feeds the picker's priority
+// chain, ADR-0096 D6).
+export interface AdapterCatalogEntry {
+  probe_kind: ProbeKind;
+  outcome: CachedOutcome;
+  probed_at_millis: number;
+}
+
+// The whole cache document, keyed by adapter id.
+export type AdapterCatalogs = Record<string, AdapterCatalogEntry>;
+
 // The probe's structured refusal/failure (ADR-0096, issue #534). Mirrors the
 // Rust `ProbeError` (serde adjacently-tagged like SessionError), with a
 // top-level `kind` set disjoint from every other typed IPC error. The three

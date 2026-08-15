@@ -47,6 +47,7 @@ import type {
   ToolKey,
 } from "./types/approval";
 import type {
+  AdapterCatalogs,
   AdapterEntry,
   ProbeOk,
   SessionModelConfig,
@@ -693,6 +694,15 @@ export async function rescanAdapters(): Promise<AdapterEntry[]> {
 // callers own the in-flight UI state.
 export async function probeAdapter(adapterId: string): Promise<ProbeOk> {
   return invoke<ProbeOk>("probe_adapter", { adapterId });
+}
+
+// Read the adapter catalog cache (ADR-0096 D5/D6, issue #536): every
+// adapter's last explicitly-tested catalog + timestamp, from the app-data
+// sidecar. Lock-light server-side (a plain file read, no session lock), so
+// it is safe during an in-flight turn. Honest-degrade server-side too -- a
+// missing or corrupt file reads as an empty map; the command never rejects.
+export async function getAdapterCatalogs(): Promise<AdapterCatalogs> {
+  return invoke<AdapterCatalogs>("get_adapter_catalogs");
 }
 
 // Read the session's runtime choice. Returns `built_in` for a fresh / resumed

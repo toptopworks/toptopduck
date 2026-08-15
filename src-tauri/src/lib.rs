@@ -308,6 +308,24 @@ pub fn run() {
             app.manage(live);
             app.manage(SessionsRoot::new(sessions_root));
             app.manage(SkillsRoot(skills_root));
+            // The adapter catalog cache sidecar (ADR-0096 D5, issue #536):
+            // `adapter-catalogs.json` under the OS app-data dir, with the
+            // same honest temp-dir fallback. The probe click is the only
+            // write point; reads honest-degrade to empty on a corrupt file.
+            let catalog_store = match app.path().app_data_dir() {
+                Ok(dir) => runtime::acp::catalog_store::AdapterCatalogStore::new(dir.join(
+                    runtime::acp::catalog_store::CATALOGS_FILE_NAME,
+                )),
+                Err(e) => {
+                    log::warn!(
+                        "failed to resolve app-data dir; adapter catalog cache falls back to a temp path: {e}"
+                    );
+                    runtime::acp::catalog_store::AdapterCatalogStore::new(
+                        std::env::temp_dir().join("toptopduck-adapter-catalogs.json"),
+                    )
+                }
+            };
+            app.manage(catalog_store);
 
             // Visibility safety net (issue #268). `visible: false` in
             // tauri.conf.json + the window-state plugin's VISIBLE flag mean
@@ -400,6 +418,7 @@ pub fn run() {
             commands::list_adapters,
             commands::rescan_adapters,
             commands::probe_adapter,
+            commands::get_adapter_catalogs,
             commands::get_session_runtime,
             commands::set_session_runtime,
             commands::get_session_model_config,

@@ -77,7 +77,9 @@ pub enum CodexCatalogOutcome {
 /// efforts are the per-model `supportedReasoningEfforts` in the CLI's declared
 /// order (never a union across models); `default_reasoning_effort` marks the
 /// model's own default; `is_default` marks the catalog's default model.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+/// Deserialize rides along (not a wire-in shape, but the catalog cache
+/// sidecar round-trips the same type, ADR-0096 D5 / issue #536).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CodexModel {
     pub id: String,
