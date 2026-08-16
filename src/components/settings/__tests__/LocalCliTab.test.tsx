@@ -131,12 +131,12 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
 
     await clickTestButton();
     const busy = (await screen.findAllByRole("button", { name: "Test" }))[0];
-    expect(busy).toBeDisabled();
+    expect(busy).toHaveAttribute("aria-disabled", "true");
     expect(onIpcBusy).toHaveBeenCalledWith("probe", true);
 
     release(acpOk);
     await waitFor(() => expect(onIpcBusy).toHaveBeenCalledWith("probe", false));
-    expect((await screen.findAllByRole("button", { name: "Test" }))[0]).toBeEnabled();
+    expect((await screen.findAllByRole("button", { name: "Test" }))[0]).not.toHaveAttribute("aria-disabled");
   });
 
   it("reports busy=false even when the probe rejects", async () => {
@@ -146,7 +146,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
 
     await clickTestButton();
     await waitFor(() => expect(onIpcBusy).toHaveBeenCalledWith("probe", false));
-    expect((await screen.findAllByRole("button", { name: "Test" }))[0]).toBeEnabled();
+    expect((await screen.findAllByRole("button", { name: "Test" }))[0]).not.toHaveAttribute("aria-disabled");
   });
 
   // The busy report is a count mirror, not a boolean mirror: the first probe
@@ -191,8 +191,12 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     expect(
       await screen.findByText(byFoldedText("fake-opus (default)")),
     ).toBeInTheDocument();
-    // Each model is its own line; the non-current one carries no marker.
-    expect(screen.getByText(byFoldedText("fake-sonnet"))).toBeInTheDocument();
+    // Exact matches pin the per-line structure: the default matcher joins
+    // only direct text nodes, so a marker moved outside the span (the wrap
+    // bug this issue fixes), a re-joined single line, or a marker on the
+    // non-current model all fail these.
+    expect(screen.getByText("fake-opus (default)")).toBeInTheDocument();
+    expect(screen.getByText("fake-sonnet")).toBeInTheDocument();
     // Thought levels render as badges with the current value marked
     // (issue #552 effort badge group).
     expect(screen.getByText("medium (default)")).toBeInTheDocument();
@@ -217,6 +221,77 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     ).toBeInTheDocument();
     // No levels means no thought-level row at all -- no label, no "—".
     expect(screen.queryByText(byFoldedText("Thought levels"))).toBeNull();
+  });
+
+  it("renders the honest no-models line and keeps an unmatched current model visible", async () => {
+    vi.mocked(probeAdapter).mockResolvedValue({
+      kind: "acp",
+      data: {
+        discovered: {
+          ...okCatalog,
+          models: [],
+          current_model: "fake-retired",
+        },
+      },
+    });
+    renderTab();
+
+    await clickTestButton();
+    // An empty catalog renders the same honest line as the codex shape --
+    // the probe succeeded, and that fact must not vanish into a bare "—".
+    expect(
+      await screen.findByText(byFoldedText("Started, but no models were reported.")),
+    ).toBeInTheDocument();
+    // The current model the empty list did not include still shows on its
+    // own line -- losing it would read as "no default reported".
+    expect(
+      screen.getByText(byFoldedText("Current model: fake-retired")),
+    ).toBeInTheDocument();
+    // No badge for an empty catalog.
+    expect(screen.queryByText("2 models")).toBeNull();
+  });
+
+  it("marks no line and keeps the current model visible when it is outside the list", async () => {
+    vi.mocked(probeAdapter).mockResolvedValue({
+      kind: "acp",
+      data: {
+        discovered: {
+          ...okCatalog,
+          current_model: "fake-retired",
+        },
+      },
+    });
+    renderTab();
+
+    await clickTestButton();
+    // The advertised lines carry no marker (identity match only)...
+    expect(await screen.findByText("fake-opus")).toBeInTheDocument();
+    expect(screen.getByText("fake-sonnet")).toBeInTheDocument();
+    expect(screen.queryByText("fake-opus (default)")).toBeNull();
+    // ...and the stale current model still renders on its own line.
+    expect(
+      screen.getByText(byFoldedText("Current model: fake-retired")),
+    ).toBeInTheDocument();
+  });
+
+  it("collapses duplicate model ids into one line", async () => {
+    // The backend flattens config options without dedup, so the same id can
+    // arrive twice -- one line per model, not one key-colliding row per entry.
+    vi.mocked(probeAdapter).mockResolvedValue({
+      kind: "acp",
+      data: {
+        discovered: {
+          ...okCatalog,
+          models: ["fake-opus", "fake-opus", "fake-sonnet"],
+        },
+      },
+    });
+    renderTab();
+
+    await clickTestButton();
+    await screen.findByText("fake-opus (default)");
+    expect(screen.getAllByText("fake-opus (default)")).toHaveLength(1);
+    expect(screen.getAllByText("fake-sonnet")).toHaveLength(1);
   });
 
   it("renders the codex per-model catalog under the row on success", async () => {
@@ -404,6 +479,9 @@ describe("LocalCliTab catalog cache (issue #536)", () => {
     expect(
       await screen.findByText(byFoldedText("fake-opus (default)")),
     ).toBeInTheDocument();
+    // No "Last tested" line in the fold -- the probe time rides the Test
+    // button's hover tooltip only (issue #559).
+    expect(screen.queryByText(byFoldedText("Last tested"))).toBeNull();
   });
 
   it("renders a cached codex entry on the idle row", async () => {
@@ -529,7 +607,7 @@ describe("LocalCliTab fold (issue #552)", () => {
 
     await clickTestButton();
     await waitFor(() =>
-      expect(screen.getAllByRole("button", { name: "Test" })[0]).toBeDisabled(),
+      expect(screen.getAllByRole("button", { name: "Test" })[0]).toHaveAttribute("aria-disabled", "true"),
     );
     // Mid-flight: the probe has no content yet -- no dead toggle.
     expect(screen.queryByRole("button", { name: "claude-code" })).toBeNull();
@@ -641,7 +719,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     // expanded row keeps its chevron and aria-expanded stays true.
     await clickTestButton();
     await waitFor(() =>
-      expect(screen.getAllByRole("button", { name: "Test" })[0]).toBeDisabled(),
+      expect(screen.getAllByRole("button", { name: "Test" })[0]).toHaveAttribute("aria-disabled", "true"),
     );
     expect(chevron).toBeInTheDocument();
     expect(chevron).toHaveAttribute("aria-expanded", "true");
@@ -657,7 +735,8 @@ describe("LocalCliTab fold (issue #552)", () => {
   // expanded row WITH a cached entry keeps showing the stale CachedCatalog
   // while probing -- the badge layer clears the stale count, but the fold
   // keeps the directory readable. The spinner on the Test button is the
-  // probing cue.
+  // probing cue, and the button stays hoverable while probing
+  // (aria-disabled), so the tooltip's last-tested time remains consultable.
   it("keeps the stale cached catalog in the expanded fold while re-probing", async () => {
     let release!: (v: ProbeOk) => void;
     vi.mocked(probeAdapter).mockImplementation(
@@ -680,7 +759,7 @@ describe("LocalCliTab fold (issue #552)", () => {
 
     await clickTestButton();
     await waitFor(() =>
-      expect(screen.getAllByRole("button", { name: "Test" })[0]).toBeDisabled(),
+      expect(screen.getAllByRole("button", { name: "Test" })[0]).toHaveAttribute("aria-disabled", "true"),
     );
     // Badge layer: the stale count is gone mid-flight (the pre-existing
     // contract). Fold layer: the stale catalog stays.
@@ -828,7 +907,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     expect(await screen.findByText("2 models")).toBeInTheDocument();
     await clickTestButton();
     await waitFor(() =>
-      expect(screen.getAllByRole("button", { name: "Test" })[0]).toBeDisabled(),
+      expect(screen.getAllByRole("button", { name: "Test" })[0]).toHaveAttribute("aria-disabled", "true"),
     );
     expect(screen.queryByText("2 models")).toBeNull();
     expect(screen.queryByText("Test failed")).toBeNull();
@@ -880,6 +959,34 @@ describe("LocalCliTab fold (issue #552)", () => {
     expect(screen.queryByRole("tooltip")).toBeNull();
   });
 
+  // Mid-probe is exactly when the expanded fold shows the stale cached
+  // catalog, so the tooltip's last-tested time must stay consultable then:
+  // the button is inert via aria-disabled (not the disabled attribute),
+  // which keeps pointer events -- and therefore the hover -- alive.
+  it("keeps the last-tested tooltip hoverable while a re-probe runs", async () => {
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({
+      "claude-code": {
+        probe_kind: "acp",
+        outcome: { acp: { discovered: okCatalog } },
+        probed_at_millis: Date.UTC(2026, 7, 15, 10, 30),
+      },
+    });
+    let release!: (v: ProbeOk) => void;
+    vi.mocked(probeAdapter).mockImplementation(
+      () => new Promise<ProbeOk>((resolve) => { release = resolve; }),
+    );
+    renderTab();
+
+    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    fireEvent.click(buttons[0]);
+    expect(buttons[0]).toHaveAttribute("aria-disabled", "true");
+    fireEvent.pointerEnter(buttons[0], { pointerType: "mouse" });
+    fireEvent.pointerMove(buttons[0], { pointerType: "mouse" });
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip.textContent).toContain("Last tested");
+    release(acpOk);
+  });
+
   // --- Effort badge group ---------------------------------------------------
 
   it("renders thought levels as badges with the current value marked", async () => {
@@ -890,6 +997,9 @@ describe("LocalCliTab fold (issue #552)", () => {
     expect(
       await screen.findByText(byFoldedText("fake-opus (default)")),
     ).toBeInTheDocument();
+    // The row's label renders positively too -- a stray deletion of the
+    // label span would otherwise leave only the badges pinned.
+    expect(screen.getByText(byFoldedText("Thought levels"))).toBeInTheDocument();
     // Three badges, one per level; the current value carries the (default)
     // annotation shape only for marked entries.
     expect(await screen.findByText("low")).toBeInTheDocument();

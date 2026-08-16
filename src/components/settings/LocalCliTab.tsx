@@ -107,21 +107,24 @@ function ProbeResult({ result }: { result: ProbeOk }) {
   }
 }
 
+/** The shared "(default)" marker label: one id + one wording for the effort
+ *  badges and both catalogs' model lines (the literal descriptor lives in
+ *  this one call so formatjs extraction sees a single source of truth --
+ *  same shape as formatProbedAt below). */
+function defaultMarkLabel(intl: IntlShape): string {
+  return intl.formatMessage({
+    id: "settings.runtime.localCli.probe.defaultMark",
+    defaultMessage: "default",
+  });
+}
+
 /** One reasoning-effort thought level as a read-only small badge. The marked
  *  level (the CLI default or the current value) renders with the shared
  *  "default" annotation -- one marker shape across both catalogs. */
 function EffortBadge({ level, marked }: { level: string; marked: boolean }) {
-  const intl = useIntl();
-  const defaultLabel = intl.formatMessage({
-    id: "settings.runtime.localCli.probe.defaultMark",
-    defaultMessage: "default",
-  });
+  const defaultLabel = defaultMarkLabel(useIntl());
   return (
-    <Badge
-      variant="secondary"
-      title={marked ? defaultLabel : undefined}
-      className="text-muted-foreground font-mono font-normal"
-    >
+    <Badge variant="secondary" className="text-muted-foreground font-mono font-normal">
       {level}
       {marked ? ` (${defaultLabel})` : ""}
     </Badge>
@@ -131,7 +134,9 @@ function EffortBadge({ level, marked }: { level: string; marked: boolean }) {
 /** A row of read-only effort badges, one per supported level, in the CLI's
  *  declared order (never a union across models, ADR-0096 D3). Callers skip
  *  the whole group when the catalog carried no levels -- an absent list has
- *  nothing to show, no placeholder. */
+ *  nothing to show, no placeholder -- and the group itself renders nothing
+ *  for an empty list, so a future unguarded call site cannot leak a stray
+ *  empty container. */
 function EffortBadgeGroup({
   levels,
   marked,
@@ -139,6 +144,7 @@ function EffortBadgeGroup({
   levels: string[];
   marked: string | null;
 }) {
+  if (levels.length === 0) return null;
   return (
     <span className="flex flex-wrap items-center gap-1">
       {levels.map((level) => (
@@ -152,26 +158,45 @@ function EffortBadgeGroup({
  *  per-model efforts, so a line is just the id with the current one marked),
  *  plus the global thought-level badge row when the catalog reported any
  *  levels -- the same per-line shape as the JsonEventStream catalog so both
- *  folds read alike. An empty level list renders no row at all. */
+ *  folds read alike. Empty lists stay honest: no models renders the shared
+ *  "no models" line, no levels renders no row, and a current model the list
+ *  did not include still renders on its own line. */
 function AcpProbeResult({ catalog }: { catalog: DiscoveredRuntime }) {
-  const intl = useIntl();
-  const defaultLabel = intl.formatMessage({
-    id: "settings.runtime.localCli.probe.defaultMark",
-    defaultMessage: "default",
-  });
+  const defaultLabel = defaultMarkLabel(useIntl());
+  // The backend flattens the CLI's config options without dedup, so the
+  // same id can arrive twice -- collapse repeats before they become keys.
+  const models = Array.from(new Set(catalog.models));
   return (
     <div className="space-y-1 text-xs">
-      {catalog.models.length === 0 ? (
-        <span className="font-mono">—</span>
+      {models.length === 0 ? (
+        <p className="text-muted-foreground">
+          <FormattedMessage
+            id="settings.runtime.localCli.probe.noModels"
+            defaultMessage="Started, but no models were reported."
+          />
+        </p>
       ) : (
-        catalog.models.map((model) => (
-          <div key={model} className="flex flex-wrap items-center gap-1">
-            <span className="font-mono">
-              {model}
-              {model === catalog.current_model ? ` (${defaultLabel})` : ""}
-            </span>
+        models.map((model) => (
+          // A line is just the id (the flat catalog carries no per-model
+          // efforts), so no flex/badge wrapper is needed here -- one text
+          // element per line.
+          <div key={model} className="font-mono">
+            {model}
+            {model === catalog.current_model ? ` (${defaultLabel})` : ""}
           </div>
         ))
+      )}
+      {catalog.current_model && !catalog.models.includes(catalog.current_model) && (
+        <div className="flex flex-wrap items-center gap-1">
+          <span className="text-muted-foreground">
+            <FormattedMessage
+              id="settings.runtime.localCli.probe.currentModel"
+              defaultMessage="Current model"
+            />
+            {": "}
+          </span>
+          <span className="font-mono">{catalog.current_model}</span>
+        </div>
       )}
       {catalog.thought_levels.length > 0 && (
         <div className="flex flex-wrap items-center gap-1">
@@ -199,11 +224,7 @@ function AcpProbeResult({ catalog }: { catalog: DiscoveredRuntime }) {
  *  renders the honest "none" line (the probe succeeded -- that fact must not
  *  vanish). */
 function JsonEventStreamProbeResult({ outcome }: { outcome: ModelCatalogOutcome }) {
-  const intl = useIntl();
-  const defaultLabel = intl.formatMessage({
-    id: "settings.runtime.localCli.probe.defaultMark",
-    defaultMessage: "default",
-  });
+  const defaultLabel = defaultMarkLabel(useIntl());
   if (outcome.status === "unavailable") {
     return (
       <p className="text-muted-foreground text-xs">
@@ -223,7 +244,7 @@ function JsonEventStreamProbeResult({ outcome }: { outcome: ModelCatalogOutcome 
     return (
       <p className="text-muted-foreground text-xs">
         <FormattedMessage
-          id="settings.runtime.localCli.probe.codex.noModels"
+          id="settings.runtime.localCli.probe.noModels"
           defaultMessage="Started, but no models were reported."
         />
       </p>
@@ -604,12 +625,21 @@ export function LocalCliTab({
                     {probeable && (
                       <Tooltip>
                         <TooltipTrigger asChild>
+                          {/* aria-disabled instead of disabled: a disabled
+                              button fires no pointer events, and this tooltip
+                              is the only last-tested surface -- it must stay
+                              hoverable mid-probe, exactly when the expanded
+                              fold shows the stale cached catalog. The click
+                              guard keeps the button inert while probing. */}
                           <Button
                             type="button"
                             variant="ghost"
                             size="sm"
-                            onClick={() => void handleProbe(a.id)}
-                            disabled={probe.status === "probing"}
+                            onClick={() => {
+                              if (probe.status !== "probing") void handleProbe(a.id);
+                            }}
+                            aria-disabled={probe.status === "probing" || undefined}
+                            className="aria-disabled:opacity-50"
                           >
                             {probe.status === "probing" && (
                               <Loader2 className="size-3.5 animate-spin" aria-hidden />
