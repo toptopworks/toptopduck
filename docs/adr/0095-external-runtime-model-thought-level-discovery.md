@@ -6,9 +6,9 @@
 
 2. **发现策略绑定 StreamFormat（turn 路径）**。`StreamFormat::Acp` 从每轮握手响应的 `config_options` 提取模型列表与思考强度选项；`StreamFormat::JsonEventStream` 在 turn 路径无动态发现（`exec --json` 不暴露 config catalog）——诊断探测路径的目录获取（含 JsonEventStream 经 app-server 查询）由 ADR-0096 另行定义。零 per-CLI 代码不变量保持：发现逻辑在 per-format 分派路径内，不在适配器定义中。
 
-3. **Wire 类型以 `serde_json::Value` 透传扩展**。`NewSessionResult` 新增可选 `config_options: Option<serde_json::Value>`（不定义完整 ConfigOption 类型层级）；`NewSessionParams` 新增可选 `model: Option<String>`（ACP 规范的标准字段）。引擎在 handshake 边界从 `Value` 提取 category 为 model / thought_level 的项，转为 `DiscoveredRuntime`。原始 `Value` 保留供未来扩展（mode 等其他 config 维度）。
+3. **Wire 类型以 `serde_json::Value` 透传扩展**。`NewSessionResult` 新增可选 `config_options: Option<serde_json::Value>`（不定义完整 ConfigOption 类型层级）。引擎在 handshake 边界从 `Value` 提取 category 为 model / thought_level 的项，转为 `DiscoveredRuntime`。原始 `Value` 保留供未来扩展（mode 等其他 config 维度）。
 
-4. **注入机制 per-format 分派**。ACP 路径：模型经 `NewSessionParams.model` 随 `session/new` 传入；思考强度在握手后、prompt 前追加一次 `session/setConfigOption`（stdio 本地通信边际成本可忽略）。JsonEventStream 路径：经 argv——`AdapterSpec` 新增两个 `Option` 字段：`model_arg`（如 `"--model"`，引擎追加 `[flag, value]`）与 `effort_config_key`（如 `"model_reasoning_effort"`，引擎拼装 `["-c", "{key}={value}"]`）。ACP 适配器两字段均 `None`（走协议参数）。
+4. **注入机制 per-format 分派**。ACP 路径：模型与思考强度在握手后、prompt 前各追加一次 `session/set_config_option`（schema 0.13.8 的 `NewSessionRequest` 不携带 model 字段，`session/set_config_option` 是协议的配置注入通道；stdio 本地通信边际成本可忽略）。config id 以目录条目自选的 `id` 为键（schema 只标准化 category、不标准化 id），目录无可用 id 时回退 category 常量。JsonEventStream 路径：经 argv——`AdapterSpec` 新增两个 `Option` 字段：`model_arg`（如 `"--model"`，引擎追加 `[flag, value]`）与 `effort_config_key`（如 `"model_reasoning_effort"`，引擎拼装 `["-c", "{key}={value}"]`）。ACP 适配器两字段均 `None`（注入走 `session/set_config_option`）。
 
 5. **发现结果经 `LoopOutcome` 回传**。`LoopOutcome` 新增 `discovered_runtime: Option<DiscoveredRuntime>`（含 models / current_model / thought_levels / current_thought_level）。内置运行时与 JsonEventStream 恒 `None`（不支持发现），ACP 填 `Some(...)`。每轮回传，前端做去重判断。`Option` 语义区分「该运行时不支持发现」与「发现结果为空」。
 
@@ -26,7 +26,7 @@ ADR-0081 定外部运行时为数据定义适配器引擎，每轮 `session/new`
 
 1. **发现零额外开销**：无状态架构下握手每轮都在发生，从已有响应中提取模型信息不增加任何 spawn 或 RPC 开销。
 2. **Value 透传避免过度建模**：`config_options` 是 ACP 协议标准结构（非 per-CLI），但完整 ConfigOption 类型层级（category / option_type / options[]）在当前需求下只消费 model 与 thought_level 两项；`Value` 透传 + 引擎边界提取把解析复杂度局限在一处，未来扩展不改 wire 类型。
-3. **注入点都在引擎内部**：ACP 注入在 `handshake()`（协议参数 + 一次 setConfigOption），JsonEventStream 注入在 argv 拼装；两条路径对外都不暴露。
+3. **注入点都在引擎内部**：ACP 注入在握手边界（模型与思考强度各一次 `session/set_config_option`），JsonEventStream 注入在 argv 拼装；两条路径对外都不暴露。
 4. **session 元数据缓存兼顾 resume 与 KISS**：per-adapter 全局缓存需要考虑过期 / 刷新 / 多会话写入竞争；前端内存缓存不跨重启。session 级快照数据极小（几个字符串），resume 场景体验最好（恢复即知可选列表 + 选中值）。
 5. **recipe 不记录是不可重放性的推论**：同一模型不同采样参数产出不同 SQL；模型选择影响「答法」而非「领域数据」，与技能注入同属轮次装配配置。
 
@@ -46,8 +46,8 @@ ADR-0081 定外部运行时为数据定义适配器引擎，每轮 `session/new`
 
 - **延伸 ADR-0094**：`StreamFormat` 不仅决定解析器分派，也隐含决定模型发现策略——`Acp` 从握手提取，`JsonEventStream` 无动态发现。未来新增带模型枚举能力的流格式时，需同时声明其发现策略。
 - **被 ADR-0096 校准与延伸**：「无动态发现」收窄至 turn 路径——诊断探测路径（设置页测试动作）为 JsonEventStream 适配器经 `codex app-server` 的 `model/list` 获取 per-model 目录，探测结果缓存（app-data 独立文件）作为选择器目录的次级数据源（会话目录优先）。
-- **校准 ADR-0081**：wire 类型扩展与 AdapterSpec 新增字段均为纯数据增量，适配器引擎架构不变；`session/setConfigOption` 是 ACP 路径的握手扩展步骤，不引入 upstream session 状态（每轮新 `session/new` 的无状态语义不变）。
+- **校准 ADR-0081**：wire 类型扩展与 AdapterSpec 新增字段均为纯数据增量，适配器引擎架构不变；`session/set_config_option` 是 ACP 路径的握手扩展步骤，不引入 upstream session 状态（每轮新 `session/new` 的无状态语义不变）。
 - **校准 ADR-0089**：session 持久化结构新增 `model` / `thought_level` / `cached_discovered` 三个可选字段，旧会话文件缺字段按 `None` 反序列化（向后兼容）。
 - **CONTEXT.md 不变**：模型/思考强度选择是会话级配置（同 runtime choice、审批姿态），非领域概念；不引入新领域词汇。
 - **fake fixture 扩展**：ACP fake CLI 需在 `session/new` 响应中返回 `config_options`（含 model + thought_level 项）以驱动发现路径测试。
-- **未决（实施期）**：各 CLI `config_options` 实测形态差异（字段名 / category 命名的兼容性矩阵）；思考强度 `session/setConfigOption` 的 option_id 命名实测；前端选择器 UI 形态与 i18n。
+- **未决（实施期）**：各 CLI `config_options` 实测形态差异（字段名 / category 命名的兼容性矩阵）；前端选择器 UI 形态与 i18n。

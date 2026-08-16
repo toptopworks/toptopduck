@@ -31,4 +31,4 @@ ADR-0076 定双运行时；本 ADR 定两运行时的实现形态。内置循环
 - **校准 ADR-0044**：provider 错误分类并入传输层重试语义（瞬时 / 永久分类保留，不上达 agent）。
 - **key 分发边界**：外部运行时用其自身鉴权（其自有登录 / 配置），app 的 Profile key 不注入外部运行时进程。
 - **未决（实施期）**：适配器引擎模块边界、桥接进程形态、ACP `session/request_permission` 与网关审批对应（自动选取允许项，无可选项 = fail-fast）。
-- **被 ADR-0095 校准**：wire 类型扩展（`NewSessionParams.model` / `NewSessionResult.config_options`）与 `AdapterSpec` 新增字段（`model_arg` / `effort_config_key`）均为纯数据增量；ACP 路径握手后追加的 `session/setConfigOption` 是握手扩展步骤，不引入 upstream session 状态——「每轮恒 `session/new` + 不持 upstream session handle」的无状态语义不变。
+- **被 ADR-0095 校准**：wire 类型扩展（`NewSessionResult.config_options`）与 `AdapterSpec` 新增字段（`model_arg` / `effort_config_key`）均为纯数据增量；ACP 路径握手后追加的 `session/set_config_option` 是握手扩展步骤，不引入 upstream session 状态——「每轮恒 `session/new` + 不持 upstream session handle」的无状态语义不变。

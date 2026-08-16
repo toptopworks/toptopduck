@@ -110,13 +110,15 @@ pub struct AdapterSpec {
     /// The argv flag that carries the model id at spawn (ADR-0095). Consumed
     /// ONLY by the JsonEventStream path (the engine appends `[flag, value]`
     /// after the argv prefix). `None` on ACP adapters -- the ACP path injects
-    /// the model via `NewSessionParams.model` instead.
+    /// the model via a `session/set_config_option` request after the
+    /// handshake instead (schema 0.13.8's `NewSessionRequest` carries no
+    /// model field).
     pub model_arg: Option<&'static str>,
     /// The runtime-config key for the reasoning-effort setting (ADR-0095).
     /// Consumed ONLY by the JsonEventStream path (the engine appends
     /// `["-c", "{key}={value}"]` to argv when a thought level is selected).
     /// `None` on ACP adapters -- the ACP path sends one
-    /// `session/setConfigOption` request after the handshake instead.
+    /// `session/set_config_option` request after the handshake instead.
     pub effort_config_key: Option<&'static str>,
 }
 
@@ -368,15 +370,22 @@ impl DiscoveredRuntime {
 
 /// The semantic categories the discovery path keys on (ADR-0095 Decision 3):
 /// the ACP `SessionConfigOption.category` enum's model + thought_level
-/// variants. A CLI with no categorized options contributes nothing to
-/// [`DiscoveredRuntime`] -- discovery degrades to the empty shape, it never
-/// fails the turn.
+/// variants, snake_case-tagged exactly this way in schema 0.13.8's
+/// `SessionConfigOptionCategory`; any other tag -- including a renamed one
+/// -- lands in that enum's `Other(String)` fallback and contributes nothing
+/// (the zero-extraction warn in [`extract_discovered_runtime`] is what makes
+/// that drift visible). A CLI with no categorized options contributes
+/// nothing to [`DiscoveredRuntime`] -- discovery degrades to the empty
+/// shape, it never fails the turn.
 pub(crate) const MODEL_CATEGORY: &str = "model";
 pub(crate) const THOUGHT_LEVEL_CATEGORY: &str = "thought_level";
 
 /// Extract the [`DiscoveredRuntime`] from a raw `config_options` value
-/// (ADR-0095). The ACP wire shape (SessionConfigOption, camelCase) is one
-/// entry per option:
+/// (ADR-0095). The ACP wire shape is schema 0.13.8's `SessionConfigOption`
+/// (camelCase: `id` / `name` / optional `description` / optional `category`,
+/// plus a flattened Select kind carrying `currentValue` + `options`;
+/// `name` / `description` / `_meta` are display-side and never read here)
+/// -- one entry per option:
 /// `{ "id", "name", "category", "currentValue", "options": [...] }` where
 /// `options` is either a flat list of `{ "value", "name" }` or a grouped
 /// list of `{ "group", "name", "options": [...] }` (serde untagged -- the
@@ -386,10 +395,14 @@ pub(crate) const THOUGHT_LEVEL_CATEGORY: &str = "thought_level";
 /// total: any malformed shape (missing fields, wrong types, a non-array
 /// catalog) contributes nothing -- the result degrades to empty lists /
 /// `None` currents, never an error (a turn must not fail because a CLI's
-/// config shape drifted).
+/// config shape drifted); when a non-empty catalog yields the empty shape,
+/// [`degrade_diagnosis`] turns that silence into one warn (issue #531).
 pub fn extract_discovered_runtime(config_options: Option<&serde_json::Value>) -> DiscoveredRuntime {
     let mut out = DiscoveredRuntime::empty();
-    let Some(entries) = config_options.and_then(|v| v.as_array()) else {
+    let Some(catalog) = config_options else {
+        return out;
+    };
+    let Some(entries) = catalog.as_array() else {
         return out;
     };
     for entry in entries {
@@ -416,7 +429,44 @@ pub fn extract_discovered_runtime(config_options: Option<&serde_json::Value>) ->
             _ => {}
         }
     }
+    // Issue #531: the silent degrade gets one diagnostic line -- config
+    // shape drift reads as a warn instead of a permanently-empty selector.
+    if let Some((count, categories)) = degrade_diagnosis(catalog, &out) {
+        log::warn!(
+            target: "toptopduck::discovery",
+            "config_options: {count} entries yielded no model/thought_level data (categories seen: {categories}); selector degrades to empty -- possible CLI config-shape drift"
+        );
+    }
     out
+}
+
+/// Diagnose the silent degrade (issue #531): a non-empty catalog that still
+/// produced the entirely-empty shape yields `Some((entry count, distinct
+/// category strings))` for the boundary warn -- the category set tells
+/// category drift (renamed tags visible verbatim) apart from field drift
+/// (known tags, nothing extracted). Every other path stays `None`: a
+/// missing / non-array / empty catalog is a normal degrade, and any partial
+/// recognition means the catalog was understood well enough to use.
+fn degrade_diagnosis(
+    catalog: &serde_json::Value,
+    out: &DiscoveredRuntime,
+) -> Option<(usize, String)> {
+    let entries = catalog.as_array()?;
+    if entries.is_empty() || *out != DiscoveredRuntime::empty() {
+        return None;
+    }
+    let mut categories: Vec<&str> = entries
+        .iter()
+        .filter_map(|e| e.get("category").and_then(|v| v.as_str()))
+        .collect();
+    categories.sort_unstable();
+    categories.dedup();
+    let seen = if categories.is_empty() {
+        "<none>".to_string()
+    } else {
+        categories.join(", ")
+    };
+    Some((entries.len(), seen))
 }
 
 /// The entry's `id`, when it is a non-empty string. The ACP schema makes the
@@ -622,6 +672,69 @@ mod tests {
         ])));
         assert!(d.thought_levels.is_empty());
         assert_eq!(d.current_thought_level.as_deref(), Some("high"));
+    }
+
+    /// Issue #531: a non-empty catalog that still yields the empty shape is
+    /// diagnosed -- entry count + the distinct category strings the CLI
+    /// actually sent, so a renamed category surfaces verbatim in the set.
+    #[test]
+    fn nonempty_catalog_with_zero_extraction_is_diagnosed() {
+        let catalog = json!([
+            { "id": "m", "name": "Model", "category": "models",
+              "currentValue": "m1", "options": [{ "value": "m1" }] },
+            { "id": "r", "name": "Reasoning", "category": "reasoning" },
+        ]);
+        let out = extract_discovered_runtime(Some(&catalog));
+        assert_eq!(out, DiscoveredRuntime::empty());
+        assert_eq!(
+            degrade_diagnosis(&catalog, &out),
+            Some((2, "models, reasoning".to_string()))
+        );
+    }
+
+    /// The diagnosis collapses absent / non-string categories into one
+    /// marker: the set stays honest about what arrived without failing on
+    /// shape (issue #531).
+    #[test]
+    fn zero_extraction_without_category_strings_uses_none_marker() {
+        let catalog = json!([
+            { "id": "m", "currentValue": "m1", "options": [{ "value": "m1" }] },
+            { "id": "x", "category": 42 },
+        ]);
+        let out = extract_discovered_runtime(Some(&catalog));
+        assert_eq!(out, DiscoveredRuntime::empty());
+        assert_eq!(
+            degrade_diagnosis(&catalog, &out),
+            Some((2, "<none>".to_string()))
+        );
+    }
+
+    /// Only the all-empty outcome is diagnosed: a missing / non-array /
+    /// empty catalog is a normal degrade, and partial recognition (a current
+    /// value with no offered list) means the catalog was understood well
+    /// enough to use -- the warn is reserved for the selector going fully
+    /// empty (issue #531).
+    #[test]
+    fn non_catalogs_and_partial_recognition_are_not_diagnosed() {
+        assert_eq!(
+            degrade_diagnosis(&json!(null), &DiscoveredRuntime::empty()),
+            None
+        );
+        assert_eq!(
+            degrade_diagnosis(&json!({}), &DiscoveredRuntime::empty()),
+            None
+        );
+        let empty_catalog = json!([]);
+        assert_eq!(
+            degrade_diagnosis(&empty_catalog, &DiscoveredRuntime::empty()),
+            None
+        );
+        let catalog = json!([
+            { "id": "t", "category": "thought_level", "currentValue": "high" }
+        ]);
+        let out = extract_discovered_runtime(Some(&catalog));
+        assert_ne!(out, DiscoveredRuntime::empty());
+        assert_eq!(degrade_diagnosis(&catalog, &out), None);
     }
 
     /// ADR-0095 injection fields: ACP adapters carry `None` (protocol

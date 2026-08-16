@@ -249,12 +249,13 @@ impl AcpEngine {
                     return outcome;
                 }
                 // An RPC error is a real rejection, not a transport gap --
-                // surface it (e.g. the CLI does not accept the config id).
+                // surface it (e.g. the CLI does not accept the id / value),
+                // naming both so the user knows which selection to clear.
                 Ok(resp) => {
                     if let Some(e) = resp.error {
                         let outcome = self.outcome(
                             Termination::Transient(format!(
-                                "session/set_config_option `{config_id}` error: {}",
+                                "session/set_config_option `{config_id}` = `{value}` error: {}",
                                 e.message
                             )),
                             Vec::new(),
@@ -387,9 +388,12 @@ pub(crate) struct HandshakeOutcome {
 }
 
 /// One `session/set_config_option` request body (ADR-0095): sets the option
-/// with the given config id to `value` on the freshly minted session. The
-/// protocol-standard injection channel for BOTH the model and the thought
-/// level (`NewSessionRequest` carries no model field, schema 0.13.8). Sent
+/// with the given config id to `value` on the freshly minted session --
+/// field-for-field schema 0.13.8's `SetSessionConfigOptionRequest`
+/// (`session_id` / `config_id` / `value` as the select value id; its
+/// optional `_meta` is deliberately not sent). The protocol-standard
+/// injection channel for BOTH the model and the thought level
+/// (`NewSessionRequest` carries no model field, schema 0.13.8). Sent
 /// after the handshake when the user selected either; the response result is
 /// ignored (the next turn's handshake re-discovers the truth) but an RPC
 /// error fails the turn honestly.

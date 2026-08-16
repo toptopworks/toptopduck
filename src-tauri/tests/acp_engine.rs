@@ -685,6 +685,10 @@ fn acp_turn_set_config_option_rejection_fails_the_turn() {
                 msg.contains("model"),
                 "the failure must name the config id: {msg}"
             );
+            assert!(
+                msg.contains("fake-sonnet"),
+                "the failure must name the rejected value: {msg}"
+            );
         }
         other => panic!("expected Transient, got {other:?}"),
     }
