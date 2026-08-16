@@ -32,8 +32,9 @@ export function SettingsCard({ className, ...props }: ComponentProps<"div">) {
  *  Two shapes, driven by which slots are filled:
  *  - Compact control (Select / Switch): pass the control as `action` (inline
  *    right, vertically centered against the title); leave `children` empty.
- *  - Explicit-save text field: pass the Save button as `action` (top-right) and
- *    the Input as `children` (rendered below the header row).
+ *  - Explicit-save text field: pass the Save button as `action` (right side,
+ *    vertically centered against the header row) and the Input as `children`
+ *    (rendered below the header row).
  *
  *  `title` is the bold label; `description` is the muted helper line under it. */
 export function SettingsRow({

@@ -137,7 +137,7 @@ function EffortBadgeGroup({
   marked,
 }: {
   levels: string[];
-  marked?: string | null;
+  marked: string | null;
 }) {
   return (
     <span className="flex flex-wrap items-center gap-1">
@@ -357,8 +357,12 @@ function CachedCatalog({ entry }: { entry: AdapterCatalogEntry }) {
 /** The probe's model count for one row, from whichever source is live: the
  *  fresh ok result, else (idle only) the cached entry. Only a count > 0 is a
  *  badge point -- empty catalogs, the unavailable outcome, probing, and
- *  failure carry no summary badge (issue #552 AC). The `probe_kind` /
- *  outcome-variant agreement mirrors CachedCatalog's narrowing checks. */
+ *  failure carry no summary badge (issue #552 AC). The cache dispatch mirrors
+ *  CachedCatalog's narrowing checks (variant check + never guard) so a future
+ *  backend shape change fails at compile time, not as a silently missing
+ *  badge. The guards degrade to null rather than throw -- this is badge
+ *  data, not render dispatch, and the IPC boundary already drops mismatched
+ *  pairs server-side (the in-checks are defensive double-cover). */
 function directoryModelCount(probe: ProbeState, cached?: AdapterCatalogEntry): number | null {
   let count: number;
   if (probe.status === "ok") {
@@ -374,9 +378,12 @@ function directoryModelCount(probe: ProbeState, cached?: AdapterCatalogEntry): n
     if (cached.probe_kind === "acp") {
       if (!("acp" in cached.outcome)) return null;
       count = cached.outcome.acp.discovered.models.length;
-    } else {
+    } else if (cached.probe_kind === "codex") {
       if (!("codex" in cached.outcome)) return null;
       count = cached.outcome.codex.models.length;
+    } else {
+      const _exhaustive: never = cached.probe_kind;
+      throw new Error(`Unknown probe kind: ${String(_exhaustive)}`);
     }
   } else {
     return null;

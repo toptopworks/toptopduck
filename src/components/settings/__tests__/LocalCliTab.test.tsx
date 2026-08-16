@@ -559,7 +559,8 @@ describe("LocalCliTab fold (issue #552)", () => {
     await screen.findByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)"));
 
     fireEvent.click((await screen.findAllByRole("button", { name: "Test" }))[0]);
-    // probing: fold stays as-is (expanded, showing the stale catalog)
+    // This case seeds no cache, so the mid-flight fold is empty -- the row
+    // stays expanded and the settled result re-renders in place.
     expect(chevron).toHaveAttribute("aria-expanded", "true");
     await screen.findByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)"));
     expect(chevron).toHaveAttribute("aria-expanded", "true");
@@ -603,10 +604,42 @@ describe("LocalCliTab fold (issue #552)", () => {
 
     await clickTestButton();
     const badge = await screen.findByText("Test failed");
-    expect(badge.closest("span")).toHaveClass("bg-destructive");
+    expect(badge.closest("[data-slot=badge]")).toHaveClass("bg-destructive");
     // The Test buttons stay beside the badge (the badge replaces the N
     // models summary slot, never the actions).
     expect((await screen.findAllByRole("button", { name: "Test" })).length).toBeGreaterThan(0);
+  });
+
+  // A failed probe outranks the cached count on every surface: the red badge
+  // replaces the stale `N models` and the fold carries the error line, never
+  // the stale catalog (the ternary ordering + directoryModelCount's failed
+  // null enforce it -- this pins it).
+  it("replaces a stale cached count with the failure badge when a re-probe fails", async () => {
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({
+      "claude-code": {
+        probe_kind: "acp",
+        outcome: { acp: { discovered: okCatalog } },
+        probed_at_millis: 0,
+      },
+    });
+    vi.mocked(probeAdapter).mockRejectedValue({ kind: "Timeout" });
+    renderTab();
+
+    // The idle+cache badge is the pre-state.
+    expect(await screen.findByText("2 models")).toBeInTheDocument();
+
+    await clickTestButton();
+    expect(await screen.findByText("Test failed")).toBeInTheDocument();
+    expect(screen.queryByText("2 models")).toBeNull();
+
+    // The fold carries the error line, not the cached catalog.
+    fireEvent.click(await rowChevron("claude-code"));
+    expect(
+      await screen.findByText(byFoldedText("The probe timed out.")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)")),
+    ).toBeNull();
   });
 
   it("shows no badge for an unavailable codex outcome", async () => {
@@ -661,6 +694,46 @@ describe("LocalCliTab fold (issue #552)", () => {
     // Available / Not installed badges exist).
     await screen.findByText("2 models");
     expect(screen.queryByText("Test failed")).toBeNull();
+  });
+
+  // The Test button's hover tooltip surfaces the cached entry's probed-at
+  // timestamp (issue #552): the timestamp stays out of the collapsed row and
+  // rides the hover instead. Radix opens on pointer hover with pointerType
+  // mouse (jsdom needs it set explicitly; bare mouseEnter does not trigger
+  // it -- the ComposerProviderPicker pattern).
+  it("surfaces the cached probed-at timestamp on the Test button hover", async () => {
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({
+      "claude-code": {
+        probe_kind: "acp",
+        outcome: { acp: { discovered: okCatalog } },
+        probed_at_millis: Date.UTC(2026, 7, 15, 10, 30),
+      },
+    });
+    renderTab();
+
+    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    fireEvent.pointerEnter(buttons[0], { pointerType: "mouse" });
+    fireEvent.pointerMove(buttons[0], { pointerType: "mouse" });
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip.textContent).toContain("Last tested");
+    // The timestamp renders in the local timezone, so build the expected
+    // string with the same params rather than hardcoding a wall-clock
+    // string -- the assertion still pins the source (the cached entry's
+    // probed_at_millis, not some other instant).
+    const expected = new Intl.DateTimeFormat("en", {
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(Date.UTC(2026, 7, 15, 10, 30));
+    expect(tooltip.textContent).toContain(expected);
+  });
+
+  it("shows no tooltip when the row has no cached entry", async () => {
+    renderTab();
+
+    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    fireEvent.pointerEnter(buttons[0], { pointerType: "mouse" });
+    fireEvent.pointerMove(buttons[0], { pointerType: "mouse" });
+    expect(screen.queryByRole("tooltip")).toBeNull();
   });
 
   // --- Effort badge group ---------------------------------------------------
