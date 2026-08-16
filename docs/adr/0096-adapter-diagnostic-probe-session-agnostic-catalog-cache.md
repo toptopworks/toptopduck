@@ -6,7 +6,7 @@
 
 2. **探测语义 per-format 分派，与 turn 路径同一分派维度**。`StreamFormat::Acp` 适配器：spawn → ACP initialize + `session/new` 握手 → 从响应 `config_options` 提取（复用 ADR-0095 的 `DiscoveredRuntime` 提取路径）。`StreamFormat::JsonEventStream` 适配器（codex）：spawn `codex app-server` → initialize 握手（`clientInfo` 复用 ACP 通道的 client 描述，服务端必填；握手完成前拒答一切请求）→ `model/list` RPC 遍历分页（每请求必带 `params` 字段，首页为空对象，后续页携带上一页 `nextCursor`，直至 `null`）→ 提取 per-model 目录。探测成功 = 握手或查询完成；进程存活但目录查询失败（含握手 RPC 错误）时降级——报启动成功 + 目录不可用，不整体判失败。
 
-3. **codex 目录为独立 per-model 类型 `CodexModelCatalog`**。`model/list` 返回每个模型各自的 `supportedReasoningEfforts`（官方声明的顺序须保留）+ `defaultReasoningEffort`。定义独立的目录类型，不压扁进 `DiscoveredRuntime` 的全局扁平 `thought_levels`——并集呈现失真：全局集合允许用户选到当前模型不支持的强度。
+3. **codex 目录为独立 per-model 类型 `ModelCatalogOutcome`**。`model/list` 返回每个模型各自的 `supportedReasoningEfforts`（官方声明的顺序须保留）+ `defaultReasoningEffort`。定义独立的目录类型，不压扁进 `DiscoveredRuntime` 的全局扁平 `thought_levels`——并集呈现失真：全局集合允许用户选到当前模型不支持的强度。
 
 4. **探测经单命令 IPC，后端持墙钟超时**。`probe_adapter(adapter_id)` 单命令承载整个探测生命周期，后端设墙钟超时（CLI 冷启动较慢，量级数十秒），超时返回结构化失败，绝不悬挂 UI。busy 态接入设置面板 close guard（与既有 IPC in-flight 拦截模式一致）。
 

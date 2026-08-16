@@ -2389,7 +2389,7 @@ pub fn rescan_adapters() -> Vec<AdapterEntry> {
 /// every other typed IPC error): unknown id / not currently detected reject
 /// before any spawn; spawn + query failures carry the English technical
 /// detail for the fold. A codex `model/list` RPC error is NOT a refusal -- it
-/// degrades to a [`ProbeOk::Codex`] carrying `Unavailable` (ADR-0096 D2).
+/// degrades to a [`ProbeOk::JsonEventStream`] carrying `Unavailable` (ADR-0096 D2).
 #[tauri::command]
 pub async fn probe_adapter(
     catalog_store: State<'_, AdapterCatalogStore>,
@@ -2431,7 +2431,7 @@ pub async fn probe_adapter(
             stderr_tail,
             PROBE_TIMEOUT,
         )
-        .map(|outcome| probe::ProbeOk::Codex { outcome }),
+        .map(|outcome| probe::ProbeOk::JsonEventStream { outcome }),
     });
     let outcome = tokio::time::timeout(PROBE_TIMEOUT, join).await;
     // A tokio timeout surfaces as ProbeError::Timeout; the blocking task
@@ -2457,7 +2457,7 @@ pub async fn probe_adapter(
     }
     // Cache the catalog on success (ADR-0096 D5, issue #536): the probe
     // click is the cache's ONLY write point, overwriting just this
-    // adapter's entry. Only a usable catalog caches -- the codex degraded
+    // adapter's entry. Only a usable catalog caches -- the JsonEventStream degraded
     // state (`Unavailable`) keeps the last good entry. Write failures are
     // swallowed inside `store_entry` (the cache never gates the probe's own
     // answer); the write happens after the kill so the child is always

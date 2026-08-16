@@ -15,7 +15,7 @@ use toptopduck_lib::runtime::acp::adapter::DiscoveredRuntime;
 use toptopduck_lib::runtime::acp::catalog_store::{
     AdapterCatalogEntry, AdapterCatalogStore, CachedOutcome, ProbeKind, CATALOGS_FILE_NAME,
 };
-use toptopduck_lib::runtime::acp::probe::CodexModel;
+use toptopduck_lib::runtime::acp::probe::CatalogModel;
 
 /// The file the store mints under the given root: `adapter-catalogs.json`
 /// (ADR-0096 D5 names the file).
@@ -85,7 +85,7 @@ fn file_shape_is_pretty_snake_case_json() {
 
     let raw = std::fs::read_to_string(&path).expect("read");
     let doc: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
-    assert_eq!(doc["codex"]["probe_kind"], "codex");
+    assert_eq!(doc["codex"]["probe_kind"], "json_event_stream");
     assert_eq!(doc["codex"]["probed_at_millis"], 1_725_000_000_000i64);
     assert!(raw.contains('\n'), "pretty-printed");
 }
@@ -112,9 +112,9 @@ fn acp_entry(at: i64) -> AdapterCatalogEntry {
 
 fn codex_entry(at: i64) -> AdapterCatalogEntry {
     AdapterCatalogEntry {
-        probe_kind: ProbeKind::Codex,
-        outcome: CachedOutcome::Codex {
-            models: vec![CodexModel {
+        probe_kind: ProbeKind::JsonEventStream,
+        outcome: CachedOutcome::JsonEventStream {
+            models: vec![CatalogModel {
                 id: "gpt-5.2-codex".to_string(),
                 display_name: "GPT-5.2 Codex".to_string(),
                 is_default: true,

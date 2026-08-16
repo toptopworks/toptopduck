@@ -30,7 +30,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::runtime::acp::adapter::{AdapterSpec, DiscoveredRuntime};
+use crate::runtime::acp::adapter::{AdapterSpec, DiscoveredRuntime, StreamFormat};
 use crate::runtime::acp::wire::{
     self, InitializeParams, NewSessionParams, NewSessionResult, Request, RequestId, Response,
 };
@@ -42,8 +42,8 @@ use crate::runtime::acp::wire::{
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// A successful probe (ADR-0096 D2/D3). Per-format tagged: the ACP handshake
-/// produces the flat [`DiscoveredRuntime`] (issue #534); the codex app-server
-/// `model/list` produces a per-model [`CodexCatalogOutcome`] (issue #535) --
+/// produces the flat [`DiscoveredRuntime`] (issue #534); the JsonEventStream
+/// query produces a per-model [`ModelCatalogOutcome`] (issue #535) --
 /// the latter never flattened into `DiscoveredRuntime` (a union of per-model
 /// efforts would let the user select an effort the current model does not
 /// support, ADR-0096 D3). The session id is not carried: the probe mints no
@@ -54,34 +54,40 @@ pub enum ProbeOk {
     /// The ACP handshake catalog, stamped with the producing adapter (issue
     /// #529 semantics -- the config_options wire carries no adapter identity).
     Acp { discovered: DiscoveredRuntime },
-    /// The codex app-server model catalog, or the honest degraded "started
-    /// but catalog unavailable" state (ADR-0096 D2 -- an old codex / not
-    /// logged in / RPC error degrades; only a spawn failure, a timeout, or
-    /// the process dying mid-query fails outright).
-    Codex { outcome: CodexCatalogOutcome },
+    /// The JsonEventStream per-model catalog, or the honest degraded
+    /// "started but catalog unavailable" state (ADR-0096 D2 -- an old CLI /
+    /// not logged in / RPC error degrades; only a spawn failure, a timeout,
+    /// or the process dying mid-query fails outright). The catalog's current
+    /// (and only) supplier is the codex app-server wire
+    /// ([`super::app_server`]) -- a PRIVATE protocol, not a reusable
+    /// JsonEventStream surface: a second JsonEventStream adapter must bring
+    /// its own wire definition, never inherit this one (issue #544).
+    JsonEventStream { outcome: ModelCatalogOutcome },
 }
 
-/// The codex app-server `model/list` outcome (ADR-0096 D2/D3). `Available`
+/// The per-model catalog outcome of a JsonEventStream probe (ADR-0096
+/// D2/D3, today the codex app-server `model/list` query). `Available`
 /// carries the ordered per-model catalog; `Unavailable` is the degraded state
 /// (the process started but the catalog was not obtainable -- RPC error /
 /// empty response / unparseable result; the process being alive is itself
 /// diagnostic signal, so this is a success variant, not an error).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-pub enum CodexCatalogOutcome {
-    Available { models: Vec<CodexModel> },
+pub enum ModelCatalogOutcome {
+    Available { models: Vec<CatalogModel> },
     Unavailable { detail: String },
 }
 
-/// One codex model from the `model/list` catalog (ADR-0096 D3). The reasoning
-/// efforts are the per-model `supportedReasoningEfforts` in the CLI's declared
-/// order (never a union across models); `default_reasoning_effort` marks the
-/// model's own default; `is_default` marks the catalog's default model.
-/// Deserialize rides along (not a wire-in shape, but the catalog cache
-/// sidecar round-trips the same type, ADR-0096 D5 / issue #536).
+/// One model from a JsonEventStream probe's per-model catalog (ADR-0096
+/// D3). The reasoning efforts are the per-model `supportedReasoningEfforts`
+/// in the CLI's declared order (never a union across models);
+/// `default_reasoning_effort` marks the model's own default; `is_default`
+/// marks the catalog's default model. Deserialize rides along (not a
+/// wire-in shape, but the catalog cache sidecar round-trips the same type,
+/// ADR-0096 D5 / issue #536).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct CodexModel {
+pub struct CatalogModel {
     pub id: String,
     pub display_name: String,
     pub is_default: bool,
@@ -131,6 +137,16 @@ pub enum ProbeError {
 /// full OS pipe buffer and wedge until killed.
 pub fn spawn_child(spec: &AdapterSpec, binary: Option<&Path>) -> Result<ChildHandle, ProbeError> {
     let binary = binary.ok_or_else(|| ProbeError::NotDetected(spec.id.to_string()))?;
+    // probe_argv/stream_format invariant (issue #544): a JsonEventStream
+    // adapter MUST carry a dedicated probe argv (its probe surface differs
+    // from the turn's protocol mode), an ACP adapter MUST NOT (the probe
+    // reuses the turn argv). Enforced at this single consumption point so a
+    // future spec that breaks the pairing fails fast under test instead of
+    // spawning the turn's argv and speaking the wrong protocol.
+    debug_assert_eq!(
+        spec.stream_format == StreamFormat::JsonEventStream,
+        spec.probe_argv.is_some()
+    );
     // Piped stderr (issue #542): the CLI's diagnostics (auth failure, startup
     // panic, version skew) land in the probe's failure detail instead of
     // vanishing into the packaged app's absent console. The turn engine's

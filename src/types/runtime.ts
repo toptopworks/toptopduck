@@ -77,29 +77,30 @@ export interface SessionModelConfig {
 
 // The adapter diagnostic probe's success shape (ADR-0096, issues #534/#535).
 // Per-format tagged (`kind`), mirroring the Rust `ProbeOk` adjacently-tagged
-// enum: `acp` carries the flat handshake catalog, `codex` carries the
-// app-server per-model catalog (or the degraded "unavailable" state). The
-// codex catalog is NOT flattened into `DiscoveredRuntime` -- a union of
+// enum: `acp` carries the flat handshake catalog, `json_event_stream`
+// carries the per-model catalog (or the degraded "unavailable" state). The
+// per-model catalog is NOT flattened into `DiscoveredRuntime` -- a union of
 // per-model efforts would let the user select an effort the current model
 // does not support (ADR-0096 D3).
 export type ProbeOk =
   | { kind: "acp"; data: { discovered: DiscoveredRuntime } }
-  | { kind: "codex"; data: { outcome: CodexCatalogOutcome } };
+  | { kind: "json_event_stream"; data: { outcome: ModelCatalogOutcome } };
 
-// The codex app-server `model/list` outcome (ADR-0096 D2/D3). `available`
+// The per-model catalog outcome of a JsonEventStream probe (ADR-0096
+// D2/D3, today the codex app-server `model/list` query). `available`
 // carries the ordered per-model catalog; `unavailable` is the degraded
-// "started but catalog unavailable" state (the process is alive, so this is a
-// success, not a ProbeError). Mirrors the Rust `CodexCatalogOutcome`
+// "started but catalog unavailable" state (the process is alive, so this is
+// a success, not a ProbeError). Mirrors the Rust `ModelCatalogOutcome`
 // (status-tagged, snake_case serde).
-export type CodexCatalogOutcome =
-  | { status: "available"; models: CodexModel[] }
+export type ModelCatalogOutcome =
+  | { status: "available"; models: CatalogModel[] }
   | { status: "unavailable"; detail: string };
 
-// One codex model from the `model/list` catalog (ADR-0096 D3). The reasoning
-// efforts are the per-model `supportedReasoningEfforts` in the CLI's declared
-// order (never a union across models). Mirrors the Rust `CodexModel`
-// (snake_case serde).
-export interface CodexModel {
+// One model from a JsonEventStream probe's per-model catalog (ADR-0096
+// D3). The reasoning efforts are the per-model `supportedReasoningEfforts`
+// in the CLI's declared order (never a union across models). Mirrors the
+// Rust `CatalogModel` (snake_case serde).
+export interface CatalogModel {
   id: string;
   display_name: string;
   is_default: boolean;
@@ -119,14 +120,15 @@ export interface CodexModel {
 
 // The channel that produced the catalog -- the per-format dispatch
 // dimension (ADR-0096 D2), selecting the consumer's rendering.
-export type ProbeKind = "acp" | "codex";
+export type ProbeKind = "acp" | "json_event_stream";
 
-// The cached outcome, tagged by channel. The codex degraded state is never
-// cached (only a usable catalog is a cache point, ADR-0096 D5) -- the
-// `models` variant is the only codex shape that appears here.
+// The cached outcome, tagged by channel. The JsonEventStream degraded
+// state is never cached (only a usable catalog is a cache point, ADR-0096
+// D5) -- the `models` variant is the only JsonEventStream shape that
+// appears here.
 export type CachedOutcome =
   | { acp: { discovered: DiscoveredRuntime } }
-  | { codex: { models: CodexModel[] } };
+  | { json_event_stream: { models: CatalogModel[] } };
 
 // One adapter's cache entry: the catalog + the probe timestamp
 // (epoch millis, display-only -- it never feeds the picker's priority
@@ -137,7 +139,11 @@ export type CachedOutcome =
 // `outcome` from `probe_kind` alone (no per-consumer variant checks).
 export type AdapterCatalogEntry =
   | { probe_kind: "acp"; outcome: Extract<CachedOutcome, { acp: unknown }>; probed_at_millis: number }
-  | { probe_kind: "codex"; outcome: Extract<CachedOutcome, { codex: unknown }>; probed_at_millis: number };
+  | {
+    probe_kind: "json_event_stream";
+    outcome: Extract<CachedOutcome, { json_event_stream: unknown }>;
+    probed_at_millis: number;
+  };
 
 // The whole cache document, keyed by adapter id.
 export type AdapterCatalogs = Record<string, AdapterCatalogEntry>;

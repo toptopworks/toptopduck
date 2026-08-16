@@ -3,9 +3,13 @@
 //! The JsonEventStream half of the probe: spawn `codex app-server` (the
 //! official JSON-RPC-over-stdio process interface that drives codex's rich
 //! client), send `model/list`, and fold the per-model catalog into a
-//! [`CodexCatalogOutcome`]. This is a DIFFERENT wire surface from the turn
+//! [`ModelCatalogOutcome`]. This is a DIFFERENT wire surface from the turn
 //! path's `exec --json` event stream (ADR-0094) -- the probe only reads the
 //! catalog here, it never drives a turn.
+//!
+//! The app-server wire is codex's PRIVATE protocol, not a reusable
+//! JsonEventStream surface: a second JsonEventStream adapter must bring its
+//! own wire module, never extend this one (issue #544).
 //!
 //! The app-server wire is JSON-RPC-shaped but deliberately NOT JSON-RPC 2.0:
 //! it neither sends nor expects the `jsonrpc` field (codex's `rpc.rs`
@@ -22,7 +26,7 @@
 //! Degraded-vs-failure (ADR-0096 D2): the process starting is itself a valid
 //! diagnostic result. A `model/list` RPC error (old codex without the RPC /
 //! not logged in) or an unparseable catalog degrades to
-//! `CodexCatalogOutcome::Unavailable`, NOT a [`ProbeError`] -- only a spawn
+//! `ModelCatalogOutcome::Unavailable`, NOT a [`ProbeError`] -- only a spawn
 //! failure, a timeout, the process dying mid-query, or a response envelope
 //! that fails to parse fail outright.
 
@@ -32,7 +36,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::runtime::acp::probe::{
-    attach_stderr_tail, CodexCatalogOutcome, CodexModel, ProbeError, StderrTail,
+    attach_stderr_tail, CatalogModel, ModelCatalogOutcome, ProbeError, StderrTail,
 };
 
 // ---------------------------------------------------------------------------
@@ -121,7 +125,7 @@ pub fn query_catalog(
     stdout: ChildStdout,
     stderr_tail: StderrTail,
     timeout: Duration,
-) -> Result<CodexCatalogOutcome, ProbeError> {
+) -> Result<ModelCatalogOutcome, ProbeError> {
     let mut io = AppServerIo::new(stdin, stdout);
     let deadline = Instant::now() + timeout;
 
@@ -156,7 +160,7 @@ pub fn query_catalog(
             None => break,
         }
     }
-    Ok(CodexCatalogOutcome::Available {
+    Ok(ModelCatalogOutcome::Available {
         models: catalog.models,
     })
 }
@@ -167,7 +171,7 @@ pub fn query_catalog(
 /// later page must not shadow its first-seen entry).
 #[derive(Default)]
 struct Catalog {
-    models: Vec<CodexModel>,
+    models: Vec<CatalogModel>,
     seen: std::collections::HashSet<String>,
 }
 
@@ -211,7 +215,7 @@ fn error_detail(resp: &AppServerResponse) -> String {
 fn fold_page(
     resp: AppServerResponse,
     stderr_tail: &StderrTail,
-) -> Result<ModelListResponse, CodexCatalogOutcome> {
+) -> Result<ModelListResponse, ModelCatalogOutcome> {
     let Some(result) = resp.result else {
         return Err(degraded(error_detail(&resp), stderr_tail));
     };
@@ -223,16 +227,16 @@ fn fold_page(
 /// Build the degraded `Unavailable` outcome, appending the stderr tail to its
 /// detail when non-empty (the same `; stderr tail: ` shape the failure path
 /// attaches).
-fn degraded(detail: String, stderr_tail: &StderrTail) -> CodexCatalogOutcome {
-    CodexCatalogOutcome::Unavailable {
+fn degraded(detail: String, stderr_tail: &StderrTail) -> ModelCatalogOutcome {
+    ModelCatalogOutcome::Unavailable {
         detail: crate::runtime::acp::probe::with_stderr_tail(detail, stderr_tail),
     }
 }
 
 /// Project one wire model onto the public catalog entry, preserving the
 /// declared order of the reasoning efforts (ADR-0096 D3).
-fn model_from_wire(m: ModelWire) -> CodexModel {
-    CodexModel {
+fn model_from_wire(m: ModelWire) -> CatalogModel {
+    CatalogModel {
         id: m.id,
         display_name: m.display_name,
         is_default: m.is_default,
