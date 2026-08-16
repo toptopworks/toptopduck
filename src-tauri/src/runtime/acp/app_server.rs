@@ -23,7 +23,8 @@
 //! diagnostic result. A `model/list` RPC error (old codex without the RPC /
 //! not logged in) or an unparseable catalog degrades to
 //! `CodexCatalogOutcome::Unavailable`, NOT a [`ProbeError`] -- only a spawn
-//! failure, a timeout, or the process dying mid-query fail outright.
+//! failure, a timeout, the process dying mid-query, or a response envelope
+//! that fails to parse fail outright.
 
 use std::process::{ChildStdin, ChildStdout};
 use std::time::{Duration, Instant};

@@ -8,12 +8,14 @@
 //! its path via `env!("CARGO_BIN_EXE_codex-app-server-fake")` and pick the
 //! scripted behavior via the `CODEX_APP_SERVER_SCENARIO` env var.
 //!
-//! Two server rules are enforced unconditionally (measured against codex-cli
-//! 0.147.0): every request must carry a `params` field (an object even when
-//! the method takes no arguments), and nothing is served before an
-//! `initialize` handshake. These pin the wire contract the real server
-//! enforces, so a request-shape regression fails CI instead of degrading
-//! against the real CLI.
+//! Three server rules are enforced unconditionally (measured against
+//! codex-cli 0.147.0): every request must carry a non-null `params` field
+//! (an object even when the method takes no arguments; the server reports a
+//! null the same as an absent field), nothing is served before an
+//! `initialize` handshake completes, and the handshake must carry a non-null
+//! `clientInfo`. These pin the wire contract the real server enforces, so a
+//! request-shape regression fails CI instead of degrading against the real
+//! CLI.
 //!
 //! Pure serde_json -- no lib import -- so the fixture stays self-contained.
 
@@ -158,9 +160,10 @@ fn main() {
         let method = v.get("method").and_then(serde_json::Value::as_str);
         let id = v.get("id").cloned().unwrap_or(serde_json::Value::Null);
 
-        // Rule 1 (every request): `params` must be present -- an object even
-        // for no-argument methods. The real server rejects its absence.
-        if method.is_some() && v.get("params").is_none() {
+        // Rule 1 (every request): `params` must be present and non-null --
+        // an object even for no-argument methods. The real server reports a
+        // null the same as an absent field.
+        if method.is_some() && !v.get("params").is_some_and(|p| !p.is_null()) {
             respond(
                 &mut out,
                 &serde_json::json!({
@@ -168,7 +171,25 @@ fn main() {
                     "error": { "code": -32600, "message": "Invalid request: missing field `params`" }
                 }),
             );
-            let _ = out.flush();
+            continue;
+        }
+
+        // Rule 3: the handshake must carry a non-null `clientInfo` -- the
+        // real server rejects the handshake without it (`missing field
+        // clientInfo`), which would degrade every probe.
+        if method == Some("initialize")
+            && !v
+                .get("params")
+                .and_then(|p| p.get("clientInfo"))
+                .is_some_and(|c| !c.is_null())
+        {
+            respond(
+                &mut out,
+                &serde_json::json!({
+                    "id": id,
+                    "error": { "code": -32600, "message": "Invalid request: missing field `clientInfo`" }
+                }),
+            );
             continue;
         }
 
@@ -184,6 +205,10 @@ fn main() {
                         "error": { "code": -32000, "message": "auth required: run `codex login`" }
                     }),
                 );
+                // One request, one response: the failed handshake must not
+                // also hit the rule-2 gate below (the real server answers
+                // exactly once).
+                continue;
             }
             (_, Some("initialize")) => {
                 initialized = true;
@@ -208,7 +233,6 @@ fn main() {
                     }),
                 );
             }
-            let _ = out.flush();
             continue;
         }
 

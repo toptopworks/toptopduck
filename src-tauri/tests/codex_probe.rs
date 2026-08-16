@@ -173,8 +173,9 @@ fn query_rpc_error_degrades_to_unavailable() {
 
 // --- Timeout ----------------------------------------------------------------
 
-/// A server that never answers trips the wall-clock timeout: a structured
-/// Timeout, never a hang (and the child is reaped by the caller).
+/// A server that answers the handshake then goes silent on `model/list`
+/// trips the wall-clock timeout: a structured Timeout, never a hang (and the
+/// child is reaped by the caller).
 #[test]
 fn query_timeout_returns_structured_failure() {
     let err = query_fixture("catalog_silent", Duration::from_secs(2))
@@ -229,9 +230,9 @@ fn query_empty_stderr_appends_nothing() {
     }
 }
 
-/// A `model/list` response with the right id but a result of the wrong type
-/// fails the round-trip's response parse (the frozen "response parse:"
-/// prefix), never a hang (issue #540).
+/// A `model/list` response with the right id but an `error.message` of the
+/// wrong type fails the round-trip's response parse (the frozen "response
+/// parse:" prefix), never a hang (issue #540).
 #[test]
 fn query_malformed_response_is_parse_failure() {
     let err = query_fixture("catalog_malformed", Duration::from_secs(5))
