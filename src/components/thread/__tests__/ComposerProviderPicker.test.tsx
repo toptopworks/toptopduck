@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { ComposerProviderPicker } from "../ComposerProviderPicker";
 import {
+  getAdapterCatalogs,
   getSessionModelConfig,
   getSessionRuntime,
   listAdapters,
@@ -15,9 +16,16 @@ import {
   setSessionThoughtLevel,
   type SetModelPersistOutcome,
 } from "../../../api";
+import { sessionKeys } from "../../../session/queryKeys";
 import { TooltipProvider } from "../../ui/tooltip";
 import type { ProviderConfig, ProfileKeyStatus } from "../../../types/provider";
-import type { AdapterEntry, DiscoveredRuntime, SessionRuntimeChoice } from "../../../types/runtime";
+import type {
+  AdapterEntry,
+  AdapterCatalogs,
+  CodexModel,
+  DiscoveredRuntime,
+  SessionRuntimeChoice,
+} from "../../../types/runtime";
 
 // ComposerProviderPicker routes its chrome through react-intl (ADR-0052) +
 // needs a Radix TooltipProvider ancestor for the hover Tooltip + a
@@ -38,6 +46,7 @@ vi.mock("../../../api", async (importOriginal) => {
     getSessionModelConfig: vi.fn(),
     setSessionModel: vi.fn(async () => PERSIST_OK),
     setSessionThoughtLevel: vi.fn(async () => PERSIST_OK),
+    getAdapterCatalogs: vi.fn(async () => ({})),
   };
 });
 
@@ -135,6 +144,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
       thought_level: null,
       cached_discovered: null,
     });
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
   });
 
   it("renders the icon trigger with an accessible name carrying the active provider", () => {
@@ -688,6 +698,7 @@ describe("ComposerProviderPicker model config selectors (ADR-0095)", () => {
       thought_level: null,
       cached_discovered: null,
     });
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
   });
 
   const CATALOG = {
@@ -776,6 +787,7 @@ describe("ComposerProviderPicker model config selectors (ADR-0095)", () => {
       thought_level: null,
       cached_discovered: null,
     });
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
     renderPicker(
       <ComposerProviderPicker
         sessionId="sess-1"
@@ -858,6 +870,7 @@ describe("ComposerProviderPicker honest selector states (issue #529)", () => {
       thought_level: null,
       cached_discovered: null,
     });
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
     vi.mocked(setSessionModel).mockResolvedValue(PERSIST_OK);
     vi.mocked(setSessionThoughtLevel).mockResolvedValue(PERSIST_OK);
   });
@@ -1180,5 +1193,419 @@ describe("ComposerProviderPicker honest selector states (issue #529)", () => {
         screen.queryByText(/Selection not saved/),
       ).not.toBeInTheDocument(),
     );
+  });
+});
+// --- #537: selector directory priority chain + codex per-model linkage ----
+
+describe("ComposerProviderPicker catalog priority chain (issue #537)", () => {
+  beforeEach(() => {
+    // Self-contained seeding (same isolation contract as the sibling
+    // describes: vi.clearAllMocks clears calls, not implementations).
+    vi.clearAllMocks();
+    vi.mocked(listProviderProfiles).mockResolvedValue([]);
+    vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
+    vi.mocked(setSessionRuntime).mockResolvedValue(undefined);
+    vi.mocked(listAdapters).mockResolvedValue([]);
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: null,
+      thought_level: null,
+      cached_discovered: null,
+    });
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
+    vi.mocked(setSessionModel).mockResolvedValue(PERSIST_OK);
+    vi.mocked(setSessionThoughtLevel).mockResolvedValue(PERSIST_OK);
+  });
+
+  const SESSION_CATALOG = {
+    models: ["session-opus", "session-sonnet"],
+    current_model: "session-opus",
+    thought_levels: ["low", "high"],
+    current_thought_level: "low",
+    adapter_id: "claude-code",
+  } satisfies DiscoveredRuntime;
+
+  const PROBE_CATALOG = {
+    models: ["probe-opus", "probe-haiku"],
+    current_model: "probe-opus",
+    thought_levels: ["minimal", "high"],
+    current_thought_level: "high",
+  } satisfies DiscoveredRuntime;
+
+  // A probe-cache document holding an ACP entry for the named adapter.
+  const probeCatalogs = (adapterId: string): AdapterCatalogs => ({
+    [adapterId]: {
+      probe_kind: "acp",
+      outcome: { acp: { discovered: PROBE_CATALOG } },
+      probed_at_millis: 1_700_000_000_000,
+    },
+  });
+
+  async function openExternal(
+    catalogs: AdapterCatalogs,
+    cached_discovered: DiscoveredRuntime | null,
+  ) {
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "claude-code",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([adapter("claude-code")]);
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: null,
+      thought_level: null,
+      cached_discovered,
+    });
+    vi.mocked(getAdapterCatalogs).mockResolvedValue(catalogs);
+    renderPicker(
+      <ComposerProviderPicker
+        sessionId="sess-1"
+        provider={pickerProvider()}
+        onSwitchActive={() => {}}
+        onSwitchModel={() => {}}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Runtime: claude-code/ }),
+    );
+  }
+
+  it("prefers the session catalog over the probe cache when both exist", async () => {
+    await openExternal(probeCatalogs("claude-code"), SESSION_CATALOG);
+    const modelSelect = await screen.findByLabelText("Model");
+    expect(
+      Array.from(modelSelect.querySelectorAll("option")).map(
+        (o) => o.textContent,
+      ),
+    ).toEqual([
+      "CLI default (session-opus)",
+      "session-opus (CLI default)",
+      "session-sonnet",
+    ]);
+    // The probe-fed provenance note must NOT render -- this is the
+    // session's own live discovery.
+    expect(screen.queryByText(/last settings test/)).not.toBeInTheDocument();
+  });
+
+  it("falls back to the probe cache when the session has no catalog", async () => {
+    await openExternal(probeCatalogs("claude-code"), null);
+    const modelSelect = await screen.findByLabelText("Model");
+    expect(
+      Array.from(modelSelect.querySelectorAll("option")).map(
+        (o) => o.textContent,
+      ),
+    ).toEqual([
+      "CLI default (probe-opus)",
+      "probe-opus (CLI default)",
+      "probe-haiku",
+    ]);
+    // Honest provenance: the options are the user's last settings test, and
+    // the session's own list replaces them after the next turn.
+    expect(await screen.findByText(/last settings test/)).toBeInTheDocument();
+  });
+
+  it("renders the empty state with a settings-test entry when no source has a catalog", async () => {
+    await openExternal({}, null);
+    expect(
+      await screen.findByText(/Model options appear after the first turn/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Test the runtime in settings/ }),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
+  });
+
+  it("does not fall back to another adapter's probe-cache entry", async () => {
+    // The cache holds an entry keyed by a DIFFERENT adapter id -- the
+    // fallback must not render that runtime's catalog.
+    await openExternal(probeCatalogs("some-other-adapter"), null);
+    expect(
+      await screen.findByText(/Model options appear after the first turn/),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
+  });
+});
+
+describe("ComposerProviderPicker codex dropdowns (issue #537)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(listProviderProfiles).mockResolvedValue([]);
+    vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
+    vi.mocked(setSessionRuntime).mockResolvedValue(undefined);
+    vi.mocked(listAdapters).mockResolvedValue([]);
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: null,
+      thought_level: null,
+      cached_discovered: null,
+    });
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
+    vi.mocked(setSessionModel).mockResolvedValue(PERSIST_OK);
+    vi.mocked(setSessionThoughtLevel).mockResolvedValue(PERSIST_OK);
+  });
+
+  // Two codex models with different supported effort sets (overlapping:
+  // "low" is shared) -- pins the per-model linkage (a union would offer
+  // every effort on every model).
+  const CODEX_MODELS: CodexModel[] = [
+    {
+      id: "gpt-5-codex",
+      display_name: "GPT-5 Codex",
+      is_default: true,
+      default_reasoning_effort: "medium",
+      supported_reasoning_efforts: ["low", "medium", "high"],
+    },
+    {
+      id: "o3-mini",
+      display_name: "o3-mini",
+      is_default: false,
+      default_reasoning_effort: "minimal",
+      supported_reasoning_efforts: ["minimal", "low"],
+    },
+  ];
+
+  const codexCatalogs = (): AdapterCatalogs => ({
+    codex: {
+      probe_kind: "codex",
+      outcome: { codex: { models: CODEX_MODELS } },
+      probed_at_millis: 1_700_000_000_000,
+    },
+  });
+
+  async function openCodex(config?: {
+    model?: string | null;
+    thought_level?: string | null;
+  }) {
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "codex",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([
+      { ...adapter("codex"), stream_format: "json_event_stream" },
+    ]);
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: config?.model ?? null,
+      thought_level: config?.thought_level ?? null,
+      cached_discovered: null,
+    });
+    vi.mocked(getAdapterCatalogs).mockResolvedValue(codexCatalogs());
+    const rendered = renderPicker(
+      <ComposerProviderPicker
+        sessionId="sess-1"
+        provider={pickerProvider()}
+        onSwitchActive={() => {}}
+        onSwitchModel={() => {}}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Runtime: codex/ }),
+    );
+    return rendered;
+  }
+
+  it("renders real dropdowns from the probe cache per-model catalog", async () => {
+    await openCodex();
+    const modelSelect = await screen.findByLabelText("Model");
+    // The model rows come from the cached catalog; the CLI-default row is
+    // annotated with the catalog flagged default.
+    expect(
+      Array.from(modelSelect.querySelectorAll("option")).map((o) => o.value),
+    ).toEqual(["", "gpt-5-codex", "o3-mini"]);
+    // With no model picked the level surface is a hint, not a dropdown
+    // (there is no honest effort list to offer).
+    expect(
+      await screen.findByText(/Pick a model to choose a thinking level/),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Thinking")).not.toBeInTheDocument();
+  });
+
+  it("shows the selected model efforts in the CLI declared order", async () => {
+    await openCodex({ model: "gpt-5-codex" });
+    const thinkSelect = await screen.findByLabelText("Thinking");
+    expect(
+      Array.from(thinkSelect.querySelectorAll("option")).map((o) => o.value),
+    ).toEqual(["", "low", "medium", "high"]);
+  });
+
+  it("refreshes the effort list when the model changes", async () => {
+    await openCodex({ model: "gpt-5-codex" });
+    // Switch to o3-mini -- its supported set differs from gpt-5-codex's.
+    fireEvent.change(await screen.findByLabelText("Model"), {
+      target: { value: "o3-mini" },
+    });
+    await waitFor(() =>
+      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "o3-mini"),
+    );
+    const thinkSelect = await screen.findByLabelText("Thinking");
+    expect(
+      Array.from(thinkSelect.querySelectorAll("option")).map((o) => o.value),
+    ).toEqual(["", "minimal", "low"]);
+  });
+
+  it("clears a held effort that the newly picked model does not support", async () => {
+    // The session holds "high" (supported by gpt-5-codex only); switching
+    // to o3-mini must clear it via the existing set IPC in the same
+    // gesture.
+    await openCodex({ model: "gpt-5-codex", thought_level: "high" });
+    fireEvent.change(await screen.findByLabelText("Model"), {
+      target: { value: "o3-mini" },
+    });
+    await waitFor(() =>
+      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "o3-mini"),
+    );
+    await waitFor(() =>
+      expect(setSessionThoughtLevel).toHaveBeenCalledWith("sess-1", null),
+    );
+  });
+
+  it("keeps the effort when the model write itself rejects", async () => {
+    // A rejected model write must not clear the effort -- it stays against
+    // the still-held model (the server posture wins).
+    vi.mocked(setSessionModel).mockRejectedValueOnce(new Error("boom"));
+    await openCodex({ model: "gpt-5-codex", thought_level: "high" });
+    fireEvent.change(await screen.findByLabelText("Model"), {
+      target: { value: "o3-mini" },
+    });
+    await waitFor(() =>
+      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "o3-mini"),
+    );
+    expect(
+      await screen.findByText(/Could not apply the selection/),
+    ).toBeInTheDocument();
+    expect(setSessionThoughtLevel).not.toHaveBeenCalled();
+  });
+
+  it("clears the effort when the model selection is cleared", async () => {
+    await openCodex({ model: "gpt-5-codex", thought_level: "high" });
+    fireEvent.change(await screen.findByLabelText("Model"), {
+      target: { value: "" },
+    });
+    await waitFor(() =>
+      expect(setSessionModel).toHaveBeenCalledWith("sess-1", null),
+    );
+    await waitFor(() =>
+      expect(setSessionThoughtLevel).toHaveBeenCalledWith("sess-1", null),
+    );
+    // The level surface collapses back to the pick-a-model hint.
+    expect(
+      await screen.findByText(/Pick a model to choose a thinking level/),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the set failure when the chained effort clear itself rejects", async () => {
+    // The distinct second-write failure mode: the model write is GRANTED
+    // (the session now runs o3-mini) but the chained effort clear rejects.
+    // The failure must surface (the held "high" is now unsupported) and the
+    // refetch restores the server truth: new model, still-held effort.
+    vi.mocked(setSessionThoughtLevel).mockRejectedValueOnce(
+      new Error("clear boom"),
+    );
+    await openCodex({ model: "gpt-5-codex", thought_level: "high" });
+    fireEvent.change(await screen.findByLabelText("Model"), {
+      target: { value: "o3-mini" },
+    });
+    await waitFor(() =>
+      expect(setSessionThoughtLevel).toHaveBeenCalledWith("sess-1", null),
+    );
+    expect(
+      await screen.findByText(/Could not apply the selection/),
+    ).toBeInTheDocument();
+    // Server truth after the refetch: the new model landed, the effort
+    // write never did.
+    expect(getSessionModelConfig).toHaveBeenLastCalledWith("sess-1");
+  });
+
+  it("keeps the model patch when the chained clear patches the cache", async () => {
+    // The functional setQueryData hardening: the chained effort clear runs
+    // in the same gesture as the model write, and both patch the cache
+    // functionally -- a snapshot form would have the clear's closure
+    // restore the OLD model id. Pin the cache directly.
+    const { queryClient } = await openCodex({
+      model: "gpt-5-codex",
+      thought_level: "high",
+    });
+    fireEvent.change(await screen.findByLabelText("Model"), {
+      target: { value: "o3-mini" },
+    });
+    await waitFor(() =>
+      expect(setSessionThoughtLevel).toHaveBeenCalledWith("sess-1", null),
+    );
+    // The model patch survives the chained clear's cache patch.
+    expect(
+      queryClient.getQueryData(sessionKeys.modelConfig("sess-1")),
+    ).toMatchObject({ model: "o3-mini", thought_level: null });
+  });
+
+  it("keeps a supported effort when switching to a model that also supports it", async () => {
+    // "low" sits in BOTH models sets -- switching models must NOT clear it.
+    await openCodex({ model: "gpt-5-codex", thought_level: "low" });
+    fireEvent.change(await screen.findByLabelText("Model"), {
+      target: { value: "o3-mini" },
+    });
+    await waitFor(() =>
+      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "o3-mini"),
+    );
+    // The select re-renders on the o3-mini effort list still holding "low".
+    await waitFor(() => {
+      expect(screen.getByLabelText("Thinking")).toHaveValue("low");
+    });
+    expect(setSessionThoughtLevel).not.toHaveBeenCalled();
+  });
+
+  it("keeps the read-only CLI-default labels when no cache entry exists", async () => {
+    // Inline seeding (openCodex would re-seed the catalogs mock with a
+    // codex entry; this state needs it EMPTY).
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "codex",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([
+      { ...adapter("codex"), stream_format: "json_event_stream" },
+    ]);
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
+    renderPicker(
+      <ComposerProviderPicker
+        sessionId="sess-1"
+        provider={pickerProvider()}
+        onSwitchActive={() => {}}
+        onSwitchModel={() => {}}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Runtime: codex/ }),
+    );
+    // Two CLI-default labels render (model + thinking), no dropdowns.
+    expect(await screen.findAllByText("CLI default")).toHaveLength(2);
+    expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
+  });
+
+  it("routes the codex empty-state entry to the settings local-cli tab", async () => {
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
+    const onOpenSettings = vi.fn();
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "codex",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([
+      { ...adapter("codex"), stream_format: "json_event_stream" },
+    ]);
+    renderPicker(
+      <ComposerProviderPicker
+        sessionId="sess-1"
+        provider={pickerProvider()}
+        onSwitchActive={() => {}}
+        onSwitchModel={() => {}}
+        onOpenSettings={onOpenSettings}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Runtime: codex/ }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /Test the runtime in settings/,
+      }),
+    );
+    expect(onOpenSettings).toHaveBeenCalledWith("local-cli");
   });
 });
