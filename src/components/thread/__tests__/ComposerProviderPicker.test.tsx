@@ -16,6 +16,7 @@ import {
   setSessionThoughtLevel,
   type SetModelPersistOutcome,
 } from "../../../api";
+import { sessionKeys } from "../../../session/queryKeys";
 import { TooltipProvider } from "../../ui/tooltip";
 import type { ProviderConfig, ProfileKeyStatus } from "../../../types/provider";
 import type {
@@ -1341,8 +1342,9 @@ describe("ComposerProviderPicker codex dropdowns (issue #537)", () => {
     vi.mocked(setSessionThoughtLevel).mockResolvedValue(PERSIST_OK);
   });
 
-  // Two codex models with DISJOINT supported effort sets -- pins the
-  // per-model linkage (a union would offer every effort on every model).
+  // Two codex models with different supported effort sets (overlapping:
+  // "low" is shared) -- pins the per-model linkage (a union would offer
+  // every effort on every model).
   const CODEX_MODELS: CodexModel[] = [
     {
       id: "gpt-5-codex",
@@ -1385,7 +1387,7 @@ describe("ComposerProviderPicker codex dropdowns (issue #537)", () => {
       cached_discovered: null,
     });
     vi.mocked(getAdapterCatalogs).mockResolvedValue(codexCatalogs());
-    renderPicker(
+    const rendered = renderPicker(
       <ComposerProviderPicker
         sessionId="sess-1"
         provider={pickerProvider()}
@@ -1397,6 +1399,7 @@ describe("ComposerProviderPicker codex dropdowns (issue #537)", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: /Runtime: codex/ }),
     );
+    return rendered;
   }
 
   it("renders real dropdowns from the probe cache per-model catalog", async () => {
@@ -1425,7 +1428,7 @@ describe("ComposerProviderPicker codex dropdowns (issue #537)", () => {
 
   it("refreshes the effort list when the model changes", async () => {
     await openCodex({ model: "gpt-5-codex" });
-    // Switch to o3-mini -- its supported set is disjoint.
+    // Switch to o3-mini -- its supported set differs from gpt-5-codex's.
     fireEvent.change(await screen.findByLabelText("Model"), {
       target: { value: "o3-mini" },
     });
@@ -1486,6 +1489,50 @@ describe("ComposerProviderPicker codex dropdowns (issue #537)", () => {
     expect(
       await screen.findByText(/Pick a model to choose a thinking level/),
     ).toBeInTheDocument();
+  });
+
+  it("shows the set failure when the chained effort clear itself rejects", async () => {
+    // The distinct second-write failure mode: the model write is GRANTED
+    // (the session now runs o3-mini) but the chained effort clear rejects.
+    // The failure must surface (the held "high" is now unsupported) and the
+    // refetch restores the server truth: new model, still-held effort.
+    vi.mocked(setSessionThoughtLevel).mockRejectedValueOnce(
+      new Error("clear boom"),
+    );
+    await openCodex({ model: "gpt-5-codex", thought_level: "high" });
+    fireEvent.change(await screen.findByLabelText("Model"), {
+      target: { value: "o3-mini" },
+    });
+    await waitFor(() =>
+      expect(setSessionThoughtLevel).toHaveBeenCalledWith("sess-1", null),
+    );
+    expect(
+      await screen.findByText(/Could not apply the selection/),
+    ).toBeInTheDocument();
+    // Server truth after the refetch: the new model landed, the effort
+    // write never did.
+    expect(getSessionModelConfig).toHaveBeenLastCalledWith("sess-1");
+  });
+
+  it("keeps the model patch when the chained clear patches the cache", async () => {
+    // The functional setQueryData hardening: the chained effort clear runs
+    // in the same gesture as the model write, and both patch the cache
+    // functionally -- a snapshot form would have the clear's closure
+    // restore the OLD model id. Pin the cache directly.
+    const { queryClient } = await openCodex({
+      model: "gpt-5-codex",
+      thought_level: "high",
+    });
+    fireEvent.change(await screen.findByLabelText("Model"), {
+      target: { value: "o3-mini" },
+    });
+    await waitFor(() =>
+      expect(setSessionThoughtLevel).toHaveBeenCalledWith("sess-1", null),
+    );
+    // The model patch survives the chained clear's cache patch.
+    expect(
+      queryClient.getQueryData(sessionKeys.modelConfig("sess-1")),
+    ).toMatchObject({ model: "o3-mini", thought_level: null });
   });
 
   it("keeps a supported effort when switching to a model that also supports it", async () => {

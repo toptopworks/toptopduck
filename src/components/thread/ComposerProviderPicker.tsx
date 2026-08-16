@@ -769,15 +769,17 @@ export function ComposerProviderPicker({
                 </button>
               );
             })}
-            {/* --- Model + thought-level selectors (ADR-0095, issue #527) ----
+            {/* --- Model + thought-level selectors (ADR-0095/0096, #527/#537) -
                 Rendered only when an external adapter is the ACTIVE runtime
                 (a selection is meaningless on the built-in profile picker).
-                ACP adapter + discovery cache present: dropdowns offering the
-                discovered ids (the current selection from the session state;
-                a null selection shows the CLI's current/default). Before the
-                first turn's discovery (no cache): a hint line instead of an
-                empty dropdown. The JsonEventStream adapter (codex) has no
-                dynamic discovery: read-only CLI Default labels. */}
+                The directory follows the priority chain (ADR-0096 D6): an ACP
+                adapter takes the session's cached discovery, else the
+                probe-cache entry for this adapter (dropdowns either way; no
+                source at all renders the pending-discovery hint plus the
+                settings-test entry). The JsonEventStream adapter (codex) has
+                no turn-path discovery: the probe-cache entry feeds real
+                per-model dropdowns, and without it the surface stays the
+                read-only CLI Default labels. */}
             {isExternal && modelConfigFault != null && (
               <p className="text-destructive px-2 pb-1 text-xs">
                 <FormattedMessage
