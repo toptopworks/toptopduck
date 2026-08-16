@@ -121,6 +121,28 @@ fn query_follows_pagination_cursor() {
     assert_eq!(models[1].id, "gpt-5.1-codex-mini");
 }
 
+// --- Handshake ---------------------------------------------------------------
+
+/// An `initialize` refusal (the not-logged-in shape) degrades to `Unavailable`
+/// -- same ADR-0096 D2 semantics as a `model/list` error: the process being
+/// alive is diagnostic signal, so a refused handshake is a degraded success,
+/// not a failure. Without the handshake round-trip this path cannot exist at
+/// all (the server would refuse every request).
+#[test]
+fn query_init_error_degrades_to_unavailable() {
+    let ok = query_fixture("catalog_init_error", Duration::from_secs(5))
+        .expect("a refused handshake degrades, it does not fail");
+    match ok {
+        CodexCatalogOutcome::Unavailable { detail } => {
+            assert!(
+                detail.contains("auth required"),
+                "the degraded detail names the handshake error: {detail}"
+            );
+        }
+        other => panic!("expected Unavailable, got {other:?}"),
+    }
+}
+
 // --- Degradation ------------------------------------------------------------
 
 /// A `model/list` JSON-RPC error (old codex without the RPC / not logged in)
@@ -151,8 +173,9 @@ fn query_rpc_error_degrades_to_unavailable() {
 
 // --- Timeout ----------------------------------------------------------------
 
-/// A server that never answers trips the wall-clock timeout: a structured
-/// Timeout, never a hang (and the child is reaped by the caller).
+/// A server that answers the handshake then goes silent on `model/list`
+/// trips the wall-clock timeout: a structured Timeout, never a hang (and the
+/// child is reaped by the caller).
 #[test]
 fn query_timeout_returns_structured_failure() {
     let err = query_fixture("catalog_silent", Duration::from_secs(2))
@@ -207,9 +230,9 @@ fn query_empty_stderr_appends_nothing() {
     }
 }
 
-/// A `model/list` response with the right id but a result of the wrong type
-/// fails the round-trip's response parse (the frozen "response parse:"
-/// prefix), never a hang (issue #540).
+/// A `model/list` response with the right id but an `error.message` of the
+/// wrong type fails the round-trip's response parse (the frozen "response
+/// parse:" prefix), never a hang (issue #540).
 #[test]
 fn query_malformed_response_is_parse_failure() {
     let err = query_fixture("catalog_malformed", Duration::from_secs(5))
