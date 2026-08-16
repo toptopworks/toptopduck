@@ -658,9 +658,9 @@ fn acp_turn_injects_model_and_thought_level() {
 
 /// A CLI that rejects the config injection (RPC error on
 /// `session/set_config_option`) fails the turn honestly as a Transient
-/// naming the config id -- the acknowledged posture, now behaviorally pinned
-/// (the fixture acks only its catalog-declared ids, so an off-catalog id
-/// lands here too).
+/// naming the config id and the rejected value -- the acknowledged posture,
+/// now behaviorally pinned (the fixture acks only its catalog-declared ids,
+/// so an off-catalog id lands here too).
 #[test]
 fn acp_turn_set_config_option_rejection_fails_the_turn() {
     let cancel = Arc::new(CancelToken::new());
@@ -682,8 +682,8 @@ fn acp_turn_set_config_option_rejection_fails_the_turn() {
                 "the failure must name the injection call: {msg}"
             );
             assert!(
-                msg.contains("model"),
-                "the failure must name the config id: {msg}"
+                msg.contains("`model` = `fake-sonnet`"),
+                "the failure must name the config id and the rejected value in order: {msg}"
             );
         }
         other => panic!("expected Transient, got {other:?}"),

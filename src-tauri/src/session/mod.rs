@@ -1358,8 +1358,8 @@ impl Session {
             cwd: self.temp_path.to_string_lossy().to_string(),
             mcp_servers: vec![mcp_server],
             // ADR-0095: the session-level model / thought-level choices ride
-            // the turn input (injected per-format inside the engine: ACP wire
-            // params / setConfigOption, JsonEventStream argv). Read from the
+            // the turn input (injected per-format inside the engine: ACP
+            // set_config_option requests, JsonEventStream argv). Read from the
             // SAME `runtime_model_config` the persister layers onto the recipe
             // header -- one storage, no mirror to drift (issue #530). `None`
             // leaves the CLI's own defaults in place.
