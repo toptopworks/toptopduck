@@ -8,6 +8,13 @@
 //! its path via `env!("CARGO_BIN_EXE_codex-app-server-fake")` and pick the
 //! scripted behavior via the `CODEX_APP_SERVER_SCENARIO` env var.
 //!
+//! Two server rules are enforced unconditionally (measured against codex-cli
+//! 0.147.0): every request must carry a `params` field (an object even when
+//! the method takes no arguments), and nothing is served before an
+//! `initialize` handshake. These pin the wire contract the real server
+//! enforces, so a request-shape regression fails CI instead of degrading
+//! against the real CLI.
+//!
 //! Pure serde_json -- no lib import -- so the fixture stays self-contained.
 
 use std::io::{BufRead, BufReader, Write};
@@ -107,6 +114,7 @@ const SCENARIOS: &[&str] = &[
     "catalog_cursor_loop",
     "catalog_dup_ids",
     "catalog_error_chatty",
+    "catalog_init_error",
 ];
 
 fn main() {
@@ -129,6 +137,9 @@ fn main() {
     let mut reader = BufReader::new(stdin.lock());
     let mut out = std::io::stdout();
     let mut line = String::new();
+    // Server-side protocol state: set by a completed `initialize` handshake.
+    // Everything before it is refused (the real 0.147.0 server's rule).
+    let mut initialized = false;
     loop {
         line.clear();
         match reader.read_line(&mut line) {
@@ -146,6 +157,60 @@ fn main() {
         };
         let method = v.get("method").and_then(serde_json::Value::as_str);
         let id = v.get("id").cloned().unwrap_or(serde_json::Value::Null);
+
+        // Rule 1 (every request): `params` must be present -- an object even
+        // for no-argument methods. The real server rejects its absence.
+        if method.is_some() && v.get("params").is_none() {
+            respond(
+                &mut out,
+                &serde_json::json!({
+                    "id": id,
+                    "error": { "code": -32600, "message": "Invalid request: missing field `params`" }
+                }),
+            );
+            let _ = out.flush();
+            continue;
+        }
+
+        // The handshake (rule 2): answers with a minimal result (the probe
+        // reads none of its fields). `catalog_init_error` degrades instead --
+        // the probe must surface the refusal, not fold an empty catalog.
+        match (scenario.as_str(), method) {
+            ("catalog_init_error", Some("initialize")) => {
+                respond(
+                    &mut out,
+                    &serde_json::json!({
+                        "id": id,
+                        "error": { "code": -32000, "message": "auth required: run `codex login`" }
+                    }),
+                );
+            }
+            (_, Some("initialize")) => {
+                initialized = true;
+                respond(
+                    &mut out,
+                    &json_result(
+                        id.clone(),
+                        serde_json::json!({ "userAgent": "codex-fake/0.0.0", "codexHome": "/tmp" }),
+                    ),
+                );
+            }
+            _ => {}
+        }
+        // Rule 2 (gated): nothing is served before `initialize` completes.
+        if !initialized {
+            if method.is_some() && v.get("id").is_some() {
+                respond(
+                    &mut out,
+                    &serde_json::json!({
+                        "id": id,
+                        "error": { "code": -32600, "message": "Not initialized" }
+                    }),
+                );
+            }
+            let _ = out.flush();
+            continue;
+        }
 
         match (scenario.as_str(), method) {
             // A CLI that answers model/list with a JSON-RPC error (old codex

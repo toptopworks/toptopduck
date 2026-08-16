@@ -121,6 +121,28 @@ fn query_follows_pagination_cursor() {
     assert_eq!(models[1].id, "gpt-5.1-codex-mini");
 }
 
+// --- Handshake ---------------------------------------------------------------
+
+/// An `initialize` refusal (the not-logged-in shape) degrades to `Unavailable`
+/// -- same ADR-0096 D2 semantics as a `model/list` error: the process being
+/// alive is diagnostic signal, so a refused handshake is a degraded success,
+/// not a failure. Without the handshake round-trip this path cannot exist at
+/// all (the server would refuse every request).
+#[test]
+fn query_init_error_degrades_to_unavailable() {
+    let ok = query_fixture("catalog_init_error", Duration::from_secs(5))
+        .expect("a refused handshake degrades, it does not fail");
+    match ok {
+        CodexCatalogOutcome::Unavailable { detail } => {
+            assert!(
+                detail.contains("auth required"),
+                "the degraded detail names the handshake error: {detail}"
+            );
+        }
+        other => panic!("expected Unavailable, got {other:?}"),
+    }
+}
+
 // --- Degradation ------------------------------------------------------------
 
 /// A `model/list` JSON-RPC error (old codex without the RPC / not logged in)

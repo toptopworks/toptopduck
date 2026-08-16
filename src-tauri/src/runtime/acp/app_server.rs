@@ -9,15 +9,15 @@
 //!
 //! The app-server wire is JSON-RPC-shaped but deliberately NOT JSON-RPC 2.0:
 //! it neither sends nor expects the `jsonrpc` field (codex's `rpc.rs`
-//! documents this). A request is `{ id, method, params? }`; a response is
+//! documents this). A request is `{ id, method, params }`; a response is
 //! `{ id, result }` or `{ id, error: { code, message, data? } }`, one NDJSON
 //! line each.
 //!
-//! The app-server protocol v2 has NO `initialize` handshake step -- the client
-//! sends `model/list` directly once the process starts (the ADR-0096 open
-//! initialize-shape question resolves to "none": the v2 protocol is
-//! request-driven with no client-capabilities preamble). The probe's only
-//! round-trip is the catalog query itself.
+//! Two request rules, measured against codex-cli 0.147.0: the server serves
+//! nothing before an `initialize` handshake (a bare `model/list` is refused
+//! with `Not initialized`), and it rejects any request whose `params` field
+//! is absent ("Invalid request: missing field `params`"). The probe's
+//! round-trips are the handshake + the catalog query itself.
 //!
 //! Degraded-vs-failure (ADR-0096 D2): the process starting is itself a valid
 //! diagnostic result. A `model/list` RPC error (old codex without the RPC /
@@ -38,13 +38,14 @@ use crate::runtime::acp::probe::{
 // Wire types (the app-server carries no `jsonrpc` field)
 // ---------------------------------------------------------------------------
 
-/// A `model/list` request (serialized without the `jsonrpc` marker).
+/// A request envelope (serialized without the `jsonrpc` marker). `params` is
+/// REQUIRED on every request (the server rejects its absence -- an empty
+/// object is the no-argument shape, never a missing field).
 #[derive(serde::Serialize)]
 struct AppServerRequest {
     id: u64,
     method: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    params: Option<Value>,
+    params: Value,
 }
 
 /// A response envelope. Exactly one of `result` / `error` is set; both are
@@ -106,11 +107,14 @@ struct ReasoningEffortWire {
 
 /// The deadline-bounded blocking `model/list` query on an already-spawned
 /// child's stdio (the app-server counterpart of
-/// [`super::probe::handshake_with`]). Follows `nextCursor` until the last
-/// page, folding each page into the catalog; a wedged cursor loop is bounded
-/// by the wall-clock deadline (surfaces as [`ProbeError::Timeout`], never a
-/// hang). Process management stays with the caller, who must
-/// [`super::probe::ChildHandle::kill_and_wait`] on every exit path.
+/// [`super::probe::handshake_with`]). An `initialize` handshake precedes the
+/// query (the server refuses everything before it); the client-info block
+/// reuses the ACP channel's [`super::wire::Implementation::client()`]. Follows
+/// `nextCursor` until the last page, folding each page into the catalog; a
+/// wedged cursor loop is bounded by the wall-clock deadline (surfaces as
+/// [`ProbeError::Timeout`], never a hang). Process management stays with the
+/// caller, who must [`super::probe::ChildHandle::kill_and_wait`] on every
+/// exit path.
 pub fn query_catalog(
     stdin: ChildStdin,
     stdout: ChildStdout,
@@ -120,10 +124,25 @@ pub fn query_catalog(
     let mut io = AppServerIo::new(stdin, stdout);
     let deadline = Instant::now() + timeout;
 
+    let init_params = serde_json::json!({
+        "clientInfo": super::wire::Implementation::client(),
+    });
+    let resp = io
+        .request_roundtrip("initialize", init_params, deadline)
+        .map_err(|e| attach_stderr_tail(e, &stderr_tail))?;
+    // The handshake result itself is not read (userAgent / codexHome are
+    // display-only); only an error envelope degrades.
+    if resp.result.is_none() {
+        return Ok(degraded(error_detail(&resp), &stderr_tail));
+    }
+
     let mut catalog = Catalog::default();
     let mut cursor: Option<String> = None;
     loop {
-        let params = cursor.as_ref().map(|c| serde_json::json!({ "cursor": c }));
+        let params = match &cursor {
+            Some(c) => serde_json::json!({ "cursor": c }),
+            None => serde_json::json!({}),
+        };
         let resp = io
             .request_roundtrip("model/list", params, deadline)
             .map_err(|e| attach_stderr_tail(e, &stderr_tail))?;
@@ -169,6 +188,17 @@ impl Catalog {
     }
 }
 
+/// Extract the error detail from a response that carries no `result`: the
+/// error message when present, an explicit fallback otherwise.
+fn error_detail(resp: &AppServerResponse) -> String {
+    resp.error
+        .as_ref()
+        .map(|e| e.message.as_str())
+        .filter(|m| !m.is_empty())
+        .unwrap_or("empty response")
+        .to_string()
+}
+
 /// Fold one `model/list` response into its catalog page, degrading to
 /// `Unavailable` on an RPC error / empty response / unparseable result
 /// (ADR-0096 D2 -- the process is alive, the catalog just is not available).
@@ -182,12 +212,7 @@ fn fold_page(
     stderr_tail: &StderrTail,
 ) -> Result<ModelListResponse, CodexCatalogOutcome> {
     let Some(result) = resp.result else {
-        let detail = resp
-            .error
-            .map(|e| e.message)
-            .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| "empty response".to_string());
-        return Err(degraded(detail, stderr_tail));
+        return Err(degraded(error_detail(&resp), stderr_tail));
     };
     // A result that is not a catalog (protocol skew) degrades the same way --
     // never a false success.
@@ -248,7 +273,7 @@ impl AppServerIo {
     fn request_roundtrip(
         &mut self,
         method: &'static str,
-        params: Option<Value>,
+        params: Value,
         deadline: Instant,
     ) -> Result<AppServerResponse, ProbeError> {
         let id = self.next_id;
