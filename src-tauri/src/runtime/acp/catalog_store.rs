@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::runtime::acp::adapter::DiscoveredRuntime;
-use crate::runtime::acp::probe::{CodexCatalogOutcome, CodexModel};
+use crate::runtime::acp::probe::{CatalogModel, ModelCatalogOutcome};
 
 /// The file name under the OS app-data directory.
 pub const CATALOGS_FILE_NAME: &str = "adapter-catalogs.json";
@@ -41,11 +41,11 @@ const TMP_SUFFIX: &str = ".tmp";
 #[serde(rename_all = "snake_case")]
 pub enum ProbeKind {
     Acp,
-    Codex,
+    JsonEventStream,
 }
 
 /// The per-adapter outcome the cache stores: the probe result that produced
-/// it, tagged by channel. The codex degraded state (`Unavailable`) is never
+/// it, tagged by channel. The JsonEventStream degraded state (`Unavailable`) is never
 /// cached -- the entry then keeps the last usable catalog or stays absent,
 /// so the cache always holds a usable snapshot (ADR-0096 D5: only a
 /// successful catalog is a cache point).
@@ -53,20 +53,23 @@ pub enum ProbeKind {
 #[serde(rename_all = "snake_case")]
 pub enum CachedOutcome {
     Acp { discovered: DiscoveredRuntime },
-    Codex { models: Vec<CodexModel> },
+    JsonEventStream { models: Vec<CatalogModel> },
 }
 
 impl AdapterCatalogEntry {
     /// Whether the tagged channel matches the outcome payload's variant.
     /// serde parses each field independently, so a hand-edited file can pair
-    /// `probe_kind: "acp"` with a codex outcome; the load path drops such an
+    /// `probe_kind: "acp"` with a JsonEventStream outcome; the load path drops such an
     /// entry on the same per-entry honest-degrade footing as an unparsable
     /// one (the file is a human-inspectable artifact).
     fn is_consistent(&self) -> bool {
         matches!(
             (self.probe_kind, &self.outcome),
             (ProbeKind::Acp, CachedOutcome::Acp { .. })
-                | (ProbeKind::Codex, CachedOutcome::Codex { .. })
+                | (
+                    ProbeKind::JsonEventStream,
+                    CachedOutcome::JsonEventStream { .. }
+                )
         )
     }
 }
@@ -86,16 +89,16 @@ impl CachedOutcome {
                     discovered: discovered.clone(),
                 },
             )),
-            ProbeOk::Codex {
-                outcome: CodexCatalogOutcome::Available { models },
+            ProbeOk::JsonEventStream {
+                outcome: ModelCatalogOutcome::Available { models },
             } => Some((
-                ProbeKind::Codex,
-                Self::Codex {
+                ProbeKind::JsonEventStream,
+                Self::JsonEventStream {
                     models: models.clone(),
                 },
             )),
-            ProbeOk::Codex {
-                outcome: CodexCatalogOutcome::Unavailable { .. },
+            ProbeOk::JsonEventStream {
+                outcome: ModelCatalogOutcome::Unavailable { .. },
             } => None,
         }
     }
@@ -298,9 +301,9 @@ mod tests {
 
     fn codex_entry(at: i64) -> AdapterCatalogEntry {
         AdapterCatalogEntry {
-            probe_kind: ProbeKind::Codex,
-            outcome: CachedOutcome::Codex {
-                models: vec![CodexModel {
+            probe_kind: ProbeKind::JsonEventStream,
+            outcome: CachedOutcome::JsonEventStream {
+                models: vec![CatalogModel {
                     id: "gpt-5.2-codex".to_string(),
                     display_name: "GPT-5.2 Codex".to_string(),
                     is_default: true,
@@ -409,9 +412,9 @@ mod tests {
 
     #[test]
     fn unavailable_codex_outcome_is_not_cacheable() {
-        use crate::runtime::acp::probe::{CodexCatalogOutcome, ProbeOk};
-        let degraded = ProbeOk::Codex {
-            outcome: CodexCatalogOutcome::Unavailable {
+        use crate::runtime::acp::probe::{ModelCatalogOutcome, ProbeOk};
+        let degraded = ProbeOk::JsonEventStream {
+            outcome: ModelCatalogOutcome::Unavailable {
                 detail: "not logged in".to_string(),
             },
         };
@@ -430,24 +433,24 @@ mod tests {
     }
 
     // The branch a real successful codex probe takes: an available catalog
-    // caches as the codex-tagged outcome (the integration fixtures hand-build
+    // caches as the JsonEventStream-tagged outcome (the integration fixtures hand-build
     // entries, so this is the only pin on the clone + tag).
     #[test]
     fn from_probe_caches_an_available_codex_catalog() {
-        use crate::runtime::acp::probe::{CodexCatalogOutcome, ProbeOk};
+        use crate::runtime::acp::probe::{ModelCatalogOutcome, ProbeOk};
         let models = match codex_entry(0).outcome {
-            CachedOutcome::Codex { models } => models,
-            other => panic!("fixture is not a codex outcome: {other:?}"),
+            CachedOutcome::JsonEventStream { models } => models,
+            other => panic!("fixture is not a JsonEventStream outcome: {other:?}"),
         };
-        let probe = ProbeOk::Codex {
-            outcome: CodexCatalogOutcome::Available { models },
+        let probe = ProbeOk::JsonEventStream {
+            outcome: ModelCatalogOutcome::Available { models },
         };
-        let (kind, outcome) = CachedOutcome::from_probe(&probe).expect("available codex caches");
-        assert_eq!(kind, ProbeKind::Codex);
+        let (kind, outcome) = CachedOutcome::from_probe(&probe).expect("available catalog caches");
+        assert_eq!(kind, ProbeKind::JsonEventStream);
         assert_eq!(outcome, codex_entry(0).outcome);
     }
 
-    // A hand-edited file can pair an acp tag with a codex payload (serde
+    // A hand-edited file can pair an acp tag with a JsonEventStream payload (serde
     // parses the fields independently); the load drops the entry instead of
     // surfacing an inconsistent one to the consumer's per-format dispatch.
     #[test]
@@ -458,7 +461,7 @@ mod tests {
         let mut doc: serde_json::Value = serde_json::from_str(&raw).expect("valid json doc");
         doc["codex"] = serde_json::json!({
             "probe_kind": "acp",
-            "outcome": { "codex": { "models": [] } },
+            "outcome": { "json_event_stream": { "models": [] } },
             "probed_at_millis": 2_000
         });
         std::fs::write(store.path(), serde_json::to_string(&doc).unwrap()).expect("write");

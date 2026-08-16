@@ -22,7 +22,7 @@ import type { ProviderConfig, ProfileKeyStatus } from "../../../types/provider";
 import type {
   AdapterEntry,
   AdapterCatalogs,
-  CodexModel,
+  CatalogModel,
   DiscoveredRuntime,
   SessionRuntimeChoice,
 } from "../../../types/runtime";
@@ -1345,7 +1345,7 @@ describe("ComposerProviderPicker codex dropdowns (issue #537)", () => {
   // Two codex models with different supported effort sets (overlapping:
   // "low" is shared) -- pins the per-model linkage (a union would offer
   // every effort on every model).
-  const CODEX_MODELS: CodexModel[] = [
+  const CODEX_MODELS: CatalogModel[] = [
     {
       id: "gpt-5-codex",
       display_name: "GPT-5 Codex",
@@ -1364,8 +1364,8 @@ describe("ComposerProviderPicker codex dropdowns (issue #537)", () => {
 
   const codexCatalogs = (): AdapterCatalogs => ({
     codex: {
-      probe_kind: "codex",
-      outcome: { codex: { models: CODEX_MODELS } },
+      probe_kind: "json_event_stream",
+      outcome: { json_event_stream: { models: CODEX_MODELS } },
       probed_at_millis: 1_700_000_000_000,
     },
   });

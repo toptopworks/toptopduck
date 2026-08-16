@@ -1310,8 +1310,8 @@ where
 
 /// ProbeOk (ADR-0096, issues #534/#535) crosses IPC adjacently-tagged
 /// (`tag="kind", content="data"`, `rename_all="snake_case"`): the ACP variant
-/// carries the flat `DiscoveredRuntime` under `data.discovered`, the codex
-/// variant carries the per-model `CodexCatalogOutcome` under `data.outcome`
+/// carries the flat `DiscoveredRuntime` under `data.discovered`, the
+/// JsonEventStream variant carries the per-model `ModelCatalogOutcome` under `data.outcome`
 /// (whose own inner tag is `status`). `src/types/runtime.ts` hand-mirrors
 /// these shapes; pin them so a serde attribute change fails here before the
 /// hand-mirror can drift (the ProbeError side is pinned by the frontend's
@@ -1319,7 +1319,7 @@ where
 #[test]
 fn probe_ok_wire_shape() {
     use toptopduck_lib::runtime::acp::adapter::DiscoveredRuntime;
-    use toptopduck_lib::runtime::acp::probe::{CodexCatalogOutcome, CodexModel, ProbeOk};
+    use toptopduck_lib::runtime::acp::probe::{CatalogModel, ModelCatalogOutcome, ProbeOk};
     assert_wire_out(
         &ProbeOk::Acp {
             discovered: DiscoveredRuntime {
@@ -1335,9 +1335,9 @@ fn probe_ok_wire_shape() {
         r#"{"kind":"acp","data":{"discovered":{"models":["fake-opus"],"current_model":"fake-opus","thought_levels":["low","high"],"current_thought_level":null,"model_config_id":"model","adapter_id":"claude-code"}}}"#,
     );
     assert_wire_out(
-        &ProbeOk::Codex {
-            outcome: CodexCatalogOutcome::Available {
-                models: vec![CodexModel {
+        &ProbeOk::JsonEventStream {
+            outcome: ModelCatalogOutcome::Available {
+                models: vec![CatalogModel {
                     id: "gpt-5.2-codex".into(),
                     display_name: "GPT-5.2 Codex".into(),
                     is_default: true,
@@ -1346,15 +1346,15 @@ fn probe_ok_wire_shape() {
                 }],
             },
         },
-        r#"{"kind":"codex","data":{"outcome":{"status":"available","models":[{"id":"gpt-5.2-codex","display_name":"GPT-5.2 Codex","is_default":true,"default_reasoning_effort":"medium","supported_reasoning_efforts":["low","medium"]}]}}}"#,
+        r#"{"kind":"json_event_stream","data":{"outcome":{"status":"available","models":[{"id":"gpt-5.2-codex","display_name":"GPT-5.2 Codex","is_default":true,"default_reasoning_effort":"medium","supported_reasoning_efforts":["low","medium"]}]}}}"#,
     );
     assert_wire_out(
-        &ProbeOk::Codex {
-            outcome: CodexCatalogOutcome::Unavailable {
+        &ProbeOk::JsonEventStream {
+            outcome: ModelCatalogOutcome::Unavailable {
                 detail: "model/list error: not logged in".into(),
             },
         },
-        r#"{"kind":"codex","data":{"outcome":{"status":"unavailable","detail":"model/list error: not logged in"}}}"#,
+        r#"{"kind":"json_event_stream","data":{"outcome":{"status":"unavailable","detail":"model/list error: not logged in"}}}"#,
     );
 }
 

@@ -12,7 +12,7 @@ import type {
   AdapterCatalogEntry,
   AdapterCatalogs,
   AdapterEntry,
-  CodexCatalogOutcome,
+  ModelCatalogOutcome,
   DiscoveredRuntime,
   ProbeError,
   ProbeOk,
@@ -91,16 +91,16 @@ function toProbeError(e: unknown): ProbeError {
 }
 
 /** The probe success block: dispatch on the per-format `kind` -- the ACP flat
- *  catalog or the codex per-model catalog (ADR-0096 D2/D3). The switch is
- *  exhaustive with a `never` guard, mirroring `ProbeErrorText`: a new backend
- *  variant must fail at compile time here, not surface as a wrong-render
- *  throw at runtime. */
+ *  catalog or the JsonEventStream per-model catalog (ADR-0096 D2/D3). The
+ *  switch is exhaustive with a `never` guard, mirroring `ProbeErrorText`: a
+ *  new backend variant must fail at compile time here, not surface as a
+ *  wrong-render throw at runtime. */
 function ProbeResult({ result }: { result: ProbeOk }) {
   switch (result.kind) {
     case "acp":
       return <AcpProbeResult catalog={result.data.discovered} />;
-    case "codex":
-      return <CodexProbeResult outcome={result.data.outcome} />;
+    case "json_event_stream":
+      return <JsonEventStreamProbeResult outcome={result.data.outcome} />;
     default: {
       const _exhaustive: never = result;
       throw new Error(`Unknown probe ok kind: ${String(_exhaustive)}`);
@@ -182,15 +182,16 @@ function AcpProbeResult({ catalog }: { catalog: DiscoveredRuntime }) {
   );
 }
 
-/** The codex success block (ADR-0096 D3): the per-model list, each model's
- *  reasoning-effort options as a read-only badge group (the CLI's declared
+/** The JsonEventStream success block (ADR-0096 D3): the per-model list,
+ *  each model's reasoning-effort options as a read-only badge group (the
+ *  CLI's declared
  *  order, never a union across models). The degraded `unavailable` state
  *  (process alive, catalog not) renders an honest line -- the process being
  *  alive is itself the signal. The status dispatch is exhaustive with a
  *  `never` guard (mirrors `ProbeResult` / `ProbeErrorText`); an empty catalog
  *  renders the honest "none" line (the probe succeeded -- that fact must not
  *  vanish). */
-function CodexProbeResult({ outcome }: { outcome: CodexCatalogOutcome }) {
+function JsonEventStreamProbeResult({ outcome }: { outcome: ModelCatalogOutcome }) {
   const intl = useIntl();
   const defaultLabel = intl.formatMessage({
     id: "settings.runtime.localCli.probe.codex.default",
@@ -328,9 +329,9 @@ function CachedCatalog({ entry }: { entry: AdapterCatalogEntry }) {
   let catalog: ReactNode;
   if (entry.probe_kind === "acp") {
     catalog = <AcpProbeResult catalog={entry.outcome.acp.discovered} />;
-  } else if (entry.probe_kind === "codex") {
+  } else if (entry.probe_kind === "json_event_stream") {
     catalog = (
-      <CodexProbeResult outcome={{ status: "available", models: entry.outcome.codex.models }} />
+      <JsonEventStreamProbeResult outcome={{ status: "available", models: entry.outcome.json_event_stream.models }} />
     );
   } else {
     const _exhaustive: never = entry;
@@ -372,8 +373,8 @@ function directoryModelCount(probe: ProbeState, cached?: AdapterCatalogEntry): n
   } else if (probe.status === "idle" && cached) {
     if (cached.probe_kind === "acp") {
       count = cached.outcome.acp.discovered.models.length;
-    } else if (cached.probe_kind === "codex") {
-      count = cached.outcome.codex.models.length;
+    } else if (cached.probe_kind === "json_event_stream") {
+      count = cached.outcome.json_event_stream.models.length;
     } else {
       const _exhaustive: never = cached;
       throw new Error(`Unknown probe kind: ${String(_exhaustive)}`);
@@ -469,7 +470,7 @@ export function LocalCliTab({
       // The backend wrote this probe's entry to the sidecar cache; mirror
       // it into the query cache so the timestamped display is immediately
       // consistent (issue #536 AC: post-probe display matches the cache).
-      // The degraded codex outcome was not cached server-side -- reflect
+      // The degraded JsonEventStream outcome was not cached server-side -- reflect
       // that here too (the entry stays whatever it was, absent included).
       if (result.kind === "acp") {
         queryClient.setQueryData(adapterKeys.catalogs(), (prev: AdapterCatalogs | undefined) => ({
@@ -485,8 +486,8 @@ export function LocalCliTab({
         queryClient.setQueryData(adapterKeys.catalogs(), (prev: AdapterCatalogs | undefined) => ({
           ...(prev ?? {}),
           [id]: {
-            probe_kind: "codex",
-            outcome: { codex: { models } },
+            probe_kind: "json_event_stream",
+            outcome: { json_event_stream: { models } },
             probed_at_millis: Date.now(),
           },
         }));

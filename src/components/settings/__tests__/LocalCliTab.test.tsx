@@ -43,7 +43,7 @@ const okCatalog: DiscoveredRuntime = {
 const acpOk: ProbeOk = { kind: "acp", data: { discovered: okCatalog } };
 
 const codexAvailable: ProbeOk = {
-  kind: "codex",
+  kind: "json_event_stream",
   data: {
     outcome: {
       status: "available",
@@ -56,12 +56,12 @@ const codexAvailable: ProbeOk = {
 };
 
 const codexUnavailable: ProbeOk = {
-  kind: "codex",
+  kind: "json_event_stream",
   data: { outcome: { status: "unavailable", detail: "method not found" } },
 };
 
 const codexEmpty: ProbeOk = {
-  kind: "codex",
+  kind: "json_event_stream",
   data: { outcome: { status: "available", models: [] } },
 };
 
@@ -360,8 +360,8 @@ describe("LocalCliTab catalog cache (issue #536)", () => {
     if (outcome.status !== "available") throw new Error("fixture shape");
     vi.mocked(getAdapterCatalogs).mockResolvedValue({
       codex: {
-        probe_kind: "codex",
-        outcome: { codex: { models: outcome.models } },
+        probe_kind: "json_event_stream",
+        outcome: { json_event_stream: { models: outcome.models } },
         probed_at_millis: 0,
       },
     });
@@ -682,8 +682,8 @@ describe("LocalCliTab fold (issue #552)", () => {
   it("shows an N models badge on a collapsed ok row, replacing the stale cache count", async () => {
     vi.mocked(getAdapterCatalogs).mockResolvedValue({
       codex: {
-        probe_kind: "codex",
-        outcome: { codex: { models: [] } },
+        probe_kind: "json_event_stream",
+        outcome: { json_event_stream: { models: [] } },
         probed_at_millis: 0,
       },
     });

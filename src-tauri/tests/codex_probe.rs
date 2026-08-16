@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use toptopduck_lib::runtime::acp::adapter::codex;
 use toptopduck_lib::runtime::acp::app_server;
-use toptopduck_lib::runtime::acp::probe::{self, CodexCatalogOutcome, ProbeError};
+use toptopduck_lib::runtime::acp::probe::{self, ModelCatalogOutcome, ProbeError};
 
 /// Resolve the fake app-server binary path (cargo sets
 /// `CARGO_BIN_EXE_codex-app-server-fake` for integration tests).
@@ -40,7 +40,7 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Spawn the fixture under `scenario`, then run the query lifecycle (spawn ->
 /// query -> kill, the same three steps the IPC shell composes) with a short
 /// timeout (the fixture answers in milliseconds). Holds ENV_LOCK.
-fn query_fixture(scenario: &str, timeout: Duration) -> Result<CodexCatalogOutcome, ProbeError> {
+fn query_fixture(scenario: &str, timeout: Duration) -> Result<ModelCatalogOutcome, ProbeError> {
     let _g = ENV_LOCK.lock().unwrap();
     std::env::set_var("CODEX_APP_SERVER_SCENARIO", scenario);
     let spec = codex();
@@ -79,10 +79,10 @@ fn fixture_unknown_scenario_exits_nonzero() {
 
 /// Unwrap the `Available` outcome (panics with the full value otherwise).
 fn expect_available(
-    outcome: CodexCatalogOutcome,
-) -> Vec<toptopduck_lib::runtime::acp::probe::CodexModel> {
+    outcome: ModelCatalogOutcome,
+) -> Vec<toptopduck_lib::runtime::acp::probe::CatalogModel> {
     match outcome {
-        CodexCatalogOutcome::Available { models } => models,
+        ModelCatalogOutcome::Available { models } => models,
         other => panic!("expected Available, got {other:?}"),
     }
 }
@@ -133,7 +133,7 @@ fn query_init_error_degrades_to_unavailable() {
     let ok = query_fixture("catalog_init_error", Duration::from_secs(5))
         .expect("a refused handshake degrades, it does not fail");
     match ok {
-        CodexCatalogOutcome::Unavailable { detail } => {
+        ModelCatalogOutcome::Unavailable { detail } => {
             assert!(
                 detail.contains("auth required"),
                 "the degraded detail names the handshake error: {detail}"
@@ -153,7 +153,7 @@ fn query_rpc_error_degrades_to_unavailable() {
     let ok = query_fixture("catalog_error", Duration::from_secs(5))
         .expect("an RPC error degrades, it does not fail");
     match ok {
-        CodexCatalogOutcome::Unavailable { detail } => {
+        ModelCatalogOutcome::Unavailable { detail } => {
             assert!(
                 detail.contains("method not found"),
                 "the degraded detail names the RPC error: {detail}"
@@ -327,7 +327,7 @@ fn query_rpc_error_unavailable_carries_stderr_tail() {
     let ok = query_fixture("catalog_error_chatty", Duration::from_secs(5))
         .expect("an RPC error degrades, it does not fail");
     match ok {
-        CodexCatalogOutcome::Unavailable { detail } => {
+        ModelCatalogOutcome::Unavailable { detail } => {
             assert!(
                 detail.contains("auth required"),
                 "the degraded detail names the RPC error: {detail}"

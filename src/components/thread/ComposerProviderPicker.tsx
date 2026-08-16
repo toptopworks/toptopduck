@@ -24,7 +24,7 @@ import type { ProfileKeyStatus, ProviderConfig } from "../../types/provider";
 import type { SaveError } from "../../types/session";
 import type {
   AdapterEntry,
-  CodexModel,
+  CatalogModel,
   SessionModelConfig,
   SessionRuntimeChoice,
 } from "../../types/runtime";
@@ -292,8 +292,8 @@ export function ComposerProviderPicker({
   // the read-only CLI Default labels).
   const codexCatalog =
     isJsonEventStreamAdapter &&
-    probeEntry?.probe_kind === "codex"
-      ? probeEntry.outcome.codex.models
+    probeEntry?.probe_kind === "json_event_stream"
+      ? probeEntry.outcome.json_event_stream.models
       : null;
 
   // Guards the two set IPCs (one at a time; the second picker is disabled
@@ -400,7 +400,7 @@ export function ComposerProviderPicker({
   // order (never a union across models). Null / unknown model: no entries
   // (the level selector disables with a "pick a model first" hint).
   function supportedEffortsFor(
-    models: CodexModel[],
+    models: CatalogModel[],
     modelId: string | null,
   ): string[] {
     if (modelId == null) return [];
@@ -1018,7 +1018,7 @@ function CodexSelectors({
   persistSuspended,
   intl,
 }: {
-  models: CodexModel[];
+  models: CatalogModel[];
   model: string | null;
   thoughtLevel: string | null;
   switching: boolean;
