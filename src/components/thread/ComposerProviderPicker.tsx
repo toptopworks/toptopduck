@@ -273,11 +273,12 @@ export function ComposerProviderPicker({
       : null;
 
   // The catalog feeding the ACP selectors after the fallback resolves.
-  // (`"acp" in outcome` narrows the keyed union; probe_kind alone does not.)
+  // (The cache entry is a tagged union on `probe_kind` -- the check narrows
+  // `outcome` directly.)
   const acpCatalog =
     isExternal && !isJsonEventStreamAdapter
       ? (discovered ??
-        (probeEntry && "acp" in probeEntry.outcome
+        (probeEntry && probeEntry.probe_kind === "acp"
           ? probeEntry.outcome.acp.discovered
           : null))
       : null;
@@ -291,8 +292,7 @@ export function ComposerProviderPicker({
   // the read-only CLI Default labels).
   const codexCatalog =
     isJsonEventStreamAdapter &&
-    probeEntry != null &&
-    "codex" in probeEntry.outcome
+    probeEntry?.probe_kind === "codex"
       ? probeEntry.outcome.codex.models
       : null;
 

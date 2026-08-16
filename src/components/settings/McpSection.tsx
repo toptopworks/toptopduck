@@ -16,11 +16,6 @@ import {
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
-// Override the base TooltipContent's teal bg-primary with a popover surface
-// (matches ImportSkillsDialog's info tooltip — bg-popover text-popover-foreground).
-const TOOLTIP_CLASS =
-  "bg-popover text-popover-foreground border shadow-md rounded-lg px-2.5 py-1.5";
-
 import type { AppConfig } from "../../types/app-config";
 import type { McpProbeResult, McpServerConfig, McpToolInfo } from "../../types/mcp";
 import { clearMcpServerSecret, probeMcpServer } from "../../api";
@@ -38,7 +33,11 @@ import {
 } from "../ui/alert-dialog";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { PaneHeader, SettingsCard } from "./settings-chrome";
+import {
+  PaneHeader,
+  SETTINGS_TOOLTIP_CLASS,
+  SettingsCard,
+} from "./settings-chrome";
 import { McpImportDialog } from "./McpImportDialog";
 import { McpServerForm } from "./McpServerForm";
 
@@ -554,7 +553,7 @@ function McpServerRow({
                 )}
               </Button>
             </TooltipTrigger>
-            <TooltipContent side="top" className={TOOLTIP_CLASS}>
+            <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
               <FormattedMessage id="settings.mcp.test" defaultMessage="Test" />
             </TooltipContent>
           </Tooltip>
@@ -575,7 +574,7 @@ function McpServerRow({
                 <Pencil className="size-4" aria-hidden />
               </Button>
             </TooltipTrigger>
-            <TooltipContent side="top" className={TOOLTIP_CLASS}>
+            <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
               <FormattedMessage id="settings.mcp.edit" defaultMessage="Edit" />
             </TooltipContent>
           </Tooltip>
@@ -596,7 +595,7 @@ function McpServerRow({
                 <Trash2 className="size-4" aria-hidden />
               </Button>
             </TooltipTrigger>
-            <TooltipContent side="top" className={TOOLTIP_CLASS}>
+            <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
               <FormattedMessage id="common.delete" defaultMessage="Delete" />
             </TooltipContent>
           </Tooltip>
@@ -619,7 +618,7 @@ function StatusDot({ probeState }: { probeState: ProbeState }) {
         <TooltipTrigger asChild>
           <span role="img" aria-label="Not tested" className={cn(dotClass, "bg-muted-foreground/40 cursor-help")} />
         </TooltipTrigger>
-        <TooltipContent side="top" className={TOOLTIP_CLASS}>
+        <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
           <FormattedMessage id="settings.mcp.notTestedHint" defaultMessage="Not tested" />
         </TooltipContent>
       </Tooltip>
@@ -709,7 +708,7 @@ function ToolTable({ tools }: { tools: McpToolInfo[] }) {
                     <TooltipTrigger asChild>
                       <span className="block truncate">{tool.description}</span>
                     </TooltipTrigger>
-                    <TooltipContent side="top" className={cn(TOOLTIP_CLASS, "max-w-sm max-h-40 overflow-y-auto")}>
+                    <TooltipContent side="top" className={cn(SETTINGS_TOOLTIP_CLASS, "max-w-sm max-h-40 overflow-y-auto")}>
                       {tool.description}
                     </TooltipContent>
                   </Tooltip>

@@ -130,12 +130,14 @@ export type CachedOutcome =
 
 // One adapter's cache entry: the catalog + the probe timestamp
 // (epoch millis, display-only -- it never feeds the picker's priority
-// chain, ADR-0096 D6).
-export interface AdapterCatalogEntry {
-  probe_kind: ProbeKind;
-  outcome: CachedOutcome;
-  probed_at_millis: number;
-}
+// chain, ADR-0096 D6). A TAGGED UNION on `probe_kind` (issue #554): the
+// probe kind and the outcome variant agree by construction -- the backend
+// stamps both from the same probe and its loader drops any mismatched pair
+// before the IPC boundary -- so the wire shape is unchanged and TS narrows
+// `outcome` from `probe_kind` alone (no per-consumer variant checks).
+export type AdapterCatalogEntry =
+  | { probe_kind: "acp"; outcome: Extract<CachedOutcome, { acp: unknown }>; probed_at_millis: number }
+  | { probe_kind: "codex"; outcome: Extract<CachedOutcome, { codex: unknown }>; probed_at_millis: number };
 
 // The whole cache document, keyed by adapter id.
 export type AdapterCatalogs = Record<string, AdapterCatalogEntry>;
