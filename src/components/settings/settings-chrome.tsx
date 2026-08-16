@@ -32,8 +32,9 @@ export function SettingsCard({ className, ...props }: ComponentProps<"div">) {
  *  Two shapes, driven by which slots are filled:
  *  - Compact control (Select / Switch): pass the control as `action` (inline
  *    right, vertically centered against the title); leave `children` empty.
- *  - Explicit-save text field: pass the Save button as `action` (top-right) and
- *    the Input as `children` (rendered below the header row).
+ *  - Explicit-save text field: pass the Save button as `action` (right side,
+ *    vertically centered against the header row) and the Input as `children`
+ *    (rendered below the header row).
  *
  *  `title` is the bold label; `description` is the muted helper line under it. */
 export function SettingsRow({
@@ -54,12 +55,10 @@ export function SettingsRow({
 }) {
   return (
     <div data-slot="settings-row" className={cn("px-4 py-4", className)}>
-      <div
-        className={cn(
-          "flex justify-between gap-4",
-          children ? "items-start" : "items-center",
-        )}
-      >
+      {/* Always center the header row: rows whose children mount/unmount
+       *  (the local CLI fold) must not shift the action controls between
+       *  center- and start-aligned as the fold toggles. */}
+      <div className="flex items-center justify-between gap-4">
         <div className="min-w-0 flex-1 space-y-1">
           <div className="text-sm font-medium">{title}</div>
           {description && (

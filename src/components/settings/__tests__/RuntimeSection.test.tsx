@@ -172,11 +172,11 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
     expect(screen.getByText("/opt/homebrew/bin/opencode")).toBeInTheDocument();
   });
 
-  it("detected adapters show a Detected badge, undetected show Not installed", async () => {
+  it("detected adapters show an Available badge, undetected show Not installed", async () => {
     renderSection();
     fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
     await screen.findByText("claude-code");
-    expect(screen.getAllByText("Detected")).toHaveLength(3);
+    expect(screen.getAllByText("Available")).toHaveLength(3);
     expect(screen.getAllByText("Not installed")).toHaveLength(2);
   });
 
@@ -286,7 +286,7 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
     // Wait for the loading state to clear (the title is always rendered).
     expect(await screen.findByText("Detected CLI adapters")).toBeInTheDocument();
     // No adapter display names or badges leak through.
-    expect(screen.queryByText("Detected")).not.toBeInTheDocument();
+    expect(screen.queryByText("Available")).not.toBeInTheDocument();
     expect(screen.queryByText("Not installed")).not.toBeInTheDocument();
     // Rescan is present + not disabled.
     const rescanButton = screen.getByRole("button", { name: "Rescan adapters" });

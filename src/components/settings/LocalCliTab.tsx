@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2, RefreshCw } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2, RefreshCw } from "lucide-react";
 
 import { fmtError } from "../../lib/error-presentation";
 import { log } from "../../lib/log";
@@ -21,6 +21,11 @@ import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { SettingsCard, SettingsRow } from "./settings-chrome";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+
+// Same tooltip skin as the MCP panel's row actions.
+const TOOLTIP_CLASS =
+  "bg-popover text-popover-foreground border shadow-md rounded-lg px-2.5 py-1.5";
 
 // Local CLI tab (issue #489, ADR-0091): the adapter management panel inside
 // the Settings runtime section. Lists every v1 adapter from `listAdapters`
@@ -40,8 +45,13 @@ import { SettingsCard, SettingsRow } from "./settings-chrome";
 // app-server `model/list`) + terminate. Every detected adapter gets the
 // button; the busy state mirrors up via onIpcBusy("probe", ...) so the
 // settings close guard blocks while the IPC is in flight (ADR-0075 pattern).
-// Probe results are display-only in this slice -- component-local state, gone
-// on unmount (the persistent catalog cache is a later slice).
+//
+// Probe results render inside a per-row fold (issue #552, closing ADR-0096's
+// open "parallel vs folded" display question): a chevron toggles the
+// directory, a probe success auto-expands the row, and the collapsed row
+// carries a summary badge (`N models` / `Test failed`). The fold mirrors the
+// MCP panel's McpServerRow interaction (chevron + summary badge + render on
+// demand); expansion state is component-local and unpersisted.
 
 // One adapter's probe lifecycle: idle -> probing -> ok | failed. Local state
 // by design (the result is an ephemeral diagnostic snapshot, not persisted
@@ -98,40 +108,88 @@ function ProbeResult({ result }: { result: ProbeOk }) {
   }
 }
 
+/** One reasoning-effort thought level as a read-only small badge. The marked
+ *  level (the CLI default or the current value) renders with the shared
+ *  "default" annotation -- one marker shape across both catalogs. */
+function EffortBadge({ level, marked }: { level: string; marked: boolean }) {
+  const intl = useIntl();
+  const defaultLabel = intl.formatMessage({
+    id: "settings.runtime.localCli.probe.codex.default",
+    defaultMessage: "default",
+  });
+  return (
+    <Badge
+      variant="secondary"
+      title={marked ? defaultLabel : undefined}
+      className="text-muted-foreground font-mono font-normal"
+    >
+      {level}
+      {marked ? ` (${defaultLabel})` : ""}
+    </Badge>
+  );
+}
+
+/** A row of read-only effort badges, one per supported level, in the CLI's
+ *  declared order (never a union across models, ADR-0096 D3). An empty level
+ *  list keeps the honest "—" fallback -- the field is present, just empty. */
+function EffortBadgeGroup({
+  levels,
+  marked,
+}: {
+  levels: string[];
+  marked: string | null;
+}) {
+  return (
+    <span className="flex flex-wrap items-center gap-1">
+      {levels.length === 0 ? (
+        <span className="font-mono">—</span>
+      ) : (
+        levels.map((level) => (
+          <EffortBadge key={level} level={level} marked={level === marked} />
+        ))
+      )}
+    </span>
+  );
+}
+
 /** The ACP success block: the catalog's model list, thought-level options,
  *  and current values, read straight off the DiscoveredRuntime fields. */
 function AcpProbeResult({ catalog }: { catalog: DiscoveredRuntime }) {
   return (
     <div className="space-y-1 text-xs">
-      <p className="text-muted-foreground">
-        <FormattedMessage
-          id="settings.runtime.localCli.probe.models"
-          defaultMessage="Models"
-        />
-        {": "}
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="text-muted-foreground">
+          <FormattedMessage
+            id="settings.runtime.localCli.probe.models"
+            defaultMessage="Models"
+          />
+          {": "}
+        </span>
         <span className="font-mono">{catalog.models.join(", ") || "—"}</span>
         {catalog.current_model ? ` (${catalog.current_model})` : null}
-      </p>
-      <p className="text-muted-foreground">
-        <FormattedMessage
-          id="settings.runtime.localCli.probe.thoughtLevels"
-          defaultMessage="Thought levels"
-        />
-        {": "}
-        <span className="font-mono">{catalog.thought_levels.join(", ") || "—"}</span>
-        {catalog.current_thought_level ? ` (${catalog.current_thought_level})` : null}
-      </p>
+      </div>
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="text-muted-foreground">
+          <FormattedMessage
+            id="settings.runtime.localCli.probe.thoughtLevels"
+            defaultMessage="Thought levels"
+          />
+          {": "}
+        </span>
+        <EffortBadgeGroup levels={catalog.thought_levels} marked={catalog.current_thought_level} />
+      </div>
     </div>
   );
 }
 
 /** The codex success block (ADR-0096 D3): the per-model list, each model's
- *  reasoning-effort options in the CLI's declared order (never a union across
- *  models). The degraded `unavailable` state (process alive, catalog not)
- *  renders an honest line -- the process being alive is itself the signal.
- *  The status dispatch is exhaustive with a `never` guard (mirrors
- *  `ProbeResult` / `ProbeErrorText`); an empty catalog renders the honest
- *  "none" line (the probe succeeded -- that fact must not vanish). */
+ *  reasoning-effort options as a read-only badge group (the CLI's declared
+ *  order, never a union across models). The degraded `unavailable` state
+ *  (process alive, catalog not) renders an honest line -- the process being
+ *  alive is itself the signal. The status dispatch is exhaustive with a
+ *  `never` guard (mirrors `ProbeResult` / `ProbeErrorText`); an empty catalog
+ *  renders the honest "none" line (the probe succeeded -- that fact must not
+ *  vanish). */
 function CodexProbeResult({ outcome }: { outcome: CodexCatalogOutcome }) {
   const intl = useIntl();
   const defaultLabel = intl.formatMessage({
@@ -166,16 +224,17 @@ function CodexProbeResult({ outcome }: { outcome: CodexCatalogOutcome }) {
   return (
     <div className="space-y-1 text-xs">
       {outcome.models.map((model) => (
-        <p key={model.id} className="text-muted-foreground">
+        <div key={model.id} className="flex flex-wrap items-center gap-1">
           <span className="font-mono">
             {model.display_name}
             {model.is_default ? ` (${defaultLabel})` : ""}
           </span>
           {": "}
-          <span className="font-mono">
-            {model.supported_reasoning_efforts.join(", ") || "—"}
-          </span>
-        </p>
+          <EffortBadgeGroup
+            levels={model.supported_reasoning_efforts}
+            marked={model.default_reasoning_effort}
+          />
+        </div>
       ))}
     </div>
   );
@@ -295,6 +354,43 @@ function CachedCatalog({ entry }: { entry: AdapterCatalogEntry }) {
   );
 }
 
+/** The probe's model count for one row, from whichever source is live: the
+ *  fresh ok result, else (idle only) the cached entry. Only a count > 0 is a
+ *  badge point -- empty catalogs, the unavailable outcome, probing, and
+ *  failure carry no summary badge (issue #552 AC). The cache dispatch mirrors
+ *  CachedCatalog's narrowing checks (variant check + never guard) so a future
+ *  backend shape change fails at compile time, not as a silently missing
+ *  badge. The guards degrade to null rather than throw -- this is badge
+ *  data, not render dispatch, and the IPC boundary already drops mismatched
+ *  pairs server-side (the in-checks are defensive double-cover). */
+function directoryModelCount(probe: ProbeState, cached?: AdapterCatalogEntry): number | null {
+  let count: number;
+  if (probe.status === "ok") {
+    const { result } = probe;
+    if (result.kind === "acp") {
+      count = result.data.discovered.models.length;
+    } else if (result.data.outcome.status === "available") {
+      count = result.data.outcome.models.length;
+    } else {
+      return null;
+    }
+  } else if (probe.status === "idle" && cached) {
+    if (cached.probe_kind === "acp") {
+      if (!("acp" in cached.outcome)) return null;
+      count = cached.outcome.acp.discovered.models.length;
+    } else if (cached.probe_kind === "codex") {
+      if (!("codex" in cached.outcome)) return null;
+      count = cached.outcome.codex.models.length;
+    } else {
+      const _exhaustive: never = cached.probe_kind;
+      throw new Error(`Unknown probe kind: ${String(_exhaustive)}`);
+    }
+  } else {
+    return null;
+  }
+  return count > 0 ? count : null;
+}
+
 export function LocalCliTab({
   onIpcBusy,
 }: {
@@ -307,6 +403,9 @@ export function LocalCliTab({
   const [rescanning, setRescanning] = useState(false);
   // Per-adapter probe state; one entry per probed row, keyed by adapter id.
   const [probeStates, setProbeStates] = useState<Record<string, ProbeState>>({});
+  // Expanded adapter ids (issue #552): component-local, never persisted -- the
+  // fold resets on unmount, mirroring the MCP panel's expandedRows.
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   // In-flight probe count (probe is the only multi-instance IPC channel --
   // multiple rows can probe concurrently). The busy report mirrors the
   // count, not any single row's status: the first probe to settle must not
@@ -349,6 +448,18 @@ export function LocalCliTab({
     }
   }
 
+  function toggleRow(id: string) {
+    setExpandedRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }
+
   async function handleProbe(id: string) {
     if (probeStates[id]?.status === "probing") return;
     setProbeStates((prev) => ({ ...prev, [id]: { status: "probing" } }));
@@ -357,6 +468,11 @@ export function LocalCliTab({
     try {
       const result = await probeAdapter(id);
       setProbeStates((prev) => ({ ...prev, [id]: { status: "ok", result } }));
+      // The probe result is what the click bought -- auto-expand the row so
+      // the directory is visible without a second click (issue #552). The
+      // degenerate outcomes (unavailable / empty) expand too: the honest
+      // line IS the result. Failure paths never touch the fold.
+      setExpandedRows((prev) => new Set(prev).add(id));
       // The backend wrote this probe's entry to the sidecar cache; mirror
       // it into the query cache so the timestamped display is immediately
       // consistent (issue #536 AC: post-probe display matches the cache).
@@ -446,6 +562,16 @@ export function LocalCliTab({
           {adapters.map((a) => {
             const probe = probeStates[a.id] ?? { status: "idle" as const };
             const probeable = a.detected;
+            const cached = cachedCatalogs?.[a.id];
+            const expanded = expandedRows.has(a.id);
+            const modelCount = directoryModelCount(probe, cached);
+            // The fold only exists when there is content to show (issue
+            // #552 follow-up): a probed row (ok or failed -- both are the
+            // result the click bought) or a cached idle entry. Idle without
+            // cache and mid-flight probing render no chevron -- an empty
+            // fold would be a dead toggle.
+            const hasFoldContent =
+              probe.status === "ok" || probe.status === "failed" || Boolean(cached);
             return (
               <SettingsRow
                 key={a.id}
@@ -457,52 +583,114 @@ export function LocalCliTab({
                 }
                 action={(
                   <div className="flex items-center gap-2">
-                    {probeable && (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => void handleProbe(a.id)}
-                        disabled={probe.status === "probing"}
-                      >
-                        {probe.status === "probing" && (
-                          <Loader2 className="size-3.5 animate-spin" aria-hidden />
-                        )}
+                    {probe.status === "failed" ? (
+                      <Badge variant="destructive">
                         <FormattedMessage
-                          id="settings.runtime.localCli.probe.test"
-                          defaultMessage="Test"
+                          id="settings.runtime.localCli.probe.testFailed"
+                          defaultMessage="Test failed"
                         />
-                      </Button>
+                      </Badge>
+                    ) : modelCount !== null ? (
+                      <Badge variant="secondary">
+                        <FormattedMessage
+                          id="settings.runtime.localCli.probe.modelCount"
+                          defaultMessage="{count} models"
+                          values={{ count: modelCount }}
+                        />
+                      </Badge>
+                    ) : null}
+                    {probeable && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => void handleProbe(a.id)}
+                            disabled={probe.status === "probing"}
+                          >
+                            {probe.status === "probing" && (
+                              <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                            )}
+                            <FormattedMessage
+                              id="settings.runtime.localCli.probe.test"
+                              defaultMessage="Test"
+                            />
+                          </Button>
+                        </TooltipTrigger>
+                        {cached && (
+                          <TooltipContent side="top" className={TOOLTIP_CLASS}>
+                            <FormattedMessage
+                              id="settings.runtime.localCli.probe.cachedAt"
+                              defaultMessage="Last tested"
+                            />
+                            {": "}
+                            <span className="font-mono">
+                              {new Intl.DateTimeFormat(intl.locale, {
+                                dateStyle: "medium",
+                                timeStyle: "short",
+                              }).format(cached.probed_at_millis)}
+                            </span>
+                          </TooltipContent>
+                        )}
+                      </Tooltip>
                     )}
                     {a.detected ? (
                       <Badge variant="default">
                         <FormattedMessage
                           id="settings.runtime.localCli.detected"
-                          defaultMessage="Detected"
+                          defaultMessage="Available"
                         />
                       </Badge>
                     ) : (
-                      <Badge variant="secondary">
+                      // Muted text: an absent adapter is inert information,
+                      // lower visual weight than an installed one.
+                      <Badge
+                        variant="secondary"
+                        className="text-muted-foreground font-normal"
+                      >
                         <FormattedMessage
                           id="settings.runtime.localCli.notInstalled"
                           defaultMessage="Not installed"
                         />
                       </Badge>
                     )}
+                    {hasFoldContent && (
+                      <button
+                        type="button"
+                        className="text-muted-foreground hover:text-foreground shrink-0 cursor-pointer"
+                        onClick={() => toggleRow(a.id)}
+                        aria-label={a.display_name}
+                        aria-expanded={expanded}
+                      >
+                        {expanded ? (
+                          <ChevronDown className="size-4" aria-hidden />
+                        ) : (
+                          <ChevronRight className="size-4" aria-hidden />
+                        )}
+                      </button>
+                    )}
                   </div>
                 )}
               >
-                {probe.status === "ok" ? (
-                  <ProbeResult result={probe.result} />
-                ) : probe.status === "failed" ? (
-                  <ProbeErrorLine error={probe.error} />
-                ) : cachedCatalogs?.[a.id] ? (
-                  // Idle row with a cached entry: the last explicitly-tested
-                  // catalog persists across restarts (issue #536 AC) -- the
-                  // cache is the idle-state render, and a fresh probe's ok
-                  // state takes precedence over it by branch order.
-                  <CachedCatalog entry={cachedCatalogs[a.id]} />
-                ) : null}
+                {expanded && (
+                  // Fold indent aligned with the MCP expanded content's
+                  // ml-7 visual hierarchy (issue #552 item 6).
+                  <div className="ml-7">
+                    {probe.status === "ok" ? (
+                      <ProbeResult result={probe.result} />
+                    ) : probe.status === "failed" ? (
+                      <ProbeErrorLine error={probe.error} />
+                    ) : cached ? (
+                      // Idle row with a cached entry: the last
+                      // explicitly-tested catalog persists across restarts
+                      // (issue #536 AC) -- the cache is the idle-state
+                      // render, and a fresh probe's ok state takes
+                      // precedence over it by branch order.
+                      <CachedCatalog entry={cached} />
+                    ) : null}
+                  </div>
+                )}
               </SettingsRow>
             );
           })}
