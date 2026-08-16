@@ -17,6 +17,7 @@ import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+import { SETTINGS_TOOLTIP_CLASS } from "./settings-chrome";
 import {
   Select,
   SelectContent,
@@ -345,7 +346,12 @@ export function ImportSkillsDialog({ onClose }: Props) {
                 <Info className="size-4" aria-hidden />
               </button>
             </TooltipTrigger>
-            <TooltipContent side="top" align="start" sideOffset={3} className="max-w-[15rem] bg-popover text-popover-foreground border shadow-md rounded-lg px-2.5 py-2">
+            <TooltipContent
+              side="top"
+              align="start"
+              sideOffset={3}
+              className={cn(SETTINGS_TOOLTIP_CLASS, "max-w-[15rem]")}
+            >
               <div className="space-y-1">
                 <p className="text-sm font-medium">
                   <FormattedMessage id="settings.skills.importModeHintTitle" defaultMessage="Import mode" />

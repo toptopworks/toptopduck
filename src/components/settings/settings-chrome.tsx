@@ -10,7 +10,15 @@ import { cn } from "../../lib/utils";
 // These are presentational shells over the ADR-0050 token system (bg-card /
 // border / divide-border), so they recolor with the .dark class; they hold no
 // state or IPC. Kept in one file because every export is a component (react-
-// refresh/only-export-components clean, cf. card.tsx).
+// refresh/only-export-components clean, cf. card.tsx) -- the tooltip skin
+// constant rides along under allowConstantExport.
+
+/** The shared settings-panel tooltip skin: a popover surface overriding the
+ *  base TooltipContent's teal accent (ADR-0050). The single source for every
+ *  settings tooltip (issue #554) -- call sites append their own size caps via
+ *  cn(SETTINGS_TOOLTIP_CLASS, "max-w-...") rather than restyling. */
+export const SETTINGS_TOOLTIP_CLASS =
+  "bg-popover text-popover-foreground border shadow-md rounded-lg px-2.5 py-1.5";
 
 /** A bordered group of hairline-divided setting rows. Rows are the direct
  *  children; `divide-y` paints the separators between them. */

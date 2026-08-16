@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { FormattedMessage, useIntl } from "react-intl";
+import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, Loader2, RefreshCw } from "lucide-react";
 
@@ -20,12 +20,12 @@ import type {
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { SettingsCard, SettingsRow } from "./settings-chrome";
+import {
+  SETTINGS_TOOLTIP_CLASS,
+  SettingsCard,
+  SettingsRow,
+} from "./settings-chrome";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
-
-// Same tooltip skin as the MCP panel's row actions.
-const TOOLTIP_CLASS =
-  "bg-popover text-popover-foreground border shadow-md rounded-lg px-2.5 py-1.5";
 
 // Local CLI tab (issue #489, ADR-0091): the adapter management panel inside
 // the Settings runtime section. Lists every v1 adapter from `listAdapters`
@@ -305,33 +305,35 @@ function ProbeErrorLine({ error }: { error: ProbeError }) {
   );
 }
 
+/** Format a cached probe's timestamp for display: one medium-date +
+ *  short-time formatter shared by every "Last tested" surface (the fold's
+ *  timestamp line + the Test button's hover tooltip) so the two can never
+ *  drift apart (issue #554). The timestamp renders in the local timezone. */
+function formatProbedAt(intl: IntlShape, probedAtMillis: number): string {
+  return new Intl.DateTimeFormat(intl.locale, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(probedAtMillis);
+}
+
 /** The cached-catalog block (ADR-0096 D5, issue #536): renders the sidecar
  *  entry through the SAME per-format components as a fresh probe result
  *  (one rendering path -- no drift between "just tested" and "restored
- *  from cache"), plus the timestamp line. The shape dispatch is exhaustive
- *  with a `never` guard like the probe-side switches. */
+ *  from cache"), plus the timestamp line. */
 function CachedCatalog({ entry }: { entry: AdapterCatalogEntry }) {
   const intl = useIntl();
-  // The cache entry's dispatch: `probe_kind` and the outcome variant agree
-  // by construction (the backend stamps both from the same probe). The
-  // variant check narrows `outcome` for TS; the never guard makes a future
-  // backend shape change fail at compile time here, mirroring the
-  // probe-side switches.
+  // The cache entry's dispatch: the tagged union's `probe_kind` narrows the
+  // outcome variant for TS; the never guard makes a future backend shape
+  // change fail at compile time here, mirroring the probe-side switches.
   let catalog: ReactNode;
   if (entry.probe_kind === "acp") {
-    if (!("acp" in entry.outcome)) {
-      throw new Error(`Corrupt cached catalog for acp adapter ${entry.probe_kind}`);
-    }
     catalog = <AcpProbeResult catalog={entry.outcome.acp.discovered} />;
   } else if (entry.probe_kind === "codex") {
-    if (!("codex" in entry.outcome)) {
-      throw new Error(`Corrupt cached catalog for codex adapter ${entry.probe_kind}`);
-    }
     catalog = (
       <CodexProbeResult outcome={{ status: "available", models: entry.outcome.codex.models }} />
     );
   } else {
-    const _exhaustive: never = entry.probe_kind;
+    const _exhaustive: never = entry;
     throw new Error(`Unknown probe kind: ${String(_exhaustive)}`);
   }
   return (
@@ -343,12 +345,7 @@ function CachedCatalog({ entry }: { entry: AdapterCatalogEntry }) {
           defaultMessage="Last tested"
         />
         {": "}
-        <span className="font-mono">
-          {new Intl.DateTimeFormat(intl.locale, {
-            dateStyle: "medium",
-            timeStyle: "short",
-          }).format(entry.probed_at_millis)}
-        </span>
+        <span className="font-mono">{formatProbedAt(intl, entry.probed_at_millis)}</span>
       </p>
     </div>
   );
@@ -357,12 +354,10 @@ function CachedCatalog({ entry }: { entry: AdapterCatalogEntry }) {
 /** The probe's model count for one row, from whichever source is live: the
  *  fresh ok result, else (idle only) the cached entry. Only a count > 0 is a
  *  badge point -- empty catalogs, the unavailable outcome, probing, and
- *  failure carry no summary badge (issue #552 AC). The cache dispatch mirrors
- *  CachedCatalog's narrowing checks (variant check + never guard) so a future
- *  backend shape change fails at compile time, not as a silently missing
- *  badge. The guards degrade to null rather than throw -- this is badge
- *  data, not render dispatch, and the IPC boundary already drops mismatched
- *  pairs server-side (the in-checks are defensive double-cover). */
+ *  failure carry no summary badge (issue #552 AC). The cache dispatch
+ *  narrows the tagged union by `probe_kind` (never guard mirrors
+ *  CachedCatalog), so a future backend shape change fails at compile time,
+ *  not as a silently missing badge. */
 function directoryModelCount(probe: ProbeState, cached?: AdapterCatalogEntry): number | null {
   let count: number;
   if (probe.status === "ok") {
@@ -376,13 +371,11 @@ function directoryModelCount(probe: ProbeState, cached?: AdapterCatalogEntry): n
     }
   } else if (probe.status === "idle" && cached) {
     if (cached.probe_kind === "acp") {
-      if (!("acp" in cached.outcome)) return null;
       count = cached.outcome.acp.discovered.models.length;
     } else if (cached.probe_kind === "codex") {
-      if (!("codex" in cached.outcome)) return null;
       count = cached.outcome.codex.models.length;
     } else {
-      const _exhaustive: never = cached.probe_kind;
+      const _exhaustive: never = cached;
       throw new Error(`Unknown probe kind: ${String(_exhaustive)}`);
     }
   } else {
@@ -565,13 +558,25 @@ export function LocalCliTab({
             const cached = cachedCatalogs?.[a.id];
             const expanded = expandedRows.has(a.id);
             const modelCount = directoryModelCount(probe, cached);
+            // The fold content for the current state: a fresh probe result
+            // (ok or failed -- both are the result the click bought), else
+            // the cached idle entry. Probing has no fresh content: the fold
+            // renders either the stale cache or nothing (mid-flight empty).
+            const foldContent =
+              probe.status === "ok" ? (
+                <ProbeResult result={probe.result} />
+              ) : probe.status === "failed" ? (
+                <ProbeErrorLine error={probe.error} />
+              ) : cached ? (
+                <CachedCatalog entry={cached} />
+              ) : null;
             // The fold only exists when there is content to show (issue
-            // #552 follow-up): a probed row (ok or failed -- both are the
-            // result the click bought) or a cached idle entry. Idle without
-            // cache and mid-flight probing render no chevron -- an empty
-            // fold would be a dead toggle.
-            const hasFoldContent =
-              probe.status === "ok" || probe.status === "failed" || Boolean(cached);
+            // #552 follow-up): an idle row without cache and a never-probed
+            // row render no chevron -- an empty fold would be a dead toggle.
+            // Exception (issue #554): an already-EXPANDED row keeps its
+            // chevron mid-flight (a re-probe transiently empties the fold);
+            // the toggle must not flicker away while a probe runs.
+            const hasFoldContent = foldContent !== null;
             return (
               <SettingsRow
                 key={a.id}
@@ -619,17 +624,14 @@ export function LocalCliTab({
                           </Button>
                         </TooltipTrigger>
                         {cached && (
-                          <TooltipContent side="top" className={TOOLTIP_CLASS}>
+                          <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
                             <FormattedMessage
                               id="settings.runtime.localCli.probe.cachedAt"
                               defaultMessage="Last tested"
                             />
                             {": "}
                             <span className="font-mono">
-                              {new Intl.DateTimeFormat(intl.locale, {
-                                dateStyle: "medium",
-                                timeStyle: "short",
-                              }).format(cached.probed_at_millis)}
+                              {formatProbedAt(intl, cached.probed_at_millis)}
                             </span>
                           </TooltipContent>
                         )}
@@ -655,7 +657,7 @@ export function LocalCliTab({
                         />
                       </Badge>
                     )}
-                    {hasFoldContent && (
+                    {(hasFoldContent || expanded) && (
                       <button
                         type="button"
                         className="text-muted-foreground hover:text-foreground shrink-0 cursor-pointer"
@@ -673,23 +675,13 @@ export function LocalCliTab({
                   </div>
                 )}
               >
-                {expanded && (
+                {expanded && foldContent !== null && (
                   // Fold indent aligned with the MCP expanded content's
-                  // ml-7 visual hierarchy (issue #552 item 6).
-                  <div className="ml-7">
-                    {probe.status === "ok" ? (
-                      <ProbeResult result={probe.result} />
-                    ) : probe.status === "failed" ? (
-                      <ProbeErrorLine error={probe.error} />
-                    ) : cached ? (
-                      // Idle row with a cached entry: the last
-                      // explicitly-tested catalog persists across restarts
-                      // (issue #536 AC) -- the cache is the idle-state
-                      // render, and a fresh probe's ok state takes
-                      // precedence over it by branch order.
-                      <CachedCatalog entry={cached} />
-                    ) : null}
-                  </div>
+                  // ml-7 visual hierarchy (issue #552 item 6). Skipped when
+                  // the fold is empty (mid-flight no-cache re-probe): an
+                  // indent-only block would paint stray vertical spacing
+                  // under the row.
+                  <div className="ml-7">{foldContent}</div>
                 )}
               </SettingsRow>
             );

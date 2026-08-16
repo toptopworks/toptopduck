@@ -560,9 +560,107 @@ describe("LocalCliTab fold (issue #552)", () => {
 
     fireEvent.click((await screen.findAllByRole("button", { name: "Test" }))[0]);
     // This case seeds no cache, so the mid-flight fold is empty -- the row
-    // stays expanded and the settled result re-renders in place.
+    // stays expanded, the chevron stays mounted (issue #554: an expanded row
+    // never unmounts its toggle mid-flight), and the settled result
+    // re-renders in place.
     expect(chevron).toHaveAttribute("aria-expanded", "true");
     await screen.findByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)"));
+    expect(chevron).toHaveAttribute("aria-expanded", "true");
+  });
+
+  // Issue #554: the chevron's render condition is hasFoldContent || expanded
+  // -- an already-expanded row keeps its toggle through the mid-flight state
+  // even when the fold itself goes empty (a failed no-cache row re-probing:
+  // probing clears the fold, but the visible chevron must not flicker away).
+  it("keeps the chevron mounted mid-flight when an expanded no-cache row re-probes", async () => {
+    // Seed a failure first so the row gains fold content and can be expanded.
+    vi.mocked(probeAdapter).mockRejectedValueOnce({ kind: "Timeout" });
+    let release!: (v: ProbeOk) => void;
+    vi.mocked(probeAdapter).mockImplementationOnce(
+      () => new Promise((resolve) => { release = resolve; }),
+    );
+    renderTab();
+
+    await clickTestButton();
+    const chevron = await rowChevron("claude-code");
+    fireEvent.click(chevron);
+    expect(
+      await screen.findByText(byFoldedText("The probe timed out.")),
+    ).toBeInTheDocument();
+
+    // Re-probe: the fold empties (no cache, status probing), but the
+    // expanded row keeps its chevron and aria-expanded stays true.
+    await clickTestButton();
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: "Test" })[0]).toBeDisabled(),
+    );
+    expect(chevron).toBeInTheDocument();
+    expect(chevron).toHaveAttribute("aria-expanded", "true");
+
+    release(acpOk);
+    expect(
+      await screen.findByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)")),
+    ).toBeInTheDocument();
+    expect(chevron).toHaveAttribute("aria-expanded", "true");
+  });
+
+  // The mid-flight staleness contract (issue #554, locked decision): an
+  // expanded row WITH a cached entry keeps showing the stale CachedCatalog
+  // while probing -- the badge layer clears the stale count, but the fold
+  // keeps the directory + its "Last tested" timestamp readable so the user
+  // can judge freshness. The spinner on the Test button is the probing cue.
+  it("keeps the stale cached catalog in the expanded fold while re-probing", async () => {
+    let release!: (v: ProbeOk) => void;
+    vi.mocked(probeAdapter).mockImplementation(
+      () => new Promise((resolve) => { release = resolve; }),
+    );
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({
+      "claude-code": {
+        probe_kind: "acp",
+        outcome: { acp: { discovered: okCatalog } },
+        probed_at_millis: Date.UTC(2026, 7, 15, 10, 30),
+      },
+    });
+    renderTab();
+
+    // Expand the idle+cache row, then start a re-probe.
+    fireEvent.click(await rowChevron("claude-code"));
+    expect(
+      await screen.findByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)")),
+    ).toBeInTheDocument();
+
+    await clickTestButton();
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: "Test" })[0]).toBeDisabled(),
+    );
+    // Badge layer: the stale count is gone mid-flight (the pre-existing
+    // contract). Fold layer: the stale catalog + timestamp line stay.
+    expect(screen.queryByText("2 models")).toBeNull();
+    expect(
+      screen.getByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)")),
+    ).toBeInTheDocument();
+    expect(screen.getByText(byFoldedText("Last tested"))).toBeInTheDocument();
+    const chevron = await rowChevron("claude-code");
+    expect(chevron).toHaveAttribute("aria-expanded", "true");
+
+    // Resolve with a DIFFERENT catalog so the settled render is
+    // distinguishable from the stale one (same text would let a sync
+    // first-check waitFor pass against the pre-release DOM). The settled ok
+    // branch renders ProbeResult -- the fold shows the fresh catalog; the
+    // "Last tested" line is cache-only, so it yields to the fresh result.
+    release({
+      kind: "acp",
+      data: {
+        discovered: { ...okCatalog, models: ["fake-opus", "fake-new"] },
+      },
+    });
+    expect(
+      await screen.findByText(byFoldedText("fake-opus, fake-new (fake-opus)")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)")),
+    ).toBeNull();
+    expect(screen.queryByText(byFoldedText("Last tested"))).toBeNull();
     expect(chevron).toHaveAttribute("aria-expanded", "true");
   });
 
