@@ -366,6 +366,18 @@ impl DiscoveredRuntime {
             adapter_id: None,
         }
     }
+
+    /// True when no selector-facing field carries data (issue #531): the
+    /// picker can render nothing from this catalog. The injection-facing
+    /// `*_config_id`s and the engine-stamped `adapter_id` are deliberately
+    /// excluded -- an id alone can only re-key an already-persisted
+    /// selection, it offers the selector nothing.
+    fn selector_fields_empty(&self) -> bool {
+        self.models.is_empty()
+            && self.current_model.is_none()
+            && self.thought_levels.is_empty()
+            && self.current_thought_level.is_none()
+    }
 }
 
 /// The semantic categories the discovery path keys on (ADR-0095 Decision 3):
@@ -395,38 +407,40 @@ pub(crate) const THOUGHT_LEVEL_CATEGORY: &str = "thought_level";
 /// total: any malformed shape (missing fields, wrong types, a non-array
 /// catalog) contributes nothing -- the result degrades to empty lists /
 /// `None` currents, never an error (a turn must not fail because a CLI's
-/// config shape drifted); when a non-empty catalog yields the empty shape,
+/// config shape drifted); when the result carries no selector-facing data,
 /// [`degrade_diagnosis`] turns that silence into one warn (issue #531).
 pub fn extract_discovered_runtime(config_options: Option<&serde_json::Value>) -> DiscoveredRuntime {
     let mut out = DiscoveredRuntime::empty();
     let Some(catalog) = config_options else {
         return out;
     };
-    let Some(entries) = catalog.as_array() else {
-        return out;
-    };
-    for entry in entries {
-        let category = entry.get("category").and_then(|v| v.as_str());
-        // One dispatch over the category binds every slot this entry owns, so
-        // adding a category is one arm (no second match to keep in sync).
-        match category {
-            Some(c) if c == MODEL_CATEGORY => {
-                out.current_model = entry
-                    .get("currentValue")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                out.model_config_id = entry_config_id(entry);
-                out.models = flatten_option_values(entry.get("options"));
+    // A non-array catalog contributes nothing, but it still flows to the
+    // diagnosis below: `null` is the legitimate no-options encoding, any
+    // other non-array shape is envelope drift (issue #531).
+    if let Some(entries) = catalog.as_array() {
+        for entry in entries {
+            let category = entry.get("category").and_then(|v| v.as_str());
+            // One dispatch over the category binds every slot this entry owns, so
+            // adding a category is one arm (no second match to keep in sync).
+            match category {
+                Some(c) if c == MODEL_CATEGORY => {
+                    out.current_model = entry
+                        .get("currentValue")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    out.model_config_id = entry_config_id(entry);
+                    out.models = flatten_option_values(entry.get("options"));
+                }
+                Some(c) if c == THOUGHT_LEVEL_CATEGORY => {
+                    out.current_thought_level = entry
+                        .get("currentValue")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    out.thought_level_config_id = entry_config_id(entry);
+                    out.thought_levels = flatten_option_values(entry.get("options"));
+                }
+                _ => {}
             }
-            Some(c) if c == THOUGHT_LEVEL_CATEGORY => {
-                out.current_thought_level = entry
-                    .get("currentValue")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                out.thought_level_config_id = entry_config_id(entry);
-                out.thought_levels = flatten_option_values(entry.get("options"));
-            }
-            _ => {}
         }
     }
     // Issue #531: the silent degrade gets one diagnostic line -- config
@@ -441,18 +455,29 @@ pub fn extract_discovered_runtime(config_options: Option<&serde_json::Value>) ->
 }
 
 /// Diagnose the silent degrade (issue #531): a non-empty catalog that still
-/// produced the entirely-empty shape yields `Some((entry count, distinct
+/// produced no selector-facing data yields `Some((entry count, distinct
 /// category strings))` for the boundary warn -- the category set tells
 /// category drift (renamed tags visible verbatim) apart from field drift
-/// (known tags, nothing extracted). Every other path stays `None`: a
-/// missing / non-array / empty catalog is a normal degrade, and any partial
-/// recognition means the catalog was understood well enough to use.
+/// (known tags, nothing extracted). Selector-facing means the fields the
+/// picker renders; the injection-facing `*_config_id`s are excluded -- an
+/// id alone can only re-key an already-persisted selection, it offers the
+/// selector nothing. A present, non-null, non-array catalog never reached
+/// extraction and diagnoses as `<not an array>`. Every other path stays
+/// `None`: a missing / null / empty catalog is a normal degrade, and any
+/// partial selector-facing recognition means the catalog was understood
+/// well enough to use.
 fn degrade_diagnosis(
     catalog: &serde_json::Value,
     out: &DiscoveredRuntime,
 ) -> Option<(usize, String)> {
-    let entries = catalog.as_array()?;
-    if entries.is_empty() || *out != DiscoveredRuntime::empty() {
+    let entries = match catalog.as_array() {
+        Some(entries) => entries,
+        // `null` is the legitimate no-options encoding; anything else
+        // non-array is envelope drift.
+        None if catalog.is_null() => return None,
+        None => return Some((0, "<not an array>".to_string())),
+    };
+    if entries.is_empty() || !out.selector_fields_empty() {
         return None;
     }
     let mut categories: Vec<&str> = entries
@@ -674,21 +699,22 @@ mod tests {
         assert_eq!(d.current_thought_level.as_deref(), Some("high"));
     }
 
-    /// Issue #531: a non-empty catalog that still yields the empty shape is
-    /// diagnosed -- entry count + the distinct category strings the CLI
-    /// actually sent, so a renamed category surfaces verbatim in the set.
+    /// Issue #531: a non-empty catalog that still yields no selector-facing
+    /// data is diagnosed -- entry count + the distinct sorted category
+    /// strings the CLI actually sent, so a renamed category surfaces
+    /// verbatim in the set (duplicates collapse, order is lexicographic).
     #[test]
     fn nonempty_catalog_with_zero_extraction_is_diagnosed() {
         let catalog = json!([
-            { "id": "m", "name": "Model", "category": "models",
-              "currentValue": "m1", "options": [{ "value": "m1" }] },
-            { "id": "r", "name": "Reasoning", "category": "reasoning" },
+            { "id": "z1", "category": "zed" },
+            { "id": "a", "name": "Alpha", "category": "alpha" },
+            { "id": "z2", "category": "zed" },
         ]);
         let out = extract_discovered_runtime(Some(&catalog));
         assert_eq!(out, DiscoveredRuntime::empty());
         assert_eq!(
             degrade_diagnosis(&catalog, &out),
-            Some((2, "models, reasoning".to_string()))
+            Some((3, "alpha, zed".to_string()))
         );
     }
 
@@ -709,8 +735,43 @@ mod tests {
         );
     }
 
-    /// Only the all-empty outcome is diagnosed: a missing / non-array /
-    /// empty catalog is a normal degrade, and partial recognition (a current
+    /// Recognition that yields only injection keys still counts as zero
+    /// extraction: an id can re-key an already-persisted selection but
+    /// offers the selector nothing, so the warn must fire (issue #531).
+    #[test]
+    fn id_only_recognition_is_still_diagnosed() {
+        let catalog = json!([
+            { "id": "m", "category": "model" },
+            { "id": "t", "category": "thought_level" },
+        ]);
+        let out = extract_discovered_runtime(Some(&catalog));
+        assert!(out.model_config_id.is_some());
+        assert!(out.thought_level_config_id.is_some());
+        assert_eq!(
+            degrade_diagnosis(&catalog, &out),
+            Some((2, "model, thought_level".to_string()))
+        );
+    }
+
+    /// Entries with and without a usable category string coexist: the set
+    /// lists what arrived, the `<none>` marker is reserved for a catalog
+    /// that carried no category strings at all (issue #531).
+    #[test]
+    fn mixed_category_availability_lists_only_the_strings() {
+        let catalog = json!([
+            { "id": "x", "category": "x" },
+            { "id": "y" },
+        ]);
+        let out = extract_discovered_runtime(Some(&catalog));
+        assert_eq!(out, DiscoveredRuntime::empty());
+        assert_eq!(
+            degrade_diagnosis(&catalog, &out),
+            Some((2, "x".to_string()))
+        );
+    }
+
+    /// Only the all-empty outcome is diagnosed: a missing / null / empty
+    /// catalog is a normal degrade, and partial recognition (a current
     /// value with no offered list) means the catalog was understood well
     /// enough to use -- the warn is reserved for the selector going fully
     /// empty (issue #531).
@@ -718,10 +779,6 @@ mod tests {
     fn non_catalogs_and_partial_recognition_are_not_diagnosed() {
         assert_eq!(
             degrade_diagnosis(&json!(null), &DiscoveredRuntime::empty()),
-            None
-        );
-        assert_eq!(
-            degrade_diagnosis(&json!({}), &DiscoveredRuntime::empty()),
             None
         );
         let empty_catalog = json!([]);
@@ -735,6 +792,23 @@ mod tests {
         let out = extract_discovered_runtime(Some(&catalog));
         assert_ne!(out, DiscoveredRuntime::empty());
         assert_eq!(degrade_diagnosis(&catalog, &out), None);
+    }
+
+    /// A present, non-null, non-array catalog is envelope drift, not the
+    /// legitimate `null` no-options encoding -- it diagnoses as such
+    /// (issue #531).
+    #[test]
+    fn non_null_non_array_catalog_is_diagnosed() {
+        let object = json!({ "model": "misplaced" });
+        assert_eq!(
+            degrade_diagnosis(&object, &DiscoveredRuntime::empty()),
+            Some((0, "<not an array>".to_string()))
+        );
+        let string = json!("catalog");
+        assert_eq!(
+            degrade_diagnosis(&string, &DiscoveredRuntime::empty()),
+            Some((0, "<not an array>".to_string()))
+        );
     }
 
     /// ADR-0095 injection fields: ACP adapters carry `None` (protocol
