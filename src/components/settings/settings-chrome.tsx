@@ -54,12 +54,10 @@ export function SettingsRow({
 }) {
   return (
     <div data-slot="settings-row" className={cn("px-4 py-4", className)}>
-      <div
-        className={cn(
-          "flex justify-between gap-4",
-          children ? "items-start" : "items-center",
-        )}
-      >
+      {/* Always center the header row: rows whose children mount/unmount
+       *  (the local CLI fold) must not shift the action controls between
+       *  center- and start-aligned as the fold toggles. */}
+      <div className="flex items-center justify-between gap-4">
         <div className="min-w-0 flex-1 space-y-1">
           <div className="text-sm font-medium">{title}</div>
           {description && (

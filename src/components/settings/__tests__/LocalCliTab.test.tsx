@@ -6,12 +6,13 @@ import type { AdapterEntry, AdapterCatalogs, DiscoveredRuntime, ProbeOk } from "
 import { adapterKeys } from "../../../session/queryKeys";
 import { renderSettings } from "./helpers";
 
-// Local CLI tab tests (issue #534/#535, ADR-0096): the diagnostic probe
-// surface -- the per-adapter Test button (rendered for every detected
-// adapter, both formats), the in-flight disable + close-guard busy report,
-// and the result rendering (per-format catalog on success, kind-dispatched
-// error on failure). The tab's list / rescan surface is covered by
-// RuntimeSection.test.
+// Local CLI tab tests (issue #534/#535, ADR-0096; fold contract issue #552):
+// the diagnostic probe surface -- the per-adapter Test button (rendered for
+// every detected adapter, both formats), the in-flight disable + close-guard
+// busy report, the result rendering (per-format catalog on success,
+// kind-dispatched error on failure), and the fold: the collapsed row carries
+// only summary badges, the chevron toggles, and a probe success auto-expands.
+// The tab's list / rescan surface is covered by RuntimeSection.test.
 
 vi.mock("../../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../api")>();
@@ -70,14 +71,18 @@ function renderTab(onIpcBusy = vi.fn()) {
   return renderSettings(<LocalCliTab onIpcBusy={onIpcBusy} />);
 }
 
-// A function matcher over full <p> text: getByText's default matcher only
+// A function matcher over full line text: getByText's default matcher only
 // sees DIRECT text nodes, but the folded lines mix FormattedMessage spans +
-// sibling text (the react-intl span pitfall) -- match on the joined
-// paragraph content instead. Shared by both describes (the probe + the
-// catalog-cache suites render the same folded lines).
+// sibling text (the react-intl span pitfall) -- match on the joined line
+// content instead. The innermost rule (no child element also contains the
+// fragment) keeps it unique: since issue #552 the catalog lines are DIVs
+// whose DIV ancestors' textContent would otherwise match too.
 const byFoldedText = (fragment: string) =>
   (_: unknown, element: Element | null) =>
-    element?.tagName === "P" && element.textContent?.includes(fragment) === true;
+    element?.textContent?.includes(fragment) === true &&
+    !Array.from(element.children).some(
+      (c) => c.textContent?.includes(fragment) === true,
+    );
 
 /** Click the first Test button (claude-code's row -- the first detected
  *  adapter). Every detected adapter now offers the button, so a singular
@@ -85,6 +90,14 @@ const byFoldedText = (fragment: string) =>
 async function clickTestButton() {
   const buttons = await screen.findAllByRole("button", { name: "Test" });
   fireEvent.click(buttons[0]);
+}
+
+/** The fold chevron for one adapter row (aria-label = the row name, the
+ *  MCP-row pattern). Awaited: the chevron only exists once the row has
+ *  fold content (probed or cached) -- after a probe settles it appears on
+ *  the next render, so a sync getBy would race the state update. */
+async function rowChevron(name: string) {
+  return screen.findByRole("button", { name });
 }
 
 describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
@@ -168,7 +181,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     await waitFor(() => expect(onIpcBusy).toHaveBeenCalledWith("probe", false));
   });
 
-  // --- Success rendering ---------------------------------------------------
+  // --- Success rendering (auto-expanded by the fold contract) --------------
 
   it("renders the ACP catalog under the row on success", async () => {
     vi.mocked(probeAdapter).mockResolvedValue(acpOk);
@@ -178,9 +191,9 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     expect(
       await screen.findByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)")),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(byFoldedText("low, medium, high (medium)")),
-    ).toBeInTheDocument();
+    // Thought levels render as badges with the current value marked
+    // (issue #552 effort badge group).
+    expect(screen.getByText("medium (default)")).toBeInTheDocument();
   });
 
   it("renders the codex per-model catalog under the row on success", async () => {
@@ -191,10 +204,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     const buttons = await screen.findAllByRole("button", { name: "Test" });
     fireEvent.click(buttons[1]);
     expect(
-      await screen.findByText(byFoldedText("GPT-5.2 Codex (default): low, medium, high")),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(byFoldedText("GPT-5.1 Codex Mini: low")),
+      await screen.findByText(byFoldedText("GPT-5.2 Codex (default):")),
     ).toBeInTheDocument();
   });
 
@@ -234,6 +244,9 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     renderTab();
 
     await clickTestButton();
+    // The failure row stays collapsed -- the error lives in the fold; expand
+    // it to read the detail (the collapsed row shows the red badge).
+    fireEvent.click(await rowChevron("claude-code"));
     expect(await screen.findByText(byFoldedText(expected))).toBeInTheDocument();
   });
 
@@ -245,6 +258,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     renderTab();
 
     await clickTestButton();
+    fireEvent.click(await rowChevron("claude-code"));
     expect(
       await screen.findByText(
         byFoldedText("Handshake with the CLI failed. (session/new error: boom)"),
@@ -259,6 +273,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     renderTab();
 
     await clickTestButton();
+    fireEvent.click(await rowChevron("claude-code"));
     expect(
       await screen.findByText(
         byFoldedText(
@@ -276,6 +291,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     renderTab();
 
     await clickTestButton();
+    fireEvent.click(await rowChevron("claude-code"));
     expect(
       await screen.findByText(
         byFoldedText("The probe request could not reach the CLI (internal error)."),
@@ -292,6 +308,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     renderTab();
 
     await clickTestButton();
+    fireEvent.click(await rowChevron("claude-code"));
     expect(
       await screen.findByText(byFoldedText("Handshake with the CLI failed.")),
     ).toBeInTheDocument();
@@ -316,7 +333,7 @@ describe("LocalCliTab catalog cache (issue #536)", () => {
 
   // The restart read: a cache entry (written by a previous app run's probe)
   // renders on the idle row through the same per-format components, plus the
-  // "Last tested" timestamp line.
+  // "Last tested" timestamp line -- after the user expands the collapsed row.
   it("renders a cached ACP entry with its timestamp on the idle row", async () => {
     vi.mocked(getAdapterCatalogs).mockResolvedValue({
       "claude-code": {
@@ -326,7 +343,12 @@ describe("LocalCliTab catalog cache (issue #536)", () => {
       },
     });
     renderTab();
+    await screen.findAllByRole("button", { name: "Test" });
 
+    // Collapsed by default: the directory (and timestamp) is not in the DOM.
+    expect(screen.queryByText(byFoldedText("Last tested"))).toBeNull();
+
+    fireEvent.click(await rowChevron("claude-code"));
     expect(
       await screen.findByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)")),
     ).toBeInTheDocument();
@@ -345,17 +367,19 @@ describe("LocalCliTab catalog cache (issue #536)", () => {
     });
     renderTab();
 
+    fireEvent.click(await screen.findByRole("button", { name: "codex" }));
     expect(
-      await screen.findByText(byFoldedText("GPT-5.2 Codex (default): low, medium, high")),
+      await screen.findByText(byFoldedText("GPT-5.2 Codex (default):")),
     ).toBeInTheDocument();
   });
 
-  // An adapter with no cached entry (never tested) renders nothing -- the
-  // cache never fabricates a row state.
+  // An adapter with no cached entry (never tested) has no fold at all --
+  // the cache never fabricates a row state, and the chevron stays absent.
   it("renders nothing for an adapter with no cached entry", async () => {
     renderTab();
 
     await screen.findAllByRole("button", { name: "Test" });
+    expect(screen.queryByRole("button", { name: "claude-code" })).toBeNull();
     expect(screen.queryByText(byFoldedText("Last tested"))).toBeNull();
     expect(
       screen.queryByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)")),
@@ -388,6 +412,8 @@ describe("LocalCliTab catalog cache (issue #536)", () => {
 
     const buttons = await screen.findAllByRole("button", { name: "Test" });
     fireEvent.click(buttons[1]);
+    // The unavailable outcome auto-expanded the row -- the honest line is
+    // already visible without a chevron click.
     await screen.findByText(
       byFoldedText("Started, but the model catalog is unavailable. (method not found)"),
     );
@@ -396,5 +422,278 @@ describe("LocalCliTab catalog cache (issue #536)", () => {
     const cached = queryClient.getQueryData<AdapterCatalogs>(adapterKeys.catalogs());
     expect(cached?.codex).toBeUndefined();
     expect(screen.queryByText(byFoldedText("Last tested"))).toBeNull();
+  });
+});
+
+// --- Fold contract (issue #552) ----------------------------------------------
+
+describe("LocalCliTab fold (issue #552)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(listAdapters).mockResolvedValue(mockAdapters);
+    vi.mocked(rescanAdapters).mockResolvedValue(mockAdapters);
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
+  });
+
+  // --- Fold contract -------------------------------------------------------
+
+  it("starts collapsed and toggles open and closed via the chevron", async () => {
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({
+      "claude-code": {
+        probe_kind: "acp",
+        outcome: { acp: { discovered: okCatalog } },
+        probed_at_millis: Date.UTC(2026, 7, 15, 10, 30),
+      },
+    });
+    renderTab();
+    const chevron = await screen.findByRole("button", { name: "claude-code" });
+
+    expect(chevron).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText(byFoldedText("Last tested"))).toBeNull();
+
+    fireEvent.click(chevron);
+    expect(chevron).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText(byFoldedText("Last tested"))).toBeInTheDocument();
+
+    fireEvent.click(chevron);
+    expect(chevron).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText(byFoldedText("Last tested"))).toBeNull();
+  });
+
+  // --- Chevron existence: only rows with fold content get a toggle ----------
+
+  it("renders no chevron for untested rows (idle without cache)", async () => {
+    renderTab();
+
+    await screen.findAllByRole("button", { name: "Test" });
+    expect(screen.queryByRole("button", { name: "claude-code" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "codex" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "gemini-cli" })).toBeNull();
+  });
+
+  it("renders no chevron while probing, and one after the probe settles", async () => {
+    let release!: (v: ProbeOk) => void;
+    vi.mocked(probeAdapter).mockImplementation(
+      () => new Promise((resolve) => { release = resolve; }),
+    );
+    renderTab();
+
+    await clickTestButton();
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: "Test" })[0]).toBeDisabled(),
+    );
+    // Mid-flight: the probe has no content yet -- no dead toggle.
+    expect(screen.queryByRole("button", { name: "claude-code" })).toBeNull();
+    release(acpOk);
+
+    // Settled: the chevron appears and the auto-expand already opened it.
+    const chevron = await screen.findByRole("button", { name: "claude-code" });
+    expect(chevron).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("renders a chevron for a failed probe even with no cache", async () => {
+    vi.mocked(probeAdapter).mockRejectedValue({ kind: "Timeout" });
+    renderTab();
+
+    await clickTestButton();
+    const chevron = await screen.findByRole("button", { name: "claude-code" });
+    expect(chevron).toHaveAttribute("aria-expanded", "false");
+    // Collapsed (failure never auto-expands); expanding reveals the error.
+    fireEvent.click(chevron);
+    expect(chevron).toHaveAttribute("aria-expanded", "true");
+    expect(
+      await screen.findByText(byFoldedText("The probe timed out.")),
+    ).toBeInTheDocument();
+  });
+
+  // --- Auto-expand on success -----------------------------------------------
+
+  it("auto-expands the row after a successful ACP probe", async () => {
+    vi.mocked(probeAdapter).mockResolvedValue(acpOk);
+    renderTab();
+
+    await clickTestButton();
+    expect(
+      await screen.findByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)")),
+    ).toBeInTheDocument();
+    expect(await rowChevron("claude-code")).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("auto-expands the row after a successful codex probe", async () => {
+    vi.mocked(probeAdapter).mockResolvedValue(codexAvailable);
+    renderTab();
+
+    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    fireEvent.click(buttons[1]);
+    expect(
+      await screen.findByText(byFoldedText("GPT-5.2 Codex (default):")),
+    ).toBeInTheDocument();
+    expect(await rowChevron("codex")).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("keeps the fold state through a failed probe", async () => {
+    vi.mocked(probeAdapter).mockRejectedValue({ kind: "HandshakeFailure", data: "boom" });
+    renderTab();
+
+    // The row starts chevron-less (never tested); the failed probe leaves
+    // it collapsed -- the red badge is the summary, the fold hides the
+    // detail until the user expands.
+    await clickTestButton();
+    const chevron = await rowChevron("claude-code");
+    expect(chevron).toHaveAttribute("aria-expanded", "false");
+    expect(await screen.findByText("Test failed")).toBeInTheDocument();
+
+    fireEvent.click(chevron);
+    expect(chevron).toHaveAttribute("aria-expanded", "true");
+    expect(
+      await screen.findByText(byFoldedText("Handshake with the CLI failed. (boom)")),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the row expanded when re-probing an expanded row", async () => {
+    vi.mocked(probeAdapter).mockResolvedValue(acpOk);
+    renderTab();
+
+    await clickTestButton();
+    const chevron = await rowChevron("claude-code");
+    await screen.findByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)"));
+
+    fireEvent.click((await screen.findAllByRole("button", { name: "Test" }))[0]);
+    // probing: fold stays as-is (expanded, showing the stale catalog)
+    expect(chevron).toHaveAttribute("aria-expanded", "true");
+    await screen.findByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)"));
+    expect(chevron).toHaveAttribute("aria-expanded", "true");
+  });
+
+  // --- Collapsed-row badges -------------------------------------------------
+
+  it("shows an N models badge on a collapsed row with a cached entry", async () => {
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({
+      "claude-code": {
+        probe_kind: "acp",
+        outcome: { acp: { discovered: okCatalog } },
+        probed_at_millis: 0,
+      },
+    });
+    renderTab();
+
+    expect(await screen.findByText("2 models")).toBeInTheDocument();
+  });
+
+  it("shows an N models badge on a collapsed ok row, replacing the stale cache count", async () => {
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({
+      codex: {
+        probe_kind: "codex",
+        outcome: { codex: { models: [] } },
+        probed_at_millis: 0,
+      },
+    });
+    vi.mocked(probeAdapter).mockResolvedValue(codexAvailable);
+    renderTab();
+
+    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    fireEvent.click(buttons[1]);
+    expect(await screen.findByText("2 models")).toBeInTheDocument();
+    expect(screen.queryByText("0 models")).toBeNull();
+  });
+
+  it("shows a red Test failed badge after a failed probe", async () => {
+    vi.mocked(probeAdapter).mockRejectedValue({ kind: "Timeout" });
+    renderTab();
+
+    await clickTestButton();
+    const badge = await screen.findByText("Test failed");
+    expect(badge.closest("span")).toHaveClass("bg-destructive");
+    // The Test buttons stay beside the badge (the badge replaces the N
+    // models summary slot, never the actions).
+    expect((await screen.findAllByRole("button", { name: "Test" })).length).toBeGreaterThan(0);
+  });
+
+  it("shows no badge for an unavailable codex outcome", async () => {
+    vi.mocked(probeAdapter).mockResolvedValue(codexUnavailable);
+    renderTab();
+
+    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    fireEvent.click(buttons[1]);
+    await screen.findByRole("button", { name: "codex", expanded: true });
+    expect(screen.queryByText("Test failed")).toBeNull();
+    expect(screen.queryByText("0 models")).toBeNull();
+  });
+
+  it("shows no badge for an empty available codex catalog", async () => {
+    vi.mocked(probeAdapter).mockResolvedValue(codexEmpty);
+    renderTab();
+
+    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    fireEvent.click(buttons[1]);
+    await screen.findByRole("button", { name: "codex", expanded: true });
+    expect(screen.queryByText("0 models")).toBeNull();
+    expect(screen.queryByText("Test failed")).toBeNull();
+  });
+
+  it("shows no badge while probing even with a cached entry, none when idle without cache, none on undetected rows", async () => {
+    let release!: (v: ProbeOk) => void;
+    vi.mocked(probeAdapter).mockImplementation(
+      () => new Promise((resolve) => { release = resolve; }),
+    );
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({
+      "claude-code": {
+        probe_kind: "acp",
+        outcome: { acp: { discovered: okCatalog } },
+        probed_at_millis: 0,
+      },
+    });
+    renderTab();
+
+    // Idle with cache first: the badge shows. Then probing must clear it --
+    // the mid-flight row carries no summary (the stale cache does not bleed
+    // through).
+    expect(await screen.findByText("2 models")).toBeInTheDocument();
+    await clickTestButton();
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: "Test" })[0]).toBeDisabled(),
+    );
+    expect(screen.queryByText("2 models")).toBeNull();
+    expect(screen.queryByText("Test failed")).toBeNull();
+    release(acpOk);
+
+    // The undetected gemini-cli row: no badge either (only the pre-existing
+    // Detected / Not installed badges exist).
+    await screen.findByText("2 models");
+    expect(screen.queryByText("Test failed")).toBeNull();
+  });
+
+  // --- Effort badge group ---------------------------------------------------
+
+  it("renders thought levels as badges with the current value marked", async () => {
+    vi.mocked(probeAdapter).mockResolvedValue(acpOk);
+    renderTab();
+
+    await clickTestButton();
+    expect(
+      await screen.findByText(byFoldedText("fake-opus, fake-sonnet (fake-opus)")),
+    ).toBeInTheDocument();
+    // Three badges, one per level; the current value carries the (default)
+    // annotation shape only for marked entries.
+    expect(await screen.findByText("low")).toBeInTheDocument();
+    expect(screen.getByText("medium (default)")).toBeInTheDocument();
+    expect(screen.getByText("high")).toBeInTheDocument();
+  });
+
+  it("renders codex efforts as badges with each model's default marked", async () => {
+    vi.mocked(probeAdapter).mockResolvedValue(codexAvailable);
+    renderTab();
+
+    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    fireEvent.click(buttons[1]);
+    expect(
+      await screen.findByText(byFoldedText("GPT-5.2 Codex (default):")),
+    ).toBeInTheDocument();
+    // gpt-5.2-codex: low / medium (default) / high; mini: its single low is
+    // the CLI default, so it carries the marker too.
+    expect(await screen.findByText("medium (default)")).toBeInTheDocument();
+    expect(screen.getByText("low")).toBeInTheDocument();
+    expect(screen.getByText("low (default)")).toBeInTheDocument();
+    expect(screen.getByText("high")).toBeInTheDocument();
   });
 });
