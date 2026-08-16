@@ -658,7 +658,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     release(acpOk);
 
     // The undetected gemini-cli row: no badge either (only the pre-existing
-    // Detected / Not installed badges exist).
+    // Available / Not installed badges exist).
     await screen.findByText("2 models");
     expect(screen.queryByText("Test failed")).toBeNull();
   });
