@@ -205,9 +205,9 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
 
   it("rescan button calls rescanAdapters and refreshes the list", async () => {
     const freshAdapters: AdapterEntry[] = [
-      ...mockAdapters.slice(0, 2), // still detected
+      ...mockAdapters.slice(0, 1), // still detected
       { id: "codex", display_name: "codex", detected: true, binary_path: "/usr/bin/codex", stream_format: "json_event_stream" }, // now detected
-      ...mockAdapters.slice(3),
+      ...mockAdapters.slice(2),
     ];
     vi.mocked(rescanAdapters).mockResolvedValue(freshAdapters);
 

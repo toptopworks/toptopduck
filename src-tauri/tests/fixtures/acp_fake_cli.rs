@@ -121,7 +121,7 @@ fn main() {
             // stderr diagnosis first (issue #542): the probe's failure detail
             // must carry the CLI's own words.
             Some("initialize") if scenario == "handshake_error" => {
-                eprintln!("acp-fake-cli: auth required: run `claude login`");
+                eprintln!("acp-fake-cli: auth required: complete the CLI's login flow");
                 respond(
                     &mut out,
                     &Response::<InitializeResult> {

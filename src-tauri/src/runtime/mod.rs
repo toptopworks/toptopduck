@@ -2,8 +2,10 @@
 //!
 //! The external runtime is the second of the two并存 runtimes (the built-in is
 //! [`crate::session::agent_loop::AgentLoop`]). The app spawns a third-party CLI
-//! agent process (gemini-cli, codex -- the ADR-0081 v1 set) and drives it over
-//! ACP v1 (stdio JSON-RPC). The engine here is the **generic, data-driven**
+//! agent process and drives it over stdio: the ACP adapters (gemini-cli,
+//! qwen-code, opencode) speak ACP v1 JSON-RPC; codex speaks its native
+//! `exec --json` event stream (ADR-0094). The engine here is the **generic,
+//! data-driven**
 //! half of ADR-0081 Decision: every CLI is a pure data definition
 //! ([`acp::adapter::AdapterSpec`]); the engine does detection / launch / parse
 //! with zero per-CLI code branches.

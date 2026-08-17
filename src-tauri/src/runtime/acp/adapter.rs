@@ -4,7 +4,8 @@
 //! engine ([`crate::runtime::acp::engine`]) has zero per-CLI code branches.
 //! Adding a CLI = adding one [`AdapterSpec`] constructor here. The v1 engine
 //! drives every external CLI (gemini-cli, codex, qwen-code, opencode)
-//! against the SAME code path, so the AC "the adapter engine has zero per-CLI
+//! through the SAME engine -- per-format dispatch ([`StreamFormat`],
+//! ADR-0094), never per-CLI -- so the AC "the adapter engine has zero per-CLI
 //! code branches" is structural: the engine takes a `&AdapterSpec` and never
 //! names a CLI.
 //!
@@ -84,8 +85,9 @@ pub struct AdapterSpec {
     /// Human-readable name for the composer runtime picker (ADR-0083).
     pub display_name: &'static str,
     /// Candidate binary names for the PATH scan, in priority order. The first
-    /// that resolves wins. Multiple names cover installer variation (npm vs the
-    /// native installer ship different binary names).
+    /// that resolves wins. Multiple names cover installer variation (an npm
+    /// wrapper vs a native installer shipping different binary names); every
+    /// current spec is single-name, so the shape is a forward reservation.
     pub binary_names: &'static [&'static str],
     /// The argv prefix that puts the CLI into its stdio protocol mode. The
     /// engine spawns `<resolved-binary> <argv-prefix...>` and speaks the
