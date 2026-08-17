@@ -8,12 +8,12 @@
 //! cleanup (the heartbeat in the fixture's trace file stops appending after
 //! the probe kills the child). The probe shares the wire types with the
 //! engine's fixture, so the round-trip is faithful to what the real
-//! claude-code drive will take.
+//! gemini-cli drive will take.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use toptopduck_lib::runtime::acp::adapter::{claude_code, DiscoveredRuntime};
+use toptopduck_lib::runtime::acp::adapter::{gemini_cli, DiscoveredRuntime};
 use toptopduck_lib::runtime::acp::probe::{self, ProbeError};
 
 /// Resolve the fake-CLI binary path (cargo sets `CARGO_BIN_EXE_acp-fake-cli`
@@ -68,7 +68,7 @@ fn probe_with_locked(
     timeout: Duration,
 ) -> Result<DiscoveredRuntime, ProbeError> {
     std::env::set_var("ACP_FAKE_SCENARIO", scenario);
-    let spec = claude_code();
+    let spec = gemini_cli();
     let mut child = probe::spawn_child(&spec, Some(binary))?;
     let (stdin, stdout, stderr_tail) = child.take_pipes();
     let result = probe::handshake_with(stdin, stdout, stderr_tail, &spec, timeout);
@@ -88,7 +88,7 @@ fn probe_success_extracts_catalog() {
     assert_eq!(ok.current_model.as_deref(), Some("fake-opus"));
     assert_eq!(ok.thought_levels, vec!["low", "medium", "high"]);
     assert_eq!(ok.current_thought_level.as_deref(), Some("medium"));
-    assert_eq!(ok.adapter_id.as_deref(), Some("claude-code"));
+    assert_eq!(ok.adapter_id.as_deref(), Some("gemini-cli"));
 }
 
 // --- Timeout ---------------------------------------------------------------
@@ -184,12 +184,12 @@ fn probe_empty_stderr_appends_nothing() {
 fn probe_spawn_failure_is_structured() {
     let mut missing = std::env::temp_dir();
     missing.push("definitely-not-a-real-acp-binary-xyz");
-    let err = probe::spawn_child(&claude_code(), Some(&missing))
+    let err = probe::spawn_child(&gemini_cli(), Some(&missing))
         .expect_err("a vanished binary must fail the probe");
     match &err {
         ProbeError::SpawnFailure(detail) => {
             assert!(
-                detail.contains("claude-code"),
+                detail.contains("gemini-cli"),
                 "spawn failure names the adapter: {detail}"
             );
         }
@@ -250,7 +250,7 @@ fn probe_kills_the_child_no_orphan() {
 /// any spawn is attempted.
 #[test]
 fn probe_rejects_undetected_adapters() {
-    let err = probe::spawn_child(&claude_code(), None)
-        .expect_err("an undetected adapter must be refused");
-    assert_eq!(err, ProbeError::NotDetected("claude-code".to_string()));
+    let err =
+        probe::spawn_child(&gemini_cli(), None).expect_err("an undetected adapter must be refused");
+    assert_eq!(err, ProbeError::NotDetected("gemini-cli".to_string()));
 }

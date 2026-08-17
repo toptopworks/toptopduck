@@ -18,7 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 # ACP fake CLI fixture (issue #299, ADR-0081 test seam C): a minimal binary that
 # speaks the ACP v1 stdio JSON-RPC subset so the adapter engine can be exercised
-# end-to-end in CI without the real claude-code install + login. Lives under
+# end-to-end in CI without the real gemini-cli install + login. Lives under
 # `tests/fixtures/` (a subdir, so cargo does NOT auto-discover it as an
 # integration-test target); declared here as a `[[bin]]` so integration tests
 # resolve its path via `env!("CARGO_BIN_EXE_acp-fake-cli")`. Built with the

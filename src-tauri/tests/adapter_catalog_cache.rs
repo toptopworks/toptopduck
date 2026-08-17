@@ -25,7 +25,7 @@ fn store_writes_the_documented_file_name() {
     let store = AdapterCatalogStore::new(dir.path().join(CATALOGS_FILE_NAME));
     assert!(store.path().ends_with(CATALOGS_FILE_NAME));
     assert!(store.load().is_empty());
-    store.store_entry("claude-code", acp_entry(1_000));
+    store.store_entry("gemini-cli", acp_entry(1_000));
     assert!(dir.path().join(CATALOGS_FILE_NAME).is_file());
 }
 
@@ -36,13 +36,13 @@ fn store_writes_the_documented_file_name() {
 fn a_fresh_store_over_the_same_path_reads_the_prior_entries() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join(CATALOGS_FILE_NAME);
-    AdapterCatalogStore::new(path.clone()).store_entry("claude-code", acp_entry(1_000));
+    AdapterCatalogStore::new(path.clone()).store_entry("gemini-cli", acp_entry(1_000));
     AdapterCatalogStore::new(path.clone()).store_entry("codex", codex_entry(2_000));
 
     let reopened = AdapterCatalogStore::new(path);
     let loaded = reopened.load();
     assert_eq!(loaded.len(), 2);
-    assert_eq!(loaded.get("claude-code"), Some(&acp_entry(1_000)));
+    assert_eq!(loaded.get("gemini-cli"), Some(&acp_entry(1_000)));
     assert_eq!(loaded.get("codex"), Some(&codex_entry(2_000)));
 }
 
@@ -58,7 +58,7 @@ fn concurrent_multi_adapter_writes_land_independently() {
 
     let a = std::thread::spawn({
         let store = store.clone();
-        move || store.store_entry("claude-code", acp_entry(1_000))
+        move || store.store_entry("gemini-cli", acp_entry(1_000))
     });
     let b = std::thread::spawn({
         let store = store.clone();
@@ -69,7 +69,7 @@ fn concurrent_multi_adapter_writes_land_independently() {
 
     let loaded = store.load();
     assert_eq!(loaded.len(), 2);
-    assert_eq!(loaded.get("claude-code"), Some(&acp_entry(1_000)));
+    assert_eq!(loaded.get("gemini-cli"), Some(&acp_entry(1_000)));
     assert_eq!(loaded.get("codex"), Some(&codex_entry(2_000)));
 }
 
@@ -103,7 +103,7 @@ fn acp_entry(at: i64) -> AdapterCatalogEntry {
                 current_thought_level: Some("high".to_string()),
                 model_config_id: None,
                 thought_level_config_id: None,
-                adapter_id: Some("claude-code".to_string()),
+                adapter_id: Some("gemini-cli".to_string()),
             },
         },
         probed_at_millis: at,

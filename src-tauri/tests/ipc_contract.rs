@@ -1194,8 +1194,8 @@ fn session_runtime_choice_wire_shape() {
     use toptopduck_lib::commands::SessionRuntimeChoice;
     assert_wire(&SessionRuntimeChoice::BuiltIn, r#"{"kind":"built_in"}"#);
     assert_wire(
-        &SessionRuntimeChoice::External("claude-code".into()),
-        r#"{"kind":"external","data":"claude-code"}"#,
+        &SessionRuntimeChoice::External("gemini-cli".into()),
+        r#"{"kind":"external","data":"gemini-cli"}"#,
     );
 }
 
@@ -1212,13 +1212,13 @@ fn adapter_entry_wire_shape() {
     use toptopduck_lib::runtime::acp::adapter::StreamFormat;
     assert_wire(
         &AdapterEntry {
-            id: "claude-code".into(),
-            display_name: "claude-code".into(),
+            id: "gemini-cli".into(),
+            display_name: "gemini-cli".into(),
             detected: true,
-            binary_path: Some(PathBuf::from("/usr/local/bin/claude")),
+            binary_path: Some(PathBuf::from("/usr/local/bin/gemini")),
             stream_format: StreamFormat::Acp,
         },
-        r#"{"id":"claude-code","display_name":"claude-code","detected":true,"binary_path":"/usr/local/bin/claude","stream_format":"acp"}"#,
+        r#"{"id":"gemini-cli","display_name":"gemini-cli","detected":true,"binary_path":"/usr/local/bin/gemini","stream_format":"acp"}"#,
     );
     assert_wire(
         &AdapterEntry {
@@ -1260,10 +1260,10 @@ fn session_model_config_wire_shape() {
                 current_thought_level: None,
                 model_config_id: Some("model".into()),
                 thought_level_config_id: Some("reasoning_effort".into()),
-                adapter_id: Some("claude-code".into()),
+                adapter_id: Some("gemini-cli".into()),
             }),
         },
-        r#"{"model":"fake-opus","thought_level":"high","cached_discovered":{"models":["fake-opus","fake-sonnet"],"current_model":"fake-opus","thought_levels":["low"],"current_thought_level":null,"model_config_id":"model","thought_level_config_id":"reasoning_effort","adapter_id":"claude-code"}}"#,
+        r#"{"model":"fake-opus","thought_level":"high","cached_discovered":{"models":["fake-opus","fake-sonnet"],"current_model":"fake-opus","thought_levels":["low"],"current_thought_level":null,"model_config_id":"model","thought_level_config_id":"reasoning_effort","adapter_id":"gemini-cli"}}"#,
     );
 }
 
@@ -1329,10 +1329,10 @@ fn probe_ok_wire_shape() {
                 current_thought_level: None,
                 model_config_id: Some("model".into()),
                 thought_level_config_id: None,
-                adapter_id: Some("claude-code".into()),
+                adapter_id: Some("gemini-cli".into()),
             },
         },
-        r#"{"kind":"acp","data":{"discovered":{"models":["fake-opus"],"current_model":"fake-opus","thought_levels":["low","high"],"current_thought_level":null,"model_config_id":"model","adapter_id":"claude-code"}}}"#,
+        r#"{"kind":"acp","data":{"discovered":{"models":["fake-opus"],"current_model":"fake-opus","thought_levels":["low","high"],"current_thought_level":null,"model_config_id":"model","adapter_id":"gemini-cli"}}}"#,
     );
     assert_wire_out(
         &ProbeOk::JsonEventStream {

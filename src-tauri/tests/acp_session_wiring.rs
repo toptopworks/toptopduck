@@ -5,7 +5,7 @@
 //! spawns the real bridge binary (its path injected via the `session/new` MCP
 //! descriptor); the bridge connects back to the per-turn gateway, which serves
 //! the MCP subset and routes `tools/call` (explore) through `tools::dispatch`
-//! against the session's live DuckDB connection. Real claude-code E2E is
+//! against the session's live DuckDB connection. Real CLI E2E is
 //! manual (the #299 AC, not in CI); #300 covers the other ACP CLIs against the
 //! same engine. The trace-merge dedup is unit-tested at the merge function;
 //! these tests pin the WIRING -- the scoped-thread serve, the bridge
@@ -27,8 +27,8 @@ use toptopduck_lib::{
 
 /// The fake-CLI adapter: the fixture binary (named `acp-fake-cli`) driven with
 /// no argv prefix -- it reads its scenario from `ACP_FAKE_SCENARIO`. A bespoke
-/// adapter (not `claude_code()`) so the PATH scan resolves the fixture, not any
-/// real claude-code install on the dev box.
+/// adapter (not `gemini_cli()`) so the PATH scan resolves the fixture, not any
+/// real gemini-cli install on the dev box.
 fn fake_cli_adapter() -> AdapterSpec {
     AdapterSpec {
         id: AdapterId::new("fake-cli"),

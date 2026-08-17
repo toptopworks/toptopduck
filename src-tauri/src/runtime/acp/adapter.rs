@@ -3,8 +3,9 @@
 //! ADR-0081 Decision: every external CLI is a **pure data definition** -- the
 //! engine ([`crate::runtime::acp::engine`]) has zero per-CLI code branches.
 //! Adding a CLI = adding one [`AdapterSpec`] constructor here. The v1 engine
-//! drives every ACP CLI (claude-code, gemini-cli, codex, qwen-code, opencode)
-//! against the SAME code path, so the AC "the adapter engine has zero per-CLI
+//! drives every external CLI (gemini-cli, codex, qwen-code, opencode)
+//! through the SAME engine -- per-format dispatch ([`StreamFormat`],
+//! ADR-0094), never per-CLI -- so the AC "the adapter engine has zero per-CLI
 //! code branches" is structural: the engine takes a `&AdapterSpec` and never
 //! names a CLI.
 //!
@@ -48,15 +49,14 @@ pub enum StreamFormat {
 // ---------------------------------------------------------------------------
 
 /// A stable identifier for a CLI adapter (per-turn provenance + the composer
-/// picker's key). Distinct from the binary name (claude-code ships as both
-/// `claude` and `claude-code` across installers) and from the display name.
+/// picker's key). Distinct from the binary name and from the display name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AdapterId(&'static str);
 
 impl AdapterId {
     /// Build a new adapter id. `pub` so the slice-9c integration test can mint a
     /// fake-CLI adapter; production code still uses the constructors below
-    /// ([`claude_code`], etc.), so a stray id fails review rather than the
+    /// ([`gemini_cli`], etc.), so a stray id fails review rather than the
     /// type system.
     pub const fn new(name: &'static str) -> Self {
         Self(name)
@@ -85,8 +85,9 @@ pub struct AdapterSpec {
     /// Human-readable name for the composer runtime picker (ADR-0083).
     pub display_name: &'static str,
     /// Candidate binary names for the PATH scan, in priority order. The first
-    /// that resolves wins. Multiple names cover installer variation (npm vs the
-    /// native installer ship different binary names).
+    /// that resolves wins. Multiple names cover installer variation (an npm
+    /// wrapper vs a native installer shipping different binary names); every
+    /// current spec is single-name, so the shape is a forward reservation.
     pub binary_names: &'static [&'static str],
     /// The argv prefix that puts the CLI into its stdio protocol mode. The
     /// engine spawns `<resolved-binary> <argv-prefix...>` and speaks the
@@ -130,37 +131,13 @@ impl AdapterSpec {
 }
 
 // ---------------------------------------------------------------------------
-// The v1 adapters (claude-code, gemini-cli, codex, qwen-code, opencode)
+// The v1 adapters (gemini-cli, codex, qwen-code, opencode)
 // ---------------------------------------------------------------------------
-
-/// The claude-code adapter (ADR-0081 v1 validation set). claude-code is
-/// installed as `claude` (native installer) or `claude-code` (npm wrapper); the
-/// PATH scan tries both. The argv prefix `["--acp"]` puts the CLI into its ACP
-/// stdio mode (the engine then drives session/new + session/prompt).
-///
-/// NOTE: the `--acp` flag spelling is pinned by claude-code's own CLI; live E2E
-/// verifies it against a real install. If claude-code renames the flag, ONLY
-/// this constant changes -- the engine is untouched (ADR-0081 zero per-CLI
-/// code).
-pub const fn claude_code() -> AdapterSpec {
-    AdapterSpec {
-        id: AdapterId::new("claude-code"),
-        display_name: "claude-code",
-        binary_names: &["claude", "claude-code"],
-        argv: &["--acp"],
-        stream_format: StreamFormat::Acp,
-        probe_argv: None,
-        model_arg: None,
-        effort_config_key: None,
-    }
-}
 
 /// The gemini-cli adapter (ADR-0081 v1 validation set, issue #300). The npm
 /// package `@google/gemini-cli` ships a single `gemini` binary; the argv prefix
-/// `["--experimental-acp"]` puts it into ACP stdio mode. Unlike claude-code's
-/// `--acp`, gemini-cli names its flag `--experimental-acp` (ACP support is
-/// still experimental upstream), so the prefix differs even though the launch
-/// shape is the same `<binary> <flag>` form.
+/// `["--experimental-acp"]` puts it into ACP stdio mode. gemini-cli names its
+/// flag `--experimental-acp` (ACP support is still experimental upstream).
 ///
 /// NOTE: the `--experimental-acp` spelling is pinned by gemini-cli's own CLI
 /// (its `config.js` option table; no alias). Live E2E verifies it against a
@@ -224,7 +201,7 @@ pub const fn codex() -> AdapterSpec {
 /// binary; the argv prefix `["--acp"]` puts it into ACP stdio mode. Unlike
 /// gemini-cli's still-experimental `--experimental-acp`, qwen-code has graduated
 /// to the stable `--acp` spelling, so the prefix differs even though the launch
-/// shape is the same `<binary> <flag>` form as claude-code.
+/// shape is the same `<binary> <flag>` form.
 ///
 /// NOTE: the `--acp` spelling is pinned by qwen-code's own CLI; live E2E
 /// verifies it against a real install. If qwen-code renames the flag, ONLY this
@@ -278,13 +255,7 @@ pub fn v1_adapters() -> &'static [AdapterSpec] {
 // directly -- no field duplication, no drift between a constructor and its
 // array entry. Adding a CLI = adding one `const fn` constructor + one call
 // here; `v1_adapters()` stays the picker source.
-static V1_ADAPTERS: [AdapterSpec; 5] = [
-    claude_code(),
-    gemini_cli(),
-    codex(),
-    qwen_code(),
-    opencode(),
-];
+static V1_ADAPTERS: [AdapterSpec; 4] = [gemini_cli(), codex(), qwen_code(), opencode()];
 
 // ---------------------------------------------------------------------------
 // Detection (PATH scan)
@@ -816,7 +787,7 @@ mod tests {
     /// the reasoning-effort config key.
     #[test]
     fn adapters_declare_per_format_injection_fields() {
-        for spec in [claude_code(), gemini_cli(), qwen_code(), opencode()] {
+        for spec in [gemini_cli(), qwen_code(), opencode()] {
             assert_eq!(spec.stream_format, StreamFormat::Acp);
             assert!(spec.model_arg.is_none(), "{}", spec.id);
             assert!(spec.effort_config_key.is_none(), "{}", spec.id);
@@ -831,22 +802,10 @@ mod tests {
     /// surface, not the turn's `exec --json` mode.
     #[test]
     fn adapters_declare_probe_argv_per_format() {
-        for spec in [claude_code(), gemini_cli(), qwen_code(), opencode()] {
+        for spec in [gemini_cli(), qwen_code(), opencode()] {
             assert!(spec.probe_argv.is_none(), "{}", spec.id);
         }
         assert_eq!(codex().probe_argv, Some(&["app-server"][..]));
-    }
-
-    /// The claude-code adapter carries both installer binary names + the ACP
-    /// argv prefix. The engine reads these as data, never naming the CLI.
-    #[test]
-    fn claude_code_spec_carries_both_binary_names_and_acp_flag() {
-        let spec = claude_code();
-        assert_eq!(spec.id.as_str(), "claude-code");
-        assert_eq!(spec.display_name, "claude-code");
-        assert_eq!(spec.binary_names, &["claude", "claude-code"]);
-        assert_eq!(spec.argv, &["--acp"]);
-        assert_eq!(spec.stream_format, StreamFormat::Acp);
     }
 
     /// v1_adapters is internally consistent: non-empty, unique ids, every entry
@@ -879,8 +838,8 @@ mod tests {
     }
 
     /// gemini-cli uses the `gemini` binary plus the `["--experimental-acp"]`
-    /// argv prefix (gemini-cli's experimental ACP flag, distinct from
-    /// claude-code's `--acp`). The engine reads this as data.
+    /// argv prefix (gemini-cli's experimental ACP flag). The engine reads this
+    /// as data.
     #[test]
     fn gemini_cli_spec_carries_gemini_binary_and_experimental_acp_flag() {
         let spec = gemini_cli();
@@ -918,7 +877,7 @@ mod tests {
 
     /// qwen-code uses the `qwen` binary plus the stable `["--acp"]` flag
     /// (graduated from gemini-cli's experimental `--experimental-acp`). The
-    /// launch shape matches claude-code's `<binary> <flag>` form.
+    /// launch shape is the same `<binary> <flag>` form.
     #[test]
     fn qwen_code_spec_carries_qwen_binary_and_stable_acp_flag() {
         let spec = qwen_code();
@@ -948,10 +907,10 @@ mod tests {
     /// panic on an absent CLI).
     #[test]
     fn detect_adapter_returns_option_regardless_of_install() {
-        let spec = claude_code();
-        // `claude` / `claude-code` are not on the CI runner's PATH. A dev box
-        // with claude-code installed may resolve to Some; the assertion pins
-        // the Option shape, not the absence, so the test is portable.
+        let spec = gemini_cli();
+        // `gemini` is not on the CI runner's PATH. A dev box with gemini-cli
+        // installed may resolve to Some; the assertion pins the Option shape,
+        // not the absence, so the test is portable.
         let _ = detect_adapter(&spec);
     }
 
@@ -983,8 +942,8 @@ mod tests {
     /// AdapterId round-trips through Display + as_str (provenance + IPC).
     #[test]
     fn adapter_id_displays_as_its_str() {
-        let id = AdapterId::new("claude-code");
-        assert_eq!(id.as_str(), "claude-code");
-        assert_eq!(id.to_string(), "claude-code");
+        let id = AdapterId::new("gemini-cli");
+        assert_eq!(id.as_str(), "gemini-cli");
+        assert_eq!(id.to_string(), "gemini-cli");
     }
 }

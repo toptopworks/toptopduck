@@ -4,7 +4,7 @@
 //! Field names + variant tags are frozen by the ACP v1 schema
 //! (<https://agentclientprotocol.com/protocol/v1/schema>); renaming any
 //! `#[serde(rename = ...)]` / variant breaks on-the-wire compatibility with
-//! real CLI agents (claude-code / gemini-cli / codex).
+//! real CLI agents (gemini-cli / codex).
 //!
 //! Only the methods + shapes the engine sends or receives are modeled. The
 //! schema's full surface (terminal/*, fs/*, session modes, plan entries, image

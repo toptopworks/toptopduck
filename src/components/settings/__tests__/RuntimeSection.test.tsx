@@ -28,7 +28,6 @@ vi.mock("../../../api", async (importOriginal) => {
 });
 
 const mockAdapters: AdapterEntry[] = [
-  { id: "claude-code", display_name: "claude-code", detected: true, binary_path: "/usr/local/bin/claude", stream_format: "acp" },
   { id: "gemini-cli", display_name: "gemini-cli", detected: true, binary_path: "/usr/bin/gemini", stream_format: "acp" },
   { id: "codex", display_name: "codex", detected: false, binary_path: null, stream_format: "json_event_stream" },
   { id: "qwen-code", display_name: "qwen-code", detected: false, binary_path: null, stream_format: "acp" },
@@ -89,8 +88,7 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
     renderSection();
     fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
     // The adapter list is rendered from the mock data.
-    expect(await screen.findByText("claude-code")).toBeInTheDocument();
-    expect(screen.getByText("gemini-cli")).toBeInTheDocument();
+    expect(await screen.findByText("gemini-cli")).toBeInTheDocument();
     expect(screen.getByText("codex")).toBeInTheDocument();
   });
 
@@ -167,16 +165,15 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
   it("detected adapters show the binary path", async () => {
     renderSection();
     fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
-    expect(await screen.findByText("/usr/local/bin/claude")).toBeInTheDocument();
-    expect(screen.getByText("/usr/bin/gemini")).toBeInTheDocument();
+    expect(await screen.findByText("/usr/bin/gemini")).toBeInTheDocument();
     expect(screen.getByText("/opt/homebrew/bin/opencode")).toBeInTheDocument();
   });
 
   it("detected adapters show an Available badge, undetected show Not installed", async () => {
     renderSection();
     fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
-    await screen.findByText("claude-code");
-    expect(screen.getAllByText("Available")).toHaveLength(3);
+    await screen.findByText("gemini-cli");
+    expect(screen.getAllByText("Available")).toHaveLength(2);
     expect(screen.getAllByText("Not installed")).toHaveLength(2);
   });
 
@@ -193,7 +190,7 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
     expect(await screen.findByText("Reading current config…")).toBeInTheDocument();
 
     resolveList(mockAdapters);
-    await waitFor(() => expect(screen.getByText("claude-code")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("gemini-cli")).toBeInTheDocument());
   });
 
   it("surfaces an inline error when the initial adapter list fails to load", async () => {
@@ -208,15 +205,15 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
 
   it("rescan button calls rescanAdapters and refreshes the list", async () => {
     const freshAdapters: AdapterEntry[] = [
-      ...mockAdapters.slice(0, 2), // still detected
+      ...mockAdapters.slice(0, 1), // still detected
       { id: "codex", display_name: "codex", detected: true, binary_path: "/usr/bin/codex", stream_format: "json_event_stream" }, // now detected
-      ...mockAdapters.slice(3),
+      ...mockAdapters.slice(2),
     ];
     vi.mocked(rescanAdapters).mockResolvedValue(freshAdapters);
 
     renderSection();
     fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
-    await screen.findByText("claude-code");
+    await screen.findByText("gemini-cli");
     // codex is initially undetected.
     expect(screen.getAllByText("Not installed")).toHaveLength(2);
 
@@ -236,7 +233,7 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
 
     renderSection();
     fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
-    await screen.findByText("claude-code");
+    await screen.findByText("gemini-cli");
 
     const rescanButton = screen.getByRole("button", { name: "Rescan adapters" });
     fireEvent.click(rescanButton);
@@ -256,7 +253,7 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
 
     renderSection();
     fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
-    await screen.findByText("claude-code");
+    await screen.findByText("gemini-cli");
 
     fireEvent.click(screen.getByRole("button", { name: "Rescan adapters" }));
     expect(await screen.findByText("scan timeout")).toBeInTheDocument();

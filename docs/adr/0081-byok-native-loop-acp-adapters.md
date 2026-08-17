@@ -32,3 +32,4 @@ ADR-0076 定双运行时；本 ADR 定两运行时的实现形态。内置循环
 - **key 分发边界**：外部运行时用其自身鉴权（其自有登录 / 配置），app 的 Profile key 不注入外部运行时进程。
 - **未决（实施期）**：适配器引擎模块边界、桥接进程形态、ACP `session/request_permission` 与网关审批对应（自动选取允许项，无可选项 = fail-fast）。
 - **被 ADR-0095 校准**：wire 类型扩展（`NewSessionResult.config_options`）与 `AdapterSpec` 新增字段（`model_arg` / `effort_config_key`）均为纯数据增量；ACP 路径握手后追加的 `session/set_config_option` 是握手扩展步骤，不引入 upstream session 状态——「每轮恒 `session/new` + 不持 upstream session handle」的无状态语义不变。
+- **被 ADR-0094 / ADR-0097 校准**：初版 v1 三件套中的 codex 经实测无原生 ACP 模式，改经原生 `exec --json` JSON 事件流直连（ADR-0094）；claude-code 的 `--acp` flag 经实测不存在，自 ACP 适配器集合移除，改经 stream-json 直连接入（ADR-0097）。ACP 适配器集合现为 gemini-cli / qwen-code / opencode；「传输优先 ACP」由 ADR-0094 的流格式数据字段分派取代，零 per-CLI 代码不变量不变。

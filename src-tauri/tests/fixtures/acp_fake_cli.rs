@@ -2,7 +2,7 @@
 //!
 //! A minimal binary that speaks the ACP v1 stdio JSON-RPC subset so the adapter
 //! engine ([`toptopduck_lib::runtime::acp::engine`]) can be exercised end-to-end
-//! in CI without the real claude-code install + login. Declared as a `[[bin]]`
+//! in CI without the real gemini-cli install + login. Declared as a `[[bin]]`
 //! in `Cargo.toml`; integration tests resolve its path via
 //! `env!("CARGO_BIN_EXE_acp-fake-cli")` and pick the scripted behavior via the
 //! `ACP_FAKE_SCENARIO` env var.
@@ -121,7 +121,7 @@ fn main() {
             // stderr diagnosis first (issue #542): the probe's failure detail
             // must carry the CLI's own words.
             Some("initialize") if scenario == "handshake_error" => {
-                eprintln!("acp-fake-cli: auth required: run `claude login`");
+                eprintln!("acp-fake-cli: auth required: complete the CLI's login flow");
                 respond(
                     &mut out,
                     &Response::<InitializeResult> {
