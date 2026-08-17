@@ -227,12 +227,19 @@ export function ComposerProviderPicker({
   // of the selector list. Surface this so the user knows their current pick is
   // broken before the next turn fails in the backend.
   // The active adapter's stream format decides the selector surface
-  // (ADR-0095): ACP adapters render dropdowns fed by handshake discovery;
-  // JsonEventStream adapters render read-only CLI Default labels (no dynamic
-  // discovery). The format rides the adapter table row -- never a hardcoded
-  // CLI id (adding a JES adapter upstream needs zero frontend change).
-  const isJsonEventStreamAdapter =
-    isExternal && activeAdapter?.stream_format === "json_event_stream";
+  // (ADR-0095/0097): ACP adapters render dropdowns fed by handshake
+  // discovery; the per-model catalog formats (codex_event_stream /
+  // claude_stream_json) render probe-cache-fed per-model dropdowns once
+  // tested, read-only CLI Default labels before. The format rides the
+  // adapter table row -- never a hardcoded CLI id (adding an adapter
+  // upstream needs zero frontend change). The dispatch enumerates the
+  // per-model kinds explicitly (not `!== "acp"`): a future fourth format
+  // must be classified here deliberately, never default into a surface.
+  const isPerModelCatalogAdapter =
+    isExternal &&
+    activeAdapter != null &&
+    (activeAdapter.stream_format === "codex_event_stream" ||
+      activeAdapter.stream_format === "claude_stream_json");
 
   const activeAdapterStale = isExternal && activeAdapterId !== null && activeAdapter === null;
 
@@ -243,25 +250,31 @@ export function ComposerProviderPicker({
   // window so the user can judge which residual selection to clear. A cache
   // with NO provenance (persisted before the field existed) is not a
   // mismatch -- it renders without the flag. Scoped to discovery-fed (ACP)
-  // adapters: a JsonEventStream runtime never reports a catalog, so its
-  // turns would never replace the cache -- the "refreshes after the next
-  // turn" promise would be a permanent lie there.
+  // adapters: a per-model runtime's selector feeds off the probe cache, so
+  // its turns would never replace the discovery cache -- the "refreshes
+  // after the next turn" promise would be a permanent lie there.
   const catalogProvenanceStale =
     isExternal &&
-    !isJsonEventStreamAdapter &&
+    !isPerModelCatalogAdapter &&
     discovered != null &&
     discovered.adapter_id != null &&
     discovered.adapter_id !== activeAdapterId;
 
-  // Catalog priority chain (ADR-0096 D6, issue #537): where the selector
-  // directory comes from, per the active runtime's stream format.
-  //   ACP:  session cached_discovered (this CLI's live handshake truth)
-  //         -> the global probe cache entry for THIS adapter (an explicit
-  //         user test in Settings; keyed by adapter id so it can never hold
-  //         another runtime's catalog) -> empty + guidance.
-  //   codex: the probe cache's codex entry only (a JES runtime reports no
-  //         session catalog; without a cache it stays the read-only CLI
-  //         Default labels -- honest rendering, no invented directory).
+  // Catalog priority chain (ADR-0096 D6, issue #537, ADR-0097): where the
+  // selector directory comes from, per the active runtime's stream format.
+  //   ACP:                  session cached_discovered (this CLI's live
+  //                         handshake truth) -> the global probe cache entry
+  //                         for THIS adapter (an explicit user test in
+  //                         Settings; keyed by adapter id so it can never
+  //                         hold another runtime's catalog) -> empty +
+  //                         guidance.
+  //   codex / claude-code:  the probe cache's per-model entry for THIS
+  //                         adapter only (these runtimes report no session
+  //                         selector catalog; without a cache the surface
+  //                         stays the read-only CLI Default labels -- honest
+  //                         rendering, no invented directory). claude-code
+  //                         annotates the labels with the last turn's
+  //                         system{init} current model when known.
   const { data: cachedCatalogsData } = useQuery({
     queryKey: adapterKeys.catalogs(),
     queryFn: getAdapterCatalogs,
@@ -276,7 +289,7 @@ export function ComposerProviderPicker({
   // (The cache entry is a tagged union on `probe_kind` -- the check narrows
   // `outcome` directly.)
   const acpCatalog =
-    isExternal && !isJsonEventStreamAdapter
+    isExternal && !isPerModelCatalogAdapter
       ? (discovered ??
         (probeEntry && probeEntry.probe_kind === "acp"
           ? probeEntry.outcome.acp.discovered
@@ -288,12 +301,18 @@ export function ComposerProviderPicker({
   const acpCatalogFromProbe =
     acpCatalog != null && discovered == null && probeEntry != null;
 
-  // The codex per-model catalog when the probe cache holds one (null keeps
-  // the read-only CLI Default labels).
-  const codexCatalog =
-    isJsonEventStreamAdapter &&
-    probeEntry?.probe_kind === "json_event_stream"
-      ? probeEntry.outcome.json_event_stream.models
+  // The per-model catalog when the probe cache holds one for this format
+  // (null keeps the read-only CLI Default labels). The tagged union's
+  // `probe_kind` narrows the outcome variant; a kind that does not match
+  // the active format cannot occur (entries are keyed by adapter id) but
+  // degrades to null instead of guessing.
+  const perModelCatalog =
+    isPerModelCatalogAdapter && probeEntry
+      ? probeEntry.probe_kind === "codex_event_stream"
+        ? probeEntry.outcome.codex_event_stream.models
+        : probeEntry.probe_kind === "claude_stream_json"
+          ? probeEntry.outcome.claude_stream_json.models
+          : null
       : null;
 
   // Guards the two set IPCs (one at a time; the second picker is disabled
@@ -369,16 +388,17 @@ export function ComposerProviderPicker({
       "model",
     );
     if (!granted) return;
-    // codex per-model linkage (issue #537): the thought level must sit in
-    // the newly selected model's supported set. A held level outside that
-    // set (including every held level once the model pick is cleared -- no
-    // model means no supported set at all) is cleared via the existing set
-    // IPC, in the SAME user gesture -- awaiting the model write first means
-    // applyModelConfig's switching gate has re-opened and the clear cannot
-    // be swallowed. A rejected model write returns early: the held level
-    // stays against the still-held model.
-    if (codexCatalog) {
-      const supported = supportedEffortsFor(codexCatalog, model);
+    // Per-model linkage (issue #537, shared by codex + claude-code): the
+    // thought level must sit in the newly selected model's supported set. A
+    // held level outside that set (including every held level once the
+    // model pick is cleared -- no model means no supported set at all) is
+    // cleared via the existing set IPC, in the SAME user gesture --
+    // awaiting the model write first means applyModelConfig's switching
+    // gate has re-opened and the clear cannot be swallowed. A rejected
+    // model write returns early: the held level stays against the
+    // still-held model.
+    if (perModelCatalog) {
+      const supported = supportedEffortsFor(perModelCatalog, model);
       if (
         modelConfig.thought_level != null &&
         !supported.includes(modelConfig.thought_level)
@@ -395,10 +415,11 @@ export function ComposerProviderPicker({
       "thought level",
     );
 
-  // codex helper (issue #537): the thought-level list for the given model
-  // id -- that model's supportedReasoningEfforts in the CLI's declared
-  // order (never a union across models). Null / unknown model: no entries
-  // (the level selector disables with a "pick a model first" hint).
+  // Per-model helper (issue #537, codex + claude-code): the thought-level
+  // list for the given model id -- that model's supported efforts in the
+  // CLI's declared order (never a union across models). Null / unknown
+  // model: no entries (the level selector disables with a "pick a model
+  // first" hint).
   function supportedEffortsFor(
     models: CatalogModel[],
     modelId: string | null,
@@ -769,15 +790,16 @@ export function ComposerProviderPicker({
                 </button>
               );
             })}
-            {/* --- Model + thought-level selectors (ADR-0095/0096, #527/#537) -
-                Rendered only when an external adapter is the ACTIVE runtime
-                (a selection is meaningless on the built-in profile picker).
-                The directory follows the priority chain (ADR-0096 D6): an ACP
-                adapter takes the session's cached discovery, else the
-                probe-cache entry for this adapter (dropdowns either way; no
-                source at all renders the pending-discovery hint plus the
-                settings-test entry). The JsonEventStream adapter (codex) has
-                no turn-path discovery: the probe-cache entry feeds real
+            {/* --- Model + thought-level selectors (ADR-0095/0096/0097,
+                #527/#537/#561) - Rendered only when an external adapter is
+                the ACTIVE runtime (a selection is meaningless on the
+                built-in profile picker). The directory follows the priority
+                chain (ADR-0096 D6): an ACP adapter takes the session's
+                cached discovery, else the probe-cache entry for this
+                adapter (dropdowns either way; no source at all renders the
+                pending-discovery hint plus the settings-test entry). The
+                per-model formats (codex / claude-code) have no turn-path
+                selector discovery: the probe-cache entry feeds real
                 per-model dropdowns, and without it the surface stays the
                 read-only CLI Default labels. */}
             {isExternal && modelConfigFault != null && (
@@ -801,10 +823,10 @@ export function ComposerProviderPicker({
             )}
             {isExternal &&
               modelConfigFault == null &&
-              (isJsonEventStreamAdapter ? (
-                codexCatalog ? (
-                  <CodexSelectors
-                    models={codexCatalog}
+              (isPerModelCatalogAdapter ? (
+                perModelCatalog ? (
+                  <ModelCatalogSelectors
+                    models={perModelCatalog}
                     model={modelConfig.model}
                     thoughtLevel={modelConfig.thought_level}
                     switching={modelSwitching}
@@ -823,11 +845,27 @@ export function ComposerProviderPicker({
                         defaultMessage="Model"
                       />
                     </span>
+                    {/* Honest rendering (ADR-0097 Decision 5): before any
+                        probe there is no directory to offer -- the label
+                        stays the CLI default, annotated with the last
+                        turn's system{init} current model when one is known
+                        (claude-code reports it; codex never does). Scoped
+                        to THIS adapter's own provenance: a residual catalog
+                        from another runtime must not annotate this one. */}
                     <p className="text-muted-foreground text-xs">
-                      <FormattedMessage
-                        id="composer.runtimePicker.cliDefault"
-                        defaultMessage="CLI default"
-                      />
+                      {discovered?.current_model &&
+                        discovered?.adapter_id === activeAdapterId ? (
+                            <FormattedMessage
+                              id="composer.runtimePicker.cliDefaultWithModel"
+                              defaultMessage="CLI default ({model})"
+                              values={{ model: discovered.current_model }}
+                            />
+                          ) : (
+                            <FormattedMessage
+                              id="composer.runtimePicker.cliDefault"
+                              defaultMessage="CLI default"
+                            />
+                          )}
                     </p>
                     <span className="text-muted-foreground text-xs font-medium">
                       <FormattedMessage
@@ -998,15 +1036,17 @@ function TestInSettingsHint({
   );
 }
 
-// The codex (JsonEventStream) selector surface (ADR-0096 D6, issue #537):
-// real dropdowns fed by the probe cache's per-model catalog. The model list
-// comes from the cache; the thought-level list is the SELECTED model's
-// supportedReasoningEfforts in the CLI's declared order (a union across
-// models would offer "model A + an effort model A does not support"). With
-// no model picked the level selector disables with a "pick a model first"
-// hint -- there is no honest level list to offer. Selecting the "CLI
-// default" row (value "") clears the selection via the existing set IPCs.
-function CodexSelectors({
+// The per-model catalog selector surface (ADR-0096 D6, issue #537,
+// ADR-0097): real dropdowns fed by the probe cache's per-model catalog,
+// shared by the codex and claude-code formats (both carry the same
+// CatalogModel shape). The model list comes from the cache; the
+// thought-level list is the SELECTED model's supported efforts in the CLI's
+// declared order (a union across models would offer "model A + an effort
+// model A does not support"). With no model picked the level selector
+// disables with a "pick a model first" hint -- there is no honest level
+// list to offer. Selecting the "CLI default" row (value "") clears the
+// selection via the existing set IPCs.
+function ModelCatalogSelectors({
   models,
   model,
   thoughtLevel,

@@ -19,10 +19,12 @@
 //! caller -- the IPC shell and the tests alike -- composes the same three
 //! steps: spawn -> handshake -> kill.
 //!
-//! Both stream formats are probeable (ADR-0096 D2): ACP adapters run the
-//! initialize + `session/new` handshake here, while `JsonEventStream`
-//! adapters (codex) dispatch to [`super::app_server`]'s `model/list` query
-//! -- the same spawn -> query -> kill lifecycle, a different wire surface.
+//! Every stream format is probeable (ADR-0096 D2, ADR-0097 Decision 5): ACP
+//! adapters run the initialize + `session/new` handshake here;
+//! `CodexEventStream` adapters (codex) dispatch to [`super::app_server`]'s
+//! `model/list` query; `ClaudeStreamJson` adapters (claude-code) dispatch to
+//! [`super::claude_control`]'s `control_request{initialize}` catalog read --
+//! the same spawn -> query -> kill lifecycle each, a different wire surface.
 
 use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout};
@@ -41,36 +43,44 @@ use crate::runtime::acp::wire::{
 /// deadline instead -- this constant is the production default only.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// A successful probe (ADR-0096 D2/D3). Per-format tagged: the ACP handshake
-/// produces the flat [`DiscoveredRuntime`] (issue #534); the JsonEventStream
-/// query produces a per-model [`ModelCatalogOutcome`] (issue #535) --
-/// the latter never flattened into `DiscoveredRuntime` (a union of per-model
-/// efforts would let the user select an effort the current model does not
-/// support, ADR-0096 D3). The session id is not carried: the probe mints no
-/// usable session (the process is killed right after the handshake).
+/// A successful probe (ADR-0096 D2/D3, ADR-0097). Per-format tagged: the ACP
+/// handshake produces the flat [`DiscoveredRuntime`] (issue #534); the
+/// per-model catalog formats produce a [`ModelCatalogOutcome`] (issue #535)
+/// -- the latter never flattened into `DiscoveredRuntime` (a union of
+/// per-model efforts would let the user select an effort the current model
+/// does not support, ADR-0096 D3). The session id is not carried: the probe
+/// mints no usable session (the process is killed right after the query).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum ProbeOk {
     /// The ACP handshake catalog, stamped with the producing adapter (issue
     /// #529 semantics -- the config_options wire carries no adapter identity).
     Acp { discovered: DiscoveredRuntime },
-    /// The JsonEventStream per-model catalog, or the honest degraded
+    /// The CodexEventStream per-model catalog, or the honest degraded
     /// "started but catalog unavailable" state (ADR-0096 D2 -- an old CLI /
     /// not logged in / RPC error degrades; only a spawn failure, a timeout,
-    /// or the process dying mid-query fails outright). The catalog's current
-    /// (and only) supplier is the codex app-server wire
-    /// ([`super::app_server`]) -- a PRIVATE protocol, not a reusable
-    /// JsonEventStream surface: a second JsonEventStream adapter must bring
-    /// its own wire definition, never inherit this one (issue #544).
-    JsonEventStream { outcome: ModelCatalogOutcome },
+    /// or the process dying mid-query fails outright). The catalog's supplier
+    /// is the codex app-server wire ([`super::app_server`]) -- a PRIVATE
+    /// protocol, not a reusable stream-format surface: every format brings
+    /// its own wire definition, never inherits another's (issue #544).
+    CodexEventStream { outcome: ModelCatalogOutcome },
+    /// The ClaudeStreamJson per-model catalog, read off the stream-json
+    /// control plane's `initialize` response (ADR-0097 Decision 5). Same
+    /// degrade footing as the codex variant: an error control response
+    /// degrades to `Unavailable`; a silent / EOF-ing child degrades to an
+    /// EMPTY catalog (`Available` with no models -- the no-response shape,
+    /// ADR-0097 Decision 5 "无响应降级空目录"); only a spawn failure, a
+    /// timeout, or a write fault fails outright.
+    ClaudeStreamJson { outcome: ModelCatalogOutcome },
 }
 
-/// The per-model catalog outcome of a JsonEventStream probe (ADR-0096
-/// D2/D3, today the codex app-server `model/list` query). `Available`
-/// carries the ordered per-model catalog; `Unavailable` is the degraded state
-/// (the process started but the catalog was not obtainable -- RPC error /
-/// empty response / unparseable result; the process being alive is itself
-/// diagnostic signal, so this is a success variant, not an error).
+/// The per-model catalog outcome of a non-ACP probe (ADR-0096 D2/D3: the
+/// codex app-server `model/list` query; ADR-0097 Decision 5: the claude-code
+/// control-plane `initialize` read). `Available` carries the ordered
+/// per-model catalog; `Unavailable` is the degraded state (the process
+/// started but the catalog was not obtainable -- RPC / control error /
+/// unparseable result; the process being alive is itself diagnostic signal,
+/// so this is a success variant, not an error).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ModelCatalogOutcome {
@@ -78,13 +88,15 @@ pub enum ModelCatalogOutcome {
     Unavailable { detail: String },
 }
 
-/// One model from a JsonEventStream probe's per-model catalog (ADR-0096
-/// D3). The reasoning efforts are the per-model `supportedReasoningEfforts`
-/// in the CLI's declared order (never a union across models);
-/// `default_reasoning_effort` marks the model's own default; `is_default`
-/// marks the catalog's default model. Deserialize rides along (not a
-/// wire-in shape, but the catalog cache sidecar round-trips the same type,
-/// ADR-0096 D5 / issue #536).
+/// One model from a per-model catalog probe (ADR-0096 D3; ADR-0097 Decision
+/// 5 reuses the shape for claude-code). The reasoning efforts are the
+/// per-model list (`supportedReasoningEfforts` on the codex wire,
+/// `supportedEffortLevels` on the claude wire) in the CLI's declared order
+/// (never a union across models); `default_reasoning_effort` marks the
+/// model's own default (empty when the wire names none); `is_default` marks
+/// the catalog's default model. Deserialize rides along (not a wire-in
+/// shape, but the catalog cache sidecar round-trips the same type, ADR-0096
+/// D5 / issue #536).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CatalogModel {
@@ -125,26 +137,28 @@ pub enum ProbeError {
 
 /// The single spawn point every probe lifecycle goes through: spawns `binary`
 /// with the adapter's probe argv prefix (ADR-0096 D2 -- the turn argv on ACP,
-/// the `app-server` subcommand on JsonEventStream, both carried as data on the
-/// spec so the kernel names no CLI) and piped stdio. A fresh PATH scan
-/// returning `None` refuses with [`ProbeError::NotDetected`] before any spawn
-/// is attempted. The caller dispatches the per-format query on the returned
-/// child's stdio. Contract (issue #542): stderr is spawned PIPED and is
-/// drained ONLY by [`ChildHandle::take_pipes`]'s stderr tail reader thread --
-/// every caller must take the pipes (all three streams, one call) for every
-/// child it spawned, including early-failure paths after a successful spawn;
-/// an untaken piped stderr is never read, so a chatty child can block on a
+/// the `app-server` subcommand on codex, the turn argv + `--input-format
+/// stream-json` on claude-code, all carried as data on the spec so the
+/// kernel names no CLI) and piped stdio. A fresh PATH scan returning `None`
+/// refuses with [`ProbeError::NotDetected`] before any spawn is attempted.
+/// The caller dispatches the per-format query on the returned child's stdio.
+/// Contract (issue #542): stderr is spawned PIPED and is drained ONLY by
+/// [`ChildHandle::take_pipes`]'s stderr tail reader thread -- every caller
+/// must take the pipes (all three streams, one call) for every child it
+/// spawned, including early-failure paths after a successful spawn; an
+/// untaken piped stderr is never read, so a chatty child can block on a
 /// full OS pipe buffer and wedge until killed.
 pub fn spawn_child(spec: &AdapterSpec, binary: Option<&Path>) -> Result<ChildHandle, ProbeError> {
     let binary = binary.ok_or_else(|| ProbeError::NotDetected(spec.id.to_string()))?;
-    // probe_argv/stream_format invariant (issue #544): a JsonEventStream
-    // adapter MUST carry a dedicated probe argv (its probe surface differs
-    // from the turn's protocol mode), an ACP adapter MUST NOT (the probe
-    // reuses the turn argv). Enforced at this single consumption point so a
-    // future spec that breaks the pairing fails fast under test instead of
-    // spawning the turn's argv and speaking the wrong protocol.
+    // probe_argv/stream_format invariant (issue #544, extended by ADR-0097):
+    // every NON-ACP adapter MUST carry a dedicated probe argv (its probe
+    // surface differs from the turn's protocol mode), an ACP adapter MUST
+    // NOT (the probe reuses the turn argv). Enforced at this single
+    // consumption point so a future spec that breaks the pairing fails fast
+    // under test instead of spawning the turn's argv and speaking the wrong
+    // protocol.
     debug_assert_eq!(
-        spec.stream_format == StreamFormat::JsonEventStream,
+        spec.stream_format != StreamFormat::Acp,
         spec.probe_argv.is_some()
     );
     // Piped stderr (issue #542): the CLI's diagnostics (auth failure, startup
@@ -411,8 +425,11 @@ pub struct StderrTail {
 }
 
 impl StderrTail {
-    /// Start the reader thread on the child's piped stderr.
-    fn spawn(mut stderr: ChildStderr) -> Self {
+    /// Start the reader thread on the child's piped stderr. `pub(super)` so
+    /// the sibling probe modules' unit tests can build a tail over a
+    /// controlled pipe (the production callers all go through
+    /// [`ChildHandle::take_pipes`]).
+    pub(super) fn spawn(mut stderr: ChildStderr) -> Self {
         let tail = Arc::new(Mutex::new(TailBuf::default()));
         let sink = Arc::clone(&tail);
         let (done_tx, done_rx) = mpsc::channel::<()>();

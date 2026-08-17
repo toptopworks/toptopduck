@@ -1,12 +1,13 @@
-//! Shared process-management helpers for the ACP + JSON event stream engines.
+//! Shared process-management helpers for the adapter engines + probe.
 //!
-//! [`super::engine`] (ACP path), [`super::probe`], and
-//! [`super::app_server`] spawn their CLI child through [`spawn_piped`] here,
-//! while [`super::json_event_stream`] (codex native exec path) keeps its own
-//! cwd-aware spawn. Both paths then kill + reap the child under the same
-//! bounded deadline: extracting the spawn shape, the constants, and the
-//! kill-reap logic here prevents drift -- a change to either lands in one
-//! place, not several.
+//! Two spawn shapes live here: [`spawn_piped`] serves [`super::engine`] (the
+//! ACP turn path), [`super::probe`], and [`super::app_server`];
+//! [`spawn_turn`] serves the cwd-aware non-ACP TURN drivers
+//! ([`super::codex_event_stream`] + [`super::claude_stream_json`], the
+//! ADR-0097 Decision 1 aligned-feed surface). Both families then kill +
+//! reap the child under the same bounded deadline: extracting the spawn
+//! shapes, the constants, and the kill-reap logic here prevents drift -- a
+//! change to either lands in one place, not several.
 
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -41,9 +42,9 @@ const KILL_REAP_POLL: Duration = Duration::from_millis(10);
 /// the diagnostic tail can be captured into the failure detail. The turn
 /// engine and both probe paths spawn through here (issue #540) -- a change to
 /// the spawn shape (env, cwd, stdio wiring) lands in one place, not three.
-/// The codex native exec spawn ([`super::json_event_stream`]) is deliberately
-/// excluded: its surface differs (extra argv flags + `current_dir`). The
-/// caller keeps the error wording (the turn path and the probe path name the
+/// The non-ACP turn drivers use [`spawn_turn`] instead: their surface
+/// differs (selection + injection argv flags + `current_dir`). The caller
+/// keeps the error wording (the turn path and the probe path name the
 /// failing adapter / CLI differently).
 pub(super) fn spawn_piped(binary: &Path, argv: &[&str], stderr: Stdio) -> std::io::Result<Child> {
     Command::new(binary)
@@ -52,6 +53,36 @@ pub(super) fn spawn_piped(binary: &Path, argv: &[&str], stderr: Stdio) -> std::i
         .stdout(Stdio::piped())
         .stderr(stderr)
         .spawn()
+}
+
+/// The cwd-aware spawn shape the non-ACP TURN drivers share (codex native
+/// exec + claude-code headless -- ADR-0097 Decision 1's aligned feed made
+/// this a two-caller surface): the spec argv first, then the selection
+/// flags (the ADR-0095/0097 model/effort argv injection), then the format's
+/// injection flags (codex `-c` config overrides / claude `--mcp-config` +
+/// `--strict-mcp-config`), piped stdin/stdout, inherited stderr (the CLI's
+/// chatter goes to the parent's terminal, the turn-engine precedent), and
+/// the working directory set to `cwd` when non-empty so any CLI file
+/// context stays within the session's temp. The caller keeps the error
+/// wording (each driver names its own CLI).
+pub(super) fn spawn_turn(
+    binary: &Path,
+    spec_argv: &[&str],
+    selection_flags: &[String],
+    injection_flags: &[String],
+    cwd: &str,
+) -> std::io::Result<Child> {
+    let mut cmd = Command::new(binary);
+    cmd.args(spec_argv);
+    cmd.args(selection_flags);
+    cmd.args(injection_flags);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::inherit());
+    if !cwd.is_empty() {
+        cmd.current_dir(cwd);
+    }
+    cmd.spawn()
 }
 
 /// Kill the child (`SIGKILL` on POSIX, `TerminateProcess` on Windows) and reap

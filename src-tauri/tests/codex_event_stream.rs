@@ -1,12 +1,13 @@
-//! JSON event stream engine integration tests (ADR-0094, issue #523).
+//! Codex event stream engine integration tests (ADR-0094, issue #523; renamed
+//! from `json_event_stream` by ADR-0097 Decision 2).
 //!
-//! Drives the real [`AcpEngine`] (via the `JsonEventStream` dispatch arm) against
-//! the codex fake-CLI fixture (`codex-fake-cli`, declared as a `[[bin]]`) across
-//! every observable pump branch: clean text reply, tool-call trajectory, turn
-//! failure, step-cap overflow, crash (EOF without text), and stdout close with
-//! accumulated text. The fake CLI emits NDJSON events; the engine's
-//! [`json_event_stream::run_json_event_stream`] reads them and maps to the SAME
-//! [`LoopOutcome`] shape the ACP path returns.
+//! Drives the real [`AcpEngine`] (via the `CodexEventStream` dispatch arm)
+//! against the codex fake-CLI fixture (`codex-fake-cli`, declared as a
+//! `[[bin]]`) across every observable pump branch: clean text reply, tool-call
+//! trajectory, turn failure, step-cap overflow, crash (EOF without text), and
+//! stdout close with accumulated text. The fake CLI emits NDJSON events; the
+//! engine's `codex_event_stream::run_codex_event_stream` reads them and maps
+//! to the SAME [`LoopOutcome`] shape the ACP path returns.
 //!
 //! Real-CLI E2E verification (the exact codex `exec --json` wire format) is
 //! tracked by #342.

@@ -1,6 +1,6 @@
 //! The codex `app-server` diagnostic query (ADR-0096 D2/D3, issue #535).
 //!
-//! The JsonEventStream half of the probe: spawn `codex app-server` (the
+//! The CodexEventStream half of the probe: spawn `codex app-server` (the
 //! official JSON-RPC-over-stdio process interface that drives codex's rich
 //! client), send `model/list`, and fold the per-model catalog into a
 //! [`ModelCatalogOutcome`]. This is a DIFFERENT wire surface from the turn
@@ -8,8 +8,8 @@
 //! catalog here, it never drives a turn.
 //!
 //! The app-server wire is codex's PRIVATE protocol, not a reusable
-//! JsonEventStream surface: a second JsonEventStream adapter must bring its
-//! own wire module, never extend this one (issue #544).
+//! stream-format surface: another non-ACP adapter brings its own wire
+//! module, never extends this one (issue #544, ADR-0097).
 //!
 //! The app-server wire is JSON-RPC-shaped but deliberately NOT JSON-RPC 2.0:
 //! it neither sends nor expects the `jsonrpc` field (codex's `rpc.rs`

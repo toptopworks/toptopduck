@@ -27,11 +27,13 @@ export interface AdapterEntry {
   detected: boolean;
   /** Absolute path of the resolved binary (null when not detected). */
   binary_path: string | null;
-  /** The adapter's stream format (ADR-0095). "acp" renders the model /
-   * thought-level dropdowns fed by handshake discovery; "json_event_stream"
-   * renders read-only CLI-default labels (no dynamic discovery). Mirrors the
-   * Rust StreamFormat (snake_case serde). */
-  stream_format: "acp" | "json_event_stream";
+  /** The adapter's stream format (ADR-0095, ADR-0097). "acp" renders the
+   * model / thought-level dropdowns fed by handshake discovery; the two
+   * per-model catalog formats ("codex_event_stream", "claude_stream_json")
+   * render probe-cache-fed per-model dropdowns once tested, read-only
+   * CLI-default labels before. Mirrors the Rust StreamFormat (snake_case
+   * serde); the "json_event_stream" tag was retired by the ADR-0097 rename. */
+  stream_format: "acp" | "codex_event_stream" | "claude_stream_json";
 }
 
 // The honest default while the read settles (and after a resume, before the
@@ -75,31 +77,33 @@ export interface SessionModelConfig {
   cached_discovered: DiscoveredRuntime | null;
 }
 
-// The adapter diagnostic probe's success shape (ADR-0096, issues #534/#535).
-// Per-format tagged (`kind`), mirroring the Rust `ProbeOk` adjacently-tagged
-// enum: `acp` carries the flat handshake catalog, `json_event_stream`
-// carries the per-model catalog (or the degraded "unavailable" state). The
-// per-model catalog is NOT flattened into `DiscoveredRuntime` -- a union of
-// per-model efforts would let the user select an effort the current model
-// does not support (ADR-0096 D3).
+// The adapter diagnostic probe's success shape (ADR-0096, issues #534/#535;
+// ADR-0097). Per-format tagged (`kind`), mirroring the Rust `ProbeOk`
+// adjacently-tagged enum: `acp` carries the flat handshake catalog, the two
+// per-model kinds carry the per-model catalog (or the degraded "unavailable"
+// state). The per-model catalog is NOT flattened into `DiscoveredRuntime` --
+// a union of per-model efforts would let the user select an effort the
+// current model does not support (ADR-0096 D3).
 export type ProbeOk =
   | { kind: "acp"; data: { discovered: DiscoveredRuntime } }
-  | { kind: "json_event_stream"; data: { outcome: ModelCatalogOutcome } };
+  | { kind: "codex_event_stream"; data: { outcome: ModelCatalogOutcome } }
+  | { kind: "claude_stream_json"; data: { outcome: ModelCatalogOutcome } };
 
-// The per-model catalog outcome of a JsonEventStream probe (ADR-0096
-// D2/D3, today the codex app-server `model/list` query). `available`
-// carries the ordered per-model catalog; `unavailable` is the degraded
-// "started but catalog unavailable" state (the process is alive, so this is
-// a success, not a ProbeError). Mirrors the Rust `ModelCatalogOutcome`
-// (status-tagged, snake_case serde).
+// The per-model catalog outcome of a non-ACP probe (ADR-0096 D2/D3: the
+// codex app-server `model/list` query; ADR-0097 Decision 5: the claude-code
+// control-plane `initialize` read). `available` carries the ordered
+// per-model catalog; `unavailable` is the degraded "started but catalog
+// unavailable" state (the process is alive, so this is a success, not a
+// ProbeError). Mirrors the Rust `ModelCatalogOutcome` (status-tagged,
+// snake_case serde).
 export type ModelCatalogOutcome =
   | { status: "available"; models: CatalogModel[] }
   | { status: "unavailable"; detail: string };
 
-// One model from a JsonEventStream probe's per-model catalog (ADR-0096
-// D3). The reasoning efforts are the per-model `supportedReasoningEfforts`
-// in the CLI's declared order (never a union across models). Mirrors the
-// Rust `CatalogModel` (snake_case serde).
+// One model from a per-model catalog probe (ADR-0096 D3; ADR-0097 Decision
+// 5 reuses the shape for claude-code). The reasoning efforts are the
+// per-model supported list in the CLI's declared order (never a union across
+// models). Mirrors the Rust `CatalogModel` (snake_case serde).
 export interface CatalogModel {
   id: string;
   display_name: string;
@@ -119,16 +123,16 @@ export interface CatalogModel {
 // AdapterCatalogEntry}` (snake_case serde).
 
 // The channel that produced the catalog -- the per-format dispatch
-// dimension (ADR-0096 D2), selecting the consumer's rendering.
-export type ProbeKind = "acp" | "json_event_stream";
+// dimension (ADR-0096 D2, ADR-0097), selecting the consumer's rendering.
+export type ProbeKind = "acp" | "codex_event_stream" | "claude_stream_json";
 
-// The cached outcome, tagged by channel. The JsonEventStream degraded
-// state is never cached (only a usable catalog is a cache point, ADR-0096
-// D5) -- the `models` variant is the only JsonEventStream shape that
-// appears here.
+// The cached outcome, tagged by channel. The per-model degraded state is
+// never cached (only a usable catalog is a cache point, ADR-0096 D5) -- the
+// `models` variants are the only per-model shape that appears here.
 export type CachedOutcome =
   | { acp: { discovered: DiscoveredRuntime } }
-  | { json_event_stream: { models: CatalogModel[] } };
+  | { codex_event_stream: { models: CatalogModel[] } }
+  | { claude_stream_json: { models: CatalogModel[] } };
 
 // One adapter's cache entry: the catalog + the probe timestamp
 // (epoch millis, display-only -- it never feeds the picker's priority
@@ -140,8 +144,13 @@ export type CachedOutcome =
 export type AdapterCatalogEntry =
   | { probe_kind: "acp"; outcome: Extract<CachedOutcome, { acp: unknown }>; probed_at_millis: number }
   | {
-    probe_kind: "json_event_stream";
-    outcome: Extract<CachedOutcome, { json_event_stream: unknown }>;
+    probe_kind: "codex_event_stream";
+    outcome: Extract<CachedOutcome, { codex_event_stream: unknown }>;
+    probed_at_millis: number;
+  }
+  | {
+    probe_kind: "claude_stream_json";
+    outcome: Extract<CachedOutcome, { claude_stream_json: unknown }>;
     probed_at_millis: number;
   };
 

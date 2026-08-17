@@ -642,7 +642,7 @@ impl SessionHandle {
     /// the engine's `LoopOutcome.discovered_runtime`); replaces the cache
     /// unconditionally -- a post-handshake ACP exit always carries a catalog
     /// (an empty one is a real state: the CLI offered no models). Built-in /
-    /// JsonEventStream turns and pre-handshake ACP failures yield `None`
+    /// CodexEventStream turns and pre-handshake ACP failures yield `None`
     /// ("no discovery", not "discovered nothing") -- the caller skips the
     /// call, preserving the previous ACP cache (issue #530 removed the
     /// unreachable no-op arm from the setter).
@@ -1260,7 +1260,7 @@ mod tests {
         };
         handle.set_cached_discovered(catalog.clone());
         assert_eq!(handle.cached_discovered(), Some(catalog.clone()));
-        // A built-in / JsonEventStream turn never calls the setter (its None
+        // A built-in / CodexEventStream turn never calls the setter (its None
         // means "no discovery"); a second ACP catalog replaces the first.
         let empty_catalog = crate::runtime::acp::adapter::DiscoveredRuntime::empty();
         handle.set_cached_discovered(empty_catalog.clone());

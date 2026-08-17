@@ -807,13 +807,13 @@ describe("ComposerProviderPicker model config selectors (ADR-0095)", () => {
     expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
   });
 
-  it("renders read-only CLI-default labels on the codex (JsonEventStream) runtime", async () => {
+  it("renders read-only CLI-default labels on the codex (CodexEventStream) runtime", async () => {
     vi.mocked(getSessionRuntime).mockResolvedValue({
       kind: "external",
       data: "codex",
     });
     vi.mocked(listAdapters).mockResolvedValue([
-      { ...adapter("codex"), stream_format: "json_event_stream" },
+      { ...adapter("codex"), stream_format: "codex_event_stream" },
     ]);
     renderPicker(
       <ComposerProviderPicker
@@ -1019,7 +1019,7 @@ describe("ComposerProviderPicker honest selector states (issue #529)", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("does not flag the stale catalog on a JsonEventStream runtime (never refreshed)", async () => {
+  it("does not flag the stale catalog on a CodexEventStream runtime (never refreshed)", async () => {
     // A JES runtime (codex) never reports a catalog, so its turns would
     // never replace an ACP-produced cache -- the "refreshes after the next
     // turn" promise would be a permanent lie. The read-only CLI-default
@@ -1029,7 +1029,7 @@ describe("ComposerProviderPicker honest selector states (issue #529)", () => {
       data: "codex",
     });
     vi.mocked(listAdapters).mockResolvedValue([
-      { ...adapter("codex"), stream_format: "json_event_stream" },
+      { ...adapter("codex"), stream_format: "codex_event_stream" },
     ]);
     vi.mocked(getSessionModelConfig).mockResolvedValue({
       model: null,
@@ -1364,8 +1364,8 @@ describe("ComposerProviderPicker codex dropdowns (issue #537)", () => {
 
   const codexCatalogs = (): AdapterCatalogs => ({
     codex: {
-      probe_kind: "json_event_stream",
-      outcome: { json_event_stream: { models: CODEX_MODELS } },
+      probe_kind: "codex_event_stream",
+      outcome: { codex_event_stream: { models: CODEX_MODELS } },
       probed_at_millis: 1_700_000_000_000,
     },
   });
@@ -1379,7 +1379,7 @@ describe("ComposerProviderPicker codex dropdowns (issue #537)", () => {
       data: "codex",
     });
     vi.mocked(listAdapters).mockResolvedValue([
-      { ...adapter("codex"), stream_format: "json_event_stream" },
+      { ...adapter("codex"), stream_format: "codex_event_stream" },
     ]);
     vi.mocked(getSessionModelConfig).mockResolvedValue({
       model: config?.model ?? null,
@@ -1559,7 +1559,7 @@ describe("ComposerProviderPicker codex dropdowns (issue #537)", () => {
       data: "codex",
     });
     vi.mocked(listAdapters).mockResolvedValue([
-      { ...adapter("codex"), stream_format: "json_event_stream" },
+      { ...adapter("codex"), stream_format: "codex_event_stream" },
     ]);
     vi.mocked(getAdapterCatalogs).mockResolvedValue({});
     renderPicker(
@@ -1587,7 +1587,7 @@ describe("ComposerProviderPicker codex dropdowns (issue #537)", () => {
       data: "codex",
     });
     vi.mocked(listAdapters).mockResolvedValue([
-      { ...adapter("codex"), stream_format: "json_event_stream" },
+      { ...adapter("codex"), stream_format: "codex_event_stream" },
     ]);
     renderPicker(
       <ComposerProviderPicker
@@ -1607,5 +1607,170 @@ describe("ComposerProviderPicker codex dropdowns (issue #537)", () => {
       }),
     );
     expect(onOpenSettings).toHaveBeenCalledWith("local-cli");
+  });
+});
+
+describe("ComposerProviderPicker claude-code dropdowns (issue #561, ADR-0097)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: null,
+      thought_level: null,
+      cached_discovered: null,
+    });
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
+    vi.mocked(setSessionModel).mockResolvedValue(PERSIST_OK);
+    vi.mocked(setSessionThoughtLevel).mockResolvedValue(PERSIST_OK);
+  });
+
+  // Two claude models with DIFFERENT supported effort sets -- pins the
+  // per-model filtering AC on the claude format (a union would offer every
+  // effort on every model).
+  const CLAUDE_MODELS: CatalogModel[] = [
+    {
+      id: "claude-sonnet-4",
+      display_name: "Claude Sonnet 4",
+      is_default: true,
+      default_reasoning_effort: "medium",
+      supported_reasoning_efforts: ["low", "medium", "high"],
+    },
+    {
+      id: "claude-opus-4",
+      display_name: "claude-opus-4-20250514",
+      is_default: false,
+      default_reasoning_effort: "",
+      supported_reasoning_efforts: ["high"],
+    },
+  ];
+
+  const claudeCatalogs = (): AdapterCatalogs => ({
+    "claude-code": {
+      probe_kind: "claude_stream_json",
+      outcome: { claude_stream_json: { models: CLAUDE_MODELS } },
+      probed_at_millis: 1_700_000_000_000,
+    },
+  });
+
+  async function openClaude(config?: {
+    model?: string | null;
+    thought_level?: string | null;
+    cached_discovered?: DiscoveredRuntime | null;
+    catalogs?: AdapterCatalogs;
+  }) {
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "claude-code",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([
+      { ...adapter("claude-code"), stream_format: "claude_stream_json" },
+    ]);
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: config?.model ?? null,
+      thought_level: config?.thought_level ?? null,
+      cached_discovered: config?.cached_discovered ?? null,
+    });
+    vi.mocked(getAdapterCatalogs).mockResolvedValue(
+      config?.catalogs ?? claudeCatalogs(),
+    );
+    const rendered = renderPicker(
+      <ComposerProviderPicker
+        sessionId="sess-1"
+        provider={pickerProvider()}
+        onSwitchActive={() => {}}
+        onSwitchModel={() => {}}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Runtime: claude-code/ }),
+    );
+    return rendered;
+  }
+
+  it("renders real dropdowns from the probe cache per-model catalog", async () => {
+    await openClaude();
+    const modelSelect = await screen.findByLabelText("Model");
+    expect(
+      Array.from(modelSelect.querySelectorAll("option")).map((o) => o.value),
+    ).toEqual(["", "claude-sonnet-4", "claude-opus-4"]);
+    // With no model picked the level surface is a hint, not a dropdown.
+    expect(
+      await screen.findByText(/Pick a model to choose a thinking level/),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Thinking")).not.toBeInTheDocument();
+  });
+
+  it("filters thought levels by the selected model's supported efforts", async () => {
+    // The per-model filtering AC: sonnet offers three efforts, opus only
+    // "high" -- the dropdown must follow the SELECTED model, never a union.
+    await openClaude({ model: "claude-sonnet-4" });
+    let thinkSelect = await screen.findByLabelText("Thinking");
+    expect(
+      Array.from(thinkSelect.querySelectorAll("option")).map((o) => o.value),
+    ).toEqual(["", "low", "medium", "high"]);
+    fireEvent.change(await screen.findByLabelText("Model"), {
+      target: { value: "claude-opus-4" },
+    });
+    await waitFor(() =>
+      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "claude-opus-4"),
+    );
+    thinkSelect = await screen.findByLabelText("Thinking");
+    expect(
+      Array.from(thinkSelect.querySelectorAll("option")).map((o) => o.value),
+    ).toEqual(["", "high"]);
+  });
+
+  it("renders the empty-directory guidance before any probe", async () => {
+    // AC: 未探测时空目录引导 -- no cache entry keeps the read-only CLI
+    // default labels + the settings-test entry.
+    const onOpenSettings = vi.fn();
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "claude-code",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([
+      { ...adapter("claude-code"), stream_format: "claude_stream_json" },
+    ]);
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
+    renderPicker(
+      <ComposerProviderPicker
+        sessionId="sess-1"
+        provider={pickerProvider()}
+        onSwitchActive={() => {}}
+        onSwitchModel={() => {}}
+        onOpenSettings={onOpenSettings}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Runtime: claude-code/ }),
+    );
+    expect(await screen.findAllByText("CLI default")).toHaveLength(2);
+    expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /Test the runtime in settings/,
+      }),
+    );
+    expect(onOpenSettings).toHaveBeenCalledWith("local-cli");
+  });
+
+  it("annotates the CLI default with the last turn's system{init} current model", async () => {
+    // Honest rendering (ADR-0097 Decision 5): before any probe the claude
+    // turn still reports the model it ran -- the label names it instead of
+    // a bare "CLI default".
+    await openClaude({
+      catalogs: {},
+      cached_discovered: {
+        models: [],
+        current_model: "claude-fake-4",
+        thought_levels: [],
+        current_thought_level: null,
+        adapter_id: "claude-code",
+      },
+    });
+    expect(
+      await screen.findByText("CLI default (claude-fake-4)"),
+    ).toBeInTheDocument();
   });
 });

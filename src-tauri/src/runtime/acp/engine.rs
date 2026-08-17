@@ -79,13 +79,15 @@ pub struct AcpTurnInput {
     /// = the CLI's own default. ACP path: one `session/set_config_option`
     /// after the handshake, keyed by the catalog entry's config id (the
     /// category constant is only a fallback) -- `NewSessionRequest` carries
-    /// no model field; JsonEventStream path: rides argv behind
+    /// no model field; the non-ACP paths ride argv behind
     /// `AdapterSpec.model_arg`.
     pub model: Option<String>,
     /// The session-level thought-level choice to inject this turn (ADR-0095).
     /// `None` = the CLI's own default. ACP path: one
     /// `session/set_config_option` after the handshake, keyed like `model`;
-    /// JsonEventStream path: argv via `AdapterSpec.effort_config_key`.
+    /// CodexEventStream path: argv via `AdapterSpec.effort_config_key`
+    /// (the `-c` surface); ClaudeStreamJson path: argv via
+    /// `AdapterSpec.effort_arg` (ADR-0097 Decision 6).
     pub thought_level: Option<String>,
     /// The full windowed context for this turn (the question + history), as
     /// text content blocks. ADR-0076 statelessness: the whole context every
@@ -125,12 +127,14 @@ impl AcpEngine {
     }
 
     /// Drive one turn against the adapter's CLI. Dispatches on
-    /// [`StreamFormat`] (ADR-0094): the ACP path drives the full JSON-RPC
-    /// turn; the JSON event stream path delegates to
-    /// [`json_event_stream::run_json_event_stream`] (codex native `exec --json`).
-    /// `binary` is the resolved CLI path (`detect_adapter` in production, the
-    /// fake-fixture path in tests). Returns the SAME [`LoopOutcome`] shape the
-    /// built-in loop returns.
+    /// [`StreamFormat`] (ADR-0094/0097): the ACP path drives the full
+    /// JSON-RPC turn; the codex event stream path delegates to
+    /// `codex_event_stream::run_codex_event_stream` (codex native
+    /// `exec --json`); the claude stream-json path delegates to
+    /// `claude_stream_json::run_claude_stream_json` (claude-code native
+    /// headless). `binary` is the resolved CLI path (`detect_adapter` in
+    /// production, the fake-fixture path in tests). Returns the SAME
+    /// [`LoopOutcome`] shape the built-in loop returns.
     pub fn run(
         &self,
         input: &AcpTurnInput,
@@ -141,7 +145,18 @@ impl AcpEngine {
     ) -> LoopOutcome {
         match self.adapter.stream_format {
             StreamFormat::Acp => self.run_acp(input, binary, approval, sink, on_phase),
-            StreamFormat::JsonEventStream => super::json_event_stream::run_json_event_stream(
+            StreamFormat::CodexEventStream => super::codex_event_stream::run_codex_event_stream(
+                &self.adapter,
+                Arc::clone(&self.cancel),
+                self.step_cap,
+                self.wall_clock,
+                input,
+                binary,
+                approval,
+                sink,
+                on_phase,
+            ),
+            StreamFormat::ClaudeStreamJson => super::claude_stream_json::run_claude_stream_json(
                 &self.adapter,
                 Arc::clone(&self.cancel),
                 self.step_cap,
@@ -1203,20 +1218,21 @@ mod tests {
     }
 
     /// ADR-0094 dispatch seam: an adapter whose `stream_format` is
-    /// `JsonEventStream` routes to the JSON event stream driver (not the ACP
-    /// path). A nonexistent binary produces a Transient spawn failure naming
-    /// the adapter, proving the dispatch fires through the new module.
+    /// `CodexEventStream` routes to the codex event stream driver (not the
+    /// ACP path). A nonexistent binary produces a Transient spawn failure
+    /// naming the adapter, proving the dispatch fires through the module.
     #[test]
-    fn json_event_stream_dispatches_to_driver() {
+    fn codex_event_stream_dispatches_to_driver() {
         let spec = AdapterSpec {
             id: crate::runtime::acp::adapter::AdapterId::new("stub-test"),
             display_name: "stub-test",
             binary_names: &["nonexistent"],
             argv: &["--json"],
-            stream_format: StreamFormat::JsonEventStream,
-            probe_argv: None,
+            stream_format: StreamFormat::CodexEventStream,
+            probe_argv: Some(&["probe"]),
             model_arg: None,
             effort_config_key: None,
+            effort_arg: None,
         };
         let cancel = Arc::new(CancelToken::new());
         let engine = AcpEngine::new(spec, cancel);
@@ -1240,6 +1256,53 @@ mod tests {
             Termination::Transient(msg) => {
                 assert!(
                     msg.contains("stub-test"),
+                    "spawn failure names the adapter: {msg}"
+                );
+            }
+            other => panic!("expected Transient from spawn failure, got {other:?}"),
+        }
+        assert!(outcome.trace.is_empty());
+    }
+
+    /// ADR-0097 dispatch seam: an adapter whose `stream_format` is
+    /// `ClaudeStreamJson` routes to the claude stream-json driver (not the
+    /// ACP path, not the codex parser). Same nonexistent-binary proof shape
+    /// as the codex arm above.
+    #[test]
+    fn claude_stream_json_dispatches_to_driver() {
+        let spec = AdapterSpec {
+            id: crate::runtime::acp::adapter::AdapterId::new("stub-claude"),
+            display_name: "stub-claude",
+            binary_names: &["nonexistent"],
+            argv: &["--print", "--output-format", "stream-json"],
+            stream_format: StreamFormat::ClaudeStreamJson,
+            probe_argv: Some(&["probe"]),
+            model_arg: None,
+            effort_config_key: None,
+            effort_arg: None,
+        };
+        let cancel = Arc::new(CancelToken::new());
+        let engine = AcpEngine::new(spec, cancel);
+        let input = AcpTurnInput {
+            cwd: std::env::temp_dir().to_string_lossy().to_string(),
+            mcp_servers: Vec::new(),
+            model: None,
+            thought_level: None,
+            prompt_blocks: Vec::new(),
+        };
+        let approval = crate::approval::ApprovalState::new();
+        let sink = RecordingAcpSink::new();
+        let outcome = engine.run(
+            &input,
+            std::path::Path::new("/nonexistent-binary-561"),
+            &approval,
+            &sink,
+            |_| {},
+        );
+        match &outcome.termination {
+            Termination::Transient(msg) => {
+                assert!(
+                    msg.contains("stub-claude"),
                     "spawn failure names the adapter: {msg}"
                 );
             }

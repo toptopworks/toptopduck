@@ -718,11 +718,13 @@ pub async fn ask(
         // session-lock re-entry.
         handle.set_last_mcp_connect(s.last_mcp_connect().to_vec());
         // ADR-0095: mirror the turn's discovered runtime catalog onto the
-        // handle (lock-light reads for the selector). Only an ACP turn
-        // reports a catalog; the built-in / JsonEventStream `None` means
-        // "no discovery", so the mirror is skipped and the previous ACP
-        // cache survives (issue #530 made the None arm unrepresentable at
-        // the setter).
+        // handle (lock-light reads for the selector). An ACP turn reports
+        // the handshake catalog and a ClaudeStreamJson turn reports the
+        // `system{init}` current model (ADR-0097 Decision 5 honest
+        // rendering); the built-in / CodexEventStream `None` means "no
+        // discovery", so the mirror is skipped and the previous cache
+        // survives (issue #530 made the None arm unrepresentable at the
+        // setter).
         if let Some(discovered) = s.last_discovered_runtime() {
             handle.set_cached_discovered(discovered);
         }
@@ -2286,9 +2288,11 @@ pub struct AdapterEntry {
     pub binary_path: Option<PathBuf>,
     /// The adapter's stream format (ADR-0095): the composer's model /
     /// thought-level selectors render per format -- ACP adapters get
-    /// dropdowns fed by handshake discovery; JsonEventStream adapters get
-    /// read-only CLI-default labels (no dynamic discovery). `#[serde(default)]`
-    /// so an older payload omitting the field degrades to the ACP surface.
+    /// dropdowns fed by handshake discovery; the non-ACP formats
+    /// (CodexEventStream / ClaudeStreamJson) get probe-cache-fed per-model
+    /// dropdowns once tested, read-only CLI-default labels before.
+    /// `#[serde(default)]` so an older payload omitting the field degrades
+    /// to the ACP surface.
     #[serde(default)]
     pub stream_format: StreamFormat,
 }
@@ -2373,9 +2377,10 @@ pub fn rescan_adapters() -> Vec<AdapterEntry> {
 /// Run the adapter diagnostic probe (ADR-0096, issues #534/#535): a session-
 /// agnostic, one-shot spawn of the detected CLI in its probe mode -> a
 /// per-format catalog query -> terminate. ACP adapters run the initialize +
-/// `session/new` handshake; JsonEventStream adapters (codex) run the
-/// `app-server` `model/list` query. The result is display-only in this slice
-/// (no catalog cache; a later slice persists to app-data).
+/// `session/new` handshake; CodexEventStream adapters (codex) run the
+/// `app-server` `model/list` query; ClaudeStreamJson adapters (claude-code)
+/// run the stream-json control-plane `initialize` read (ADR-0097 Decision
+/// 5). The catalog result caches to the app-data sidecar (ADR-0096 D5).
 ///
 /// Async + deadline-bounded, the `probe_mcp_server` layering (issue #392):
 /// the child is spawned in the async scope so the `Child` handle stays OUT
@@ -2389,7 +2394,10 @@ pub fn rescan_adapters() -> Vec<AdapterEntry> {
 /// every other typed IPC error): unknown id / not currently detected reject
 /// before any spawn; spawn + query failures carry the English technical
 /// detail for the fold. A codex `model/list` RPC error is NOT a refusal -- it
-/// degrades to a [`ProbeOk::JsonEventStream`] carrying `Unavailable` (ADR-0096 D2).
+/// degrades to a [`ProbeOk::CodexEventStream`] carrying `Unavailable`
+/// (ADR-0096 D2); a claude-code control-plane error response degrades to a
+/// [`ProbeOk::ClaudeStreamJson`] carrying `Unavailable`, and a silent /
+/// EOF-ing claude child degrades to an EMPTY catalog (ADR-0097 Decision 5).
 #[tauri::command]
 pub async fn probe_adapter(
     catalog_store: State<'_, AdapterCatalogStore>,
@@ -2425,13 +2433,20 @@ pub async fn probe_adapter(
             probe::handshake_with(stdin, stdout, stderr_tail, &spec, PROBE_TIMEOUT)
                 .map(|discovered| probe::ProbeOk::Acp { discovered })
         }
-        StreamFormat::JsonEventStream => crate::runtime::acp::app_server::query_catalog(
+        StreamFormat::CodexEventStream => crate::runtime::acp::app_server::query_catalog(
             stdin,
             stdout,
             stderr_tail,
             PROBE_TIMEOUT,
         )
-        .map(|outcome| probe::ProbeOk::JsonEventStream { outcome }),
+        .map(|outcome| probe::ProbeOk::CodexEventStream { outcome }),
+        StreamFormat::ClaudeStreamJson => crate::runtime::acp::claude_control::query_catalog(
+            stdin,
+            stdout,
+            stderr_tail,
+            PROBE_TIMEOUT,
+        )
+        .map(|outcome| probe::ProbeOk::ClaudeStreamJson { outcome }),
     });
     let outcome = tokio::time::timeout(PROBE_TIMEOUT, join).await;
     // A tokio timeout surfaces as ProbeError::Timeout; the blocking task
@@ -2457,11 +2472,11 @@ pub async fn probe_adapter(
     }
     // Cache the catalog on success (ADR-0096 D5, issue #536): the probe
     // click is the cache's ONLY write point, overwriting just this
-    // adapter's entry. Only a usable catalog caches -- the JsonEventStream degraded
-    // state (`Unavailable`) keeps the last good entry. Write failures are
-    // swallowed inside `store_entry` (the cache never gates the probe's own
-    // answer); the write happens after the kill so the child is always
-    // dead first, timeout path included.
+    // adapter's entry. Only a usable catalog caches -- the per-model
+    // degraded state (`Unavailable`) keeps the last good entry. Write
+    // failures are swallowed inside `store_entry` (the cache never gates
+    // the probe's own answer); the write happens after the kill so the
+    // child is always dead first, timeout path included.
     if let Ok(ok) = &result {
         if let Some((probe_kind, outcome)) = CachedOutcome::from_probe(ok) {
             catalog_store.store_entry(

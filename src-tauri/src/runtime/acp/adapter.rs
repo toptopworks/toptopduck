@@ -31,7 +31,11 @@ use std::path::PathBuf;
 /// The wire protocol an adapter's CLI speaks over stdio (ADR-0094). The engine
 /// dispatches on this field -- per-format, NOT per-CLI: multiple CLIs share a
 /// format, adding a CLI never touches the engine, and adding a format adds one
-/// parser path (ADR-0081 zero per-CLI code invariant preserved).
+/// parser path (ADR-0081 zero per-CLI code invariant preserved). Each variant
+/// is exactly one parser's dispatch unit, named after its owning CLI's
+/// vocabulary (ADR-0097 Decision 2): a neutral shared name would misassociate
+/// a second CLI with the wrong parser (claude's official output format is ALSO
+/// called stream-json).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamFormat {
@@ -40,8 +44,18 @@ pub enum StreamFormat {
     /// to the ACP surface.
     #[default]
     Acp,
-    /// A native JSONL event stream over stdio (codex `exec --json`, ADR-0094).
-    JsonEventStream,
+    /// The codex native JSONL event stream over stdio (codex `exec --json`,
+    /// ADR-0094). Renamed from `JsonEventStream` when the format set grew to
+    /// three (ADR-0097 Decision 2): the value's single owner is codex, and the
+    /// wire-tag change drops pre-rename catalog-cache entries through the
+    /// existing corrupt-entry degrade (the cache is a discardable snapshot).
+    CodexEventStream,
+    /// The claude-code native headless stream (ADR-0097): NDJSON `system` /
+    /// `assistant` / `stream_event` / `result` frames over stdout, driven via
+    /// `--print --output-format stream-json` with the prompt on stdin. The
+    /// catalog channel is the stream-json control plane (a probe-time
+    /// `control_request{initialize}`), never the turn path.
+    ClaudeStreamJson,
 }
 
 // ---------------------------------------------------------------------------
@@ -94,14 +108,17 @@ pub struct AdapterSpec {
     /// protocol selected by [`StreamFormat`] over stdio. The prefix is the
     /// full CLI-specific invocation into protocol mode; the engine appends
     /// only generic per-turn args derived from the other spec fields and the
-    /// turn input (JsonEventStream model/effort flags, bridge config
-    /// overrides) -- never CLI-specific arguments.
+    /// turn input (non-ACP model/effort flags, bridge config overrides) --
+    /// never CLI-specific arguments.
     pub argv: &'static [&'static str],
     /// The argv prefix the diagnostic probe uses to spawn this CLI (ADR-0096).
     /// `None` on ACP adapters -- the probe reuses [`Self::argv`] (the same
-    /// protocol mode the turn drives). JsonEventStream adapters (codex) probe
-    /// via the `app-server` subcommand, a different surface from the turn's
-    /// `exec --json` mode, so the probe argv cannot be the turn argv. Like
+    /// protocol mode the turn drives). Every non-ACP adapter carries a
+    /// dedicated probe argv (the probe surface differs from the turn's
+    /// protocol mode): codex probes via the `app-server` subcommand, a
+    /// different surface from the turn's `exec --json` mode; claude-code
+    /// probes via the turn argv extended with `--input-format stream-json`
+    /// (the stream-json control plane, ADR-0097 Decision 5). Like
     /// [`Self::argv`], pure CLI-specific data: the probe kernel reads it and
     /// names no CLI.
     pub probe_argv: Option<&'static [&'static str]>,
@@ -109,18 +126,27 @@ pub struct AdapterSpec {
     /// engine's per-format dispatch path.
     pub stream_format: StreamFormat,
     /// The argv flag that carries the model id at spawn (ADR-0095). Consumed
-    /// ONLY by the JsonEventStream path (the engine appends `[flag, value]`
-    /// after the argv prefix). `None` on ACP adapters -- the ACP path injects
-    /// the model via a `session/set_config_option` request after the
-    /// handshake instead (schema 0.13.8's `NewSessionRequest` carries no
-    /// model field).
+    /// ONLY by the non-ACP paths (the engine appends `[flag, value]` after
+    /// the argv prefix). `None` on ACP adapters -- the ACP path injects the
+    /// model via a `session/set_config_option` request after the handshake
+    /// instead (schema 0.13.8's `NewSessionRequest` carries no model field).
     pub model_arg: Option<&'static str>,
     /// The runtime-config key for the reasoning-effort setting (ADR-0095).
-    /// Consumed ONLY by the JsonEventStream path (the engine appends
+    /// Consumed ONLY by the CodexEventStream path (the engine appends
     /// `["-c", "{key}={value}"]` to argv when a thought level is selected).
     /// `None` on ACP adapters -- the ACP path sends one
-    /// `session/set_config_option` request after the handshake instead.
+    /// `session/set_config_option` request after the handshake instead --
+    /// and on ClaudeStreamJson, whose effort rides an argv flag
+    /// ([`Self::effort_arg`]) instead of a `-c` config override.
     pub effort_config_key: Option<&'static str>,
+    /// The argv flag that carries the reasoning effort at spawn (ADR-0097
+    /// Decision 6): the argv-shaped injection counterpart of
+    /// [`Self::effort_config_key`]'s `-c`-shaped one. Consumed ONLY by the
+    /// non-ACP paths (the engine appends `[flag, value]` when a thought level
+    /// is selected, parallel to [`Self::model_arg`]). claude-code = `--effort`;
+    /// `None` wherever the effort rides a config override (codex) or a
+    /// protocol request (ACP).
+    pub effort_arg: Option<&'static str>,
 }
 
 impl AdapterSpec {
@@ -131,7 +157,7 @@ impl AdapterSpec {
 }
 
 // ---------------------------------------------------------------------------
-// The v1 adapters (gemini-cli, codex, qwen-code, opencode)
+// The v1 adapters (gemini-cli, codex, qwen-code, opencode, claude-code)
 // ---------------------------------------------------------------------------
 
 /// The gemini-cli adapter (ADR-0081 v1 validation set, issue #300). The npm
@@ -153,6 +179,7 @@ pub const fn gemini_cli() -> AdapterSpec {
         probe_argv: None,
         model_arg: None,
         effort_config_key: None,
+        effort_arg: None,
     }
 }
 
@@ -163,8 +190,8 @@ pub const fn gemini_cli() -> AdapterSpec {
 /// file-write tools blocked platform-uniformly). The prompt is written to stdin
 /// as flattened text; MCP tool calls route through the gateway bridge injected
 /// via `-c` config override (ADR-0085/0094). The stream format is
-/// `JsonEventStream`, so the engine dispatches to the JSON event stream path,
-/// not the ACP JSON-RPC path.
+/// `CodexEventStream`, so the engine dispatches to the codex event stream
+/// path, not the ACP JSON-RPC path.
 ///
 /// NOTE: the argv shape is pinned by the codex CLI's `exec` subcommand; live
 /// E2E verifies it against a real install. If codex changes the flags, ONLY
@@ -183,7 +210,7 @@ pub const fn codex() -> AdapterSpec {
             "--sandbox",
             "read-only",
         ],
-        stream_format: StreamFormat::JsonEventStream,
+        stream_format: StreamFormat::CodexEventStream,
         // The probe surface is the `app-server` subcommand, NOT the turn's
         // `exec --json` (ADR-0096 D2) -- a different communication channel
         // whose `model/list` RPC returns the per-model catalog.
@@ -191,9 +218,11 @@ pub const fn codex() -> AdapterSpec {
         // ADR-0095: codex's native `exec` takes the model as `--model <id>`
         // and the reasoning effort via the config override
         // `-c model_reasoning_effort=<value>` (same `-c` mechanism the bridge
-        // injection uses, ADR-0094).
+        // injection uses, ADR-0094). No argv-shaped effort flag (ADR-0097
+        // Decision 6 leaves codex on the `-c` surface).
         model_arg: Some("--model"),
         effort_config_key: Some("model_reasoning_effort"),
+        effort_arg: None,
     }
 }
 
@@ -216,6 +245,7 @@ pub const fn qwen_code() -> AdapterSpec {
         probe_argv: None,
         model_arg: None,
         effort_config_key: None,
+        effort_arg: None,
     }
 }
 
@@ -240,6 +270,82 @@ pub const fn opencode() -> AdapterSpec {
         probe_argv: None,
         model_arg: None,
         effort_config_key: None,
+        effort_arg: None,
+    }
+}
+
+/// The claude-code adapter (ADR-0097, issue #561). claude-code has no native
+/// ACP mode (measured on 2.1.222: no `--acp` option; the spawn errors), so the
+/// only structured interface is its headless mode: `--print --output-format
+/// stream-json` emits NDJSON frames (`system` / `assistant` / `stream_event` /
+/// `result`) on stdout while the prompt rides stdin as flattened text -- the
+/// SAME stateless per-turn spawn shape the codex path drives (new spawn every
+/// turn, no `--resume` / `--session-id`; `--no-session-persistence` keeps
+/// upstream from writing a session file). The stream format is
+/// `ClaudeStreamJson`, so the engine dispatches to the claude stream-json
+/// path, never the codex parser.
+///
+/// Native tools are blocked wholesale (ADR-0097 Decision 3): the
+/// `--disallowedTools` deny list below names claude-code's native tool
+/// surface (the implementation-period measured set -- an open set upstream,
+/// with headless auto-refusal of any permission request as the backstop), and
+/// `--permission-prompt-tool` is deliberately NOT wired (no approval surface
+/// for tools with no legitimate use). The ONLY tool plane is the gateway
+/// bridge injected via `--mcp-config` + `--strict-mcp-config` (the turn
+/// driver builds those from the turn input, ADR-0097 Decision 4).
+///
+/// NOTE: the argv spellings are pinned by the claude-code CLI; live E2E
+/// verifies them against a real install (ADR-0097 unresolved item). If
+/// claude-code renames a flag, ONLY this constant changes -- the engine is
+/// untouched (ADR-0081 zero per-CLI code).
+pub const fn claude_code() -> AdapterSpec {
+    AdapterSpec {
+        id: AdapterId::new("claude-code"),
+        display_name: "claude-code",
+        // The npm package `@anthropic-ai/claude-code` ships the `claude`
+        // binary (native installers ship the same name).
+        binary_names: &["claude"],
+        // ADR-0097 Decision 7: the minimal flag set, no version gating. The
+        // deny list is one comma-joined argv element (claude-code's
+        // `--disallowedTools` spelling).
+        argv: &[
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--no-session-persistence",
+            "--disallowedTools",
+            "Task,Bash,Glob,Grep,Read,Edit,Write,NotebookEdit,WebFetch,WebSearch,\
+             TodoWrite,BashOutput,KillShell,SlashCommand",
+        ],
+        stream_format: StreamFormat::ClaudeStreamJson,
+        // The probe surface is the stream-json CONTROL PLANE (ADR-0097
+        // Decision 5): the turn argv extended with `--input-format
+        // stream-json` so the probe can send a `control_request{initialize}`
+        // frame and read the per-model catalog back -- the same spawn ->
+        // query -> kill lifecycle the codex `app-server` probe drives, a
+        // different wire surface. The turn argv prefix is repeated verbatim
+        // (const fn cannot concatenate slices); the
+        // `claude_probe_argv_is_turn_argv_plus_stream_json_input` test pins
+        // the pairing so a drift fails instead of probing the wrong surface.
+        probe_argv: Some(&[
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--no-session-persistence",
+            "--disallowedTools",
+            "Task,Bash,Glob,Grep,Read,Edit,Write,NotebookEdit,WebFetch,WebSearch,\
+             TodoWrite,BashOutput,KillShell,SlashCommand",
+            "--input-format",
+            "stream-json",
+        ]),
+        // ADR-0095/0097: claude-code's headless mode takes the model as
+        // `--model <id>` and the reasoning effort as `--effort <level>` --
+        // both argv-shaped (no `-c` config surface on this CLI).
+        model_arg: Some("--model"),
+        effort_config_key: None,
+        effort_arg: Some("--effort"),
     }
 }
 
@@ -255,7 +361,13 @@ pub fn v1_adapters() -> &'static [AdapterSpec] {
 // directly -- no field duplication, no drift between a constructor and its
 // array entry. Adding a CLI = adding one `const fn` constructor + one call
 // here; `v1_adapters()` stays the picker source.
-static V1_ADAPTERS: [AdapterSpec; 4] = [gemini_cli(), codex(), qwen_code(), opencode()];
+static V1_ADAPTERS: [AdapterSpec; 5] = [
+    gemini_cli(),
+    codex(),
+    qwen_code(),
+    opencode(),
+    claude_code(),
+];
 
 // ---------------------------------------------------------------------------
 // Detection (PATH scan)
@@ -289,7 +401,8 @@ pub fn detect_adapter(spec: &AdapterSpec) -> Option<PathBuf> {
 
 /// The model + thought-level catalog extracted from an ACP handshake's
 /// `config_options` (ADR-0095 Discovery Decision). Produced by the engine at
-/// the handshake boundary (per format: ACP extracts, JsonEventStream has none),
+/// the handshake boundary (per format: ACP extracts, CodexEventStream has
+/// none, ClaudeStreamJson reports the `system{init}` current model),
 /// returned to the frontend via `LoopOutcome.discovered_runtime`, and cached
 /// on the session for resume cold-start rendering.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -783,34 +896,69 @@ mod tests {
     }
 
     /// ADR-0095 injection fields: ACP adapters carry `None` (protocol
-    /// injection), the JsonEventStream adapter (codex) carries `--model` +
-    /// the reasoning-effort config key.
+    /// injection), the CodexEventStream adapter (codex) carries `--model` +
+    /// the reasoning-effort config key, the ClaudeStreamJson adapter carries
+    /// `--model` + the argv-shaped `--effort` (ADR-0097 Decision 6).
     #[test]
     fn adapters_declare_per_format_injection_fields() {
         for spec in [gemini_cli(), qwen_code(), opencode()] {
             assert_eq!(spec.stream_format, StreamFormat::Acp);
             assert!(spec.model_arg.is_none(), "{}", spec.id);
             assert!(spec.effort_config_key.is_none(), "{}", spec.id);
+            assert!(spec.effort_arg.is_none(), "{}", spec.id);
         }
         let codex = codex();
         assert_eq!(codex.model_arg, Some("--model"));
         assert_eq!(codex.effort_config_key, Some("model_reasoning_effort"));
+        assert!(codex.effort_arg.is_none(), "codex effort rides `-c`");
+        let claude = claude_code();
+        assert_eq!(claude.model_arg, Some("--model"));
+        assert!(
+            claude.effort_config_key.is_none(),
+            "claude-code has no `-c` config surface"
+        );
+        assert_eq!(claude.effort_arg, Some("--effort"));
     }
 
     /// ADR-0096 D2: the probe argv is `None` on ACP adapters (the probe reuses
-    /// the turn argv) and the `app-server` subcommand on codex -- the probe
-    /// surface, not the turn's `exec --json` mode.
+    /// the turn argv); every non-ACP adapter carries a dedicated probe
+    /// surface -- the `app-server` subcommand on codex, the turn argv +
+    /// `--input-format stream-json` on claude-code (ADR-0097 Decision 5).
+    /// The spawn kernel enforces this pairing via a debug_assert.
     #[test]
     fn adapters_declare_probe_argv_per_format() {
         for spec in [gemini_cli(), qwen_code(), opencode()] {
             assert!(spec.probe_argv.is_none(), "{}", spec.id);
         }
         assert_eq!(codex().probe_argv, Some(&["app-server"][..]));
+        assert!(claude_code().probe_argv.is_some());
     }
 
-    /// v1_adapters is internally consistent: non-empty, unique ids, every entry
-    /// has a non-empty display name + binary names. ADR-0094: codex carries
-    /// `JsonEventStream`; the remaining adapters carry `Acp`. Count-agnostic --
+    /// The claude-code probe argv is the turn argv extended with
+    /// `--input-format stream-json` (ADR-0097 Decision 5: the probe spawns
+    /// the SAME stateless surface and speaks the control plane over stdin,
+    /// probing without an upstream session file just like the turn). const
+    /// fn cannot concatenate slices, so the two literals repeat the prefix --
+    /// this test is the drift guard.
+    #[test]
+    fn claude_probe_argv_is_turn_argv_plus_stream_json_input() {
+        let spec = claude_code();
+        let probe = spec
+            .probe_argv
+            .expect("claude-code probes via its own argv");
+        assert!(
+            probe.len() == spec.argv.len() + 2,
+            "probe argv = turn argv + [--input-format, stream-json]"
+        );
+        assert_eq!(&probe[..spec.argv.len()], spec.argv);
+        assert_eq!(
+            &probe[spec.argv.len()..],
+            &["--input-format", "stream-json"]
+        );
+    }
+
+    /// v1_adapters is internally consistent: non-empty, unique ids, every
+    /// entry has a non-empty display name + binary names. Count-agnostic --
     /// adding a CLI (one `const fn` constructor + one V1_ADAPTERS entry) never
     /// touches this test.
     #[test]
@@ -831,9 +979,18 @@ mod tests {
                 "{:?}: empty binary name in binary_names",
                 a.id
             );
-            // Each adapter's stream_format is a valid known variant (Acp or
-            // JsonEventStream). The specific per-adapter assignment is pinned
-            // in the per-adapter tests above, not here.
+            // Each adapter's stream_format is a valid known variant (Acp,
+            // CodexEventStream, or ClaudeStreamJson). The specific
+            // per-adapter assignment is pinned in the per-adapter tests
+            // above, not here.
+            // Every non-ACP adapter carries a dedicated probe argv; ACP
+            // adapters reuse the turn argv (the spawn kernel's invariant).
+            assert_eq!(
+                a.stream_format != StreamFormat::Acp,
+                a.probe_argv.is_some(),
+                "{}: probe argv pairing",
+                a.id
+            );
         }
     }
 
@@ -853,7 +1010,7 @@ mod tests {
     /// ADR-0094: codex uses the native `codex` binary (not the retired
     /// `codex-acp` bridge package) with the `exec --json` argv that puts it
     /// into structured-NDJSON mode + a read-only sandbox. The stream format is
-    /// `JsonEventStream`, not `Acp`. This is the structural proof that
+    /// `CodexEventStream`, not `Acp`. This is the structural proof that
     /// per-CLI variation lives in data, not code.
     #[test]
     fn codex_spec_targets_native_exec_json() {
@@ -872,7 +1029,60 @@ mod tests {
                 "read-only",
             ]
         );
-        assert_eq!(spec.stream_format, StreamFormat::JsonEventStream);
+        assert_eq!(spec.stream_format, StreamFormat::CodexEventStream);
+    }
+
+    /// ADR-0097: claude-code targets its native headless surface -- the
+    /// `claude` binary, `--print --output-format stream-json` argv with
+    /// `--no-session-persistence` (stateless per-turn spawn, no upstream
+    /// session file), and the `--disallowedTools` deny list blocking the
+    /// native tool plane. The stream format is `ClaudeStreamJson`, not
+    /// `Acp` (claude-code has no ACP mode) and not the codex parser.
+    #[test]
+    fn claude_code_spec_targets_native_headless_stream_json() {
+        let spec = claude_code();
+        assert_eq!(spec.id.as_str(), "claude-code");
+        assert_eq!(spec.display_name, "claude-code");
+        assert_eq!(spec.binary_names, &["claude"]);
+        assert_eq!(spec.stream_format, StreamFormat::ClaudeStreamJson);
+        // Turn argv pins: the headless flags + session-persistence opt-out +
+        // the native-tool deny list (ADR-0097 Decision 1/3/7).
+        assert!(spec
+            .argv
+            .starts_with(&["--print", "--output-format", "stream-json"]));
+        assert!(spec.argv.contains(&"--verbose"));
+        assert!(spec.argv.contains(&"--no-session-persistence"));
+        let deny = spec
+            .argv
+            .iter()
+            .position(|a| *a == "--disallowedTools")
+            .expect("the deny list rides the turn argv");
+        let deny_value = spec.argv[deny + 1];
+        for tool in [
+            "Task",
+            "Bash",
+            "Glob",
+            "Grep",
+            "Read",
+            "Edit",
+            "Write",
+            "NotebookEdit",
+            "WebFetch",
+            "WebSearch",
+            "TodoWrite",
+            "BashOutput",
+            "KillShell",
+            "SlashCommand",
+        ] {
+            assert!(
+                deny_value.split(',').any(|t| t == tool),
+                "the deny list covers claude-code's native tool `{tool}`: {deny_value}"
+            );
+        }
+        // No session addressing: neither flag may ride the turn argv
+        // (ADR-0097 Decision 1 -- resume / session state is app-side).
+        assert!(!spec.argv.contains(&"--resume"));
+        assert!(!spec.argv.contains(&"--session-id"));
     }
 
     /// qwen-code uses the `qwen` binary plus the stable `["--acp"]` flag
