@@ -394,9 +394,13 @@ fn run_probe(scenario: &str) {
     }
 }
 
-/// The measured catalog payload (2.1.222 shape): two models, the first
-/// fully populated (default marker + ordered efforts), the second minimal
-/// (resolvedModel display fallback, no default marker).
+/// The measured catalog payload (2.1.222 shape, re-measured locally): two
+/// models, the first fully populated (ordered efforts + the measured
+/// `description` / `supports*` capability bits the extraction ignores), the
+/// second minimal (resolvedModel display fallback). `isDefault` /
+/// `defaultEffort` were absent in the measured response (the CLI points at
+/// its default via the `default` alias) but ride here as tolerated optional
+/// markers so the integration tests can pin the default-marker render path.
 fn catalog_success_payload() -> serde_json::Value {
     serde_json::json!({
         "models": [
@@ -407,7 +411,10 @@ fn catalog_success_payload() -> serde_json::Value {
                 "isDefault": true,
                 "defaultEffort": "medium",
                 "supportedEffortLevels": ["low", "medium", "high"],
-                "capabilities": {"thinking": true}
+                "description": "Recommended model",
+                "supportsEffort": true,
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true
             },
             {
                 "value": "claude-opus-4",

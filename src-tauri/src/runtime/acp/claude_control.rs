@@ -261,9 +261,14 @@ mod tests {
     use serde_json::json;
 
     /// The full happy-path wire shape, frozen against the 2.1.222
-    /// measurement: `value` / `resolvedModel` / `displayName` /
-    /// `supportedEffortLevels` (+ optional `isDefault` / `defaultEffort` /
-    /// capability bits the extraction ignores).
+    /// measurement (third-party endpoint): `value` / `resolvedModel` /
+    /// `displayName` / `description` / `supportedEffortLevels` plus the
+    /// `supportsEffort` / `supportsAdaptiveThinking` / `supportsAutoMode`
+    /// capability bits the extraction ignores (no consumer, ADR-0097 D5
+    /// catalog shape reuse). The optional `isDefault` / `defaultEffort`
+    /// markers were absent in the measured response (the `default` alias
+    /// entry is the CLI's own default pointer) but are tolerated when a
+    /// provider sends them.
     #[test]
     fn extract_models_maps_the_measured_wire_shape() {
         let payload = json!({
@@ -275,7 +280,10 @@ mod tests {
                     "isDefault": true,
                     "defaultEffort": "medium",
                     "supportedEffortLevels": ["low", "medium", "high"],
-                    "capabilities": {"thinking": true}
+                    "description": "Recommended model",
+                    "supportsEffort": true,
+                    "supportsAdaptiveThinking": true,
+                    "supportsAutoMode": true
                 },
                 {
                     "value": "claude-opus-4",
