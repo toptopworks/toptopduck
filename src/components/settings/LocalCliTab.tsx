@@ -39,11 +39,12 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 // The composer's adapter list + rescan still work independently -- both read
 // the same cache key.
 //
-// The per-adapter Test button (ADR-0096, issues #534/#535) runs the
+// The per-adapter Test button (ADR-0096, issues #534/#535/#561) runs the
 // diagnostic probe: one-shot spawn + per-format query (ACP handshake / codex
-// app-server `model/list`) + terminate. Every detected adapter gets the
-// button; the busy state mirrors up via onIpcBusy("probe", ...) so the
-// settings close guard blocks while the IPC is in flight (ADR-0075 pattern).
+// app-server `model/list` / claude-code control-plane `initialize`) +
+// terminate. Every detected adapter gets the button; the busy state mirrors
+// up via onIpcBusy("probe", ...) so the settings close guard blocks while
+// the IPC is in flight (ADR-0075 pattern).
 //
 // Probe results render inside a per-row fold (issue #552, closing ADR-0096's
 // open "parallel vs folded" display question): a chevron toggles the
@@ -90,16 +91,18 @@ function toProbeError(e: unknown): ProbeError {
 }
 
 /** The probe success block: dispatch on the per-format `kind` -- the ACP flat
- *  catalog or the JsonEventStream per-model catalog (ADR-0096 D2/D3). The
- *  switch is exhaustive with a `never` guard, mirroring `ProbeErrorText`: a
- *  new backend variant must fail at compile time here, not surface as a
- *  wrong-render throw at runtime. */
+ *  catalog or the per-model catalog (codex / claude-code, ADR-0096 D2/D3 +
+ *  ADR-0097). Both per-model kinds render the same shape (the shared
+ *  `ModelCatalogOutcome`). The switch is exhaustive with a `never` guard,
+ *  mirroring `ProbeErrorText`: a new backend variant must fail at compile
+ *  time here, not surface as a wrong-render throw at runtime. */
 function ProbeResult({ result }: { result: ProbeOk }) {
   switch (result.kind) {
     case "acp":
       return <AcpProbeResult catalog={result.data.discovered} />;
-    case "json_event_stream":
-      return <JsonEventStreamProbeResult outcome={result.data.outcome} />;
+    case "codex_event_stream":
+    case "claude_stream_json":
+      return <ModelCatalogProbeResult outcome={result.data.outcome} />;
     default: {
       const _exhaustive: never = result;
       throw new Error(`Unknown probe ok kind: ${String(_exhaustive)}`);
@@ -157,7 +160,7 @@ function EffortBadgeGroup({
 /** The ACP success block: one model per line (the flat catalog carries no
  *  per-model efforts, so a line is just the id with the current one marked),
  *  plus the global thought-level badge row when the catalog reported any
- *  levels -- the same per-line shape as the JsonEventStream catalog so both
+ *  levels -- the same per-line shape as the per-model catalog so both
  *  folds read alike. Empty lists stay honest: no models renders the shared
  *  "no models" line, no levels renders no row, and a current model the list
  *  did not include still renders on its own line. */
@@ -214,22 +217,22 @@ function AcpProbeResult({ catalog }: { catalog: DiscoveredRuntime }) {
   );
 }
 
-/** The JsonEventStream success block (ADR-0096 D3): the per-model list,
- *  each model's reasoning-effort options as a read-only badge group (the
- *  CLI's declared
- *  order, never a union across models). The degraded `unavailable` state
- *  (process alive, catalog not) renders an honest line -- the process being
- *  alive is itself the signal. The status dispatch is exhaustive with a
- *  `never` guard (mirrors `ProbeResult` / `ProbeErrorText`); an empty catalog
- *  renders the honest "none" line (the probe succeeded -- that fact must not
- *  vanish). */
-function JsonEventStreamProbeResult({ outcome }: { outcome: ModelCatalogOutcome }) {
+/** The per-model catalog success block (ADR-0096 D3, shared by the codex
+ *  and claude-code probe kinds per ADR-0097): the per-model list, each
+ *  model's reasoning-effort options as a read-only badge group (the CLI's
+ *  declared order, never a union across models). The degraded `unavailable`
+ *  state (process alive, catalog not) renders an honest line -- the process
+ *  being alive is itself the signal. The status dispatch is exhaustive with
+ *  a `never` guard (mirrors `ProbeResult` / `ProbeErrorText`); an empty
+ *  catalog renders the honest "none" line (the probe succeeded -- that fact
+ *  must not vanish). */
+function ModelCatalogProbeResult({ outcome }: { outcome: ModelCatalogOutcome }) {
   const defaultLabel = defaultMarkLabel(useIntl());
   if (outcome.status === "unavailable") {
     return (
       <p className="text-muted-foreground text-xs">
         <FormattedMessage
-          id="settings.runtime.localCli.probe.codex.unavailable"
+          id="settings.runtime.localCli.probe.modelCatalog.unavailable"
           defaultMessage="Started, but the model catalog is unavailable."
         />
         {outcome.detail ? ` (${outcome.detail})` : null}
@@ -358,10 +361,17 @@ function CachedCatalog({ entry }: { entry: AdapterCatalogEntry }) {
   if (entry.probe_kind === "acp") {
     return <AcpProbeResult catalog={entry.outcome.acp.discovered} />;
   }
-  if (entry.probe_kind === "json_event_stream") {
+  if (entry.probe_kind === "codex_event_stream") {
     return (
-      <JsonEventStreamProbeResult
-        outcome={{ status: "available", models: entry.outcome.json_event_stream.models }}
+      <ModelCatalogProbeResult
+        outcome={{ status: "available", models: entry.outcome.codex_event_stream.models }}
+      />
+    );
+  }
+  if (entry.probe_kind === "claude_stream_json") {
+    return (
+      <ModelCatalogProbeResult
+        outcome={{ status: "available", models: entry.outcome.claude_stream_json.models }}
       />
     );
   }
@@ -383,6 +393,7 @@ function directoryModelCount(probe: ProbeState, cached?: AdapterCatalogEntry): n
     if (result.kind === "acp") {
       count = result.data.discovered.models.length;
     } else if (result.data.outcome.status === "available") {
+      // Both per-model kinds carry the same outcome shape.
       count = result.data.outcome.models.length;
     } else {
       return null;
@@ -390,8 +401,10 @@ function directoryModelCount(probe: ProbeState, cached?: AdapterCatalogEntry): n
   } else if (probe.status === "idle" && cached) {
     if (cached.probe_kind === "acp") {
       count = cached.outcome.acp.discovered.models.length;
-    } else if (cached.probe_kind === "json_event_stream") {
-      count = cached.outcome.json_event_stream.models.length;
+    } else if (cached.probe_kind === "codex_event_stream") {
+      count = cached.outcome.codex_event_stream.models.length;
+    } else if (cached.probe_kind === "claude_stream_json") {
+      count = cached.outcome.claude_stream_json.models.length;
     } else {
       const _exhaustive: never = cached;
       throw new Error(`Unknown probe kind: ${String(_exhaustive)}`);
@@ -487,8 +500,9 @@ export function LocalCliTab({
       // The backend wrote this probe's entry to the sidecar cache; mirror
       // it into the query cache so the timestamped display is immediately
       // consistent (issue #536 AC: post-probe display matches the cache).
-      // The degraded JsonEventStream outcome was not cached server-side -- reflect
-      // that here too (the entry stays whatever it was, absent included).
+      // The degraded per-model outcome was not cached server-side --
+      // reflect that here too (the entry stays whatever it was, absent
+      // included).
       if (result.kind === "acp") {
         queryClient.setQueryData(adapterKeys.catalogs(), (prev: AdapterCatalogs | undefined) => ({
           ...(prev ?? {}),
@@ -500,13 +514,23 @@ export function LocalCliTab({
         }));
       } else if (result.data.outcome.status === "available") {
         const { models } = result.data.outcome;
+        // The mirror entry's kind + outcome tag must agree (the same
+        // tagged-union invariant the backend stamps); dispatch per kind.
+        const entry: AdapterCatalogEntry =
+          result.kind === "codex_event_stream"
+            ? {
+                probe_kind: "codex_event_stream",
+                outcome: { codex_event_stream: { models } },
+                probed_at_millis: Date.now(),
+              }
+            : {
+                probe_kind: "claude_stream_json",
+                outcome: { claude_stream_json: { models } },
+                probed_at_millis: Date.now(),
+              };
         queryClient.setQueryData(adapterKeys.catalogs(), (prev: AdapterCatalogs | undefined) => ({
           ...(prev ?? {}),
-          [id]: {
-            probe_kind: "json_event_stream",
-            outcome: { json_event_stream: { models } },
-            probed_at_millis: Date.now(),
-          },
+          [id]: entry,
         }));
       }
     } catch (e) {

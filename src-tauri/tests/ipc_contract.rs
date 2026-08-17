@@ -1226,9 +1226,22 @@ fn adapter_entry_wire_shape() {
             display_name: "codex".into(),
             detected: false,
             binary_path: None,
-            stream_format: StreamFormat::JsonEventStream,
+            stream_format: StreamFormat::CodexEventStream,
         },
-        r#"{"id":"codex","display_name":"codex","detected":false,"binary_path":null,"stream_format":"json_event_stream"}"#,
+        r#"{"id":"codex","display_name":"codex","detected":false,"binary_path":null,"stream_format":"codex_event_stream"}"#,
+    );
+    // ADR-0097: the third format tag the frontend's per-format dispatch
+    // narrows on (the rename retired the `json_event_stream` tag -- old
+    // payloads carrying it degrade per entry, never to this value).
+    assert_wire(
+        &AdapterEntry {
+            id: "claude-code".into(),
+            display_name: "claude-code".into(),
+            detected: true,
+            binary_path: Some(PathBuf::from("/usr/local/bin/claude")),
+            stream_format: StreamFormat::ClaudeStreamJson,
+        },
+        r#"{"id":"claude-code","display_name":"claude-code","detected":true,"binary_path":"/usr/local/bin/claude","stream_format":"claude_stream_json"}"#,
     );
 }
 
@@ -1308,10 +1321,11 @@ where
     assert_eq!(json, expected, "wire format drifted from pinned contract");
 }
 
-/// ProbeOk (ADR-0096, issues #534/#535) crosses IPC adjacently-tagged
-/// (`tag="kind", content="data"`, `rename_all="snake_case"`): the ACP variant
-/// carries the flat `DiscoveredRuntime` under `data.discovered`, the
-/// JsonEventStream variant carries the per-model `ModelCatalogOutcome` under `data.outcome`
+/// ProbeOk (ADR-0096, issues #534/#535; ADR-0097) crosses IPC
+/// adjacently-tagged (`tag="kind", content="data"`,
+/// `rename_all="snake_case"`): the ACP variant carries the flat
+/// `DiscoveredRuntime` under `data.discovered`, the two per-model variants
+/// (codex / claude) carry the `ModelCatalogOutcome` under `data.outcome`
 /// (whose own inner tag is `status`). `src/types/runtime.ts` hand-mirrors
 /// these shapes; pin them so a serde attribute change fails here before the
 /// hand-mirror can drift (the ProbeError side is pinned by the frontend's
@@ -1335,7 +1349,7 @@ fn probe_ok_wire_shape() {
         r#"{"kind":"acp","data":{"discovered":{"models":["fake-opus"],"current_model":"fake-opus","thought_levels":["low","high"],"current_thought_level":null,"model_config_id":"model","adapter_id":"gemini-cli"}}}"#,
     );
     assert_wire_out(
-        &ProbeOk::JsonEventStream {
+        &ProbeOk::CodexEventStream {
             outcome: ModelCatalogOutcome::Available {
                 models: vec![CatalogModel {
                     id: "gpt-5.2-codex".into(),
@@ -1346,15 +1360,31 @@ fn probe_ok_wire_shape() {
                 }],
             },
         },
-        r#"{"kind":"json_event_stream","data":{"outcome":{"status":"available","models":[{"id":"gpt-5.2-codex","display_name":"GPT-5.2 Codex","is_default":true,"default_reasoning_effort":"medium","supported_reasoning_efforts":["low","medium"]}]}}}"#,
+        r#"{"kind":"codex_event_stream","data":{"outcome":{"status":"available","models":[{"id":"gpt-5.2-codex","display_name":"GPT-5.2 Codex","is_default":true,"default_reasoning_effort":"medium","supported_reasoning_efforts":["low","medium"]}]}}}"#,
     );
     assert_wire_out(
-        &ProbeOk::JsonEventStream {
+        &ProbeOk::CodexEventStream {
             outcome: ModelCatalogOutcome::Unavailable {
                 detail: "model/list error: not logged in".into(),
             },
         },
-        r#"{"kind":"json_event_stream","data":{"outcome":{"status":"unavailable","detail":"model/list error: not logged in"}}}"#,
+        r#"{"kind":"codex_event_stream","data":{"outcome":{"status":"unavailable","detail":"model/list error: not logged in"}}}"#,
+    );
+    // ADR-0097: the claude-code control-plane catalog rides the SAME
+    // per-model outcome shape under its own kind tag.
+    assert_wire_out(
+        &ProbeOk::ClaudeStreamJson {
+            outcome: ModelCatalogOutcome::Available {
+                models: vec![CatalogModel {
+                    id: "claude-sonnet-4".into(),
+                    display_name: "Claude Sonnet 4".into(),
+                    is_default: true,
+                    default_reasoning_effort: "medium".into(),
+                    supported_reasoning_efforts: vec!["low".into(), "medium".into(), "high".into()],
+                }],
+            },
+        },
+        r#"{"kind":"claude_stream_json","data":{"outcome":{"status":"available","models":[{"id":"claude-sonnet-4","display_name":"Claude Sonnet 4","is_default":true,"default_reasoning_effort":"medium","supported_reasoning_efforts":["low","medium","high"]}]}}}"#,
     );
 }
 

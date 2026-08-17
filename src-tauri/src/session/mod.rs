@@ -1359,7 +1359,7 @@ impl Session {
             mcp_servers: vec![mcp_server],
             // ADR-0095: the session-level model / thought-level choices ride
             // the turn input (injected per-format inside the engine: ACP
-            // set_config_option requests, JsonEventStream argv). Read from the
+            // set_config_option requests, non-ACP argv). Read from the
             // SAME `runtime_model_config` the persister layers onto the recipe
             // header -- one storage, no mirror to drift (issue #530). `None`
             // leaves the CLI's own defaults in place.

@@ -38,12 +38,14 @@ fn a_fresh_store_over_the_same_path_reads_the_prior_entries() {
     let path = dir.path().join(CATALOGS_FILE_NAME);
     AdapterCatalogStore::new(path.clone()).store_entry("gemini-cli", acp_entry(1_000));
     AdapterCatalogStore::new(path.clone()).store_entry("codex", codex_entry(2_000));
+    AdapterCatalogStore::new(path.clone()).store_entry("claude-code", claude_entry(3_000));
 
     let reopened = AdapterCatalogStore::new(path);
     let loaded = reopened.load();
-    assert_eq!(loaded.len(), 2);
+    assert_eq!(loaded.len(), 3);
     assert_eq!(loaded.get("gemini-cli"), Some(&acp_entry(1_000)));
     assert_eq!(loaded.get("codex"), Some(&codex_entry(2_000)));
+    assert_eq!(loaded.get("claude-code"), Some(&claude_entry(3_000)));
 }
 
 /// AC (multi-adapter entry independence under concurrent sessions): two
@@ -64,13 +66,19 @@ fn concurrent_multi_adapter_writes_land_independently() {
         let store = store.clone();
         move || store.store_entry("codex", codex_entry(2_000))
     });
+    let c = std::thread::spawn({
+        let store = store.clone();
+        move || store.store_entry("claude-code", claude_entry(3_000))
+    });
     a.join().expect("thread a");
     b.join().expect("thread b");
+    c.join().expect("thread c");
 
     let loaded = store.load();
-    assert_eq!(loaded.len(), 2);
+    assert_eq!(loaded.len(), 3);
     assert_eq!(loaded.get("gemini-cli"), Some(&acp_entry(1_000)));
     assert_eq!(loaded.get("codex"), Some(&codex_entry(2_000)));
+    assert_eq!(loaded.get("claude-code"), Some(&claude_entry(3_000)));
 }
 
 /// The on-disk JSON shape is human-inspectable (pretty, snake_case,
@@ -85,7 +93,7 @@ fn file_shape_is_pretty_snake_case_json() {
 
     let raw = std::fs::read_to_string(&path).expect("read");
     let doc: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
-    assert_eq!(doc["codex"]["probe_kind"], "json_event_stream");
+    assert_eq!(doc["codex"]["probe_kind"], "codex_event_stream");
     assert_eq!(doc["codex"]["probed_at_millis"], 1_725_000_000_000i64);
     assert!(raw.contains('\n'), "pretty-printed");
 }
@@ -112,14 +120,34 @@ fn acp_entry(at: i64) -> AdapterCatalogEntry {
 
 fn codex_entry(at: i64) -> AdapterCatalogEntry {
     AdapterCatalogEntry {
-        probe_kind: ProbeKind::JsonEventStream,
-        outcome: CachedOutcome::JsonEventStream {
+        probe_kind: ProbeKind::CodexEventStream,
+        outcome: CachedOutcome::CodexEventStream {
             models: vec![CatalogModel {
                 id: "gpt-5.2-codex".to_string(),
                 display_name: "GPT-5.2 Codex".to_string(),
                 is_default: true,
                 default_reasoning_effort: "medium".to_string(),
                 supported_reasoning_efforts: vec!["low".to_string(), "medium".to_string()],
+            }],
+        },
+        probed_at_millis: at,
+    }
+}
+
+fn claude_entry(at: i64) -> AdapterCatalogEntry {
+    AdapterCatalogEntry {
+        probe_kind: ProbeKind::ClaudeStreamJson,
+        outcome: CachedOutcome::ClaudeStreamJson {
+            models: vec![CatalogModel {
+                id: "claude-sonnet-4".to_string(),
+                display_name: "Claude Sonnet 4".to_string(),
+                is_default: true,
+                default_reasoning_effort: "medium".to_string(),
+                supported_reasoning_efforts: vec![
+                    "low".to_string(),
+                    "medium".to_string(),
+                    "high".to_string(),
+                ],
             }],
         },
         probed_at_millis: at,

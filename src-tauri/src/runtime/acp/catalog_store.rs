@@ -36,39 +36,49 @@ const TMP_SUFFIX: &str = ".tmp";
 /// Which probe channel produced the cached catalog (ADR-0096 D2 -- the
 /// per-format dispatch dimension, not the CLI identity). Serialized as the
 /// bare lowercase name; an unknown value at parse time drops the entry
-/// (a newer app's shape, honest-degrade).
+/// (a newer app's shape, honest-degrade). The ADR-0097 rename
+/// (`json_event_stream` -> `codex_event_stream`) rides this same path:
+/// pre-rename entries carry a tag this enum no longer knows, so they drop
+/// and the next probe rebuilds the slot -- no migration code (the cache is
+/// a discardable snapshot).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeKind {
     Acp,
-    JsonEventStream,
+    CodexEventStream,
+    ClaudeStreamJson,
 }
 
 /// The per-adapter outcome the cache stores: the probe result that produced
-/// it, tagged by channel. The JsonEventStream degraded state (`Unavailable`) is never
-/// cached -- the entry then keeps the last usable catalog or stays absent,
-/// so the cache always holds a usable snapshot (ADR-0096 D5: only a
+/// it, tagged by channel. The per-model degraded state (`Unavailable`) is
+/// never cached -- the entry then keeps the last usable catalog or stays
+/// absent, so the cache always holds a usable snapshot (ADR-0096 D5: only a
 /// successful catalog is a cache point).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CachedOutcome {
     Acp { discovered: DiscoveredRuntime },
-    JsonEventStream { models: Vec<CatalogModel> },
+    CodexEventStream { models: Vec<CatalogModel> },
+    ClaudeStreamJson { models: Vec<CatalogModel> },
 }
 
 impl AdapterCatalogEntry {
     /// Whether the tagged channel matches the outcome payload's variant.
     /// serde parses each field independently, so a hand-edited file can pair
-    /// `probe_kind: "acp"` with a JsonEventStream outcome; the load path drops such an
-    /// entry on the same per-entry honest-degrade footing as an unparsable
-    /// one (the file is a human-inspectable artifact).
+    /// `probe_kind: "acp"` with a per-model outcome; the load path drops
+    /// such an entry on the same per-entry honest-degrade footing as an
+    /// unparsable one (the file is a human-inspectable artifact).
     fn is_consistent(&self) -> bool {
         matches!(
             (self.probe_kind, &self.outcome),
             (ProbeKind::Acp, CachedOutcome::Acp { .. })
                 | (
-                    ProbeKind::JsonEventStream,
-                    CachedOutcome::JsonEventStream { .. }
+                    ProbeKind::CodexEventStream,
+                    CachedOutcome::CodexEventStream { .. }
+                )
+                | (
+                    ProbeKind::ClaudeStreamJson,
+                    CachedOutcome::ClaudeStreamJson { .. }
                 )
         )
     }
@@ -89,15 +99,26 @@ impl CachedOutcome {
                     discovered: discovered.clone(),
                 },
             )),
-            ProbeOk::JsonEventStream {
+            ProbeOk::CodexEventStream {
                 outcome: ModelCatalogOutcome::Available { models },
             } => Some((
-                ProbeKind::JsonEventStream,
-                Self::JsonEventStream {
+                ProbeKind::CodexEventStream,
+                Self::CodexEventStream {
                     models: models.clone(),
                 },
             )),
-            ProbeOk::JsonEventStream {
+            ProbeOk::ClaudeStreamJson {
+                outcome: ModelCatalogOutcome::Available { models },
+            } => Some((
+                ProbeKind::ClaudeStreamJson,
+                Self::ClaudeStreamJson {
+                    models: models.clone(),
+                },
+            )),
+            ProbeOk::CodexEventStream {
+                outcome: ModelCatalogOutcome::Unavailable { .. },
+            }
+            | ProbeOk::ClaudeStreamJson {
                 outcome: ModelCatalogOutcome::Unavailable { .. },
             } => None,
         }
@@ -301,14 +322,30 @@ mod tests {
 
     fn codex_entry(at: i64) -> AdapterCatalogEntry {
         AdapterCatalogEntry {
-            probe_kind: ProbeKind::JsonEventStream,
-            outcome: CachedOutcome::JsonEventStream {
+            probe_kind: ProbeKind::CodexEventStream,
+            outcome: CachedOutcome::CodexEventStream {
                 models: vec![CatalogModel {
                     id: "gpt-5.2-codex".to_string(),
                     display_name: "GPT-5.2 Codex".to_string(),
                     is_default: true,
                     default_reasoning_effort: "medium".to_string(),
                     supported_reasoning_efforts: vec!["low".into(), "medium".into()],
+                }],
+            },
+            probed_at_millis: at,
+        }
+    }
+
+    fn claude_entry(at: i64) -> AdapterCatalogEntry {
+        AdapterCatalogEntry {
+            probe_kind: ProbeKind::ClaudeStreamJson,
+            outcome: CachedOutcome::ClaudeStreamJson {
+                models: vec![CatalogModel {
+                    id: "claude-sonnet-4".to_string(),
+                    display_name: "Claude Sonnet 4".to_string(),
+                    is_default: true,
+                    default_reasoning_effort: "medium".to_string(),
+                    supported_reasoning_efforts: vec!["low".into(), "medium".into(), "high".into()],
                 }],
             },
             probed_at_millis: at,
@@ -413,9 +450,23 @@ mod tests {
     #[test]
     fn unavailable_codex_outcome_is_not_cacheable() {
         use crate::runtime::acp::probe::{ModelCatalogOutcome, ProbeOk};
-        let degraded = ProbeOk::JsonEventStream {
+        let degraded = ProbeOk::CodexEventStream {
             outcome: ModelCatalogOutcome::Unavailable {
                 detail: "not logged in".to_string(),
+            },
+        };
+        assert_eq!(CachedOutcome::from_probe(&degraded), None);
+    }
+
+    /// Same degrade footing on the claude channel: a degraded control-plane
+    /// read never caches (the slot keeps the last usable catalog or stays
+    /// absent).
+    #[test]
+    fn unavailable_claude_outcome_is_not_cacheable() {
+        use crate::runtime::acp::probe::{ModelCatalogOutcome, ProbeOk};
+        let degraded = ProbeOk::ClaudeStreamJson {
+            outcome: ModelCatalogOutcome::Unavailable {
+                detail: "initialize error".to_string(),
             },
         };
         assert_eq!(CachedOutcome::from_probe(&degraded), None);
@@ -433,24 +484,41 @@ mod tests {
     }
 
     // The branch a real successful codex probe takes: an available catalog
-    // caches as the JsonEventStream-tagged outcome (the integration fixtures hand-build
+    // caches as the CodexEventStream-tagged outcome (the integration fixtures hand-build
     // entries, so this is the only pin on the clone + tag).
     #[test]
     fn from_probe_caches_an_available_codex_catalog() {
         use crate::runtime::acp::probe::{ModelCatalogOutcome, ProbeOk};
         let models = match codex_entry(0).outcome {
-            CachedOutcome::JsonEventStream { models } => models,
-            other => panic!("fixture is not a JsonEventStream outcome: {other:?}"),
+            CachedOutcome::CodexEventStream { models } => models,
+            other => panic!("fixture is not a CodexEventStream outcome: {other:?}"),
         };
-        let probe = ProbeOk::JsonEventStream {
+        let probe = ProbeOk::CodexEventStream {
             outcome: ModelCatalogOutcome::Available { models },
         };
         let (kind, outcome) = CachedOutcome::from_probe(&probe).expect("available catalog caches");
-        assert_eq!(kind, ProbeKind::JsonEventStream);
+        assert_eq!(kind, ProbeKind::CodexEventStream);
         assert_eq!(outcome, codex_entry(0).outcome);
     }
 
-    // A hand-edited file can pair an acp tag with a JsonEventStream payload (serde
+    // The branch a real successful claude-code probe takes: an available
+    // control-plane catalog caches as the ClaudeStreamJson-tagged outcome.
+    #[test]
+    fn from_probe_caches_an_available_claude_catalog() {
+        use crate::runtime::acp::probe::{ModelCatalogOutcome, ProbeOk};
+        let models = match claude_entry(0).outcome {
+            CachedOutcome::ClaudeStreamJson { models } => models,
+            other => panic!("fixture is not a ClaudeStreamJson outcome: {other:?}"),
+        };
+        let probe = ProbeOk::ClaudeStreamJson {
+            outcome: ModelCatalogOutcome::Available { models },
+        };
+        let (kind, outcome) = CachedOutcome::from_probe(&probe).expect("available catalog caches");
+        assert_eq!(kind, ProbeKind::ClaudeStreamJson);
+        assert_eq!(outcome, claude_entry(0).outcome);
+    }
+
+    // A hand-edited file can pair an acp tag with a per-model payload (serde
     // parses the fields independently); the load drops the entry instead of
     // surfacing an inconsistent one to the consumer's per-format dispatch.
     #[test]
@@ -461,12 +529,39 @@ mod tests {
         let mut doc: serde_json::Value = serde_json::from_str(&raw).expect("valid json doc");
         doc["codex"] = serde_json::json!({
             "probe_kind": "acp",
-            "outcome": { "json_event_stream": { "models": [] } },
+            "outcome": { "codex_event_stream": { "models": [] } },
             "probed_at_millis": 2_000
         });
         std::fs::write(store.path(), serde_json::to_string(&doc).unwrap()).expect("write");
         let loaded = store.load();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded.get("gemini-cli"), Some(&acp_entry("opus", 1_000)));
+    }
+
+    /// ADR-0097 Decision 2: a pre-rename entry whose wire tag is the retired
+    /// `json_event_stream` drops through the existing per-entry honest-degrade
+    /// (the tag is an unknown enum variant on BOTH the `probe_kind` and the
+    /// `outcome` side), and the rest of the cache survives. NO migration code
+    /// -- the next probe rebuilds the slot.
+    #[test]
+    fn legacy_json_event_stream_tag_drops_without_migration() {
+        let (_dir, store) = temp_store();
+        store.store_entry("gemini-cli", acp_entry("opus", 1_000));
+        let raw = std::fs::read_to_string(store.path()).expect("read");
+        let mut doc: serde_json::Value = serde_json::from_str(&raw).expect("valid json doc");
+        // The pre-rename codex entry shape, verbatim.
+        doc["codex"] = serde_json::json!({
+            "probe_kind": "json_event_stream",
+            "outcome": { "json_event_stream": { "models": [] } },
+            "probed_at_millis": 2_000
+        });
+        std::fs::write(store.path(), serde_json::to_string(&doc).unwrap()).expect("write");
+        let loaded = store.load();
+        assert_eq!(loaded.len(), 1, "the legacy-tag entry drops");
+        assert_eq!(loaded.get("gemini-cli"), Some(&acp_entry("opus", 1_000)));
+        assert!(!loaded.contains_key("codex"));
+        // The slot rebuilds on the next probe write.
+        store.store_entry("codex", codex_entry(3_000));
+        assert_eq!(store.load().get("codex"), Some(&codex_entry(3_000)));
     }
 }

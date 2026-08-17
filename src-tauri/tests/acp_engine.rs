@@ -439,8 +439,10 @@ fn engine_runs_against_the_gemini_cli_spec() {
 /// outcome + phase stream per scenario across all ACP specs, so a future
 /// per-CLI branch that changes outcomes or phases would trip it.
 ///
-/// Codex is excluded: ADR-0094 migrated it to `JsonEventStream` (native
-/// `exec --json`), so the ACP fake-CLI fixture does not apply.
+/// Codex is excluded: ADR-0094 migrated it to `CodexEventStream` (native
+/// `exec --json`), and claude-code never spoke ACP (ADR-0097's
+/// `ClaudeStreamJson` headless format), so the ACP fake-CLI fixture does
+/// not apply to either.
 ///
 /// What this does NOT prove: behavioral isomorphism of the REAL CLIs (cancel /
 /// step-cap / wall-clock fallback, the rest of AC #3). The fixture erases the
@@ -493,8 +495,9 @@ fn engine_outcome_is_identical_across_all_v1_specs() {
 }
 
 /// ADR-0094: the three ACP-format adapters carry `StreamFormat::Acp`. Codex
-/// migrated to `JsonEventStream` (native `exec --json`); the codex spec is
-/// asserted separately below.
+/// migrated to `CodexEventStream` (native `exec --json`) and claude-code is
+/// `ClaudeStreamJson` (ADR-0097); both are asserted at the spec level in
+/// adapter.rs.
 #[test]
 fn acp_adapters_are_acp_format() {
     use toptopduck_lib::runtime::acp::adapter::StreamFormat;
@@ -511,13 +514,13 @@ fn acp_adapters_are_acp_format() {
 
 /// ADR-0094: the codex adapter uses native `exec --json` direct-connect. Pin
 /// the detection binary (`codex`, not the retired `codex-acp`), the exec argv
-/// shape, and the `JsonEventStream` format so a regression is caught at the
+/// shape, and the `CodexEventStream` format so a regression is caught at the
 /// spec level.
 #[test]
-fn codex_adapter_is_native_exec_json_event_stream() {
+fn codex_adapter_is_native_exec_codex_event_stream() {
     use toptopduck_lib::runtime::acp::adapter::StreamFormat;
     let spec = codex();
-    assert_eq!(spec.stream_format, StreamFormat::JsonEventStream);
+    assert_eq!(spec.stream_format, StreamFormat::CodexEventStream);
     assert_eq!(spec.binary_names, &["codex"]);
     assert_eq!(
         spec.argv,

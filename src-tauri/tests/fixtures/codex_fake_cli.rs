@@ -1,7 +1,7 @@
 //! Codex fake CLI fixture (ADR-0094 test seam, issue #523).
 //!
 //! A minimal binary that emulates `codex exec --json` NDJSON output so the JSON
-//! event stream engine ([`toptopduck_lib::runtime::acp::json_event_stream`]) can
+//! event stream engine (`toptopduck_lib::runtime::acp::codex_event_stream`) can
 //! be exercised end-to-end in CI without the real codex install. Declared as a
 //! `[[bin]]` in `Cargo.toml`; integration tests resolve its path via
 //! `env!("CARGO_BIN_EXE_codex-fake-cli")` and pick the scripted behavior via the

@@ -52,6 +52,19 @@ path = "tests/fixtures/codex_fake_cli.rs"
 name = "codex-app-server-fake"
 path = "tests/fixtures/codex_app_server_fake.rs"
 
+# Claude-code fake CLI fixture (ADR-0097, issue #561): a minimal binary that
+# emulates BOTH claude-code surfaces the product drives, in one binary like the
+# real CLI -- the TURN surface (`--print --output-format stream-json` frames)
+# and the PROBE surface (the same argv + `--input-format stream-json`
+# control-plane initialize). Lives under `tests/fixtures/` (subdir, no
+# auto-discovery); pure serde_json (no lib import) so the fixture stays
+# self-contained. Integration tests resolve its path via
+# `env!("CARGO_BIN_EXE_claude-fake-cli")`. The Tauri bundler ships only
+# `main.rs`, so this fixture never reaches end users.
+[[bin]]
+name = "claude-fake-cli"
+path = "tests/fixtures/claude_fake_cli.rs"
+
 # MCP fake server fixture (issue #301 slice C-gw): a minimal stdio MCP server
 # the gateway aggregation / routing integration tests spawn via
 # `env!("CARGO_BIN_EXE_mcp-fake-server")`. Speaks the MCP stdio newline-delimited

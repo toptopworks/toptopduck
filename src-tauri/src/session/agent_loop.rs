@@ -835,9 +835,11 @@ pub struct LoopOutcome {
     pub round_trips: u32,
     /// The external runtime's discovered model / thought-level catalog
     /// (ADR-0095). `Some` only on the ACP path (handshake config_options
-    /// extraction); the built-in loop and the JsonEventStream path have no
-    /// discovery and carry `None` -- the Option distinguishes "this runtime
-    /// does not support discovery" from "discovery found nothing".
+    /// extraction); the built-in loop and the CodexEventStream path have no
+    /// discovery and carry `None` (the ClaudeStreamJson path reports the
+    /// `system{init}` current model, ADR-0097) -- the Option distinguishes
+    /// "this runtime does not support discovery" from "discovery found
+    /// nothing".
     pub discovered_runtime: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
 }
 

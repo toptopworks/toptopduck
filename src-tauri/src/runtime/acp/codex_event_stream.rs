@@ -1,21 +1,24 @@
-//! JSON event stream engine for codex native `exec --json` (ADR-0094, #523).
+//! Codex event stream engine for codex native `exec --json` (ADR-0094, #523;
+//! renamed from `json_event_stream` by ADR-0097 Decision 2).
 //!
 //! Invoked by [`super::engine::AcpEngine::run`] when the adapter's
-//! [`StreamFormat`] is [`JsonEventStream`]. Spawns `codex exec --json` with the
-//! gateway bridge injected via `-c` config overrides, writes the flattened
+//! [`StreamFormat`] is [`CodexEventStream`]. Spawns `codex exec --json` with
+//! the gateway bridge injected via `-c` config overrides, writes the flattened
 //! window text to stdin, then reads NDJSON events from stdout and maps them to
 //! [`TurnPhase`] / [`TraceEntry`] / [`Termination`] — the SAME [`LoopOutcome`]
 //! shape the ACP path and the built-in loop return.
 //!
 //! Approval: unlike the ACP path (inline `session/request_permission`), the
-//! JSON event stream has no protocol-level pre-check. All tool calls route
+//! codex event stream has no protocol-level pre-check. All tool calls route
 //! through the gateway bridge MCP server, where the gateway enforces the
 //! approval gate (ADR-0085/0094). Native codex tools (shell / file write) are
 //! blocked by `--sandbox read-only` — no native tool event is expected.
+//!
+//! [`StreamFormat`]: super::adapter::StreamFormat
+//! [`CodexEventStream`]: super::adapter::StreamFormat::CodexEventStream
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -27,7 +30,8 @@ use crate::approval::OperationKind;
 use crate::cancel::CancelToken;
 use crate::model::{TraceEntryView, TurnPhase};
 use crate::runtime::acp::adapter::AdapterSpec;
-use crate::runtime::acp::wire::{ContentBlock, McpServer};
+use crate::runtime::acp::turn_io::{build_model_flags, flatten_prompt};
+use crate::runtime::acp::wire::McpServer;
 use crate::session::agent_loop::{
     truncate_trace_excerpt, LoopOutcome, Termination, TraceEntry, TRACE_EXCERPT_MAX,
 };
@@ -211,21 +215,6 @@ fn extract_command(value: &Value) -> Option<CodexEvent> {
 }
 
 // ---------------------------------------------------------------------------
-// Prompt flattening (pure)
-// ---------------------------------------------------------------------------
-
-/// Flatten the windowed [`ContentBlock`] array into a single text string for
-/// stdin (ADR-0094 Decision 3: the same windowed context the ACP path sends
-/// as blocks, here joined as text). Non-text blocks are skipped.
-pub(crate) fn flatten_prompt(blocks: &[ContentBlock]) -> String {
-    blocks
-        .iter()
-        .filter_map(|b| b.as_text().map(|t| t.to_string()))
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
-// ---------------------------------------------------------------------------
 // Config override builder (pure)
 // ---------------------------------------------------------------------------
 
@@ -277,7 +266,7 @@ pub(crate) fn build_config_overrides(mcp_servers: &[McpServer]) -> Vec<String> {
 /// unused — the gateway enforces approval (ADR-0094 Decision 5); the JSON event
 /// stream has no protocol-level permission request.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn run_json_event_stream(
+pub(super) fn run_codex_event_stream(
     adapter: &AdapterSpec,
     cancel: Arc<CancelToken>,
     step_cap: u32,
@@ -312,9 +301,21 @@ pub(super) fn run_json_event_stream(
         input.model.as_deref(),
         input.thought_level.as_deref(),
     );
-    let mut child = match spawn_codex(binary, adapter, &config_flags, &model_flags, &input.cwd) {
+    let mut child = match super::process::spawn_turn(
+        binary,
+        adapter.argv,
+        &model_flags,
+        &config_flags,
+        &input.cwd,
+    ) {
         Ok(c) => c,
-        Err(detail) => return outcome(Termination::Transient(detail), Vec::new(), 0),
+        Err(e) => {
+            return outcome(
+                Termination::Transient(format!("failed to spawn codex exec `{}`: {e}", adapter.id)),
+                Vec::new(),
+                0,
+            )
+        }
     };
 
     // Write the flattened prompt to stdin, then close stdin so codex begins
@@ -494,50 +495,6 @@ struct JsonPump {
     step_cap: u32,
 }
 
-/// Build the argv segments carrying the ADR-0095 selections: the model as
-/// `[model_arg, id]` and the thought level as `["-c", "{key}={value}"]`.
-/// Pure -- adapters without the matching spec field contribute nothing.
-pub(crate) fn build_model_flags(
-    adapter: &AdapterSpec,
-    model: Option<&str>,
-    thought_level: Option<&str>,
-) -> Vec<String> {
-    let mut flags = Vec::new();
-    if let (Some(flag), Some(id)) = (adapter.model_arg, model) {
-        flags.push(flag.to_string());
-        flags.push(id.to_string());
-    }
-    if let (Some(key), Some(level)) = (adapter.effort_config_key, thought_level) {
-        flags.push("-c".to_string());
-        flags.push(format!("{key}={level}"));
-    }
-    flags
-}
-
-/// Spawn `codex exec --json …` with the gateway bridge injected via `-c`
-/// overrides. The working directory is set to `cwd` so codex's file operations
-/// (if any survive the read-only sandbox) stay within the session's temp.
-fn spawn_codex(
-    binary: &Path,
-    adapter: &AdapterSpec,
-    config_flags: &[String],
-    model_flags: &[String],
-    cwd: &str,
-) -> Result<Child, String> {
-    let mut cmd = Command::new(binary);
-    cmd.args(adapter.argv);
-    cmd.args(model_flags);
-    cmd.args(config_flags);
-    cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::inherit());
-    if !cwd.is_empty() {
-        cmd.current_dir(cwd);
-    }
-    cmd.spawn()
-        .map_err(|e| format!("failed to spawn codex exec `{}`: {e}", adapter.id))
-}
-
 /// Build the [`LoopOutcome`] (same shape as the ACP engine's `outcome`).
 fn outcome(termination: Termination, trace: Vec<TraceEntry>, round_trips: u32) -> LoopOutcome {
     LoopOutcome {
@@ -709,69 +666,6 @@ mod tests {
     fn parse_missing_type_is_other() {
         let v: Value = serde_json::json!({"foo": "bar"});
         assert_eq!(parse_event(&v), CodexEvent::Other);
-    }
-
-    // --- flatten_prompt -----------------------------------------------------
-
-    #[test]
-    fn flatten_prompt_joins_text_blocks() {
-        let blocks = vec![ContentBlock::text("first"), ContentBlock::text("second")];
-        assert_eq!(flatten_prompt(&blocks), "first\n\nsecond");
-    }
-
-    #[test]
-    fn flatten_prompt_skips_non_text() {
-        let blocks = vec![ContentBlock::text("visible"), ContentBlock::Other];
-        assert_eq!(flatten_prompt(&blocks), "visible");
-    }
-
-    #[test]
-    fn flatten_prompt_empty_blocks_produces_empty() {
-        assert_eq!(flatten_prompt(&[]), "");
-    }
-
-    // --- build_model_flags (ADR-0095) ----------------------------------------
-
-    fn stub_spec(model_arg: Option<&'static str>, key: Option<&'static str>) -> AdapterSpec {
-        AdapterSpec {
-            id: crate::runtime::acp::adapter::AdapterId::new("stub"),
-            display_name: "stub",
-            binary_names: &["nonexistent"],
-            argv: &["--json"],
-            stream_format: crate::runtime::acp::adapter::StreamFormat::JsonEventStream,
-            probe_argv: None,
-            model_arg,
-            effort_config_key: key,
-        }
-    }
-
-    /// Both selections land: `--model <id>` + `-c key=value`.
-    #[test]
-    fn model_flags_carry_model_and_effort() {
-        let s = stub_spec(Some("--model"), Some("model_reasoning_effort"));
-        assert_eq!(
-            build_model_flags(&s, Some("gpt-5.1"), Some("high")),
-            vec![
-                "--model".to_string(),
-                "gpt-5.1".to_string(),
-                "-c".to_string(),
-                "model_reasoning_effort=high".to_string(),
-            ]
-        );
-    }
-
-    /// No selection / no spec field -> nothing appended (CLI defaults rule).
-    #[test]
-    fn model_flags_empty_without_selection_or_spec_fields() {
-        let s = stub_spec(Some("--model"), Some("model_reasoning_effort"));
-        assert!(build_model_flags(&s, None, None).is_empty());
-        let acp_like = stub_spec(None, None);
-        assert!(build_model_flags(&acp_like, Some("m"), Some("high")).is_empty());
-        // Half-selected: each selection independently contributes.
-        assert_eq!(
-            build_model_flags(&s, None, Some("low")),
-            vec!["-c".to_string(), "model_reasoning_effort=low".to_string()]
-        );
     }
 
     // --- build_config_overrides ---------------------------------------------

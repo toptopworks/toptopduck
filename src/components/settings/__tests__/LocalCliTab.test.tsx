@@ -27,7 +27,7 @@ vi.mock("../../../api", async (importOriginal) => {
 
 const mockAdapters: AdapterEntry[] = [
   { id: "qwen-code", display_name: "qwen-code", detected: true, binary_path: "/usr/local/bin/qwen", stream_format: "acp" },
-  { id: "codex", display_name: "codex", detected: true, binary_path: "/usr/local/bin/codex", stream_format: "json_event_stream" },
+  { id: "codex", display_name: "codex", detected: true, binary_path: "/usr/local/bin/codex", stream_format: "codex_event_stream" },
   { id: "gemini-cli", display_name: "gemini-cli", detected: false, binary_path: null, stream_format: "acp" },
 ];
 
@@ -43,7 +43,7 @@ const okCatalog: DiscoveredRuntime = {
 const acpOk: ProbeOk = { kind: "acp", data: { discovered: okCatalog } };
 
 const codexAvailable: ProbeOk = {
-  kind: "json_event_stream",
+  kind: "codex_event_stream",
   data: {
     outcome: {
       status: "available",
@@ -56,14 +56,50 @@ const codexAvailable: ProbeOk = {
 };
 
 const codexUnavailable: ProbeOk = {
-  kind: "json_event_stream",
+  kind: "codex_event_stream",
   data: { outcome: { status: "unavailable", detail: "method not found" } },
 };
 
 const codexEmpty: ProbeOk = {
-  kind: "json_event_stream",
+  kind: "codex_event_stream",
   data: { outcome: { status: "available", models: [] } },
 };
+
+// The claude-code control-plane shapes (ADR-0097, issue #561): the SAME
+// per-model outcome under the claude kind, with the wire's display fallback
+// (resolvedModel when no displayName) + an absent default marker.
+const claudeAvailable: ProbeOk = {
+  kind: "claude_stream_json",
+  data: {
+    outcome: {
+      status: "available",
+      models: [
+        { id: "claude-sonnet-4", display_name: "Claude Sonnet 4", is_default: true, default_reasoning_effort: "medium", supported_reasoning_efforts: ["low", "medium", "high"] },
+        { id: "claude-opus-4", display_name: "claude-opus-4-20250514", is_default: false, default_reasoning_effort: "", supported_reasoning_efforts: ["high"] },
+      ],
+    },
+  },
+};
+
+const claudeUnavailable: ProbeOk = {
+  kind: "claude_stream_json",
+  data: { outcome: { status: "unavailable", detail: "auth required" } },
+};
+
+// The no-response degrade lands as the EMPTY catalog (ADR-0097 Decision 5),
+// never a failure -- the honest "no models" line.
+const claudeEmpty: ProbeOk = {
+  kind: "claude_stream_json",
+  data: { outcome: { status: "available", models: [] } },
+};
+
+// The adapter table extended with the claude-code row (tests that cover the
+// third format override the global mock with this list, so the
+// index-sensitive codex tests above keep their button positions).
+const claudeAdapters: AdapterEntry[] = [
+  ...mockAdapters,
+  { id: "claude-code", display_name: "claude-code", detected: true, binary_path: "/usr/local/bin/claude", stream_format: "claude_stream_json" },
+];
 
 function renderTab(onIpcBusy = vi.fn()) {
   // The returned queryClient lets the catalog-cache tests assert actual
@@ -112,7 +148,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
 
   it("renders the Test button for detected adapters of either format", async () => {
     renderTab();
-    // qwen-code (acp) + codex (json_event_stream) each get one button; the
+    // qwen-code (acp) + codex (codex_event_stream) each get one button; the
     // undetected gemini-cli gets none.
     const buttons = await screen.findAllByRole("button", { name: "Test" });
     expect(buttons).toHaveLength(2);
@@ -308,7 +344,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
 
   it("renders a model line without badges when the model supports no efforts", async () => {
     vi.mocked(probeAdapter).mockResolvedValue({
-      kind: "json_event_stream",
+      kind: "codex_event_stream",
       data: {
         outcome: {
           status: "available",
@@ -354,6 +390,52 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
 
     const buttons = await screen.findAllByRole("button", { name: "Test" });
     fireEvent.click(buttons[1]);
+    expect(
+      await screen.findByText(byFoldedText("Started, but no models were reported.")),
+    ).toBeInTheDocument();
+  });
+
+  // --- ClaudeStreamJson probe results (ADR-0097, issue #561) ---------------
+
+  it("renders the claude-code per-model catalog under the row on success", async () => {
+    vi.mocked(listAdapters).mockResolvedValue(claudeAdapters);
+    vi.mocked(probeAdapter).mockResolvedValue(claudeAvailable);
+    renderTab();
+
+    // The claude-code row is the third DETECTED adapter -- click its
+    // button (the undetected gemini-cli has none).
+    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    fireEvent.click(buttons[2]);
+    expect(
+      await screen.findByText(byFoldedText("Claude Sonnet 4 (default):")),
+    ).toBeInTheDocument();
+    // The resolved-model display fallback renders verbatim too.
+    expect(
+      screen.getByText(byFoldedText("claude-opus-4-20250514:")),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the degraded claude-code state under the row", async () => {
+    vi.mocked(listAdapters).mockResolvedValue(claudeAdapters);
+    vi.mocked(probeAdapter).mockResolvedValue(claudeUnavailable);
+    renderTab();
+
+    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    fireEvent.click(buttons[2]);
+    expect(
+      await screen.findByText(
+        byFoldedText("Started, but the model catalog is unavailable. (auth required)"),
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("renders an honest line for the empty claude-code catalog (no-response degrade)", async () => {
+    vi.mocked(listAdapters).mockResolvedValue(claudeAdapters);
+    vi.mocked(probeAdapter).mockResolvedValue(claudeEmpty);
+    renderTab();
+
+    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    fireEvent.click(buttons[2]);
     expect(
       await screen.findByText(byFoldedText("Started, but no models were reported.")),
     ).toBeInTheDocument();
@@ -489,8 +571,8 @@ describe("LocalCliTab catalog cache (issue #536)", () => {
     if (outcome.status !== "available") throw new Error("fixture shape");
     vi.mocked(getAdapterCatalogs).mockResolvedValue({
       codex: {
-        probe_kind: "json_event_stream",
-        outcome: { json_event_stream: { models: outcome.models } },
+        probe_kind: "codex_event_stream",
+        outcome: { codex_event_stream: { models: outcome.models } },
         probed_at_millis: 0,
       },
     });
@@ -499,6 +581,27 @@ describe("LocalCliTab catalog cache (issue #536)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "codex" }));
     expect(
       await screen.findByText(byFoldedText("GPT-5.2 Codex (default):")),
+    ).toBeInTheDocument();
+  });
+
+  // The claude-code cache entry renders through the SAME per-model
+  // components as a fresh probe (ADR-0097 -- one rendering path).
+  it("renders a cached claude-code entry on the idle row", async () => {
+    vi.mocked(listAdapters).mockResolvedValue(claudeAdapters);
+    const outcome = claudeAvailable.data.outcome;
+    if (outcome.status !== "available") throw new Error("fixture shape");
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({
+      "claude-code": {
+        probe_kind: "claude_stream_json",
+        outcome: { claude_stream_json: { models: outcome.models } },
+        probed_at_millis: 0,
+      },
+    });
+    renderTab();
+
+    fireEvent.click(await screen.findByRole("button", { name: "claude-code" }));
+    expect(
+      await screen.findByText(byFoldedText("Claude Sonnet 4 (default):")),
     ).toBeInTheDocument();
   });
 
@@ -549,6 +652,24 @@ describe("LocalCliTab catalog cache (issue #536)", () => {
     // degraded outcome).
     const cached = queryClient.getQueryData<AdapterCatalogs>(adapterKeys.catalogs());
     expect(cached?.codex).toBeUndefined();
+  });
+
+  // A successful claude-code probe mirrors its entry with the claude kind +
+  // matching outcome tag (ADR-0097 -- the tagged-union invariant).
+  it("mirrors a successful claude-code probe into the cache with the claude kind", async () => {
+    vi.mocked(listAdapters).mockResolvedValue(claudeAdapters);
+    vi.mocked(probeAdapter).mockResolvedValue(claudeAvailable);
+    const { queryClient } = renderTab();
+
+    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    fireEvent.click(buttons[2]);
+    await screen.findByText(byFoldedText("Claude Sonnet 4 (default):"));
+    const cached = queryClient.getQueryData<AdapterCatalogs>(adapterKeys.catalogs());
+    const entry = cached?.["claude-code"];
+    expect(entry).toBeDefined();
+    expect(entry?.probe_kind).toBe("claude_stream_json");
+    if (entry?.probe_kind !== "claude_stream_json") throw new Error("fixture shape");
+    expect(entry.outcome.claude_stream_json.models.length).toBe(2);
   });
 });
 
@@ -807,8 +928,8 @@ describe("LocalCliTab fold (issue #552)", () => {
   it("shows an N models badge on a collapsed ok row, replacing the stale cache count", async () => {
     vi.mocked(getAdapterCatalogs).mockResolvedValue({
       codex: {
-        probe_kind: "json_event_stream",
-        outcome: { json_event_stream: { models: [] } },
+        probe_kind: "codex_event_stream",
+        outcome: { codex_event_stream: { models: [] } },
         probed_at_millis: 0,
       },
     });
