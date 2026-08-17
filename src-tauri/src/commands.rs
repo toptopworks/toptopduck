@@ -2468,7 +2468,7 @@ pub async fn probe_adapter(
     // kill (the kill's EOF drains the pipe's final bytes into the reader).
     // Inner-timeout races are left to the blocking task's own log.
     if outer_timeout {
-        timeout_tail.log_tail();
+        timeout_tail.log_tail("probe timed out");
     }
     // Cache the catalog on success (ADR-0096 D5, issue #536): the probe
     // click is the cache's ONLY write point, overwriting just this

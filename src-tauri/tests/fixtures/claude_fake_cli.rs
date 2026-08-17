@@ -64,6 +64,7 @@ const SCENARIOS: &[&str] = &[
     "catalog_success",
     "catalog_hook_noise",
     "catalog_error",
+    "catalog_error_chatty",
     "catalog_no_response",
     "catalog_silent",
 ];
@@ -368,6 +369,23 @@ fn run_probe(scenario: &str) {
                 return;
             }
             "catalog_error" => {
+                emit(
+                    &mut out,
+                    &serde_json::json!({
+                        "type": "control_response",
+                        "request_id": request_id,
+                        "response": {"subtype": "error", "message": "auth required"}
+                    }),
+                );
+                return;
+            }
+            // An error response with a chatty-but-alive process (issue #543
+            // precedent, codex fixture's `catalog_error_chatty` peer): the
+            // degraded `Unavailable` detail must carry the stderr diagnosis
+            // too (the not-logged-in shape: the CLI keeps running and prints
+            // its auth guidance on stderr).
+            "catalog_error_chatty" => {
+                eprintln!("claude-fake: please run `claude login` before listing models");
                 emit(
                     &mut out,
                     &serde_json::json!({

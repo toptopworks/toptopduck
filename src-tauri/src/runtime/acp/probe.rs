@@ -481,16 +481,19 @@ impl StderrTail {
         self.tail.lock().map(|t| t.snapshot()).unwrap_or_default()
     }
 
-    /// Log the captured tail at warn level (empty tails log nothing). The
-    /// outer-timeout exit path uses this: the blocking task's own
-    /// `attach_stderr_tail` never runs there (its join result is dropped),
-    /// so the probe-timeout diagnosis -- often the most valuable one -- would
-    /// otherwise be lost. Call after the child is killed: the kill's EOF lets
-    /// the reader thread drain the pipe's final bytes before the snapshot.
-    pub(crate) fn log_tail(&self) {
+    /// Log the captured tail at warn level (empty tails log nothing),
+    /// tagged with the exit path that would otherwise lose the diagnosis.
+    /// A `Timeout` cannot change shape (its IPC form is pinned), so its
+    /// tail goes to the log: the outer-timeout path calls this after the
+    /// kill (the kill's EOF lets the reader thread drain the pipe's final
+    /// bytes before the snapshot), and the blocking task calls it itself
+    /// when its own inner-timeout or stdout-EOF race wins (the
+    /// `commands.rs` contract: inner races are left to the blocking
+    /// task's own log).
+    pub(crate) fn log_tail(&self, context: &str) {
         let tail = self.snapshot();
         if !tail.is_empty() {
-            log::warn!(target: "toptopduck::probe", "probe timed out; stderr tail: {tail}");
+            log::warn!(target: "toptopduck::probe", "{context}; stderr tail: {tail}");
         }
     }
 }
@@ -521,7 +524,7 @@ pub(super) fn attach_stderr_tail(err: ProbeError, stderr: &StderrTail) -> ProbeE
             ProbeError::HandshakeFailure(with_stderr_tail(detail, stderr))
         }
         ProbeError::Timeout => {
-            stderr.log_tail();
+            stderr.log_tail("probe timed out");
             ProbeError::Timeout
         }
         other => other,

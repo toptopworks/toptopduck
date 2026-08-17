@@ -147,6 +147,36 @@ fn query_error_response_degrades_to_unavailable() {
                 detail.contains("auth required"),
                 "the degraded detail names the control error: {detail}"
             );
+            // A silent CLI leaves no bare `stderr tail: ` artifact behind
+            // (the codex_probe.rs peer assertion, issue #542).
+            assert!(
+                !detail.contains("stderr tail"),
+                "no stderr output means no tail marker: {detail}"
+            );
+        }
+        other => panic!("expected Unavailable, got {other:?}"),
+    }
+}
+
+/// An error control response from a chatty-but-alive CLI degrades to
+/// `Unavailable` whose detail ALSO carries the stderr diagnosis (issue #543
+/// precedent -- the degraded success variant appends the tail at its
+/// construction site, same shape as the failure path's `attach_stderr_tail`;
+/// the codex_probe.rs peer test).
+#[test]
+fn query_error_response_chatty_degrades_carries_stderr_tail() {
+    let ok = query_fixture("catalog_error_chatty", Duration::from_secs(5))
+        .expect("an error control response degrades, it does not fail");
+    match ok {
+        ModelCatalogOutcome::Unavailable { detail } => {
+            assert!(
+                detail.contains("auth required"),
+                "the degraded detail names the control error: {detail}"
+            );
+            assert!(
+                detail.contains("stderr tail: claude-fake: please run `claude login`"),
+                "the degraded detail carries the stderr diagnosis: {detail}"
+            );
         }
         other => panic!("expected Unavailable, got {other:?}"),
     }

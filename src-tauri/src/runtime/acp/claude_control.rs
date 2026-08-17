@@ -113,7 +113,11 @@ pub fn query_catalog(
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(ProbeError::Timeout);
+            // The inner-deadline race logs the stderr tail itself (the
+            // commands.rs contract for inner-timeout races; a Timeout
+            // cannot change shape, so the diagnosis goes to the log --
+            // the app_server.rs precedent routes it the same way).
+            return Err(attach_stderr_tail(ProbeError::Timeout, &stderr_tail));
         }
         match io.recv_timeout(remaining) {
             Ok(line) => {
@@ -124,6 +128,10 @@ pub fn query_catalog(
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 // No response before stdout EOF: the honest empty catalog.
+                // The child's stderr may still name WHY it exited without
+                // answering (auth failure, startup panic) -- log it; the
+                // packaged app has no console (issue #542 precedent).
+                stderr_tail.log_tail("claude exited before answering the initialize handshake");
                 return Ok(ModelCatalogOutcome::Available { models: Vec::new() });
             }
         }
