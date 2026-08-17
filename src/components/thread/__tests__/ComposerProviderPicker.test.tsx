@@ -488,7 +488,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
     // Issue #490: undetected adapters are filtered out (the group is a pure
     // selector; management moved to Settings → Runtime → Local CLI).
     vi.mocked(listAdapters).mockResolvedValue([
-      adapter("claude-code", "claude-code", true),
+      adapter("qwen-code", "qwen-code", true),
       adapter("gemini-cli", "gemini-cli", false),
     ]);
     renderPicker(
@@ -502,14 +502,14 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
     );
     fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
     // Only the detected adapter renders.
-    expect(await screen.findByText("claude-code")).toBeInTheDocument();
+    expect(await screen.findByText("qwen-code")).toBeInTheDocument();
     expect(screen.queryByText("gemini-cli")).not.toBeInTheDocument();
     // No "Not installed" mark -- the group is a pure selector.
     expect(screen.queryByText("Not installed")).not.toBeInTheDocument();
   });
 
   it("selecting an external adapter writes the external choice via setSessionRuntime", async () => {
-    vi.mocked(listAdapters).mockResolvedValue([adapter("claude-code", "claude-code", true)]);
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code", "qwen-code", true)]);
     renderPicker(
       <ComposerProviderPicker
         sessionId="sess-1"
@@ -520,12 +520,12 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    const row = await screen.findByRole("button", { name: /claude-code/ });
+    const row = await screen.findByRole("button", { name: /qwen-code/ });
     fireEvent.click(row);
     await waitFor(() =>
       expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
         kind: "external",
-        data: "claude-code",
+        data: "qwen-code",
       }),
     );
   });
@@ -553,7 +553,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
 
   it("routes runtime selection to onPendingRuntimeChange when sessionId is null", async () => {
     vi.mocked(listAdapters).mockResolvedValue([
-      adapter("claude-code", "claude-code", true),
+      adapter("qwen-code", "qwen-code", true),
     ]);
     const onPendingRuntimeChange = vi.fn();
     renderPicker(
@@ -567,21 +567,21 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    const row = await screen.findByRole("button", { name: /claude-code/ });
+    const row = await screen.findByRole("button", { name: /qwen-code/ });
     fireEvent.click(row);
     // Selection routes to the pending callback, not the per-session IPC.
     expect(onPendingRuntimeChange).toHaveBeenCalledWith({
       kind: "external",
-      data: "claude-code",
+      data: "qwen-code",
     });
     expect(setSessionRuntime).not.toHaveBeenCalled();
   });
 
   it("selecting the built-in header writes the built-in choice via setSessionRuntime", async () => {
     // Start on the external runtime so reverting to built-in is a real switch.
-    const external: SessionRuntimeChoice = { kind: "external", data: "claude-code" };
+    const external: SessionRuntimeChoice = { kind: "external", data: "qwen-code" };
     vi.mocked(getSessionRuntime).mockResolvedValue(external);
-    vi.mocked(listAdapters).mockResolvedValue([adapter("claude-code", "claude-code", true)]);
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code", "qwen-code", true)]);
     renderPicker(
       <ComposerProviderPicker
         sessionId="sess-1"
@@ -592,7 +592,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
       />,
     );
     // The trigger name carries the external adapter while external is active.
-    const trigger = await screen.findByRole("button", { name: "Runtime: claude-code" });
+    const trigger = await screen.findByRole("button", { name: "Runtime: qwen-code" });
     fireEvent.click(trigger);
     // The built-in header reverts to the built-in runtime.
     const builtinHeader = screen.getByRole("button", { name: /^Built-in$/ });
@@ -605,9 +605,9 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
   });
 
   it("renders the external runtime in the trigger name + tooltip when external is active", async () => {
-    const external: SessionRuntimeChoice = { kind: "external", data: "claude-code" };
+    const external: SessionRuntimeChoice = { kind: "external", data: "qwen-code" };
     vi.mocked(getSessionRuntime).mockResolvedValue(external);
-    vi.mocked(listAdapters).mockResolvedValue([adapter("claude-code", "claude-code", true)]);
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code", "qwen-code", true)]);
     renderPicker(
       <ComposerProviderPicker
         sessionId="sess-1"
@@ -617,13 +617,13 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
         onOpenSettings={vi.fn()}
       />,
     );
-    const trigger = await screen.findByRole("button", { name: "Runtime: claude-code" });
+    const trigger = await screen.findByRole("button", { name: "Runtime: qwen-code" });
     // The hover tooltip names the external runtime (the closed chip's Cpu
     // glyph is unified; the tooltip is where the user reads WHICH runtime).
     fireEvent.pointerEnter(trigger, { pointerType: "mouse" });
     fireEvent.pointerMove(trigger, { pointerType: "mouse" });
     const tooltip = await screen.findByRole("tooltip");
-    expect(tooltip.textContent).toContain("External runtime: claude-code");
+    expect(tooltip.textContent).toContain("External runtime: qwen-code");
   });
 
   // --- Issue #490: external group slimmed to a pure selector ---------------
@@ -660,7 +660,7 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
     const external: SessionRuntimeChoice = { kind: "external", data: "gemini-cli" };
     vi.mocked(getSessionRuntime).mockResolvedValue(external);
     vi.mocked(listAdapters).mockResolvedValue([
-      adapter("claude-code", "claude-code", true),
+      adapter("qwen-code", "qwen-code", true),
       adapter("gemini-cli", "gemini-cli", false),
     ]);
     renderPicker(
@@ -711,9 +711,9 @@ describe("ComposerProviderPicker model config selectors (ADR-0095)", () => {
   async function openExternalPopover() {
     vi.mocked(getSessionRuntime).mockResolvedValue({
       kind: "external",
-      data: "claude-code",
+      data: "qwen-code",
     });
-    vi.mocked(listAdapters).mockResolvedValue([adapter("claude-code")]);
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
     vi.mocked(getSessionModelConfig).mockResolvedValue({
       model: null,
       thought_level: null,
@@ -731,7 +731,7 @@ describe("ComposerProviderPicker model config selectors (ADR-0095)", () => {
     // Wait for the external runtime query to land (the trigger label flips
     // from the built-in readout to the adapter name), then open the popover.
     const trigger = await screen.findByRole("button", {
-      name: /Runtime: claude-code/,
+      name: /Runtime: qwen-code/,
     });
     fireEvent.click(trigger);
   }
@@ -778,9 +778,9 @@ describe("ComposerProviderPicker model config selectors (ADR-0095)", () => {
   it("shows the pending hint when the external runtime has no discovery cache yet", async () => {
     vi.mocked(getSessionRuntime).mockResolvedValue({
       kind: "external",
-      data: "claude-code",
+      data: "qwen-code",
     });
-    vi.mocked(listAdapters).mockResolvedValue([adapter("claude-code")]);
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
     // No cached_discovered (before the first ACP turn).
     vi.mocked(getSessionModelConfig).mockResolvedValue({
       model: null,
@@ -798,7 +798,7 @@ describe("ComposerProviderPicker model config selectors (ADR-0095)", () => {
       />,
     );
     fireEvent.click(
-      await screen.findByRole("button", { name: /Runtime: claude-code/ }),
+      await screen.findByRole("button", { name: /Runtime: qwen-code/ }),
     );
     expect(
       await screen.findByText(/Model options appear after the first turn/),
@@ -880,7 +880,7 @@ describe("ComposerProviderPicker honest selector states (issue #529)", () => {
     current_model: "fake-opus",
     thought_levels: ["low", "medium", "high"],
     current_thought_level: "medium",
-    adapter_id: "claude-code",
+    adapter_id: "qwen-code",
   } satisfies DiscoveredRuntime;
 
   // Seed an external ACP runtime + open the popover. `config` overrides the
@@ -888,7 +888,7 @@ describe("ComposerProviderPicker honest selector states (issue #529)", () => {
   // cache reads as fresh.
   async function openExternal(
     config: Awaited<ReturnType<typeof getSessionModelConfig>>,
-    adapterId = "claude-code",
+    adapterId = "qwen-code",
   ) {
     vi.mocked(getSessionRuntime).mockResolvedValue({
       kind: "external",
@@ -982,7 +982,7 @@ describe("ComposerProviderPicker honest selector states (issue #529)", () => {
 
   it("flags a catalog cached under a different adapter and lets the user clear the model", async () => {
     // The runtime switched to gemini-cli but the cache still holds the
-    // claude-code catalog (replace-on-Some only updates after gemini's first
+    // qwen-code catalog (replace-on-Some only updates after gemini's first
     // turn). A stale marker renders + the residual selection stays visible.
     await openExternal(
       {
@@ -1057,9 +1057,9 @@ describe("ComposerProviderPicker honest selector states (issue #529)", () => {
   it("renders an inline error when the model-config read fails (not the pending hint)", async () => {
     vi.mocked(getSessionRuntime).mockResolvedValue({
       kind: "external",
-      data: "claude-code",
+      data: "qwen-code",
     });
-    vi.mocked(listAdapters).mockResolvedValue([adapter("claude-code")]);
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
     vi.mocked(getSessionModelConfig).mockRejectedValue(new Error("ipc down"));
     renderPicker(
       <ComposerProviderPicker
@@ -1071,7 +1071,7 @@ describe("ComposerProviderPicker honest selector states (issue #529)", () => {
       />,
     );
     fireEvent.click(
-      await screen.findByRole("button", { name: /Runtime: claude-code/ }),
+      await screen.findByRole("button", { name: /Runtime: qwen-code/ }),
     );
     // The honest error line, NOT the discovery-pending hint masquerading as
     // "no catalog yet".
@@ -1221,7 +1221,7 @@ describe("ComposerProviderPicker catalog priority chain (issue #537)", () => {
     current_model: "session-opus",
     thought_levels: ["low", "high"],
     current_thought_level: "low",
-    adapter_id: "claude-code",
+    adapter_id: "qwen-code",
   } satisfies DiscoveredRuntime;
 
   const PROBE_CATALOG = {
@@ -1246,9 +1246,9 @@ describe("ComposerProviderPicker catalog priority chain (issue #537)", () => {
   ) {
     vi.mocked(getSessionRuntime).mockResolvedValue({
       kind: "external",
-      data: "claude-code",
+      data: "qwen-code",
     });
-    vi.mocked(listAdapters).mockResolvedValue([adapter("claude-code")]);
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
     vi.mocked(getSessionModelConfig).mockResolvedValue({
       model: null,
       thought_level: null,
@@ -1265,12 +1265,12 @@ describe("ComposerProviderPicker catalog priority chain (issue #537)", () => {
       />,
     );
     fireEvent.click(
-      await screen.findByRole("button", { name: /Runtime: claude-code/ }),
+      await screen.findByRole("button", { name: /Runtime: qwen-code/ }),
     );
   }
 
   it("prefers the session catalog over the probe cache when both exist", async () => {
-    await openExternal(probeCatalogs("claude-code"), SESSION_CATALOG);
+    await openExternal(probeCatalogs("qwen-code"), SESSION_CATALOG);
     const modelSelect = await screen.findByLabelText("Model");
     expect(
       Array.from(modelSelect.querySelectorAll("option")).map(
@@ -1287,7 +1287,7 @@ describe("ComposerProviderPicker catalog priority chain (issue #537)", () => {
   });
 
   it("falls back to the probe cache when the session has no catalog", async () => {
-    await openExternal(probeCatalogs("claude-code"), null);
+    await openExternal(probeCatalogs("qwen-code"), null);
     const modelSelect = await screen.findByLabelText("Model");
     expect(
       Array.from(modelSelect.querySelectorAll("option")).map(

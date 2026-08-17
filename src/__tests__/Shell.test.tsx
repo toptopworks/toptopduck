@@ -562,7 +562,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       baseAppConfig({ sidebar_collapsed: false }),
     );
     vi.mocked(listAdapters).mockResolvedValue([
-      { id: "claude-code", display_name: "claude-code", detected: true, binary_path: "/usr/local/bin/claude", stream_format: "acp" },
+      { id: "gemini-cli", display_name: "gemini-cli", detected: true, binary_path: "/usr/local/bin/gemini", stream_format: "acp" },
     ]);
     // The creation turn rejects so it settles immediately (openSession pattern).
     vi.mocked(askQuestion).mockRejectedValueOnce(
@@ -577,7 +577,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       );
       // Open the picker popover and select the external adapter.
       fireEvent.click(screen.getByRole("button", { name: /运行时/ }));
-      const adapterBtn = await screen.findByRole("button", { name: "claude-code" });
+      const adapterBtn = await screen.findByRole("button", { name: "gemini-cli" });
       fireEvent.click(adapterBtn);
       // Type and submit from the centered bar.
       fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
@@ -587,7 +587,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       await waitFor(() =>
         expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
           kind: "external",
-          data: "claude-code",
+          data: "gemini-cli",
         }),
       );
     } finally {
@@ -2171,7 +2171,7 @@ describe("App composer refactor follow-ups (issue #504)", () => {
       { profile_id: "default", has_key: false, keychain_fault: null },
     ]);
     vi.mocked(listAdapters).mockResolvedValue([
-      { id: "claude-code", display_name: "claude-code", detected: true, binary_path: "/usr/local/bin/claude", stream_format: "acp" },
+      { id: "gemini-cli", display_name: "gemini-cli", detected: true, binary_path: "/usr/local/bin/gemini", stream_format: "acp" },
     ]);
     vi.mocked(askQuestion).mockRejectedValueOnce(
       new Error("discard the creation turn"),
@@ -2184,7 +2184,7 @@ describe("App composer refactor follow-ups (issue #504)", () => {
       );
       // Pick the external adapter.
       fireEvent.click(screen.getByRole("button", { name: /运行时/ }));
-      const adapterBtn = await screen.findByRole("button", { name: "claude-code" });
+      const adapterBtn = await screen.findByRole("button", { name: "gemini-cli" });
       fireEvent.click(adapterBtn);
       // Type and submit — the gate is bypassed (external kind).
       fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
@@ -2194,7 +2194,7 @@ describe("App composer refactor follow-ups (issue #504)", () => {
       await waitFor(() =>
         expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
           kind: "external",
-          data: "claude-code",
+          data: "gemini-cli",
         }),
       );
     } finally {

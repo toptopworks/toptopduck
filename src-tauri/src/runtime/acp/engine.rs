@@ -1066,7 +1066,7 @@ mod tests {
     #[test]
     fn decide_permission_no_confirmation_selects_allow() {
         use crate::approval::ApprovalState;
-        let adapter = crate::runtime::acp::adapter::claude_code();
+        let adapter = crate::runtime::acp::adapter::gemini_cli();
         let approval = ApprovalState::new();
         approval.set_auth_mode(crate::approval::AuthMode::NoConfirmation);
         let params = RequestPermissionParams {
@@ -1109,7 +1109,7 @@ mod tests {
     #[test]
     fn decide_permission_per_call_untrusted_fail_fasts_to_reject() {
         use crate::approval::ApprovalState;
-        let adapter = crate::runtime::acp::adapter::claude_code();
+        let adapter = crate::runtime::acp::adapter::gemini_cli();
         let approval = ApprovalState::new(); // PerCall, empty trust
         let params = RequestPermissionParams {
             session_id: "s".into(),
@@ -1149,7 +1149,7 @@ mod tests {
     /// A cancel in flight short-circuits permission to Cancelled.
     #[test]
     fn decide_permission_cancel_short_circuits() {
-        let adapter = crate::runtime::acp::adapter::claude_code();
+        let adapter = crate::runtime::acp::adapter::gemini_cli();
         let approval = crate::approval::ApprovalState::new();
         let cancel = CancelToken::new();
         cancel.request();
@@ -1172,7 +1172,7 @@ mod tests {
     #[test]
     fn decide_permission_truncates_summary_before_broadcast() {
         use crate::approval::ApprovalState;
-        let adapter = crate::runtime::acp::adapter::claude_code();
+        let adapter = crate::runtime::acp::adapter::gemini_cli();
         let approval = ApprovalState::new();
         approval.set_auth_mode(crate::approval::AuthMode::NoConfirmation);
         let params = RequestPermissionParams {

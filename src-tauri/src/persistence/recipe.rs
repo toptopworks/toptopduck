@@ -1639,7 +1639,7 @@ mod tests {
                 current_thought_level: Some("high".into()),
                 model_config_id: Some("model".into()),
                 thought_level_config_id: Some("thought".into()),
-                adapter_id: Some("claude-code".into()),
+                adapter_id: Some("gemini-cli".into()),
             }),
         );
         let v = serde_json::to_value(&layered).expect("serialize");
@@ -1654,7 +1654,7 @@ mod tests {
         assert_eq!(back.cached_discovered, layered.cached_discovered);
         assert_eq!(
             back.cached_discovered.and_then(|d| d.adapter_id),
-            Some("claude-code".to_string())
+            Some("gemini-cli".to_string())
         );
     }
 

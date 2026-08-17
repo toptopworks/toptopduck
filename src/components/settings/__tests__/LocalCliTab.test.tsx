@@ -26,7 +26,7 @@ vi.mock("../../../api", async (importOriginal) => {
 });
 
 const mockAdapters: AdapterEntry[] = [
-  { id: "claude-code", display_name: "claude-code", detected: true, binary_path: "/usr/local/bin/claude", stream_format: "acp" },
+  { id: "qwen-code", display_name: "qwen-code", detected: true, binary_path: "/usr/local/bin/qwen", stream_format: "acp" },
   { id: "codex", display_name: "codex", detected: true, binary_path: "/usr/local/bin/codex", stream_format: "json_event_stream" },
   { id: "gemini-cli", display_name: "gemini-cli", detected: false, binary_path: null, stream_format: "acp" },
 ];
@@ -36,7 +36,7 @@ const okCatalog: DiscoveredRuntime = {
   current_model: "fake-opus",
   thought_levels: ["low", "medium", "high"],
   current_thought_level: "medium",
-  adapter_id: "claude-code",
+  adapter_id: "qwen-code",
 };
 
 // The per-format tagged success shapes (mirror the Rust ProbeOk wire form).
@@ -84,7 +84,7 @@ const byFoldedText = (fragment: string) =>
       (c) => c.textContent?.includes(fragment) === true,
     );
 
-/** Click the first Test button (claude-code's row -- the first detected
+/** Click the first Test button (qwen-code's row -- the first detected
  *  adapter). Every detected adapter now offers the button, so a singular
  *  findByRole would be ambiguous. */
 async function clickTestButton() {
@@ -112,7 +112,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
 
   it("renders the Test button for detected adapters of either format", async () => {
     renderTab();
-    // claude-code (acp) + codex (json_event_stream) each get one button; the
+    // qwen-code (acp) + codex (json_event_stream) each get one button; the
     // undetected gemini-cli gets none.
     const buttons = await screen.findAllByRole("button", { name: "Test" });
     expect(buttons).toHaveLength(2);
@@ -365,7 +365,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     [{ kind: "Timeout" }, "The probe timed out."],
     [{ kind: "SpawnFailure", data: "failed to spawn ACP agent" }, "Failed to start the CLI."],
     [{ kind: "HandshakeFailure", data: "initialize: empty response" }, "Handshake with the CLI failed."],
-    [{ kind: "NotDetected", data: "claude-code" }, "Adapter is not detected."],
+    [{ kind: "NotDetected", data: "qwen-code" }, "Adapter is not detected."],
   ])("renders the %s failure as an error line", async (rejection, expected) => {
     vi.mocked(probeAdapter).mockRejectedValue(rejection);
     renderTab();
@@ -373,7 +373,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     await clickTestButton();
     // The failure row stays collapsed -- the error lives in the fold; expand
     // it to read the detail (the collapsed row shows the red badge).
-    fireEvent.click(await rowChevron("claude-code"));
+    fireEvent.click(await rowChevron("qwen-code"));
     expect(await screen.findByText(byFoldedText(expected))).toBeInTheDocument();
   });
 
@@ -385,7 +385,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     renderTab();
 
     await clickTestButton();
-    fireEvent.click(await rowChevron("claude-code"));
+    fireEvent.click(await rowChevron("qwen-code"));
     expect(
       await screen.findByText(
         byFoldedText("Handshake with the CLI failed. (session/new error: boom)"),
@@ -400,7 +400,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     renderTab();
 
     await clickTestButton();
-    fireEvent.click(await rowChevron("claude-code"));
+    fireEvent.click(await rowChevron("qwen-code"));
     expect(
       await screen.findByText(
         byFoldedText(
@@ -418,7 +418,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     renderTab();
 
     await clickTestButton();
-    fireEvent.click(await rowChevron("claude-code"));
+    fireEvent.click(await rowChevron("qwen-code"));
     expect(
       await screen.findByText(
         byFoldedText("The probe request could not reach the CLI (internal error)."),
@@ -435,7 +435,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     renderTab();
 
     await clickTestButton();
-    fireEvent.click(await rowChevron("claude-code"));
+    fireEvent.click(await rowChevron("qwen-code"));
     expect(
       await screen.findByText(byFoldedText("Handshake with the CLI failed.")),
     ).toBeInTheDocument();
@@ -463,7 +463,7 @@ describe("LocalCliTab catalog cache (issue #536)", () => {
   // the user expands the collapsed row.
   it("renders a cached ACP entry on the idle row", async () => {
     vi.mocked(getAdapterCatalogs).mockResolvedValue({
-      "claude-code": {
+      "qwen-code": {
         probe_kind: "acp",
         outcome: { acp: { discovered: okCatalog } },
         probed_at_millis: Date.UTC(2026, 7, 15, 10, 30),
@@ -475,7 +475,7 @@ describe("LocalCliTab catalog cache (issue #536)", () => {
     // Collapsed by default: the directory is not in the DOM.
     expect(screen.queryByText(byFoldedText("fake-opus (default)"))).toBeNull();
 
-    fireEvent.click(await rowChevron("claude-code"));
+    fireEvent.click(await rowChevron("qwen-code"));
     expect(
       await screen.findByText(byFoldedText("fake-opus (default)")),
     ).toBeInTheDocument();
@@ -508,7 +508,7 @@ describe("LocalCliTab catalog cache (issue #536)", () => {
     renderTab();
 
     await screen.findAllByRole("button", { name: "Test" });
-    expect(screen.queryByRole("button", { name: "claude-code" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "qwen-code" })).toBeNull();
     expect(
       screen.queryByText(byFoldedText("fake-opus (default)")),
     ).toBeNull();
@@ -525,8 +525,8 @@ describe("LocalCliTab catalog cache (issue #536)", () => {
     await clickTestButton();
     await screen.findByText(byFoldedText("fake-opus (default)"));
     const cached = queryClient.getQueryData<AdapterCatalogs>(adapterKeys.catalogs());
-    expect(cached?.["claude-code"]).toBeDefined();
-    expect(cached?.["claude-code"].probe_kind).toBe("acp");
+    expect(cached?.["qwen-code"]).toBeDefined();
+    expect(cached?.["qwen-code"].probe_kind).toBe("acp");
     // The mirror is a setQueryData write, not an invalidation: the sidecar
     // read is not re-fetched.
     expect(getAdapterCatalogs).toHaveBeenCalledTimes(1);
@@ -566,14 +566,14 @@ describe("LocalCliTab fold (issue #552)", () => {
 
   it("starts collapsed and toggles open and closed via the chevron", async () => {
     vi.mocked(getAdapterCatalogs).mockResolvedValue({
-      "claude-code": {
+      "qwen-code": {
         probe_kind: "acp",
         outcome: { acp: { discovered: okCatalog } },
         probed_at_millis: Date.UTC(2026, 7, 15, 10, 30),
       },
     });
     renderTab();
-    const chevron = await screen.findByRole("button", { name: "claude-code" });
+    const chevron = await screen.findByRole("button", { name: "qwen-code" });
 
     expect(chevron).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByText(byFoldedText("fake-opus (default)"))).toBeNull();
@@ -593,7 +593,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     renderTab();
 
     await screen.findAllByRole("button", { name: "Test" });
-    expect(screen.queryByRole("button", { name: "claude-code" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "qwen-code" })).toBeNull();
     expect(screen.queryByRole("button", { name: "codex" })).toBeNull();
     expect(screen.queryByRole("button", { name: "gemini-cli" })).toBeNull();
   });
@@ -610,11 +610,11 @@ describe("LocalCliTab fold (issue #552)", () => {
       expect(screen.getAllByRole("button", { name: "Test" })[0]).toHaveAttribute("aria-disabled", "true"),
     );
     // Mid-flight: the probe has no content yet -- no dead toggle.
-    expect(screen.queryByRole("button", { name: "claude-code" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "qwen-code" })).toBeNull();
     release(acpOk);
 
     // Settled: the chevron appears and the auto-expand already opened it.
-    const chevron = await screen.findByRole("button", { name: "claude-code" });
+    const chevron = await screen.findByRole("button", { name: "qwen-code" });
     expect(chevron).toHaveAttribute("aria-expanded", "true");
   });
 
@@ -623,7 +623,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     renderTab();
 
     await clickTestButton();
-    const chevron = await screen.findByRole("button", { name: "claude-code" });
+    const chevron = await screen.findByRole("button", { name: "qwen-code" });
     expect(chevron).toHaveAttribute("aria-expanded", "false");
     // Collapsed (failure never auto-expands); expanding reveals the error.
     fireEvent.click(chevron);
@@ -643,7 +643,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     expect(
       await screen.findByText(byFoldedText("fake-opus (default)")),
     ).toBeInTheDocument();
-    expect(await rowChevron("claude-code")).toHaveAttribute("aria-expanded", "true");
+    expect(await rowChevron("qwen-code")).toHaveAttribute("aria-expanded", "true");
   });
 
   it("auto-expands the row after a successful codex probe", async () => {
@@ -666,7 +666,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     // it collapsed -- the red badge is the summary, the fold hides the
     // detail until the user expands.
     await clickTestButton();
-    const chevron = await rowChevron("claude-code");
+    const chevron = await rowChevron("qwen-code");
     expect(chevron).toHaveAttribute("aria-expanded", "false");
     expect(await screen.findByText("Test failed")).toBeInTheDocument();
 
@@ -682,7 +682,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     renderTab();
 
     await clickTestButton();
-    const chevron = await rowChevron("claude-code");
+    const chevron = await rowChevron("qwen-code");
     await screen.findByText(byFoldedText("fake-opus (default)"));
 
     fireEvent.click((await screen.findAllByRole("button", { name: "Test" }))[0]);
@@ -709,7 +709,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     renderTab();
 
     await clickTestButton();
-    const chevron = await rowChevron("claude-code");
+    const chevron = await rowChevron("qwen-code");
     fireEvent.click(chevron);
     expect(
       await screen.findByText(byFoldedText("The probe timed out.")),
@@ -743,7 +743,7 @@ describe("LocalCliTab fold (issue #552)", () => {
       () => new Promise((resolve) => { release = resolve; }),
     );
     vi.mocked(getAdapterCatalogs).mockResolvedValue({
-      "claude-code": {
+      "qwen-code": {
         probe_kind: "acp",
         outcome: { acp: { discovered: okCatalog } },
         probed_at_millis: Date.UTC(2026, 7, 15, 10, 30),
@@ -752,7 +752,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     renderTab();
 
     // Expand the idle+cache row, then start a re-probe.
-    fireEvent.click(await rowChevron("claude-code"));
+    fireEvent.click(await rowChevron("qwen-code"));
     expect(
       await screen.findByText(byFoldedText("fake-opus (default)")),
     ).toBeInTheDocument();
@@ -767,7 +767,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     expect(
       screen.getByText(byFoldedText("fake-opus (default)")),
     ).toBeInTheDocument();
-    const chevron = await rowChevron("claude-code");
+    const chevron = await rowChevron("qwen-code");
     expect(chevron).toHaveAttribute("aria-expanded", "true");
 
     // Resolve with a DIFFERENT catalog so the settled render is
@@ -793,7 +793,7 @@ describe("LocalCliTab fold (issue #552)", () => {
 
   it("shows an N models badge on a collapsed row with a cached entry", async () => {
     vi.mocked(getAdapterCatalogs).mockResolvedValue({
-      "claude-code": {
+      "qwen-code": {
         probe_kind: "acp",
         outcome: { acp: { discovered: okCatalog } },
         probed_at_millis: 0,
@@ -839,7 +839,7 @@ describe("LocalCliTab fold (issue #552)", () => {
   // null enforce it -- this pins it).
   it("replaces a stale cached count with the failure badge when a re-probe fails", async () => {
     vi.mocked(getAdapterCatalogs).mockResolvedValue({
-      "claude-code": {
+      "qwen-code": {
         probe_kind: "acp",
         outcome: { acp: { discovered: okCatalog } },
         probed_at_millis: 0,
@@ -856,7 +856,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     expect(screen.queryByText("2 models")).toBeNull();
 
     // The fold carries the error line, not the cached catalog.
-    fireEvent.click(await rowChevron("claude-code"));
+    fireEvent.click(await rowChevron("qwen-code"));
     expect(
       await screen.findByText(byFoldedText("The probe timed out.")),
     ).toBeInTheDocument();
@@ -893,7 +893,7 @@ describe("LocalCliTab fold (issue #552)", () => {
       () => new Promise((resolve) => { release = resolve; }),
     );
     vi.mocked(getAdapterCatalogs).mockResolvedValue({
-      "claude-code": {
+      "qwen-code": {
         probe_kind: "acp",
         outcome: { acp: { discovered: okCatalog } },
         probed_at_millis: 0,
@@ -926,7 +926,7 @@ describe("LocalCliTab fold (issue #552)", () => {
   // it -- the ComposerProviderPicker pattern).
   it("surfaces the cached probed-at timestamp on the Test button hover", async () => {
     vi.mocked(getAdapterCatalogs).mockResolvedValue({
-      "claude-code": {
+      "qwen-code": {
         probe_kind: "acp",
         outcome: { acp: { discovered: okCatalog } },
         probed_at_millis: Date.UTC(2026, 7, 15, 10, 30),
@@ -965,7 +965,7 @@ describe("LocalCliTab fold (issue #552)", () => {
   // which keeps pointer events -- and therefore the hover -- alive.
   it("keeps the last-tested tooltip hoverable while a re-probe runs", async () => {
     vi.mocked(getAdapterCatalogs).mockResolvedValue({
-      "claude-code": {
+      "qwen-code": {
         probe_kind: "acp",
         outcome: { acp: { discovered: okCatalog } },
         probed_at_millis: Date.UTC(2026, 7, 15, 10, 30),

@@ -119,7 +119,7 @@ pub struct AdapterCatalogEntry {
 }
 
 /// The cache document: one entry per adapter id, keyed by the spec id
-/// (`claude-code`, `codex`, ...).
+/// (`gemini-cli`, `codex`, ...).
 pub type AdapterCatalogs = HashMap<String, AdapterCatalogEntry>;
 
 /// The managed state: the resolved sidecar path plus the in-process write
@@ -292,7 +292,7 @@ mod tests {
                     current_thought_level: None,
                     model_config_id: None,
                     thought_level_config_id: None,
-                    adapter_id: Some("claude-code".to_string()),
+                    adapter_id: Some("gemini-cli".to_string()),
                 },
             },
             probed_at_millis: at,
@@ -344,20 +344,20 @@ mod tests {
     #[test]
     fn store_entry_round_trips() {
         let (_dir, store) = temp_store();
-        store.store_entry("claude-code", acp_entry("opus", 1_000));
+        store.store_entry("gemini-cli", acp_entry("opus", 1_000));
         let loaded = store.load();
-        assert_eq!(loaded.get("claude-code"), Some(&acp_entry("opus", 1_000)));
+        assert_eq!(loaded.get("gemini-cli"), Some(&acp_entry("opus", 1_000)));
     }
 
     #[test]
     fn retest_overwrites_only_that_adapter() {
         let (_dir, store) = temp_store();
-        store.store_entry("claude-code", acp_entry("opus", 1_000));
+        store.store_entry("gemini-cli", acp_entry("opus", 1_000));
         store.store_entry("codex", codex_entry(2_000));
-        // Re-probe claude-code: only its slot moves.
-        store.store_entry("claude-code", acp_entry("sonnet", 3_000));
+        // Re-probe gemini-cli: only its slot moves.
+        store.store_entry("gemini-cli", acp_entry("sonnet", 3_000));
         let loaded = store.load();
-        assert_eq!(loaded.get("claude-code"), Some(&acp_entry("sonnet", 3_000)));
+        assert_eq!(loaded.get("gemini-cli"), Some(&acp_entry("sonnet", 3_000)));
         assert_eq!(loaded.get("codex"), Some(&codex_entry(2_000)));
         assert_eq!(loaded.len(), 2);
     }
@@ -373,7 +373,7 @@ mod tests {
         ));
         let a = std::thread::spawn({
             let store = store.clone();
-            move || store.store_entry("claude-code", acp_entry("opus", 1_000))
+            move || store.store_entry("gemini-cli", acp_entry("opus", 1_000))
         });
         let b = std::thread::spawn({
             let store = store.clone();
@@ -383,14 +383,14 @@ mod tests {
         b.join().expect("thread b");
         let loaded = store.load();
         assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded.get("claude-code"), Some(&acp_entry("opus", 1_000)));
+        assert_eq!(loaded.get("gemini-cli"), Some(&acp_entry("opus", 1_000)));
         assert_eq!(loaded.get("codex"), Some(&codex_entry(2_000)));
     }
 
     #[test]
     fn one_bad_entry_drops_others_survive() {
         let (_dir, store) = temp_store();
-        store.store_entry("claude-code", acp_entry("opus", 1_000));
+        store.store_entry("gemini-cli", acp_entry("opus", 1_000));
         // Hand-corrupt one entry's shape, leaving the other intact.
         let raw = std::fs::read_to_string(store.path()).expect("read");
         let mut doc: serde_json::Value = serde_json::from_str(&raw).expect("valid json doc");
@@ -398,7 +398,7 @@ mod tests {
         std::fs::write(store.path(), serde_json::to_string(&doc).unwrap()).expect("write");
         let loaded = store.load();
         assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded.get("claude-code"), Some(&acp_entry("opus", 1_000)));
+        assert_eq!(loaded.get("gemini-cli"), Some(&acp_entry("opus", 1_000)));
     }
 
     #[test]
@@ -456,7 +456,7 @@ mod tests {
     #[test]
     fn mismatched_kind_outcome_pair_drops() {
         let (_dir, store) = temp_store();
-        store.store_entry("claude-code", acp_entry("opus", 1_000));
+        store.store_entry("gemini-cli", acp_entry("opus", 1_000));
         let raw = std::fs::read_to_string(store.path()).expect("read");
         let mut doc: serde_json::Value = serde_json::from_str(&raw).expect("valid json doc");
         doc["codex"] = serde_json::json!({
@@ -467,6 +467,6 @@ mod tests {
         std::fs::write(store.path(), serde_json::to_string(&doc).unwrap()).expect("write");
         let loaded = store.load();
         assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded.get("claude-code"), Some(&acp_entry("opus", 1_000)));
+        assert_eq!(loaded.get("gemini-cli"), Some(&acp_entry("opus", 1_000)));
     }
 }

@@ -1811,7 +1811,7 @@ fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
 /// `round_trips` are ACP-only (the gateway serves tools, it does not produce
 /// a turn termination).
 ///
-/// TODO(issue #299 E2E): a real claude-code drive may prefix MCP tool names
+/// TODO(issue #299 E2E): a real ACP CLI drive (e.g. gemini-cli) may prefix MCP tool names
 /// (e.g. `mcp__<server>__explore`) in its `session/update` notifications, in
 /// which case the `builtin_metadata` filter would let a gateway-routed call
 /// through as "non-gateway" and double it. The slice 9c integration test

@@ -2,11 +2,11 @@
 
 ## Decision
 
-**内置运行时 = Rust 原生 agent 循环**，驱动现有 Provider 层（ADR-0064 anthropic/openai 协议，用各协议**原生 tool-calling**）；key 永不出进程（ADR-0029 不变量完整）。**外部运行时 = 数据定义适配器引擎**：每 CLI 一个纯数据定义（bin / argv builder / 流格式 / MCP 注入方式），通用引擎统一做检测 / 启动 / 解析；传输**优先 ACP**（stdio JSON-RPC；MCP server 描述符经 `session/new` 注入；`session/update` 的 tool_call 系列天然映射执行轨迹）；**每轮恒 `session/new` + 喂全量窗口化上下文**，不持 upstream session handle（运行时无状态，ADR-0076）。v1 验证 ACP 三件套 claude-code / gemini-cli / codex；qwen-code 列二批。**执行级兜底**：步数上限（默认 24）+ 墙钟 watchdog（默认 120s，对齐 ADR-0021 `REQUEST_TIMEOUT`），触顶该轮 failed/cancelled；cancel = 整轮中止（内置：interrupt token 扩至循环；外部：ACP `session/cancel` + SIGTERM fallback）。
+**内置运行时 = Rust 原生 agent 循环**，驱动现有 Provider 层（ADR-0064 anthropic/openai 协议，用各协议**原生 tool-calling**）；key 永不出进程（ADR-0029 不变量完整）。**外部运行时 = 数据定义适配器引擎**：每 CLI 一个纯数据定义（bin / argv builder / 流格式 / MCP 注入方式），通用引擎统一做检测 / 启动 / 解析；传输**优先 ACP**（stdio JSON-RPC；MCP server 描述符经 `session/new` 注入；`session/update` 的 tool_call 系列天然映射执行轨迹）；**每轮恒 `session/new` + 喂全量窗口化上下文**，不持 upstream session handle（运行时无状态，ADR-0076）。v1 验证集初版为 claude-code / gemini-cli / codex（qwen-code 列二批）；经实测校准后 ACP 适配器集合为 gemini-cli / qwen-code / opencode（claude-code 与 codex 均无原生 ACP 模式，见 Consequences 校准条目）。**执行级兜底**：步数上限（默认 24）+ 墙钟 watchdog（默认 120s，对齐 ADR-0021 `REQUEST_TIMEOUT`），触顶该轮 failed/cancelled；cancel = 整轮中止（内置：interrupt token 扩至循环；外部：ACP `session/cancel` + SIGTERM fallback）。
 
 ## Context
 
-ADR-0076 定双运行时；本 ADR 定两运行时的实现形态。内置循环两候选：Rust 自写，或拉起第三方 agent 进程注入 BYOK 配置（key 经环境变量过界、循环借壳）。外部运行时两候选：per-CLI 定制协议 plumbing，或数据定义适配器引擎 + 标准传输优先。ACP（stdio JSON-RPC 开放标准）自 2026 年起被 claude-code / gemini-cli / codex / copilot 等原生支持，MCP 注入与工具调用通知在协议内。
+ADR-0076 定双运行时；本 ADR 定两运行时的实现形态。内置循环两候选：Rust 自写，或拉起第三方 agent 进程注入 BYOK 配置（key 经环境变量过界、循环借壳）。外部运行时两候选：per-CLI 定制协议 plumbing，或数据定义适配器引擎 + 标准传输优先。ACP（stdio JSON-RPC 开放标准）被 gemini-cli 等 CLI 原生支持（初版所列 claude-code / codex 经实测均无原生 ACP 模式，见 Consequences 校准条目），MCP 注入与工具调用通知在协议内。
 
 ## Why
 
@@ -32,3 +32,4 @@ ADR-0076 定双运行时；本 ADR 定两运行时的实现形态。内置循环
 - **key 分发边界**：外部运行时用其自身鉴权（其自有登录 / 配置），app 的 Profile key 不注入外部运行时进程。
 - **未决（实施期）**：适配器引擎模块边界、桥接进程形态、ACP `session/request_permission` 与网关审批对应（自动选取允许项，无可选项 = fail-fast）。
 - **被 ADR-0095 校准**：wire 类型扩展（`NewSessionResult.config_options`）与 `AdapterSpec` 新增字段（`model_arg` / `effort_config_key`）均为纯数据增量；ACP 路径握手后追加的 `session/set_config_option` 是握手扩展步骤，不引入 upstream session 状态——「每轮恒 `session/new` + 不持 upstream session handle」的无状态语义不变。
+- **被 ADR-0094 / ADR-0097 校准**：初版 v1 三件套中的 codex 经实测无原生 ACP 模式，改经原生 `exec --json` JSON 事件流直连（ADR-0094）；claude-code 的 `--acp` flag 经实测不存在，自 ACP 适配器集合移除，改经 stream-json 直连接入（ADR-0097）。ACP 适配器集合现为 gemini-cli / qwen-code / opencode；「传输优先 ACP」由 ADR-0094 的流格式数据字段分派取代，零 per-CLI 代码不变量不变。

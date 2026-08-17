@@ -1205,12 +1205,12 @@ mod tests {
             "a fresh session defaults to the built-in runtime"
         );
 
-        let spec = crate::runtime::acp::adapter::claude_code();
+        let spec = crate::runtime::acp::adapter::gemini_cli();
         handle.set_runtime_choice(Some(spec));
         let chosen = handle
             .runtime_choice()
             .expect("an external choice round-trips");
-        assert_eq!(chosen.id.as_str(), "claude-code");
+        assert_eq!(chosen.id.as_str(), "gemini-cli");
 
         handle.reset_runtime_choice();
         assert!(
@@ -1256,7 +1256,7 @@ mod tests {
             current_thought_level: None,
             model_config_id: Some("model".into()),
             thought_level_config_id: Some("reasoning_effort".into()),
-            adapter_id: Some("claude-code".into()),
+            adapter_id: Some("gemini-cli".into()),
         };
         handle.set_cached_discovered(catalog.clone());
         assert_eq!(handle.cached_discovered(), Some(catalog.clone()));

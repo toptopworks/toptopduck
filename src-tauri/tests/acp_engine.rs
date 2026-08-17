@@ -6,7 +6,7 @@
 //! stop_reason ceilings, cooperative cancel, permission handshake, runaway
 //! step-cap trip, and mid-turn crash (EOF). The fake CLI + the engine share
 //! the `wire` types, so this is a faithful ACP v1 stdio round-trip -- the same
-//! path the real claude-code drive will take in slice 9c (manual E2E only, per
+//! path the real gemini-cli drive will take in slice 9c (manual E2E only, per
 //! the PRD's testing decisions; real-CLI E2E verification is tracked by #342).
 
 use std::path::PathBuf;
@@ -15,9 +15,7 @@ use std::sync::Arc;
 use toptopduck_lib::approval::{ApprovalResponse, ApprovalSink, ApprovalState, AuthMode};
 use toptopduck_lib::cancel::CancelToken;
 use toptopduck_lib::model::TurnPhase;
-use toptopduck_lib::runtime::acp::adapter::{
-    claude_code, codex, gemini_cli, opencode, qwen_code, AdapterSpec,
-};
+use toptopduck_lib::runtime::acp::adapter::{codex, gemini_cli, opencode, qwen_code, AdapterSpec};
 use toptopduck_lib::runtime::acp::engine::{AcpEngine, AcpTurnInput};
 use toptopduck_lib::runtime::acp::wire::{ContentBlock, McpServer};
 use toptopduck_lib::session::agent_loop::{LoopOutcome, Termination};
@@ -48,7 +46,7 @@ fn input() -> AcpTurnInput {
 /// Build an engine with a short wall-clock (so a stuck scenario fails the test
 /// fast, not the 120s production default) + a tunable step cap.
 fn engine(cancel: Arc<CancelToken>, step_cap: u32) -> AcpEngine {
-    AcpEngine::new(claude_code(), cancel)
+    AcpEngine::new(gemini_cli(), cancel)
         .with_caps(step_cap, Some(std::time::Duration::from_secs(10)))
 }
 
@@ -104,12 +102,12 @@ fn run_with_spec(
     (outcome, phases, start)
 }
 
-/// The default scenario runner: claude-code (the v1 reference spec). Most
+/// The default scenario runner: gemini-cli (the v1 reference spec). Most
 /// scenarios assert behavior independent of which spec drives them, so they go
 /// through here; the isomorphism test calls [`run_with_spec`] directly to
 /// exercise all v1 specs.
 fn run(scenario: &str, step_cap: u32) -> (LoopOutcome, Vec<TurnPhase>) {
-    let (outcome, phases, _) = run_with_spec(&claude_code(), scenario, step_cap);
+    let (outcome, phases, _) = run_with_spec(&gemini_cli(), scenario, step_cap);
     (outcome, phases)
 }
 
@@ -213,7 +211,7 @@ fn refusal_maps_to_text_outcome() {
 /// deterministically Cancelled (no race with the success response).
 #[test]
 fn step_cap_overflow_trips_cancel_deterministically() {
-    let (outcome, _, start) = run_with_spec(&claude_code(), "step_cap_overflow", 5);
+    let (outcome, _, start) = run_with_spec(&gemini_cli(), "step_cap_overflow", 5);
     assert!(
         matches!(outcome.termination, Termination::Cancelled),
         "step-cap trip + cooperative fixture -> Cancelled: {:?}",
@@ -232,7 +230,7 @@ fn step_cap_overflow_trips_cancel_deterministically() {
 #[test]
 fn wall_clock_watchdog_fires_cancel_on_a_stuck_agent() {
     let cancel = Arc::new(CancelToken::new());
-    let eng = AcpEngine::new(claude_code(), Arc::clone(&cancel))
+    let eng = AcpEngine::new(gemini_cli(), Arc::clone(&cancel))
         .with_caps(24, Some(std::time::Duration::from_millis(200)));
     let approval = ApprovalState::new();
     let sink = RecordingSink::default();
@@ -419,21 +417,21 @@ fn user_cancel_aborts_the_whole_turn() {
 
 /// The engine takes the adapter spec as data and never names the CLI: the same
 /// engine drives any spec. Smoke: a text_reply run completes (the spec's argv
-/// is what the spawn used; the fixture tolerates the `--acp` arg).
+/// is what the spawn used; the fixture tolerates the `--experimental-acp` arg).
 #[test]
-fn engine_runs_against_the_claude_code_spec() {
-    let spec: AdapterSpec = claude_code();
-    assert_eq!(spec.adapter_id().as_str(), "claude-code");
+fn engine_runs_against_the_gemini_cli_spec() {
+    let spec: AdapterSpec = gemini_cli();
+    assert_eq!(spec.adapter_id().as_str(), "gemini-cli");
     let (outcome, _) = run("text_reply", 24);
     assert!(matches!(outcome.termination, Termination::Text(_)));
 }
 
 /// #300 structural coverage of AC "the engine gains no per-CLI branch": drive
 /// the same text-reply (success path) and the same step-cap overflow (the
-/// step-cap cancel fallback path) through each of the four ACP-format specs
-/// (claude-code, gemini-cli, qwen-code, opencode) and assert identical
+/// step-cap cancel fallback path) through each of the three ACP-format specs
+/// (gemini-cli, qwen-code, opencode) and assert identical
 /// termination + phase emission. The fixture ignores argv, so the per-spec
-/// launch shapes (claude-code `--acp`, gemini-cli `--experimental-acp`,
+/// launch shapes (gemini-cli `--experimental-acp`,
 /// qwen-code `--acp`, opencode `acp` subcommand) all spawn + pump
 /// through the SAME engine entry point. Combined with the
 /// engine's spec-consumption surface being only `argv` (spawn) + `id` (error
@@ -449,11 +447,11 @@ fn engine_runs_against_the_claude_code_spec() {
 /// very dimension (argv) a per-CLI branch would consume, so it cannot observe
 /// real-CLI divergence by design; that coverage is manual E2E per the PRD. The
 /// wall-clock fallback path across specs is also not exercised here (only the
-/// claude-code `wall_clock_watchdog_*` test drives it). The real-CLI E2E for
+/// gemini-cli `wall_clock_watchdog_*` test drives it). The real-CLI E2E for
 /// AC #1-3 is tracked by #342.
 #[test]
 fn engine_outcome_is_identical_across_all_v1_specs() {
-    let specs = [claude_code(), gemini_cli(), qwen_code(), opencode()];
+    let specs = [gemini_cli(), qwen_code(), opencode()];
     for spec in &specs {
         // Success path: a clean text reply -> Text for every spec, and the
         // Thinking phase fires before the prompt for every spec (the phase
@@ -494,13 +492,13 @@ fn engine_outcome_is_identical_across_all_v1_specs() {
     }
 }
 
-/// ADR-0094: the four ACP-format adapters carry `StreamFormat::Acp`. Codex
+/// ADR-0094: the three ACP-format adapters carry `StreamFormat::Acp`. Codex
 /// migrated to `JsonEventStream` (native `exec --json`); the codex spec is
 /// asserted separately below.
 #[test]
 fn acp_adapters_are_acp_format() {
     use toptopduck_lib::runtime::acp::adapter::StreamFormat;
-    let specs = [claude_code(), gemini_cli(), qwen_code(), opencode()];
+    let specs = [gemini_cli(), qwen_code(), opencode()];
     for spec in &specs {
         assert_eq!(
             spec.stream_format,
@@ -541,7 +539,7 @@ fn codex_adapter_is_native_exec_json_event_stream() {
 /// the LoopOutcome.
 #[test]
 fn acp_turn_returns_discovered_runtime_catalog() {
-    let (outcome, _, _) = run_with_spec(&claude_code(), "text_reply", 24);
+    let (outcome, _, _) = run_with_spec(&gemini_cli(), "text_reply", 24);
     let d = outcome
         .discovered_runtime
         .as_ref()
@@ -558,8 +556,8 @@ fn acp_turn_returns_discovered_runtime_catalog() {
     assert_eq!(d.current_thought_level.as_deref(), Some("medium"));
     // Issue #529: the engine stamps the producing adapter onto the catalog
     // (provenance for the frontend's stale-cache detection across a runtime
-    // switch). The fake fixture runs under the claude-code spec.
-    assert_eq!(d.adapter_id.as_deref(), Some("claude-code"));
+    // switch). The fake fixture runs under the gemini-cli spec.
+    assert_eq!(d.adapter_id.as_deref(), Some("gemini-cli"));
 }
 
 /// A handshake failure exits with `discovered_runtime: None` (discovery only
@@ -567,7 +565,7 @@ fn acp_turn_returns_discovered_runtime_catalog() {
 #[test]
 fn acp_turn_handshake_failure_carries_no_discovery() {
     let cancel = Arc::new(CancelToken::new());
-    let eng = AcpEngine::new(claude_code(), cancel);
+    let eng = AcpEngine::new(gemini_cli(), cancel);
     let approval = ApprovalState::new();
     let sink = RecordingSink::default();
     let outcome = eng.run(
@@ -626,7 +624,7 @@ impl Drop for TraceFile {
 #[test]
 fn acp_turn_injects_model_and_thought_level() {
     let cancel = Arc::new(CancelToken::new());
-    let eng = AcpEngine::new(claude_code(), cancel)
+    let eng = AcpEngine::new(gemini_cli(), cancel)
         .with_caps(24, Some(std::time::Duration::from_secs(10)));
     let approval = ApprovalState::new();
     let sink = RecordingSink::default();
@@ -664,7 +662,7 @@ fn acp_turn_injects_model_and_thought_level() {
 #[test]
 fn acp_turn_set_config_option_rejection_fails_the_turn() {
     let cancel = Arc::new(CancelToken::new());
-    let eng = AcpEngine::new(claude_code(), cancel)
+    let eng = AcpEngine::new(gemini_cli(), cancel)
         .with_caps(24, Some(std::time::Duration::from_secs(10)));
     let approval = ApprovalState::new();
     let sink = RecordingSink::default();

@@ -128,7 +128,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   // Fixture adapters for the Local CLI tab (issue #489). Always mounted, so
   // every test must have the mock resolve.
   const mockAdapters: AdapterEntry[] = [
-    { id: "claude-code", display_name: "claude-code", detected: true, binary_path: "/usr/local/bin/claude", stream_format: "acp" },
+    { id: "qwen-code", display_name: "qwen-code", detected: true, binary_path: "/usr/local/bin/qwen", stream_format: "acp" },
     { id: "gemini-cli", display_name: "gemini-cli", detected: false, binary_path: null, stream_format: "acp" },
   ];
 
