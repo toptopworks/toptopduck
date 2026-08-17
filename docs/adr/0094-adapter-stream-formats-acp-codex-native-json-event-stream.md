@@ -40,3 +40,4 @@ ADR-0081 定外部运行时「传输优先 ACP」——优先非排他，决策�
 - **CONTEXT.md 不变**：流格式是实现概念非领域概念；运行时 / 网关 / 桥接词汇表已足。
 - **未决（实施期）**：事件流到 TurnPhase / TraceEntry / Termination 的完整映射（含 MCP 工具调用事件的实测形态）；stdin 窗口扁平化的分隔符形态；read-only 沙箱在无 OS 级沙箱平台上的实际行为验证；exec 对未信任目录的 trust 检查路径；codex 适配器的 real-CLI 端到端验证（替换既有桥接包形态的验证项）。
 - **被 ADR-0095 延伸**：`StreamFormat` 不仅决定解析器分派，也隐含决定模型发现策略——`Acp` 从每轮握手 `config_options` 提取模型列表与思考强度选项，`JsonEventStream` 无动态发现。
+- **被 ADR-0097 延伸**：流格式集扩为三值，`JsonEventStream` 更名 `CodexEventStream`；claude-code 以 `ClaudeStreamJson` 直连形态接入。

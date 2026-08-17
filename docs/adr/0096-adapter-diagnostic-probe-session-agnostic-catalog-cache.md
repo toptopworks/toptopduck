@@ -56,3 +56,4 @@ codex CLI 官方提供 `codex app-server` 进程接口（JSON-RPC over stdio，�
 - **探测超时与进程清理**：墙钟超时后强制 kill 子进程；探测进程绝不残留（与 turn 路径的 watchdog 语义对齐）。
 - **CONTEXT.md 不变**：「探测」「目录缓存」是实现概念非领域概念；「运行时」「适配器」词汇表已足。
 - **未决（实施期）**：探测墙钟超时具体值（数十秒量级，实测校准）；ACP 握手目录与探测缓存的 UI 展示形态（同面板并列 vs 折叠）；codex 未登录时 `model/list` 的实际失败形态实测。
+- **被 ADR-0097 延伸**：探测语义 per-format 分派新增 `ClaudeStreamJson` 形态——spawn + `control_request{initialize}` 收目录即退（无握手 RPC 链、无 API 调用）。

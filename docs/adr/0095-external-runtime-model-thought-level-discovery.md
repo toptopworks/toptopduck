@@ -51,3 +51,4 @@ ADR-0081 定外部运行时为数据定义适配器引擎，每轮 `session/new`
 - **CONTEXT.md 不变**：模型/思考强度选择是会话级配置（同 runtime choice、审批姿态），非领域概念；不引入新领域词汇。
 - **fake fixture 扩展**：ACP fake CLI 需在 `session/new` 响应中返回 `config_options`（含 model + thought_level 项）以驱动发现路径测试。
 - **未决（实施期）**：各 CLI `config_options` 实测形态差异（字段名 / category 命名的兼容性矩阵）；前端选择器 UI 形态与 i18n。
+- **被 ADR-0097 校准与延伸**：发现策略按格式三分化（`ClaudeStreamJson` 的 turn 路径无动态发现，探测通道为 stream-json 控制平面 `initialize`）；注入字段新增 argv 形 `effort_arg` 与 `effort_config_key` 平行。
