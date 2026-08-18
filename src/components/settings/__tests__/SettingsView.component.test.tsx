@@ -8,13 +8,14 @@ import {
   setProfileKey,
   setSessionsDir,
   getSessionsDir,
+  setDefaultRuntime,
   listAdapters,
   rescanAdapters,
 } from "../../../api";
 import type { AppConfig } from "../../../types/app-config";
 import type { AdapterEntry } from "../../../types/runtime";
 import type { SettingsSection } from "../sections";
-import { renderSettings } from "./helpers";
+import { chooseOption, openSelect, renderSettings } from "./helpers";
 
 // SettingsView reaches the per-profile keychain surface (issue #153); mock the
 // IPC functions so the view never hits Tauri. listProviderProfiles feeds the
@@ -30,6 +31,7 @@ vi.mock("../../../api", async (importOriginal) => {
     clearProfileKey: vi.fn(),
     setSessionsDir: vi.fn(),
     getSessionsDir: vi.fn(),
+    setDefaultRuntime: vi.fn(),
     listAdapters: vi.fn(),
     rescanAdapters: vi.fn(),
   };
@@ -158,12 +160,14 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     appConfig = baseConfig,
     onCommitAppConfig = vi.fn<CommitFn>().mockResolvedValue(undefined),
     onSessionsDirChanged = vi.fn(),
+    onDefaultRuntimeChanged = vi.fn(),
     onClose = vi.fn(),
     initialSection = "general",
   }: {
     appConfig?: AppConfig;
     onCommitAppConfig?: Mock<CommitFn>;
     onSessionsDirChanged?: (cfg: AppConfig) => void;
+    onDefaultRuntimeChanged?: (cfg: AppConfig) => void;
     onClose?: () => void;
     initialSection?: SettingsSection;
   } = {}) {
@@ -172,7 +176,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
         appConfig={appConfig}
         onCommitAppConfig={onCommitAppConfig}
         onSessionsDirChanged={onSessionsDirChanged ?? (() => undefined)}
-        onDefaultRuntimeChanged={() => undefined}
+        onDefaultRuntimeChanged={onDefaultRuntimeChanged}
         onClose={onClose}
         initialSection={initialSection}
       />,
@@ -180,17 +184,15 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     return { ...result, onCommitAppConfig, onClose };
   }
 
-  // Radix Select in jsdom: the trigger opens on a primary pointer-down + click;
-  // an option selects on pointer-up + click (the test-setup polyfills stub the
-  // pointer APIs jsdom lacks).
-  function openSelect(combobox: HTMLElement) {
-    fireEvent.pointerDown(combobox, { button: 0, pointerType: "mouse" });
-    fireEvent.click(combobox);
-  }
-  function chooseOption(name: string) {
-    const option = screen.getByRole("option", { name });
-    fireEvent.pointerUp(option, { button: 0, pointerType: "mouse" });
-    fireEvent.click(option);
+  // openSelect / chooseOption (Radix jsdom interaction) live in ./helpers,
+  // shared with the DefaultRuntimeControl + RuntimeSection suites.
+
+  // The runtime pane may carry more than one Save row (profiles + default
+  // runtime); the enabled one is the row under test.
+  function enabledSave(): HTMLButtonElement {
+    return screen.getAllByRole("button", { name: "Save" }).find(
+      (b) => !(b as HTMLButtonElement).disabled,
+    ) as HTMLButtonElement;
   }
 
   // --- General pane: immediate-commit selects (no Save) --------------------
@@ -295,6 +297,63 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
 
     // Once the IPC settles, ESC closes.
     resolveSave(updatedConfig);
+    await new Promise((r) => setTimeout(r, 0));
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  // --- Default runtime row (issue #571) -------------------------------------
+
+  it("a default-runtime Save calls setDefaultRuntime and feeds the returned config through onDefaultRuntimeChanged", async () => {
+    // Pins the SettingsView wiring: the shell callback receives the config
+    // the write IPC returned, through the latestRef-syncing wrapper (same
+    // seam the sessions-dir Browse + Save test pins for its callback).
+    const onDefaultRuntimeChanged = vi.fn();
+    const updatedConfig: AppConfig = {
+      ...baseConfig,
+      default_runtime: { kind: "external", data: "qwen-code" },
+    };
+    vi.mocked(setDefaultRuntime).mockResolvedValue(updatedConfig);
+
+    renderView({ initialSection: "runtime", onDefaultRuntimeChanged });
+    const combobox = await screen.findByRole("combobox", { name: "Default runtime" });
+    await waitFor(() => expect(combobox).toHaveTextContent("Built-in"));
+
+    openSelect(combobox);
+    chooseOption("qwen-code");
+    fireEvent.click(enabledSave());
+
+    await waitFor(() =>
+      expect(vi.mocked(setDefaultRuntime)).toHaveBeenCalledWith({
+        kind: "external",
+        data: "qwen-code",
+      }),
+    );
+    await waitFor(() => expect(onDefaultRuntimeChanged).toHaveBeenCalledWith(updatedConfig));
+  });
+
+  it("ESC is blocked while a default-runtime Save IPC is in flight", async () => {
+    // Pins the defaultRuntime busy-channel registration in the close guard
+    // (ADR-0075): while the write IPC is in flight, ESC must not close.
+    let resolveSave!: (cfg: AppConfig) => void;
+    vi.mocked(setDefaultRuntime).mockImplementation(
+      () => new Promise<AppConfig>((resolve) => { resolveSave = resolve; }),
+    );
+
+    const { onClose } = renderView({ initialSection: "runtime" });
+    const combobox = await screen.findByRole("combobox", { name: "Default runtime" });
+    await waitFor(() => expect(combobox).toHaveTextContent("Built-in"));
+    openSelect(combobox);
+    chooseOption("qwen-code");
+    fireEvent.click(enabledSave());
+    await waitFor(() => expect(vi.mocked(setDefaultRuntime)).toHaveBeenCalled());
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(onClose).not.toHaveBeenCalled();
+
+    // Once the IPC settles, ESC closes.
+    resolveSave({ ...baseConfig, default_runtime: { kind: "external", data: "qwen-code" } });
     await new Promise((r) => setTimeout(r, 0));
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));

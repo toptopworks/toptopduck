@@ -77,21 +77,26 @@ export function DefaultRuntimeControl({
 
   // The shared adapter table (the same cache key the Local CLI tab + composer
   // picker read): a rescan there lands via setQueryData and this control's
-  // option list refreshes inside the same Settings session.
-  const { data: adapterData } = useQuery({
+  // option list refreshes inside the same Settings session. A failed read is
+  // surfaced inline (the Local CLI tab pattern) -- never a silent blank list.
+  const { data: adapterData, isError, error: adapterError } = useQuery({
     queryKey: adapterKeys.all(),
     queryFn: listAdapters,
   });
+  const loadError = isError ? fmtError(adapterError, intl) : null;
   const detected = (adapterData ?? []).filter((a) => a.detected);
 
   const displayed = draft ?? defaultRuntime;
 
-  // A persisted external value whose adapter is currently undetected (CLI
-  // uninstalled). Only possible while the control is untouched (the draft can
-  // never be stale), and only once the table has loaded -- before that the
-  // trigger simply waits for its options, like every adapter-fed surface. An
-  // id absent from the table entirely (retired upstream) falls back to the raw
-  // id as its display name.
+  // A persisted (or drafted) external value whose adapter is currently
+  // undetected (CLI uninstalled). Rendered only once the table has loaded --
+  // before that (pending or failed read) no external option exists and the
+  // trigger falls back to the raw id via SelectValue children below. The
+  // draft is picked from detected rows only, though a rescan can later leave
+  // it undetected; that lands here too, and the backend accepts in-table
+  // undetected ids by design (ADR-0098 Decision 3). An id absent from the
+  // table entirely (retired upstream) falls back to the raw id as its
+  // display name.
   const staleEntry =
     adapterData !== undefined &&
     displayed.kind === "external" &&
@@ -155,7 +160,19 @@ export function DefaultRuntimeControl({
                     defaultMessage: "Default runtime",
                   })}
                 >
-                  <SelectValue />
+                  {/* Fallback text while the table has not loaded (pending or
+                      failed read): the external value has no option to portal
+                      its text from, and Radix suppresses the placeholder for a
+                      non-empty value, so without children the trigger would
+                      render blank. Children presence also suppresses the
+                      selected-item portal (Radix gates it on the value node
+                      having none), so this must stay conditional on exactly
+                      the no-option state. */}
+                  <SelectValue>
+                    {adapterData === undefined && displayed.kind === "external"
+                      ? displayed.data
+                      : undefined}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectGroup>
@@ -211,6 +228,9 @@ export function DefaultRuntimeControl({
         />
       </SettingsCard>
 
+      {loadError && !adapterData && (
+        <p className="settings-error mt-3 text-destructive text-sm">{loadError}</p>
+      )}
       {error && (
         <p className="settings-error mt-3 text-destructive text-sm">{error}</p>
       )}

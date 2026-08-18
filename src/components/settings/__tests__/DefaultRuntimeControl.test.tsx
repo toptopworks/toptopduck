@@ -5,7 +5,7 @@ import { listAdapters, setDefaultRuntime } from "../../../api";
 import type { AppConfig } from "../../../types/app-config";
 import type { AdapterEntry } from "../../../types/runtime";
 import { DefaultRuntimeControl } from "../DefaultRuntimeControl";
-import { renderSettings } from "./helpers";
+import { chooseOption, openSelect, renderSettings } from "./helpers";
 
 // Default runtime control tests (issue #571, ADR-0098 Decision 2/3): the
 // machine-level "default runtime" row at the top of the Runtime pane. Covers
@@ -69,18 +69,8 @@ function renderControl(
   return renderSettings(<DefaultRuntimeControl {...props} />);
 }
 
-// Radix Select in jsdom: the trigger opens on a primary pointer-down + click;
-// an option selects on pointer-up + click (same pattern as the SettingsView
-// tests; test-setup polyfills stub the pointer APIs jsdom lacks).
-function openSelect(combobox: HTMLElement) {
-  fireEvent.pointerDown(combobox, { button: 0, pointerType: "mouse" });
-  fireEvent.click(combobox);
-}
-function chooseOption(name: string) {
-  const option = screen.getByRole("option", { name });
-  fireEvent.pointerUp(option, { button: 0, pointerType: "mouse" });
-  fireEvent.click(option);
-}
+// openSelect / chooseOption (Radix jsdom interaction) live in ./helpers,
+// shared with the SettingsView + RuntimeSection suites.
 
 describe("DefaultRuntimeControl (issue #571, ADR-0098)", () => {
   beforeEach(() => {
@@ -151,6 +141,19 @@ describe("DefaultRuntimeControl (issue #571, ADR-0098)", () => {
     expect(
       screen.queryByRole("option", { name: "codex (Not installed)" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("falls back to the raw id and surfaces the error when the adapter table fails to load", async () => {
+    // The read rejects; the query never resolves to a table (retry off in the
+    // test client), so the persisted external value has no option to portal
+    // its trigger text from. The trigger must fall back to the raw id and the
+    // failed read must be visible -- never a silent blank row.
+    vi.mocked(listAdapters).mockRejectedValue(new Error("adapter IPC lost"));
+    renderControl({ defaultRuntime: { kind: "external", data: "codex" } });
+
+    const combobox = await screen.findByRole("combobox", { name: "Default runtime" });
+    await waitFor(() => expect(combobox).toHaveTextContent("codex"));
+    expect(await screen.findByText("adapter IPC lost")).toBeInTheDocument();
   });
 
   // --- Draft + Save success path ---------------------------------------------
