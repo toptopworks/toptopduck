@@ -101,6 +101,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     shell: { sidebar_collapsed: false, sidebar_grouping: "flat" },
     mcp_servers: { servers: [] },
     sessions_dir: null,
+    default_runtime: { kind: "built_in" },
   };
   const profileKeysDefault = [{ profile_id: "default", has_key: false, keychain_fault: null }];
 

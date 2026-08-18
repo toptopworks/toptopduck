@@ -78,6 +78,25 @@ pub enum Theme {
     Dark,
 }
 
+/// The runtime new sessions + resumes start on (ADR-0098 Decision 2, issue
+/// #569). A machine-level preference like the active provider profile
+/// (ADR-0038 preferences-only model), NOT a last-used hint: switching the
+/// runtime mid-session never writes back. `BuiltIn` is the fresh-install
+/// default; `External` carries the adapter id STRING -- the config outlives
+/// any one build's adapter table, so the id (not the `AdapterSpec`) is what
+/// persists. Adjacently tagged (`kind`/`data`, snake_case), mirroring
+/// `commands::SessionRuntimeChoice`'s wire shape so one frontend type shape
+/// serves both surfaces. Startup RESOLUTION (in `commands`) degrades an
+/// undetected `External` to built-in per-startup WITHOUT rewriting this
+/// field (ADR-0098 Decision 3: environment restored -> auto re-effective).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum DefaultRuntime {
+    #[default]
+    BuiltIn,
+    External(String),
+}
+
 /// Engine default parameters (ADR-0005 L3). Persisted so a user's preferred
 /// resource ceiling survives a restart. Applying these to the live DuckDB
 /// (threading them through every Session constructor) is a follow-up slice; this
@@ -271,6 +290,13 @@ pub struct AppConfig {
     /// new field is additive (same pattern as `mcp_servers` / `shell`).
     #[serde(default)]
     pub sessions_dir: Option<String>,
+    /// The default runtime new sessions + resumes start on (ADR-0098 Decision
+    /// 2, issue #569). Forward-compat: a pre-#569 file has no
+    /// `default_runtime` key, so serde(default) fills `BuiltIn` rather than
+    /// rejecting the whole document. The format_version is NOT bumped — the
+    /// new field is additive (same pattern as `sessions_dir`).
+    #[serde(default)]
+    pub default_runtime: DefaultRuntime,
 }
 
 impl AppConfig {
@@ -290,6 +316,7 @@ impl AppConfig {
             shell: ShellPrefs::default(),
             mcp_servers: McpServerRegistry::default(),
             sessions_dir: None,
+            default_runtime: DefaultRuntime::default(),
         }
     }
 
@@ -922,5 +949,40 @@ mod tests {
         let json = serde_json::to_string(&cfg).expect("serialize");
         let back: AppConfig = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.sessions_dir.as_deref(), Some("/custom/sessions"));
+    }
+
+    // --- default_runtime (issue #569, ADR-0098 Decision 2) -------------------
+
+    #[test]
+    fn default_runtime_defaults_to_built_in() {
+        // The fresh-install default is the built-in runtime, so a brand-new
+        // install starts exactly as before the field existed (issue #569 AC1).
+        let cfg = AppConfig::defaults();
+        assert_eq!(cfg.default_runtime, DefaultRuntime::BuiltIn);
+    }
+
+    #[test]
+    fn default_runtime_absent_fills_built_in_for_forward_compat() {
+        // A pre-#569 config file has no `default_runtime` key. serde(default)
+        // fills BuiltIn rather than rejecting the document (same forward-compat
+        // pattern as sessions_dir / mcp_servers).
+        let json = r#"{"format_version":2,"theme":"dark"}"#;
+        let cfg: AppConfig = serde_json::from_str(json).expect("partial deserialize");
+        assert_eq!(cfg.default_runtime, DefaultRuntime::BuiltIn);
+    }
+
+    #[test]
+    fn default_runtime_round_trips_external_through_serde() {
+        // The external choice persists verbatim -- including an adapter id that
+        // is not currently detected (ADR-0098 Decision 3: no write-time
+        // validation; degradation is per-startup resolution, never a rewrite).
+        let mut cfg = AppConfig::defaults();
+        cfg.default_runtime = DefaultRuntime::External("gemini-cli".into());
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: AppConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            back.default_runtime,
+            DefaultRuntime::External("gemini-cli".into())
+        );
     }
 }

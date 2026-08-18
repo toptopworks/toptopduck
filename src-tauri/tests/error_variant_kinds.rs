@@ -161,6 +161,7 @@ fn store_command_error() -> Vec<StoreCommandError> {
         StoreCommandError::KeychainFailure(String::new()),
         StoreCommandError::ConfigWriteFailure(String::new()),
         StoreCommandError::NoActiveProfile,
+        StoreCommandError::UnknownAdapter(String::new()),
     ]
 }
 

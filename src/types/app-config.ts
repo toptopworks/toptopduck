@@ -74,6 +74,17 @@ export interface ShellPrefs {
   sidebar_grouping: SidebarGrouping;
 }
 
+// The default runtime new sessions + resumes start on (ADR-0098 Decision 2,
+// issue #569). A machine-level preference like the active provider profile,
+// NOT a last-used hint. Mirrors the Rust `DefaultRuntime` -- a type distinct
+// from `SessionRuntimeChoice`, mirroring the config-vs-session domain split
+// on the Rust side; the two wire shapes are pinned identical in
+// tests/ipc_contract.rs so the unions cannot drift. An `external` id the
+// backend does not currently detect still persists -- startup RESOLUTION
+// degrades to built-in per-startup without rewriting the field
+// (ADR-0098 Decision 3).
+export type DefaultRuntime = { kind: "built_in" } | { kind: "external"; data: string };
+
 // The full app-config document. Lives in the OS app-data directory; all
 // non-secret, so it crosses IPC verbatim (no separate "view" type).
 export interface AppConfig {
@@ -96,4 +107,7 @@ export interface AppConfig {
   // null = runtime-computed default (<Documents>/toptopduck/sessions/).
   // serde(default) fills null for a pre-#452 file.
   sessions_dir: string | null;
+  // The default runtime new sessions + resumes start on (ADR-0098 Decision 2,
+  // issue #569). serde(default) fills built_in for a pre-#569 file.
+  default_runtime: DefaultRuntime;
 }

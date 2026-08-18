@@ -69,7 +69,8 @@
     "IoFailure",
     "KeychainFailure",
     "NoActiveProfile",
-    "OpenConflict"
+    "OpenConflict",
+    "UnknownAdapter"
   ],
   "TurnFailure": [
     "Execute",

@@ -268,6 +268,7 @@ describe("fmtError — StoreCommandError", () => {
         { kind: "NoActiveProfile" },
         "No provider profile is active; create or activate one first",
       ],
+      [{ kind: "UnknownAdapter", data: "no-such-cli" }, "Unknown CLI adapter"],
     ];
     for (const [err, expected] of cases) {
       expect(fmtError(err, intl)).toBe(expected);
@@ -368,6 +369,7 @@ describe("errorDetail", () => {
     expect(errorDetail({ kind: "IoFailure", data: "io-fail" })).toBe("io-fail");
     expect(errorDetail({ kind: "KeychainFailure", data: "kc-fail" })).toBe("kc-fail");
     expect(errorDetail({ kind: "ConfigWriteFailure", data: "cfg-fail" })).toBe("cfg-fail");
+    expect(errorDetail({ kind: "UnknownAdapter", data: "no-such-cli" })).toBe("no-such-cli");
   });
 
   it("returns null for self-contained StoreCommandError kinds (issue #130)", () => {
