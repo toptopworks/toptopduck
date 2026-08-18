@@ -2596,7 +2596,10 @@ pub fn set_session_runtime(
 /// "an undetected runtime is unselectable" signal, applied at startup). The
 /// config field is NEVER rewritten by resolution: a degraded start is
 /// per-startup only, so an environment restore (reinstall) auto re-enables
-/// the external start with no re-configuration.
+/// the external start with no re-configuration. Each degrade leaves a
+/// diagnostic log line (warn for an out-of-table id, info for an
+/// undetected adapter) so a "starts built-in despite my default" report
+/// has something to look at in the log dir.
 fn resolve_default_runtime(
     default: &DefaultRuntime,
     detected: impl Fn(&AdapterSpec) -> bool,
@@ -2604,8 +2607,27 @@ fn resolve_default_runtime(
     match default {
         DefaultRuntime::BuiltIn => None,
         DefaultRuntime::External(id) => {
-            let spec = resolve_adapter(id)?;
-            detected(&spec).then_some(spec)
+            let Some(spec) = resolve_adapter(id) else {
+                // Only a hand-edited config reaches here (set_default_runtime
+                // rejects unknown ids), so warn on the config anomaly.
+                log::warn!(
+                    "default_runtime names an adapter outside the v1 table ({id}); \
+                     degrading this start to the built-in runtime"
+                );
+                return None;
+            };
+            if !detected(&spec) {
+                // The specced common case (ADR-0098 Decision 3): the CLI is
+                // not installed right now. Info, not warn -- the degrade is
+                // per-startup and the field is kept for the environment's
+                // return.
+                log::info!(
+                    "default_runtime names {id}, which is not currently detected; \
+                     degrading this start to the built-in runtime (field kept)"
+                );
+                return None;
+            }
+            Some(spec)
         }
     }
 }
@@ -2626,10 +2648,13 @@ fn startup_runtime_choice(live: &LiveProviderConfig) -> Option<AdapterSpec> {
 /// only serialization is the config write lock inside the read-modify-write.
 /// An `External` id must name a v1 adapter -- the settings control only
 /// offers `list_adapters` ids, so an unknown id is a stale / buggy client,
-/// not a user mistake. The adapter does NOT need to be detected: ADR-0098
-/// Decision 3 declines write-time validation so an absent environment (CLI
-/// uninstalled) never destroys the preference; the startup resolution
-/// degrades per-start instead.
+/// not a user mistake. The check is a picker contract, NOT a model
+/// invariant: `set_app_config` full-document writes intentionally skip it
+/// (the config outlives any one build's adapter table), and startup
+/// resolution covers an out-of-table id by degrading. The adapter does NOT
+/// need to be detected: ADR-0098 Decision 3 declines write-time validation
+/// so an absent environment (CLI uninstalled) never destroys the
+/// preference; the startup resolution degrades per-start instead.
 #[tauri::command]
 pub fn set_default_runtime(
     live: State<'_, LiveProviderConfig>,
@@ -3184,6 +3209,14 @@ mod tests {
             startup_runtime_choice(&live),
             None,
             "an id outside the v1 table degrades to built-in at startup"
+        );
+        // AC3's field-unchanged clause as an observable assertion, not just
+        // the &DefaultRuntime type shape: the degrade never rewrote the
+        // config (ADR-0098 Decision 3).
+        assert_eq!(
+            live.load().default_runtime,
+            DefaultRuntime::External("no-such-cli".into()),
+            "resolution never rewrites the config field"
         );
     }
 

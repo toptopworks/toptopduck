@@ -51,6 +51,7 @@ const intl = createIntl({
     "error.store.keychainFailure": "Failed to access the OS keychain",
     "error.store.noActiveProfile": "No provider profile is active; create or activate one first",
     "error.store.openConflict": "This session is currently open; close it first",
+    "error.store.unknownAdapter": "Unknown CLI adapter",
     "error.turn.execute": "Failed to execute the query",
   },
 });

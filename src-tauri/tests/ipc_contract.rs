@@ -379,6 +379,10 @@ fn store_command_error_serializes_adjacently_tagged() {
         &StoreCommandError::NoActiveProfile,
         r#"{"kind":"NoActiveProfile"}"#,
     );
+    assert_wire(
+        &StoreCommandError::UnknownAdapter("no-such-cli".into()),
+        r#"{"kind":"UnknownAdapter","data":"no-such-cli"}"#,
+    );
 }
 
 #[test]
