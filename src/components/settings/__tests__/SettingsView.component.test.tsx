@@ -54,12 +54,14 @@ function SettingsViewHarness({
   appConfig,
   onCommitAppConfig,
   onSessionsDirChanged,
+  onDefaultRuntimeChanged,
   onClose,
   initialSection,
 }: {
   appConfig: AppConfig;
   onCommitAppConfig: Mock<CommitFn>;
   onSessionsDirChanged: (cfg: AppConfig) => void;
+  onDefaultRuntimeChanged: (cfg: AppConfig) => void;
   onClose: () => void;
   initialSection: SettingsSection;
 }) {
@@ -72,6 +74,7 @@ function SettingsViewHarness({
       onSectionChange={setSection}
       onCommitAppConfig={onCommitAppConfig}
       onSessionsDirChanged={onSessionsDirChanged}
+      onDefaultRuntimeChanged={onDefaultRuntimeChanged}
       onClose={onClose}
     />
   );
@@ -169,6 +172,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
         appConfig={appConfig}
         onCommitAppConfig={onCommitAppConfig}
         onSessionsDirChanged={onSessionsDirChanged ?? (() => undefined)}
+        onDefaultRuntimeChanged={() => undefined}
         onClose={onClose}
         initialSection={initialSection}
       />,
@@ -488,8 +492,12 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalled());
     const committed = onCommitAppConfig.mock.calls[0][0];
     expect(committed.provider.profiles[0].base_url).toBe("https://my-gw.example/v1");
-    // Edit mode has no Save button.
-    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+    // Endpoint edit mode has no Save button of its own (commit-on-blur). The
+    // only Save on this pane is the default-runtime row's (issue #571), which
+    // stays disabled while it has no draft -- so no enabled Save is present.
+    const saveButtons = screen.getAllByRole("button", { name: "Save" });
+    expect(saveButtons.length).toBeGreaterThan(0);
+    for (const b of saveButtons) expect(b).toBeDisabled();
   });
 
   it("an invalid base URL blocks the blur commit with a validation error", async () => {

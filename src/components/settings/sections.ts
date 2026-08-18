@@ -33,8 +33,9 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSection> = [
 /** The pane IPC channels whose in-flight state blocks the settings close
  *  guard (ADR-0075): each is owned by a pane child (key / test by the
  *  Profiles pane's field IPCs, sessionsDir by General, probe by the local
- *  CLI tab's adapter probe) and mirrored up through a single reporter. */
-export type IpcChannel = "key" | "test" | "sessionsDir" | "probe";
+ *  CLI tab's adapter probe, defaultRuntime by the default-runtime control's
+ *  Save, issue #571) and mirrored up through a single reporter. */
+export type IpcChannel = "key" | "test" | "sessionsDir" | "probe" | "defaultRuntime";
 
 /** Reports one channel's busy transition. Panes declare a narrower channel
  *  set than IpcChannel (e.g. Profiles: "key" | "test") so the contract stays

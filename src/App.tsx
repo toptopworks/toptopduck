@@ -234,6 +234,17 @@ export default function App() {
     [replaceAppConfig, refreshSessions],
   );
 
+  // Default runtime change callback (issue #571): the setDefaultRuntime IPC
+  // persists + returns the updated config; sync local state only. No sidebar
+  // re-scan -- a machine-level runtime preference does not move session files
+  // (contrast handleSessionsDirChanged).
+  const handleDefaultRuntimeChanged = useCallback(
+    (cfg: AppConfig) => {
+      replaceAppConfig(cfg);
+    },
+    [replaceAppConfig],
+  );
+
   // The tiered-approval side channel (ADR-0083, issue #297) is owned here at
   // the shell root: ONE listener pair feeds the per-session entry map that
   // BOTH the SessionPane of a suspended turn (in-flow approval cards) and the
@@ -827,6 +838,7 @@ export default function App() {
                     // write on a caught reject.
                     onCommitAppConfig={(cfg) => commitAppConfig(cfg)}
                     onSessionsDirChanged={handleSessionsDirChanged}
+                    onDefaultRuntimeChanged={handleDefaultRuntimeChanged}
                     onClose={() => {
                       setSettingsView({ open: false });
                       setLiveSettingsSection("general");
