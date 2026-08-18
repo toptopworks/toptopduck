@@ -126,6 +126,12 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     { profile_id: "second", has_key: false, keychain_fault: null },
   ];
 
+  // ADR-0098 Decision 1: the zero-profile state is a legal persisted posture.
+  const zeroProfileConfig: AppConfig = {
+    ...baseConfig,
+    provider: { profiles: [], active_profile: null },
+  };
+
   // Fixture adapters for the Local CLI tab (issue #489). Always mounted, so
   // every test must have the mock resolve.
   const mockAdapters: AdapterEntry[] = [
@@ -511,7 +517,37 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     expect(committed.provider.profiles[1].protocol).toBe("anthropic");
   });
 
-  it("delete confirms then commits immediately; last profile is guarded", async () => {
+  it("zero profiles: empty state shows, New profile prefills defaults, Create commits 0 → 1 (issue #570)", async () => {
+    const { onCommitAppConfig } = renderView({ appConfig: zeroProfileConfig });
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
+    // Empty state (not an empty list), and no misleading "select a profile on
+    // the left" prompt while there is nothing to select.
+    expect(
+      await screen.findByText("No profiles yet. Click “New profile” to add one."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Select a profile on the left to edit it, or create a new one."),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "New profile" }));
+    // The add form prefills the interaction-layer defaults (anthropic + the
+    // direct endpoint + the default model, ADR-0098 Decision 1 -- prefill is
+    // UI-layer only; the store never seeds a skeleton).
+    expect(
+      ((await screen.findByLabelText("Base URL")) as HTMLInputElement).value,
+    ).toBe("https://api.anthropic.com");
+    expect(
+      ((screen.getByLabelText("Model")) as HTMLInputElement).value,
+    ).toBe("claude-sonnet-4-6");
+    fireEvent.click(screen.getByRole("button", { name: "Create profile" }));
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalled());
+    const committed = onCommitAppConfig.mock.calls[0][0];
+    expect(committed.provider.profiles).toHaveLength(1);
+    expect(committed.provider.profiles[0].protocol).toBe("anthropic");
+    expect(committed.provider.profiles[0].base_url).toBe("https://api.anthropic.com");
+    expect(committed.provider.profiles[0].model).toBe("claude-sonnet-4-6");
+  });
+
+  it("delete confirms then commits immediately", async () => {
     vi.mocked(listProviderProfiles).mockResolvedValue(twoProfileKeys);
     const { onCommitAppConfig } = renderView({ appConfig: twoProfileConfig });
     fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
@@ -550,11 +586,21 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     expect(committed.provider.active_profile).toBe("second");
   });
 
-  it("the last profile's delete button is disabled", async () => {
-    renderView();
+  it("the last profile's delete is enabled; deleting to zero commits an empty set (ADR-0098)", async () => {
+    // Zero profiles is a legal persisted state, so the last-profile delete
+    // guard is gone (ADR-0098 Decision 1): the write lands profiles: [] with
+    // a null active pointer -- self-consistent, no dangling id.
+    const { onCommitAppConfig } = renderView();
     fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
     await screen.findAllByText("Anthropic");
-    expect(screen.getByRole("button", { name: "Delete" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Delete" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalled());
+    const committed = onCommitAppConfig.mock.calls[0][0];
+    expect(committed.provider.profiles).toHaveLength(0);
+    expect(committed.provider.active_profile).toBeNull();
   });
 
   it("set-active commits immediately and refreshes key status", async () => {

@@ -212,6 +212,51 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
     ]);
   });
 
+  it("renders the not-configured state when the profile set is empty (issue #570, ADR-0098)", async () => {
+    // Zero profiles is a legal persisted state: the built-in readout says
+    // "Not configured" (never "Unnamed profile"), the profile select holds a
+    // disabled placeholder, and the key-missing hint is replaced by the
+    // zero-profile guidance (the plain no-key display stays for the
+    // profiles-exist-but-key-missing case).
+    renderPicker(
+      <ComposerProviderPicker
+        sessionId="sess-1"
+        provider={{ profiles: [], active_profile: null }}
+        onSwitchActive={vi.fn()}
+        onSwitchModel={vi.fn()}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Runtime: Not configured" }),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Runtime: Not configured" }),
+    );
+    expect(await screen.findByText("Built-in")).toBeInTheDocument();
+    // The select is disabled with a single placeholder option -- there is
+    // nothing to switch and no profile name to show.
+    const select = screen.getByLabelText("Profile") as HTMLSelectElement;
+    expect(select).toBeDisabled();
+    expect(select.value).toBe("");
+    expect(
+      screen.getByRole("option", { name: "Not configured" }),
+    ).toBeInTheDocument();
+    // The model input is disabled too (its commit would be a no-op). Role
+    // query: input[list] maps to combobox, and its wrapping label folds the
+    // hint span into the accessible name, so anchor on the /^Model/ prefix.
+    expect(screen.getByRole("combobox", { name: /^Model/ })).toBeDisabled();
+    // No "this profile" no-key hint (no profile exists); the zero-profile
+    // hint points at Settings instead. The "No key" badge stays (true).
+    expect(screen.getByText("No key")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/No key saved for this profile/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("No access profile yet. Create one in Settings."),
+    ).toBeInTheDocument();
+  });
+
   it("commits active_profile when the provider dropdown changes", async () => {
     const onSwitchActive = vi.fn();
     renderPicker(
