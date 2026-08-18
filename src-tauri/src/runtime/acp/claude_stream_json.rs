@@ -457,11 +457,10 @@ pub(super) fn run_claude_stream_json(
                 // stdout closed before a `result` frame. With accumulated
                 // text, treat it as the answer (honest degrade); without, a
                 // transient failure.
-                termination = Some(if !pump.text.is_empty() {
-                    Termination::Text(std::mem::take(&mut pump.text))
-                } else {
-                    Termination::Transient("claude closed stdout without a result frame".into())
-                });
+                termination = Some(text_or_transient(
+                    &mut pump.text,
+                    "claude closed stdout without a result frame",
+                ));
                 break;
             }
         }
@@ -479,11 +478,7 @@ pub(super) fn run_claude_stream_json(
     super::process::kill_and_reap(&mut child);
 
     let term = termination.unwrap_or_else(|| {
-        if !pump.text.is_empty() {
-            Termination::Text(std::mem::take(&mut pump.text))
-        } else {
-            Termination::Transient("claude turn ended without a result frame".into())
-        }
+        text_or_transient(&mut pump.text, "claude turn ended without a result frame")
     });
 
     // ADR-0097 Decision 5: `system{init}` reports the model this turn
@@ -547,18 +542,17 @@ impl ClaudePump {
             }
             ClaudeEvent::ToolUse { id, name, input } => {
                 self.tool_call_count += 1;
-                let gateway_routed = self
-                    .gateway_prefixes
-                    .iter()
-                    .any(|prefix| name.starts_with(prefix));
-                // The display name strips the gateway prefix (the merged
+                // One prefix scan settles both facts (strip_prefix(p)
+                // .is_some() <=> starts_with(p)): whether the call is
+                // gateway-routed, and the bare display name (the merged
                 // trace's gateway rows carry the bare name; the live phases
                 // must read the same).
-                let bare = self
+                let stripped = self
                     .gateway_prefixes
                     .iter()
-                    .find_map(|prefix| name.strip_prefix(prefix))
-                    .unwrap_or(&name);
+                    .find_map(|prefix| name.strip_prefix(prefix));
+                let gateway_routed = stripped.is_some();
+                let bare = stripped.unwrap_or(name.as_str());
                 let (_, operation_kind, summary) = classify_call(&ToolUse {
                     id: id.clone(),
                     name: bare.to_string(),
@@ -652,6 +646,18 @@ impl ClaudePump {
         for row in std::mem::take(&mut self.pending) {
             self.finalize_row(row, true, on_phase);
         }
+    }
+}
+
+/// The turn's closing shape when no `result` frame settled it: accumulated
+/// stream text becomes the answer (the honest degrade); without any, a
+/// transient failure carrying `message`. Shared by the EOF path and the
+/// post-pump fallback.
+fn text_or_transient(text: &mut String, message: &str) -> Termination {
+    if !text.is_empty() {
+        Termination::Text(std::mem::take(text))
+    } else {
+        Termination::Transient(message.to_string())
     }
 }
 
