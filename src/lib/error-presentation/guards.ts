@@ -213,6 +213,7 @@ export function isStoreCommandError(e: unknown): e is StoreCommandError {
     case "IoFailure":
     case "KeychainFailure":
     case "ConfigWriteFailure":
+    case "UnknownAdapter":
       return typeof (e as { data?: unknown }).data === "string";
     case "NoActiveProfile":
       return true;

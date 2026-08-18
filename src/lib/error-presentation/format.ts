@@ -183,6 +183,11 @@ function formatStoreCommandError(e: StoreCommandError, intl: IntlShape): string 
         id: "error.store.noActiveProfile",
         defaultMessage: "No provider profile is active; create or activate one first",
       });
+    case "UnknownAdapter":
+      return intl.formatMessage({
+        id: "error.store.unknownAdapter",
+        defaultMessage: "Unknown CLI adapter",
+      });
     default: {
       const unhandled: never = e;
       throw new Error(`unhandled StoreCommandError kind: ${JSON.stringify(unhandled)}`);
@@ -487,12 +492,13 @@ export function errorDetail(e: unknown): string | null {
     // The three failure variants carry the English technical detail for the
     // fold; OpenConflict / BlankName / NoActiveProfile are self-contained (the
     // message already names the refusal). DestinationExists carries the path
-    // for the fold.
+    // and UnknownAdapter the offending adapter id for the fold.
     if (
       e.kind === "DestinationExists" ||
       e.kind === "IoFailure" ||
       e.kind === "KeychainFailure" ||
-      e.kind === "ConfigWriteFailure"
+      e.kind === "ConfigWriteFailure" ||
+      e.kind === "UnknownAdapter"
     ) {
       return e.data;
     }

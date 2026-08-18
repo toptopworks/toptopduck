@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use tauri::{Emitter, Manager, State};
 
-use crate::app_config::AppConfig;
+use crate::app_config::{AppConfig, DefaultRuntime};
 use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink, AuthMode, ToolKey};
 use crate::cancel::CancelToken;
 use crate::mcp::config::{McpServerConfig, McpServerId, McpTransport};
@@ -120,6 +120,13 @@ pub enum StoreCommandError {
     /// [`KeychainFailure`]; the remedy is creating/activating a profile.
     #[error("no active provider profile to write the key for")]
     NoActiveProfile,
+    /// A `set_default_runtime` call named an adapter id outside the v1 adapter
+    /// table (issue #569, ADR-0098 Decision 2). A client bug / stale picker,
+    /// not a user mistake -- the settings control only offers `list_adapters`
+    /// ids. The app-config was never touched. Carries the offending id for
+    /// the technical-details fold.
+    #[error("unknown adapter id: {0}")]
+    UnknownAdapter(String),
 }
 
 /// Reject a mutating command while THIS session is resuming (ADR-0053, made
@@ -187,6 +194,13 @@ pub fn create_session(
     // before that every turn refuses honestly as not-wired.
     let provider = Box::new(crate::LiveProvider::new(live.inner().clone()));
     let id = store.create(cancel, provider)?;
+    // ADR-0098 Decision 2 (issue #569): a fresh session starts on the
+    // RESOLVED default runtime, not the hardcoded built-in -- the same
+    // resolution resume falls back to (`startup_runtime_choice`), so both
+    // startup points share one degrade rule (undetected default -> built-in
+    // for this session only, config field untouched).
+    let startup = startup_runtime_choice(live.inner());
+    store.get(&id)?.set_runtime_choice(startup);
     // ADR-0089: per-session directory `{sessions_root}/{uuid}/session.duck`.
     // The UUID directory name is the stable identity; session.duck is the
     // fixed recipe filename.
@@ -1934,6 +1948,12 @@ pub async fn open_duck(
     let app_for_cb = app.clone();
     let sid = id.clone();
     let sessions_root_path = sessions_root.path();
+    // ADR-0098 Decision 2 (issue #569): the resume reset's fallback is the
+    // RESOLVED default runtime, replacing the hardcoded built-in. Resolved
+    // BEFORE the swap closure (the State handle must not cross into the
+    // 'static blocking task; the resolved spec is plain data) so the reset
+    // batch below stays pure handle mutations.
+    let startup = startup_runtime_choice(live.inner());
     let inner = tauri::async_runtime::spawn_blocking(move || {
         let mut new_session = Session::open_duck(
             &path,
@@ -2015,12 +2035,13 @@ pub async fn open_duck(
         // resumed session starts at the default empty set -- the user re-
         // enables servers explicitly, mirroring how trust resets (ADR-0080).
         handle_for_task.reset_mcp_enablement();
-        // Issue #353: reset the per-session runtime choice alongside the
-        // approval posture + MCP enablement. The runtime is a session-level
-        // assembly posture (not in the recipe / app-config), so a resumed
-        // session starts on the built-in default -- the user re-picks an
-        // external runtime explicitly (the ADR-0080 reset lineage).
-        handle_for_task.reset_runtime_choice();
+        // Issue #353 / ADR-0098 Decision 2 (issue #569): reset the per-session
+        // runtime choice alongside the approval posture + MCP enablement. The
+        // runtime is a session-level assembly posture (not in the recipe /
+        // app-config), so it must not survive a resume -- but the fallback is
+        // now the RESOLVED default runtime instead of the hardcoded built-in:
+        // a zero-profile user whose default is a detected CLI resumes on it.
+        handle_for_task.reset_runtime_choice(startup);
         // ADR-0095 Decision 6: restore the model config AFTER the reset batch
         // (the restored values win over any stale pre-resume state).
         handle_for_task.restore_runtime_model_config(
@@ -2560,6 +2581,94 @@ pub fn set_session_runtime(
     Ok(())
 }
 
+// --- Default runtime + startup resolution (ADR-0098 Decision 2/3, #569) -----
+
+/// Resolve the app-config `default_runtime` (ADR-0098 Decision 2/3, issue
+/// #569) onto the session-handle storage form (`None` = built-in) for ONE
+/// startup -- a fresh session's creation or a resume's post-reset fallback.
+/// `BuiltIn` passes through as `None`. `External(id)` resolves the id
+/// against the v1 adapter table and degrades to `None` when the adapter is
+/// unknown or not detected -- never to another detected adapter (the user
+/// picked a specific CLI, not "some external runtime"). Detection is
+/// INJECTED so the pure resolution stays PATH-scan-free for tests; the
+/// command path ([`startup_runtime_choice`]) injects the same fresh
+/// `detect_adapter` scan the picker's `scan_adapters` uses (the ADR-0092
+/// "an undetected runtime is unselectable" signal, applied at startup). The
+/// config field is NEVER rewritten by resolution: a degraded start is
+/// per-startup only, so an environment restore (reinstall) auto re-enables
+/// the external start with no re-configuration. Each degrade leaves a
+/// diagnostic log line (warn for an out-of-table id, info for an
+/// undetected adapter) so a "starts built-in despite my default" report
+/// has something to look at in the log dir.
+fn resolve_default_runtime(
+    default: &DefaultRuntime,
+    detected: impl Fn(&AdapterSpec) -> bool,
+) -> Option<AdapterSpec> {
+    match default {
+        DefaultRuntime::BuiltIn => None,
+        DefaultRuntime::External(id) => {
+            let Some(spec) = resolve_adapter(id) else {
+                // Only a hand-edited config reaches here (set_default_runtime
+                // rejects unknown ids), so warn on the config anomaly.
+                log::warn!(
+                    "default_runtime names an adapter outside the v1 table ({id}); \
+                     degrading this start to the built-in runtime"
+                );
+                return None;
+            };
+            if !detected(&spec) {
+                // The specced common case (ADR-0098 Decision 3): the CLI is
+                // not installed right now. Info, not warn -- the degrade is
+                // per-startup and the field is kept for the environment's
+                // return.
+                log::info!(
+                    "default_runtime names {id}, which is not currently detected; \
+                     degrading this start to the built-in runtime (field kept)"
+                );
+                return None;
+            }
+            Some(spec)
+        }
+    }
+}
+
+/// The command-path resolution: an honest-degrade app-config read
+/// (lock-light -- [`LiveProviderConfig::load`] takes no lock) + a fresh PATH
+/// scan per candidate adapter. Shared by `create_session` and `open_duck` so
+/// both startup points apply ONE degrade rule.
+fn startup_runtime_choice(live: &LiveProviderConfig) -> Option<AdapterSpec> {
+    resolve_default_runtime(&live.load().default_runtime, |spec| {
+        detect_adapter(spec).is_some()
+    })
+}
+
+/// Set the default runtime new sessions + resumes start on (ADR-0098 Decision
+/// 2, issue #569). Returns the updated AppConfig so the frontend syncs state
+/// without a re-fetch (same shape as `set_sessions_dir`). Lock-light: the
+/// only serialization is the config write lock inside the read-modify-write.
+/// An `External` id must name a v1 adapter -- the settings control only
+/// offers `list_adapters` ids, so an unknown id is a stale / buggy client,
+/// not a user mistake. The check is a picker contract, NOT a model
+/// invariant: `set_app_config` full-document writes intentionally skip it
+/// (the config outlives any one build's adapter table), and startup
+/// resolution covers an out-of-table id by degrading. The adapter does NOT
+/// need to be detected: ADR-0098 Decision 3 declines write-time validation
+/// so an absent environment (CLI uninstalled) never destroys the
+/// preference; the startup resolution degrades per-start instead.
+#[tauri::command]
+pub fn set_default_runtime(
+    live: State<'_, LiveProviderConfig>,
+    runtime: DefaultRuntime,
+) -> Result<AppConfig, StoreCommandError> {
+    if let DefaultRuntime::External(id) = &runtime {
+        if resolve_adapter(id).is_none() {
+            return Err(StoreCommandError::UnknownAdapter(id.clone()));
+        }
+    }
+    live.set_default_runtime(runtime)
+        .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))
+}
+
 // --- External-runtime model + thought level (ADR-0095, issue #527) ---------
 
 /// The wire read shape for the session's external-runtime model config: the
@@ -3004,6 +3113,112 @@ mod tests {
     use super::*;
     use crate::session_store::UNKNOWN_SESSION;
     use crate::CancelToken;
+
+    // --- default runtime startup resolution (issue #569, ADR-0098 D2/D3) ----
+
+    /// A detected-fn keyed by adapter id: the pure-seam stand-in for the PATH
+    /// scan, so the resolution tests never touch process-global state.
+    fn detected_ids<'a>(ids: &'a [&'a str]) -> impl Fn(&AdapterSpec) -> bool + 'a {
+        move |spec| ids.contains(&spec.id.as_str())
+    }
+
+    #[test]
+    fn default_runtime_built_in_resolves_to_none() {
+        // The fresh-install default keeps the pre-#569 start: built-in (None
+        // on the handle). The detected signal is irrelevant for BuiltIn.
+        assert_eq!(
+            resolve_default_runtime(&DefaultRuntime::BuiltIn, detected_ids(&["gemini-cli"])),
+            None
+        );
+    }
+
+    #[test]
+    fn default_runtime_detected_external_resolves_to_that_cli() {
+        // A default naming a DETECTED adapter starts every session on that
+        // exact CLI (issue #569 AC2).
+        let spec = resolve_default_runtime(
+            &DefaultRuntime::External("gemini-cli".into()),
+            detected_ids(&["gemini-cli"]),
+        )
+        .expect("detected default resolves external");
+        assert_eq!(spec.id.as_str(), "gemini-cli");
+    }
+
+    #[test]
+    fn default_runtime_undetected_degrades_field_effective_again_on_reprobe() {
+        // AC3/AC4: an undetected default degrades this start to built-in;
+        // re-detection (the environment restored) makes the very same config
+        // value resolve external again -- the field was never rewritten.
+        let default = DefaultRuntime::External("gemini-cli".into());
+        assert_eq!(
+            resolve_default_runtime(&default, detected_ids(&[])),
+            None,
+            "undetected default degrades to built-in for this start"
+        );
+        let spec = resolve_default_runtime(&default, detected_ids(&["gemini-cli"]))
+            .expect("re-detected default resolves external again");
+        assert_eq!(spec.id.as_str(), "gemini-cli");
+    }
+
+    #[test]
+    fn default_runtime_never_resolves_to_a_different_detected_cli() {
+        // AC4: the default names a SPECIFIC CLI -- a missing one degrades to
+        // built-in, never silently to another detected adapter (here codex is
+        // detected but the default names gemini-cli).
+        assert_eq!(
+            resolve_default_runtime(
+                &DefaultRuntime::External("gemini-cli".into()),
+                detected_ids(&["codex"])
+            ),
+            None
+        );
+        // An id outside the v1 table (hand-edited config) degrades the same
+        // way -- resolution is total, the config field stays as written.
+        assert_eq!(
+            resolve_default_runtime(
+                &DefaultRuntime::External("no-such-cli".into()),
+                detected_ids(&["gemini-cli", "codex"])
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn startup_runtime_choice_reads_the_real_config_and_degrades_unknown_ids() {
+        // The command-path helper through a real config file (the two cases
+        // that are PATH-independent, so the test is deterministic on any
+        // machine): a fresh-install config resolves to built-in regardless of
+        // what is installed, and a hand-edited unknown adapter id degrades
+        // without the PATH scan ever deciding anything. The
+        // detected-external case is environment-bound (gemini-cli may or may
+        // not be on the dev box's PATH) and stays covered by the injected
+        // seam tests above.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live = LiveProviderConfig::new(
+            crate::provider::keychain::KeychainStore::new(),
+            dir.path().join("config.json"),
+        );
+        assert_eq!(
+            startup_runtime_choice(&live),
+            None,
+            "fresh-install config starts built-in (AC1)"
+        );
+        live.set_default_runtime(DefaultRuntime::External("no-such-cli".into()))
+            .expect("the store persists the value verbatim");
+        assert_eq!(
+            startup_runtime_choice(&live),
+            None,
+            "an id outside the v1 table degrades to built-in at startup"
+        );
+        // AC3's field-unchanged clause as an observable assertion, not just
+        // the &DefaultRuntime type shape: the degrade never rewrote the
+        // config (ADR-0098 Decision 3).
+        assert_eq!(
+            live.load().default_runtime,
+            DefaultRuntime::External("no-such-cli".into()),
+            "resolution never rewrites the config field"
+        );
+    }
 
     /// The per-session resume guard rejects a mutating command while THAT
     /// session is resuming. Pin the rejection branch itself (the happy path is

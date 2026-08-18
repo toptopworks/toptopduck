@@ -407,6 +407,7 @@ pub fn run() {
             commands::prepare_import_session,
             commands::set_sessions_dir,
             commands::get_sessions_dir,
+            commands::set_default_runtime,
             commands::open_duck,
             commands::take_persist_error,
             commands::take_pending_conflict,

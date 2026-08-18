@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
-import type { AppConfig } from "./types/app-config";
+import type { AppConfig, DefaultRuntime } from "./types/app-config";
 import type {
   DatasetDescriptor,
   DatasetPrivacy,
@@ -392,6 +392,16 @@ export async function setAppConfig(config: AppConfig): Promise<AppConfig> {
 // caller's next refresh.
 export async function setSessionsDir(path: string | null): Promise<AppConfig> {
   return invoke<AppConfig>("set_sessions_dir", { path });
+}
+
+// Set the default runtime new sessions + resumes start on (ADR-0098 Decision
+// 2, issue #569). Returns the updated AppConfig so the caller syncs state
+// without a re-fetch. An external id must name a `listAdapters` adapter
+// (unknown ids reject -- UnknownAdapter); the adapter does NOT need to be
+// detected: the preference persists and startup resolution degrades
+// per-start (ADR-0098 Decision 3).
+export async function setDefaultRuntime(runtime: DefaultRuntime): Promise<AppConfig> {
+  return invoke<AppConfig>("set_default_runtime", { runtime });
 }
 
 // Read the current sessions directory's resolved path string. Used for the

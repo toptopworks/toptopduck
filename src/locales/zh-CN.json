@@ -124,6 +124,7 @@
   "error.store.keychainFailure": "系统钥匙串访问失败",
   "error.store.noActiveProfile": "当前没有激活的服务商档案，请先创建或激活档案",
   "error.store.openConflict": "该会话已打开，请先关闭后再操作",
+  "error.store.unknownAdapter": "未知的 CLI 适配器",
   "error.turn.execute": "执行查询失败",
   "error.turn.invalidConfig": "提供方配置无效",
   "error.turn.notWired": "未配置 LLM 提供方",

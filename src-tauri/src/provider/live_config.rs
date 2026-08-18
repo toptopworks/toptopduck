@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::app_config::{self, AppConfig, LocalePreference};
+use crate::app_config::{self, AppConfig, DefaultRuntime, LocalePreference};
 use crate::mcp::config::{McpServerConfig, McpServerId};
 use crate::model::{ProfileId, Protocol};
 use crate::provider::keychain::{KeychainStore, ProviderConfigSource};
@@ -386,6 +386,27 @@ impl LiveProviderConfig {
             .expect("app-config write_lock poisoned");
         let mut cfg = self.load();
         cfg.sessions_dir = path;
+        self.store_inner(cfg)
+    }
+
+    /// Set the default runtime new sessions + resumes start on (ADR-0098
+    /// Decision 2, issue #569). Read-modify-write under [`Self::write_lock`]
+    /// (same pattern as sessions-dir). The value persists VERBATIM -- no
+    /// detected-state write-time validation (ADR-0098 Decision 3): an adapter
+    /// that is not currently detected must keep the preference so an
+    /// environment restore re-enables the external start with no
+    /// re-configuration. Referential validation (the id names a v1 adapter)
+    /// is the command boundary's job, not the store's.
+    pub fn set_default_runtime(
+        &self,
+        runtime: DefaultRuntime,
+    ) -> Result<AppConfig, app_config::WriteError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("app-config write_lock poisoned");
+        let mut cfg = self.load();
+        cfg.default_runtime = runtime;
         self.store_inner(cfg)
     }
 }
@@ -892,6 +913,35 @@ mod tests {
             Err(ActiveKeyError::NoActiveProfile)
         );
         assert_eq!(live.clear_key(), Err(ActiveKeyError::NoActiveProfile));
+    }
+
+    // --- default runtime (issue #569, ADR-0098 Decision 2) ------------------
+
+    #[test]
+    fn set_default_runtime_persists_verbatim_across_a_reload() {
+        // The IPC round-trip: set external -> the returned config carries it ->
+        // a reload reads it back verbatim. gemini-cli is NOT installed on CI,
+        // which is the point: the store path has no detected-state validation
+        // (ADR-0098 Decision 3) -- an undetected adapter's preference persists
+        // so an environment restore re-enables it with no re-configuration.
+        let (_dir, live) = live();
+        let stored = live
+            .set_default_runtime(DefaultRuntime::External("gemini-cli".into()))
+            .expect("set_default_runtime");
+        assert_eq!(
+            stored.default_runtime,
+            DefaultRuntime::External("gemini-cli".into())
+        );
+        assert_eq!(
+            live.load().default_runtime,
+            DefaultRuntime::External("gemini-cli".into())
+        );
+        // Setting BuiltIn resets the start to the built-in loop.
+        let reset = live
+            .set_default_runtime(DefaultRuntime::BuiltIn)
+            .expect("set_default_runtime built-in");
+        assert_eq!(reset.default_runtime, DefaultRuntime::BuiltIn);
+        assert_eq!(live.load().default_runtime, DefaultRuntime::BuiltIn);
     }
 
     // --- MCP server CRUD (issue #301 slice B) -------------------------------

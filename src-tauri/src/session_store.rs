@@ -582,13 +582,16 @@ impl SessionHandle {
         *self.runtime.lock().expect("runtime lock poisoned") = spec;
     }
 
-    /// Reset the runtime choice to the built-in default (issue #353). Called
-    /// by `open_duck` after a successful resume alongside
-    /// [`Self::reset_approval`] + [`Self::reset_mcp_enablement`] -- the
-    /// runtime posture is session-level and must not survive a resume (it is
-    /// not in the recipe / app-config).
-    pub fn reset_runtime_choice(&self) {
-        *self.runtime.lock().expect("runtime lock poisoned") = None;
+    /// Reset the runtime choice after a successful resume (issue #353,
+    /// ADR-0098 Decision 2). The runtime posture is session-level and must
+    /// not survive a resume (it is not in the recipe / app-config) -- the
+    /// choice returns to the STARTUP default, which since issue #569 is the
+    /// RESOLVED `default_runtime` (an undetected external default already
+    /// degraded to `None` by the caller's resolution), not the hardcoded
+    /// built-in. Called by `open_duck` in the same reset batch as
+    /// [`Self::reset_approval`] + [`Self::reset_mcp_enablement`].
+    pub fn reset_runtime_choice(&self, fallback: Option<AdapterSpec>) {
+        *self.runtime.lock().expect("runtime lock poisoned") = fallback;
     }
 
     /// The session-level model + thought-level pair (ADR-0095), read under
@@ -1186,9 +1189,12 @@ mod tests {
     }
 
     /// The runtime choice defaults to the built-in runtime (None), round-trips
-    /// an external adapter spec, and resets to the default (issue #353). The
-    /// choice lives on the handle, so a fresh session starts built-in and a
-    /// resume's `reset_runtime_choice` returns it there.
+    /// an external adapter spec, and resets to the caller-supplied fallback
+    /// (issue #353). The choice lives on the handle, so a fresh session starts
+    /// built-in (the command layer applies the default runtime on top) and a
+    /// resume's `reset_runtime_choice` returns it to the RESOLVED startup
+    /// default -- None when the default is built-in or degraded, the spec when
+    /// the default names a detected CLI (issue #569).
     #[test]
     fn runtime_choice_defaults_to_none_round_trips_and_resets() {
         let store = SessionStore::new();
@@ -1206,16 +1212,29 @@ mod tests {
         );
 
         let spec = crate::runtime::acp::adapter::gemini_cli();
-        handle.set_runtime_choice(Some(spec));
+        handle.set_runtime_choice(Some(spec.clone()));
         let chosen = handle
             .runtime_choice()
             .expect("an external choice round-trips");
         assert_eq!(chosen.id.as_str(), "gemini-cli");
 
-        handle.reset_runtime_choice();
+        // The resume fallback is the resolved default runtime (issue #569):
+        // resetting with an external default lands that spec, not None.
+        handle.reset_runtime_choice(Some(spec));
+        assert_eq!(
+            handle
+                .runtime_choice()
+                .expect("external default lands")
+                .id
+                .as_str(),
+            "gemini-cli",
+            "reset to an external default returns the choice to that CLI"
+        );
+
+        handle.reset_runtime_choice(None);
         assert!(
             handle.runtime_choice().is_none(),
-            "reset returns the choice to the built-in default"
+            "reset to the built-in default clears the choice"
         );
     }
 

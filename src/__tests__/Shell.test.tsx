@@ -1267,6 +1267,7 @@ function baseAppConfig(
     shell: { ...shell, sidebar_grouping: "flat" },
     mcp_servers: { servers: [] },
     sessions_dir: null,
+    default_runtime: { kind: "built_in" },
   };
 }
 

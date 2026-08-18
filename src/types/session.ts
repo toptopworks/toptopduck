@@ -134,7 +134,8 @@ export type StoreCommandError =
   | { kind: "IoFailure"; data: string }
   | { kind: "KeychainFailure"; data: string }
   | { kind: "ConfigWriteFailure"; data: string }
-  | { kind: "NoActiveProfile" };
+  | { kind: "NoActiveProfile" }
+  | { kind: "UnknownAdapter"; data: string };
 
 // --- Progress side-channel events ----------------------------------------
 

@@ -379,6 +379,10 @@ fn store_command_error_serializes_adjacently_tagged() {
         &StoreCommandError::NoActiveProfile,
         r#"{"kind":"NoActiveProfile"}"#,
     );
+    assert_wire(
+        &StoreCommandError::UnknownAdapter("no-such-cli".into()),
+        r#"{"kind":"UnknownAdapter","data":"no-such-cli"}"#,
+    );
 }
 
 #[test]
@@ -1239,6 +1243,22 @@ fn session_runtime_choice_wire_shape() {
     assert_wire(&SessionRuntimeChoice::BuiltIn, r#"{"kind":"built_in"}"#);
     assert_wire(
         &SessionRuntimeChoice::External("gemini-cli".into()),
+        r#"{"kind":"external","data":"gemini-cli"}"#,
+    );
+}
+
+/// The app-config default runtime (issue #569, ADR-0098 Decision 2) crosses
+/// IPC / persists with the SAME adjacently-tagged shape as
+/// `SessionRuntimeChoice` -- one frontend type shape serves both the
+/// per-session choice and the machine-level preference. Pin the literals so
+/// a serde attribute change on either type fails before the hand-mirror in
+/// `src/types/app-config.ts` can drift.
+#[test]
+fn default_runtime_wire_shape() {
+    use toptopduck_lib::app_config::DefaultRuntime;
+    assert_wire(&DefaultRuntime::BuiltIn, r#"{"kind":"built_in"}"#);
+    assert_wire(
+        &DefaultRuntime::External("gemini-cli".into()),
         r#"{"kind":"external","data":"gemini-cli"}"#,
     );
 }
