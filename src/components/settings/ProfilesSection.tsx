@@ -371,7 +371,10 @@ export function ProfilesSection({
     });
     setCommitBusy(false);
     setFormError(err);
-    if (selectedId === id) setSelectedId(null);
+    // Deselect only on success -- a failed delete keeps the selection (and
+    // the form it hosts) so the pane-bottom error has a surface to render on,
+    // mirroring commitDraft's stay-put on failure.
+    if (err === null && selectedId === id) setSelectedId(null);
   }
 
   async function handleSetActive(id: string) {
@@ -703,7 +706,6 @@ export function ProfilesSection({
                 </div>
               )}
 
-              {formError && <p className="text-destructive text-sm">{formError}</p>}
             </div>
           ) : provider.profiles.length > 0 ? (
             <p className="text-muted-foreground text-sm">
@@ -713,6 +715,11 @@ export function ProfilesSection({
               />
             </p>
           ) : null}
+          {/* Commit failures render at the pane bottom regardless of the
+              right pane's mode (draft form, select prompt, or zero-profile
+              empty state) -- a failed delete keeps no draft of its own, so
+              the error must not live inside the draft branch. */}
+          {formError && <p className="text-destructive text-sm">{formError}</p>}
         </div>
       </div>
 

@@ -545,6 +545,10 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     expect(committed.provider.profiles[0].protocol).toBe("anthropic");
     expect(committed.provider.profiles[0].base_url).toBe("https://api.anthropic.com");
     expect(committed.provider.profiles[0].model).toBe("claude-sonnet-4-6");
+    // Create appends without repointing the pointer (creation is not
+    // activation): the commit lands "1 profile + null active" -- the legal
+    // nullable-active posture, left to Set as active to move.
+    expect(committed.provider.active_profile).toBeNull();
   });
 
   it("delete confirms then commits immediately", async () => {
@@ -596,6 +600,11 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     expect(screen.getByRole("button", { name: "Delete" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     const dialog = await screen.findByRole("alertdialog");
+    // The body copy states the zero-profile landing (no active profile after
+    // the last delete), matching the self-consistent commit below.
+    expect(
+      within(dialog).getByText(/switches to the next remaining one, or none if this was the last/),
+    ).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalled());
     const committed = onCommitAppConfig.mock.calls[0][0];

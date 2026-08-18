@@ -227,12 +227,8 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
         onOpenSettings={vi.fn()}
       />,
     );
-    expect(
-      screen.getByRole("button", { name: "Runtime: Not configured" }),
-    ).toBeInTheDocument();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Runtime: Not configured" }),
-    );
+    const trigger = screen.getByRole("button", { name: "Runtime: Not configured" });
+    fireEvent.click(trigger);
     expect(await screen.findByText("Built-in")).toBeInTheDocument();
     // The select is disabled with a single placeholder option -- there is
     // nothing to switch and no profile name to show.
@@ -255,6 +251,15 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
     expect(
       screen.getByText("No access profile yet. Create one in Settings."),
     ).toBeInTheDocument();
+    // The tooltip doubles as the trigger's aria-describedby content: with no
+    // profiles it reads the plain notConfigured text, never the summary
+    // shape carrying the "no key" suffix (that is what SR users hear on
+    // focus).
+    fireEvent.pointerEnter(trigger, { pointerType: "mouse" });
+    fireEvent.pointerMove(trigger, { pointerType: "mouse" });
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip.textContent).toContain("Not configured");
+    expect(tooltip.textContent).not.toContain("no key");
   });
 
   it("commits active_profile when the provider dropdown changes", async () => {
