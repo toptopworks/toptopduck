@@ -56,7 +56,7 @@ LLM 接入的线协议，支持两种——**anthropic**（Anthropic Messages �
 _Avoid_: 提供商(provider)、API、后端(backend)
 
 **接入档案 (Profile)**:
-一套命名的 LLM 接入组合 = 协议 + endpoint + model + key，是用户在设置里创建、命名、并指定其一为活跃的单元。非机密部分（协议/endpoint/model/展示名）住 app-config（ADR-0038），key 住 OS keychain 的 per-profile slot（ADR-0029），活跃 Profile 全局单一、不进 `.duck`（ADR-0034/0036）。它是机器级接入偏好，与具体分析正交。
+一套命名的 LLM 接入组合 = 协议 + endpoint + model + key，是用户在设置里创建、命名的单元，仅驱动内置运行时。档案集**可为空**——仅使用外部 CLI 运行时的用户可不配置任何接入档案，空档案集是合法持久状态、非待修复异常（ADR-0098）。非机密部分（协议/endpoint/model/展示名）住 app-config（ADR-0038），key 住 OS keychain 的 per-profile slot（ADR-0029）；活跃 Profile **至多一个**、零档案时无活跃，不进 `.duck`（ADR-0034/0036）。它是机器级接入偏好，与具体分析正交，与默认运行时相互独立。
 _Avoid_: 账号(account)、连接(connection)、配置项(config item)
 
 ### Agent 执行
@@ -64,6 +64,10 @@ _Avoid_: 账号(account)、连接(connection)、配置项(config item)
 **运行时 (Runtime)**:
 一次轮次的执行引擎：接收（提问 + 窗口化上下文 + 工具面），产出执行轨迹与终局答复。两种并存且可换——**内置**（app 自有 agent 循环，由活跃 BYOK 档案驱动）与**外部**（app 拉起的第三方 CLI agent 进程）。运行时**无状态**：不持任何权威会话状态（thread、窗口、recipe 全归 app）；进程存活只是传输层优化，不是状态边界。
 _Avoid_: 提供商(provider)——那是协议档案；引擎(engine)——易与 DuckDB 引擎混；agent——太泛
+
+**默认运行时 (Default Runtime)**:
+新会话与 resume 后第一轮的起步运行时，机器级执行偏好（内置 或 某一外部适配器），住 app-config、缺省内置（ADR-0098）。会话内切换运行时不回写默认，resume 时回落到它。起步时解析：默认指向的适配器不再被检测到时，该次起步诚实降级为内置，偏好不销毁。活跃接入档案仅在内置运行时执行时被读取——「激活」是接入面的属性，与运行时起步无关。
+_Avoid_: 活跃运行时(active runtime)——「活跃」是接入档案的属性；推荐(recommended)——默认是持久偏好非 app 建议；上次使用(last used)
 
 **网关 (Gateway)**:
 运行时访问工具面的唯一聚合接入点：装配工具表（内置 DuckDB 工具 + 用户配置的外部 MCP 服务器 + 技能声明的工具），并在此强制分级审批（ADR-0080）、审计、物化命名（ADR-0077）。内置运行时在 app 进程内直接经网关路由；外部运行时经**桥接**回连网关。网关是强制边界——运行时绕过网关直连工具，则审批/审计/物化皆不可强制。
