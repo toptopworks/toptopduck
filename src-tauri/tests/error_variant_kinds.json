@@ -68,6 +68,7 @@
     "DestinationExists",
     "IoFailure",
     "KeychainFailure",
+    "NoActiveProfile",
     "OpenConflict"
   ],
   "TurnFailure": [

@@ -350,9 +350,10 @@ fn rename_session_error_serializes_adjacently_tagged() {
 fn store_command_error_serializes_adjacently_tagged() {
     // StoreCommandError (cold-store commands, issue #130) crosses IPC as the
     // reject of delete_session / rename_persisted_session / keychain / provider
-    // + app config. OpenConflict is a unit variant; BlankName nests
-    // RenameSessionError (the blank-name refusal matches rename_session's
-    // shape); the three failure variants carry the English detail under data.
+    // + app config. OpenConflict / NoActiveProfile are unit variants (self-
+    // contained user-correctable refusals); BlankName nests RenameSessionError
+    // (the blank-name refusal matches rename_session's shape); the three
+    // failure variants carry the English detail under data.
     use toptopduck_lib::{RenameSessionError, StoreCommandError};
     assert_wire(
         &StoreCommandError::OpenConflict,
@@ -373,6 +374,10 @@ fn store_command_error_serializes_adjacently_tagged() {
     assert_wire(
         &StoreCommandError::ConfigWriteFailure("rename busy".into()),
         r#"{"kind":"ConfigWriteFailure","data":"rename busy"}"#,
+    );
+    assert_wire(
+        &StoreCommandError::NoActiveProfile,
+        r#"{"kind":"NoActiveProfile"}"#,
     );
 }
 

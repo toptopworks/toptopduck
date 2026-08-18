@@ -160,6 +160,7 @@ fn store_command_error() -> Vec<StoreCommandError> {
         StoreCommandError::IoFailure(String::new()),
         StoreCommandError::KeychainFailure(String::new()),
         StoreCommandError::ConfigWriteFailure(String::new()),
+        StoreCommandError::NoActiveProfile,
     ]
 }
 

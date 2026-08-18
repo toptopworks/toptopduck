@@ -43,6 +43,23 @@ pub struct LiveProviderConfig {
     write_lock: Arc<Mutex<()>>,
 }
 
+/// Why an ACTIVE-profile key write (`set_key` / `clear_key`) failed. The two
+/// causes map onto different [`crate::commands::StoreCommandError`] variants
+/// at the IPC boundary: the zero-profile refusal is a config-state rejection
+/// (the OS keychain was never touched -- NOT a keychain fault), while the
+/// keychain fault propagates the OS-level detail (ADR-0029).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ActiveKeyError {
+    /// No active profile (ADR-0098 zero-profile state or null pointer): there
+    /// is no keychain slot to write. A user-correctable refusal, not a fault.
+    #[error("no active provider profile to write the key for")]
+    NoActiveProfile,
+    /// The OS keychain operation itself failed; carries the English technical
+    /// detail (locked / service down / permission revoked / corrupt entry).
+    #[error("{0}")]
+    Keychain(String),
+}
+
 impl LiveProviderConfig {
     /// Bind a new live source to an app-config `path` (resolved by the caller via
     /// the Tauri `app_data_dir`). The path's parent directory must exist; the
@@ -82,22 +99,28 @@ impl LiveProviderConfig {
 
     /// Store the API key for the ACTIVE profile (one-shot frontend -> Rust
     /// transfer, ADR-0029; ADR-0064 per-profile slot). With no active profile
-    /// (ADR-0098) there is no slot to write: an explicit refusal rather than a
-    /// silent success that would misread as "stored".
-    pub fn set_key(&self, key: &str) -> Result<(), String> {
+    /// (ADR-0098) there is no slot to write: an explicit typed refusal rather
+    /// than a silent success that would misread as "stored".
+    pub fn set_key(&self, key: &str) -> Result<(), ActiveKeyError> {
         match self.load().provider.active_profile.as_ref() {
-            Some(id) => self.keychain.set_key_for(id, key),
-            None => Err("no active provider profile to store the key for".into()),
+            Some(id) => self
+                .keychain
+                .set_key_for(id, key)
+                .map_err(ActiveKeyError::Keychain),
+            None => Err(ActiveKeyError::NoActiveProfile),
         }
     }
 
     /// Remove the stored API key for the ACTIVE profile (idempotent). With no
     /// active profile (ADR-0098) the operation has no referent: an explicit
-    /// refusal (the caller cannot have meant any specific slot).
-    pub fn clear_key(&self) -> Result<(), String> {
+    /// typed refusal (the caller cannot have meant any specific slot).
+    pub fn clear_key(&self) -> Result<(), ActiveKeyError> {
         match self.load().provider.active_profile.as_ref() {
-            Some(id) => self.keychain.clear_key_for(id),
-            None => Err("no active provider profile to clear the key for".into()),
+            Some(id) => self
+                .keychain
+                .clear_key_for(id)
+                .map_err(ActiveKeyError::Keychain),
+            None => Err(ActiveKeyError::NoActiveProfile),
         }
     }
 
@@ -421,10 +444,11 @@ impl ProviderConfigSource for LiveProviderConfig {
     fn base_url(&self) -> String {
         // Fresh disk read each call -- a reconfigured endpoint on the active
         // profile lands live on the next turn, no caching. effective_base_url
-        // falls back to the canonical default when the active profile is
-        // missing (a malformed config normalize repairs on the next store;
-        // a hand-edited gap never hands the provider an empty endpoint) --
-        // the same fallback the IPC view uses, single-sourced.
+        // falls back to the canonical default when there is no active profile
+        // (the legal zero-profile state, or a dangling pointer that normalize
+        // nulls on the next store), so a live read never hands the provider an
+        // empty endpoint. The IPC view does NOT share this fallback -- it
+        // exposes null endpoints instead (ADR-0098).
         self.load().provider.effective_base_url().to_string()
     }
     fn model(&self) -> String {
@@ -858,10 +882,16 @@ mod tests {
         let (_dir, live) = live();
         live.store(AppConfig::defaults()).expect("store");
         assert_eq!(live.has_key(), Ok(false));
-        // set_key / clear_key have no referent: an explicit refusal, never a
-        // silent success that would misread as "stored" / "removed".
-        assert!(live.set_key("sk-test").is_err());
-        assert!(live.clear_key().is_err());
+        // set_key / clear_key have no referent: an explicit TYPED refusal
+        // (ActiveKeyError::NoActiveProfile -- a config-state rejection the
+        // command boundary maps to StoreCommandError::NoActiveProfile, NOT
+        // KeychainFailure), never a silent success that would misread as
+        // "stored" / "removed".
+        assert_eq!(
+            live.set_key("sk-test"),
+            Err(ActiveKeyError::NoActiveProfile)
+        );
+        assert_eq!(live.clear_key(), Err(ActiveKeyError::NoActiveProfile));
     }
 
     // --- MCP server CRUD (issue #301 slice B) -------------------------------

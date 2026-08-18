@@ -141,9 +141,11 @@ function formatSaveError(e: SaveError, intl: IntlShape): string {
 // Format a StoreCommandError through the locale catalog (issue #130). BlankName
 // reuses error.session.renameEmpty (the same id as SessionError::RenameSession)
 // so the blank-name refusal has one user-facing shape across rename_session
-// and rename_persisted_session. The three failure variants render a generic
-// message; their English data rides the technical-details fold (ADR-0029: no
-// key leaks).
+// and rename_persisted_session. NoActiveProfile is a self-contained refusal
+// like OpenConflict (a config-state rejection -- the OS keychain was never
+// touched, so it is NOT keychainFailure). The three failure variants render a
+// generic message; their English data rides the technical-details fold
+// (ADR-0029: no key leaks).
 function formatStoreCommandError(e: StoreCommandError, intl: IntlShape): string {
   switch (e.kind) {
     case "OpenConflict":
@@ -175,6 +177,11 @@ function formatStoreCommandError(e: StoreCommandError, intl: IntlShape): string 
       return intl.formatMessage({
         id: "error.store.configWriteFailure",
         defaultMessage: "Failed to save settings",
+      });
+    case "NoActiveProfile":
+      return intl.formatMessage({
+        id: "error.store.noActiveProfile",
+        defaultMessage: "No provider profile is active; create or activate one first",
       });
     default: {
       const unhandled: never = e;
@@ -478,8 +485,9 @@ export function errorDetail(e: unknown): string | null {
   }
   if (isStoreCommandError(e)) {
     // The three failure variants carry the English technical detail for the
-    // fold; OpenConflict / BlankName are self-contained (the message already
-    // names the refusal). DestinationExists carries the path for the fold.
+    // fold; OpenConflict / BlankName / NoActiveProfile are self-contained (the
+    // message already names the refusal). DestinationExists carries the path
+    // for the fold.
     if (
       e.kind === "DestinationExists" ||
       e.kind === "IoFailure" ||

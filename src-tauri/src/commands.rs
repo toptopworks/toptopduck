@@ -42,7 +42,7 @@ use crate::persistence::{
     default_sessions_root, scan_sessions_dir, validate_sessions_dir, SaveError, SessionMetadata,
     SessionsRoot,
 };
-use crate::provider::live_config::LiveProviderConfig;
+use crate::provider::live_config::{ActiveKeyError, LiveProviderConfig};
 use crate::runtime::acp::adapter::{
     detect_adapter, v1_adapters, AdapterSpec, DiscoveredRuntime, StreamFormat,
 };
@@ -113,6 +113,13 @@ pub enum StoreCommandError {
     /// one refusal to the user, not three messages.
     #[error("{0}")]
     ConfigWriteFailure(String),
+    /// An active-profile key write (`set_api_key` / `clear_api_key`) was refused
+    /// because there is no active profile to address (ADR-0098 zero-profile
+    /// state or null pointer). A user-correctable refusal like [`OpenConflict`]
+    /// -- the OS keychain was never touched, so this is NOT a
+    /// [`KeychainFailure`]; the remedy is creating/activating a profile.
+    #[error("no active provider profile to write the key for")]
+    NoActiveProfile,
 }
 
 /// Reject a mutating command while THIS session is resuming (ADR-0053, made
@@ -812,8 +819,7 @@ pub fn set_api_key(
     live: State<'_, LiveProviderConfig>,
     key: String,
 ) -> Result<(), StoreCommandError> {
-    live.set_key(&key)
-        .map_err(StoreCommandError::KeychainFailure)
+    live.set_key(&key).map_err(store_key_error)
 }
 
 /// Remove the stored API key. Idempotent: a missing entry is success; a real
@@ -822,7 +828,19 @@ pub fn set_api_key(
 /// and the next turn refuses honestly as not-wired.
 #[tauri::command]
 pub fn clear_api_key(live: State<'_, LiveProviderConfig>) -> Result<(), StoreCommandError> {
-    live.clear_key().map_err(StoreCommandError::KeychainFailure)
+    live.clear_key().map_err(store_key_error)
+}
+
+/// Map an active-profile key write failure onto the IPC error contract: the
+/// no-active-profile refusal is a config-state rejection
+/// ([`StoreCommandError::NoActiveProfile`] -- the OS keychain was never
+/// touched), distinct from a real OS keychain fault
+/// ([`StoreCommandError::KeychainFailure`], ADR-0029).
+fn store_key_error(e: ActiveKeyError) -> StoreCommandError {
+    match e {
+        ActiveKeyError::NoActiveProfile => StoreCommandError::NoActiveProfile,
+        ActiveKeyError::Keychain(detail) => StoreCommandError::KeychainFailure(detail),
+    }
 }
 
 /// Read the effective provider endpoint + the active profile's key status

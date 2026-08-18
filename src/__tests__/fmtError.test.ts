@@ -49,6 +49,7 @@ const intl = createIntl({
     "error.store.destinationExists": "A folder with this name already exists; choose a different name",
     "error.store.ioFailure": "A file operation failed",
     "error.store.keychainFailure": "Failed to access the OS keychain",
+    "error.store.noActiveProfile": "No provider profile is active; create or activate one first",
     "error.store.openConflict": "This session is currently open; close it first",
     "error.turn.execute": "Failed to execute the query",
   },
@@ -263,6 +264,10 @@ describe("fmtError — StoreCommandError", () => {
       [{ kind: "IoFailure", data: "io-fail" }, "A file operation failed"],
       [{ kind: "KeychainFailure", data: "kc-fail" }, "Failed to access the OS keychain"],
       [{ kind: "ConfigWriteFailure", data: "cfg-fail" }, "Failed to save settings"],
+      [
+        { kind: "NoActiveProfile" },
+        "No provider profile is active; create or activate one first",
+      ],
     ];
     for (const [err, expected] of cases) {
       expect(fmtError(err, intl)).toBe(expected);
@@ -368,6 +373,7 @@ describe("errorDetail", () => {
   it("returns null for self-contained StoreCommandError kinds (issue #130)", () => {
     expect(errorDetail({ kind: "OpenConflict" })).toBeNull();
     expect(errorDetail({ kind: "BlankName", data: { kind: "EmptyName" } })).toBeNull();
+    expect(errorDetail({ kind: "NoActiveProfile" })).toBeNull();
   });
 
   it("extracts SessionError::Turn::Execute detail and nulls UnknownDataset (issue #121)", () => {
