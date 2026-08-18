@@ -345,7 +345,7 @@ fn run_probe(scenario: &str) {
             "catalog_success" => {
                 emit(
                     &mut out,
-                    &control_response(request_id.clone(), catalog_success_payload()),
+                    &control_response(request_id, catalog_success_payload()),
                 );
                 return;
             }
@@ -364,7 +364,7 @@ fn run_probe(scenario: &str) {
                 );
                 emit(
                     &mut out,
-                    &control_response(request_id.clone(), catalog_success_payload()),
+                    &control_response(request_id, catalog_success_payload()),
                 );
                 return;
             }

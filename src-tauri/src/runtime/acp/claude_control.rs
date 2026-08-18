@@ -28,8 +28,8 @@
 //! alive is diagnostic signal, the ADR-0096 D2 precedent); a child that
 //! never answers -- silence, garbage, or stdout EOF -- degrades to an
 //! EMPTY catalog (`Available` with no models), never a failure. Only a
-//! write fault, the deadline, or a response envelope that fails to parse
-//! fail outright.
+//! write fault or the deadline fails outright; a `control_response` that
+//! fails to correlate is a logged stray, never a hard failure.
 
 use std::process::{ChildStdin, ChildStdout};
 use std::time::{Duration, Instant};
@@ -147,9 +147,10 @@ pub fn query_catalog(
 /// One incoming line against the awaited control response:
 /// `Some(Ok(outcome))` when the line IS the probe's control_response (a
 /// success folds the catalog, an error / foreign subtype degrades to
-/// `Unavailable`), `Some(Err(_))` when the envelope matched but failed to
-/// parse (a hard failure, the app_server malformed-response precedent),
-/// `None` for a stray to keep sniffing past.
+/// `Unavailable`), `None` for a stray to keep sniffing past. Extraction
+/// is tolerant throughout -- unlike the codex malformed-response hard
+/// failure, a non-correlating envelope is a logged stray, never an
+/// `Err`.
 fn match_control_response(
     line: &str,
     stderr_tail: &StderrTail,
@@ -162,16 +163,27 @@ fn match_control_response(
     // not at the frame's top level -- the id-placement asymmetry measured
     // on 2.1.222. Reading the top level here silently dropped every real
     // response (the probe sniffed past its own answer until the deadline).
-    let payload = v.get("response").cloned().unwrap_or(Value::Null);
+    // With one request in flight, a control_response on stdout is almost
+    // certainly this probe's own reply, so a frame that fails to
+    // correlate logs its drop: the next wire-shape drift must not
+    // resurface as an opaque 45s timeout (the #543 "log the invisible
+    // drop" precedent).
+    let Some(payload) = v.get("response") else {
+        log::warn!(
+            target: "toptopduck::probe",
+            "dropping control_response without a response payload (wire shape drift?)"
+        );
+        return None;
+    };
     if payload.get("request_id").and_then(Value::as_str) != Some(INITIALIZE_REQUEST_ID) {
+        log::warn!(
+            target: "toptopduck::probe",
+            "dropping control_response that did not echo the probe's request_id (wire shape drift?)"
+        );
         return None;
     }
-    let subtype = payload
-        .get("subtype")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    Some(match subtype.as_str() {
+    let subtype = payload.get("subtype").and_then(Value::as_str).unwrap_or("");
+    Some(match subtype {
         "success" => Ok(ModelCatalogOutcome::Available {
             models: extract_models(payload.get("response").unwrap_or(&Value::Null)),
         }),
