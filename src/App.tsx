@@ -10,6 +10,7 @@ import { useShellError } from "./shell/useShellError";
 import { usePersistedSessions } from "./shell/usePersistedSessions";
 import { useShellSessions } from "./shell/useShellSessions";
 import { useAppConfigState } from "./shell/useAppConfigState";
+import { useStartupRuntime } from "./shell/useStartupRuntime";
 import { useSidebarResize } from "./shell/useSidebarResize";
 import { useRailResize } from "./shell/useRailResize";
 import { useProfileKeys } from "./shell/useProfileKeys";
@@ -28,7 +29,6 @@ import type { AppConfig } from "./types/app-config";
 import type { AuthMode } from "./types/approval";
 import { AUTH_MODE_DEFAULT } from "./types/approval";
 import type { SessionRuntimeChoice } from "./types/runtime";
-import { RUNTIME_CHOICE_DEFAULT } from "./types/runtime";
 import { usePlatform } from "./shell/use-platform";
 import { SidebarToggle } from "./shell/SidebarToggle";
 import { NavButtons } from "./shell/NavButtons";
@@ -307,17 +307,34 @@ export default function App() {
   // ADR-0092 Decision 6 (#500): shell-level pending composer posture for the
   // cold-start bar. Every composer control renders on the centered bar with
   // NO session in draft mode; the selections land here and are applied to the
-  // session the first submit mints (consumed = reset to the backend defaults
-  // / empty lists, so each cold-start visit starts from the default posture).
+  // session the first submit mints (consumed = reset to the unset posture /
+  // empty lists, so each cold-start visit starts from the default posture).
   // runtime / authMode / skills / mcpServers apply via per-session IPC writes
   // in useShellSessions.mintAndRegister; the file list rides the new session's
   // pendingIngestPaths.
+  //
+  // ADR-0098 Decision 4 (issue #572): the runtime facet starts UNSET (null)
+  // -- before any pick it reads as the resolved default_runtime below, so the
+  // cold-start picker opens on the startup resolution instead of a built-in
+  // constant. A pick replaces the whole value (never null again until
+  // consumed).
   const [pendingRuntime, setPendingRuntime] =
-    useState<SessionRuntimeChoice>(RUNTIME_CHOICE_DEFAULT);
+    useState<SessionRuntimeChoice | null>(null);
   const [pendingAuthMode, setPendingAuthMode] = useState<AuthMode>(AUTH_MODE_DEFAULT);
   const [pendingSkills, setPendingSkills] = useState<string[]>([]);
   const [pendingMcpServers, setPendingMcpServers] = useState<string[]>([]);
   const [pendingFiles, setPendingFiles] = useState<string[]>([]);
+
+  // The startup resolution of the persisted default_runtime against the
+  // shared adapter table (ADR-0098 Decisions 2/3, issue #572): what a cold
+  // start opens on before any user pick, degrading to built-in when the
+  // named CLI is undetected / the table has not loaded. Display + gate read
+  // this projection; the startup TRUTH stays the backend's own
+  // create_session resolution, so an unset pending skips the runtime write
+  // (the minted session already carries the resolved runtime) while an
+  // explicit pick still applies via setSessionRuntime.
+  const startupRuntime = useStartupRuntime(queryClient, appConfig?.default_runtime);
+  const effectivePendingRuntime = pendingRuntime ?? startupRuntime;
 
   // ADR-0092 Decision 4 honest gate (submit-time). The centered bar is
   // always typeable; a cold-start submit on the built-in runtime requires a
@@ -349,13 +366,18 @@ export default function App() {
         if (fields) void fields.handleAsk(question);
         return;
       }
-      if (pendingRuntime.kind === "built_in" && builtInGateOpen) {
+      if (effectivePendingRuntime.kind === "built_in" && builtInGateOpen) {
         openSettings({
           section: "runtime",
           editProfileId: profileKeys.activeProfileId ?? undefined,
         });
         return;
       }
+      // Null passes through so mintAndRegister SKIPS the runtime write: the
+      // backend's create_session resolution is the startup truth and already
+      // started the session on the resolved runtime. An explicit pick --
+      // including a built-in pick against an external default -- always
+      // applies.
       const runtime = pendingRuntime;
       const authMode = pendingAuthMode;
       const skills = pendingSkills;
@@ -367,7 +389,7 @@ export default function App() {
         files,
       ).then((created) => {
         if (created) {
-          setPendingRuntime(RUNTIME_CHOICE_DEFAULT);
+          setPendingRuntime(null);
           setPendingAuthMode(AUTH_MODE_DEFAULT);
           setPendingSkills([]);
           setPendingMcpServers([]);
@@ -379,6 +401,7 @@ export default function App() {
       activeSessionId,
       composerFieldsMap,
       createSessionWithQuestion,
+      effectivePendingRuntime,
       pendingRuntime,
       pendingAuthMode,
       pendingSkills,
@@ -505,7 +528,8 @@ export default function App() {
   // The provider picker bundle for the shell-level bar (ADR-0071/0092):
   // app-level state (active profile + writes + the settings-open path)
   // rendered at the bar's trailing slot in BOTH positions — session-active
-  // and cold start (sessionId null reads RUNTIME_CHOICE_DEFAULT + writes to
+  // and cold start (sessionId null reads the resolved default_runtime seed
+  // and writes to
   // the shell-level pending state, Decision 6 no-degraded-controls). Absent
   // until app-config resolves. Explicitly typed so the render site spreads it
   // without an assertion.
@@ -781,6 +805,11 @@ export default function App() {
                             <ComposerProviderPicker
                               sessionId={activeSessionId}
                               onPendingRuntimeChange={setPendingRuntime}
+                              pendingRuntime={
+                                activeSessionId === null
+                                  ? effectivePendingRuntime
+                                  : undefined
+                              }
                               {...providerPicker}
                             />
                           ) : undefined

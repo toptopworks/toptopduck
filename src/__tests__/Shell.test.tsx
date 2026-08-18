@@ -632,6 +632,118 @@ describe("App multi-session shell (issue #81 ACs)", () => {
     }
   });
 
+  it("cold-start picker opens on a detected default runtime; first submit mints on it without a frontend runtime write (issue #572)", async () => {
+    // default_runtime = external(detected): the cold-start picker starts with
+    // that CLI selected, and an unmodified first submit mints on it WITHOUT a
+    // frontend setSessionRuntime -- the backend's create_session resolution
+    // is the startup truth (ADR-0098 Decisions 2/3); the write only applies
+    // an explicit user pick.
+    vi.mocked(getAppConfig).mockResolvedValue({
+      ...baseAppConfig({ sidebar_collapsed: false }),
+      default_runtime: { kind: "external", data: "gemini-cli" },
+    });
+    vi.mocked(listAdapters).mockResolvedValue([
+      { id: "gemini-cli", display_name: "gemini-cli", detected: true, binary_path: "/usr/local/bin/gemini", stream_format: "acp" },
+    ]);
+    // The creation turn rejects so it settles immediately (openSession pattern).
+    vi.mocked(askQuestion).mockRejectedValueOnce(
+      new Error("discard the creation turn"),
+    );
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      // The trigger names the resolved default's adapter from the start --
+      // no picker interaction needed.
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "运行时：gemini-cli" }),
+        ).toBeInTheDocument(),
+      );
+      // Submit straight away: the external default bypasses the built-in key
+      // gate and mints a session.
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+      // Unmodified pending posture: no redundant runtime write.
+      expect(setSessionRuntime).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+      vi.mocked(listAdapters).mockResolvedValue([]);
+    }
+  });
+
+  it("an explicit built-in pick on an external default overwrites the startup resolution (issue #572)", async () => {
+    // The unset/explicit distinction survives the mint: with default_runtime
+    // = external(detected), picking Built-in on the cold-start picker and
+    // submitting applies the built-in choice via setSessionRuntime (the
+    // session would otherwise run the external default the backend resolved).
+    vi.mocked(getAppConfig).mockResolvedValue({
+      ...baseAppConfig({ sidebar_collapsed: false }),
+      default_runtime: { kind: "external", data: "gemini-cli" },
+    });
+    vi.mocked(listAdapters).mockResolvedValue([
+      { id: "gemini-cli", display_name: "gemini-cli", detected: true, binary_path: "/usr/local/bin/gemini", stream_format: "acp" },
+    ]);
+    vi.mocked(askQuestion).mockRejectedValueOnce(
+      new Error("discard the creation turn"),
+    );
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      // The trigger opens on the resolved external default...
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "运行时：gemini-cli" }),
+        ).toBeInTheDocument(),
+      );
+      // ...then the user explicitly reverts to built-in.
+      fireEvent.click(screen.getByRole("button", { name: "运行时：gemini-cli" }));
+      const builtinHeader = await screen.findByRole("button", { name: "内置" });
+      fireEvent.click(builtinHeader);
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+      // The explicit pick lands -- the startup resolution does not swallow it.
+      await waitFor(() =>
+        expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
+          kind: "built_in",
+        }),
+      );
+    } finally {
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+      vi.mocked(listAdapters).mockResolvedValue([]);
+    }
+  });
+
+  it("cold-start picker degrades to built-in when the default names an undetected CLI (issue #572)", async () => {
+    // default_runtime = external but the CLI is not detected: the resolution
+    // degrades per-start (ADR-0098 Decision 3), so the cold-start trigger
+    // shows the built-in readout (the active profile), not the missing CLI.
+    vi.mocked(getAppConfig).mockResolvedValue({
+      ...baseAppConfig({ sidebar_collapsed: false }),
+      default_runtime: { kind: "external", data: "gemini-cli" },
+    });
+    vi.mocked(listAdapters).mockResolvedValue([
+      { id: "gemini-cli", display_name: "gemini-cli", detected: false, binary_path: null, stream_format: "acp" },
+    ]);
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "运行时：Anthropic" }),
+        ).toBeInTheDocument(),
+      );
+      // The degraded external default is NOT the trigger readout.
+      expect(
+        screen.queryByRole("button", { name: "运行时：gemini-cli" }),
+      ).not.toBeInTheDocument();
+    } finally {
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+      vi.mocked(listAdapters).mockResolvedValue([]);
+    }
+  });
+
   it("cold-start bar renders the full composer control row — no degraded controls (ADR-0092 D6, #500)", async () => {
     // The centered bar carries the SAME six controls as the session bar:
     // Skills + MCP trigger chips, the "+" file button, the auth-mode chip,

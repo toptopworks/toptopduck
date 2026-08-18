@@ -92,9 +92,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 export type ComposerProviderPickerProps = {
   // The session whose runtime this picker reads / switches. Runtime selection
   // is per-session assembly posture (ADR-0083), like the auth-mode chip.
-  // null on the cold-start shell-level bar (ADR-0092): the picker reads
-  // RUNTIME_CHOICE_DEFAULT and writes runtime switches to the caller-held
-  // pending state via onPendingRuntimeChange instead of per-session IPC.
+  // null on the cold-start shell-level bar (ADR-0092): the picker displays
+  // the caller-held pending value (pendingRuntime below) and writes runtime
+  // switches to it via onPendingRuntimeChange instead of per-session IPC.
   sessionId: string | null;
   // The non-secret provider config (profiles list + active id), single-sourced
   // by the parent from app-config. This component never mutates it.
@@ -121,6 +121,13 @@ export type ComposerProviderPickerProps = {
   // session is created. Undefined when sessionId is non-null (the picker writes
   // through setSessionRuntime as before).
   onPendingRuntimeChange?: (runtime: SessionRuntimeChoice) => void;
+  // The shell-level pending runtime value to DISPLAY while sessionId is null
+  // (issue #572, ADR-0098 Decision 4): the caller seeds it with the resolved
+  // default_runtime and replaces it on each onPendingRuntimeChange, so the
+  // trigger reflects the startup resolution before the first pick and the
+  // pick after it (the auth-mode chip's pendingMode pattern). Meaningful only
+  // when sessionId is null; the session query is the truth otherwise.
+  pendingRuntime?: SessionRuntimeChoice;
 };
 
 export function ComposerProviderPicker({
@@ -131,6 +138,7 @@ export function ComposerProviderPicker({
   onOpenSettings,
   profileKeyEpoch,
   onPendingRuntimeChange,
+  pendingRuntime,
 }: ComposerProviderPickerProps) {
   const intl = useIntl();
   const [open, setOpen] = useState(false);
@@ -172,7 +180,9 @@ export function ComposerProviderPicker({
   // session-prefix query so a close drops it with the rest and a resume lands
   // the reset built-in value via the fresh SessionPane mount (mirrors authMode).
   // Null sessionId (cold-start bar, ADR-0092): the query is disabled and the
-  // fallback RUNTIME_CHOICE_DEFAULT drives the picker -- no IPC round-trip.
+  // caller-held pendingRuntime drives the picker -- no IPC round-trip. The
+  // constant is the last resort (tests rendering the picker in isolation), so
+  // an unseeded cold start renders the built-in default rather than nothing.
   const queryClient = useQueryClient();
   const { data: runtimeData } = useQuery({
     // The queryKey uses a stable placeholder when sessionId is null — the key
@@ -184,7 +194,8 @@ export function ComposerProviderPicker({
     queryFn: () => getSessionRuntime(sessionId as string),
     enabled: sessionId !== null,
   });
-  const runtime: SessionRuntimeChoice = runtimeData ?? RUNTIME_CHOICE_DEFAULT;
+  const runtime: SessionRuntimeChoice =
+    runtimeData ?? pendingRuntime ?? RUNTIME_CHOICE_DEFAULT;
   const isExternal = runtime.kind === "external";
   const activeAdapterId = isExternal ? runtime.data : null;
 

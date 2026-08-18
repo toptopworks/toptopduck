@@ -59,11 +59,15 @@ import { isPointOverComposerBar, type DropPoint } from "./dropTarget";
  *  freshly minted session BEFORE registering it open, so the SessionPane's
  *  pendingQuestion / pendingIngestPaths consumption on mount runs under the
  *  chosen runtime + authorization mode with the picked skills mounted + MCP
- *  servers enabled. runtime / authMode default to the backend defaults; a
- *  field still at its default skips its IPC (nothing to apply). The two lists
- *  are empty by default; each entry lands one mount / enable IPC. */
+ *  servers enabled. authMode defaults to the backend default and a field
+ *  still at that default skips its IPC (nothing to apply); runtime's unset
+ *  marker is null for the same skip (issue #572: the backend's own
+ *  create_session resolution already started the session on the resolved
+ *  default_runtime), while an EXPLICIT pick -- including a built-in pick
+ *  against an external default -- always applies. The two lists are empty by
+ *  default; each entry lands one mount / enable IPC. */
 export interface PendingComposerPosture {
-  runtime: SessionRuntimeChoice;
+  runtime: SessionRuntimeChoice | null;
   authMode: AuthMode;
   /** Skill spec names picked on the cold-start Skills trigger (draft mode,
    *  #500): mounted onto the minted session one by one, in pick order. */
@@ -341,9 +345,12 @@ export function useShellSessions({
               setShellError(toAppError(e, intl, "shell"));
             }
           };
-          if (posture.runtime.kind === "external") {
+          if (posture.runtime !== null) {
+            // Local const so the null narrowing survives into the write
+            // closure (a property access would widen back to the union).
+            const runtimePick = posture.runtime;
             await applyPostureWrite(
-              () => setSessionRuntime(sid, posture.runtime),
+              () => setSessionRuntime(sid, runtimePick),
               "runtime",
             );
           }
