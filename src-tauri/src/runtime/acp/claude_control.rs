@@ -16,7 +16,11 @@
 //! stream-format surface (the issue #544 precedent): `control_request` /
 //! `control_response` frames keyed by `request_id` (NOT JSON-RPC `id`),
 //! mixed freely with `system` hook frames on the same stdout -- the query
-//! sniffs for its own response and drops everything else.
+//! sniffs for its own response and drops everything else. The id placement
+//! is asymmetric (measured on 2.1.222 against the CLI's own emit sites): a
+//! request carries `request_id` at the top level, a response echoes it
+//! INSIDE the `response` payload, and error responses carry the diagnostic
+//! under `error`.
 //!
 //! Degrade footing (ADR-0097 Decision 5 "无响应降级空目录"): a success
 //! response yields `Available` with the extracted models (possibly none);
@@ -36,8 +40,10 @@ use crate::runtime::acp::probe::{
     attach_stderr_tail, with_stderr_tail, CatalogModel, ModelCatalogOutcome, ProbeError, StderrTail,
 };
 
-/// The probe's request id: the response must echo it. A fixed literal is
-/// fine -- one query, one child, one lifetime.
+/// The probe's request id: the response must echo it inside the response
+/// payload (`response.request_id`, never the frame's top level -- the
+/// measured 2.1.222 wire). A fixed literal is fine -- one query, one
+/// child, one lifetime.
 const INITIALIZE_REQUEST_ID: &str = "probe-initialize";
 
 // ---------------------------------------------------------------------------
@@ -152,10 +158,14 @@ fn match_control_response(
     if v.get("type").and_then(Value::as_str) != Some("control_response") {
         return None;
     }
-    if v.get("request_id").and_then(Value::as_str) != Some(INITIALIZE_REQUEST_ID) {
+    // The echo rides INSIDE the response payload (`response.request_id`),
+    // not at the frame's top level -- the id-placement asymmetry measured
+    // on 2.1.222. Reading the top level here silently dropped every real
+    // response (the probe sniffed past its own answer until the deadline).
+    let payload = v.get("response").cloned().unwrap_or(Value::Null);
+    if payload.get("request_id").and_then(Value::as_str) != Some(INITIALIZE_REQUEST_ID) {
         return None;
     }
-    let payload = v.get("response").cloned().unwrap_or(Value::Null);
     let subtype = payload
         .get("subtype")
         .and_then(Value::as_str)
@@ -166,8 +176,10 @@ fn match_control_response(
             models: extract_models(payload.get("response").unwrap_or(&Value::Null)),
         }),
         "error" => {
+            // The CLI's error frames carry the diagnostic under `error`
+            // (the 2.1.222 emit sites; `message` is not on the wire).
             let message = payload
-                .get("message")
+                .get("error")
                 .and_then(Value::as_str)
                 .filter(|m| !m.is_empty())
                 .unwrap_or("initialize error");
@@ -348,18 +360,31 @@ mod tests {
     }
 
     /// The sniff matches ONLY a `control_response` echoing the probe's
-    /// request id; success folds the catalog from `response.response`.
+    /// request id inside the response payload; success folds the catalog
+    /// from `response.response`. The envelope is pinned to the wire
+    /// measured on 2.1.222 (the CLI's own emit sites): no top-level
+    /// `request_id`, and the frames may carry extra top-level keys (the
+    /// CLI stamps `session_id`) -- only the nested echo identifies the
+    /// response.
     #[test]
     fn match_control_response_sniffs_past_strays() {
         let tail = silent_tail();
-        // Stray frames: hook noise, another request's response.
+        // Stray frames: hook noise, another request's response, a
+        // top-level-id frame (not the CLI's shape for a response).
         assert!(match_control_response(
             &json!({"type": "system", "subtype": "hook"}).to_string(),
             &tail
         )
         .is_none());
         assert!(match_control_response(
-            &json!({"type": "control_response", "request_id": "other",
+            &json!({"type": "control_response",
+                    "response": {"subtype": "success", "request_id": "other"}})
+            .to_string(),
+            &tail
+        )
+        .is_none());
+        assert!(match_control_response(
+            &json!({"type": "control_response", "request_id": INITIALIZE_REQUEST_ID,
                     "response": {"subtype": "success"}})
             .to_string(),
             &tail
@@ -369,9 +394,10 @@ mod tests {
         // The real response.
         let line = json!({
             "type": "control_response",
-            "request_id": INITIALIZE_REQUEST_ID,
+            "session_id": "extra-top-level-key-is-inert",
             "response": {
                 "subtype": "success",
+                "request_id": INITIALIZE_REQUEST_ID,
                 "response": { "models": [{ "value": "m1" }] }
             }
         })
@@ -389,14 +415,17 @@ mod tests {
     }
 
     /// An error control response degrades to `Unavailable` carrying the
-    /// message; a foreign subtype degrades with its name.
+    /// `error` diagnostic; a foreign subtype degrades with its name.
     #[test]
     fn match_control_response_degrades_error_subtypes() {
         let tail = silent_tail();
         let line = json!({
             "type": "control_response",
-            "request_id": INITIALIZE_REQUEST_ID,
-            "response": { "subtype": "error", "message": "auth required" }
+            "response": {
+                "subtype": "error",
+                "request_id": INITIALIZE_REQUEST_ID,
+                "error": "auth required"
+            }
         })
         .to_string();
         let outcome = match_control_response(&line, &tail).unwrap().unwrap();
@@ -408,8 +437,10 @@ mod tests {
         }
         let line = json!({
             "type": "control_response",
-            "request_id": INITIALIZE_REQUEST_ID,
-            "response": { "subtype": "from-the-future" }
+            "response": {
+                "subtype": "from-the-future",
+                "request_id": INITIALIZE_REQUEST_ID
+            }
         })
         .to_string();
         let outcome = match_control_response(&line, &tail).unwrap().unwrap();
@@ -428,8 +459,11 @@ mod tests {
         let tail = silent_tail();
         let line = json!({
             "type": "control_response",
-            "request_id": INITIALIZE_REQUEST_ID,
-            "response": { "subtype": "success", "response": {} }
+            "response": {
+                "subtype": "success",
+                "request_id": INITIALIZE_REQUEST_ID,
+                "response": {}
+            }
         })
         .to_string();
         let outcome = match_control_response(&line, &tail).unwrap().unwrap();
