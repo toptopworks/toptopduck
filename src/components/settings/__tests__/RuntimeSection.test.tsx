@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { RuntimeSection } from "../RuntimeSection";
 import {
   listAdapters,
@@ -9,7 +9,7 @@ import {
 import type { AdapterEntry } from "../../../types/runtime";
 import type { ProviderConfig } from "../../../types/provider";
 import type { ProfilesControls } from "../ProfilesSection";
-import { renderSettings } from "./helpers";
+import { chooseOption, openSelect, renderSettings } from "./helpers";
 
 // Runtime section tests (issue #489, ADR-0091): the two sub-tabs, the adapter
 // list rendering, the rescan IPC flow, and WAI-ARIA APG keyboard navigation.
@@ -51,7 +51,9 @@ function renderSection(overrides: Partial<React.ComponentProps<typeof RuntimeSec
   const controlsRef = { current: null as ProfilesControls | null } as React.MutableRefObject<ProfilesControls | null>;
   const props: React.ComponentProps<typeof RuntimeSection> = {
     provider,
+    defaultRuntime: { kind: "built_in" },
     onCommit: vi.fn(),
+    onDefaultRuntimeChanged: vi.fn(),
     onIpcBusy: vi.fn(),
     profilesControlsRef: controlsRef,
     ...overrides,
@@ -111,6 +113,43 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
     renderSection({ initialRuntimeTab: "local-cli" });
     expect(screen.getByRole("tab", { name: "Local CLI" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("tab", { name: "API Access" })).toHaveAttribute("aria-selected", "false");
+  });
+
+  // --- Default runtime placement (issue #571) -------------------------------
+
+  it("renders the default-runtime control above the tab switcher, mounted on both tabs", async () => {
+    // The control is a section-level preamble preference: it must sit above
+    // the tabs (document order) and stay mounted across a sub-tab switch --
+    // gating it on either tab would silently reset its draft.
+    renderSection();
+    const combobox = await screen.findByRole("combobox", { name: "Default runtime" });
+    const tablist = screen.getByRole("tablist");
+    expect(
+      combobox.compareDocumentPosition(tablist) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
+    expect(
+      screen.getByRole("combobox", { name: "Default runtime" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the default-runtime draft across a sub-tab switch", async () => {
+    renderSection();
+    const combobox = await screen.findByRole("combobox", { name: "Default runtime" });
+    await waitFor(() => expect(combobox).toHaveTextContent("Built-in"));
+
+    openSelect(combobox);
+    chooseOption("gemini-cli");
+    await waitFor(() => expect(combobox).toHaveTextContent("gemini-cli"));
+
+    fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
+    // The control does not remount: the draft survives with Save still armed.
+    expect(combobox).toHaveTextContent("gemini-cli");
+    const save = screen.getAllByRole("button", { name: "Save" }).find(
+      (b) => !(b as HTMLButtonElement).disabled,
+    );
+    expect(save).toBeDefined();
   });
 
   it("falls back to API Access when initialRuntimeTab is undefined", () => {
@@ -198,7 +237,13 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
 
     renderSection();
     fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
-    expect(await screen.findByText("IPC connection lost")).toBeInTheDocument();
+    // The default-runtime control above the tabs surfaces the same failed
+    // read (issue #571), so scope the assertion to the panel's own copy.
+    const cliTab = screen.getByRole("tab", { name: "Local CLI" });
+    const panel = document.getElementById(cliTab.getAttribute("aria-controls")!)!;
+    expect(
+      await within(panel).findByText("IPC connection lost"),
+    ).toBeInTheDocument();
   });
 
   // --- Rescan IPC flow ----------------------------------------------------

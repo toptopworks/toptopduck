@@ -1,9 +1,10 @@
 import { useId, useState, type KeyboardEvent, type ReactNode } from "react";
 import { FormattedMessage } from "react-intl";
 
-import type { AppConfig } from "../../types/app-config";
+import type { AppConfig, DefaultRuntime } from "../../types/app-config";
 import { bareButtonReset } from "../../lib/buttonReset";
 import { cn } from "../../lib/utils";
+import { DefaultRuntimeControl } from "./DefaultRuntimeControl";
 import type { ProfilesControls } from "./ProfilesSection";
 import { ProfilesSection } from "./ProfilesSection";
 import { LocalCliTab } from "./LocalCliTab";
@@ -12,6 +13,9 @@ import { PaneHeader } from "./settings-chrome";
 // Runtime section (issue #489, ADR-0091): the Settings "Runtime" pane, split
 // into two sub-tabs -- "API Access" (the existing ProfilesSection master-detail
 // + keychain + preflight) and "Local CLI" (the v1 adapter management panel).
+// Above the tab switcher sits the default-runtime control (issue #571,
+// ADR-0098 Decision 2): a section-level preamble preference, always mounted
+// regardless of the active sub-tab.
 //
 // The PaneHeader (hero title + description) sits ABOVE the tabs and describes
 // the entire runtime section. Tab state is local useState -- NOT persisted: a
@@ -32,10 +36,16 @@ const DEFAULT_TAB: RuntimeTab = "api-access";
 
 export type RuntimeSectionProps = {
   provider: AppConfig["provider"];
+  /** The persisted default-runtime preference (issue #571), feeding the
+   *  section-top control. */
+  defaultRuntime: DefaultRuntime;
   onCommit: (mutate: (cfg: AppConfig) => AppConfig) => Promise<string | null>;
+  /** Replace shell app-config state with the config the setDefaultRuntime IPC
+   *  returned (issue #571) -- state-only sync, the dedicated IPC persisted. */
+  onDefaultRuntimeChanged: (cfg: AppConfig) => void;
   /** Narrowed pass-through: the runtime pane's children fire key / test /
-   *  probe, never sessionsDir. */
-  onIpcBusy: (channel: "key" | "test" | "probe", busy: boolean) => void;
+   *  probe / defaultRuntime, never sessionsDir. */
+  onIpcBusy: (channel: "key" | "test" | "probe" | "defaultRuntime", busy: boolean) => void;
   initialEditProfileId?: string;
   /** Landing sub-tab when the section opens (issue #490). Undefined = default. */
   initialRuntimeTab?: RuntimeTab;
@@ -44,7 +54,9 @@ export type RuntimeSectionProps = {
 
 export function RuntimeSection({
   provider,
+  defaultRuntime,
   onCommit,
+  onDefaultRuntimeChanged,
   onIpcBusy,
   initialEditProfileId,
   initialRuntimeTab,
@@ -88,6 +100,17 @@ export function RuntimeSection({
             defaultMessage="API access profiles and local CLI adapters for driving turns."
           />
         )}
+      />
+
+      {/* Default runtime (issue #571, ADR-0098 Decision 2): the machine-level
+          startup preference, above the sub-tabs so it reads as a section-level
+          setting, not either tab's content. Always mounted -- its draft
+          survives a sub-tab switch (a nav switch unmounts the pane, resetting
+          the draft like every pane-local state). */}
+      <DefaultRuntimeControl
+        defaultRuntime={defaultRuntime}
+        onSaved={onDefaultRuntimeChanged}
+        onIpcBusy={onIpcBusy}
       />
 
       {/* Tab switcher (issue #489): two tab buttons. State is NOT persisted --

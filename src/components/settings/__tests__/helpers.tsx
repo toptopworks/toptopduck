@@ -1,4 +1,4 @@
-import { render } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactElement } from "react";
@@ -33,4 +33,18 @@ export function renderSettings(ui: ReactElement) {
   // the component (e.g. the post-probe setQueryData mirror, issue #536) via
   // getQueryData.
   return { ...result, queryClient };
+}
+
+// Radix Select in jsdom: the trigger opens on a primary pointer-down + click;
+// an option selects on pointer-up + click (the test-setup polyfills stub the
+// pointer APIs jsdom lacks).
+export function openSelect(combobox: HTMLElement) {
+  fireEvent.pointerDown(combobox, { button: 0, pointerType: "mouse" });
+  fireEvent.click(combobox);
+}
+
+export function chooseOption(name: string) {
+  const option = screen.getByRole("option", { name });
+  fireEvent.pointerUp(option, { button: 0, pointerType: "mouse" });
+  fireEvent.click(option);
 }

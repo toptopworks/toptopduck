@@ -123,6 +123,7 @@ function SectionContent({
   appConfig,
   onCommit,
   onSessionsDirChanged,
+  onDefaultRuntimeChanged,
   onIpcBusy,
   initialEditProfileId,
   initialRuntimeTab,
@@ -132,6 +133,7 @@ function SectionContent({
   appConfig: AppConfig;
   onCommit: (mutate: (cfg: AppConfig) => AppConfig) => Promise<string | null>;
   onSessionsDirChanged: (cfg: AppConfig) => void;
+  onDefaultRuntimeChanged: (cfg: AppConfig) => void;
   onIpcBusy: IpcBusyReporter;
   initialEditProfileId?: string;
   initialRuntimeTab?: RuntimeTab;
@@ -155,7 +157,9 @@ function SectionContent({
       return (
         <RuntimeSection
           provider={appConfig.provider}
+          defaultRuntime={appConfig.default_runtime}
           onCommit={onCommit}
+          onDefaultRuntimeChanged={onDefaultRuntimeChanged}
           onIpcBusy={onIpcBusy}
           initialEditProfileId={initialEditProfileId}
           initialRuntimeTab={initialRuntimeTab}
@@ -179,6 +183,7 @@ export function SettingsView({
   appConfig,
   onCommitAppConfig,
   onSessionsDirChanged,
+  onDefaultRuntimeChanged,
   onClose,
   section,
   onSectionChange,
@@ -197,6 +202,11 @@ export function SettingsView({
   // setSessionsDir IPC persists + returns the updated config, this syncs the
   // frontend state + triggers the sidebar re-scan.
   onSessionsDirChanged: (cfg: AppConfig) => void;
+  // Replace local appConfig state WITHOUT an IPC write (issue #571). The
+  // setDefaultRuntime IPC already persisted + returned the updated config;
+  // this is the state-only sync (no sidebar re-scan -- a machine-level
+  // runtime preference does not move session files).
+  onDefaultRuntimeChanged: (cfg: AppConfig) => void;
   // Called to exit back to the workspace (rail-top back, the gear, or ESC).
   onClose: () => void;
   // The live settings section is controlled by the shell (issue #288): the
@@ -275,6 +285,13 @@ export function SettingsView({
     onSessionsDirChanged(cfg);
   }, [onSessionsDirChanged]);
 
+  // Default-runtime IPC also bypasses commitWithRevert (dedicated IPC, issue
+  // #571). Same latestRef sync for the same I-1 race reason.
+  const handleDefaultRuntimeChanged = useCallback((cfg: AppConfig) => {
+    latestRef.current = cfg;
+    onDefaultRuntimeChanged(cfg);
+  }, [onDefaultRuntimeChanged]);
+
   // The Profiles pane's close-contract controls (flush / addDirty / discardAdd /
   // busy / dialogOpen); null when the pane is not mounted.
   const profilesControlsRef = useRef<ProfilesControls | null>(null);
@@ -290,6 +307,7 @@ export function SettingsView({
     test: false,
     sessionsDir: false,
     probe: false,
+    defaultRuntime: false,
   });
   const handlePaneIpcBusy = useCallback<IpcBusyReporter>((channel, busy) => {
     paneIpcBusyRef.current[channel] = busy;
@@ -432,6 +450,7 @@ export function SettingsView({
             appConfig={appConfig}
             onCommit={commitWithRevert}
             onSessionsDirChanged={handleSessionsDirChanged}
+            onDefaultRuntimeChanged={handleDefaultRuntimeChanged}
             onIpcBusy={handlePaneIpcBusy}
             initialEditProfileId={initialEditProfileId}
             initialRuntimeTab={initialRuntimeTab}
